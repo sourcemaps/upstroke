@@ -64,5 +64,4 @@ recorded once, about 6 on 2026-11-25; it was not recorded for the other two.
 
 ## What the change that takes this up should do
 
-Keep the assertion, with no retry, skip or weaker assertion, and make observable what the reaper's
-listing returned. The guard names the change.
+Not proposed here (ruling r39 step 7); the guard names the change that takes it up.

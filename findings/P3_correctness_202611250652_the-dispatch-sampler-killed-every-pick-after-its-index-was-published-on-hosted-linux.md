@@ -73,5 +73,4 @@ different assertion, and that file is not edited.
 
 ## What the change that takes this up should do
 
-Keep the assertion at line 1570, with no retry, skip or weaker assertion, and make observable when
-each pick published its index relative to its kill. The guard names the change.
+Not proposed here (ruling r39 step 7); the guard names the change that takes it up.
