@@ -439,6 +439,27 @@ class MovementContracts(unittest.TestCase):
         self.write("findings/two.md", "two\n")
         self.assertEqual(self.movement(self.commit("addition after merge")), "ledger-only")
 
+    def test_archive_symlink_removed_through_a_merge_is_not_an_existing_directory(self):
+        # An addition under reviews/findings/ is exempt only where the reviewed tree carries that
+        # directory. This reviewed tree carries a link there, which the merged-in base deletes.
+        (self.repo / "reviews").mkdir()
+        (self.repo / "reviews/findings").symlink_to("../findings")
+        self.base = self.commit("archive is a link")
+        self.write("findings/one.md", "one\n")
+        self.reviewed = self.commit("reviewed")
+        self.assertEqual(self.git("ls-tree", self.reviewed, "reviews/findings").split(b" ")[0], b"120000")
+        self.git("checkout", "-qb", "base-side", self.base)
+        (self.repo / "reviews/findings").unlink()
+        base_tip = self.commit("base deletes the link")
+        self.git("checkout", "-qb", "topic", self.reviewed)
+        self.git("-c", "commit.gpgsign=false", "merge", "--no-ff", "-qm", "clean merge", base_tip)
+        self.base = base_tip
+        self.write("reviews/findings/x.md", "x\n")
+        head = self.commit("archive directory after merge")
+        self.assertEqual([(one.commit, one.status, one.path) for one in self.changes(head)],
+                         [(head, "A", b"reviews/findings/x.md")])
+        self.assertEqual(self.movement(head), "ledger-rewrite")
+
     def test_shell_reads_only_a_complete_typed_result(self):
         self.write("findings/one.md", "one\n")
         head = self.commit("addition")
