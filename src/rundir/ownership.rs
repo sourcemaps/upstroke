@@ -50,8 +50,8 @@
 )]
 
 use super::{
-    COMMIT_RECORD, CreatingMarker, MARKER, MARKER_STAGED, OWNER_RECORD, OwnerField, OwnerRecord,
-    Path, PathBuf, PrivateHalfOwnership, RepoKey, RetainReason, UnboundShape, fs, io,
+    COMMIT_RECORD, CreatingMarker, MARKER, MARKER_STAGED, OWNER_RECORD, OsStr, OwnerField,
+    OwnerRecord, Path, PathBuf, PrivateHalfOwnership, RepoKey, RetainReason, UnboundShape, fs, io,
     read_dir_names, runner_policy_sha256,
 };
 
@@ -327,7 +327,7 @@ mod locator_fault {
 fn unbound_shape(public: &Path) -> PrivateHalfOwnership {
     match read_dir_names(public).as_slice() {
         [] => PrivateHalfOwnership::NothingBound(UnboundShape::Bare),
-        [only] if only == MARKER_STAGED => {
+        [only] if only == OsStr::new(MARKER_STAGED) => {
             PrivateHalfOwnership::NothingBound(UnboundShape::StagedMarkerOnly)
         }
         _ => PrivateHalfOwnership::Retained(RetainReason::MarkerlessWithContent),
