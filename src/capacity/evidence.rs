@@ -46,8 +46,14 @@ pub enum What {
         pool: String,
         reset_at: Option<String>,
     },
-    /// Settled work. `served` are the pools the record proves answered,
-    /// `limited` the one it proves refused, `draws` what it drew.
+    /// Settled work. `served` are the pools `served_pools` counts as serving
+    /// the record, the ones the live run retires when it settles the
+    /// attempt: the worker's, unless the attempt was interrupted or its
+    /// worker refused, and each available reviewer's. A failed attempt's
+    /// pool is among them even where the provider never answered, as for a
+    /// worker that could not reach it, which is why a failed record has no
+    /// [`Evidence::served_at`]. `limited` is the pool the record proves
+    /// refused, `draws` what it drew.
     Work {
         served: Vec<String>,
         limited: Option<String>,
@@ -62,14 +68,18 @@ pub struct Evidence {
     /// timestamp could not be read; such evidence keeps its place in its own
     /// log and is never dropped for being undated.
     pub at: Option<u64>,
-    /// For an attempt's record, the Unix second its worker finished: the
-    /// latest `attempt_started` of that attempt before the record, plus the
-    /// record's duration in whole seconds, and never later than `at`. A
-    /// schema-4 log names the attempt by its key, generation and number, a
-    /// log of schemas 1–3 by its task and number. It dates the worker's pool
-    /// and each reviewer's pool alike, since the worker's end is the earliest
-    /// a review of it can have run. `None` where the log holds no dated start
-    /// for the attempt, and for evidence that is no attempt's record.
+    /// For the record of an attempt that passed, one with no failure, the
+    /// Unix second its worker finished: the latest `attempt_started` of that
+    /// attempt before the record, plus the record's duration in whole
+    /// seconds, and never later than `at`. A schema-4 log names the attempt
+    /// by its key, generation and number, a log of schemas 1–3 by its task
+    /// and number. It dates the worker's pool and each reviewer's pool alike,
+    /// since the worker's end is the earliest a review of it can have run.
+    /// `None` for a record with a failure, whatever its kind, origin, usage
+    /// or cost: a failed record does not date its usage, and a worker served
+    /// at 11:04 that timed out at 11:34 would be dated after a refusal at
+    /// 11:05. `None` too where the log holds no dated start for the attempt,
+    /// and for evidence that is no attempt's record.
     pub served_at: Option<u64>,
     /// The run the evidence came from: its place among the runs [`merge`]
     /// was given, in key order. Evidence of one log is one run.
@@ -90,9 +100,12 @@ fn at(ts: &str) -> Option<u64> {
     super::usage::unix_from_rfc3339(ts)
 }
 
-/// When the worker of `record` finished, from its start: see
-/// [`Evidence::served_at`].
+/// When the worker of `record` finished, from its start, where the record
+/// has no failure: see [`Evidence::served_at`].
 fn served_at(started: Option<u64>, record: &AttemptRecord, settled: Option<u64>) -> Option<u64> {
+    if record.failure.is_some() {
+        return None;
+    }
     let ended = started?.saturating_add(record.duration.as_secs());
     Some(settled.map_or(ended, |settled| ended.min(settled)))
 }
@@ -158,12 +171,14 @@ fn reviews(reviews: &[ReviewRecord]) -> What {
 
 /// The evidence in a sequential (schema 1–3) log, in log order.
 ///
-/// A settled attempt's record is dated twice, as a schema-4 one is: `at` by
-/// the event that carries it, an `attempt_finished` the run writes after the
+/// A settled attempt's record is dated as a schema-4 one is: `at` by the
+/// event that carries it, an `attempt_finished` the run writes after the
 /// attempt's gates and its judgement or an `attempt_interrupted` a resume
-/// writes for an attempt the process ended on, and `served_at` by the
-/// attempt's own start and duration. The start is the latest
-/// `attempt_started` of the same task and attempt number before that event.
+/// writes for an attempt the process ended on, and, where the record has no
+/// failure, `served_at` by the attempt's own start and duration. The start is
+/// the latest `attempt_started` of the same task and attempt number before
+/// that event. The record an `attempt_interrupted` carries always fails, so
+/// it has `at` alone.
 #[must_use]
 pub fn of_legacy(events: &[Event]) -> Vec<Evidence> {
     let mut out = Vec::new();
@@ -225,9 +240,10 @@ pub fn of_legacy(events: &[Event]) -> Vec<Evidence> {
 /// `attempt_started` named, and none where that start is missing or named no
 /// pool.
 ///
-/// A settled or promoted attempt's record is dated twice: `at` by the event
-/// that carries it, which the run writes after the attempt's gates and its
-/// judgement, and `served_at` by the attempt's own start and duration.
+/// A settled or promoted attempt's record is dated by the event that carries
+/// it, `at`, which the run writes after the attempt's gates and its
+/// judgement, and, where the record has no failure, by the attempt's own
+/// start and duration, `served_at`.
 #[must_use]
 pub fn of_topology(events: &[TopologyEvent]) -> Vec<Evidence> {
     let mut out = Vec::new();
@@ -332,7 +348,7 @@ pub fn of_topology(events: &[TopologyEvent]) -> Vec<Evidence> {
 /// instead. Between runs the order is by time, and at an equal time by the
 /// evidence and the keys, never by the order the runs are given in: evidence
 /// that marks a pool refused waits while another run's evidence of that
-/// second still to come proves the pool served, and otherwise the run whose
+/// second still to come marks the pool served, and otherwise the run whose
 /// key sorts first goes first. A success's service is never dated after its
 /// own settlement, and a success whose service is not dated retires no other
 /// run's refusal at all, so it retires no refusal another run wrote in that
@@ -375,7 +391,7 @@ fn interleave(mut lanes: Vec<VecDeque<Evidence>>, merged: &mut Vec<Evidence>) {
 
 /// The lane whose head goes next: the first whose head need not wait. A head
 /// waits while it marks a pool refused that evidence still in another lane
-/// proves served. Where every head waits, the first lane goes. That takes
+/// marks served. Where every head waits, the first lane goes. That takes
 /// runs whose refusals and successes of one second cross, one refusing `p`
 /// before it serves `q` and another refusing `q` before it serves `p`: no
 /// order puts both refusals after both successes and keeps both runs' own
@@ -412,7 +428,7 @@ fn refused(evidence: &Evidence) -> Option<&str> {
     }
 }
 
-/// Whether `evidence` proves `pool` served.
+/// Whether `evidence` marks `pool` served.
 fn serves(evidence: &Evidence, pool: &str) -> bool {
     match &evidence.what {
         What::Signal { .. } => false,
@@ -425,17 +441,20 @@ fn serves(evidence: &Evidence, pool: &str) -> bool {
 /// Refusals are held per pool and per run: a pool is exhausted while any
 /// run's refusal of it stands, and it shows the reset of the refusal applied
 /// last. A signal adds or replaces its run's refusal of its pool, with its own
-/// reset: the latest wins. Work retires refusals of the pools it proves
+/// reset: the latest wins. Work retires refusals of the pools it marks
 /// served, then marks the pool it proves refused, adding or replacing its
 /// run's refusal of it with the reset the pool already shows, if it shows
-/// one. Work retires its own run's refusal of a pool it served always, in
-/// that run's order, which is all one log has. It retires another run's only
-/// when its `served_at` is known and strictly later than that refusal's `at`:
-/// a success settled after another run's refusal, from service given before
-/// it, proves nothing about it. An undated refusal yields to its own run
-/// alone, and so does every refusal to a success with no `served_at`,
+/// one. Work retires its own run's refusal of a pool it marks served always,
+/// in that run's order, which is all one log has, whether its attempt passed
+/// or failed. It retires another run's only when its `served_at` is known and
+/// strictly later than that refusal's `at`, and only an attempt that passed
+/// has one: a success settled after another run's refusal, from service
+/// given before it, proves nothing about it, and nor does a failed attempt,
+/// whose record does not date its usage. An undated refusal yields to its
+/// own run alone, and so does every refusal to work with no `served_at`,
 /// whatever its log's schema. Inside one run a late settlement still retires
-/// that run's own newer refusal.
+/// that run's own newer refusal, and a failed attempt whose provider never
+/// answered still retires that run's refusal of the pool it ran on.
 ///
 /// A draw is counted when its evidence is dated at or after `spend_since`, and
 /// when it is undated: an estimate is a ceiling, and leaving out a draw whose
@@ -518,7 +537,10 @@ fn refuse(
     });
 }
 
-/// Whether `service`, which proves the refusal's pool served, retires it.
+/// Whether `service`, which marks the refusal's pool served, retires it:
+/// always where the refusal is its own run's, and otherwise only where its
+/// attempt passed and its worker finished after the refusal, which is what a
+/// known `served_at` later than the refusal's `at` says.
 fn retires(service: &Evidence, refusal: &Refusal) -> bool {
     refusal.run == service.run
         || matches!(
@@ -1172,8 +1194,8 @@ mod tests {
                     record("shared", None, Some(FailureKind::Interrupted)),
                 ),
             ]),
-            vec![None, Some(eleven)],
-            "an interrupted attempt's record is dated as a finished one is, and a signal is no \
+            vec![None, None],
+            "an interrupted attempt's record has a failure, so it is not dated, and a signal is no \
              attempt's record"
         );
     }
@@ -1427,6 +1449,251 @@ mod tests {
                     "with no dated start the legacy success retires its own run's refusal at \
                      11:02 and not the other run's at 11:05"
                 );
+            }
+        }
+    }
+
+    fn used() -> crate::ir::Usage {
+        crate::ir::Usage {
+            input_tokens: Some(1_200),
+            output_tokens: Some(300),
+            ..crate::ir::Usage::default()
+        }
+    }
+
+    fn failing(
+        kind: FailureKind,
+        origin: FailureOrigin,
+        usage: Option<crate::ir::Usage>,
+        record: AttemptRecord,
+    ) -> AttemptRecord {
+        AttemptRecord {
+            duration: Duration::from_secs(1),
+            usage,
+            failure: Some(FailureRecord {
+                kind,
+                origin,
+                reason: "r".to_owned(),
+                detail: None,
+            }),
+            ..record
+        }
+    }
+
+    #[test]
+    fn a_record_with_a_failure_is_not_dated_whatever_its_kind_origin_usage_or_cost() {
+        let kinds = [
+            FailureKind::NoChain,
+            FailureKind::EmptyDiff,
+            FailureKind::AgentError,
+            FailureKind::Timeout,
+            FailureKind::RateLimited,
+            FailureKind::GateFailed,
+            FailureKind::TestProvenance,
+            FailureKind::ReviewInputTooLarge,
+            FailureKind::ReviewInputOpaque,
+            FailureKind::ReviewFailed,
+            FailureKind::ReviewUnavailable,
+            FailureKind::NeedsHuman,
+            FailureKind::Declined,
+            FailureKind::Interrupted,
+        ];
+        let served_at = |evidence: Vec<Evidence>| -> Vec<Option<u64>> {
+            evidence.iter().map(|item| item.served_at).collect()
+        };
+        let schema_4 = |record: &AttemptRecord| {
+            served_at(of_topology(&[
+                started4("2026-11-23T11:00:00Z", 1, "shared"),
+                settled4("2026-11-23T11:20:00Z", 1, record.clone()),
+            ]))
+        };
+        let legacy = |record: &AttemptRecord| {
+            served_at(of_legacy(&[
+                started("2026-11-23T11:00:00Z", "t1", 1),
+                finished("2026-11-23T11:20:00Z", record.clone()),
+            ]))
+        };
+        let eleven = 1_795_431_600;
+        for kind in kinds {
+            for origin in [FailureOrigin::Worker, FailureOrigin::Reviewer] {
+                for (usage, cost) in [(None, None), (Some(used()), Some(0.04))] {
+                    let failed = failing(kind, origin, usage, record("shared", cost, None));
+                    assert_eq!(schema_4(&failed), vec![None], "{failed:?}");
+                    assert_eq!(legacy(&failed), vec![None], "{failed:?}");
+
+                    let passed = AttemptRecord {
+                        failure: None,
+                        ..failed
+                    };
+                    assert_eq!(
+                        schema_4(&passed),
+                        vec![Some(eleven + 1)],
+                        "the same record with no failure is dated: {passed:?}"
+                    );
+                    assert_eq!(
+                        legacy(&passed),
+                        vec![Some(eleven + 1)],
+                        "the same record with no failure is dated: {passed:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn failed_on_shared() -> Vec<AttemptRecord> {
+        let mut records = Vec::new();
+        for (usage, cost) in [(None, None), (Some(used()), Some(0.04))] {
+            for kind in [
+                FailureKind::AgentError,
+                FailureKind::Timeout,
+                FailureKind::GateFailed,
+            ] {
+                records.push(failing(
+                    kind,
+                    FailureOrigin::Worker,
+                    usage.clone(),
+                    record("shared", cost, None),
+                ));
+            }
+            let reviewed = AttemptRecord {
+                reviews: vec![ReviewRecord {
+                    outcome: ReviewPassOutcome::Failed,
+                    ..review("shared", cost)
+                }],
+                ..record("worker", cost, None)
+            };
+            records.push(failing(
+                FailureKind::ReviewFailed,
+                FailureOrigin::Reviewer,
+                usage,
+                reviewed,
+            ));
+        }
+        records
+    }
+
+    #[test]
+    fn a_failed_attempt_retires_its_own_runs_refusal_and_not_another_runs_older_one() {
+        for failed in failed_on_shared() {
+            let pool = failed
+                .pool
+                .clone()
+                .expect("the record names its worker's pool");
+            let schema_4 = |mut events: Vec<TopologyEvent>| {
+                events.extend([
+                    started4("2026-11-23T11:06:00Z", 1, &pool),
+                    settled4("2026-11-23T11:06:02Z", 1, failed.clone()),
+                ]);
+                of_topology(&events)
+            };
+            let legacy = |mut events: Vec<Event>| {
+                events.extend([
+                    started("2026-11-23T11:06:00Z", "t1", 2),
+                    finished(
+                        "2026-11-23T11:06:02Z",
+                        AttemptRecord {
+                            attempt: 2,
+                            ..failed.clone()
+                        },
+                    ),
+                ]);
+                of_legacy(&events)
+            };
+
+            for erring in [schema_4(Vec::new()), legacy(Vec::new())] {
+                for refused in refused_at_eleven_five() {
+                    for merged in both_ways(&erring, &refused) {
+                        assert_eq!(
+                            exhausted(&merged),
+                            held("shared", SIXTEEN),
+                            "{failed:?} served `shared` from 11:06:00 to 11:06:01 and failed: its \
+                             record does not date its usage, so the other run's refusal at 11:05 \
+                             stands"
+                        );
+                    }
+                }
+            }
+
+            for own in [
+                schema_4(refused4("2026-11-23T11:05:30Z", 3, "shared", RESET)),
+                legacy(vec![
+                    finished(
+                        "2026-11-23T11:05:30Z",
+                        record("shared", None, Some(FailureKind::RateLimited)),
+                    ),
+                    signalled("2026-11-23T11:05:30Z", "shared", Some(RESET)),
+                ]),
+            ] {
+                assert!(
+                    exhausted(&own).is_empty(),
+                    "{failed:?}: alone, the log folds as it always did, and the failed attempt \
+                     retires its own run's refusal of the pool it served"
+                );
+                for refused in refused_at_eleven_five() {
+                    for merged in both_ways(&own, &refused) {
+                        assert_eq!(
+                            exhausted(&merged),
+                            held("shared", SIXTEEN),
+                            "{failed:?} retires its own run's refusal at 11:05:30 and not the \
+                             other run's at 11:05, whose reset the pool shows"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_later_attempt_that_passed_retires_the_refusal_a_failed_one_left_standing() {
+        let failed = failing(
+            FailureKind::AgentError,
+            FailureOrigin::Worker,
+            None,
+            record("shared", None, None),
+        );
+        let mut schema_4 = vec![
+            started4("2026-11-23T11:06:00Z", 1, "shared"),
+            settled4("2026-11-23T11:06:02Z", 1, failed.clone()),
+        ];
+        let mut legacy = vec![
+            started("2026-11-23T11:06:00Z", "t1", 1),
+            finished("2026-11-23T11:06:02Z", failed),
+        ];
+        for refused in refused_at_eleven_five() {
+            for erring in [of_topology(&schema_4), of_legacy(&legacy)] {
+                for merged in both_ways(&erring, &refused) {
+                    assert_eq!(
+                        exhausted(&merged),
+                        held("shared", SIXTEEN),
+                        "the failed attempt alone leaves the refusal at 11:05 standing"
+                    );
+                }
+            }
+        }
+
+        schema_4.extend([
+            started4("2026-11-23T11:07:00Z", 2, "shared"),
+            promoted4("2026-11-23T11:20:00Z", 2, worked("shared", 60)),
+        ]);
+        legacy.extend([
+            started("2026-11-23T11:07:00Z", "t1", 2),
+            finished(
+                "2026-11-23T11:20:00Z",
+                AttemptRecord {
+                    attempt: 2,
+                    ..worked("shared", 60)
+                },
+            ),
+        ]);
+        for refused in refused_at_eleven_five() {
+            for serving in [of_topology(&schema_4), of_legacy(&legacy)] {
+                for merged in both_ways(&serving, &refused) {
+                    assert!(
+                        exhausted(&merged).is_empty(),
+                        "the attempt that passed served `shared` from 11:07 to 11:08, after the \
+                         refusal at 11:05"
+                    );
+                }
             }
         }
     }

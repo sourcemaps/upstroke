@@ -1607,10 +1607,19 @@ pub(crate) mod tests {
         }
     }
 
+    const STAMPED_AT: &str = "2026-11-11T03:00:00Z";
+
     fn topology(body: TopologyEventBody) -> TopologyEvent {
         TopologyEvent {
-            ts: "2026-11-11T03:00:00Z".to_owned(),
+            ts: STAMPED_AT.to_owned(),
             body,
+        }
+    }
+
+    fn stamped(ts: &str, event: TopologyEvent) -> TopologyEvent {
+        TopologyEvent {
+            ts: ts.to_owned(),
+            ..event
         }
     }
 
@@ -2044,6 +2053,16 @@ pub(crate) mod tests {
 
         #[track_caller]
         fn begin_attempt(&mut self, key: crate::topology::registry::TaskKey, pool: &str) {
+            self.begin_attempt_at(STAMPED_AT, key, pool);
+        }
+
+        #[track_caller]
+        fn begin_attempt_at(
+            &mut self,
+            ts: &str,
+            key: crate::topology::registry::TaskKey,
+            pool: &str,
+        ) {
             use crate::topology::events::{
                 AttemptNumber, AttemptStarted4, CommitSha, GenerationId, LeaseGrant, TaskDispatched,
             };
@@ -2051,7 +2070,7 @@ pub(crate) mod tests {
                 .fold
                 .predicted_region(key)
                 .expect("the run has started and registers this task");
-            self.push(topology(TopologyEventBody::TaskDispatched {
+            let dispatched = topology(TopologyEventBody::TaskDispatched {
                 data: TaskDispatched {
                     key,
                     generation: GenerationId(0),
@@ -2060,12 +2079,13 @@ pub(crate) mod tests {
                     lease: LeaseGrant::Predicted { paths },
                     source_candidate: None,
                 },
-            }));
+            });
+            self.push(stamped(ts, dispatched));
             let binding = self
                 .fold
                 .frozen_rung_binding(key, 0)
                 .expect("the task's ladder has a first rung");
-            self.push(topology(TopologyEventBody::AttemptStarted {
+            let started = topology(TopologyEventBody::AttemptStarted {
                 data: AttemptStarted4 {
                     key,
                     generation: GenerationId(0),
@@ -2076,7 +2096,8 @@ pub(crate) mod tests {
                     resume_session: None,
                     materialization_observed: None,
                 },
-            }));
+            });
+            self.push(stamped(ts, started));
         }
 
         fn obliged_passes(&self, key: crate::topology::registry::TaskKey) -> Vec<&'static str> {
@@ -2911,6 +2932,100 @@ pub(crate) mod tests {
             "the success on `shared` was written in the second of the other run's refusal, so it \
              proves nothing about the pool after it"
         );
+    }
+
+    const ERRING_RUN: &str = "01CAPACITYERRING0000000001";
+    const SIXTEEN: &str = "2026-11-23T16:00:00Z";
+
+    #[test]
+    fn a_worker_error_does_not_clear_another_runs_limit() {
+        use crate::agent::AgentAdapter;
+
+        let output = crate::agent::ProcessOutput {
+            code: Some(1),
+            stdout: String::new(),
+            stderr: "Could not connect to api.anthropic.com: Network is unreachable".to_owned(),
+            duration: Duration::from_secs(1),
+            timed_out: false,
+            output_limited: false,
+        };
+        let outcome = crate::agent::claude::ClaudeCodeAdapter
+            .parse(&output)
+            .expect("the adapter reads the process's output");
+        assert_eq!(outcome.status, crate::ir::OutcomeStatus::AgentError);
+        assert_eq!(outcome.usage, None);
+        assert_eq!(outcome.cost_usd, None);
+        let erred = AttemptRecord {
+            duration: outcome.duration,
+            cost_usd: outcome.cost_usd,
+            usage: outcome.usage,
+            failure: Some(crate::events::FailureRecord {
+                kind: FailureKind::AgentError,
+                origin: FailureOrigin::Worker,
+                reason: format!(
+                    "agent error (exit {:?}): {}",
+                    output.code,
+                    outcome.detail.expect("the adapter says what went wrong")
+                ),
+                detail: None,
+            }),
+            ..settled(Some("shared"), Vec::new())
+        };
+
+        let tree = crate::workspace_manager::fixture::scratch("capacity-worker-error");
+        let machine_dir = tree.path().join("machine");
+        let refusing = tree.path().join("refusing");
+        let erring = tree.path().join("erring");
+        let mut refused = Schema4Run::started(&refusing, REFUSING_RUN);
+        refused.begin_attempt_at("2026-11-23T11:05:00Z", ALPHA, "shared");
+        refused.push(stamped(
+            "2026-11-23T11:05:00Z",
+            signalled("shared", Some(SIXTEEN)),
+        ));
+        refused.push(stamped(
+            "2026-11-23T11:05:00Z",
+            finished(failed(
+                settled(Some("shared"), Vec::new()),
+                FailureKind::RateLimited,
+                FailureOrigin::Worker,
+            )),
+        ));
+        let mut errored = Schema4Run::started(&erring, ERRING_RUN);
+        errored.begin_attempt_at("2026-11-23T11:06:00Z", ALPHA, "shared");
+        errored.push(stamped("2026-11-23T11:06:02Z", finished(erred)));
+        owner_record_of(&machine_dir, &refusing, REFUSING_RUN);
+        owner_record_of(&machine_dir, &erring, ERRING_RUN);
+
+        let held = exhausted(&[("shared", Some(SIXTEEN))]);
+        let (repository, warnings) = folded(&refusing);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(repository.observations.exhausted, held);
+        let mut answers = vec![repository];
+        for repo in [&refusing, &erring] {
+            let (machine, warnings) = on_the_machine(repo, &machine_dir);
+            assert_eq!(warnings, Vec::<String>::new());
+            assert_eq!(
+                (machine.runs, machine.repositories, machine.unread),
+                (2, 2, 0)
+            );
+            assert_eq!(
+                machine.observations.exhausted, held,
+                "the worker on `shared` failed at 11:06 with no answer from the provider, and a \
+                 failed record does not date its usage, so the other run's refusal at 11:05 \
+                 stands"
+            );
+            answers.push(machine);
+        }
+        for gathered in answers {
+            let estimates = estimate(&[pool("shared")], &gathered.observations);
+            assert_eq!(
+                estimates[0].remaining,
+                Remaining::Exhausted,
+                "{:?}",
+                gathered.basis
+            );
+            assert_eq!(estimates[0].reset_at.as_deref(), Some(SIXTEEN));
+        }
     }
 
     #[test]

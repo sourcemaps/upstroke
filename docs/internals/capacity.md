@@ -1166,7 +1166,7 @@ the second: one machine, two answers (`PR409-MACHINE-CWD-TIE-ORDER`). Each
 run is now handed to `merge` keyed by its id and then its log's path, and at
 an equal time the order follows the evidence and the keys, never the listing.
 Evidence that marks a pool refused waits while another run's evidence of that
-second still to come proves the pool served. So a success in one run does not
+second still to come marks the pool served. So a success in one run does not
 clear a refusal another run met in the same second, and the pool reads
 exhausted, which is the conservative reading of two facts of one second.
 Otherwise the run whose key sorts first goes first. A run's own order is kept
@@ -1181,7 +1181,7 @@ asked.
 
 **Whose refusal a success retires.** The order alone cannot say whether a
 success came after another run's refusal
-(`PR409-DELAYED-SETTLEMENT-CLEARS-NEWER-LIMIT`). A schema-4 run proves a pool
+(`PR409-DELAYED-SETTLEMENT-CLEARS-NEWER-LIMIT`). A schema-4 run marks a pool
 served at the event that carries the attempt's record, `attempt_finished` or
 `candidate_prepared`, which it writes after the attempt's gates and its
 judgement, and `fold` used to retire every refusal of each pool the record
@@ -1200,18 +1200,19 @@ its pool, with its own reset, and a rate-limited settlement does the same,
 keeping the reset the pool shows. Each piece of evidence carries its run,
 which `merge` records as the run's place in key order. Evidence of one log is
 one run, so one log alone folds exactly as it did, and a resume, which replays
-`exhausted_pools_of` (§4.4), sees no change. An attempt's record also carries
-`served_at`: the latest `attempt_started` of that attempt before it, plus the
-record's duration in whole seconds, never later than the record's own event.
-A schema-4 log names the attempt by its key, generation and number, and a log
-of schemas 1–3 by its task and number, where the record is the one its
-`attempt_finished` or `attempt_interrupted` carries. A success retires its own
-run's refusal of a pool always, in that run's order, and another run's only
-when its `served_at` is known and strictly later than that refusal's time. A
-refusal whose time cannot be read yields to its own run alone, and so does
-every refusal to a success whose attempt has no dated start, in a log of
-either kind. `evidence.rs`'s tests pin each case, the witness ported among
-them.
+`exhausted_pools_of` (§4.4), sees no change. The record of an attempt that
+passed, one with no failure, also carries `served_at`: the latest
+`attempt_started` of that attempt before it, plus the record's duration in
+whole seconds, never later than the record's own event. A schema-4 log names
+the attempt by its key, generation and number, and a log of schemas 1–3 by
+its task and number, where the record is the one its `attempt_finished`
+carries; the record an `attempt_interrupted` carries always fails. Work
+retires its own run's refusal of a pool always, in that run's order, whether
+its attempt passed or failed, and another run's only when its `served_at` is
+known and strictly later than that refusal's time. A refusal whose time cannot
+be read yields to its own run alone, and so does every refusal to work whose
+attempt failed or has no dated start, in a log of either kind. `evidence.rs`'s
+tests pin each case, the witness ported among them.
 
 A success of a log of schemas 1–3 was at first left undated, and kept the
 rule every success had before: it retired every run's refusal of the pool
@@ -1223,14 +1224,47 @@ after its gates and its judgement, as a schema-4 run does, so since
 2026-11-24 its records are dated the same way, and `fold` no longer asks
 which schema a log is of.
 
-Two limits remain, each stated here because the rule cannot see past it. A
+**Only an attempt that passed retires another run's refusal** (ruling r51).
+Until 2026-11-24 a failed attempt's record was dated as well, and
+`served_pools`, which is `master`'s and which the live run binds on, counts
+every failure but an interruption and the worker's own rate limit as service.
+So a worker whose CLI never reached its provider cleared another run's
+refusal (`PR409-WORKER-ERROR-CLEARS-OTHER-RUNS-LIMIT`). Claude Code exiting 1
+after one second with nothing on stdout and `Could not connect to
+api.anthropic.com: Network is unreachable` on stderr is an `AgentError` with
+no usage and no cost. Started on `shared` at 11:06:00 and settled at 11:06:02,
+its record was dated 11:06:01, and it retired another run's refusal of
+`shared` at 11:05:00, reset at 16:00: repository scope kept the reset, and
+machine scope held no pool and read `shared` as unknown. Nor does a failed
+record date its usage when the provider did answer: a worker served at 11:04
+that timed out at 11:34 would have cleared a refusal at 11:05. So `served_at`
+is `None` for every record with a failure, whatever its kind, origin, usage or
+cost, in a log of either schema, and a failed attempt retires its own run's
+refusals alone. `served_pools`, `retire_served_pools` and `merge` are
+unchanged, so one log alone folds exactly as it did and a resume sees no
+change. `a_worker_error_does_not_clear_another_runs_limit`, below, ports the
+witness through the adapter and the gatherer, and `evidence.rs`'s tests pin
+the failures `AgentError`, `Timeout`, `GateFailed` and a reviewer's
+`ReviewFailed`, each with and without usage, in logs of both schemas.
+
+Four limits remain, each stated here because the rule cannot see past it. A
 reviewer's pool is dated by its worker's end, the earliest its review can
 have run, so a review that served after another run's refusal leaves that
-refusal standing when its worker ended before it. Inside one run a late
-settlement still retires that run's own newer refusal: a worker that served
-before a refusal its own run met, and settled after it, clears that refusal,
-which is `master`'s rule for one run and is filed `deferred` as
-`PR409-LATE-SETTLEMENT-RETIRES-OWN-RUNS-NEWER-REFUSAL`.
+refusal standing when its worker ended before it. A failed attempt that the
+provider did answer, a worker whose gates then failed, say, retires only its
+own run's refusal, so the machine view errs toward exhausted until an attempt
+passes on the pool. The pool is the unit: a refusal that named one model,
+`You've hit your Fable limit` (§13), holds the whole pool, and an attempt that
+passed on that pool retires it whatever model the attempt ran, though the
+model named may still be limited. And inside one run the rule is `master`'s,
+which keeps two in-run twins of the defects above, both filed `deferred`. A
+late settlement still retires that run's own newer refusal: a worker that
+served before a refusal its own run met, and settled after it, clears that
+refusal (`PR409-LATE-SETTLEMENT-RETIRES-OWN-RUNS-NEWER-REFUSAL`). And a failed
+attempt still retires its own run's refusal of the pool it ran on, a worker
+that never reached its provider included, since the live run retires every
+pool `served_pools` names when it settles an attempt
+(`PR409-WORKER-ERROR-RETIRES-OWN-RUNS-HELD-POOL`).
 
 Pools are user-level (§17), so a listing outside a repo is still worth
 having, and with the machine scope it now says what other repositories drew.
@@ -1410,9 +1444,12 @@ with the fold's own refusal, so no test here reads a log that
 ## `fn begin_attempt(&mut self, key: crate::topology::registry::TaskKey, pool: &str) {`
 
 `task_dispatched` and `attempt_started` for a task's first attempt, with
-the region and the rung binding the fold itself derives. The settlement
-that follows is the existing `finished` (task 0) or `prepared` (task 1), or
-`interrupted` for either.
+the region and the rung binding the fold itself derives, stamped with the
+instant `topology` stamps every event with. `begin_attempt_at` writes the
+two at a given time instead, and `stamped` restamps any event, for a test
+whose runs' evidence has to be dated. The settlement that follows is the
+existing `finished` (task 0) or `prepared` (task 1), or `interrupted` for
+either.
 
 ## `fn rewritten_with(self, line: &[u8]) {`
 
@@ -1573,6 +1610,26 @@ exhausted. The refusing run's id sorts first, so an order by run id alone
 would give one answer from both repositories with `shared` cleared. That is
 why the test asserts which pools are held, and not only that the two answers
 agree.
+
+## `fn a_worker_error_does_not_clear_another_runs_limit() {`
+
+The witness from `PR409-WORKER-ERROR-CLEARS-OTHER-RUNS-LIMIT`'s review,
+ported. Claude Code's adapter parses the process output the witness gave it,
+exit 1 after one second, nothing on stdout and `Could not connect to
+api.anthropic.com: Network is unreachable` on stderr, as an `AgentError` with
+no usage and no cost, and the failed record is built from what it parsed. Two
+repositories on one machine each hold a checked schema-4 run that an owner
+record locates. The `refusing` run's attempt was refused on `shared` at
+11:05:00, with a signalled reset at 16:00. The `erring` run's attempt started
+on `shared` at 11:06:00 and settled at 11:06:02 with the failed record. The
+repository scope, started in `refusing`, and the machine scope, started in
+either repository, all hold `shared` at 16:00, and the estimate of `shared`
+over each reads it exhausted with that reset. Before the fix the failed record
+was dated 11:06:01, so the machine scope held no pool and the estimate read
+`shared` as unknown, while the repository scope kept the reset.
+`begin_attempt_at` and `stamped` give the runs their times; every other
+schema-4 run these tests write is stamped with the one instant `topology`
+gives.
 
 ## `fn unreadable_owner_must_be_counted_in_the_scope_line() {`
 
