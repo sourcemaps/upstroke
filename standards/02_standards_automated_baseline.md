@@ -18,8 +18,8 @@ bash .github/scripts/test-pr-ready-audit.sh
 CI splits the ten across jobs: `lint` runs rustfmt, Clippy and the six Bash gates; `test` runs
 the suite on Linux in two shards, `test (ubuntu-latest, k of 2)`, and on macOS in five,
 `test (macos-latest, k of 5)`, each leg
-under 30 minutes, and `test-windows-hosted` runs it on Windows, on `windows-latest` in fourteen
-shards, `test (windows-latest, k of 14)`, by the same rule as the Linux and macOS shards, a
+under 30 minutes, and `test-windows-hosted` runs it on Windows, on `windows-latest` in ten
+shards, `test (windows-latest, k of 10)`, by the same rule as the Linux and macOS shards, a
 test running in exactly one shard, for a pull request, a push and a merge-queue entry alike
 (`MAINTAINING.md` step 3); `msrv` runs the locked check for each of the three targets, the
 macOS one cross-compiled on Linux; `lint (windows)` runs Clippy natively and builds every
