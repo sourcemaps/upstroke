@@ -56,7 +56,8 @@ backticked fragment separately; the enclosing item distinguishes repeated lines.
 
 ## Getting from the code to a note
 
-One marker, in the module header, and nothing else:
+One marker, in the module header; beside it the source keeps only the four site-required exceptions
+listed under "What moves" below:
 
 ```rust
 //! Extended notes: `docs/internals/runner/host.md`
