@@ -14421,10 +14421,12 @@ enum BudgetSpecError {
 ///
 /// Four sites each wait out a ladder summing to about four budgets, so the
 /// whole sampling costs roughly `16 x budget`. At five seconds that is 80
-/// seconds of waiting — generous, since the largest budget ever *measured* here
-/// is about 45 ms, and bounded, which unbounded input was not: `u64::MAX` parsed
-/// happily and asked its first rung to sleep about 64,949 years, ending only at
-/// CI's job timeout.
+/// seconds of waiting — generous, since red runs recorded budgets of
+/// 827.468 ms (`Object.CandidateStage`, hosted macOS, 2026-11-27, run
+/// 46020861627, job 140579863888) and, at the same site, 785.585 ms
+/// (2026-11-24, run 45479941648), and bounded, which unbounded input was
+/// not: `u64::MAX` parsed happily and asked its first rung to sleep about
+/// 64,949 years, ending only at CI's job timeout.
 const MAX_REPLAY_BUDGET_US: u64 = 5_000_000;
 
 /// Parse a replay spec, validating **every** entry, and return the budget for
@@ -14960,28 +14962,44 @@ fn kill_git_child(
 }
 
 /// How close to its rung [`wait_out_rung`] stops sleeping and spins on the
-/// clock. It is wider than the lateness measured: on hosted macOS on
+/// clock. It is wider than the lateness measured. On hosted macOS on
 /// 2026-11-27 (run 46020861627, job 140579863888) the wait before each of
 /// the 32 kills of `sampled_git_child_kills_every_residue_classified_and_recovered`
-/// was `std::thread::sleep(after)`, those sleeps returned late, and every
-/// kill fired late: the latest of the 32 fired 148.31 ms after its rung.
-/// Why the sleeps returned late, timer delivery or no free core, is not
-/// established.
+/// was `std::thread::sleep(after)`, and every kill fired late. The job
+/// measured each kill's lateness, 2.48 to 148.31 ms after its rung, read in
+/// [`SampledChild::kill`] after the wait had returned. It did not show when
+/// the sleeps returned: a sleep that returned on time, followed by a pause
+/// before the reading, reads the same as a late sleep. Why the kills fired
+/// late is not established.
 const RUNG_SPIN_WITHIN: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Return once `elapsed()` reads `after` or later: the rung a sampled kill
 /// is aimed at, waited out on the clock rather than on a sleep's return.
 ///
 /// While more than [`RUNG_SPIN_WITHIN`] is left it sleeps for what is left
-/// less that margin, so a sleep that returns up to the margin late still
-/// returns short of the rung. Inside the margin it spins, on
-/// `std::hint::spin_loop` and not on `std::thread::yield_now`, which hands
-/// the core away and gets it back when the scheduler pleases, as a sleep
-/// does. It reads `elapsed()` afresh after every sleep and every spin, and
-/// returns at the first reading at or past `after`.
+/// less that margin, planned from a fresh reading. The margin covers two
+/// things together: any pause between that reading and the sleep planned
+/// from it, and that sleep's overshoot. A sleep returns short of the rung
+/// when the two, counted from that reading, come to less than the margin.
+/// Past that, the kill fires late by the excess, as a thread preempted in
+/// the spin does. On a fake clock, the wait for a rung of 735.527593 ms
+/// returned 18.311690 ms past it after a 120 ms pause before its sleep and
+/// an overshoot of 148.311690 ms ([`RUNG_TEST_OVERSHOOT`]). On this file's
+/// fake clock ([`on_a_fake_clock`]), with an overshoot of exactly 250 ms,
+/// the wait returned 1 µs past the rung: the reading's own tick
+/// ([`RUNG_TEST_TICK`]).
 ///
-/// What it cannot do. A thread preempted inside the margin, while it spins
-/// or between its last reading and the kill, still fires late: the spin
+/// Inside the margin it spins, on `std::hint::spin_loop` and not on
+/// `std::thread::yield_now`, which hands the core away and gets it back
+/// when the scheduler pleases, as a sleep does. It reads `elapsed()` afresh
+/// after every sleep and every spin, and returns at the first reading at or
+/// past `after`.
+///
+/// What it cannot do. A thread paused between a reading and the sleep
+/// planned from it for longer than the margin leaves after the sleep's
+/// overshoot, or preempted inside the margin, while it spins or between
+/// its last reading and the kill, still fires late: the wait cannot see
+/// time that passes between a reading and the sleep's start, and the spin
 /// keeps the core only for as long as the scheduler leaves it there. And on
 /// one core the spin delays the child it times: for up to the whole margin
 /// on every rung, the parent spins on the core the child needs.
@@ -15017,8 +15035,11 @@ fn wait_out_rung(
 /// 32 kills fired after its rung.
 const RUNG_TEST_TICK: std::time::Duration = std::time::Duration::from_micros(1);
 
-/// How late the fake clock's sleeps return: 148.311690 ms. The latest of
-/// the macOS job's 32 kills fired 148.31 ms after its rung.
+/// How late the fake clock's sleeps return: 148.311690 ms, a test input
+/// taken from the lateness of the latest of the macOS job's 32 kills, which
+/// fired 148.31 ms after its rung. It is not a measured sleep: the job
+/// measured when its kills fired, not when its sleeps returned
+/// ([`RUNG_SPIN_WITHIN`]).
 const RUNG_TEST_OVERSHOOT: std::time::Duration = std::time::Duration::from_nanos(148_311_690);
 
 /// What [`wait_out_rung`] did on the fake clock of [`on_a_fake_clock`],
@@ -15061,7 +15082,9 @@ impl RungWait {
 /// reading taken and every sleep asked for. The reading reads the clock,
 /// then moves it on by [`RUNG_TEST_TICK`]; the sleeper records each
 /// duration it is asked for and moves the clock on by that much plus
-/// `overshoot`, how late the sleep returns.
+/// `overshoot`, how late the sleep returns. That is a test input and not a
+/// measured sleep: the tests here pass [`RUNG_TEST_OVERSHOOT`], taken from
+/// the lateness of the macOS job's latest kill.
 ///
 /// Each refuses, with a panic, what a wait on this clock never does. A
 /// reading taken after one at or past the rung: the wait should have
@@ -15131,8 +15154,9 @@ fn wait_out_rung_on_a_fake_clock(
 }
 
 /// A rung inside [`RUNG_SPIN_WITHIN`], from a clock at zero, is spun out
-/// and never slept: a sleep there could return as late as the macOS job's,
-/// with no margin left to take it up.
+/// and never slept: a sleep there would have no margin left to take up its
+/// overshoot, and the test's overshoot, [`RUNG_TEST_OVERSHOOT`], is as late
+/// as the macOS job's latest kill fired.
 #[test]
 fn a_rung_inside_the_spin_margin_is_never_slept() {
     // A number, not a fraction of `RUNG_SPIN_WITHIN`: a rung taken from the
@@ -15151,9 +15175,12 @@ fn a_rung_inside_the_spin_margin_is_never_slept() {
 
 /// A sleep that returns 148.311690 ms late, inside the margin, does not
 /// make the kill late: the wait sleeps only to the margin short of the
-/// rung, the overshoot ends inside that margin, and the spin carries the
-/// clock the rest of the way. Behind `std::thread::sleep(after)`, the
-/// latest of the macOS job's 32 kills fired 148.31 ms after its rung.
+/// rung, the overshoot and the one pause this clock puts before the sleep,
+/// the reading's own tick, end inside that margin, and the spin carries the
+/// clock the rest of the way. That overshoot, [`RUNG_TEST_OVERSHOOT`], is a
+/// test input and not a measured sleep: it is as late as the latest of the
+/// macOS job's 32 kills fired, 148.31 ms after its rung, behind
+/// `std::thread::sleep(after)`.
 #[test]
 fn a_sleep_that_overshoots_inside_the_margin_does_not_make_the_kill_late() {
     let rung = std::time::Duration::from_nanos(735_527_593);
@@ -15199,11 +15226,11 @@ fn a_rung_already_passed_returns_without_waiting() {
 /// [`kill_git_child`], the sampler's own kill path, waits out its rung
 /// through [`wait_out_rung`], on the clock and the sleeper it is handed. A
 /// real `git --version` child is aimed at a rung of 735.527593 ms, on a fake
-/// clock at zero whose sleeps return [`RUNG_TEST_OVERSHOOT`] late: the wait
-/// sleeps once, on the fake sleeper, for the rung less the 250 ms margin,
-/// and returns at its first reading of the fake clock at or past the rung;
-/// and the one launch is pushed to the private log it is handed, aimed at
-/// that rung and fired at.
+/// clock at zero whose sleeps return [`RUNG_TEST_OVERSHOOT`] late (a test
+/// input, not a measured sleep): the wait sleeps once, on the fake sleeper,
+/// for the rung less the 250 ms margin, and returns at its first reading of
+/// the fake clock at or past the rung; and the one launch is pushed to the
+/// private log it is handed, aimed at that rung and fired at.
 ///
 /// Three regressions of the kill path fail here. A sleep of the whole rung
 /// put back in place of the wait asks the fake sleeper for nothing. A wait
