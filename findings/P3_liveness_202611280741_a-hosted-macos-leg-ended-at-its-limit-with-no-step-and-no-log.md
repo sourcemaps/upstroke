@@ -4,7 +4,7 @@ severity: P3
 disposition: deferred
 category: liveness
 pr: 443
-reviewed_sha: 6513c22d24f8404b6877a6da578deaff19aa7224
+reviewed_sha: d1b706c23def16fb3a37e0e19c122136d8eb99dd
 location: .github/workflows/ci.yml:281
 provenance: undetermined
 first_bad:
@@ -21,17 +21,16 @@ guard: a recurrence on any hosted leg, or the change that prints whether a leg t
    (`.github/workflows/ci.yml:281`).
 4. The aggregate `upstroke-ci` fails on `TEST_MACOS_RESULT: cancelled`.
 
-No assertion failed, so there is none for this sequence to end at.
-
 ## The loss
 
 | run | job | platform | date | pull request | checkout |
 |---|---|---|---|---|---|
-| `46089584677` (`pull_request`), attempt 1 | `140807181395`, `test (macos-latest, 3 of 12)`, runner `GitHub Actions 1000008970` | a GitHub-hosted `macos-latest` runner | 2026-11-28: created 00:45:41Z, started 00:46:12Z, completed 01:21:13Z | #443 at `d1b706c2` | none recorded, since no step ran; the run's other jobs, and this job's attempt 2, checked out `3b3f421`, GitHub's merge of `d1b706c2` into `master` at `b7482c2c` |
+| `46089584677` (`pull_request`), attempt 1 | `140807181395`, `test (macos-latest, 3 of 12)`, runner `GitHub Actions 1000008970` | a GitHub-hosted `macos-latest` runner | 2026-11-28: created 00:45:41Z, started 00:46:12Z, completed 01:21:13Z | #443 at `d1b706c2` | none recorded; this job's attempt 2 and 44 of the run's 45 other attempt-1 jobs checked out `3b3f421`, GitHub's merge of `d1b706c2` into `master` at `b7482c2c`; the 45th, the aggregate `upstroke-ci`, has no checkout step |
 
 GitHub serves no log for this job. Asked for it (`actions/jobs/140807181395/logs`), the API answered
-HTTP 404, `BlobNotFound`, at 01:23:04Z, 01:25:30Z, 01:31:07Z and 01:57Z on 2026-11-28 and again at
-06:46:36Z, and the run's attempt-1 log archive holds no log for it. In place of the log, the API's
+HTTP 404 with a `BlobNotFound` body at 01:23:04Z, 01:25:31Z, 01:31:07Z and 01:57:31Z on 2026-11-28,
+each time the saved body's own, and HTTP 404 again at 06:46:36Z, that response's body not kept; the
+run's attempt-1 log archive holds no log for it. In place of the log, the API's
 records, each saved under `~/selfhost-findings-20261128/evidence/r99-shapes` and listed with its
 SHA-256 in that directory's `SHA256SUMS`:
 
@@ -116,6 +115,11 @@ How a lost hosted macOS leg has looked here, read from the job records and check
   (`findings/P3_liveness_202611162300_a-windows-test-job-never-ended-after-its-tests-passed.md:60-61`)
   records a hosted Windows job that its time limit cancelled after every harness of its shard had
   reported a pass, read from that job's log.
+- `PR320-R7-MACOS-SIGTTOU-STRANDED`
+  (`findings/P3_portability_202609241645_sigttou-left-the-supervised-tree-stranded-on-macos.md:86-95`)
+  records a `test (macos-latest)` job, `123226497738` on 2026-10-29, whose annotations read "The job
+  has exceeded the maximum execution time of 30m0s" and then "The operation was canceled", and whose
+  log shows the library printing `running 3555 tests`.
 
 ## What the change that takes this up should do
 
