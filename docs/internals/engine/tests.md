@@ -2982,11 +2982,31 @@ first answer's standard error after one call for the same line with exit 1,
 from a Git `SIGKILL` ended (no inherited disposition can ignore it), unfinished,
 or with an empty line after it, and for the gate's own registration and an
 unrelated failure. With the call site put back to `probe_git`, the first case
-records `FAIL`. The stand-in is written by
-`runner::container::write_program_in_its_own_process`, from a process of its
-own, because a fork another test thread made while this process held it open
+records `FAIL`.
+
+The cases and their assertions run in `the_gate_role_probe_cases_child`, an
+isolated child that this test starts through
+`agent::proc::test_support::run_test_isolated` under a 300-second deadline, and
+the test asserts that the child passed and recorded that it reached the end of
+its cases. The child writes the stand-in through `write_the_gate_probe_stand_in`:
+`runner::container::write_program_in_its_own_process` writes it from a process
+of its own, because a fork another thread made while this process held it open
 for writing kept that writer and the gate role's exec of it failed with "Text
-file busy" (`CI-FLAKE-GATE-PROBE-TEXT-FILE-BUSY`).
+file busy" (`CI-FLAKE-GATE-PROBE-TEXT-FILE-BUSY`), and `fs::set_permissions`
+then gives it mode 0700, as before that fix (the helper makes it 0755). The
+helper's end waits for its reaper without a bound, so it is called only inside
+an isolated, bounded child (`FUA-I4-RELAY`); until this round the test called it
+from its own process.
+
+Nothing fails if the stand-in is written by `fs::write` again. The
+inherited-writer technique of `runner::host::tests` needs a fork taken while the
+writer's descriptor is open. `fs::write` opens, writes and closes a regular file
+in one call, and a write to a regular file never blocks, so a test can reach
+that window only by racing. The host oracle makes the window deterministic by
+blocking the writer on a FIFO. A FIFO cannot be executed (`execve` refuses it
+with `EACCES`), so that oracle cannot end in `ETXTBSY`. The host suite's
+`ETXTBSY` control opens a writer of its own, so it passes whichever writer made
+the file.
 
 ## `fn the_v1_include_names_the_managed_repository_however_its_path_is_spelled() {`
 
