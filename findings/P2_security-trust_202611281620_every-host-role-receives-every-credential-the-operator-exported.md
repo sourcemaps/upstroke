@@ -33,9 +33,14 @@ guard: the runner change that carries out the owner's decision, not yet made, on
    `src/runner/host/environment.rs:386-409`).
 4. A gate's command carries no overlay (`src/gates.rs:84-90`), and the runner starts every child
    from the composed list alone, clearing the rest (`src/runner/host.rs:329-338`).
-5. So a gate, a shell probe and every agent role of another vendor receive every exported value
-   except the three location variables, the credentials among them: only the locations are
-   scoped by role.
+5. So a gate, a shell probe and every agent role of another vendor receive every credential the
+   operator exported. Apart from the three location variables, the runner removes or changes only
+   `PATH`, `HOME` and `USERPROFILE`, which it gives back from the base, the names a command's
+   overlay sets (a gate's sets none), and Git variables: `GIT_NO_REPLACE_OBJECTS`, or the managed
+   include it appends to `GIT_CONFIG_PARAMETERS` (`src/runner/host/environment.rs:419-462`), and,
+   for a role it starts outside the started checkout, the four work-tree selectors and a relative
+   `GIT_COMMON_DIR` (`src/runner/host.rs:75-81`, `:94-118`, `:296-307`). No exported credential is
+   withheld by role; the locations are.
 
 **How each step is known.**
 
