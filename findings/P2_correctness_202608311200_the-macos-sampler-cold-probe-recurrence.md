@@ -77,7 +77,11 @@ From the job's log as GitHub's API serves it, with ANSI escape sequences removed
 - Lines 427, 429, 431 and 433: the four sites' budgets were 827468, 80294, 15237 and 31962 µs
   (`Object.CandidateStage`, `Object.CandidateWriteTree`, `Object.ProposalCherryPick`,
   `Worktree.Add`). Each site's summary (lines 428, 430, 432 and 434) has `unclassified=0`.
-- Line 435: every killed group was gone within 5.083 µs of its leader's reap.
+- Line 435 prints
+  `residue sampling: every killed group was gone within 5.083µs of its leader's reap (the bound is 10s)`.
+  That figure is the greatest `group_ended` over all 32 launches
+  (`src/workspace_manager/tests.rs:1436-1440` at `449fcfb1`), line 460's, a `write-tree` launch
+  that ended `Completed`.
 - Lines 436 to 443: for each of `git add`, `git write-tree`, `git cherry-pick` and
   `git worktree add`, the kill errors list eight times `Operation not permitted (os error 1)`, and
   the next line is `killed 0/8`.
@@ -132,8 +136,9 @@ From the job's log as GitHub's API serves it, with ANSI escape sequences removed
 **What the test asserts**, by line at `449fcfb1` (`c91f148` has `449fcfb1`'s tree). The assertion
 that failed is the kill floor, `assert!(killed > 0, …)` at `src/workspace_manager/tests.rs:1652`,
 over every launch; `killed` counts the launches whose end is `LaunchEnd::Killed` (`:1645-1648`).
-`kill_git_child` (`:2573`) spawns the child, sleeps for `after` (`:2575`) and then kills it, and
-`SampledChild::kill` reads `fired` off the clock (`:2492`) before it sends the signal (`:2494`).
+`kill_git_child` (`:2573`) spawns the child, sleeps for `after` (`:2575`), then calls the child's
+`kill` and keeps the error it answers (`:2581`), and `SampledChild::kill` reads `fired` off the
+clock (`:2492`) before it calls `kill_process_group` (`:2494`).
 
 **What #439's diff does to this test.** #439 moves the workspace-manager tests into modules. At
 `449fcfb1` this test, `src/workspace_manager/tests.rs:1323-1673`, is `master` `ca058512`'s
@@ -161,7 +166,7 @@ Its log: `~/selfhost-findings-20261128/evidence/job-46020861627-140607672907.log
   `Operation not permitted (os error 1)`; every child ended `Completed`; and the kill floor failed.
   The same checkout passed the test on attempt 2 the same day.
 - The log does not show when each child exited.
-- The log does not show when each signal was sent: each `fired` is read before its signal.
+- The log does not show when each kill call was made: each `fired` is read before the call.
 - **Inferred, not established:** the kills came late, each firing after its child had already
   exited.
 - **Inferred, not established:** the kills were refused.
@@ -182,6 +187,23 @@ Other open findings, as facts and not as causes:
   (`findings/P2_correctness_202611272326_the-census-samplers-probe-and-kill-are-timed-from-different-origins.md:18-19`)
   records that `measure_budget` includes the launch delay in the budget the kill ladder is cut
   from, while each sample's clock starts after the spawn.
+- `CLASS-INTERMITTENT-SUBPROCESS-KILL-SETTLE-RESIDUE-FAILURES`
+  (`findings/P1_liveness_202609031117_intermittent-kill-settle-and-residue-failures.md:37-48`)
+  lists this test among four kill samplers that it records as not members of it.
+- `PR249-KILL-SAMPLER-WINDOWS-WRAPPER`
+  (`findings/P2_correctness_202609090020_pr5s-census-sampler-kills-gits-launcher-on-windows.md:70-72`)
+  records this test failing on a Windows guest, in its `Worktree.Add` sample.
+- `CI-FLAKE-WINDOWS-SAMPLER-FSCK-TORN-REFLOG`
+  (`findings/P3_correctness_202611212300_the-kill-sampler-refused-a-torn-reflog-on-hosted-windows.md:14-24`)
+  records this test failing on a hosted Windows runner at its refusals assertion, after `fsck`
+  reported an invalid reflog entry.
+- `PR281-RECOVER-SAMPLER-NO-SAMPLE-DIED-BY-THE-KILL`
+  (`findings/P2_correctness_202609131201_the-recover-sampler-cold-probe-sibling.md:42-46`) records
+  the recovery sampler, a different test in a different module, and names this test beside it.
+- `CI-FLAKE-CHERRY-PICK-SAMPLER-NO-PICK-UNDER-WAY`
+  (`findings/P3_correctness_202611120400_the-cherry-pick-sampler-interrupted-no-pick-under-way-on-macos.md:18-49`)
+  records, for the recovery sampler, a different test, a `test (macos-latest)` job of 2026-11-11 in
+  which one kill failed with "Operation not permitted (os error 1)".
 
 **After this sighting.** #443, "the census kill sampler waits out each rung on the clock, not on a
 sleep", merged on 2026-11-28 as `f84bee7b`. Nothing shows that change on macOS against this red:
