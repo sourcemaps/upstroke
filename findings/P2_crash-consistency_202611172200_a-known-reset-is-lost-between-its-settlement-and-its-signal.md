@@ -8,7 +8,7 @@ reviewed_sha: 265abbd2aeabc437337b91dcef7e0c5d8de69700
 location: src/engine/coordinator.rs:827
 provenance: introduced_by_feature
 first_bad: ae2097a081dd14256691d801e9d2d3c5c2a11f16
-guard: capacity stage three, where the schema-4 engine records `pool_exhausted` (ruling r6; a branch such as `feature/schema-4-records-pool-exhaustion`), and no later than stage four
+guard: the next change to the legacy coordinator's rate-limited appends (ruling r41 step 5, 2026-11-22; the earlier guard, capacity stage three and no later than stage four, lapsed when stage four merged)
 ---
 
 # A known reset is lost between its settlement and its signal
