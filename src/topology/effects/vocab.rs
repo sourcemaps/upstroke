@@ -1458,15 +1458,22 @@ mod tests {
         found
     }
 
+    /// Whether a trimmed line of an enum body declares a variant.
+    ///
+    /// The identifier is the text before the first `=`, `(` or `{`, so a
+    /// variant is read whatever follows its name: nothing, an explicit
+    /// discriminant, a tuple body or a struct body. Requiring the whole line
+    /// to be alphanumeric, as this once did, left `Timeout = 2,` uncounted and
+    /// let a discriminant-bearing variant go missing from its `ALL` unseen.
     fn is_variant_line(text: &str) -> bool {
         let Some(body) = text.strip_suffix(',') else {
             return false;
         };
-        let identifier = match body.find('(') {
-            Some(open) if body.ends_with(')') => body.get(..open).unwrap_or_default(),
-            Some(_) => return false,
-            None => body,
-        };
+        let identifier = body
+            .find(['=', '(', '{'])
+            .and_then(|at| body.get(..at))
+            .unwrap_or(body)
+            .trim();
         let mut characters = identifier.chars();
         matches!(characters.next(), Some(first) if first.is_ascii_uppercase())
             && characters.all(|c| c.is_ascii_alphanumeric())
@@ -1476,7 +1483,9 @@ mod tests {
     fn the_census_reads_variants_and_not_the_text_that_looks_like_them() {
         // The blanker's positive control: a variant named only inside a comment
         // or a string literal is not a variant, and a `'static` lifetime does
-        // not swallow the file behind it.
+        // not swallow the file behind it. The real variants take every shape a
+        // variant line can -- unit, tuple body, explicit discriminant, struct
+        // body -- so a parser that reads only some of them undercounts here.
         let fixture = "\
 const NOISE: &'static str = \"pub enum Ghost {\\n    Boo,\\n}\";
 const RAW: &str = r#\"pub enum Phantom {\"#;
@@ -1484,6 +1493,8 @@ pub enum Real {
     One,
     // Two,
     Three(Payload),
+    Five = 5,
+    Six { seven: u8 },
 }
 ";
         assert_eq!(
@@ -1493,14 +1504,14 @@ pub enum Real {
         );
         assert_eq!(
             declared_variants(fixture),
-            vec![("Real".to_owned(), 2)],
+            vec![("Real".to_owned(), 4)],
             "a commented-out or quoted variant was counted, or a real one was not"
         );
 
         // The injected violation: one variant added to the enum and to nothing
         // else has to move the count.
         let widened = fixture.replace("    Three(Payload),", "    Three(Payload),\n    Four,");
-        assert_eq!(declared_variants(&widened), vec![("Real".to_owned(), 3)]);
+        assert_eq!(declared_variants(&widened), vec![("Real".to_owned(), 5)]);
 
         // And the blanker survives the two literal shapes that make a naive
         // scanner lose its place.
