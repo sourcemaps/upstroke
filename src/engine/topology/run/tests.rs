@@ -3869,8 +3869,6 @@ fn a_reviewers_limit_whose_pool_resets_at_the_clock_backs_off_as_before() {
     assert_backs_off_as_before("reviewer", &steps, &sleeper);
 }
 
-/// A client that hands on every question to `builtin`, and sets `scanned`
-/// when the run asks for its scan ([`CapacityClient::held_unspent`]).
 struct ScanMovesTheClock {
     builtin: Box<dyn CapacityClient>,
     scanned: std::rc::Rc<std::cell::Cell<bool>>,
@@ -3928,7 +3926,6 @@ impl CapacityClient for ScanMovesTheClock {
     }
 }
 
-/// 03:02:59 until the client is scanned, and 03:03:00 from then on.
 struct MovedByTheScan(std::rc::Rc<std::cell::Cell<bool>>);
 
 impl TimeSource for MovedByTheScan {
@@ -4014,8 +4011,6 @@ fn a_pool_the_installed_client_holds_is_passed_over_on_a_log_holding_none() {
     );
 }
 
-/// The scaffold's `plans`, with each agent [`AttemptPlans::pools_for`] is
-/// asked for listed in `asked`.
 struct AskedForPools<'a> {
     plans: &'a dyn AttemptPlans,
     asked: std::cell::RefCell<Vec<String>>,

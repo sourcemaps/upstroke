@@ -856,9 +856,11 @@ Generation 0 never reaches its gate, because its worker is rate limited. Generat
 attempt runs on `claude-max-2` and fails the gate. That is an ordinary failure with a session, so
 the generation is retained and its second attempt resumes the session.
 
-Before the retry the test installs a client with `claude-max` out of its map (`test_support::replayed_releasing`), as a review that pool
-served for another task would. `claude-max` is then first in file order and held by nothing, so
-`capacity::client::serving_pool` would choose it. The retry still records `claude-max-2`, with a `resume_session`,
+Before the retry the test releases `claude-max` in the run's own client. It asserts that the
+client's scan (`held_unspent`) holds `claude-max` at 05:30, hands the client a record of an
+attempt that pool served (`CapacityClient::served`), as a review that pool served for another
+task would, and asserts that the scan no longer holds it. `claude-max` is then first in file
+order and held by nothing, so `capacity::client::serving_pool` would choose it. The retry still records `claude-max-2`, with a `resume_session`,
 because `retry_request` takes the retained attempt's own pool. A session lives under its pool's
 credential directory, and the first pool's credentials never held this one.
 
@@ -1075,11 +1077,13 @@ so the `ts` of the refusal it settles.
 
 ## `impl TopologyRun` › `fn held_unspent(&self) -> BTreeMap<String, Option<String>> {`
 
-The pools the run's log holds exhausted, with each spent reset dropped: what
-`CapacityClient::grant` gives `serving_pool`. Read through `test_support::replayed_held_unspent`
-from a built-in client replayed from the run's own log, the client `resumed` starts from
-(`builtin_capacity_client_from_log`), since the run's client is a `dyn CapacityClient` and the
-map is the built-in's.
+The scan of the run's own client: the pools it holds exhausted, each with the reset
+`CapacityClient::grant` judges it by, a spent reset read as none. It asks the installed client
+for its scan of the run's events (`CapacityClient::held_unspent`), as `prepare_attempt` does,
+and reads the map out through `test_support::pools_held`, since the scan's field is private to
+`capacity::client`. A test that sets the client's memory through `CapacityClient::held` or
+`CapacityClient::served` reads the change here, where a client replayed from the log would not
+show it.
 
 ## `fn refused_again_on_resume(`
 
@@ -1123,10 +1127,60 @@ unrepaired code `awaited_reset` waited out the margin, to 03:02.
 
 ## `fn a_reviewers_limit_whose_pool_resets_at_the_clock_backs_off_as_before() {`
 
-`a_reviewers_rate_limit_still_defers`' run, with `copilot-pool`'s reset set on the run to
-03:00:00, the clock. A reviewer's limit waits on its own pool alone, so as with one pool
-`awaited_reset` answers `None` and the run backs off as before. On the unrepaired code it waited
-to 03:02.
+`a_reviewers_rate_limit_still_defers`' run, with `copilot-pool`'s reset set to 03:00:00, the
+clock, in the run's own client (`CapacityClient::held`). A reviewer's limit waits on its own pool
+alone, so as with one pool `awaited_reset` answers `None` and the run backs off as before. On the
+unrepaired code it waited to 03:02.
+
+## `struct ScanMovesTheClock {`
+
+A client that hands on every question to `builtin`, and sets `scanned` when the run asks for its
+scan (`CapacityClient::held_unspent`).
+
+## `struct MovedByTheScan(std::rc::Rc<std::cell::Cell<bool>>);`
+
+03:02:59 until the client is scanned, and 03:03:00 from then on.
+
+## `fn the_grant_judges_at_the_clock_read_after_its_scan() {`
+
+The witness for the order of the grant's arguments (`prepare_attempt`'s `let pool =` section).
+`on_primary_and_spare` with no limit, and the run's client replaced by a `ScanMovesTheClock`
+whose `builtin` holds `primary` to 05:30 and `spare` to 03:01 (`test_support::holding`). One step
+on a `MovedByTheScan` clock, with the serving adapters, dispatches `alpha`. The test asserts that
+the scan was asked for, and that the attempt starts on `spare`.
+
+`prepare_attempt` hands `grant` the candidates, the scan and the clock, in that order, so the
+clock is read after the scan, at 03:03:00. That is two minutes past `spare`'s 03:01 to the
+second, so `spare`'s reset and margin have passed and `primary`'s have not, and the grant takes
+`spare` (`capacity::client::serving_pool`'s second rule). With the clock read before the scan, as
+`prepare_attempt` read it from `e3f3416d` until the repair this test came with, it reads 03:02:59, neither reset and margin has passed, and the
+grant takes `primary`, first in file order. The test fails on the pool.
+
+## `fn a_pool_the_installed_client_holds_is_passed_over_on_a_log_holding_none() {`
+
+The witness that the grant asks the run's own client. `on_two_claude_max_pools` with one task,
+`alpha`, and no limit, so the log holds no `pool_exhausted`, which the test asserts. The run's
+client is then replaced by one holding `claude-max` to 05:30 (`test_support::holding`), and one
+step with the serving adapters starts `alpha` on `claude-max-2`, the agent's second pool. A grant
+that judged by a client replayed from the log rather than by the one installed would find no pool
+held and start it on `claude-max`, and the test fails on the pool.
+
+## `struct AskedForPools<'a> {`
+
+The scaffold's `plans`, with each agent `AttemptPlans::pools_for` is asked for listed in `asked`.
+
+## `fn a_reviewers_limit_never_calls_the_failovers_candidates() {`
+
+The witness that the failover asks for the agent's pools only after its guards.
+`a_reviewers_rate_limit_still_defers`' run, two reviewers and two pools for each agent, with the
+second reviewer rate limited on `copilot-pool`, stepped once on `AskedForPools` over the
+scaffold's plans. The limit defers the task, and the plans were asked for pools once, for
+`AGENT`, by the grant the worker's attempt started on. The failover
+(`TopologyRun::another_pool_can_serve`) did not ask again: a reviewer's limit fails `fails_over`'s
+first guard, and `fails_over` calls `candidates` only once its guards pass. The test then asks the
+run's client directly, with the settled record and its reviewer's `RateLimited` failure: it answers
+`false` and leaves `candidates` uncalled. With the pools read before the guards the plans are
+asked for `AGENT` twice, and the test fails on `asked`.
 
 ## `fn a_rate_limit_with_no_other_pool_for_the_agent_still_defers() {`
 

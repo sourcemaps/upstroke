@@ -1617,6 +1617,15 @@ last. A pool a later attempt proved serving is no longer in
 choice read one pool for each task, the one its last attempt's failure
 named. [`capacity::client::BuiltinClient::resets_awaited_by`] says what it reads now and why.
 
+**The limits are drawn one task at a time.** The run hands its client the
+deferred tasks' limits as an iterator (`limits`, each a
+`capacity::client::DeferredLimit` from `deferred_limit`), not as a list
+built first. The built-in client reads the spent resets from the log
+before it draws the first limit. Each task's last record, and for a
+worker's limit its agent's pools from the plans, are read as that limit is
+drawn, which is the order the engine read them in before the seam
+(`50c11ded`), and no list of every task's pools is built.
+
 ## `impl TopologyRun` › `fn announce_reset_wait(&self, awaited: &AwaitedReset, now_unix: u64) {`
 
 Hand each notifier [`interaction::reset_wait_line`] once, for the wait
@@ -2001,10 +2010,26 @@ pool `retry_request` took from the retained attempt. Any other attempt is the
 first of its generation, in a fresh session, and binds the pool the run's
 capacity client grants (`CapacityClient::grant`, which the built-in client
 answers with [`capacity::client::serving_pool`]) among the pools the plans
-list for the binding's agent (`AttemptPlans::pools_for`), read against the
-run's events and its clock. The choice goes to the assembler as `PlanRequest::pool`, and the
+list for the binding's agent (`AttemptPlans::pools_for`). The choice goes to the assembler as `PlanRequest::pool`, and the
 plan's `pool`, the slot the worker takes and its credential profile follow
 from it.
+
+**The grant's arguments are read in the order the engine read them before
+the seam (`50c11ded`).** They are one argument list, evaluated left to
+right: the candidates, then the client's scan of the run's events
+(`CapacityClient::held_unspent`), then the clock. So the log is scanned
+before the clock is read, and the grant judges at a clock read after the
+scan. From `e3f3416d` until the scan became a method of its own, the clock
+was read first and the scan ran inside `grant`. The scan is a value,
+`capacity::client::HeldUnspent`, whose field only `capacity::client` reads,
+so a client written elsewhere hands on one a built-in client scanned.
+
+The scan and the grant are both asked of the run's own client
+(`capacity_client`), the one `resumed` installed, and not of a client
+rebuilt from the log. `tests::the_grant_judges_at_the_clock_read_after_its_scan`
+is the witness for the order, and
+`tests::a_pool_the_installed_client_holds_is_passed_over_on_a_log_holding_none`
+for the client.
 
 So a task that a usage limit deferred is dispatched again on its agent's
 next pool while a signal still holds the first one exhausted, and returns to
@@ -2307,6 +2332,13 @@ same agent could take over. All three must hold:
    attempt on no pool has no other pool to move to.
 3. Some pool the plans list for the agent (`AttemptPlans::pools_for`), other
    than the one that refused, is not in `BuiltinClient`'s `exhausted_pools`.
+
+The plans are asked for the agent's pools only once the first two hold, as
+the engine asked them before the seam. The run hands
+`CapacityClient::fails_over` the lookup as a closure (`candidates`), and
+the built-in client calls it after its guards, so a reviewer's limit, or a
+record on no pool, never asks the plans
+(`tests::a_reviewers_limit_never_calls_the_failovers_candidates`).
 
 The pool that refused is excluded by name, not by looking it up.
 `settle_failure` asks this before it records the refusal, so on a pool's
