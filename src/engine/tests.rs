@@ -8447,18 +8447,60 @@ fn a_reviewers_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_p
     assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
 }
 
-const DEFERRAL_RATE_LIMIT: &str = "You've hit your weekly limit · resets Nov 14, 5pm (UTC)";
+const MONTH_NAMES: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+fn deferral_rate_limit(now: u64) -> (String, String) {
+    let reset = (now + 3 * 3_600) / 60 * 60;
+    let (_, month, day) = crate::util::civil_from_days(
+        i64::try_from(reset / 86_400).expect("the reset's day fits an i64"),
+    );
+    let month = MONTH_NAMES[usize::try_from(month - 1).expect("a month runs from 1 to 12")];
+    let minute_of_day = reset % 86_400 / 60;
+    let (hour, minute) = (minute_of_day / 60, minute_of_day % 60);
+    let minutes = if minute == 0 {
+        String::new()
+    } else {
+        format!(":{minute:02}")
+    };
+    let text = format!(
+        "You've hit your weekly limit · resets {month} {day}, {}{minutes}{} (UTC)",
+        (hour + 11) % 12 + 1,
+        if hour < 12 { "am" } else { "pm" },
+    );
+    (text, crate::util::rfc3339_utc(reset))
+}
 
 #[test]
 fn the_deferral_rate_limit_text_names_one_reset_at_any_time_of_day() {
-    const NOV_11_2026: u64 = 1_794_355_200;
-    for second in 0..86_400 {
-        assert_eq!(
-            crate::agent::reset_at_from_limit_message(DEFERRAL_RATE_LIMIT, NOV_11_2026 + second)
-                .as_deref(),
-            Some("2026-11-14T17:00:00Z"),
-            "read {second}s into the day"
-        );
+    let at = |year, month, day, second_of_day: i64| {
+        u64::try_from(crate::util::days_from_civil(year, month, day) * 86_400 + second_of_day)
+            .expect("an instant after 1970")
+    };
+    assert_eq!(
+        deferral_rate_limit(at(2026, 11, 14, 14 * 3_600)),
+        (
+            "You've hit your weekly limit · resets Nov 14, 5pm (UTC)".to_owned(),
+            "2026-11-14T17:00:00Z".to_owned()
+        ),
+        "built three hours before it, the text the deferral tests used to carry"
+    );
+    for built in [
+        at(2026, 11, 11, 0),
+        at(2027, 5, 16, 5 * 3_600 - 1),
+        at(2027, 5, 16, 5 * 3_600),
+        at(2026, 12, 31, 21 * 3_600 + 30 * 60),
+        at(2028, 2, 29, 9 * 3_600),
+    ] {
+        let (text, reset) = deferral_rate_limit(built);
+        for second in 0..86_400 {
+            assert_eq!(
+                crate::agent::reset_at_from_limit_message(&text, built + second).as_deref(),
+                Some(reset.as_str()),
+                "{text}, built at {built}, read {second}s later"
+            );
+        }
     }
 }
 
@@ -8478,7 +8520,8 @@ fn a_deferral_rate_limit_keeps_the_reset_pool_exhausted_recorded() {
         vec![Effect::RateLimited, Effect::RateLimited, Effect::EditFile],
         vec![ReviewBehavior::Pass],
     );
-    source.adapter.worker_rate_limit = DEFERRAL_RATE_LIMIT;
+    let (limit, _) = deferral_rate_limit(crate::util::unix_seconds_now());
+    source.adapter.worker_rate_limit = limit.leak();
     let report = run_with(&opts, &source).expect("run");
     assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
 
@@ -8653,7 +8696,8 @@ fn a_rate_limit_after_a_success_retired_its_pool_writes_pool_exhausted_again() {
         ],
         vec![ReviewBehavior::Pass],
     );
-    source.adapter.worker_rate_limit = "You've hit your weekly limit · resets Nov 14, 5pm (UTC)";
+    let (limit, reset) = deferral_rate_limit(crate::util::unix_seconds_now());
+    source.adapter.worker_rate_limit = limit.leak();
     let report = run_with(&opts, &source).expect("run");
     assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
 
@@ -8676,7 +8720,7 @@ fn a_rate_limit_after_a_success_retired_its_pool_writes_pool_exhausted_again() {
         .reset_at
         .clone()
         .expect("the weekly text named its reset");
-    assert!(first.ends_with("-11-14T17:00:00Z"), "{first}");
+    assert_eq!(first, reset, "{first}");
     assert_eq!(
         signals[1].1.reset_at.as_deref(),
         Some(first.as_str()),

@@ -5251,26 +5251,53 @@ failed`) and feedback are what they were, and whose `limit_message` is that stde
 rate-limited outcome whose stderr signals nothing: the reason is the outcome's detail, as before,
 and no `limit_message` is carried, because the stderr did not classify the attempt.
 
+## `fn deferral_rate_limit(now: u64) -> (String, String) {`
+
+Claude Code's weekly-limit text built from a clock reading: it names, by date and time, the minute
+three hours after `now`, and the second value is that reset in the log's fixed-width RFC 3339 form.
+Like Claude Code it leaves the minutes out on the hour, so built at 14:00 on 2026-11-14 it is the
+fixed `You've hit your weekly limit · resets Nov 14, 5pm (UTC)` the deferral tests used to carry.
+`MONTH_NAMES` spells the month as Claude Code does; the parser's own list is private to
+`agent::adapter`.
+
+The engine reads a reset against the real clock on every refusal, and a dated reset resolves to
+the occurrence of its month and day nearest that read. A date three hours after the run's own clock
+is the nearest occurrence of itself for about half a year either side, so every read during the run
+names the same reset, whatever the date and time it runs. The fixed text did not: its nearest Nov 14
+moves to the next year at 2027-05-16T05:00:00Z, halfway between two of them.
+
+The tests set the text through `worker_rate_limit`, which holds a `&'static str`, so they leak it
+with `String::leak`: a few dozen bytes for each test that runs.
+
 ## `fn the_deferral_rate_limit_text_names_one_reset_at_any_time_of_day() {`
 
-The test below reads its text against the real clock once per refusal, so the text must name one
-reset whenever it is read. This reads `DEFERRAL_RATE_LIMIT` at every second of 2026-11-11 and
-requires `2026-11-14T17:00:00Z` each time. The time-only `resets 5:30am (UTC)` it replaced fails
-here at 17:30:00, where the next morning's 05:30 takes over.
+The two tests below build their text with `deferral_rate_limit` from the clock as they start, and
+the engine reads it against the real clock once per refusal, so the text must name one reset
+whenever a run reads it. The test first pins the text's form: built at 2026-11-14T14:00:00Z it is
+exactly the fixed text it replaced, with `2026-11-14T17:00:00Z` as its reset. Then, for each of five
+build instants, it reads the text at every second of the day that follows and requires the reset
+`deferral_rate_limit` returned each time. The instants are 2026-11-11T00:00:00Z, the day Claude
+Code printed the text; 2027-05-16T04:59:59Z and 05:00:00Z, either side of the instant the fixed `Nov
+14, 5pm` text moved from naming 2026-11-14T17:00:00Z to naming 2027-11-14T17:00:00Z;
+2026-12-31T21:30:00Z, whose reset is `Jan 1, 12:30am` in the next year; and 2028-02-29T09:00:00Z,
+whose reset is `Feb 29, 12pm` on a date most years lack. The time-only `resets 5:30am (UTC)` that
+came before the fixed text changed reset at 17:30:00 each day, where the next morning's 05:30 took
+over.
 
 ## `fn a_deferral_rate_limit_keeps_the_reset_pool_exhausted_recorded() {`
 
 The same run as `a_rate_limit_that_names_its_reset_records_it_on_pool_exhausted`, rate limited
 twice before it succeeds: `[RateLimited, RateLimited, EditFile]`, with a text that names the reset. The engine writes one `pool_exhausted` for the
 outage, after the first rate-limited `attempt_finished` and before the second; the second is the
-first deferral, and it writes no signal of its own. The text is the dated `You've hit your weekly
-limit · resets Nov 14, 5pm (UTC)`, not the time-only `resets 5:30am (UTC)`, because the engine reads
-the reset again on each refusal against the real clock. A time-only reset resolves to the nearest
-05:30, and the later one wins a tie, so a run whose first refusal was read at 17:29:59 and whose
-retry was read at 17:30:00 named two different resets and rightly wrote a second signal. The
-dated text gives both reads the same Nov 14 17:00 at any time of day. The year it picks changes
-only once a year, halfway between two Nov 14s in mid-May, and the two reads would have to fall
-either side of that one instant. The estimate folded from the log through that second
+first deferral, and it writes no signal of its own. The text is `deferral_rate_limit`'s, built from
+the clock as the test starts: a weekly limit that resets, by date, three hours later. It is dated
+and built from the run's own clock because the engine reads the reset again on each refusal
+against the real clock, and the two reads must name the same reset. A time-only `resets 5:30am
+(UTC)` resolves to the nearest 05:30, and the later one wins a tie, so a run whose first refusal
+was read at 17:29:59 and whose retry was read at 17:30:00 named two different resets and rightly
+wrote a second signal. The fixed `resets Nov 14, 5pm (UTC)` that replaced it did the same either
+side of 2027-05-16T05:00:00Z, where its nearest Nov 14 moves to the next year. A date three hours
+ahead of the run gives both reads the same reset on any day. The estimate folded from the log through that second
 `attempt_finished` still reports the pool exhausted with the reset the signal recorded.
 Before `retire_signals` kept a known reset, that settlement marked the pool again with none, so
 `upstroke validate` said the signal carried no reset time and a resume's `capacity_snapshot` wrote
@@ -5289,6 +5316,19 @@ exhausted until the weekly reset. Before the engine remembered each pool's recor
 second refusal wrote nothing, and the estimate kept a 05:30 that had already passed. The test above,
 where the same reset is named twice, and `one_outage_records_one_signal_however_many_deferrals_it_causes`,
 where no reset is named, still write one signal each.
+
+## `fn a_rate_limit_after_a_success_retired_its_pool_writes_pool_exhausted_again() {`
+
+Two tasks on one pool, each refused once with the same text and then served: `[RateLimited,
+EditFile, RateLimited, EditFile]`. The success between the refusals retires the first signal, so
+the second refusal writes a second `pool_exhausted` naming the same reset, and the estimate folded
+through it reports that reset rather than "unknown". `capacity.md` and `coordinator.md` give the
+defect. The text is `deferral_rate_limit`'s, built from the clock as the test starts, and the first
+signal's reset is the one it names. The test needs both reads to name one reset: two different
+resets write two signals with or without the fix, so only the same reset read twice tells them
+apart. The fixed `resets Nov 14, 5pm (UTC)` this test used to carry named the next year's Nov 14 on
+a read at or after 2027-05-16T05:00:00Z, so a run whose two refusals fell either side of that
+instant recorded two different resets and failed the test's equality.
 
 ## `fn another_agents_rate_limit_naming_a_reset_records_none_on_pool_exhausted() {`
 
