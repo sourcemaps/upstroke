@@ -26243,6 +26243,11 @@ fn a_configured_reviewer_whose_cli_is_absent_fails_creation_before_p5b_and_commi
 /// What a creation refused at P3c leaves in `repo`, whose refusal said `said`:
 /// no execution root, no run directory, no private half carrying a commit
 /// record, and no integration ref.
+///
+/// The walk of the private `runs` directory reads every directory and entry or
+/// panics naming the path: one it cannot read is not certified as holding no
+/// commit record. Only the `runs` directory itself being absent counts as
+/// empty, since then there is nothing under it to hold one.
 fn assert_a_refused_creation_left_nothing(repo: &Path, said: &str) {
     assert_eq!(
         execution_roots_under(&private_root_for(repo)),
@@ -26256,14 +26261,23 @@ fn assert_a_refused_creation_left_nothing(repo: &Path, said: &str) {
     );
     let private_runs = private_root_for(repo).join("runs");
     let mut committed_records = Vec::new();
-    let mut stack = vec![private_runs];
+    let mut stack = vec![private_runs.clone()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if dir == private_runs && error.kind() == std::io::ErrorKind::NotFound => {
+                continue;
+            }
+            Err(error) => panic!("list {}: {error}", dir.display()),
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|error| panic!("read an entry of {}: {error}", dir.display()))
+                .path();
+            let is_dir = fs::metadata(&path)
+                .unwrap_or_else(|error| panic!("stat {}: {error}", path.display()))
+                .is_dir();
+            if is_dir {
                 stack.push(path);
             } else if path
                 .file_name()
@@ -26290,6 +26304,21 @@ fn assert_a_refused_creation_left_nothing(repo: &Path, said: &str) {
         "",
         "no integration ref"
     );
+}
+
+/// The refusal check the absent-alternative tests lean on does not certify a
+/// private `runs` it cannot list: here a file stands where the directory would,
+/// so listing it fails with an error other than its absence, and the check
+/// fails rather than reading it as holding no commit record.
+#[test]
+#[should_panic(expected = "list ")]
+fn an_absent_alternative_reviewer_cli_refusal_check_fails_on_a_runs_it_cannot_list() {
+    let (_tree, repo) = temp_engine_repo("refusal-check-unlistable-runs");
+    let private_root = private_root_for(&repo);
+    fs::create_dir_all(&private_root).expect("create the private root");
+    fs::write(private_root.join("runs"), "not a directory")
+        .expect("put a file where the private runs directory would be");
+    assert_a_refused_creation_left_nothing(&repo, "a fixture, not a refusal");
 }
 
 /// The program the alternative reviewer's adapter, `codex`, asks the runner
