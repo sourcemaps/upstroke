@@ -48,6 +48,39 @@ as an attribution.
 **not** that row's self-kill mechanism, which is what that row was about and what its repair
 addressed. That row is closed. So these sightings have had no home since.
 
+## Two more sightings, 2026-11-22 and 2026-11-24
+
+| run | job | date | branch | head |
+|---|---|---|---|---|
+| `45061116652` | `137327046665` | 2026-11-22T19:30:20Z | `gh-readonly-queue/master/pr-404-…` | `e215c508` |
+| `45309476256` | `138161315576` | 2026-11-24T02:02:51Z | `ci/macos-checks-cross-compile-on-linux` | `7110364a` (checkout `89ed1a42`) |
+
+Both ran on GitHub-hosted `macos-latest` runners, in `test (macos-latest, 5 of 5)`. Each is the same
+test with the same message as the four recorded above, now at `src/agent/proc/tests.rs:1263:5`: the
+assertion moved from line 879 as the file grew, and it is the same `assert!(settled, …)`. In each, it
+is the job's only failure.
+
+- **Run `45061116652`** (`merge_group`, #404), job `137327046665`, 2026-11-22T19:30:20Z, branch
+  `gh-readonly-queue/master/pr-404-…`, head `e215c508`. Log
+  `evidence/job-45061116652-137327046665.log`, ANSI-stripped SHA-256
+  `7c645be14209832ac1a5f7bc02e8c9c65b098cf7fde7ccd2ae70f90d2594401f`. Line 667: `... FAILED`.
+  Line 2532: the panic at `src/agent/proc/tests.rs:1263:5`, *"kill_tree returned while a member of
+  the child's process group was still running and still holding its pipes: only the direct child
+  was killed"*. Line 2539: `1992 passed; 1 failed; 66 ignored`. #404 changes only `findings/`.
+  **Same tree's pass:** merge-queue run `45064602211` tested `2c516b64`, whose tree is `e215c508`'s
+  (`c5b41056`), and passed; it merged #404.
+- **Run `45309476256`** (`pull_request`, #412 at `7110364a`), job `138161315576`,
+  2026-11-24T02:02:51Z, branch `ci/macos-checks-cross-compile-on-linux`, checkout `89ed1a42`
+  (GitHub's merge of `7110364a` into `master` `4c9c566b`). Log
+  `evidence/job-45309476256-138161315576.log`, ANSI-stripped SHA-256
+  `3da9a1c111993fee7f993cad18a775bda4c7e76025a40fd22f695bb90ac3ae60`. Line 668: `... FAILED`.
+  Line 2551: the same panic. Line 2558: `2011 passed; 1 failed; 66 ignored`. #412 changes no file
+  under `src/agent/`. The test passed in the next run, `45316622352`, on `7163640a` (an empty commit
+  on `7110364a`), which checked out `678f8f6f`, a merge into a later `master` (`ead85451`, which had
+  merged a docs pull request). That is **not the same tree**.
+- **Established:** the same assertion failed twice more on hosted macOS runners, on changes that do
+  not reach `kill_tree`, and the test passed in the next run each time.
+
 ## What the change that takes this up should do
 
 Read the settle predicate at `src/agent/proc/tests.rs:879` against what `kill_tree` actually
