@@ -1459,14 +1459,13 @@ mod tests {
     }
 
     fn is_variant_line(text: &str) -> bool {
-        let Some(body) = text.strip_suffix(',') else {
+        let Some(body) = text.strip_suffix(',').or_else(|| text.strip_suffix('{')) else {
             return false;
         };
-        let identifier = match body.find('(') {
-            Some(open) if body.ends_with(')') => body.get(..open).unwrap_or_default(),
-            Some(_) => return false,
-            None => body,
-        };
+        let identifier = body
+            .split_once(['=', '(', '{'])
+            .map_or(body, |(identifier, _)| identifier)
+            .trim();
         let mut characters = identifier.chars();
         matches!(characters.next(), Some(first) if first.is_ascii_uppercase())
             && characters.all(|c| c.is_ascii_alphanumeric())
@@ -1484,6 +1483,11 @@ pub enum Real {
     One,
     // Two,
     Three(Payload),
+    Four = 4,
+    Five { inner: u8 },
+    Six {
+        size: u32,
+    },
 }
 ";
         assert_eq!(
@@ -1493,14 +1497,14 @@ pub enum Real {
         );
         assert_eq!(
             declared_variants(fixture),
-            vec![("Real".to_owned(), 2)],
+            vec![("Real".to_owned(), 5)],
             "a commented-out or quoted variant was counted, or a real one was not"
         );
 
         // The injected violation: one variant added to the enum and to nothing
         // else has to move the count.
         let widened = fixture.replace("    Three(Payload),", "    Three(Payload),\n    Four,");
-        assert_eq!(declared_variants(&widened), vec![("Real".to_owned(), 3)]);
+        assert_eq!(declared_variants(&widened), vec![("Real".to_owned(), 6)]);
 
         // And the blanker survives the two literal shapes that make a naive
         // scanner lose its place.
