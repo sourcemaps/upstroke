@@ -1570,11 +1570,49 @@ reader's exact bytes, overlay, role, binding and identity are pinned at the sour
 `tracker::tests::subscription_cli_is_one_exact_probe_with_its_profile_and_no_bearer`, over a
 recording Runner, with no process.
 
+## `const OVERLAID_FIXTURE_BASE: &[&str] = &["PATH", "SYSTEMROOT"];`
+
+The only ambient names the overlaid fixture's base may carry. The child is this test binary named
+by its absolute path, so it needs no more than a search path and, on Windows, the system root. Every
+other ambient variable stays out of the child, including a real reset bearer or credential location
+the operator exported.
+
 ## `fn inheriting_the_overlaid_key() -> HostEnvironment {`
 
-The process environment, plus a synthetic non-empty value under the overlaid name. Without that
-value, the overlay's empty value would replace nothing, and the composition check below would pass
-even if the overlay had never been applied.
+The fixture the subscription-probe test runs with. It reads each allowlisted name with
+`std::env::var_os` and never enumerates the process environment with `vars_os`, so an unlisted
+variable cannot reach the base.
+
+## `fn inheriting_the_overlaid_key_from(`
+
+The base, built from an ambient list the caller supplies: the entries whose names are in
+`OVERLAID_FIXTURE_BASE`, compared with this platform's key case, plus a synthetic non-empty value
+under the overlaid name. An ambient value under the overlaid name is dropped, because the name is
+not allowlisted. Without the synthetic value, the overlay's empty value would replace nothing, and
+the composition check below would pass even if the overlay had never been applied.
+
+## `const UNRELATED_AMBIENT_MARKER: &str = "UPSTROKE_SYNTHETIC_UNRELATED_MARKER";`
+
+A synthetic, nonsecret name that no allowlist carries. It stands in for any unrelated variable an
+operator's shell exports.
+
+## `fn the_subscription_probe_fixture_forwards_no_unrelated_ambient_variable() {`
+
+`PR441-HOST-FIXTURE-ENVIRONMENT`. The fixture used to copy all of `vars_os()` and replace only the
+overlaid key, so every child it started inherited unrelated ambient variables. That contradicted
+the credential isolation the subscription probe's note claims. This test passes a synthetic ambient
+list: an allowlisted `PATH`, an unrelated dummy marker, and an ambient value under the overlaid
+name. It asserts that the base is exactly `PATH` plus the fixture's own overlaid value, and that the
+marker is absent from both the base and the vector `HostRunner::child_environment` composes for the
+overlaid probe request. That vector still carries the overlay's empty value. The test changes no
+process environment and starts no child.
+
+## `fn the_runner_contract_note_counts_the_subscription_overlay_among_production_values() {`
+
+`PR441-NOTES-RUNNER-OVERLAY`. The runner-contract note called an empty overlay production's only
+value, but the subscription reader's native route sets one. This test reads that note with its
+whitespace collapsed. It refuses the retired claim and requires the paragraph to name the reader's
+builder, the role grid and the grid that carries the reader's overlay.
 
 ## `fn a_subscription_probe_with_an_overlay_and_a_payload_reaches_the_containment_points() {`
 
@@ -1600,7 +1638,9 @@ test closes that gap, in four parts:
   count keeps the shape from dropping out of the grid unnoticed.
 
 The child is the grid's agent CLI (this test binary, running no test). It is never `claude`, and
-nothing here reads a credential or reaches a provider.
+nothing here reads a credential or reaches a provider. Its base holds only the entries of
+`OVERLAID_FIXTURE_BASE` that are set, plus the synthetic overlaid value, so no other ambient variable
+reaches any of its children.
 
 ## `fn the_pre_exec_containment_step_runs_in_the_forked_child() {`
 

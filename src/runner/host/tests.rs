@@ -4255,15 +4255,106 @@ fn overlaid_probe_request() -> Result<RunnerRequest, UpstrokeError> {
     )
 }
 
+const OVERLAID_FIXTURE_BASE: &[&str] = &["PATH", "SYSTEMROOT"];
+
 fn inheriting_the_overlaid_key() -> HostEnvironment {
+    inheriting_the_overlaid_key_from(
+        OVERLAID_FIXTURE_BASE
+            .iter()
+            .filter_map(|name| std::env::var_os(name).map(|value| (os(name), value))),
+    )
+}
+
+fn inheriting_the_overlaid_key_from(
+    ambient: impl IntoIterator<Item = (OsString, OsString)>,
+) -> HostEnvironment {
     let case = KeyCase::current();
     HostEnvironment::with_base(
-        std::env::vars_os()
-            .filter(|(name, _)| !case.same_key(name, OsStr::new(OVERLAID_TO_EMPTY)))
+        ambient
+            .into_iter()
+            .filter(|(name, _)| {
+                OVERLAID_FIXTURE_BASE
+                    .iter()
+                    .any(|allowed| case.same_key(name, OsStr::new(allowed)))
+            })
             .chain([(os(OVERLAID_TO_EMPTY), os("synthetic-inherited-value"))])
             .collect(),
         case,
     )
+}
+
+const UNRELATED_AMBIENT_MARKER: &str = "UPSTROKE_SYNTHETIC_UNRELATED_MARKER";
+
+#[test]
+fn the_subscription_probe_fixture_forwards_no_unrelated_ambient_variable() {
+    let case = KeyCase::current();
+    let environment = inheriting_the_overlaid_key_from([
+        (os("PATH"), os("/synthetic/bin")),
+        (
+            os(UNRELATED_AMBIENT_MARKER),
+            os("synthetic-unrelated-value"),
+        ),
+        (os(OVERLAID_TO_EMPTY), os("synthetic-ambient-value")),
+    ]);
+    assert_eq!(
+        value(environment.base(), UNRELATED_AMBIENT_MARKER, case),
+        None,
+        "the fixture's base copied an ambient variable its allowlist never names: {:?}",
+        environment.base()
+    );
+    assert_eq!(
+        environment
+            .base()
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<BTreeSet<OsString>>(),
+        BTreeSet::from([os("PATH"), os(OVERLAID_TO_EMPTY)]),
+        "the base is the named allowlist's present entries and the synthetic overlaid key"
+    );
+    assert_eq!(
+        value(environment.base(), OVERLAID_TO_EMPTY, case),
+        Some(OsStr::new("synthetic-inherited-value")),
+        "the overlaid key's base value is the fixture's own, not the ambient one"
+    );
+
+    let request = overlaid_probe_request().expect("a shipped adapter id");
+    let composed = HostRunner::new()
+        .with_environment(environment)
+        .child_environment(&request)
+        .expect("the overlay names no reserved key");
+    assert_eq!(
+        value(&composed, UNRELATED_AMBIENT_MARKER, case),
+        None,
+        "the child environment carries the unrelated ambient marker: {composed:?}"
+    );
+    assert_eq!(
+        value(&composed, OVERLAID_TO_EMPTY, case),
+        Some(OsStr::new("")),
+        "and still the overlay's empty value"
+    );
+}
+
+#[test]
+fn the_runner_contract_note_counts_the_subscription_overlay_among_production_values() {
+    const NOTES: &str = include_str!("../../../docs/internals/runner/contract.md");
+    let notes = NOTES.split_whitespace().collect::<Vec<_>>().join(" ");
+    for retired in ["**nothing does**", "production's only value"] {
+        assert!(
+            !notes.contains(retired),
+            "the runner-contract note still says no production spec sets an overlay \
+             ({retired:?}), but the subscription reader's native route sets one"
+        );
+    }
+    for pin in [
+        "`tracker::subscription::read_cli`",
+        "`runner::host::tests::a_subscription_probe_with_an_overlay_and_a_payload_reaches_the_containment_points`",
+        "`runner::host::tests::the_role_grid_sends_the_shapes_production_sends`",
+    ] {
+        assert!(
+            notes.contains(pin),
+            "the runner-contract note's overlay paragraph must name {pin}"
+        );
+    }
 }
 
 #[test]

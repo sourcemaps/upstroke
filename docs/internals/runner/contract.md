@@ -1230,10 +1230,18 @@ This is the tripwire for `PR4-CONF-006`'s whole class. That finding was
 not "the fixtures forgot stdin"; it was that a production call site
 started filling a spec field and no fixture grid learned of it, so an
 observer suppression keyed on that field passed every test in the suite.
-The same thing is true of the overlay the moment anything sets one: as
-of this slice **nothing does**, and `runner::host::tests::
-the_role_grid_sends_the_shapes_production_sends` carries an empty
-overlay for all five roles *because* that is production's only value.
+The same thing is true of the overlay, and one production spec now sets
+one: `tracker::subscription::read_cli`, the subscription reader's
+native route, binds the reset bearer's variable to an empty value on an
+agent-probe request that `main.rs` hands to a host Runner of its own.
+No run's Runner and no container carries that request, so
+`runner::host::tests::the_role_grid_sends_the_shapes_production_sends`
+still carries an empty overlay for all five roles, the value every
+request a run builds sends. The reader's overlay, together with its
+stdin payload, has its own grid:
+`runner::host::tests::a_subscription_probe_with_an_overlay_and_a_payload_reaches_the_containment_points`,
+named in the `src/tracker/subscription.rs` row of
+`every_production_command_spec_payload_is_classified`.
 
 So the count is on the population, not on the shape. `.stdin(` and
 `.env(` are counted across the production region of the tree — both
