@@ -1169,43 +1169,106 @@ fn timeout_kills_a_background_grandchild_before_it_can_escape() {
     );
 }
 
-#[cfg(unix)]
-fn every_pipe_writer_is_gone(fd: libc::c_int) -> bool {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const WRITERS_GONE_BOUND: Duration = Duration::from_secs(10);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const WRITERS_GONE_SLICE: Duration = Duration::from_millis(10);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Writers {
+    Gone,
+    Held,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn look_at_writers(
+    mut read: impl FnMut(&mut [u8]) -> std::io::Result<usize>,
+) -> std::io::Result<Writers> {
     let mut buffer = [0_u8; 256];
     loop {
-        // SAFETY: `fd` is a live non-blocking read end owned by this test
-        // and `buffer` is a writable buffer of the length passed.
-        let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
-        match read {
-            0 => return true,
-            1.. => (),
-            _ => return false,
+        match read(&mut buffer) {
+            Ok(0) => return Ok(Writers::Gone),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                return Ok(Writers::Held);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
         }
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WritersWatched {
+    last: Writers,
+    looks: u32,
+    waited: Duration,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn watch_writers(
+    mut look: impl FnMut() -> std::io::Result<Writers>,
+    bound: Duration,
+    mut now: impl FnMut() -> Instant,
+    mut rest: impl FnMut(Duration),
+) -> std::io::Result<WritersWatched> {
+    let started = now();
+    let mut looks = 0_u32;
+    loop {
+        let last = look()?;
+        looks += 1;
+        let waited = now().saturating_duration_since(started);
+        if last == Writers::Gone || waited >= bound {
+            return Ok(WritersWatched {
+                last,
+                looks,
+                waited,
+            });
+        }
+        rest(WRITERS_GONE_SLICE.min(bound - waited));
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
-    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::process::CommandExt;
 
-    let scratch = std::env::temp_dir().join(format!(
-        "upstroke-kill-tree-{}-{}",
-        std::process::id(),
-        crate::ulid::ulid()
-    ));
-    std::fs::create_dir_all(&scratch).expect("scratch directory");
-    let ready = scratch.join("ready");
+    let parent = std::env::temp_dir();
+    let scratch = match crate::rundir::scratch_tree::acquire(&parent, "kill-tree") {
+        Ok(scratch) => scratch,
+        Err(refusal) => panic!(
+            "a scratch tree for `kill-tree` under {}: {refusal:?}",
+            parent.display()
+        ),
+    };
+    let fifo = scratch.path().join("writers");
+    let ready = scratch.path().join("ready");
+    let path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).expect("a path without NUL");
+    // SAFETY: `path` is a NUL-terminated string that outlives the call.
+    let made = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+    assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    let mut writers = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo)
+        .expect("open the fifo's reading end");
     let mut command = shell(
-        "sh -c 'printf \"ready\\n\" > \"$UPSTROKE_READY.publishing\"; \
+        "exec 3>\"$UPSTROKE_FIFO\"; \
+         sh -c 'printf \"ready\\n\" > \"$UPSTROKE_READY.publishing\"; \
          mv \"$UPSTROKE_READY.publishing\" \"$UPSTROKE_READY\"; sleep 60' & sleep 60",
     );
     command
+        .env("UPSTROKE_FIFO", &fifo)
         .env("UPSTROKE_READY", &ready)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::null());
     // SAFETY: the closure calls one async-signal-safe syscall. The group is
     // what `kill_tree` targets, so the fixture must have one of its own.
     unsafe {
@@ -1218,12 +1281,6 @@ fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
     }
     let mut tree = ProcessTree::spawn(&mut command, &mut NoHooks).expect("spawn a group leader");
     let pgid = i32::try_from(tree.child.id()).expect("pid fits");
-    let stderr = tree.child.stderr.take().expect("piped stderr");
-    let fd = stderr.as_raw_fd();
-    // SAFETY: `fd` is owned by `stderr`, which outlives this call.
-    unsafe {
-        libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
-    }
     let published = readiness::await_signal(&ready, &mut tree.child, Duration::from_secs(10))
         .or_fail("the grandchild never started");
     assert_eq!(
@@ -1231,8 +1288,9 @@ fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
         ["ready"],
         "the marker became visible with its content, not before it"
     );
+    let before = look_at_writers(|bytes| writers.read(bytes)).expect("read the fifo");
     assert!(
-        !every_pipe_writer_is_gone(fd),
+        before == Writers::Held,
         "the fixture holds no pipe, so this test would pass vacuously"
     );
 
@@ -1243,19 +1301,160 @@ fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
         &std::cell::Cell::new(ProcessFate::Unresolved),
     )
     .expect("settle the group");
-    let settled = every_pipe_writer_is_gone(fd);
+    let after = watch_writers(
+        || look_at_writers(|bytes| writers.read(bytes)),
+        WRITERS_GONE_BOUND,
+        Instant::now,
+        thread::sleep,
+    )
+    .expect("read the fifo");
     // SAFETY: a negative pid names the group; this is cleanup for the
     // failing case and a no-op for the passing one.
     unsafe {
         let _ = libc::kill(-pgid, libc::SIGKILL);
     }
-    drop(stderr);
+    drop(writers);
     drop(tree);
-    let _ = std::fs::remove_dir_all(&scratch);
+    drop(scratch);
     assert!(
-        settled,
+        after.last == Writers::Gone,
         "kill_tree returned while a member of the child's process group was still \
          running and still holding its pipes: only the direct child was killed"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn scripted_reads(answers: &[std::io::Result<usize>]) -> (std::io::Result<Writers>, usize) {
+    let mut script = answers.iter();
+    let mut reads = 0_usize;
+    let answered = look_at_writers(|_| {
+        reads += 1;
+        match script.next().expect("the look reads only until an answer") {
+            Ok(count) => Ok(*count),
+            Err(error) => Err(std::io::Error::from(error.kind())),
+        }
+    });
+    (answered, reads)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_look_at_the_writers_retries_an_interrupted_read_and_drains_bytes() {
+    use std::io::ErrorKind::{Interrupted, WouldBlock};
+
+    let (answered, reads) = scripted_reads(&[
+        Err(Interrupted.into()),
+        Ok(3),
+        Err(Interrupted.into()),
+        Err(WouldBlock.into()),
+    ]);
+    assert_eq!(
+        (answered.ok(), reads),
+        (Some(Writers::Held), 4),
+        "an interrupted read and bytes are not answers, so the look reads again"
+    );
+
+    let (answered, reads) = scripted_reads(&[Ok(1), Err(Interrupted.into()), Ok(0)]);
+    assert_eq!(
+        (answered.ok(), reads),
+        (Some(Writers::Gone), 3),
+        "the end of file after an interrupted read is no writer left"
+    );
+
+    let (answered, reads) = scripted_reads(&[
+        Err(Interrupted.into()),
+        Err(std::io::ErrorKind::InvalidInput.into()),
+    ]);
+    assert_eq!(
+        (answered.map_err(|error| error.kind()), reads),
+        (Err(std::io::ErrorKind::InvalidInput), 2),
+        "any other error is the look's error, not an answer either way"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn scripted_watch(
+    looks: &[Writers],
+    then: Writers,
+    bound: Duration,
+) -> (WritersWatched, Vec<Duration>) {
+    let started = Instant::now();
+    let elapsed = std::cell::Cell::new(Duration::ZERO);
+    let mut script = looks.iter().copied();
+    let mut rests = Vec::new();
+    let watched = watch_writers(
+        || Ok(script.next().unwrap_or(then)),
+        bound,
+        || started + elapsed.get(),
+        |slice| {
+            rests.push(slice);
+            elapsed.set(elapsed.get() + slice);
+        },
+    )
+    .expect("a scripted look does not fail");
+    (watched, rests)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn the_writer_watch_ends_at_the_first_look_that_finds_no_writer() {
+    let (watched, rests) = scripted_watch(
+        &[Writers::Held, Writers::Held, Writers::Gone],
+        Writers::Held,
+        WRITERS_GONE_BOUND,
+    );
+    assert_eq!(
+        (watched, rests),
+        (
+            WritersWatched {
+                last: Writers::Gone,
+                looks: 3,
+                waited: 2 * WRITERS_GONE_SLICE,
+            },
+            vec![WRITERS_GONE_SLICE; 2],
+        ),
+        "one rest after each look that found a writer, and none after the end of file"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn the_writer_watch_answers_a_held_writer_at_its_deadline_on_a_scripted_clock() {
+    let bound = Duration::from_millis(25);
+    let (watched, rests) = scripted_watch(&[], Writers::Held, bound);
+    assert_eq!(
+        (watched, rests),
+        (
+            WritersWatched {
+                last: Writers::Held,
+                looks: 4,
+                waited: bound,
+            },
+            vec![
+                WRITERS_GONE_SLICE,
+                WRITERS_GONE_SLICE,
+                Duration::from_millis(5),
+            ],
+        ),
+        "the last rest is cut to the time left, and the look at the deadline is the last"
+    );
+
+    let (watched, _) = scripted_watch(
+        &[Writers::Held, Writers::Held, Writers::Held, Writers::Gone],
+        Writers::Held,
+        bound,
+    );
+    assert_eq!(
+        (watched.last, watched.looks, watched.waited),
+        (Writers::Gone, 4, bound),
+        "a look taken at the deadline is answered whatever the clock says"
+    );
+
+    let (watched, rests) = scripted_watch(&[], Writers::Held, Duration::ZERO);
+    assert_eq!(
+        (watched.last, watched.looks, rests.as_slice()),
+        (Writers::Held, 1, [].as_slice()),
+        "a zero bound still looks once, and rests not at all"
     );
 }
 

@@ -2488,9 +2488,18 @@ against a child that would otherwise run 300 seconds.
 Unix. The tree, not just the child: the child opens a fifo for writing, starts a background
 grandchild that inherits the descriptor, and announces itself. The fifo's reading end reports
 `WouldBlock` (writers exist) before the cancel, so the end of file after it is not vacuous. Once the
-runner reports the invocation cancelled, every writer is gone and the fifo reads end of file: the
-oracle `agent::proc`'s `kill_tree_settles_the_whole_unix_group_before_it_returns` uses for a timeout,
-with the same bounded read loop while the kernel closes a killed process's descriptors.
+runner reports the invocation cancelled, the fifo must read end of file within 10 s, polled every
+10 ms. The test process opens only the reading end, so every writer is the child's shell or a
+descendant of it, and no fork another test thread makes can hold a copy outside the tree. The bound
+covers the time between the report and the release of the last write end. Nothing the runner
+observes orders that release: a report that the group has no running member says nothing about
+descriptors (`agent::proc`'s notes on `kill_tree_primitive`).
+
+`agent::proc`'s `kill_tree_settles_the_whole_unix_group_before_it_returns` follows this pattern for
+`kill_tree` called directly, not for a cancel or a timeout. Its oracle used to be the child's stderr
+pipe, which the test process created, so a fork in another test thread could hold a copy of its
+write end. It differs from this test in two ways. Its read retries an interrupted read, where this loop fails on one and the check
+before the cancel counts one as no writer. Its bound is tested on a scripted clock (`watch_writers`).
 
 ## `fn rendezvous_helper() {`
 

@@ -410,15 +410,44 @@ The non-Windows block carries one statement gated `cfg(unix)` and no
 `not(unix)` body: the platform census (`effects::tests`) refuses a body no
 CI runner compiles. The Windows arm is unchanged by any of this.
 
-One delivered `SIGKILL` is not enough. The notes used to say otherwise:
-after it no member can run user code or complete a `fork`.
-`PR281-MACOS-KILL-TREE-SETTLE-ONLY-THE-DIRECT-CHILD` disproved that.
-`kill_tree_settles_the_whole_unix_group_before_it_returns` failed on hosted
-macOS seven times between 2026-09-06 and 2026-11-24, one of them on
-`master`. Each time, a member of the group was still running and holding
-the child's pipes after this primitive returned `Ok`. The settle loop
-waits until the group is seen without a live member, and a zombie has
-closed its descriptors.
+The settlement does not trust one delivered `SIGKILL`. The notes used to
+say one was enough: after it no member can run user code or complete a
+`fork`. Nothing here establishes that, and nothing has disproved it
+either. The settlement was written for
+`PR281-MACOS-KILL-TREE-SETTLE-ONLY-THE-DIRECT-CHILD`, as recorded at
+`3b04c1d7`
+(`findings/P2_correctness_202609131200_the-macos-kill-tree-settle-fingerprint.md`,
+deleted since). It records
+`kill_tree_settles_the_whole_unix_group_before_it_returns` failing on
+hosted macOS seven times between 2026-09-06 and 2026-11-24, one of them
+on `master`. Each failure shows only that the read end of the test's
+stderr pipe was not at EOF for the 5 s the test then polled after this
+primitive returned `Ok`, so some process held a write end. The failure
+message names a running member of the group, but the read cannot say
+which process held it. The evidence fits more than one holder:
+
+- a member the group signal never reached, which the settlement's
+  re-signal answers;
+- a copy of the write end outside the group, which a fork made by
+  another test thread could take from the test process that created the
+  pipe, and which no settlement of the group can end;
+- a killed member that took more than 5 s to end on a loaded host.
+
+The failures do not choose between these. The test now reads a fifo
+whose only writer its shell opens, and waits a bounded time for EOF
+(`proc/tests.md`).
+
+What the settlement can observe has limits. A look that finds no
+non-zombie member is an answer about group membership and run state.
+The scanner reads no descriptor, so it cannot see a holder outside the
+group, and a look walks the process table one entry at a time and is
+atomic with nothing. On Linux the state it reads is the thread-group
+leader's, and a leader whose own thread has exited reads `Z` while the
+process's other threads have not exited and still share its descriptors.
+On Darwin this repository establishes no order between `SZOMB` and the
+release of a process's descriptors. So `Ok` says the group was seen
+without a running member. It does not say that every descriptor the
+group held was closed at that instant.
 
 On any other Unix nothing here can observe the group, so the answer is
 what it was: the signal delivered (or `ESRCH`) and the leader reaped. The
@@ -2561,7 +2590,8 @@ into permission to release the cleanup lease.
 `pub(super)` on both definitions, Linux and macOS, so that
 [`end_unix_group`] in `agent::proc` can observe the group
 [`kill_tree_primitive`] signalled through the same scanner
-`cleanup_reaper_group` loops on (`PR281-MACOS-KILL-TREE-SETTLE-ONLY-THE-DIRECT-CHILD`).
+`cleanup_reaper_group` loops on (`PR281-MACOS-KILL-TREE-SETTLE-ONLY-THE-DIRECT-CHILD`,
+as recorded at `3b04c1d7`).
 This is the narrowest visibility that reaches the parent module, and the
 bodies are unchanged. `effects/wrappers.toml` classifies the name
 `effect_free` under `src/agent/proc.rs`, with `shared` counting its two

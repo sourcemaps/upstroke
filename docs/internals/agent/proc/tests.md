@@ -464,42 +464,66 @@ The marker was `temp_dir()/upstroke-proc-tree-<pid>-<test>.marker`, opened by a 
 (`PR64-CLEANUP-003-SCRATCH-PRECLEAN`). It is now in a tree this test acquired, whose guard
 reclaims it.
 
-## `fn every_pipe_writer_is_gone(fd: libc::c_int) -> bool {`
+## `const WRITERS_GONE_BOUND: Duration = Duration::from_secs(10);`
 
-Whether every writer of `fd`'s pipe is gone, asked of the kernel and
-answered now.
+How long `kill_tree_settles_the_whole_unix_group_before_it_returns`
+keeps looking at its fifo after `kill_tree` returns. It is the bound of
+`cancelling_an_invocation_ends_every_process_of_its_tree` in
+`runner::host::tests`, whose fifo pattern that test follows, and twice
+the 5 s poll the test had before `kill_tree` observed the group itself.
+The fixture's survivors sleep for 60 s, six times as long, so a member
+that was never signalled still holds the writer when the bound passes.
 
-A dead process holds no descriptors, so an immediate `EOF` from a
-non-blocking read is exactly "nothing that inherited this pipe is still
-running" — and unlike `kill(pid, 0)` it is not answered `Ok` by a
-zombie waiting for its reparented reaper. `EAGAIN` is the other answer:
-somebody still holds the write end.
+## `const WRITERS_GONE_SLICE: Duration = Duration::from_millis(10);`
 
-**Bytes are not an answer, so they are drained rather than counted.**
-`read` returns how many bytes it moved, and this used to compare that
-against zero: one byte of anything on the child's stderr — a shell
-diagnostic, a linker warning, a locale complaint, none of which this
-fixture controls on every platform — then reads as "a writer is still
-there" for as long as the byte sits in the pipe, which is forever. EOF
-is a property of the pipe once it is empty, so emptying it first is
-what makes this question the one the caller means.
+The rest between a look that found a writer and the next look. When
+less than this is left before the bound, the rest is cut to what is
+left, so the last look falls on the bound. It is the runner-host test's
+10 ms, and the old poll's.
 
-## `fn every_pipe_writer_is_gone(fd: libc::c_int) -> bool` › `0 => return true,`
+## `fn look_at_writers(`
 
-EOF: no descriptor for the write end exists anywhere.
+One look at a fifo's reading end, through a `read` the caller passes so
+that a test can script it
+(`a_look_at_the_writers_retries_an_interrupted_read_and_drains_bytes`).
 
-## `fn every_pipe_writer_is_gone(fd: libc::c_int) -> bool` › `1.. => (),`
+A dead process holds no descriptors, so EOF from a non-blocking read
+means no write end is open anywhere, and the look answers `Gone`. Unlike
+`kill(pid, 0)`, it is not answered by a zombie waiting for its
+reparented reaper. `EAGAIN` (`WouldBlock`) is the other answer, `Held`:
+some process still holds a write end. It does not say which.
 
-Somebody wrote. Not an answer either way — drain and re-ask.
+Neither bytes nor an interrupted read is an answer, so the look reads
+again at once after either. **Bytes are drained rather than counted**: a
+byte left in the pipe would answer "a writer is still there" for as long
+as it sat there, and EOF is a property of the pipe once it is empty. The
+fixture never writes to the fifo, so this is a guard rather than a path
+the test takes. **`EINTR` is retried**, because it says nothing about the
+writers. The reader this replaced, `every_pipe_writer_is_gone`, answered
+"a writer holds it" for `EINTR` and for every other failed read alike.
+Every other error is now the look's own, returned to the caller, which
+fails on it.
 
-## `fn every_pipe_writer_is_gone(fd: libc::c_int) -> bool` › `_ => return false,`
+## `fn watch_writers(`
 
-`EAGAIN` (a writer holds it) or `EINTR` (ask again later).
+Looks until a look answers `Gone` or `bound` passes. The clock (`now`)
+and the rest (`rest`) are passed in, so the deadline is tested on a
+scripted clock rather than by waiting on a real one
+(`the_writer_watch_answers_a_held_writer_at_its_deadline_on_a_scripted_clock`).
+
+The clock is read once before the first look and once after each look.
+So the first look is always taken, even under a zero bound, a look made
+at the deadline is answered whatever it finds, and the rest before it is
+cut to the time left. A look's error ends the watch with that error. It
+answers the last look, the number of looks, and the time from the first
+reading of the clock to the last. The real test reads only the last
+look; the other two are for the scripted tests.
 
 ## `fn kill_tree_settles_the_whole_unix_group_before_it_returns() {`
 
-`kill_tree` settles the child's whole **group**, and does it before it
-returns.
+`kill_tree` ends the child's whole **group**, not only the child: after
+it returns, no member of the group is left holding a descriptor the
+group's shell opened.
 
 This is the one path on Unix that reaches `kill_tree`, and no test drove
 it: the explicit `kill(-pgid, SIGKILL)` could be deleted outright and
@@ -512,9 +536,39 @@ two apart.
 The oracle is `kill_tree`'s own doc comment turned into a question:
 "the real agent process would survive, keep running, and **keep the
 pipes open**". A group member that outlived the call still holds the
-inherited stderr, so the read end is not at EOF.
+fifo's write end it inherited, so the read end is not at EOF.
+
+Linux and macOS only. Those are the two platforms on which `kill_tree`
+observes the group (`end_unix_group`'s observer is gated to them), and
+the observation is what this test is named for. It was gated
+`cfg(unix)`; no CI runner compiles another Unix, so nothing ran there
+either way.
 
 ## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `let mut command = shell(`
+
+**The writer is the shell's.** The test makes the fifo and opens only
+its reading end, non-blocking, before the spawn. The shell opens the one
+write end (`exec 3>"$UPSTROKE_FIFO"`) before it starts anything else,
+and every other holder inherits it from the shell: the background `sh`,
+its `sleep`, and the shell's own `sleep`. So every process that holds
+the writer is the shell or a descendant of it, and the test process
+never holds a write end for another thread's fork to copy. The child's
+standard streams are `/dev/null`. This is the pattern of
+`cancelling_an_invocation_ends_every_process_of_its_tree` in
+`runner::host::tests`.
+
+The oracle used to be the child's stderr pipe, and the test process
+made that pipe for `Stdio::piped()`. So a write end of it was open in
+the test process from the pipe's creation until the spawn returned, and
+a fork that another test thread made in that window copied it. That
+copy stays open outside the group for as long as the forked process
+runs before it `exec`s. If the fork copied it before it was marked
+close-on-exec, it stays open across the `exec` too, for that process's
+whole life. Darwin has no `pipe2` (`create_cloexec_pipe`, in
+`agent::proc`'s notes), so a pipe made there with `pipe` is not
+close-on-exec until a second call marks it. A copy held outside the
+group is in a process `kill_tree` never signals, and it holds the read
+end off EOF exactly as a surviving member does.
 
 Staged and renamed, not written in place. The waiter below polls for
 the path, and a path that is created and then filled is observable
@@ -526,21 +580,104 @@ Producer-aware: the direct child is the only liveness fact a file
 signal has, and a fixture whose `sh` never started would otherwise
 have spent the whole bound before saying so.
 
-## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `let settled = every_pipe_writer_is_gone(fd);`
+## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `let before = look_at_writers(|bytes| writers.read(bytes)).expect("read the fifo");`
 
-One read, and no wait before it. A 5 s poll stood here because
-`kill(-pgid, SIGKILL)` returns as soon as the signals are queued, so a
-member could still be tearing down when `kill_tree` returned. The
-primitive now observes the group itself until no running member remains
-(`settle_signalled_group` over `settle_group`,
-`PR281-MACOS-KILL-TREE-SETTLE-ONLY-THE-DIRECT-CHILD`), and returns its
-error when it cannot establish that. A process that has exited has
-closed its descriptors, zombie or not, so once `kill_tree` answers `Ok`
-the read end is at EOF at once. A member still holding the pipe here is
-the defect this witness names, not a kernel that has yet to act: the
-fixture's survivors sleep for a minute. The settlement exists on Linux
-and macOS, where the termination module's scanner does; no CI runner
-compiles another Unix.
+The writer is held before the kill, so the EOF after it is not vacuous.
+The marker is published by the background `sh`, which the shell starts
+after its `exec 3>`, so the writer is open by the time this looks. The
+assertion keeps its words ("holds no pipe"): a fifo is a named pipe.
+
+## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `let after = watch_writers(`
+
+**Bounded, not one read.** One read straight after `kill_tree` returned
+stood here. It rested on a claim: a process that has exited has closed
+its descriptors, zombie or not, so `kill_tree`'s `Ok` put the read end
+at EOF at once, and a writer still open could only be the defect. That
+claim is about the kernel, and `kill_tree` does not observe it. On Linux
+and macOS its `Ok` is the scanner's answer that the group was looked at
+and found without a non-zombie member (`group_has_non_zombie_members`).
+That is an answer about membership and run state, and the scanner reads
+no descriptor. EOF at that instant follows only if three things hold:
+every writer is a member of the group, no member reads as a zombie
+before its descriptors are released, and nothing else holds the open
+file. The shell-owned writer secures the first for this fixture. The
+second is not always the kernel's order. On Linux the state the scanner
+reads is the thread-group leader's, and a leader whose own thread has
+exited reads `Z` while the process's other threads have not exited and
+still share its descriptors. On Darwin this repository establishes no
+order between `SZOMB` and the release of a process's descriptors. So the
+test waits up to `WRITERS_GONE_BOUND` for EOF, looking every
+`WRITERS_GONE_SLICE`.
+
+**What the bound costs.** This test can no longer tell a `kill_tree`
+that observes the group settled before it returns from one that signals
+the group and returns at once: members killed by the signal release
+their descriptors well inside the bound either way. That order is
+witnessed on a scripted group instead
+(`kill_tree_ends_a_group_by_signal_kill_settlement_and_reap_in_that_order`,
+`the_direct_child_is_reaped_only_after_the_last_look_at_its_group`).
+What this test still catches is the defect its words name: a member the
+signal never reached, whose `sleep 60` outlasts the bound six times
+over.
+
+**What a failure says.** The assertion keeps its words, so a failure
+reads as the recorded ones did. The words name one holder, a running
+member of the group. What the read establishes is only that some process
+still held a write end when the bound passed. With the writer the
+shell's, that process is the shell or a descendant of it. The test can
+still fail with nothing wrong in `kill_tree`: a host stalled for longer
+than the bound after the kill, a member whose ending the kernel does not
+finish in that time, or a descendant that left the group with the
+descriptor (this fixture starts none).
+
+**The recorded failures.**
+`PR281-MACOS-KILL-TREE-SETTLE-ONLY-THE-DIRECT-CHILD`, as recorded at
+`3b04c1d7`
+(`findings/P2_correctness_202609131200_the-macos-kill-tree-settle-fingerprint.md`,
+deleted since), lists this assertion failing seven times on hosted macOS
+between 2026-09-06 and 2026-11-24, one of them on `master`. Every one ran
+the old oracle, the stderr pipe, under a 5 s poll every 10 ms after
+`kill_tree` returned, and `kill_tree` did not yet observe the group. So
+each shows that the read end stayed off EOF for those 5 s, whether by
+`EAGAIN` or by any other failed read, which the old reader counted
+alike. That fits more than one cause. A member the group signal never
+reached would hold the writer for the length of its `sleep 60`, and the
+settlement's re-signal answers that. A copy of the write end held
+outside the group by another test thread's fork would hold it for as
+long as that process ran, and the shell-owned writer answers that. A
+killed member whose ending took more than 5 s on a loaded host would
+fail it too. The failures do not choose between these, and neither
+change is shown by them to be the repair.
+
+## `fn a_look_at_the_writers_retries_an_interrupted_read_and_drains_bytes() {`
+
+`look_at_writers` over a scripted `read` (`scripted_reads`), counting
+the reads. An interrupted read and a read that returned bytes are each
+followed by another read, and the look answers at the first `EAGAIN`
+(`Held`) or EOF (`Gone`) after them. Any other error is the look's
+error, even straight after an interrupted read was retried. The script
+fails the test if the look reads past an answer.
+
+## `fn scripted_watch(`
+
+`watch_writers` on a scripted clock. The clock is a fixed start plus the
+rests taken so far, and each rest advances it by exactly the slice it
+was asked for, so nothing here waits and no reading depends on how fast
+the host is. The looks come from a script and then repeat `then`.
+
+## `fn the_writer_watch_ends_at_the_first_look_that_finds_no_writer() {`
+
+Two looks that find a writer, then EOF, under the production bound:
+three looks, a rest after each of the first two and none after the EOF,
+and 20 ms on the scripted clock.
+
+## `fn the_writer_watch_answers_a_held_writer_at_its_deadline_on_a_scripted_clock() {`
+
+The deadline, exactly. A writer held at every look under a 25 ms bound
+is looked at four times, at 0, 10, 20 and 25 ms. The last rest is cut to
+the 5 ms left, the look at the deadline is the last, and the watch
+answers `Held` at exactly the bound. A look at the deadline that finds
+EOF is answered `Gone`. A zero bound looks once and does not rest.
 
 ## `fn a_group_signals_error_is_settled_only_by_esrch_or_by_eperm_beside_no_running_member() {`
 

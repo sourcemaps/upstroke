@@ -1559,7 +1559,8 @@ effect_free = [
     "deref_mut",
     "fmt",
     # Reads `/proc` (Linux) or `proc_listpids` (macOS) and mutates nothing, as `process_alive` does;
-    # `pub(super)` since PR281's settle loop in `kill_tree_primitive` observes the group through it.
+    # `pub(super)` since the settle loop for `PR281-MACOS-KILL-TREE-SETTLE-ONLY-THE-DIRECT-CHILD` (as
+    # recorded at `3b04c1d7`) observes the group through it, from `end_unix_group`.
     "group_has_non_zombie_members",
     # A pure decision over a memoised `Result`: it clones a message or returns
     # `Ok`, and touches nothing.
