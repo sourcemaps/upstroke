@@ -1699,27 +1699,91 @@ pub fn remove_public_husk(public: &Path, hooks: &mut dyn RunDirHooks) -> Result<
     funnel(
         hooks,
         EffectSiteId::RunDir(RunDirSite::RemovePublicHusk),
-        || {
-            let entries = read_dir_names(public)?;
-            for entry in entries {
-                if entry == OsStr::new(MARKER) {
-                    continue;
-                }
-                let path = public.join(&entry);
-                let removed = if path.is_dir() {
-                    fs::remove_dir_all(&path)
-                } else {
-                    fs::remove_file(&path)
-                };
-                removed.map_err(|source| UpstrokeError::Io { path, source })?;
+        || remove_listed_husk_marker_last(public),
+    )
+}
+
+/// `RunDir.RemovePublicHusk` for a husk the ownership proof found unbound,
+/// removing only what its planned [`UnboundShape`] says is there.
+///
+/// The shape is what [`prove_private_half_ownership`] answered when the
+/// census planned this removal. The directory can change after that answer,
+/// so the two shapes defined by what the directory holds are removed without
+/// listing it again:
+///
+/// - [`UnboundShape::Bare`]: `fs::remove_dir(public)` and nothing else.
+/// - [`UnboundShape::StagedMarkerOnly`]: the staged marker
+///   ([`MARKER_STAGED`]) is removed if present, then `fs::remove_dir(public)`.
+/// - [`UnboundShape::TargetAbsent`]: exactly [`remove_public_husk`] — the
+///   directory is listed and emptied with the published marker last. That
+///   shape is decided by the marker's private target, not by what the public
+///   directory holds, so there is no list of contents to keep to.
+///
+/// **Content that arrived after the plan is never removed under the first
+/// two shapes.** `remove_dir` refuses a directory that is not empty, so an
+/// entry written after the proof answered (a creator's marker, an event log)
+/// turns the removal into an error, and the entry and the directory are left
+/// for the next census to classify again. Under `StagedMarkerOnly` the
+/// staged marker is already gone when `remove_dir` fails. A staged marker
+/// binds nothing, because no private half is created before the marker is
+/// published, so the next census classifies the directory by what it holds.
+///
+/// The hook is consulted once per call, `Before` and `After` around the one
+/// primitive for the shape, as in [`remove_public_husk`]; the site inventory
+/// is frozen, so the shapes share `RunDir.RemovePublicHusk` and add no site.
+///
+/// # Errors
+///
+/// [`UpstrokeError::Io`] for `public` when `remove_dir` fails, which
+/// includes a directory that is no longer empty; for the staged marker's
+/// path when its removal fails for any reason other than `NotFound`; and,
+/// under `TargetAbsent`, the errors [`remove_public_husk`] returns. A hook
+/// that answers with an error returns that error.
+pub fn remove_unbound_husk(
+    public: &Path,
+    shape: UnboundShape,
+    hooks: &mut dyn RunDirHooks,
+) -> Result<(), UpstrokeError> {
+    funnel(
+        hooks,
+        EffectSiteId::RunDir(RunDirSite::RemovePublicHusk),
+        || match shape {
+            UnboundShape::Bare => remove_empty_public_dir(public),
+            UnboundShape::StagedMarkerOnly => {
+                remove_file_if_present(&public.join(MARKER_STAGED))?;
+                remove_empty_public_dir(public)
             }
-            remove_file_if_present(&public.join(MARKER))?;
-            fs::remove_dir(public).map_err(|source| UpstrokeError::Io {
-                path: public.to_path_buf(),
-                source,
-            })
+            UnboundShape::TargetAbsent => remove_listed_husk_marker_last(public),
         },
     )
+}
+
+/// The body of [`remove_public_husk`]: list `public`, remove every entry but
+/// the marker, then the marker, then the directory.
+fn remove_listed_husk_marker_last(public: &Path) -> Result<(), UpstrokeError> {
+    let entries = read_dir_names(public)?;
+    for entry in entries {
+        if entry == OsStr::new(MARKER) {
+            continue;
+        }
+        let path = public.join(&entry);
+        let removed = if path.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        removed.map_err(|source| UpstrokeError::Io { path, source })?;
+    }
+    remove_file_if_present(&public.join(MARKER))?;
+    remove_empty_public_dir(public)
+}
+
+/// `fs::remove_dir(public)`, which fails if anything is inside.
+fn remove_empty_public_dir(public: &Path) -> Result<(), UpstrokeError> {
+    fs::remove_dir(public).map_err(|source| UpstrokeError::Io {
+        path: public.to_path_buf(),
+        source,
+    })
 }
 
 /// `RunDir.RemovePrivateHusk` — and the only way to reach it is a token.

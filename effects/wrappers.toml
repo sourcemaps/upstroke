@@ -561,6 +561,7 @@ funnel = [
     "remove_marker",
     "remove_private_husk",
     "remove_public_husk",
+    "remove_unbound_husk",
     "stage_answer",
     "stage_commit_record",
     "stage_marker",

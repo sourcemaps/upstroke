@@ -4155,6 +4155,102 @@ fn probe_a_staged_marker_only_public_husk_is_removed() {
     assert!(!retried.exists(), "the next census finishes the job");
 }
 
+/// A husk on disk in `shape`, built through the creation funnels and checked
+/// against the ownership proof, so the fixture is the shape the proof plans
+/// for and not merely one that looks like it.
+///
+/// `Bare` is P0 and `StagedMarkerOnly` is P1a, with no private half. The
+/// `TargetAbsent` husk carries a plan beside its marker, so its removal has
+/// content to list and remove before the marker.
+fn unbound_husk(tag: &str, shape: UnboundShape) -> BoundHusk {
+    let husk = BoundHusk::new(tag);
+    let public = husk.public();
+    match shape {
+        UnboundShape::Bare => create_public_dir(&public, &mut NoHooks).expect("P0"),
+        UnboundShape::StagedMarkerOnly => {
+            create_public_dir(&public, &mut NoHooks).expect("P0");
+            stage_marker(&public, &husk.marker, &mut NoHooks).expect("P1a");
+        }
+        UnboundShape::TargetAbsent => {
+            husk.publish();
+            fs::remove_dir_all(&husk.private).expect("remove the private half");
+            write(&public.join(PLAN), b"{}");
+        }
+    }
+    match husk.prove() {
+        PrivateHalfOwnership::NothingBound(proved) => {
+            assert_eq!(proved, shape, "the fixture is the shape it is built as");
+        }
+        other => panic!("{shape:?}: the fixture must bind nothing private: {other:?}"),
+    }
+    husk
+}
+
+/// Every [`UnboundShape`] removes a directory that matches it, and each
+/// removal consults `RunDir.RemovePublicHusk` once: one `Before` and one
+/// `After`, and no other site.
+#[test]
+fn an_unbound_husk_is_removed_by_its_planned_shape() {
+    let site = EffectSiteId::RunDir(RunDirSite::RemovePublicHusk);
+    for (index, shape) in UnboundShape::ALL.iter().copied().enumerate() {
+        let husk = unbound_husk(&format!("unbound-shape-{index}"), shape);
+        let public = husk.public();
+        let mut observer = Observer::default();
+
+        remove_unbound_husk(&public, shape, &mut observer)
+            .unwrap_or_else(|error| panic!("{shape:?}: a matching husk is removed: {error}"));
+
+        assert!(!public.exists(), "{shape:?}: the public directory is gone");
+        assert_eq!(
+            observer.reached,
+            vec![
+                (site.to_string(), HookPhase::Before),
+                (site.to_string(), HookPhase::After),
+            ],
+            "{shape:?}: the hook is consulted once, around the one removal"
+        );
+    }
+}
+
+/// A `Bare` or `StagedMarkerOnly` plan applied to a directory that has since
+/// gained a file is an error, and the file is still there afterwards.
+///
+/// These two shapes are defined by what the directory holds, and the removal
+/// does not list it again, so `remove_dir` refusing a directory that is not
+/// empty is what keeps an entry written after the proof answered. A removal
+/// that listed and emptied the directory, as `TargetAbsent`'s does, deletes
+/// the newcomer and passes every matching-shape case above.
+#[test]
+fn a_bare_or_staged_plan_leaves_a_file_the_directory_gained_since() {
+    let gained: &[u8] = b"written after the plan was made";
+    for (index, shape) in [UnboundShape::Bare, UnboundShape::StagedMarkerOnly]
+        .into_iter()
+        .enumerate()
+    {
+        let husk = unbound_husk(&format!("unbound-gained-{index}"), shape);
+        let public = husk.public();
+        let newcomer = public.join(EVENT_LOG);
+        write(&newcomer, gained);
+
+        let error = remove_unbound_husk(&public, shape, &mut NoHooks)
+            .expect_err("a directory that is no longer the planned shape is not removed");
+
+        match &error {
+            UpstrokeError::Io { path, .. } => assert_eq!(
+                path, &public,
+                "{shape:?}: the error names the directory remove_dir refused"
+            ),
+            other => panic!("{shape:?}: a refused remove_dir is an Io error: {other:?}"),
+        }
+        assert_eq!(
+            fs::read(&newcomer).expect("the gained file is still there"),
+            gained,
+            "{shape:?}: and its bytes are untouched"
+        );
+        assert!(public.is_dir(), "{shape:?}: so is the directory");
+    }
+}
+
 /// P0 creates the **public** run directory and nothing else
 /// (`PR5-RUNDIR-036`).
 ///
