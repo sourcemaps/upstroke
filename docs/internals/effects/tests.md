@@ -2222,6 +2222,48 @@ root `workspace.default-members = [...]` are one table to Cargo and three
 different strings to a line scan, which is how the first two versions of
 this check read and how each was shown a spelling it missed.
 
+## `fn windows_suite_start(selection: &str) -> String {`
+
+Line 4 of the two Windows suite scripts, as `TEST_COMMAND` makes it: the
+command's first word is the program `Start-Process` is given, and the rest
+is its argument list, with `selection` after it inside the same quotes. The
+guest's line is the one made of no selection, and the shards' the one made
+of ` -- ${{ matrix.tests }}`. The rest of the line is fixed text: the
+process handed back, its two streams sent to the files line 3 names, its
+handle taken, `WaitForExit()`, and its exit kept as `$code`.
+
+Both tests that read the scripts compare a whole line with this one, so the
+command a Windows suite job starts cannot drift from `TEST_COMMAND`, and
+nothing can be added to its arguments, with each script's pin holding.
+
+## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {`
+
+What a Windows suite script must do about the process it starts, read from
+its text, as the ones it does not do. Four:
+
+- It waits on that process with `WaitForExit()`, after `Start-Process`, and
+  `Start-Process` is given no `-Wait`, which waits for the process's
+  descendants as well.
+- It pipes nothing into `Tee-Object`.
+- It exits with the code it kept from that process before it counts.
+- It lists the `upstroke*` processes still running before that exit, and
+  throws for them after it and before the count. So a failed suite's
+  processes are listed and stopped too, and a suite that passed and left
+  one fails.
+
+The order is read from where each fragment first occurs in the script.
+[`the_windows_leg_counts_the_tests_it_ran`] asks it of the guest's script
+and
+[`the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler`] of
+the shards'. Both scripts are pinned whole by the oracle, so these are
+relations a pin does not state: a script edited back to a pipeline, with
+its constant edited to match, passes the pin and fails here.
+
+Measured once, unplanned: with the space after `$passed =` lost from both
+constants and not from the workflow, the guest's script failed the third and
+fourth of these, and the oracle's clean-workflow check failed beside them as
+an unpinned script.
+
 ## `fn the_windows_leg_counts_the_tests_it_ran() {`
 
 The leg whose tests leave GitHub's runners reports that they ran, and
@@ -2240,6 +2282,17 @@ the oracle; this test holds two numbers inside that text to the constants
 they must equal -- the floor and the compiler version -- and requires the
 compiler check to come before the suite, since a refusal after the run has
 already spent the run on the wrong compiler.
+
+The suite is one line of that text, the one [`windows_suite_start`] makes of
+no selection: `cargo` started as a process with `TEST_COMMAND`'s arguments
+and nothing else, waited on, its exit kept. The test requires that line
+exactly once, and the compiler check before it. It also requires the four
+things [`windows_suite_wait_complaints`] reads of the script: that it waits
+on the process it starts, pipes nothing into `Tee-Object`, exits with
+Cargo's code before it counts, and throws when a test process is left
+running. The reason for the four is under `WINDOWS_TEST_WITNESS` in the CI
+model notes: two hosted runs, 43719719561 and 44277078005, in which a shard
+reported its tests and did not end.
 
 Every other assertion here reads `ci.yml` and concludes what CI was *asked*
 to do. Cargo can be asked for this suite and execute none of it: a
@@ -2632,19 +2685,28 @@ And the legs' suite step is the guest's but for the shard. The oracle pins
 `WINDOWS_TEST_WITNESS` and `WINDOWS_SHARD_WITNESS` each as a whole text, and
 two whole texts can drift apart with both pins holding. So, by line:
 
-- lines 1, 2, 4 and 5 of the shards' script are the guest's lines 1, 2, 4
-  and 5: the compiler questions, their refusal, the suite's exit and the
-  count;
-- the guest's line 3 is `TEST_COMMAND` and ` | Tee-Object -Variable log`,
-  and the shards' line 3 is the same with ` -- ${{ matrix.tests }}` between
-  them and nothing else, so a leg runs the guest's command over its
-  selection;
-- the shards' line 6 opens `if ($passed -lt ${{ matrix.floor }}) { throw `,
+- lines 1 to 3 and 5 to 9 of the shards' script are the guest's lines 1 to
+  3 and 5 to 9: the compiler questions, their refusal, the two files the
+  suite writes to, what is read from them, the processes left running, the
+  suite's exit, the refusal of a process left running and the count;
+- the guest's line 4 is [`windows_suite_start`] of no selection, `cargo`
+  started as a process with `TEST_COMMAND`'s arguments and nothing else,
+  and the shards' line 4 is the same with ` -- ${{ matrix.tests }}` after
+  those arguments and nothing else, so a leg runs the guest's command over
+  its selection;
+- the shards' line 10 opens `if ($passed -lt ${{ matrix.floor }}) { throw `,
   so the floor a leg refuses below is the one the matrix hands it, which
   the oracle holds to `WINDOWS_SHARD_FLOORS`.
 
-The shards' seventh line, which prints the count, is held by the oracle's
+The shards' eleventh line, which prints the count, is held by the oracle's
 pin alone.
+
+The shards' script is also asked what the guest's is about the process it
+starts ([`windows_suite_wait_complaints`]): that it waits on it, pipes
+nothing into `Tee-Object`, exits with Cargo's code before it counts, and
+throws when a test process is left running. Lines 5 to 8 being the guest's
+already says most of that; the question is asked of this text as well so
+that it does not rest on the other test's.
 
 Measured by setting the twin's install back to `stable` in the workflow and
 restoring it: this test and the oracle's clean-workflow check both failed,
@@ -2652,11 +2714,12 @@ each with the twin's toolchain complaint. That was before the shards. On
 2026-11-17, with a leg's arguments changed in the workflow and with a leg
 removed, each restored, this test failed at its first assertion with the
 matrix complaint (`windows_shard_matrix_complaints` in the workflow notes).
-And with line 6 testing `$passed -lt 0` in the workflow and in
-`WINDOWS_SHARD_WITNESS` together, then restored, the oracle's clean-workflow
-check passed, as an equality whose two sides moved together must, and this
-test failed at its line 6 assertion. The assertions on lines 1 to 5 were not
-mutated.
+And with the floor line, line 6 as the script then stood, testing
+`$passed -lt 0` in the workflow and in `WINDOWS_SHARD_WITNESS` together,
+then restored, the oracle's clean-workflow check passed, as an equality
+whose two sides moved together must, and this test failed at that line's
+assertion. The assertions on the script's other lines were not mutated
+then, and have not been since the script became eleven lines.
 
 ## `fn the_shard_tables_run_every_test_in_exactly_one_shard() {`
 

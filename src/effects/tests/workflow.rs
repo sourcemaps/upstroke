@@ -2456,9 +2456,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-WINDOWS-COMMAND-DELETED",
         escape: "the self-hosted job checks out, configures git, and runs no suite. The \
                  witness makes this one loud twice over -- the step is off its pin, and a \
-                 count of nothing is below the floor -- but the pin is what refuses it here.",
+                 step that started no suite has no output to read or count -- but the pin is \
+                 what refuses it here.",
         job: Some("test-windows"),
-        anchor: "          cargo test --all-targets --all-features | Tee-Object -Variable log\n",
+        anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
         replacement: "",
         refused_as: "test-windows-command",
     },
@@ -4365,8 +4366,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  on 2026-11-15 at 59 to 76 minutes a job, that is five legs cancelled at their \
                  limit; on a faster runner it is five green legs and no shard",
         job: Some("test-windows-hosted"),
-        anchor: "          cargo test --all-targets --all-features -- ${{ matrix.tests }} | Tee-Object -Variable log\n",
-        replacement: "          cargo test --all-targets --all-features | Tee-Object -Variable log\n",
+        anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- ${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
+        replacement: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
         refused_as: "test-windows-hosted-command",
     },
     WorkflowEscape {
@@ -4379,8 +4380,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  leg's 1085 among them: five green legs over a suite that lost the 2,188 tests \
                  of its largest shard",
         job: Some("test-windows-hosted"),
-        anchor: "          cargo test --all-targets --all-features -- ${{ matrix.tests }} | Tee-Object -Variable log\n",
-        replacement: "          cargo test --all-targets --all-features -- engine:: | Tee-Object -Variable log\n",
+        anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- ${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
+        replacement: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- engine::' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
         refused_as: "test-windows-hosted-command",
     },
     WorkflowEscape {
