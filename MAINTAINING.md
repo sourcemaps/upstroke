@@ -14,7 +14,7 @@ source, documentation, workflows, release machinery and this file.
    pushing.
 3. **Run the ten-command baseline** (`CODING_STANDARDS.md` §2) before every push, then wait for
    the two required contexts: `upstroke-ci` (formatting, Clippy on three platforms, the Linux and macOS
-   test matrix, the Windows suite in `test-windows-hosted` -- fourteen shards on `windows-latest`, on
+   test jobs, the Windows suite in `test-windows-hosted` -- fourteen shards on `windows-latest`, on
    every pull request, push and merge-queue entry -- the MSRV matrix, the six
    Bash gates) and `upstroke-pr-policy` (title, body sections, ledger). A
    branch behind `master` is not updated by hand to merge once the ruleset carries the merge
