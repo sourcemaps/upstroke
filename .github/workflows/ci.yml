@@ -769,8 +769,12 @@ jobs:
   # The floor `Cargo.toml` publishes, checked for each of the three targets,
   # one `include:` entry apiece: the runner that checks it and its tuple,
   # which the toolchain step installs and the check names with `--target`.
-  # The macOS tuple is checked from Linux, for the reason the comment above
-  # `lint (macos)` gives.
+  # Each target is checked on its own platform. The macOS entry runs on
+  # `macos-latest`, so Cargo builds dependency build scripts and procedural
+  # macros for macOS at 1.85, as a user's Mac does. It returned to
+  # `macos-latest` on 2026-11-25, once the organisation's macOS job limit,
+  # raised from 5 to 50 with its move to GitHub Enterprise Cloud on
+  # 2026-11-24, was seen in effect.
   msrv:
     name: msrv (Rust 1.85, ${{ matrix.target }})
     runs-on: ${{ matrix.os }}
@@ -783,7 +787,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-          - os: ubuntu-latest
+          - os: macos-latest
             target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -843,19 +847,22 @@ jobs:
   # with every required check green. This leg is the whole repair.
   #
   # The leg runs on Linux and compiles for `aarch64-apple-darwin`, the tuple
-  # `macos-latest` builds. `cfg` follows the target, not the host, so Clippy
-  # evaluates every `#[cfg(target_os = "macos")]` region of the package's
-  # target code as a Mac would. A host unit -- a build script or a
-  # proc-macro -- still compiles for Linux, so the package may have none:
+  # `macos-latest` builds, and it stays on Linux. Clippy lints only this
+  # package's own code, and `cfg` follows the target, not the host, so the
+  # cross-compiled lint evaluates every `#[cfg(target_os = "macos")]` region
+  # of the package's target code as a Mac would. A host unit of this package
+  # -- a build script or a proc-macro -- would still be linted for Linux, so
+  # the package may have none:
   # `no_repository_file_adds_a_host_unit_the_macos_cross_checks_cannot_reach`
   # refuses one, and adding one means restoring a native `macos-latest`
-  # Clippy and MSRV leg in the same change. The
+  # Clippy leg in the same change. The
   # toolchain step installs that tuple's standard library, and the workflow
   # oracle holds it to the tuple the command names. It moved off
-  # `macos-latest` because GitHub runs at most five macOS jobs at once for the
-  # account, and each run asked for seven: this leg, an `msrv` leg and the five
+  # `macos-latest` when GitHub ran at most five macOS jobs at once for the
+  # account and each run asked for seven: this leg, an `msrv` leg and the five
   # macOS test legs. Run 45175187088 shows each macOS job starting as another
-  # ended. The five macOS test legs still run natively.
+  # ended. The five macOS test legs still run natively, and the `msrv` leg is
+  # native again, for the reason the comment above `msrv` gives.
   lint-macos:
     name: lint (macos)
     runs-on: ubuntu-latest

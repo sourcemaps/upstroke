@@ -2250,18 +2250,20 @@ as the workspace check above does, so no spelling of a key hides it.
 
 ## `fn no_repository_file_adds_a_host_unit_the_macos_cross_checks_cannot_reach() {`
 
-The package has no host unit, and this is what keeps the macOS cross checks
+The package has no host unit, and this is what keeps the macOS cross check
 complete.
 
-Since #412, `lint (macos)` and the macOS `msrv` entry run on `ubuntu-latest`
-with `--target aarch64-apple-darwin` rather than on a Mac. `cfg` follows
-the target for the package's target code, so Clippy and the MSRV check see
+Since #412, `lint (macos)` runs on `ubuntu-latest` with
+`--target aarch64-apple-darwin` rather than on a Mac; it is the only macOS
+check that does. The macOS `msrv` entry ran there too until 2026-11-25 and
+is native again. Clippy lints only this package's own code, and `cfg`
+follows the target for its target code, so the cross-compiled lint sees
 every `#[cfg(target_os = "macos")]` region of it as a Mac would. A host
-unit -- a build script or a proc-macro -- compiles for the host instead,
-which there is Linux: its macOS branches would be neither linted nor
-compiled at the MSRV, and both legs would still pass. Absence is the
-contract, as for the files above: adding a host unit is a deliberate act,
-and the same change restores a native `macos-latest` Clippy and MSRV leg
+unit of this package -- a build script or a proc-macro -- would be linted
+for the host instead, which there is Linux: its macOS branches would never
+be linted, and the leg would still pass. Absence is the contract, as for
+the files above: adding a host unit is a deliberate act, and the same
+change restores a native `macos-latest` Clippy leg
 (`PR412-MACOS-HOST-UNITS-UNLINTED`).
 
 ## `fn no_repository_file_host_unit_check_names_each_host_unit() {`
@@ -3128,10 +3130,10 @@ Four claims. Three were held by nothing at all before this test: that the leg
 is enabled and unabsolved, that its command is the documented one *including*
 `--locked`, and that its matrix is every supported target. The matrix is one
 `include:` entry per target of [`CI_TARGETS`], each on that target's
-`check_runner` and compiling its tuple with `--target ${{ matrix.target }}`:
-Linux and Windows on their own runners, macOS from `ubuntu-latest` by triple,
-because GitHub runs at most five macOS jobs at once for the account and each
-run asked for seven (run 45175187088). The fourth, the
+`msrv_runner` and compiling its tuple with `--target ${{ matrix.target }}`:
+each target on its own platform, macOS on `macos-latest` since 2026-11-25,
+so that Cargo builds the dependencies' build scripts and procedural macros
+for macOS at the floor, as a user's Mac does. The fourth, the
 toolchain, was held loosely -- `.github/scripts/test-docs-consistency.sh`'s C2
 accepts `rust-version` "or a patch release of it" -- and is held exactly here.
 It is derived from the manifest and quoted from it on failure, because a
@@ -3289,12 +3291,13 @@ and which runs its `clippy_gate`. Linux and Windows are linted natively.
 `lint (macos)` runs on `ubuntu-latest` with `--target aarch64-apple-darwin`:
 `cfg` follows the target, not the host, so it evaluates every
 `#[cfg(target_os = "macos")]` region of the package's target code as a Mac
-would; a host unit -- a build script or a proc-macro -- would compile for
-Linux, and
+would; a host unit of this package -- a build script or a proc-macro --
+would be linted for Linux, and
 `no_repository_file_adds_a_host_unit_the_macos_cross_checks_cannot_reach`
-refuses one, and it left `macos-latest` because GitHub runs at most five
-macOS jobs at once for the account and each run asked for seven (run
-45175187088).
+refuses one. It left `macos-latest` when GitHub ran at most five macOS jobs
+at once for the account and each run asked for seven (run 45175187088), and
+it stays, because Clippy lints only this package's own code; the `msrv`
+macOS entry, which compiles dependency host units, is native again.
 
 **Why this is one test and not three.** `PR5D-MSVC-CLIPPY-NEVER-RUN` and
 `PR5-MACOS-CLIPPY-NEVER-RUN` are the same defect on two platforms, found

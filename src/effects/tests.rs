@@ -5610,11 +5610,11 @@ fn no_repository_file_adds_a_host_unit_the_macos_cross_checks_cannot_reach() {
     let complaints = host_unit_complaints(&repo_root());
     assert!(
         complaints.is_empty(),
-        "the package declares a host unit: {}. `lint (macos)` and the macOS `msrv` entry run on \
-         Linux with `--target aarch64-apple-darwin`, so a host unit (a build script or a \
-         proc-macro) compiles for the Linux host and its macOS branches are never linted or \
-         checked; adding one requires restoring a native `macos-latest` Clippy and MSRV leg in \
-         the same change (finding `PR412-MACOS-HOST-UNITS-UNLINTED`).",
+        "the package declares a host unit: {}. Only `lint (macos)` runs on Linux, with \
+         `--target aarch64-apple-darwin`; the macOS `msrv` entry is native. So a host unit (a \
+         build script or a proc-macro) is linted for the Linux host and its macOS branches are \
+         never linted; adding one requires restoring a native `macos-latest` Clippy leg in the \
+         same change (finding `PR412-MACOS-HOST-UNITS-UNLINTED`).",
         complaints.join("; ")
     );
 }

@@ -1589,11 +1589,9 @@ pub(super) fn ci_msrv_job_complaints(doc: &Yaml) -> Vec<String> {
             ));
         }
         if scalar(step, "run").is_some() {
-            let check_runners: BTreeSet<&str> = CI_TARGETS
-                .iter()
-                .map(|target| target.check_runner)
-                .collect();
-            for runner in check_runners {
+            let msrv_runners: BTreeSet<&str> =
+                CI_TARGETS.iter().map(|target| target.msrv_runner).collect();
+            for runner in msrv_runners {
                 let Some(host) = runner_target(runner) else {
                     out.push(format!(
                         "[step-shell] `{MSRV_JOB}` step {index} runs on `{runner}`, which is not \
@@ -1639,7 +1637,7 @@ pub(super) fn ci_msrv_job_complaints(doc: &Yaml) -> Vec<String> {
 
     let expected_entries: BTreeSet<(String, String)> = CI_TARGETS
         .iter()
-        .map(|target| (target.check_runner.to_owned(), target.triple.to_owned()))
+        .map(|target| (target.msrv_runner.to_owned(), target.triple.to_owned()))
         .collect();
     match field(job, "strategy") {
         None => out.push(format!(
@@ -2595,9 +2593,11 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-MSRV-COMMAND-UNTARGETED",
         escape: "the check loses `--target ${{ matrix.target }}`. Each entry then checks its \
-                 runner's own tuple: the macOS entry, on `ubuntu-latest`, compiles the Linux \
-                 regions a second time and none of the macOS ones, and every entry is still \
-                 green.",
+                 runner's own tuple. Every entry's runner is its target's own platform today, \
+                 so the same regions compile; but `target:` then decides only what the \
+                 toolchain installs, and an entry moved to another runner -- the macOS entry \
+                 stood on `ubuntu-latest` until 2026-11-25 -- compiles that host's regions and \
+                 none of its own while every entry is still green.",
         job: Some("msrv"),
         anchor: "      - run: cargo check --locked --target ${{ matrix.target }} --all-targets --all-features\n",
         replacement: "      - run: cargo check --locked --all-targets --all-features\n",
@@ -2611,7 +2611,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  floor inside a `#[cfg(target_os = \"macos\")]` region breaks on a target this \
                  leg no longer compiles.",
         job: Some("msrv"),
-        anchor: "          - os: ubuntu-latest\n\
+        anchor: "          - os: macos-latest\n\
                  \x20           target: aarch64-apple-darwin\n",
         replacement: "",
         refused_as: "msrv-job-matrix",
@@ -2629,7 +2629,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         job: Some("msrv"),
         anchor: "        include:\n",
         replacement: "        exclude:\n\
-                      \x20         - os: ubuntu-latest\n\
+                      \x20         - os: macos-latest\n\
                       \x20           target: aarch64-apple-darwin\n\
                       \x20       include:\n",
         refused_as: "msrv-job-matrix",
@@ -2637,8 +2637,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-MSRV-CROSS-TARGET-DROPPED",
         escape: "the macOS entry's `target:` becomes the Linux tuple. The matrix still has \
-                 three entries and the job three green results, but two of them check \
-                 `x86_64-unknown-linux-gnu` on `ubuntu-latest` and none compiles the macOS \
+                 three entries, but two of them check `x86_64-unknown-linux-gnu`, one on \
+                 `ubuntu-latest` and one from `macos-latest`, and none compiles the macOS \
                  regions on the floor.",
         job: Some("msrv"),
         anchor: "            target: aarch64-apple-darwin\n",
@@ -2646,11 +2646,27 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         refused_as: "msrv-job-matrix",
     },
     WorkflowEscape {
+        name: "MUT-MSRV-MACOS-ON-LINUX",
+        escape: "the macOS entry moves back to `ubuntu-latest` and still names its tuple with \
+                 `--target`. The package's own macOS regions still compile on the floor and \
+                 the entry is green, but Cargo builds the dependency host units -- every \
+                 build script and procedural macro, and what they depend on -- for Linux, so \
+                 a locked dependency whose macOS host code needs a Rust newer than the floor \
+                 passes here and fails on a user's Mac \
+                 (`PR412-MACOS-DEPENDENCY-HOST-MSRV-GAP`).",
+        job: Some("msrv"),
+        anchor: "          - os: macos-latest\n",
+        replacement: "          - os: ubuntu-latest\n",
+        refused_as: "msrv-job-matrix",
+    },
+    WorkflowEscape {
         name: "MUT-MSRV-TOOLCHAIN-TARGET-DROPPED",
-        escape: "the floor's toolchain step no longer installs the entry's target. The macOS \
-                 entry then fails for want of that tuple's standard library, which is loud; \
-                 the pin keeps the toolchain's targets and the check's `--target` reading the \
-                 one matrix value.",
+        escape: "the floor's toolchain step no longer installs the entry's target. Every \
+                 entry runs on its target's own platform, whose standard library the \
+                 toolchain installs anyway, so today each entry still passes; an entry \
+                 checked from another runner would fail for want of its tuple's standard \
+                 library, which is loud. The pin keeps the toolchain's targets and the \
+                 check's `--target` reading the one matrix value.",
         job: Some("msrv"),
         anchor: "          targets: ${{ matrix.target }}\n",
         replacement: "",

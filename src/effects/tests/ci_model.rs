@@ -411,6 +411,7 @@ pub(super) const AGGREGATE_SHELL: &str = "bash";
 pub(super) struct CiTarget {
     pub(super) runner: &'static str,
     pub(super) check_runner: &'static str,
+    pub(super) msrv_runner: &'static str,
     pub(super) clippy_gate: &'static str,
     pub(super) triple: &'static str,
     pub(super) default_shell: &'static str,
@@ -423,6 +424,7 @@ pub(super) const CI_TARGETS: [CiTarget; 3] = [
     CiTarget {
         runner: "ubuntu-latest",
         check_runner: "ubuntu-latest",
+        msrv_runner: "ubuntu-latest",
         clippy_gate: CLIPPY_GATE,
         default_shell: "bash",
         triple: "x86_64-unknown-linux-gnu",
@@ -441,6 +443,7 @@ pub(super) const CI_TARGETS: [CiTarget; 3] = [
     CiTarget {
         runner: "macos-latest",
         check_runner: "ubuntu-latest",
+        msrv_runner: "macos-latest",
         clippy_gate: CLIPPY_GATE_MACOS_CROSS,
         default_shell: "bash",
         triple: "aarch64-apple-darwin",
@@ -459,6 +462,7 @@ pub(super) const CI_TARGETS: [CiTarget; 3] = [
     CiTarget {
         runner: "windows-latest",
         check_runner: "windows-latest",
+        msrv_runner: "windows-latest",
         clippy_gate: CLIPPY_GATE,
         default_shell: "pwsh",
         triple: "x86_64-pc-windows-msvc",
