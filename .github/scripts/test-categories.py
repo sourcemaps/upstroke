@@ -3,16 +3,12 @@
 
 The Rust table is the only registry. Planning inventories and timings are not
 inputs to this program. No check ever executes an unmatched test.
-The standalone check also verifies the crate-root metadata consumed by tests;
-refresh-targets updates those snapshots after a manifest or target change,
-leaving every other byte of their file alone. Under upstroke-build one slot holds
-the whole check, so it lists only the executables it built, with the library
-path Cargo gives a test it runs.
+Under upstroke-build one slot holds the whole check, so it lists only the
+executables it built, with the library path Cargo gives a test it runs.
 """
 import argparse
 import ast
 from collections import Counter, namedtuple
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,12 +16,10 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL = ROOT / "src/effects/tests/ci_model.rs"
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
-TARGET_SOURCE = ROOT / "src/effects/tests.rs"
 PLATFORMS = ("ubuntu", "macos", "windows")
 # Set for the check that upstroke-build runs inside the slot it holds.
 SLOT_HELD = "TEST_CATEGORIES_BUILD_SLOT"
@@ -216,57 +210,6 @@ def native_platform():
     return {"linux": "ubuntu", "darwin": "macos", "win32": "windows"}[sys.platform]
 
 
-def target_constant(source, name):
-    matches = list(re.finditer(rf'(?ms)^const {name}: &str = r#"(.*?)"#;', source))
-    if len(matches) != 1:
-        raise ValueError(f"expected one target inventory constant {name}")
-    return matches[0]
-
-
-def target_metadata(manifest):
-    manifest = manifest.resolve(strict=True)
-    document = json.loads(checked(cargo() + [
-        "metadata", "--format-version", "1", "--no-deps", "--offline",
-        "--manifest-path", str(manifest),
-    ]))
-    packages = [package for package in document["packages"]
-                if Path(package["manifest_path"]) == manifest]
-    if len(packages) != 1 or not packages[0]["targets"]:
-        raise ValueError(f"Cargo did not report one nonempty target inventory for {manifest}")
-    paths = sorted({Path(os.path.relpath(target["src_path"], manifest.parent)).as_posix()
-                    for target in packages[0]["targets"]})
-    return dict(manifest_sha256=hashlib.sha256(
-        manifest.read_text(encoding="utf-8").encode("utf-8")).hexdigest(), packages=[dict(
-            manifest_path="Cargo.toml", targets=[dict(src_path=path) for path in paths])])
-
-
-def sync_target_metadata(refresh=False):
-    # Decode explicitly without universal-newline translation: only a stale
-    # constant's interior may change, taking the line ending after that constant.
-    before = TARGET_SOURCE.read_bytes()
-    source = before.decode("utf-8")
-    with tempfile.TemporaryDirectory(prefix="upstroke-targets-") as directory:
-        fixture = Path(directory) / "Cargo.toml"
-        # Rust reads a raw string's CRLF as LF, so the manifest's text is LF's.
-        fixture.write_text(target_constant(source, "CUSTOM_TARGET_MANIFEST").group(1)
-                           .replace("\r\n", "\n"), encoding="utf-8")
-        for name, manifest in (("REPOSITORY_TARGET_METADATA", ROOT / "Cargo.toml"),
-                               ("CUSTOM_TARGET_METADATA", fixture)):
-            match = target_constant(source, name)
-            actual = target_metadata(manifest)
-            if json.loads(match.group(1)) == actual:
-                continue
-            if not refresh:
-                raise ValueError(f"stale {name}; run python3 .github/scripts/test-categories.py "
-                                 "refresh-targets before testing")
-            newline = "\r\n" if source.startswith("\r\n", match.end()) else "\n"
-            source = (source[:match.start(1)] + json.dumps(actual, indent=2).replace("\n", newline)
-                      + source[match.end(1):])
-    after = source.encode("utf-8")
-    if after != before:
-        TARGET_SOURCE.write_bytes(after)
-
-
 def built_harnesses():
     return build().harnesses
 
@@ -396,7 +339,7 @@ def sync_workflow(rows, check=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("generate", "check", "prove", "contract", "refresh-targets"))
+    parser.add_argument("action", choices=("generate", "check", "prove", "contract"))
     parser.add_argument("--check", action="store_true", help="refuse a stale generated matrix")
     parser.add_argument("--platform", choices=PLATFORMS, default=native_platform())
     parser.add_argument("--harness", help="already built native libtest executable")
@@ -404,16 +347,14 @@ def main():
                         help="require a unit/cli registration (always required by check)")
     parser.add_argument("--explain", action="store_true", help="show subcategory counts and later matches")
     args = parser.parse_args()
-    if args.action in ("check", "refresh-targets") and "RUSTC_BOOTSTRAP" in os.environ:
-        raise ValueError(f"{args.action} refuses to run Cargo while RUSTC_BOOTSTRAP is set; "
+    if args.action == "check" and "RUSTC_BOOTSTRAP" in os.environ:
+        raise ValueError("check refuses to run Cargo while RUSTC_BOOTSTRAP is set; "
                          "use prove --harness for a running libtest")
     rows = registry()
     if args.action == "contract":
         print(json.dumps(dict(registry=rows, legs={p: legs(rows, p) for p in PLATFORMS})))
     elif args.action == "generate":
         sync_workflow(rows, check=args.check)
-    elif args.action == "refresh-targets":
-        sync_target_metadata(refresh=True)
     elif args.action == "prove":
         if not args.harness:
             parser.error("prove requires --harness")
@@ -432,7 +373,6 @@ def main():
 
 
 def standalone(rows, platform, explain_rows=False):
-    sync_target_metadata()
     built = build()
     harnesses = built.harnesses
     # From here this process only lists harnesses, each as `cargo test` runs it.
@@ -456,7 +396,7 @@ def standalone(rows, platform, explain_rows=False):
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, KeyError, SyntaxError, OSError) as error:
+    except (ValueError, KeyError, SyntaxError) as error:
         print(error, file=sys.stderr)
         sys.exit(1)
 

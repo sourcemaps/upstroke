@@ -1958,14 +1958,45 @@ pub(crate) mod census_domain {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) enum InventoryRefusal {
-        Unreadable { manifest: PathBuf, why: String },
-        NoPackage { manifest: PathBuf },
-        NoTargets { manifest: PathBuf },
+        NotRun {
+            manifest: PathBuf,
+            why: String,
+        },
+        Failed {
+            manifest: PathBuf,
+            status: String,
+            stderr: String,
+        },
+        Unreadable {
+            manifest: PathBuf,
+            why: String,
+        },
+        NoPackage {
+            manifest: PathBuf,
+        },
+        NoTargets {
+            manifest: PathBuf,
+        },
     }
 
     impl std::fmt::Display for InventoryRefusal {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
+                Self::NotRun { manifest, why } => write!(
+                    f,
+                    "`cargo metadata` for `{}` could not be started ({why}), so the crate roots \
+                     are unknown and this census will not guess them from file names",
+                    manifest.display()
+                ),
+                Self::Failed {
+                    manifest,
+                    status,
+                    stderr,
+                } => write!(
+                    f,
+                    "`cargo metadata` for `{}` exited {status}: {stderr}",
+                    manifest.display()
+                ),
                 Self::Unreadable { manifest, why } => write!(
                     f,
                     "`cargo metadata` for `{}` did not answer with the document this reads \
