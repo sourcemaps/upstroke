@@ -2145,6 +2145,18 @@ The intersection: {leader, detached descendant} × {container running,
 container reclaimed}. The two "running" cells are the control — without
 them a test in which nothing ever started would pass.
 
+It runs on **Linux only** (`#[cfg(target_os = "linux")]`), not on every
+Unix: it observes the container's processes through the host's own
+`/proc`, which holds only where the containers share the host's kernel.
+Docker Desktop and Lima on macOS run them inside a Linux virtual
+machine, and the macOS host has no `/proc` at all, so `pids_with` would
+find nothing, the controls in `let seen` would fail after the
+thirty-second invocation, and the failure would describe the host rather
+than the container (`PR366-MACOS-PROC-SAMPLER`). GitHub's macOS runners
+have no Docker, so CI never ran it there. Nothing outside the test is
+used by it alone: `SetOnDrop` and `pids_with` live in its body, and every
+helper it borrows is also used by tests compiled on every platform.
+
 ## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `let clock = std::time::SystemTime::now()`
 
 The two markers, the run's own. `pids_with` reads every process on the
@@ -2237,6 +2249,18 @@ only the leader's process group would leave it here.
 The descendant first: it is the invariant's subject, and a leader
 assertion that fires before it would report the wrong thing about a
 cancellation that left both alive.
+
+## `fn real_docker_a_container_descendant_test_is_gated_to_linux() {`
+
+The regression for `PR366-MACOS-PROC-SAMPLER`: the attributes directly
+above `real_docker_a_container_contains_a_daemonised_descendant` include
+`#[cfg(target_os = "linux")]`. Put `#[cfg(unix)]` back and this fails.
+It reads this module's source rather than running Docker, and carries no
+gate of its own, so it holds the rule on every platform. That includes
+macOS, the one platform where the rule matters and CI has no Docker to
+show it. The signature it looks for is built with `format!` so that this
+test's own text never spells `fn <that name>(`. `every_gated_test_of_this_lane_is_counted`
+and the effects contract mapping both look tests up by that spelling.
 
 ## `fn real_docker_a_container_slow_to_start_still_reaches_its_timeout() {`
 

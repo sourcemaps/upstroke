@@ -6258,7 +6258,7 @@ fn real_docker_withholds_an_image_credential_variable_from_a_role_that_takes_non
 }
 
 #[test]
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn real_docker_a_container_contains_a_daemonised_descendant() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -6393,6 +6393,36 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
     assert!(
         leader.is_empty(),
         "the invocation's leader survived its container: {leader:?}"
+    );
+}
+
+#[test]
+fn real_docker_a_container_descendant_test_is_gated_to_linux() {
+    const GUARDED: &str = "real_docker_a_container_contains_a_daemonised_descendant";
+    let source = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("runner")
+            .join("container")
+            .join("exec")
+            .join("tests.rs"),
+    )
+    .expect("read this module");
+    let signature = format!("\nfn {GUARDED}() {{");
+    let at = source
+        .find(&signature)
+        .unwrap_or_else(|| panic!("`{GUARDED}` is not a test here"));
+    let attributes: Vec<&str> = source[..at]
+        .lines()
+        .rev()
+        .take_while(|line| line.starts_with("#["))
+        .collect();
+    assert!(
+        attributes.contains(&"#[cfg(target_os = \"linux\")]"),
+        "`{GUARDED}` finds its container's processes through the host's own `/proc`, which a \
+         Docker Desktop or Lima host on macOS does not have, so anywhere but Linux it fails \
+         after its invocation instead of observing anything; its attributes are \
+         {attributes:?} (`PR366-MACOS-PROC-SAMPLER`)"
     );
 }
 
