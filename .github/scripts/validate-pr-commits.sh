@@ -12,14 +12,13 @@
 #   claude-committer   the same two tests on the committer;
 #   claude-co-author   a message line whose key, after leading whitespace, is `Co-Authored-By`,
 #                      followed by optional whitespace and a `:`, and whose value names Claude BY
-#                      IDENTITY: its `<address>` is noreply@anthropic.com or at anthropic.com or a
-#                      subdomain of it, or its name holds `claude` or `anthropic` as a whole word;
+#                      IDENTITY: its mailbox domain is anthropic.com or a subdomain of it, or its
+#                      display name holds `claude` or `anthropic` as a whole name word;
 #   claude-session     a message line whose key, after leading whitespace, is `Claude-Session`,
 #                      followed by optional whitespace and a `:`;
-#   claude-generated   a message line that is a footer: after leading whitespace and at most one
-#                      run of characters that are neither letters, digits nor whitespace (an emoji)
-#                      and optional whitespace, it BEGINS `Generated with [Claude Code]` or
-#                      `Generated with Claude Code`, whatever follows.
+#   claude-generated   a whole message line `Generated with Claude Code` or `Generated with
+#                      [Claude Code]` (the bracketed label may have a Markdown link destination),
+#                      with an optional final period, surrounding whitespace and leading robot emoji.
 #
 # Every comparison is case-insensitive, because none of these is spelled one way by every tool
 # that writes it, and git preserves whatever case it was given.
@@ -33,15 +32,14 @@
 #   somebody else. The email is the address Claude Code writes, matched whole for the same reason.
 #
 #   A CO-AUTHOR IS MATCHED BY IDENTITY, NOT BY SUBSTRING. The value is split into its `<address>`,
-#   the first `<...>` in it, and its name, everything else. The address, trimmed, is refused when
-#   it is noreply@anthropic.com, or when its domain -- what follows its last `@` -- is anthropic.com
-#   or ends in `.anthropic.com`. The name is refused when it holds `claude` or `anthropic` as a
-#   whole word, a word being bounded by the start or end of the name or by a character that is
-#   neither an ASCII letter, a digit nor a hyphen (a non-ASCII byte bounds a word: the comparison
-#   is byte-wise, below). So `Claude`, `Claude Fable 5.2` and `Anthropic Claude` are refused, and
-#   `Jean-Claude Martin`, `Claudette Martin` and an address at `philanthropic.example` are people.
-#   A value with no `<address>` is all name, so a bare `noreply@anthropic.com` is still refused:
-#   `@` and `.` bound the word `anthropic`.
+#   the first `<...>` in it, and the display name BEFORE it. Text after the closing `>` is a
+#   comment, not a name. Only a mailbox with a nonempty local part, one `@` and a DNS-shaped
+#   domain supplies a domain to compare. A bare mailbox is checked as a mailbox, not as a name;
+#   a following parenthesized comment is not a display name. Without a mailbox the value is a
+#   name. Name words keep ASCII letters, digits, apostrophes, hyphens and UTF-8 bytes together:
+#   non-ASCII letters and compound-name punctuation must not split a human name into `Claude`.
+#   Thus `Claude`, `Claude Fable 5.2` and `Anthropic Claude` are refused, while `Jean-Claude
+#   Example`, `Claudette Example`, `Claudeé Example` and `D’Claude Example` are people.
 #
 #   A TRAILER MATCHES ONLY AT THE START OF ITS LINE. `Co-Authored-By:` and `Claude-Session:` are
 #   trailers, and a trailer is a line that begins with its key. A sentence that mentions
@@ -50,19 +48,20 @@
 #   credit to anyone who looks, and the rule exists for what a reader sees; whitespace is allowed
 #   between the key and its `:` because git itself parses `Co-Authored-By :` as that trailer.
 #
-#   THE GENERATED-WITH FOOTER MATCHES ONLY AT THE START OF ITS LINE, past at most one emoji or
-#   other run of punctuation, because it is written behind an emoji (`🤖 Generated with [Claude
-#   Code](...)`) and has no key to anchor on. A sentence that says `generated with Claude Code`
-#   part-way through, or a subject quoting the phrase, is prose about the footer and passes.
+#   THE GENERATED-WITH FOOTER MATCHES A COMPLETE CREDIT, optionally behind the documented robot
+#   emoji (`🤖 Generated with [Claude Code](...)`). Quotes, blockquotes and sentences discussing
+#   the label are prose, even if the label appears at the start of the line.
 #
-# TRAILERS ARE READ AS GIT READS THEM, three ways, and a rule hit any of them refuses:
+# CO-AUTHORS ARE JUDGED ONLY AFTER UNFOLDING, never from an incomplete physical-line prefix:
 #
-#   - every message line as written (all five line rules);
-#   - every line of the message UNFOLDED: a line that begins with whitespace and follows a line
+#   - every logical line of the message: a nonblank line that begins with whitespace and follows a line
 #     whose key matches `^[[:space:]]*[A-Za-z0-9-]+[[:space:]]*:` is appended to that line, its
 #     leading whitespace dropped and one space joining the two, as git's trailer folding does, so a
 #     `Co-Authored-By:` whose identity sits on an indented continuation line is judged whole (all
-#     five line rules, on every line, folded or not);
+#     message rules). Empty AND whitespace-only lines end a logical value, as Git's paragraph
+#     separators do. This also retains the owner's standalone credits outside Git's final trailer
+#     block: an explicit co-author key starts its own value even when indented after another key.
+#     Session keys and generated-with footers are additionally recognized as written;
 #   - every line `git interpret-trailers --parse --no-divider` prints for the message, which is what
 #     git itself takes for the trailers (the co-author and session rules). `--no-divider` because
 #     that is how git reads a commit's trailers: a `---` in a commit message ends nothing. The
@@ -130,8 +129,8 @@
 
 set -Eeuo pipefail
 export PATH="/usr/bin:/bin:$PATH"
-# Byte-wise classes and ASCII case folding, whatever locale the runner has: every rule here is
-# spelled in ASCII, and a multibyte locale would only add ways for a class to mean something else.
+# Byte-wise classes and ASCII case folding, whatever locale the runner has. Name boundaries
+# explicitly retain high bytes, so UTF-8 names do not depend on installed locales.
 export LC_ALL=C
 # A replace ref swaps one object for another under the same name. The object judged is the object
 # the name was written for.
@@ -275,27 +274,34 @@ identity_re='^(author|committer) ([^<]*)<([^>]*)>'
 fold_key_re='^[[:space:]]*[A-Za-z0-9-]+[[:space:]]*:'
 co_author_re='^[[:space:]]*co-authored-by[[:space:]]*:(.*)$'
 session_re='^[[:space:]]*claude-session[[:space:]]*:'
-# A value's `<address>`, and the name around it. Held in variables for the same reason as above.
+# A value's `<address>`, and the name before it. Held in variables for the same reason as above.
 address_re='^([^<]*)<([^>]*)>(.*)$'
-# `claude` or `anthropic` as a whole word: bounded by an end of the name or by a byte that is not
-# an ASCII letter, a digit or a hyphen.
-word_re='(^|[^A-Za-z0-9-])(claude|anthropic)($|[^A-Za-z0-9-])'
-# The footer: leading whitespace, at most one run of non-alphanumeric, non-space bytes (an emoji is
-# several such bytes in a row) and optional whitespace, then the phrase, whatever follows.
-footer_re='^[[:space:]]*([^[:alnum:][:space:]]+[[:space:]]*)?generated with (\[claude code\]|claude code)'
+mailbox_re='^[^[:space:]<>@()]+@([a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*)$'
+bare_mailbox_re='^([^[:space:]<>@()]+@[^[:space:]<>@()]+)([[:space:]]*\(.*\))?$'
+# Keep every UTF-8 byte and compound-name apostrophe/hyphen within a name word. This avoids
+# depending on a UTF-8 locale that need not exist on all supported runners.
+word_re=$'(^|[^A-Za-z0-9\'\200-\377-])(claude|anthropic)($|[^A-Za-z0-9\'\200-\377-])'
+# A whole footer, not an arbitrary punctuation prefix or a sentence beginning with the label.
+footer_re='^[[:space:]]*(🤖[[:space:]]*)?generated with (\[claude code\](\([^()[:space:]]+\))?|claude code)\.?[[:space:]]*$'
 
 # names_claude <co-author value>: the co-author's identity is Claude's or Anthropic's.
 names_claude() {
-  local value="$1" name address domain
+  local value name address="" domain
+  value="$(trim "$1")"
   if [[ "$value" =~ $address_re ]]; then
-    name="${BASH_REMATCH[1]} ${BASH_REMATCH[3]}"
+    name="${BASH_REMATCH[1]}"
     address="$(trim "${BASH_REMATCH[2]}")"
-    domain="${address##*@}"
-    if [[ "$address" == "noreply@anthropic.com" || "$domain" == "anthropic.com" || "$domain" == *".anthropic.com" ]]; then
-      return 0
-    fi
+  elif [[ "$value" =~ $bare_mailbox_re ]]; then
+    address="${BASH_REMATCH[1]}"
+    name=""
   else
     name="$value"
+  fi
+  if [[ "$address" =~ $mailbox_re ]]; then
+    domain="${BASH_REMATCH[1]}"
+    if [[ "$domain" == "anthropic.com" || "$domain" == *".anthropic.com" ]]; then
+      return 0
+    fi
   fi
   [[ "$name" =~ $word_re ]]
 }
@@ -364,7 +370,14 @@ judge() {
       continue
     fi
     message+=("$line")
-    judge_line "$sha" "$line"
+    # These standalone rules do not interpret a co-author identity. Never judge a physical
+    # co-author prefix: its continuation can change which bytes are name, mailbox or comment.
+    if [[ "$line" =~ $session_re ]]; then
+      refuse "$sha" claude-session "$line"
+    fi
+    if [[ "$line" =~ $footer_re ]]; then
+      refuse "$sha" claude-generated "$line"
+    fi
   done < "$object"
   (( read_lines == written )) \
     || fail "read $read_lines of the $written lines of commit $sha"
@@ -372,11 +385,14 @@ judge() {
   (( authors >= 1 && committers >= 1 )) \
     || fail "commit $sha carries no author or no committer"
 
-  # The message unfolded: an indented line after a keyed line continues it.
+  # The message unfolded: only a nonblank indented line continues a keyed line. A paragraph
+  # separator ends the value even when it contains spaces or tabs. An explicit co-author key
+  # starts a new standalone credit, including after another keyed line (the owner's rule).
   for line in ${message[@]+"${message[@]}"}; do
     last=$(( ${#logical[@]} - 1 ))
-    if (( last >= 0 )) && [[ "$line" =~ ^[[:space:]] && "${logical[$last]}" =~ $fold_key_re ]]; then
-      logical[$last]="${logical[$last]} ${line#"${line%%[![:space:]]*}"}"
+    if (( last >= 0 )) && [[ "$line" =~ ^[[:space:]] && "$line" =~ [^[:space:]] &&
+        ! "$line" =~ $co_author_re && "${logical[$last]}" =~ $fold_key_re ]]; then
+      logical[$last]="$(trim "${logical[$last]}") $(trim "$line")"
     else
       logical+=("$line")
     fi

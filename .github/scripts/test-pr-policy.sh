@@ -7067,7 +7067,7 @@ c="$(credit_commit "$credit_base" claude someone@example.com 'Jane Doe' jane@exa
 credit_refuse 'the author name claude with another email' "$c" "$c:claude-author"
 c="$(credit_commit "$credit_base" 'Jane Doe' jane@example.com Claude committer@example.com 'feat: a change')" || exit 1
 credit_refuse 'the committer name Claude' "$c" "$c:claude-committer"
-c="$(plain_commit "$credit_base" $'feat: a change\n\nCo-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>')" || exit 1
+c="$(plain_commit "$credit_base" $'feat: a change\n\nCo-Authored-By: Claude Fable 5.2 <model@example.invalid>')" || exit 1
 credit_refuse 'Co-Authored-By naming Claude Fable 5.2' "$c" "$c:claude-co-author"
 c="$(plain_commit "$credit_base" $'feat: a change\n\nco-authored-by: Someone <someone@anthropic.com>')" || exit 1
 credit_refuse 'co-authored-by naming an anthropic address' "$c" "$c:claude-co-author"
@@ -7089,6 +7089,110 @@ c="$(plain_commit "$credit_base" $'feat: a change with a folded trailer\n\nCo-Au
 credit_refuse 'a Co-Authored-By whose identity is on an indented continuation line' "$c" "$c:claude-co-author"
 c="$(plain_commit "$credit_base" $'feat: a change with a spaced trailer\n\nCo-Authored-By : Claude <noreply@anthropic.com>')" || exit 1
 credit_refuse 'Co-Authored-By : with a space before the colon' "$c" "$c:claude-co-author"
+
+# Parsing contracts run in both object formats. Each case changes the message alone; neutral
+# addresses keep a name test independent of the domain test, and all identities are invented.
+credit_message_case() {  # <pass|rule-id> <label> <message>
+  local verdict="$1" label="$2" commit
+  commit="$(plain_commit "$credit_target" "$3")" || exit 1
+  if [[ "$verdict" == pass ]]; then
+    credit_pass "$label" "$commit" 1
+  else
+    credit_refuse "$label" "$commit" "$commit:$verdict"
+  fi
+}
+
+credit_parsing_contracts() {  # <base>
+  local credit_target="$1" value prefix=$'feat: parsing contract\n\n'
+  # PR431-COAUTHOR-NAME-BOUNDARIES: UTF-8 bytes, apostrophes and compound hyphens belong to
+  # the human name. None of these addresses can independently pass or fail a name comparison.
+  for value in 'Éclaude Exemple' 'Claudeé Exemple' 'Claudé Exemple' 'Jean-Claude Exemple' \
+    'Jean‐Claude Exemple' 'Jean‑Claude Exemple' "D'Claude Exemple" 'D’Claude Exemple' \
+    'Claudette Exemple' '林澄 Exemple'; do
+    credit_message_case pass 'international human display name' \
+      "${prefix}Co-Authored-By: $value <person@example.invalid>"
+  done
+  for value in 'Claude' 'Claude Code' 'Claude Fable 5.2' 'Anthropic Claude'; do
+    credit_message_case claude-co-author 'agent/model display name at an independent address' \
+      "${prefix}Co-Authored-By: $value <model@example.invalid>"
+  done
+
+  # The display name, mailbox and trailing comment are distinct fields. Bare mailboxes have
+  # no display name, and a domain is compared only when the mailbox actually has one.
+  for value in 'Mira Example <claude@example.invalid>' \
+    'Mira Example <person@anthropic.com.example.invalid>' \
+    'Mira Example <anthropic.com>' 'Mira Example <research.anthropic.com>' \
+    'Mira Example <@anthropic.com>' 'Mira Example <person@@anthropic.com>' \
+    'claude@example.invalid' 'person@anthropic.example.invalid' \
+    'Mira Example <person@example.invalid> (Claude reviewed the patch)' \
+    'person@example.invalid (Claude reviewed the patch)'; do
+    credit_message_case pass 'only a display name or a mailbox domain supplies identity' \
+      "${prefix}Co-Authored-By: $value"
+  done
+  for value in 'Mira Example <person@anthropic.com>' \
+    'Mira Example <person@research.anthropic.com>' 'person@anthropic.com' \
+    'person@research.anthropic.com (Mira Example)'; do
+    credit_message_case claude-co-author 'a syntactically present provider domain' \
+      "${prefix}Co-Authored-By: $value"
+  done
+
+  # Folded and unfolded identities must have identical verdicts. The partial physical line
+  # ending in <Claude is not a complete name; a completed identity's continuation is a comment.
+  for value in $'Mira Example <Claude\n  >' 'Mira Example <Claude >' \
+    $'Mira Example\n  <claude@example.invalid>' 'Mira Example <claude@example.invalid>' \
+    $'Mira Example <person@example.invalid>\n  (Claude reviewed the patch)' \
+    'Mira Example <person@example.invalid> (Claude reviewed the patch)'; do
+    credit_message_case pass 'folded and unfolded human identities agree' \
+      "${prefix}Co-Authored-By: $value"
+  done
+  for value in $'Claude Fable\n\t5.2 <model@example.invalid>' \
+    'Claude Fable 5.2 <model@example.invalid>' \
+    $'Mira Example <\n  person@anthropic.com>' 'Mira Example < person@anthropic.com>'; do
+    credit_message_case claude-co-author 'folded and unfolded agent identities agree' \
+      "${prefix}Co-Authored-By: $value"
+  done
+  # PR431-TRAILER-UNFOLDS-BLANK-SEPARATOR: neither kind of paragraph separator can join a
+  # later indented paragraph to the co-author. Without that separator it IS the trailer value.
+  for value in $'\n' $' \t\n'; do
+    credit_message_case pass 'blank paragraph ends a logical trailer' \
+      "${prefix}Co-Authored-By: Mira Example"$'\n'"${value}  Claude explains folding."
+  done
+  credit_message_case claude-co-author 'a nonblank continuation belongs to the name' \
+    "${prefix}Co-Authored-By: Mira Example"$'\n  Claude'
+  credit_message_case claude-co-author 'standalone credit outside the final trailer block' \
+    "${prefix}  Co-Authored-By : Claude <model@example.invalid>"$'\n\nLater prose.'
+  credit_message_case claude-co-author 'an indented co-author key still starts a standalone credit' \
+    "${prefix}Note: collaborators"$'\n  Co-Authored-By:\n    Claude <model@example.invalid>\n\nLater prose.'
+  credit_message_case pass 'another trailer is not a co-author field' \
+    "${prefix}Reviewed-By: Claude <model@example.invalid>"
+  credit_message_case claude-session 'session keys retain their standalone rule' \
+    "${prefix}  Claude-Session : invented-session"$'\n\nLater prose.'
+
+  # PR431-FOOTER-PREFIX-CLASS: recognize a complete credit, not arbitrary punctuation or
+  # sentences about the label. No growing list of prose exceptions belongs in the validator.
+  for value in '"Generated with Claude Code"' "'Generated with Claude Code'" \
+    '> Generated with Claude Code' '`Generated with Claude Code`' \
+    '“Generated with Claude Code”' 'Generated with Claude Code is the footer label.' \
+    'Generated with [Claude Code](https://example.invalid) is an example.' \
+    'Generated with Claude Codecs'; do
+    credit_message_case pass 'quotation or sentence discussing the footer' "$prefix$value"
+  done
+  for value in 'Generated with Claude Code' 'Generated with Claude Code.' \
+    'Generated with [Claude Code]' 'Generated with [Claude Code](https://example.invalid)' \
+    '🤖 Generated with [Claude Code](https://example.invalid)' \
+    '  🤖 generated with Claude Code.  '; do
+    credit_message_case claude-generated 'recognized standalone generated-with credit' "$prefix$value"
+  done
+}
+
+credit_parsing_contracts "$credit_base"
+
+# The author and committer still use whole-name/exact-email rules, not the broader co-author
+# rules. A provider domain alone or an agent/model suffix is not either header rule.
+c="$(credit_commit "$credit_base" 'Claude Fable 5.2' person@anthropic.com \
+  'Jean-Claude Exemple' person@research.anthropic.com 'feat: header identity contract')" || exit 1
+credit_pass 'author and committer rules stay distinct from co-author rules' "$c" 1
+
 # Reached only through a merge: the side branch's commit is on no first-parent path from the head.
 credit_side="$(plain_commit "$credit_base" $'feat: the side branch\n\nCo-Authored-By: Claude <noreply@anthropic.com>')" || exit 1
 credit_trunk="$(plain_commit "$credit_base" 'feat: the trunk')" || exit 1
@@ -7234,6 +7338,7 @@ credit_pass 'SHA-256 empty range' "$credit_sha256_base" 0 "$credit_sha256_base"
 credit_sha256_bad="$(plain_commit "$credit_sha256_base" $'SHA-256 credit\n\nClaude-Session: private-session')" || exit 1
 credit_target="$credit_sha256_base" credit_refuse 'SHA-256 rule output' \
   "$credit_sha256_bad" "$credit_sha256_bad:claude-session"
+credit_parsing_contracts "$credit_sha256_base"
 credit_repo="$credit_sha1_repo"
 
 # Criss-crossed histories: two merge bases, and both are the target's. A and C are siblings on
