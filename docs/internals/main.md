@@ -465,9 +465,10 @@ drives a run, so neither is the "coordinator" whose ambient job INV-18
 names. Since 2026-11-23 `capacity --refresh` also starts `curl`, once per
 pool that names a usage provider, through the same host Runner. The opt-in
 `capacity --reset-credits claude` also starts curl, once, with a usable credential;
-it does not probe agents. `capacity --subscription-usage claude` starts one bounded CLI
-control probe, plus an independent reset GET only when both data flags are selected, or
-just the same single GET with `--auth bearer`. All are capacity operations, so the
+it does not probe agents. `capacity --subscription-usage claude` starts at most one bounded
+CLI control probe, and none when `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_OAUTH_TOKEN` are both
+set, plus an independent reset GET only when both data flags are selected, or just the same
+single GET with `--auth bearer`. All are capacity operations, so the
 count stands at two.
 
 ## `mod tests` › `fn a_write_command_refuses_before_any_effect_when_containment_fails() {`

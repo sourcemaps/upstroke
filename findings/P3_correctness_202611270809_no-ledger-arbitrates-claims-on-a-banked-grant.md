@@ -27,7 +27,7 @@ The head redeems nothing, so the gap fails nowhere today. Nothing calls `plan`, 
 
 ## What is established
 
-- `plan` is pure and keeps no state between calls, so the same `Input` always gives the same plan (`docs/internals/capacity_planner.md`, *Module*). Within one call, at most one of an account's grants is `Redeem` and the others are `Unknown(AwaitsReRead)` (*Tie behavior*). Nothing carries that across two calls or two runs.
+- `plan` is pure and keeps no state between calls, so the same `Input` always gives the same plan (`docs/internals/capacity_planner.md`, *Module*). Within one call, at most one of an account's grants is `Redeem`. Every other grant that would have been `Redeem`, `Defer` or `LetExpire(NoUnlock)` becomes `Unknown(AwaitsReRead)`, while `LetExpire(NotRedeemable)` and every other `Unknown` stand (*Tie behavior*). Nothing carries that across two calls or two runs.
 - Design §13 requires actual balances and timestamps to be read again after an authorized redemption, before restored capacity is allocated. Nothing at this head allocates capacity, so nothing enforces that.
 - The withdrawn ledger did both of these in memory, and two review rounds found the thirty-nine defects listed below. It registered claims on a grant, settled them from replies and inventories, issued permits against window balances, and marked a restored window to be read again. Round one's repairs introduced seven of round two's rows (`fix_regression`).
 
