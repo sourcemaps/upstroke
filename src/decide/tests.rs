@@ -1822,11 +1822,18 @@ fn a_run_whose_claim_exists_is_not_asked_and_nothing_is_written() {
 /// Directory and interruption: the run is claimed in its private directory immediately before
 /// its first call, with the mode a plain `create_dir` gives it and no other, and the claim stays
 /// after the call is interrupted, so a later decide asks nothing.
+///
+/// On targets other than Unix, where the mode cannot be read, this checks that the claim holds
+/// only the call's settings while the call is in flight, that the run is asked once, that the
+/// claim stays after an interruption, and that a later decide asks nothing after either. It does
+/// not check the claim's mode or owner, that its parent's mode is unchanged, or that the claim
+/// and its parent are directories and not links.
 #[test]
 fn the_run_is_claimed_in_its_private_directory_before_its_first_call_and_the_claim_outlives_an_interruption()
  {
     let fixture = one_question("decide-claim");
     let claim = fixture.claim();
+    #[cfg(unix)]
     let private = fixture.private.clone();
     let runner = Acting::new(move |_| {
         let names: Vec<String> = snapshot(&claim)
