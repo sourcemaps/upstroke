@@ -187,9 +187,10 @@ pub fn parse(response: &UsageResponse, now_unix: u64) -> ResetReport {
 }
 
 /// Shared status, size and JSON checks for the single fixed bearer response.
-/// A key repeated in a response group is two competing readings, so that
-/// group alone is unreported (`subscription::bearer_groups`): windows never
-/// gate grants or vice versa. A body with no group left is not reported.
+/// A response group that repeats a key, or holds a value that does not
+/// decode, is unreported alone (`subscription::bearer_groups`): windows never
+/// gate grants or vice versa, and metadata is never decoded or counted as a
+/// group. A body with something voided and no group left is not reported.
 /// Errors carry only a fixed category, never the response body.
 pub(super) fn response_value(response: &UsageResponse) -> Result<Value, Unavailable> {
     let unavailable = match response.status {

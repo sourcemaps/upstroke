@@ -1260,6 +1260,63 @@ agent = \"claude-code\"
         }
     }
 
+    /// The combined bearer read of one 200 body: one GET and no CLI.
+    fn bearer_report(body: &str) -> subscription::Report {
+        let table = Table::new(&[("api.anthropic.com", Ok((200, body)))]);
+        let runner = subscription_runner(None);
+        let report = subscription_usage(
+            subscription::Auth::Bearer,
+            &runner,
+            &table,
+            &|_| Some("synthetic-bearer".to_owned()),
+            &|_| false,
+            Some(NOON),
+        );
+        assert!(runner.seen.lock().expect("seen lock").is_empty());
+        assert_eq!(table.asked.borrow().len(), 1);
+        report
+    }
+
+    /// The reset-only read of the same 200 body.
+    fn reset_report(body: &str) -> reset::ResetReport {
+        let table = Table::new(&[("api.anthropic.com", Ok((200, body)))]);
+        reset_credits(&table, &|_| Some("synthetic-bearer".to_owned()), Some(NOON))
+    }
+
+    /// The CLI read of one scripted standard output: one probe and no bearer.
+    fn cli_report(stdout: &str) -> subscription::Report {
+        let mut output = subscription_output();
+        output.stdout = stdout.to_owned();
+        let runner = subscription_runner(Some(output));
+        let report = subscription_usage(
+            subscription::Auth::Cli,
+            &runner,
+            &Table::new(&[]),
+            &|_| panic!("CLI must never resolve the bearer"),
+            &|_| false,
+            Some(NOON),
+        );
+        assert_eq!(runner.seen.lock().expect("seen lock").len(), 1);
+        report
+    }
+
+    /// One stream line: a control response whose `response` member is `envelope`, verbatim.
+    fn control_line(envelope: &str) -> String {
+        format!("{{\"type\":\"control_response\",\"response\":{envelope}}}\n")
+    }
+
+    /// A control envelope for `request_id` around a raw result.
+    fn answer(request_id: &str, result: &str) -> String {
+        format!(r#"{{"request_id":"{request_id}","subtype":"success","response":{result}}}"#)
+    }
+
+    /// A native usage payload reporting 31% five-hour use, with raw native grants.
+    fn native_payload(grants: &str) -> String {
+        format!(
+            r#"{{"rate_limits_available":true,"rate_limits":{{"five_hour":{{"utilization":31}},"cedar_ember":{grants}}}}}"#
+        )
+    }
+
     /// Finding PR441-READER-DUPLICATE-VOIDS-OTHER-GROUP's two independent-group
     /// assertions, ported into the crate. A key repeated in one bearer response
     /// group voided the whole body: duplicate `resets_left` fields discarded a
@@ -1267,44 +1324,25 @@ agent = \"claude-code\"
     /// discarded an explicitly empty grant inventory, on the reset-only route too.
     #[test]
     fn a_duplicate_in_one_bearer_group_leaves_the_other_reported() {
-        let bearer = |body: &str| {
-            let table = Table::new(&[("api.anthropic.com", Ok((200, body)))]);
-            let runner = subscription_runner(None);
-            let report = subscription_usage(
-                subscription::Auth::Bearer,
-                &runner,
-                &table,
-                &|_| Some("synthetic-bearer".to_owned()),
-                &|_| false,
-                Some(NOON),
-            );
-            assert!(runner.seen.lock().expect("seen lock").is_empty());
-            assert_eq!(table.asked.borrow().len(), 1);
-            report
-        };
-        let reset_only = |body: &str| {
-            let table = Table::new(&[("api.anthropic.com", Ok((200, body)))]);
-            reset_credits(&table, &|_| Some("synthetic-bearer".to_owned()), Some(NOON))
-        };
         let ends_at = crate::util::rfc3339_utc(NOON + 3_600);
         let not_reported = reset::ResetReport::Unavailable(reset::Unavailable::NotReported);
 
         let grant_repeats = format!(
             r#"{{"five_hour":{{"utilization":31}},"cedar_ember":{{"eligible":true,"grants":[{{"resets_left":0,"resets_left":1,"ends_at":"{ends_at}","type":"weekly","paused":false,"usable_now":true}}]}}}}"#
         );
-        let text = bearer(grant_repeats.as_str()).render();
+        let text = bearer_report(grant_repeats.as_str()).render();
         assert!(text.contains("five-hour: used: 31%"), "{text}");
         assert!(text.contains(&not_reported.render()), "{text}");
         assert!(!text.contains("count:"), "{text}");
-        assert_eq!(reset_only(grant_repeats.as_str()), not_reported);
+        assert_eq!(reset_report(grant_repeats.as_str()), not_reported);
 
         let window_repeats = r#"{"five_hour":{"utilization":31,"utilization":4},"seven_day":{"utilization":70},"cedar_ember":{"eligible":false,"grants":[]}}"#;
-        let text = bearer(window_repeats).render();
+        let text = bearer_report(window_repeats).render();
         assert!(text.contains("explicitly empty inventory"), "{text}");
         assert!(text.contains("five-hour: used: unknown"), "{text}");
         assert!(text.contains("seven-day: used: 70%"), "{text}");
         assert!(!text.contains("31%") && !text.contains("4%"), "{text}");
-        let report = reset_only(window_repeats);
+        let report = reset_report(window_repeats);
         assert!(
             matches!(&report, reset::ResetReport::Inventory(inventory) if inventory.grants.is_empty()),
             "{report:?}"
@@ -1321,23 +1359,126 @@ agent = \"claude-code\"
                 "model windows: not reported",
             ),
         ] {
-            let text = bearer(body).render();
+            let text = bearer_report(body).render();
             assert!(text.contains(windows), "{text}");
             assert!(!text.contains("31%"), "{text}");
             assert!(!text.contains("used: 9%"), "{text}");
             assert!(text.contains("explicitly empty inventory"), "{text}");
         }
-        let text = bearer(
+        let text = bearer_report(
             r#"{"five_hour":{"utilization":31},"cedar_ember":{"grants":[]},"cedar_ember":{"eligible":true,"grants":[]}}"#,
         )
         .render();
         assert!(text.contains("five-hour: used: 31%"), "{text}");
         assert!(text.contains(&not_reported.render()), "{text}");
         assert_eq!(
-            bearer(r#"{"five_hour":{"utilization":31,"utilization":4}}"#),
+            bearer_report(r#"{"five_hour":{"utilization":31,"utilization":4}}"#),
             subscription::Report::Unavailable(reset::Unavailable::NotReported),
             "a body with no group left reports nothing"
         );
+    }
+
+    /// Finding PR441-READER-NUMERIC-FIELD-DROPS-GROUPS's witness. A five-hour
+    /// percentage beyond `f64` failed the decode of the whole bearer body
+    /// before any group was isolated, so both readers lost the 70% weekly
+    /// window and the explicitly empty inventory. It now voids its own group
+    /// only, and both readers answer as they do for an out-of-range 101.
+    #[test]
+    fn an_unrepresentable_percentage_voids_only_its_own_bearer_group() {
+        for percent in ["101", "1e400", "-1e400"] {
+            let body = format!(
+                r#"{{"five_hour":{{"utilization":{percent}}},"seven_day":{{"utilization":70}},"cedar_ember":{{"grants":[]}}}}"#
+            );
+            let text = bearer_report(&body).render();
+            assert!(text.contains("five-hour: used: unknown"), "{text}");
+            assert!(text.contains("seven-day: used: 70%"), "{text}");
+            assert!(text.contains("explicitly empty inventory"), "{text}");
+            let report = reset_report(&body);
+            assert!(
+                matches!(&report, reset::ResetReport::Inventory(inventory) if inventory.grants.is_empty()),
+                "{percent}: {report:?}"
+            );
+        }
+    }
+
+    /// Finding PR441-READER-METADATA-COUNTED-AS-GROUP's witness. A bearer body
+    /// whose only group repeats a key reports nothing, and an unrelated
+    /// top-level `request_id` beside it was counted as a surviving group, so
+    /// the same reading came back as windows reported, every one unknown.
+    /// Metadata, and the qualifier saying whether windows are reported, are
+    /// no reading of their own.
+    #[test]
+    fn bearer_metadata_is_never_a_surviving_group() {
+        let only_group = r#""five_hour":{"utilization":31,"utilization":4}"#;
+        for beside in [
+            "",
+            r#""request_id":"synthetic-request","#,
+            r#""rate_limits_available":true,"#,
+        ] {
+            let body = format!("{{{beside}{only_group}}}");
+            assert_eq!(
+                bearer_report(&body),
+                subscription::Report::Unavailable(reset::Unavailable::NotReported),
+                "{body}"
+            );
+        }
+    }
+
+    /// Finding PR441-READER-POSITIONAL-CONTROL-RESPONSE's witness. The derived
+    /// reader filled the control response's fields by position, so an array
+    /// stood in for the named envelope and its percentage was printed.
+    #[test]
+    fn a_positional_control_response_is_no_usage_answer() {
+        let payload = native_payload("null");
+        let named = cli_report(&control_line(&answer("usage-only", &payload)));
+        assert!(named.render().contains("five-hour: used: 31%"), "{named:?}");
+        let positional = cli_report(&control_line(&format!(
+            r#"["usage-only","success",{payload}]"#
+        )));
+        assert_eq!(
+            positional,
+            subscription::Report::Unavailable(reset::Unavailable::CliResponse)
+        );
+    }
+
+    /// Finding PR441-READER-FOREIGN-CONTROL-PAYLOAD's witness. Another
+    /// request's result was decoded before its `request_id` was compared, so a
+    /// repeated key inside it discarded the genuine usage answer that followed.
+    /// Another request's status and result are its own and are never read.
+    #[test]
+    fn another_requests_result_cannot_void_the_usage_answer() {
+        let usage = control_line(&answer("usage-only", &native_payload("null")));
+        let alone = cli_report(&usage).render();
+        assert!(alone.contains("five-hour: used: 31%"), "{alone}");
+        for foreign in [
+            answer("another-request", r#"{"synthetic":1,"synthetic":2}"#),
+            answer("another-request", r#"{"synthetic":1e400}"#),
+            r#"{"request_id":"another-request","subtype":"error","subtype":"success"}"#.to_owned(),
+        ] {
+            let text = cli_report(&format!("{}{usage}", control_line(&foreign))).render();
+            assert!(text.contains("five-hour: used: 31%"), "{foreign}: {text}");
+        }
+    }
+
+    /// Finding PR441-READER-NATIVE-GRANT-DUPLICATE-VOIDS-WINDOWS's witness. The
+    /// windows-only CLI route ignores native grants, but its duplicate check
+    /// traversed them first, so a repeated `resets_left` there voided the 31%
+    /// window. Unread native members are checked for syntax only.
+    #[test]
+    fn a_repeated_native_grant_field_leaves_the_windows_reported() {
+        for grants in [
+            r#"{"grants":[{"resets_left":1}]}"#,
+            r#"{"grants":[{"resets_left":0,"resets_left":1}]}"#,
+            r#"{"grants":[{"resets_left":1e400}]}"#,
+        ] {
+            let report = cli_report(&control_line(&answer(
+                "usage-only",
+                &native_payload(grants),
+            )));
+            let text = report.render();
+            assert!(text.contains("five-hour: used: 31%"), "{grants}: {text}");
+            assert!(!text.contains("reset credits"), "{grants}: {text}");
+        }
     }
 
     const ANTHROPIC_BODY: &str =

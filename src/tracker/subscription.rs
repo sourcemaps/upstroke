@@ -14,6 +14,7 @@
 )]
 
 use serde::Deserialize;
+use serde::de::{DeserializeOwned, IgnoredAny};
 use serde_json::Value;
 
 use crate::runner::{CommandSpec, Runner};
@@ -124,84 +125,109 @@ pub(super) fn read_cli(
     control_payload(&output.stdout)
 }
 
-// Typed envelopes reject duplicate routing/status fields as ambiguous. The
-// type is read alone first: only a control response's `response` is
-// interpreted, so another event's same-named field of any shape is ignored.
-#[derive(Deserialize)]
-struct StreamEvent {
-    #[serde(rename = "type")]
-    kind: String,
-}
+// What the readers decode, by name: `parse` reads the window qualifier and
+// the native `rate_limits`, `parse_windows` the window groups and
+// `reset::parse_value` the grant group. Nothing else in a response is decoded.
+const AVAILABLE: &str = "rate_limits_available";
+const RATE_LIMITS: &str = "rate_limits";
+const WINDOW_GROUPS: [&str; 4] = ["five_hour", "seven_day", "model_scoped", "limits"];
+const GRANT_GROUP: &str = "cedar_ember";
 
-#[derive(Deserialize)]
-struct ControlEvent {
-    response: Option<ControlResponse>,
-}
-
-#[derive(Deserialize)]
-struct ControlResponse {
-    request_id: String,
-    subtype: String,
-    response: Option<UniqueValue>,
-}
-
-// Value's default map reader keeps the last duplicate key. A usage payload
-// with two competing readings is ambiguous, including inside a window/grant.
-// This reader records where a key repeats instead: `repeated` names each
-// member of an object whose own key or contents repeat one. The CLI payload
-// (`UniqueValue`) refuses any repetition; the bearer body (`bearer_groups`)
-// voids only the response group that holds it.
-struct Scanned {
-    value: Value,
-    ambiguous: bool,
-    repeated: Vec<String>,
-}
-
-impl Scanned {
-    fn plain(value: Value) -> Self {
-        Self {
-            value,
-            ambiguous: false,
-            repeated: Vec::new(),
+/// A JSON object's members in order, repeats included, each as its decoded
+/// name and its value's raw text; `None` unless `text` is exactly one
+/// syntactically valid object, so a positional array is never one. Values
+/// are checked for syntax only (`IgnoredAny` computes no number and decodes no
+/// string), so a member nobody reads cannot fail the object and each one read
+/// is decoded on its own terms. A name that does not decode is no name a
+/// reader asks for, so its member is left out.
+fn members(text: &str) -> Option<Vec<(String, &str)>> {
+    serde_json::from_str::<IgnoredAny>(text).ok()?;
+    let mut rest = json_space(text).strip_prefix('{')?;
+    let mut members = Vec::new();
+    if json_space(rest).starts_with('}') {
+        return Some(members);
+    }
+    loop {
+        let (name, after) = next_value(json_space(rest))?;
+        let (value, after) = next_value(json_space(json_space(after).strip_prefix(':')?))?;
+        if let Ok(name) = serde_json::from_str::<String>(name) {
+            members.push((name, value));
+        }
+        // The whole text is valid, so a member is followed by `,` or `}`.
+        match json_space(after).strip_prefix(',') {
+            Some(after) => rest = after,
+            None => return Some(members),
         }
     }
 }
 
-impl<'de> Deserialize<'de> for Scanned {
+/// The JSON value at the start of `text`, checked for syntax only, and what follows it.
+fn next_value(text: &str) -> Option<(&str, &str)> {
+    let mut values = serde_json::Deserializer::from_str(text).into_iter::<IgnoredAny>();
+    values.next()?.ok()?;
+    text.split_at_checked(values.byte_offset())
+}
+
+/// JSON's four whitespace characters, never Unicode's wider set.
+fn json_space(text: &str) -> &str {
+    text.trim_start_matches([' ', '\t', '\n', '\r'])
+}
+
+enum Member<'t> {
+    Absent,
+    Once(&'t str),
+    Repeated,
+}
+
+fn member<'t>(members: &[(String, &'t str)], name: &str) -> Member<'t> {
+    let mut found = members.iter().filter(|(member, _)| member == name);
+    match (found.next(), found.next()) {
+        (None, _) => Member::Absent,
+        (Some((_, text)), None) => Member::Once(text),
+        (Some(_), Some(_)) => Member::Repeated,
+    }
+}
+
+// Value's default map reader keeps the last duplicate key. A reading with two
+// competing values is ambiguous, including inside a window or grant, so this
+// reader refuses a key repeated at any depth, and a non-finite number.
+struct UniqueValue(Value);
+
+impl<'de> Deserialize<'de> for UniqueValue {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Visitor;
 
         impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = Scanned;
+            type Value = UniqueValue;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("JSON")
+                formatter.write_str("JSON with unique object keys")
             }
 
             fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                Ok(Scanned::plain(Value::Null))
+                Ok(UniqueValue(Value::Null))
             }
 
             fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
-                Ok(Scanned::plain(Value::Bool(value)))
+                Ok(UniqueValue(Value::Bool(value)))
             }
 
             fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
-                Ok(Scanned::plain(Value::from(value)))
+                Ok(UniqueValue(Value::from(value)))
             }
 
             fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
-                Ok(Scanned::plain(Value::from(value)))
+                Ok(UniqueValue(Value::from(value)))
             }
 
             fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
                 serde_json::Number::from_f64(value)
-                    .map(|number| Scanned::plain(Value::Number(number)))
+                    .map(|number| UniqueValue(Value::Number(number)))
                     .ok_or_else(|| E::custom("non-finite number"))
             }
 
             fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(Scanned::plain(Value::String(value.to_owned())))
+                Ok(UniqueValue(Value::String(value.to_owned())))
             }
 
             fn visit_seq<A: serde::de::SeqAccess<'de>>(
@@ -209,16 +235,10 @@ impl<'de> Deserialize<'de> for Scanned {
                 mut sequence: A,
             ) -> Result<Self::Value, A::Error> {
                 let mut values = Vec::new();
-                let mut ambiguous = false;
-                while let Some(element) = sequence.next_element::<Scanned>()? {
-                    ambiguous |= element.ambiguous;
-                    values.push(element.value);
+                while let Some(UniqueValue(value)) = sequence.next_element()? {
+                    values.push(value);
                 }
-                Ok(Scanned {
-                    value: Value::Array(values),
-                    ambiguous,
-                    repeated: Vec::new(),
-                })
+                Ok(UniqueValue(Value::Array(values)))
             }
 
             fn visit_map<A: serde::de::MapAccess<'de>>(
@@ -226,19 +246,14 @@ impl<'de> Deserialize<'de> for Scanned {
                 mut map: A,
             ) -> Result<Self::Value, A::Error> {
                 let mut values = serde_json::Map::new();
-                let mut repeated = Vec::new();
                 while let Some(key) = map.next_key::<String>()? {
-                    let member: Scanned = map.next_value()?;
-                    if member.ambiguous || values.contains_key(&key) {
-                        repeated.push(key.clone());
+                    if values.contains_key(&key) {
+                        return Err(serde::de::Error::custom("duplicate object key"));
                     }
-                    values.insert(key, member.value);
+                    let UniqueValue(value) = map.next_value()?;
+                    values.insert(key, value);
                 }
-                Ok(Scanned {
-                    value: Value::Object(values),
-                    ambiguous: !repeated.is_empty(),
-                    repeated,
-                })
+                Ok(UniqueValue(Value::Object(values)))
             }
         }
 
@@ -246,76 +261,126 @@ impl<'de> Deserialize<'de> for Scanned {
     }
 }
 
-struct UniqueValue(Value);
-
-impl<'de> Deserialize<'de> for UniqueValue {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let scanned = Scanned::deserialize(deserializer)?;
-        if scanned.ambiguous {
-            return Err(serde::de::Error::custom("duplicate object key"));
-        }
-        Ok(Self(scanned.value))
-    }
-}
-
-/// The bearer body, read group by group: each top-level member is one
-/// response group. A key repeated inside a member, or the member's own repeated
-/// name, leaves that member null, so it reads as present but malformed and no
-/// other group is suppressed. `None` for invalid JSON, or when no group
-/// survives a repeated key, including a non-object body that repeats one.
+/// The bearer body, read group by group. Each response group the readers
+/// read (`WINDOW_GROUPS`, `GRANT_GROUP`) and the `AVAILABLE` qualifier is
+/// decoded on its own: one whose name repeats, or that holds a repeated key or
+/// a value that does not decode (a number beyond `f64`), is left null, so it
+/// reads as present but malformed and suppresses no other group. Any other
+/// member is metadata: checked for syntax only, never decoded, never a group.
+/// `None` for invalid JSON, for a non-object body that does not decode with
+/// unique keys, or when something was left null and no group survives.
 pub(super) fn bearer_groups(body: &str) -> Option<Value> {
-    let Scanned {
-        mut value,
-        ambiguous,
-        mut repeated,
-    } = serde_json::from_str(body).ok()?;
-    if !ambiguous {
-        return Some(value);
+    let Some(members) = members(body) else {
+        return serde_json::from_str(body)
+            .ok()
+            .map(|UniqueValue(value)| value);
+    };
+    let mut read = serde_json::Map::new();
+    let (mut voided, mut survived) = (false, false);
+    for name in [AVAILABLE, GRANT_GROUP].into_iter().chain(WINDOW_GROUPS) {
+        let value = match member(&members, name) {
+            Member::Absent => continue,
+            Member::Once(text) => serde_json::from_str(text)
+                .ok()
+                .map(|UniqueValue(value)| value),
+            Member::Repeated => None,
+        };
+        voided |= value.is_none();
+        survived |= value.is_some() && name != AVAILABLE;
+        read.insert(name.to_owned(), value.unwrap_or(Value::Null));
     }
-    let members = value.as_object_mut()?;
-    repeated.sort_unstable();
-    repeated.dedup();
-    if repeated.len() == members.len() {
-        return None;
-    }
-    for name in repeated {
-        members.insert(name, Value::Null);
-    }
-    Some(value)
+    (survived || !voided).then_some(Value::Object(read))
 }
 
+// The CLI stream is read by name, one envelope at a time, and only as far as
+// this request's answer needs. Every line is one JSON object whose `type` is
+// read first, so another event's members of any shape are never interpreted.
+// A control response's `response` is a named object whose `request_id` is
+// read before anything else: another request's status and result are its own
+// and are never decoded. What is read must appear once and decode, or the
+// answer is ambiguous and refused.
 fn control_payload(stdout: &str) -> Result<Value, Unavailable> {
     if !stdout.ends_with('\n') {
         return Err(Unavailable::CliResponse);
     }
     let mut payload = None;
     for line in stdout.lines() {
-        let event: StreamEvent =
-            serde_json::from_str(line).map_err(|_| Unavailable::CliResponse)?;
-        if event.kind != "control_response" {
+        let event = envelope(line)?;
+        let kind: String = field(&event, "type")?;
+        if kind != "control_response" {
             // Other typed stream objects carry no usage authority. New event
             // types can be ignored without interpreting or printing their data.
-            if event.kind.is_empty() {
+            if kind.is_empty() {
                 return Err(Unavailable::CliResponse);
             }
             continue;
         }
-        let event: ControlEvent =
-            serde_json::from_str(line).map_err(|_| Unavailable::CliResponse)?;
-        let response = event.response.ok_or(Unavailable::CliResponse)?;
-        if response.request_id != "usage-only" {
+        let response = envelope(required(&event, "response")?)?;
+        if field::<String>(&response, "request_id")? != "usage-only" {
             continue;
         }
-        if response.subtype != "success" || payload.is_some() {
+        if field::<String>(&response, "subtype")? != "success" || payload.is_some() {
             return Err(Unavailable::CliResponse);
         }
-        let UniqueValue(value) = response.response.ok_or(Unavailable::CliResponse)?;
-        if !value.is_object() {
-            return Err(Unavailable::CliResponse);
-        }
-        payload = Some(value);
+        payload = Some(native_windows(required(&response, "response")?)?);
     }
     payload.ok_or(Unavailable::CliResponse)
+}
+
+/// The usage payload as the windows reader reads it: the `AVAILABLE`
+/// qualifier and the `WINDOW_GROUPS` of `rate_limits`, each once and decoded
+/// whole, or no answer. Native grants and every other member are not read, so
+/// they are checked for syntax only and can neither void nor feed a window.
+fn native_windows(payload: &str) -> Result<Value, Unavailable> {
+    let payload = envelope(payload)?;
+    let mut read = serde_json::Map::new();
+    if let Some(text) = once(&payload, AVAILABLE)? {
+        let UniqueValue(available) = decoded(text)?;
+        read.insert(AVAILABLE.to_owned(), available);
+    }
+    if let Some(text) = once(&payload, RATE_LIMITS)? {
+        // A non-object holds no window, whatever else it holds.
+        let limits = match members(text) {
+            None => Value::Null,
+            Some(groups) => {
+                let mut windows = serde_json::Map::new();
+                for name in WINDOW_GROUPS {
+                    if let Some(text) = once(&groups, name)? {
+                        let UniqueValue(window) = decoded(text)?;
+                        windows.insert(name.to_owned(), window);
+                    }
+                }
+                Value::Object(windows)
+            }
+        };
+        read.insert(RATE_LIMITS.to_owned(), limits);
+    }
+    Ok(Value::Object(read))
+}
+
+/// A named object, or no answer: an array or any other value is no envelope.
+fn envelope(text: &str) -> Result<Vec<(String, &str)>, Unavailable> {
+    members(text).ok_or(Unavailable::CliResponse)
+}
+
+fn once<'t>(members: &[(String, &'t str)], name: &str) -> Result<Option<&'t str>, Unavailable> {
+    match member(members, name) {
+        Member::Absent => Ok(None),
+        Member::Once(text) => Ok(Some(text)),
+        Member::Repeated => Err(Unavailable::CliResponse),
+    }
+}
+
+fn required<'t>(members: &[(String, &'t str)], name: &str) -> Result<&'t str, Unavailable> {
+    once(members, name)?.ok_or(Unavailable::CliResponse)
+}
+
+fn decoded<T: DeserializeOwned>(text: &str) -> Result<T, Unavailable> {
+    serde_json::from_str(text).map_err(|_| Unavailable::CliResponse)
+}
+
+fn field<T: DeserializeOwned>(members: &[(String, &str)], name: &str) -> Result<T, Unavailable> {
+    decoded(required(members, name)?)
 }
 
 fn window(value: &Value, percent_key: &str) -> Option<Window> {
@@ -344,7 +409,7 @@ fn model_label(value: Option<&Value>) -> &'static str {
 
 pub(super) fn parse(value: &Value, auth: Auth, now_unix: u64) -> Report {
     let limits = match auth {
-        Auth::Cli => value.get("rate_limits").unwrap_or(&Value::Null),
+        Auth::Cli => value.get(RATE_LIMITS).unwrap_or(&Value::Null),
         Auth::Bearer => value,
     };
     // Native usage is authoritative only for windows. Grants are requested
@@ -353,7 +418,7 @@ pub(super) fn parse(value: &Value, auth: Auth, now_unix: u64) -> Report {
         Auth::Cli => None,
         Auth::Bearer => Some(reset::parse_value(limits, now_unix)),
     };
-    let available = value.get("rate_limits_available");
+    let available = value.get(AVAILABLE);
     let windows = if available.and_then(Value::as_bool) == Some(false) {
         Windows::Disabled
     } else if (auth == Auth::Cli && available.and_then(Value::as_bool) != Some(true))
@@ -651,6 +716,34 @@ mod tests {
                 Err(Unavailable::CliResponse),
                 "{bad}"
             );
+        }
+    }
+
+    /// The group splitter reads names and spacing as JSON does, and decodes
+    /// only the groups the readers read: metadata holding a number beyond
+    /// `f64`, or under a name that does not decode, is checked for syntax and
+    /// dropped. Before, the out-of-range metadata failed the whole body.
+    #[test]
+    fn bearer_groups_split_bodies_as_json_does_and_never_decode_metadata() {
+        let body = " { \"five\\u005fhour\" : { \"utilization\" : 31 } ,\r\n\t\"request_id\" : 1e400 , \
+                    \"\\ud800\" : [ ] , \"cedar_ember\" : { \"grants\" : [ ] } } \n";
+        let value = bearer_groups(body).expect("both groups survive");
+        assert_eq!(
+            value,
+            json!({"five_hour": {"utilization": 31}, "cedar_ember": {"grants": []}})
+        );
+        let text = parse(&value, Auth::Bearer, NOW).render();
+        assert!(text.contains("five-hour: used: 31%"), "{text}");
+        assert!(text.contains("explicitly empty inventory"), "{text}");
+        for invalid in [
+            "{",
+            "{\"five_hour\":{},}",
+            "{\"five_hour\" {}}",
+            "{} {}",
+            "{\"five_hour\":1e}",
+            "\u{a0}{\"five_hour\":{}}",
+        ] {
+            assert_eq!(bearer_groups(invalid), None, "{invalid:?}");
         }
     }
 }
