@@ -22,8 +22,11 @@
   directory must be the user's own and closed to group and other, or the run is refused before
   anything is written or asked; each file is written immediately after that check is made again.
   The call is capped at the run's `--max-cost-usd`
-  allowance (default 5), and only a clean, successful, priced call is settled, at its price; any
-  other outcome is saved as refused. It asks only a Claude Code reviewer of a host run, whose
+  allowance (default 5), and only a clean, successful, priced call is settled, at its price: a
+  result the reviewer marks as an error never settles. Any other outcome is saved as refused, and
+  so is a call that reports more than its ceiling, which fails the command and says so. A write
+  that fails after the call fails the command naming what the call cost, and is worded as a
+  write. It asks only a Claude Code reviewer of a host run, whose
   pools pass the credential pre-flight a resume would run and whose CLI passes the probe and
   sign-in checks a run makes of it, under the profile a resume probes it under, giving the call
   the recorded model and review effort, the

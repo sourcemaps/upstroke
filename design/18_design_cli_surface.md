@@ -91,8 +91,11 @@ any other, or one started beside it that loses the `create_dir`, is refused. Eac
 written immediately after the check that admits it (§15). `--max-cost-usd`
 (default 5) is the run's dollar allowance, and the one call's own `--max-budget-usd`, whole:
 nothing is subtracted from it. Only a clean, successful and priced call (exit 0 within its
-limits, an outcome the adapter reads as completed, a cost of $0 or more) is settled, at its
-price; any other outcome a call returns is saved as refused, its cost unknown. A reply
+limits, an outcome the adapter reads as completed, a result that itself reports success,
+`"subtype": "success"` with `"is_error": false`, and a cost of $0 or more) is settled, at its
+price, so a result the reviewer marks as an error never settles; any other outcome a call returns
+is saved as refused, its cost unknown beside what it reported. A call that reports more than its
+ceiling is saved as refused, settled or not, its reason saying so, and so fails the command. A reply
 is accepted only when it holds exactly one closed fenced `json` block, its fences whole lines, and
 no line outside that block holds three backticks or three tildes anywhere, a fence of another
 block or a run within a line alike (the block's own closing line is the block's), holding
@@ -101,12 +104,14 @@ one of the question's options and never one that gives up, or `null` where there
 whose `guidance` is never one `upstroke answer --text` would read as declining. The reply,
 accepted or refused, is saved as §15 lays out, in `proposal.json` in the claim, whose path the
 report names for the person who applies it with `upstroke answer`. The report gives the question's
-decider, status, choice and the reply's fields, cost (`unknown` for a call that did not settle)
-and saved path, then the directory that claims the run, and ends saying nothing was answered. Agent text,
+decider, status, choice and the reply's fields, cost (`unknown` for a call that did not settle,
+beside any cost it reported) and saved path, then the directory that claims the run, and ends
+saying nothing was answered. Agent text,
 question text, file names and every refusal are data inside a line, sanitized as `status`
 sanitizes them. The command exits non-zero, after the whole report, when the reply was refused,
 saying its reason is saved in the proposal; a write that fails after the claim fails the command
-with no proposal saved, and says the run stays claimed.
+with no proposal saved, worded as the write it is, and says whether the call was made and what it
+cost, which no proposal then records, and that the run stays claimed.
 
 `--dry-run` executes everything except agents: parse, route, and print task → kind → chain (with source of each decision: config/annotation/override) → gates → pool + strategy effect, at zero spend. It exists from day one; it is both the config-iteration loop and the sales demo.
 

@@ -529,13 +529,13 @@ fn agent_text_is_rendered_inside_its_own_line_with_its_controls_made_visible() {
     let decider = rendering_decider();
     let mut out = TerminalLines::default();
     let saved = Path::new("q-1.1.json");
-    render_one(&mut out, &decider, &asked, &Ok(record), Some(0.25), saved);
+    render_one(&mut out, &decider, &asked, &Ok(record), "$0.2500", saved);
     render_one(
         &mut out,
         &decider,
         &asked,
         &Err(HOSTILE.to_owned()),
-        None,
+        "unknown",
         saved,
     );
     let report = out.into_string();
@@ -651,11 +651,32 @@ impl Runner for Scripted {
     }
 }
 
-/// What the Claude adapter's own `parse` reads: the reply's text and its cost.
+/// What Claude Code prints for a successful call, as the Claude adapter's own `parse` reads it:
+/// the reply's text and its cost, with the result's own marks of success.
 fn claude_output(text: &str, cost_usd: Option<f64>) -> String {
-    let mut output = json!({ "result": text, "session_id": "s-1" });
-    if let (Some(cost), Some(object)) = (cost_usd, output.as_object_mut()) {
-        object.insert("total_cost_usd".to_owned(), json!(cost));
+    claude_result(text, cost_usd, Some("success"), Some(false))
+}
+
+/// What Claude Code prints for a call with `--output-format json`: the reply's text and its
+/// cost, and the two marks a result says whether it succeeded with, `subtype` and `is_error`,
+/// each left out where it is `None`.
+fn claude_result(
+    text: &str,
+    cost_usd: Option<f64>,
+    subtype: Option<&str>,
+    is_error: Option<bool>,
+) -> String {
+    let mut output = json!({ "type": "result", "result": text, "session_id": "s-1" });
+    if let Some(object) = output.as_object_mut() {
+        if let Some(subtype) = subtype {
+            object.insert("subtype".to_owned(), json!(subtype));
+        }
+        if let Some(is_error) = is_error {
+            object.insert("is_error".to_owned(), json!(is_error));
+        }
+        if let Some(cost) = cost_usd {
+            object.insert("total_cost_usd".to_owned(), json!(cost));
+        }
     }
     output.to_string()
 }
@@ -1502,13 +1523,14 @@ fn two_questions(tag: &str) -> Fixture {
 
 /// Spend: the allowance is the run's (a run is asked once), and it is the ceiling of the one call
 /// the command makes, whole: nothing is subtracted from it. A settled call counts at its price,
-/// above its ceiling included. Another open question of the run is never asked.
+/// the ceiling itself included; one above it fails the command
+/// (`a_last_call_above_its_ceiling_fails_the_command`). Another open question of the run is never
+/// asked.
 #[test]
 fn the_one_call_is_capped_at_the_allowance_and_counted_at_its_price() {
     for (tag, cap, cost, ceiling) in [
         ("decide-cap-under", 1.0, 0.5, "1"),
         ("decide-cap-reached", 1.0, 1.0, "1"),
-        ("decide-cap-overrun", DEFAULT_MAX_COST_USD, 7.0, "5"),
     ] {
         let capped = two_questions(tag);
         let options = DecideOptions {
@@ -1534,6 +1556,91 @@ fn the_one_call_is_capped_at_the_allowance_and_counted_at_its_price() {
         );
         assert!(decided.outcome().is_ok(), "{tag}: {}", decided.report);
     }
+}
+
+/// `PR435-LAST-CALL-OVERRUN`: a call that reports more than its ceiling fails the command and
+/// says so. The run's one call is given the $5 allowance as its `--max-budget-usd` and reports a
+/// clean $7 price: its proposal is saved refused, its reason naming the price and the ceiling,
+/// the price recorded as what the call settled at, and the command exits non-zero. A call that did
+/// not settle and reported more than its ceiling, one Claude Code stopped at its budget, says so
+/// as well. A price at the ceiling is the control.
+#[test]
+fn a_last_call_above_its_ceiling_fails_the_command() {
+    let overrun = one_question("decide-overrun");
+    let runner = Acting::priced(7.0);
+    let decided = decide(&overrun.options(), &BuiltinAdapters, &runner).expect("decided");
+    assert_eq!(ceilings(&runner.seen()), [Some("5".to_owned())]);
+    let saved = overrun.proposal("q-01A");
+    let over = "the call reported $7, more than its ceiling of $5";
+    assert_eq!(saved["status"], "refused", "{saved}");
+    assert!(
+        saved["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with(over)),
+        "{saved}"
+    );
+    assert_eq!(saved["settled"], true, "what it cost is known: {saved}");
+    assert_eq!(saved["cost_usd"], 7.0, "{saved}");
+    assert_eq!(saved["ceiling_usd"], DEFAULT_MAX_COST_USD, "{saved}");
+    let report = &decided.report;
+    assert!(
+        report
+            .lines()
+            .any(|line| line == format!("  status: refused — {over}")),
+        "{report}"
+    );
+    assert!(
+        report.lines().any(|line| line == "  cost: $7.0000"),
+        "{report}"
+    );
+    assert!(decided.refused, "{report}");
+    let error = decided
+        .outcome()
+        .expect_err("a call above its ceiling fails the command")
+        .to_string();
+    assert!(
+        error.contains("question q-01A was refused") && error.contains("saved with its reason"),
+        "{error}"
+    );
+
+    // Stopped by Claude Code at its budget: its result an error, the cost it reported above the
+    // ceiling. It did not settle, and its reason says first that it went over.
+    let stopped = one_question("decide-overrun-unsettled");
+    let runner = Acting::new(|_| {
+        Ok(exited(claude_result(
+            "",
+            Some(5.5),
+            Some("error_max_budget_usd"),
+            Some(true),
+        )))
+    });
+    let decided = decide(&stopped.options(), &BuiltinAdapters, &runner).expect("decided");
+    let saved = stopped.proposal("q-01A");
+    assert_eq!(saved["status"], "refused", "{saved}");
+    assert!(
+        saved["reason"].as_str().is_some_and(|reason| reason
+            .starts_with("the call reported $5.5, more than its ceiling of $5; ")
+            && reason.contains("the adapter read the call as an agent error")),
+        "{saved}"
+    );
+    assert_eq!(saved["settled"], false, "{saved}");
+    assert_eq!(saved["cost_usd"], 5.5, "{saved}");
+    assert!(
+        decided
+            .report
+            .lines()
+            .any(|line| line == "  cost: unknown (the call did not settle; it reported $5.5000)"),
+        "{}",
+        decided.report
+    );
+    assert!(decided.outcome().is_err(), "{}", decided.report);
+
+    // The control: a price at the ceiling settles, and the reply is accepted.
+    let reached = one_question("decide-overrun-reached");
+    let runner = Acting::priced(DEFAULT_MAX_COST_USD);
+    let decided = decide(&reached.options(), &BuiltinAdapters, &runner).expect("decided");
+    assert_eq!(reached.proposal("q-01A")["status"], "accepted");
+    assert!(decided.outcome().is_ok(), "{}", decided.report);
 }
 
 /// `PR435-EXHAUSTED-DECIMAL-ALLOWANCE`: a $0.80 allowance and calls priced at $0.70 once left a
@@ -2390,12 +2497,20 @@ fn only_a_clean_successful_priced_call_settles_and_any_other_is_saved_refused() 
                 .any(|line| line.starts_with("  status: refused — ") && line.contains(reason)),
             "{case}: {report}"
         );
-        for line in [
-            "  cost: unknown".to_owned(),
-            format!("claimed: {}", fixture.claim().display()),
-        ] {
-            assert!(report.contains(&line), "{case}: {line}: {report}");
-        }
+        let cost_line = cost.map_or_else(
+            || "  cost: unknown".to_owned(),
+            |reported| {
+                format!("  cost: unknown (the call did not settle; it reported ${reported:.4})")
+            },
+        );
+        assert!(
+            report.lines().any(|line| line == cost_line),
+            "{case}: what it reported is shown, and is no price: {report}"
+        );
+        assert!(
+            report.contains(&format!("claimed: {}", fixture.claim().display())),
+            "{case}: {report}"
+        );
         assert!(decided.refused, "{case}");
         let error = decided.outcome().expect_err("nonzero").to_string();
         assert!(
@@ -2406,8 +2521,105 @@ fn only_a_clean_successful_priced_call_settles_and_any_other_is_saved_refused() 
     }
 }
 
+/// `PR435-ERROR-SUBTYPE-SETTLES`: a result the reviewer marks as an error never settles. Claude
+/// Code's adapter reads a result with no `is_error` as completed whatever its `subtype`, so a call
+/// that exits 0 and prints `error_max_turns`, a price and a valid reply was saved accepted and
+/// settled. A call now settles only when its result reports success itself, `"subtype":
+/// "success"` with `"is_error": false`; any other is saved refused with what it reported, and
+/// fails the command.
+#[test]
+fn an_explicit_error_subtype_is_unsettled() {
+    let text = reply(VALID);
+    let finding = claude_result(&text, Some(0.25), Some("error_max_turns"), None);
+    assert_eq!(
+        crate::agent::claude::ClaudeCodeAdapter
+            .parse(&exited(finding))
+            .map(|outcome| outcome.status)
+            .ok(),
+        Some(OutcomeStatus::Completed),
+        "the adapter's reading alone settles the finding's result, so decide reads its marks"
+    );
+
+    // The control: a result that reports success settles at its price, its reply accepted.
+    let control = one_question("decide-subtype-success");
+    let runner = Scripted::answering(vec![claude_result(
+        &text,
+        Some(0.25),
+        Some("success"),
+        Some(false),
+    )]);
+    let decided = decide(&control.options(), &BuiltinAdapters, &runner).expect("decided");
+    assert!(decided.outcome().is_ok(), "{}", decided.report);
+    assert_eq!(control.proposal("q-01A")["settled"], true);
+
+    let cases: [(&str, Option<&str>, Option<bool>, &str); 5] = [
+        (
+            "an error subtype and no is_error",
+            Some("error_max_turns"),
+            None,
+            "its subtype is \"error_max_turns\" and its is_error is absent",
+        ),
+        (
+            "an error subtype and is_error false",
+            Some("error_during_execution"),
+            Some(false),
+            "its subtype is \"error_during_execution\" and its is_error is false",
+        ),
+        (
+            "no subtype",
+            None,
+            Some(false),
+            "its subtype is absent and its is_error is false",
+        ),
+        (
+            "success and no is_error",
+            Some("success"),
+            None,
+            "its subtype is \"success\" and its is_error is absent",
+        ),
+        (
+            "success and is_error true",
+            Some("success"),
+            Some(true),
+            "the adapter read the call as an agent error",
+        ),
+    ];
+    for (at, (case, subtype, is_error, reason)) in cases.into_iter().enumerate() {
+        let fixture = one_question(&format!("decide-subtype-{at}"));
+        let runner = Scripted::answering(vec![claude_result(&text, Some(0.25), subtype, is_error)]);
+        let decided = decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+        assert_eq!(runner.seen().len(), 1, "{case}: one call");
+        let saved = fixture.proposal("q-01A");
+        assert_eq!(saved["status"], "refused", "{case}: {saved}");
+        assert_eq!(saved["settled"], false, "{case}: {saved}");
+        assert_eq!(saved["cost_usd"], 0.25, "{case}: what it reported is kept");
+        assert!(
+            saved["reason"]
+                .as_str()
+                .is_some_and(|text| text.contains(reason)),
+            "{case}: {saved}"
+        );
+        let report = &decided.report;
+        assert!(
+            report
+                .lines()
+                .any(|line| line.starts_with("  status: refused — ") && line.contains(reason)),
+            "{case}: {report}"
+        );
+        assert!(
+            report.lines().any(
+                |line| line == "  cost: unknown (the call did not settle; it reported $0.2500)"
+            ),
+            "{case}: {report}"
+        );
+        assert!(decided.refused, "{case}");
+        assert!(decided.outcome().is_err(), "{case}: {report}");
+    }
+}
+
 /// Publication: every file is created new and none is replaced. A name another hand took while
-/// the call was in flight fails the command with that file as it was and no proposal saved.
+/// the call was in flight fails the command with that file as it was and no proposal saved,
+/// naming what the call cost, which no proposal records.
 #[test]
 fn a_taken_name_is_never_replaced_and_fails_the_command() {
     let fixture = one_question("decide-taken");
@@ -2431,7 +2643,8 @@ fn a_taken_name_is_never_replaced_and_fails_the_command() {
     assert!(!fixture.has_proposal("q-01A"));
     assert!(
         message.contains("no proposal for question q-01A was saved")
-            && message.contains(RAW_FILE)
+            && message.contains(&format!("failed to write {}", dir.join(RAW_FILE).display()))
+            && message.contains("; the call was made, cost: $0.2500, and the run stays claimed")
             && message.contains("the run stays claimed"),
         "{message}"
     );
@@ -2443,6 +2656,82 @@ fn a_taken_name_is_never_replaced_and_fails_the_command() {
     let decided = decide(&control.options(), &BuiltinAdapters, &runner).expect("decided");
     assert_eq!(runner.seen().len(), 1);
     assert!(decided.outcome().is_ok(), "{}", decided.report);
+}
+
+/// `PR435-COST-LOST-ON-PUBLICATION-ERROR`: a clean call returns its price and its raw output is
+/// saved, and the proposal cannot be created, its name taken while the call was in flight. No
+/// proposal records the price, so the command's failure names it, and words that failure as the
+/// write it is (`PR435-PUBLICATION-ERROR-SAYS-READ`). A call that did not settle is named as the
+/// report names it, with what it reported. The run stays claimed, and nothing is replaced.
+#[test]
+fn a_failed_proposal_write_preserves_a_reported_price() {
+    let cases = [
+        (claude_output(&reply(VALID), Some(0.25)), "$0.2500"),
+        (
+            claude_result(&reply(VALID), Some(0.25), Some("error_max_turns"), None),
+            "unknown (the call did not settle; it reported $0.2500)",
+        ),
+    ];
+    for (at, (stdout, cost)) in cases.into_iter().enumerate() {
+        let fixture = one_question(&format!("decide-proposal-taken-{at}"));
+        let proposal = fixture.claim().join(PROPOSAL_FILE);
+        let runner = Acting::new({
+            let proposal = proposal.clone();
+            let stdout = stdout.clone();
+            move |_| {
+                std::fs::write(&proposal, "someone else's bytes").expect("a stray file");
+                Ok(exited(stdout.clone()))
+            }
+        });
+        let message = decide(&fixture.options(), &BuiltinAdapters, &runner)
+            .map(|decided| decided.report)
+            .expect_err("the proposal's name was taken")
+            .to_string();
+        assert_eq!(runner.seen().len(), 1, "{cost}: {message}");
+        assert!(
+            message.contains("no proposal for question q-01A was saved")
+                && message.contains(&format!("failed to write {}", proposal.display()))
+                && message.contains(&format!(
+                    "; the call was made, cost: {cost}, and the run stays claimed"
+                )),
+            "{cost}: {message}"
+        );
+        assert!(!message.contains("failed to read"), "{cost}: {message}");
+        assert!(is_one_line(&message), "{cost}: {message:?}");
+        assert_eq!(
+            std::fs::read_to_string(&proposal).expect("the stray file"),
+            "someone else's bytes",
+            "{cost}: nothing is replaced"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.claim().join(RAW_FILE)).expect("the raw output"),
+            stdout,
+            "{cost}: the raw output was saved before the proposal was attempted"
+        );
+        refused_as_claimed(&fixture, "a run whose proposal could not be written");
+    }
+}
+
+/// `PR435-PUBLICATION-ERROR-SAYS-READ`: a file this command cannot create new is reported as a
+/// failed write of that path, never as a failed read, and the file at the name is left as it was.
+#[test]
+fn an_exclusive_write_that_fails_is_worded_as_a_write() {
+    let tree = scratch("decide-write-worded");
+    let path = tree.path().join(PROPOSAL_FILE);
+    write_new(&path, b"first").expect("the name is free");
+    let error = write_new(&path, b"second")
+        .expect_err("the name is taken")
+        .to_string();
+    assert!(
+        error.starts_with(&format!("failed to write {}: ", path.display())),
+        "{error}"
+    );
+    assert!(!error.contains("failed to read"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the file"),
+        "first",
+        "nothing is replaced"
+    );
 }
 
 #[test]

@@ -30,8 +30,11 @@ beside it that loses the `create_dir`, spends nothing. The claim holds three fil
 are fixed (`SETTINGS_FILE`, `RAW_FILE`, `PROPOSAL_FILE`), so no question id becomes a file name
 (`no_question_id_becomes_a_file_name`). The call is capped at `--max-cost-usd`, the run's allowance, whole; nothing is
 subtracted from it and no other call follows, so there is no remainder to compute. Only a clean,
-successful, priced call is settled, at its price (`settle`); any other outcome is saved as
-refused, and a refused proposal makes the command exit non-zero (`Decided::outcome`).
+successful, priced call is settled, at its price (`settle`), and a call is successful only when
+its result reports success itself, so a result the reviewer marks as an error never settles
+(`reports_success`). Any other outcome is saved as refused, and so is a call that reports more
+than its ceiling, settled or not (`judged`); a refused proposal makes the command exit non-zero
+(`Decided::outcome`).
 
 ## Module
 
@@ -117,12 +120,17 @@ per input keeps a long input from crowding out the others.
 The default of `--max-cost-usd`: the dollar allowance of the run. A run is decided by one command
 (`Claim::take`), from whichever copy of the checkout, with one call, so the allowance is that
 call's own `--max-budget-usd` (`call_args`),
-whole, checked on the command as built (`kept`), and the adapter itself stops the call at the
-allowance rather than after it. A clean, successful, priced call is recorded at its price, above
-its ceiling included (`the_one_call_is_capped_at_the_allowance_and_counted_at_its_price`). No
-spend is summed and nothing is subtracted, so no floating-point remainder can start a call an
-exhausted allowance should not (`a_decimal_allowance_buys_one_call_and_no_remainder_starts_another`).
-The report's `cost` is what the call settled at, or `unknown` when it did not settle.
+whole, checked on the command as built (`kept`), so the CLI itself is to stop the call at the
+allowance rather than after it. A clean, successful, priced call is recorded at its price, the
+ceiling itself included (`the_one_call_is_capped_at_the_allowance_and_counted_at_its_price`). A
+call that reports more than its ceiling did not stop where it was to: it is recorded at what it
+reported and refused, settled or not, its reason saying so first, so the command exits non-zero
+(`judged`, `a_last_call_above_its_ceiling_fails_the_command`). No spend is summed and nothing is
+subtracted, so no floating-point remainder can start a call an exhausted allowance should not
+(`a_decimal_allowance_buys_one_call_and_no_remainder_starts_another`); the check of an
+exhausted allowance that went with the sum is gone, and the one call's own report is held to its
+ceiling instead. The report's `cost` is what the call settled at, or `unknown` when it did not
+settle, with any cost it reported beside it (`Returned::cost`).
 
 ## `pub struct DecideOptions {`
 
@@ -284,9 +292,14 @@ run and `ask` writes and starts the call, so an answer published during admissio
 paid call is made (`an_answer_published_after_admission_is_seen_before_the_call`).
 
 Until the claim, every refusal is the command's error, with nothing written and no agent asked.
-After it, a call that returns an outcome that does not settle is saved as refused, and a file that
-cannot be written, or that `Claim::admits` no longer admits, fails the command naming the
-question, with no proposal saved (`a_taken_name_is_never_replaced_and_fails_the_command`,
+After it, a call that returns an outcome that does not settle, or that reports more than its
+ceiling, is saved as refused (`judged`), and a file that cannot be written, or that
+`Claim::admits` no longer admits, fails the command naming the question, with no proposal saved.
+That failure says whether the call was made and, when it was, what it cost (`Returned::cost`),
+which no proposal then records: `propose` writes the raw output and then the proposal itself,
+once `ask` has returned what the call did, so a write that fails cannot lose a known price
+(`a_taken_name_is_never_replaced_and_fails_the_command`,
+`a_failed_proposal_write_preserves_a_reported_price`,
 `a_claim_changed_while_the_reviewer_runs_is_not_written_into`). The claim stays in every case.
 
 Once the pools file is read, the Runner the command was handed is wrapped
@@ -347,32 +360,60 @@ What each guarantee requires of the built command:
 
 What the call returned. `Settled` is a clean, successful, priced call, and only it is settled,
 at its price; `Unsettled` is every other outcome, with any cost it reported, which the proposal
-records as reported and unsettled.
+records as reported and unsettled. `cost` is what the call cost as the report says it, and as a
+write that fails after the call names it: a settled call's price, and otherwise `unknown`, with
+any cost the call reported beside it, which is no price.
 
 ## `fn settle(adapter: &dyn AgentAdapter, output: &ProcessOutput) -> Returned {`
 
 A call settles when its process exited 0, within its time limit and its output limit, the adapter
-read the outcome as `Completed`, and the outcome reports a finite cost of $0 or more. Anything
-else does not, and the reason names the first thing missing: a timeout, an output limit, a
-non-zero exit or a signal, an outcome the adapter read as an agent error, a timeout or a rate
-limit, a cost that is no price, or no cost at all; a Runner error is read in `ask`
+read the outcome as `Completed`, its result reports success itself (`reports_success`), and the
+outcome reports a finite cost of $0 or more. Anything else does not, and the reason names the
+first thing missing: a timeout, an output limit, a non-zero exit or a signal, an outcome the
+adapter read as an agent error, a timeout or a rate limit, a result that does not report success,
+a cost that is no price, or no cost at all; a Runner error is read in `ask`
 (`only_a_clean_successful_priced_call_settles_and_any_other_is_saved_refused`). A settled call
 whose reply `check_reply` refuses is still settled: what it cost is known. An unsettled one is
-saved as refused, its cost `unknown` in the report.
+saved as refused, its cost `unknown` in the report, beside what it reported.
+
+## `fn reports_success(stdout: &str) -> Result<(), String> {`
+
+Claude Code, the one reviewer a decide call is made with (`guarantees_of`), says whether a result
+succeeded with two marks: `"subtype": "success"` and `"is_error": false` when it did, and an
+error's name in `subtype` (`error_max_turns`, `error_during_execution`, `error_max_budget_usd`)
+or `"is_error": true` when it did not. The adapter reads a result with no `is_error` as completed
+whatever its subtype, the reading every run's attempts are given, which this command does not
+change; on the adapter's word alone, a call that exited 0 and printed `error_max_turns`, a price
+and a reply was saved accepted and settled. A call settles only when its result carries both
+marks of success, as written: a result that names an error by either mark, or leaves either out,
+does not settle, and the reason quotes both (`an_explicit_error_subtype_is_unsettled`).
+
+## `fn judged(question: &Question, returned: &Returned, ceiling_usd: f64) -> Result<Value, String> {`
+
+The proposal's verdict on what the call returned. A call that reported more than its ceiling, the
+run's allowance it was given as `--max-budget-usd`, is refused whether it settled or not, and its
+reason says so first, naming what it reported and the ceiling exactly; a call that did not settle
+is refused with why; a settled call's reply is read by `check_reply`. A per-call dollar ceiling is
+one of the promises every decide call keeps (`Guarantee`), and a call that broke it is not
+accepted, so an overrun fails the command and is never reported as a success. A price at the
+ceiling is within it. A settled call above its ceiling stays settled, its price known and
+recorded (`a_last_call_above_its_ceiling_fails_the_command`).
 
 ## `fn ask(`
 
-Writes the call's settings file new, starts the command's one call through the Runner as
-`CALL_ORDINAL`, saves its raw output
-new, and reads what it returned with `settle`. It takes the `Call` by value: the command and
-workspace `prepare` checked move into the request, uncopied. A Runner error (the process could not be started,
-was cancelled, or ended in a way the Runner reports as an error) is a returned outcome too: its
-words are saved in place of the raw output, and it does not settle. Both files go through
-`Claim::write`, so each is written immediately after the check that admits it: the raw output's
-check is made once the call has returned, not before the call, so no reviewer call sits between a
-check and its write. A launcher killed mid-call returns nothing, and leaves the claim and the
-settings file in place; the run's lock is given back as the stack unwinds, or by the OS when the
-process dies
+Writes the call's settings file new, through `Claim::write`, starts the command's one call
+through the Runner as `CALL_ORDINAL`, and reads what it returned with `settle`, handing it back
+with the bytes to save as its raw output (`Called`). It takes the `Call` by value: the command
+and workspace `prepare` checked move into the request, uncopied. A Runner error (the process could
+not be started, was cancelled, or ended in a way the Runner reports as an error) is a returned
+outcome too: its words stand in for the raw output, and it does not settle. Its one error is the
+settings file's, before the call starts, so no agent was asked. The raw output used to be written
+here, and a write of it that failed lost what the call had returned; `propose` writes it now, and
+then the proposal, each through `Claim::write`, so each is written immediately after the check
+that admits it, and both checks are made once the call has returned: no reviewer call sits
+between a check and its write. A launcher killed mid-call returns nothing, and leaves the claim
+and the settings file in place; the run's lock is given back as the stack unwinds, or by the OS
+when the process dies
 (`the_run_is_claimed_in_its_private_directory_before_its_first_call_and_the_claim_outlives_an_interruption`).
 
 ## `fn plain_id(id: &str) -> bool {`
@@ -530,5 +571,7 @@ whose cases are replies written out in plain text).
 Every file this command writes, each settings file, raw output and proposal, is created new
 (`File::create_new`), written, and synced with its directory; it never overwrites, and a name that
 is taken is an error rather than a replacement, which fails the command with the file as it was
-(`a_taken_name_is_never_replaced_and_fails_the_command`). `write_new` is
-the same with the error naming the path.
+(`a_taken_name_is_never_replaced_and_fails_the_command`). `write_new` is the same with its error
+worded as the write it is, `failed to write <path>` (`UpstrokeError::Filesystem`). It used
+`UpstrokeError::Io`, whose words are `failed to read`, so a proposal whose name was taken was
+reported as a read that failed (`an_exclusive_write_that_fails_is_worded_as_a_write`).

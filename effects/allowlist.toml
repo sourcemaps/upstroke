@@ -870,11 +870,11 @@ every settings file, raw output and proposal goes through (by way of \
 directory and the claim, and `libc::geteuid` (listed as no effect in \
 `effects/wrappers.toml`) are not denied; nothing lists or reads the claim. \
 `rundir::RunLock::acquire`, the run's own lock, is the engine's facility and \
-not denied. The test region adds 81 more, counted the same way with \
-`--all-targets` on Linux (87 in all, re-measured on 2026-11-27 when the \
-reviewer's probes moved behind the profiled runner and a configuration error \
-became one line): `std::fs::create_dir_all` 9 and \
-`std::fs::write` 11, which build the fixture repository's plan file, pools \
+not denied. The test region adds 88 more, counted the same way with \
+`--all-targets` on Linux (94 in all, re-measured on 2026-11-27 when an error \
+result, a call above its ceiling and a proposal whose name was taken gained \
+tests of their own): `std::fs::create_dir_all` 9 and \
+`std::fs::write` 12, which build the fixture repository's plan file, pools \
 files (one naming a profile whose path carries control characters, one that \
 does not parse), credential \
 profile directory, private directory, a schema-3 run, an earlier claim of the \
@@ -891,7 +891,7 @@ gives the fixture's private directory, or a directory left in the checkout, \
 the mode a case needs, `std::fs::rename` 2, moving the private directory or \
 the claim aside for a link, and `std::os::unix::fs::symlink` 3, a link at the \
 claim's name, at the private directory's and, while the call is in flight, at \
-the claim's again; and 50 calls of the module's own denied entry point, \
+the claim's again; and 56 calls of the module's own denied entry point, \
 `decide`. \
 `clippy::disallowed_types` and `clippy::disallowed_macros` are FORBIDDEN in this \
 file: it names no `std::process::Command` or `OpenOptions` and prints nothing. \

@@ -384,18 +384,18 @@ fn propose(
     // have answered while the pre-flight ran, and an answered question is never asked.
     unanswered(&answers, asked)?;
     claim.take(&opts.run_id)?;
-    let claimed = |error: UpstrokeError| {
+    // Once the run is claimed, a failure saves no proposal and leaves the claim, and it says
+    // whether the call was made and, when it was, what it cost, which no proposal then records.
+    let unsaved = |error: UpstrokeError, the_call: &str| {
         refused(format!(
-            "no proposal for question {id} was saved: {error}; the run stays claimed (`{}`), so a \
-             later decide of it writes nothing and asks no agent",
+            "no proposal for question {id} was saved: {error}; {the_call}, and the run stays \
+             claimed (`{}`), so a later decide of it writes nothing and asks no agent",
             claim.dir.display()
         ))
     };
-    let returned = ask(&decider, &runner, call, &claim).map_err(claimed)?;
-    let verdict = match &returned {
-        Returned::Settled { reply, .. } => check_reply(&asked.question, reply),
-        Returned::Unsettled { reason, .. } => Err(reason.clone()),
-    };
+    let Called { returned, raw } = ask(&decider, &runner, call, &claim)
+        .map_err(|error| unsaved(error, "no agent was asked"))?;
+    let verdict = judged(&asked.question, &returned, opts.max_cost_usd);
     let record = SaveRecord {
         run_id: &opts.run_id,
         question_id: id,
@@ -404,7 +404,17 @@ fn propose(
         returned: &returned,
         ceiling_usd: opts.max_cost_usd,
     };
-    save(&claim, &record).map_err(claimed)?;
+    // The raw output, then the proposal, each through `Claim::write`, which makes its check
+    // immediately before the write it admits, now that the call has returned.
+    claim
+        .write(RAW_FILE, &raw)
+        .and_then(|()| save(&claim, &record))
+        .map_err(|error| {
+            unsaved(
+                error,
+                &format!("the call was made, cost: {}", returned.cost()),
+            )
+        })?;
 
     // Every line of the report is pushed whole through the terminal line builder: the agent's
     // reply, the run's question text and the file names are data inside a line, so none of them
@@ -415,7 +425,7 @@ fn propose(
         &decider,
         &asked.question,
         &verdict,
-        returned.settled_usd(),
+        &returned.cost(),
         &claim.file(PROPOSAL_FILE),
     );
     out.push(format_args!(
@@ -774,15 +784,16 @@ fn earlier_answers(events: &[TopologyEvent], key: crate::topology::registry::Tas
     text
 }
 
-/// What one call returned, once its raw output is saved.
+/// What one call returned.
 #[derive(Debug, PartialEq)]
 enum Returned {
     /// A clean, successful, priced call: the process exited 0 within its time and output
-    /// limits, the adapter read a completed outcome, and it reported a finite cost of $0 or
-    /// more. The reply's text, and the price the call settles at.
+    /// limits, the adapter read a completed outcome, its result reported success itself
+    /// (`reports_success`), and it reported a finite cost of $0 or more. The reply's text, and
+    /// the price the call settles at.
     Settled { reply: String, cost_usd: f64 },
     /// Every other outcome a call returns: why it does not settle, and any cost it reported,
-    /// which is recorded and never counted.
+    /// which is recorded and never taken for its price.
     Unsettled {
         reason: String,
         cost_usd: Option<f64>,
@@ -790,19 +801,24 @@ enum Returned {
 }
 
 impl Returned {
-    /// The price a settled call is counted at.
-    const fn settled_usd(&self) -> Option<f64> {
-        match self {
-            Self::Settled { cost_usd, .. } => Some(*cost_usd),
-            Self::Unsettled { .. } => None,
-        }
-    }
-
     /// Any cost the call reported, settled or not.
     const fn reported_usd(&self) -> Option<f64> {
         match self {
             Self::Settled { cost_usd, .. } => Some(*cost_usd),
             Self::Unsettled { cost_usd, .. } => *cost_usd,
+        }
+    }
+
+    /// What the call cost, as the report says it and as a write that fails after the call names
+    /// it: a settled call's price; otherwise `unknown`, with any cost it reported beside it.
+    fn cost(&self) -> String {
+        match self {
+            Self::Settled { cost_usd, .. } => format!("${cost_usd:.4}"),
+            Self::Unsettled {
+                cost_usd: Some(reported),
+                ..
+            } => format!("unknown (the call did not settle; it reported ${reported:.4})"),
+            Self::Unsettled { cost_usd: None, .. } => "unknown".to_owned(),
         }
     }
 }
@@ -851,6 +867,9 @@ fn settle(adapter: &dyn AgentAdapter, output: &ProcessOutput) -> Returned {
             status_named(outcome.status)
         ));
     }
+    if let Err(reason) = reports_success(&output.stdout) {
+        return unsettled(reason);
+    }
     match outcome.cost_usd {
         Some(cost) if cost.is_finite() && cost >= 0.0 => Returned::Settled {
             reply: outcome.detail.unwrap_or_default(),
@@ -860,6 +879,53 @@ fn settle(adapter: &dyn AgentAdapter, output: &ProcessOutput) -> Returned {
             "the call reported a cost of {cost}, which is no price"
         )),
         None => unsettled("the call reported no cost".to_owned()),
+    }
+}
+
+/// The `subtype` of a result that reports success.
+const SUCCESS_SUBTYPE: &str = "success";
+
+/// Whether the result the call printed reports success itself. Claude Code, the one reviewer a
+/// decide call is made with (`guarantees_of`), marks a result twice: `"subtype": "success"` and
+/// `"is_error": false` when it succeeded, and an error's name in `subtype` (`error_max_turns`,
+/// say) or `"is_error": true` when it did not. Both marks of success are required, as written:
+/// the adapter reads a result with no `is_error` as completed whatever its subtype, so its word
+/// alone would settle a result that names an error.
+fn reports_success(stdout: &str) -> Result<(), String> {
+    let result: Option<Value> = serde_json::from_str(stdout.trim()).ok();
+    let mark = |name: &str| result.as_ref().and_then(|result| result.get(name));
+    let (subtype, is_error) = (mark("subtype"), mark("is_error"));
+    if subtype.and_then(Value::as_str) == Some(SUCCESS_SUBTYPE)
+        && is_error.and_then(Value::as_bool) == Some(false)
+    {
+        return Ok(());
+    }
+    let shown = |value: Option<&Value>| value.map_or_else(|| "absent".to_owned(), Value::to_string);
+    Err(format!(
+        "the call's result does not report success itself: its subtype is {} and its is_error \
+         is {}, and only a result whose subtype is \"{SUCCESS_SUBTYPE}\" and whose is_error is \
+         false settles",
+        shown(subtype),
+        shown(is_error)
+    ))
+}
+
+/// The proposal's verdict on what the call returned. A call that reported more than its ceiling
+/// is refused, settled or not, and its reason says so first: the ceiling is a promise every
+/// decide call keeps (`Guarantee::PerCallCeiling`), and a call that broke it fails the command.
+/// A call that did not settle is refused with why; a settled call's reply is read by
+/// `check_reply`.
+fn judged(question: &Question, returned: &Returned, ceiling_usd: f64) -> Result<Value, String> {
+    let over = returned
+        .reported_usd()
+        .filter(|cost| *cost > ceiling_usd)
+        .map(|cost| format!("the call reported ${cost}, more than its ceiling of ${ceiling_usd}"));
+    match (over, returned) {
+        (Some(over), Returned::Settled { .. }) => Err(over),
+        (Some(over), Returned::Unsettled { reason, .. }) => Err(format!("{over}; {reason}")),
+        // Copied: the verdict owns its reason, and `returned` stays whole for the cost recorded.
+        (None, Returned::Unsettled { reason, .. }) => Err(reason.clone()),
+        (None, Returned::Settled { reply, .. }) => check_reply(question, reply),
     }
 }
 
@@ -1140,18 +1206,26 @@ fn kept(guarantee: Guarantee, built: &Built<'_>) -> Result<(), String> {
 /// The identity of the command's one call: the first and only decider of the run.
 const CALL_ORDINAL: u32 = 1;
 
-/// Starts the one call of the claimed run: writes its settings file new, starts it through the
-/// Runner, saves its raw output new, and reads what it returned. A Runner error is a returned
-/// outcome too, saved in place of the raw output, and never settles. The call is taken whole:
-/// its command and workspace move into the request, so what starts is what `prepare` checked.
-/// Each file is written through `Claim::write`, immediately after the check that admits it: the
-/// raw output's check is made once the call has returned, never before it.
+/// What the one call returned, and the bytes saved as its raw output: what the agent printed or,
+/// when the Runner failed the call, why.
+struct Called {
+    returned: Returned,
+    raw: Vec<u8>,
+}
+
+/// Starts the one call of the claimed run: writes its settings file new, through `Claim::write`,
+/// starts it through the Runner, and reads what it returned. A Runner error is a returned outcome
+/// too, whose words stand in for the raw output, and never settles. The call is taken whole: its
+/// command and workspace move into the request, so what starts is what `prepare` checked. Its one
+/// error is the settings file's, before the call starts. Nothing is written once the call has
+/// started: `propose` saves the raw output and the proposal once this returns, so a write of
+/// either that fails still knows what the call cost.
 fn ask(
     decider: &Decider<'_>,
     runner: &dyn Runner,
     call: Call,
     claim: &Claim,
-) -> Result<Returned, UpstrokeError> {
+) -> Result<Called, UpstrokeError> {
     let Call {
         task_run,
         command,
@@ -1172,19 +1246,23 @@ fn ask(
             ordinal: CALL_ORDINAL,
         },
     );
-    let output = match runner.run_blocking(&request) {
-        Ok(output) => output,
+    Ok(match runner.run_blocking(&request) {
+        Ok(output) => Called {
+            returned: settle(decider.adapter, &output),
+            raw: output.stdout.into_bytes(),
+        },
         Err(error) => {
             let reason = format!("the agent process failed: {}", UpstrokeError::from(error));
-            claim.write(RAW_FILE, reason.as_bytes())?;
-            return Ok(Returned::Unsettled {
-                reason,
-                cost_usd: None,
-            });
+            Called {
+                // Copied: the failure's words are both the raw output and the proposal's reason.
+                raw: reason.as_bytes().to_vec(),
+                returned: Returned::Unsettled {
+                    reason,
+                    cost_usd: None,
+                },
+            }
         }
-    };
-    claim.write(RAW_FILE, output.stdout.as_bytes())?;
-    Ok(settle(decider.adapter, &output))
+    })
 }
 
 /// A fence: with an info string after it, a line that opens a block; alone, one that closes it.
@@ -1564,8 +1642,10 @@ fn create_durably(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
 }
 
+/// `create_durably`, its error worded as the write it is: `failed to write <path>`.
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), UpstrokeError> {
-    create_durably(path, bytes).map_err(|source| UpstrokeError::Io {
+    create_durably(path, bytes).map_err(|source| UpstrokeError::Filesystem {
+        operation: "write",
         path: path.to_path_buf(),
         source,
     })
@@ -1598,7 +1678,7 @@ fn save(claim: &Claim, record: &SaveRecord<'_>) -> Result<(), UpstrokeError> {
         "effort": record.decider.effort,
         "status": status,
         "cost_usd": record.returned.reported_usd(),
-        "settled": record.returned.settled_usd().is_some(),
+        "settled": matches!(record.returned, Returned::Settled { .. }),
         "ceiling_usd": record.ceiling_usd,
         "raw_output": RAW_FILE,
     });
@@ -1609,15 +1689,15 @@ fn save(claim: &Claim, record: &SaveRecord<'_>) -> Result<(), UpstrokeError> {
     claim.write(PROPOSAL_FILE, &bytes)
 }
 
-/// One question's lines of the report. The reply's fields, the refusal's reason and the option's
-/// text are each data inside a line `out` builds, so none can start a line or reach the terminal
-/// as a control; the saved record keeps them as they were.
+/// One question's lines of the report, `cost` as `Returned::cost` says it. The reply's fields,
+/// the refusal's reason and the option's text are each data inside a line `out` builds, so none
+/// can start a line or reach the terminal as a control; the saved record keeps them as they were.
 fn render_one(
     out: &mut TerminalLines,
     decider: &Decider<'_>,
     question: &Question,
     verdict: &Result<Value, String>,
-    cost_usd: Option<f64>,
+    cost: &str,
     saved: &Path,
 ) {
     out.push(format_args!(
@@ -1659,10 +1739,7 @@ fn render_one(
             }
         }
     }
-    out.push(format_args!(
-        "  cost: {}",
-        cost_usd.map_or_else(|| "unknown".to_owned(), |cost| format!("${cost:.4}"))
-    ));
+    out.push(format_args!("  cost: {cost}"));
     out.push(format_args!("  saved: {}", saved.display()));
 }
 
