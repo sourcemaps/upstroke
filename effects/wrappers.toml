@@ -1473,7 +1473,7 @@ effect_free = [
 [[module]]
 path = "src/agent/proc.rs"
 crate_path = "upstroke::agent::proc"
-shared = { deref = 2, drop = 6 }
+shared = { deref = 2, drop = 6, group_has_non_zombie_members = 2 }
 funnel = [
     # PR11 follow-up A (`PR11-REAPER-CONTAINER-SCOPE-UNREGISTERED`): `arm_container_reaper` takes
     # `ProcessSite::Terminate` by value, refuses any other site, and forks one cleanup reaper through the
@@ -1558,6 +1558,9 @@ effect_free = [
     "deref",
     "deref_mut",
     "fmt",
+    # Reads `/proc` (Linux) or `proc_listpids` (macOS) and mutates nothing, as `process_alive` does;
+    # `pub(super)` since PR281's settle loop in `kill_tree_primitive` observes the group through it.
+    "group_has_non_zombie_members",
     # A pure decision over a memoised `Result`: it clones a message or returns
     # `Ok`, and touches nothing.
     "memoised_outcome",

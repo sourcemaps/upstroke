@@ -581,12 +581,21 @@ fn kill_tree_primitive(child: &mut ProcessTree) -> Result<(), UpstrokeError> {
     {
         let mut not_established = Vec::new();
         #[cfg(unix)]
-        if let Err(error) = signal_group_kill(child) {
+        let signalled = signal_group_kill(child);
+        let _ = child.kill();
+        let reaped = child.wait();
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let (signalled, settled) = settle_signalled_group(child.id(), signalled);
+        #[cfg(unix)]
+        if let Err(error) = signalled {
             not_established.push(format!("the group signal failed ({error})"));
         }
-        let _ = child.kill();
-        if let Err(error) = child.wait() {
+        if let Err(error) = reaped {
             not_established.push(format!("the direct child's reap failed ({error})"));
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Err(reason) = settled {
+            not_established.push(reason);
         }
         if not_established.is_empty() {
             Ok(())
@@ -611,10 +620,128 @@ fn signal_group_kill(child: &ProcessTree) -> std::io::Result<()> {
         return Ok(());
     }
     let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
+    // Nothing has looked at the group yet, so only `ESRCH` settles here. On
+    // Linux and macOS `kill_tree_primitive` judges what is left again, against
+    // what `settle_group` then observed.
+    if group_signal_settled(error.raw_os_error(), None) {
         return Ok(());
     }
     Err(error)
+}
+
+/// What a group signal's error means, given what was then observed of the
+/// group. `error` is the errno `kill(-pgid, SIGKILL)` failed with (`None`:
+/// delivered); `non_zombie_members` is the termination module's scanner's
+/// answer (`None`: not observed, or it could not answer).
+///
+/// Settled: a delivered signal, `ESRCH` (no member left), and `EPERM` once the
+/// scanner found no non-zombie member, which is how macOS refuses a signal to
+/// a group of zombies (`PR292-MACOS-ZOMBIE-ONLY-GROUP-EPERM-FAILS-KILL-TREE`).
+/// Every other `EPERM` stays an error, because a host policy can refuse a
+/// signal to a live process; so does every other errno.
+#[cfg(unix)]
+fn group_signal_settled(error: Option<i32>, non_zombie_members: Option<bool>) -> bool {
+    match error {
+        None | Some(libc::ESRCH) => true,
+        Some(libc::EPERM) => non_zombie_members == Some(false),
+        Some(_) => false,
+    }
+}
+
+/// How long [`kill_tree_primitive`] keeps observing (and re-signalling) the
+/// group it signalled before it reports the group not established gone. A
+/// failsafe, not a wait: a group that is going to settle has done so once the
+/// kernel has acted on the `SIGKILL`s, and the loop ends on that observation.
+/// This bound is what turns a group that never settles (a member the kernel
+/// will not hand back, a signal a host policy refuses, a scanner that cannot
+/// answer) into the primitive's error rather than a caller held for ever.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const GROUP_SETTLE_BOUND: Duration = Duration::from_secs(10);
+
+/// The pause [`settle_group`] takes after each re-signal before it looks at
+/// the group again. The cadence of the observation, not a stand-in for one:
+/// the loop ends on the scanner's answer, and this keeps a member that takes a
+/// moment to die from being scanned for in a busy loop.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const GROUP_SETTLE_POLL_SLICE: Duration = Duration::from_millis(1);
+
+/// [`kill_tree_primitive`]'s settlement of the group its leader led, on the
+/// platforms the termination module's scanner exists for
+/// (`PR281-MACOS-KILL-TREE-SETTLE-ONLY-THE-DIRECT-CHILD`): [`settle_group`]
+/// over that scanner and a repeated group `SIGKILL`, then the first signal's
+/// error judged against what it observed ([`group_signal_settled`]). Answers
+/// that judged signal and, when the group was not observed settled, the reason.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn settle_signalled_group(
+    pid: u32,
+    signalled: std::io::Result<()>,
+) -> (std::io::Result<()>, Result<(), String>) {
+    let Ok(pgid) = i32::try_from(pid) else {
+        return (
+            signalled,
+            Err(format!(
+                "the group's membership could not be observed: pid {pid} is not a process group id"
+            )),
+        );
+    };
+    let members = settle_group(
+        pgid,
+        termination::group_has_non_zombie_members,
+        |pgid| {
+            // SAFETY: `pgid` is the group `signal_group_kill` signalled, whose
+            // id is the leader's pid; `settle_group` signals it only straight
+            // after a look that did not find it settled. A negative pid
+            // targets that group only.
+            let _ = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+        },
+        GROUP_SETTLE_BOUND,
+    );
+    let signalled = match signalled {
+        Err(error) if group_signal_settled(error.raw_os_error(), members) => Ok(()),
+        other => other,
+    };
+    let settled = match members {
+        Some(false) => Ok(()),
+        Some(true) => Err(format!(
+            "the group settle passed its {GROUP_SETTLE_BOUND:?} bound with members still running"
+        )),
+        None => Err(format!(
+            "the group settle passed its {GROUP_SETTLE_BOUND:?} bound and the group's membership \
+             could not be observed"
+        )),
+    };
+    (signalled, settled)
+}
+
+/// Observe group `pgid` with `probe` until it answers that no non-zombie
+/// member remains (`Some(false)`), calling `signal` straight after every
+/// answer that does not, the way `cleanup_reaper_group` does, and giving up
+/// once `bound` has passed.
+///
+/// Answers what `probe` established: `Some(false)` once it said so; at the
+/// bound, `Some(true)` if it ever found a non-zombie member and `None` if it
+/// answered `None` throughout.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn settle_group(
+    pgid: i32,
+    mut probe: impl FnMut(i32) -> Option<bool>,
+    mut signal: impl FnMut(i32),
+    bound: Duration,
+) -> Option<bool> {
+    let deadline = Instant::now() + bound;
+    let mut found_a_member = false;
+    loop {
+        match probe(pgid) {
+            Some(false) => return Some(false),
+            Some(true) => found_a_member = true,
+            None => {}
+        }
+        if Instant::now() >= deadline {
+            return found_a_member.then_some(true);
+        }
+        signal(pgid);
+        thread::sleep(GROUP_SETTLE_POLL_SLICE);
+    }
 }
 
 #[cfg(all(unix, test))]
@@ -4378,7 +4505,7 @@ mod termination {
     }
 
     #[cfg(target_os = "linux")]
-    fn group_has_non_zombie_members(pgid: i32) -> Option<bool> {
+    pub(super) fn group_has_non_zombie_members(pgid: i32) -> Option<bool> {
         let directory = unsafe {
             libc::open(
                 c"/proc".as_ptr(),
@@ -4577,7 +4704,7 @@ mod termination {
     }
 
     #[cfg(target_os = "macos")]
-    fn group_has_non_zombie_members(pgid: i32) -> Option<bool> {
+    pub(super) fn group_has_non_zombie_members(pgid: i32) -> Option<bool> {
         const PROC_PGRP_ONLY: u32 = 2;
         const MAX_PIDS: usize = 16_384;
         let mut pids = [0_i32; MAX_PIDS];
@@ -10946,6 +11073,130 @@ pub(crate) mod test_support {
     }
 
     pub(crate) mod readiness;
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod group_settle_tests {
+    use std::time::{Duration, Instant};
+
+    use super::{group_signal_settled, settle_group};
+
+    #[test]
+    fn group_signal_errors_settle_only_by_esrch_or_an_eperm_on_a_zombie_only_group() {
+        for members in [None, Some(false), Some(true)] {
+            assert!(
+                group_signal_settled(None, members),
+                "a delivered signal is settled whatever was observed ({members:?})"
+            );
+            assert!(
+                group_signal_settled(Some(libc::ESRCH), members),
+                "ESRCH says no member was left, whatever was observed ({members:?})"
+            );
+            for other in [libc::EINVAL, libc::EAGAIN, libc::EINTR] {
+                assert!(
+                    !group_signal_settled(Some(other), members),
+                    "errno {other} is an error, whatever was observed ({members:?})"
+                );
+            }
+        }
+        assert!(
+            group_signal_settled(Some(libc::EPERM), Some(false)),
+            "an EPERM for a group the scanner then found holding no non-zombie member is the \
+             zombie-only group's answer (PR292), not a refusal"
+        );
+        assert!(
+            !group_signal_settled(Some(libc::EPERM), Some(true)),
+            "an EPERM beside a running member is a refusal of a signal to a live process"
+        );
+        assert!(
+            !group_signal_settled(Some(libc::EPERM), None),
+            "an EPERM for a group nothing could observe stays an error"
+        );
+    }
+
+    #[test]
+    fn the_settle_loop_signals_after_every_unsettled_look_and_stops_at_the_settled_one() {
+        let mut answers = [Some(true), None, Some(true), Some(false)].into_iter();
+        let mut probed = Vec::new();
+        let mut signalled = Vec::new();
+        let established = settle_group(
+            4242,
+            |pgid| {
+                probed.push(pgid);
+                answers
+                    .next()
+                    .expect("the loop looks again only while the group is not settled")
+            },
+            |pgid| signalled.push(pgid),
+            Duration::from_secs(60),
+        );
+        assert_eq!(
+            established,
+            Some(false),
+            "the settled answer is what ends it"
+        );
+        assert_eq!(probed, [4242; 4], "one look per answer, at the group given");
+        assert_eq!(
+            signalled, [4242; 3],
+            "one signal after each look that did not find the group settled, none after it"
+        );
+
+        let mut looks = 0;
+        let mut signals = 0;
+        let established = settle_group(
+            7,
+            |_| {
+                looks += 1;
+                Some(false)
+            },
+            |_| signals += 1,
+            Duration::from_secs(60),
+        );
+        assert_eq!(
+            (established, looks, signals),
+            (Some(false), 1, 0),
+            "a group already settled is looked at once and never signalled again"
+        );
+    }
+
+    #[test]
+    fn a_group_that_never_settles_is_answered_at_the_bound_with_what_was_seen() {
+        let bound = Duration::from_millis(20);
+
+        let started = Instant::now();
+        let mut signals = 0;
+        let running = settle_group(1, |_| Some(true), |_| signals += 1, bound);
+        assert!(
+            started.elapsed() >= bound,
+            "the loop gave up before its bound"
+        );
+        assert_eq!(running, Some(true), "members were seen running");
+        assert!(signals > 0, "the group was signalled again while it ran");
+
+        assert_eq!(
+            settle_group(1, |_| None, |_| {}, bound),
+            None,
+            "a scanner that answered None throughout established nothing"
+        );
+
+        let mut answers = [Some(true)].into_iter();
+        assert_eq!(
+            settle_group(1, |_| answers.next().flatten(), |_| {}, bound),
+            Some(true),
+            "a member seen once and then a scanner that stopped answering is still a member \
+             seen running"
+        );
+
+        let mut signals = 0;
+        assert_eq!(
+            (
+                settle_group(1, |_| Some(true), |_| signals += 1, Duration::ZERO),
+                signals
+            ),
+            (Some(true), 0),
+            "a bound that has already passed ends the loop at its first look, unsignalled"
+        );
+    }
 }
 
 #[cfg(test)]
