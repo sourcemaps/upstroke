@@ -729,9 +729,10 @@ which can differ and would load another repo's config.
 ## `pub fn load_for_report(`
 
 [`load`] for `upstroke capacity`, which reads only the pools file,
-`[routing.strategy]`, `[capacity]` and the machine directory. A refusal in a
-section the report never reads becomes a warning, and the report is still
-produced.
+`[routing.strategy]`, `[capacity]` and the machine directory. In a file that
+parses as TOML, a refusal in a section the report never reads becomes a
+warning, and the report is still produced. A file that does not parse as TOML
+is refused as [`load`] refuses it.
 
 It captures once and reads the capture the way [`load`] does. If that reading
 accepts the file, the result and its warnings are exactly [`load`]'s. If it

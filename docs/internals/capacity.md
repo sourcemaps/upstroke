@@ -1071,10 +1071,12 @@ files and starts each agent's probe; it writes nothing and asks no provider.
 
 The configuration is read through `config::load_for_report` and not
 `config::load`. The report uses only the pools file, `[routing.strategy]`,
-`[capacity]` and the machine directory. A file refused over any other section
-(a `[[gates]]` entry, `[engine]`, `[interaction]`) still gives a report, and
-the refusal becomes one warning that says a run created now would refuse the
-file. A refusal in the sections the report reads still fails it.
+`[capacity]` and the machine directory. A file that parses as TOML but is
+refused over any other section (a `[[gates]]` entry, `[engine]`,
+`[interaction]`) still gives a report, and the refusal becomes one warning
+that says a run created now would refuse the file. A refusal in the sections
+the report reads still fails it, and so does a file that does not parse as
+TOML, such as one that repeats a key within `[engine]`.
 
 ## `let gathered = machine::gather(`
 
