@@ -1467,7 +1467,9 @@ agent = \"claude-code\"
     mod fold {
         use std::time::Duration;
 
-        use crate::events::{AttemptRecord, Event, EventBody, FailureRecord, RunStarted};
+        use crate::events::{
+            AttemptRecord, AttemptStarted, Event, EventBody, FailureRecord, RunStarted,
+        };
         use crate::ladder::{FailureKind, FailureOrigin};
 
         pub(super) fn record(pool: &str, usd: Option<f64>, limited: bool) -> AttemptRecord {
@@ -1514,6 +1516,29 @@ agent = \"claude-code\"
                         gate_cmds: None,
                         reviews: None,
                     }),
+                },
+            }
+        }
+
+        pub(super) fn legacy_attempt_started(ts: &str, pool: &str) -> Event {
+            Event {
+                ts: ts.to_owned(),
+                body: EventBody::AttemptStarted {
+                    task: "t1".to_owned(),
+                    attempt: 1,
+                    rung: 0,
+                    profile: "p".to_owned(),
+                    data: AttemptStarted {
+                        tier: "small".to_owned(),
+                        agent: "claude-code".to_owned(),
+                        model: "m".to_owned(),
+                        adapter: None,
+                        preflight_cli_version: None,
+                        effort: None,
+                        selection_origin: None,
+                        pool: Some(pool.to_owned()),
+                        resume_session: None,
+                    },
                 },
             }
         }
@@ -1774,6 +1799,7 @@ agent = \"claude-code\"
             "01HERELATER",
             &[
                 fold::legacy_started("2026-11-23T11:00:00Z", "01HERELATER"),
+                fold::legacy_attempt_started("2026-11-23T11:00:00Z", "claude-max"),
                 fold::legacy_finished(
                     "2026-11-23T11:30:00Z",
                     fold::record("claude-max", None, false),

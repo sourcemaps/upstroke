@@ -10,11 +10,10 @@
   against. `[capacity] scope = "repo"`, or `upstroke capacity --scope repo`, folds this
   repository's runs alone. A run that cannot be read still shows nothing and is named in a
   warning, and the scope line now counts such runs. Nothing routes on any of this yet.
-  A schema-4 attempt the pool served clears another run's rate limit on that pool only when its
-  worker finished after that limit was met, dated by the attempt's start and measured duration;
-  an attempt settled late from earlier work, or with no recorded start, no longer reads the pool
-  as serving again. It still clears its own run's limits, and an attempt of a run of schemas 1–3,
-  which records no such time, still clears any run's earlier limit.
+  An attempt the pool served, in a run of any schema, clears another run's rate limit on that pool
+  only when its worker finished after that limit was met, dated by the attempt's start and
+  measured duration; an attempt settled late from earlier work, or with no recorded start, no
+  longer reads the pool as serving again. It still clears its own run's limits.
 - `upstroke capacity --refresh` is new: the capacity tracker. For each pool that names a
   `usage_provider` in `pools.toml` it asks that provider's documented usage endpoint what the
   account has drawn this month, through a `curl` subprocess, and stores the answer under
