@@ -855,28 +855,35 @@ reviewer for a proposal, read-only, through the Runner. It is not the engine: no
 engine module names it, and it never answers -- it calls no `write_answer`, no \
 `AnswerSource` and no coordinator. \
 WHAT IT NEEDS THE ALLOWANCE FOR, measured by denying the lint and counting the \
-errors on the library target: `clippy::disallowed_methods`, 3 production sites \
--- `std::fs::create_dir_all` 1 (the proposals directory, in `ask`) and, in the \
-private `write_new` that every proposal and raw output goes through, \
-`std::fs::File::create_new` 1 and `std::io::Write::write_all` 1. The adapter's \
-`materialize_permissions`, which writes the read-only profile's settings file \
-into the same directory, is a trait method no path denies, so it is not among \
-them. The test region adds 15 more, counted the same way with `--all-targets` \
-(18 in all): `std::fs::create_dir_all` 3 and `std::fs::write` 4, which build \
-the fixture repository's plan file, pools file, private directory and a \
-schema-3 run (the schema-4 run is written through the event funnel), and 8 \
-calls of the module's own denied entry point, `decide`. \
+errors on the library target: `clippy::disallowed_methods`, 4 production sites \
+-- in `ask`, `std::fs::create_dir_all` 1 (the proposals directory) and \
+`util::write_json` 1 (the call's settings file, which `ask` writes itself so \
+that the private directory's deny rules are in it and which `prepare` checked \
+before anything was written), and, in the private `write_new` that every \
+proposal and raw output goes through, `std::fs::File::create_new` 1 and \
+`std::io::Write::write_all` 1. `admit`'s `std::fs::canonicalize` reads where the \
+private directory resolves and is not denied. The test region adds 23 more, \
+counted the same way with `--all-targets` (27 in all): `std::fs::create_dir_all` \
+4 and `std::fs::write` 5, which build the fixture repository's plan file, pools \
+files, credential profile directory, private directory and a schema-3 run (the \
+schema-4 run is written through the event funnel), and 14 calls of the module's \
+own denied entry point, `decide`. \
 `clippy::disallowed_types` and `clippy::disallowed_macros` are FORBIDDEN in this \
 file: it names no `std::process::Command` or `OpenOptions` and prints nothing. \
 NO PROCESS IS STARTED HERE. The agent is the adapter's data-only `CommandSpec`, \
 started by the Runner through `runner::decide_request` (role `Decide`, no \
 environment overlay), which the CLI passes as a `HostRunner` inside the write \
-command's containment. \
+command's containment. Nothing is written and nothing is started before \
+`admit` has refused a container run, a run the credential pre-flight refuses \
+and a reviewer whose adapter does not claim every guarantee, and before \
+`prepare` has refused a command that carries an environment overlay or does not \
+keep each guarantee as built. \
 CONTAINMENT. Every write is under `<repo>/.upstroke/proposals/<run-id>/`. The \
 run id is the exact name of an existing run directory and the question id is \
 one the run's own log froze. Nothing is written under a run's public or private \
-directory or an answers directory, nothing is overwritten (`create_new`), and \
-nothing is deleted. \
+directory or an answers directory, no proposal or raw output is overwritten \
+(`create_new`; the call's settings file is written in place), and nothing is \
+deleted. \
 HANDLES: no item returns a `File`, an `OpenOptions` or a `Command`. \
 ITS ENTRY POINT IS DENIED. `decide` is an effectful row of \
 `effects/wrappers.toml` and an entry of `clippy.toml`."""

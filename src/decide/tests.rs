@@ -3,14 +3,15 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use super::*;
-use crate::agent::ProcessOutput;
+use crate::agent::{Caps, ProcessOutput};
 use crate::engine::BuiltinAdapters;
-use crate::ir::{Effort, QuestionId, QuestionKind, TaskId};
+use crate::ir::{Effort, Outcome, QuestionId, QuestionKind, TaskId};
 use crate::review::PassBinding;
 use crate::rundir::scratch_tree::ScratchTree;
 use crate::runner::{ExecutionRole, RunFuture, RunnerCall, RunnerRequest};
 use crate::topology::events::{
-    Answer4, FrozenQuestion, QuestionAnswered4, QuestionRaised4, RunStarted4,
+    Answer4, FrozenQuestion, ImageIdentity, QuestionAnswered4, QuestionRaised4, RunStarted4,
+    RunnerContract, RunnerPolicy,
 };
 use crate::topology::registry::TaskKey;
 
@@ -203,20 +204,54 @@ fn plan(tasks: usize) -> crate::ir::Plan {
     }
 }
 
+fn host_runner() -> RunnerPolicy {
+    RunnerPolicy {
+        kind: RunnerKind::Host,
+        policy: RunnerContract::HostV1,
+        image: None,
+        credential_volumes: None,
+        mounts: Vec::new(),
+    }
+}
+
+fn container_runner() -> RunnerPolicy {
+    RunnerPolicy {
+        kind: RunnerKind::Container,
+        policy: RunnerContract::ContainerV1,
+        image: Some(ImageIdentity {
+            reference: "ghcr.io/example/upstroke-runner:v1".to_owned(),
+            id: "sha256:11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff"
+                .to_owned(),
+            digest: None,
+        }),
+        credential_volumes: Some(BTreeMap::from([(
+            crate::agent::claude::ADAPTER_ID.to_owned(),
+            "upstroke-creds-claude".to_owned(),
+        )])),
+        mounts: Vec::new(),
+    }
+}
+
 fn run_started(
     plan: &crate::ir::Plan,
     normalized_plan_digest: &str,
     private: &Path,
-    primary: Option<PassBinding>,
+    setup: Setup,
 ) -> RunStarted4 {
     use crate::events::{BindingSummary, ChainSummary, GateSummary};
     use crate::gates::ShellKind;
     use crate::ir::{ResolvedEffortPolicy, Tier};
     use crate::review::ReviewPlan;
-    use crate::topology::events::{
-        CommitSha, GitRef, IncarnationId, RunnerContract, RunnerKind, RunnerPolicy, TopologyLimits,
-    };
+    use crate::topology::events::{CommitSha, GitRef, IncarnationId, TopologyLimits};
     use crate::topology::paths::{PathGrammar, PathPolicy, PathPolicyVersion};
+
+    let Setup {
+        primary, runner, ..
+    } = setup;
+    let mut probed_agents = vec![crate::agent::claude::ADAPTER_ID.to_owned()];
+    probed_agents.extend(primary.iter().map(|binding| binding.agent.clone()));
+    probed_agents.sort_unstable();
+    probed_agents.dedup();
 
     let chain = |task: &str| ChainSummary {
         task: task.to_owned(),
@@ -242,14 +277,8 @@ fn run_started(
         upstroke_version: "0.2.0-decide".to_owned(),
         run_id: RUN.to_owned(),
         incarnation: IncarnationId("01DECIDEINC000000000000000".to_owned()),
-        runner: RunnerPolicy {
-            kind: RunnerKind::Host,
-            policy: RunnerContract::HostV1,
-            image: None,
-            credential_volumes: None,
-            mounts: Vec::new(),
-        },
-        probed_agents: vec![crate::agent::claude::ADAPTER_ID.to_owned()],
+        runner,
+        probed_agents,
         shell: ShellKind::Bash,
         branch: format!("upstroke/run-{RUN}"),
         integration_ref: GitRef(format!("refs/heads/upstroke/run-{RUN}")),
@@ -373,6 +402,13 @@ struct Fixture {
     _tree: ScratchTree,
     repo: PathBuf,
     private: PathBuf,
+    profile: PathBuf,
+}
+
+/// The coordinator environment of every fixture: no variable is set, so the credential
+/// preflight never reads this test process's own.
+fn no_variables(_key: &str) -> Option<OsString> {
+    None
 }
 
 impl Fixture {
@@ -383,7 +419,12 @@ impl Fixture {
             question_id: None,
             max_cost_usd: DEFAULT_MAX_COST_USD,
             pools_path: Some(self.repo.join("pools.toml")),
+            environment: Some(no_variables),
         }
+    }
+
+    fn proposals_written(&self) -> bool {
+        proposals_dir(&self.repo, RUN).exists()
     }
 
     fn public(&self) -> PathBuf {
@@ -398,7 +439,30 @@ impl Fixture {
     }
 }
 
-const POOLS: &str = "[pools.claude-max]\nkind = \"subscription-window\"\nagent = \"claude-code\"\nprofile = \"/profiles/claude-max\"\n";
+/// A pools file whose one pool binds `agent` to the credential profile `profile`.
+fn pools(agent: &str, profile: &str) -> String {
+    format!(
+        "[pools.claude-max]\nkind = \"subscription-window\"\nagent = \"{agent}\"\nprofile = '{profile}'\n"
+    )
+}
+
+/// What the recorded run looks like: its primary reviewer, its runner, and the name of the
+/// scratch directory its private directory is under.
+struct Setup {
+    primary: Option<PassBinding>,
+    runner: RunnerPolicy,
+    private_root: &'static str,
+}
+
+impl Setup {
+    fn host(primary: Option<PassBinding>) -> Self {
+        Self {
+            primary,
+            runner: host_runner(),
+            private_root: "private",
+        }
+    }
+}
 
 /// A schema-4 run with `tasks` tasks whose log `write` fills after `run_started`.
 fn fixture(
@@ -407,12 +471,24 @@ fn fixture(
     primary: Option<PassBinding>,
     write: impl FnOnce(&mut Log),
 ) -> Fixture {
+    fixture_with(tag, tasks, Setup::host(primary), write)
+}
+
+/// [`fixture`], recorded as `setup` says. The pools file binds Claude Code to a credential
+/// profile directory that exists in the scratch tree, so the credential preflight admits it.
+fn fixture_with(tag: &str, tasks: usize, setup: Setup, write: impl FnOnce(&mut Log)) -> Fixture {
     let tree = scratch(tag);
     let repo = tree.path().join("repo");
-    let private = tree.path().join("private").join(RUN);
+    let private = tree.path().join(setup.private_root).join(RUN);
+    let profile = tree.path().join("profiles").join("claude-max");
     std::fs::create_dir_all(repo.join("docs")).expect("docs");
     std::fs::write(repo.join("docs").join("plan.md"), PLAN_TEXT).expect("the plan file");
-    std::fs::write(repo.join("pools.toml"), POOLS).expect("the pools file");
+    std::fs::create_dir_all(&profile).expect("the credential profile directory");
+    std::fs::write(
+        repo.join("pools.toml"),
+        pools(crate::agent::claude::ADAPTER_ID, &profile.to_string_lossy()),
+    )
+    .expect("the pools file");
     std::fs::create_dir_all(&private).expect("the private directory");
     std::fs::write(private.join("transcript.txt"), "a transcript\n").expect("a transcript");
 
@@ -431,7 +507,7 @@ fn fixture(
         &mut Vec::new(),
     )
     .expect("open the run's log");
-    let started = run_started(&plan, &normalized_plan_digest, &private, primary);
+    let started = run_started(&plan, &normalized_plan_digest, &private, setup);
     let mut log = Log {
         log,
         fold: crate::topology::fold::TopologyFold::new(crate::topology::fold::FrozenInputs {
@@ -448,6 +524,7 @@ fn fixture(
         _tree: tree,
         repo,
         private,
+        profile,
     }
 }
 
@@ -605,7 +682,7 @@ fn the_request_is_a_decide_request_for_the_runs_reviewer_with_no_overlay() {
     assert_eq!(request.invocation, InvocationId::Decide { ordinal: 1 });
     assert_eq!(
         request.credential_profile,
-        Some(PathBuf::from("/profiles/claude-max")),
+        Some(fixture.profile.clone()),
         "the first pool of the reviewer's agent"
     );
 
@@ -614,14 +691,45 @@ fn the_request_is_a_decide_request_for_the_runs_reviewer_with_no_overlay() {
         .settings_file
         .as_ref()
         .expect("the read-only profile's settings file");
+    assert_eq!(
+        settings,
+        &proposals_dir(&fixture.repo, RUN).join("q-01A.1-decide.json")
+    );
     let written: Value =
         serde_json::from_str(&std::fs::read_to_string(settings).expect("the settings file"))
             .expect("JSON");
     let profile = crate::review::profile_for("claude-code", "opus", "decide-opus", Effort::Medium);
     assert_eq!(profile.permissions, crate::ir::PermissionMode::ReadOnly);
+    let mut expected = crate::agent::claude::permission_settings(&profile, &[]);
+    let denials = private_denials(&fixture.private.to_string_lossy()).expect("spellable");
+    if let Some(deny) = expected
+        .pointer_mut("/permissions/deny")
+        .and_then(Value::as_array_mut)
+    {
+        deny.extend(denials.iter().cloned().map(Value::String));
+    }
     assert_eq!(
-        written,
-        crate::agent::claude::permission_settings(&profile, &[])
+        written, expected,
+        "the read-only profile's settings, and reads of the run's private directory denied"
+    );
+    let recorded = rule_path(&fixture.private).expect("an absolute fixture path");
+    for rule in [format!("Read({recorded})"), format!("Read({recorded}/**)")] {
+        assert!(denials.contains(&rule), "{rule}: {denials:?}");
+    }
+
+    let args = &request.command.args;
+    let at = args
+        .iter()
+        .position(|arg| arg == "--max-budget-usd")
+        .expect("the call's own ceiling");
+    assert_eq!(
+        args.get(at + 1).map(String::as_str),
+        Some("5"),
+        "all of --max-cost-usd is left for the first call: {args:?}"
+    );
+    assert!(
+        args.iter().any(|arg| arg == "--strict-mcp-config"),
+        "{args:?}"
     );
 
     let prompt = String::from_utf8_lossy(&request.command.stdin);
@@ -801,6 +909,443 @@ fn a_third_proposal_is_refused_before_a_request_and_the_dollar_cap_stops_the_nex
         "{}",
         decided.report
     );
+}
+
+/// The value the request's command gives `flag`, if it carries it with one.
+fn flag_value(request: &RunnerRequest, flag: &str) -> Option<String> {
+    let args = &request.command.args;
+    let at = args.iter().position(|arg| arg == flag)?;
+    args.get(at + 1).cloned()
+}
+
+/// Asserts that `decide` refused before writing a proposal or making a request, and returns
+/// the refusal's words.
+fn refused_before_anything(
+    fixture: &Fixture,
+    options: &DecideOptions,
+    adapters: &dyn AdapterSource,
+    case: &str,
+) -> String {
+    let runner = Scripted::answering(vec![claude_output(&reply(VALID), Some(0.25))]);
+    let message = decide(options, adapters, &runner)
+        .map(|decided| decided.report)
+        .expect_err(case)
+        .to_string();
+    assert!(runner.seen().is_empty(), "{case}: no agent was asked");
+    assert!(
+        !fixture.proposals_written(),
+        "{case}: nothing was written under the proposals directory"
+    );
+    message
+}
+
+#[test]
+fn each_built_in_adapter_is_admitted_only_when_it_keeps_every_guarantee() {
+    assert_eq!(
+        crate::agent::ADAPTERS.len(),
+        3,
+        "one case per built-in adapter"
+    );
+    for adapter in crate::agent::ADAPTERS {
+        let id = adapter.id();
+        let fixture = fixture(
+            &format!("decide-adapter-{id}"),
+            1,
+            Some(PassBinding::new(id, "a-model")),
+            |log| log.raise("q-01A", 0),
+        );
+        if id == crate::agent::claude::ADAPTER_ID {
+            assert_eq!(guarantees_of(id), Guarantee::ALL);
+            let runner = Scripted::answering(vec![claude_output(&reply(VALID), Some(0.25))]);
+            let decided = decide(&fixture.options(), &BuiltinAdapters, &runner)
+                .expect("Claude Code is admitted");
+            assert!(decided.outcome().is_ok(), "{decided:?}");
+            assert_eq!(runner.seen().len(), 1, "{id}: one question, one call");
+        } else {
+            assert!(guarantees_of(id).is_empty(), "{id} claims nothing");
+            let message =
+                refused_before_anything(&fixture, &fixture.options(), &BuiltinAdapters, id);
+            assert!(
+                message.contains(&format!(
+                    "primary reviewer `{id}` cannot guarantee cost reporting, a per-call dollar \
+                     ceiling, no web access or the run's private data being unreadable"
+                )),
+                "{id}: {message}"
+            );
+            assert!(message.contains(NOTHING_DONE), "{id}: {message}");
+        }
+    }
+}
+
+#[test]
+fn a_container_run_is_refused_before_anything_is_written_or_asked() {
+    let setup = Setup {
+        runner: container_runner(),
+        ..Setup::host(reviewer())
+    };
+    let fixture = fixture_with("decide-container", 1, setup, |log| log.raise("q-01A", 0));
+    let message =
+        refused_before_anything(&fixture, &fixture.options(), &BuiltinAdapters, "container");
+    assert!(
+        message.contains("was recorded on the container runner"),
+        "{message}"
+    );
+    assert!(message.contains(NOTHING_DONE), "{message}");
+}
+
+/// A coordinator environment in which a Claude Code token is set.
+fn token_set(key: &str) -> Option<OsString> {
+    (key == "CLAUDE_CODE_OAUTH_TOKEN").then(|| OsString::from("a-token"))
+}
+
+#[test]
+fn a_run_the_credential_preflight_refuses_is_refused_before_anything_is_written_or_asked() {
+    let fixture = one_question("decide-credentials");
+    let claude = crate::agent::claude::ADAPTER_ID;
+    let profile = fixture.profile.to_string_lossy().into_owned();
+    let absent = fixture
+        .profile
+        .with_file_name("no-such-profile")
+        .to_string_lossy()
+        .into_owned();
+    let environment: fn(&str) -> Option<OsString> = no_variables;
+    let cases = [
+        (
+            "absent",
+            pools(claude, &absent),
+            environment,
+            "which does not exist",
+        ),
+        (
+            "relative",
+            pools(claude, "profiles/claude-max"),
+            environment,
+            "which is a relative path",
+        ),
+        (
+            "codex",
+            pools(crate::agent::codex::ADAPTER_ID, &profile),
+            environment,
+            "supports Claude Code's profile only",
+        ),
+        (
+            "token",
+            pools(claude, &profile),
+            token_set,
+            "`CLAUDE_CODE_OAUTH_TOKEN` is set",
+        ),
+    ];
+    for (case, text, environment, needle) in cases {
+        let path = fixture.repo.join(format!("pools-{case}.toml"));
+        std::fs::write(&path, text).expect("a pools file");
+        let options = DecideOptions {
+            pools_path: Some(path),
+            environment: Some(environment),
+            ..fixture.options()
+        };
+        let message = refused_before_anything(&fixture, &options, &BuiltinAdapters, case);
+        assert!(
+            message.contains("pre-flight:") && message.contains(needle),
+            "{case}: {message}"
+        );
+    }
+    let runner = Scripted::answering(vec![claude_output(&reply(VALID), Some(0.25))]);
+    decide(&fixture.options(), &BuiltinAdapters, &runner).expect("the usable profile admits");
+    assert_eq!(runner.seen().len(), 1);
+}
+
+#[test]
+fn a_cap_that_is_not_a_positive_number_of_dollars_is_refused_before_anything() {
+    let fixture = one_question("decide-bad-cap");
+    for cap in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let options = DecideOptions {
+            max_cost_usd: cap,
+            ..fixture.options()
+        };
+        let message = refused_before_anything(&fixture, &options, &BuiltinAdapters, "a bad cap");
+        assert!(
+            message.contains("is not a positive number of dollars"),
+            "{cap}: {message}"
+        );
+    }
+}
+
+#[test]
+fn a_private_directory_that_cannot_be_spelled_in_a_rule_is_refused_before_anything() {
+    let setup = Setup {
+        private_root: "private[old]",
+        ..Setup::host(reviewer())
+    };
+    let fixture = fixture_with("decide-unspellable", 1, setup, |log| log.raise("q-01A", 0));
+    let message = refused_before_anything(
+        &fixture,
+        &fixture.options(),
+        &BuiltinAdapters,
+        "unspellable",
+    );
+    assert!(
+        message.contains("cannot be written into a permission rule exactly"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_private_directory_is_spelled_as_an_absolute_rule_or_not_at_all() {
+    let root = std::env::temp_dir();
+    assert!(rule_path(&root.join("runs").join("01X")).is_some());
+    assert_eq!(rule_path(Path::new("relative/runs/01X")), None);
+    assert_eq!(rule_path(&root.join("..").join("01X")), None);
+    for name in ["a*", "a?", "a[1]", "a{b}", "a(b)"] {
+        assert_eq!(rule_path(&root.join(name)), None, "{name}");
+    }
+    #[cfg(unix)]
+    assert_eq!(
+        rule_path(Path::new("/var/lib/Upstroke/private runs/01X")).as_deref(),
+        Some("//var/lib/Upstroke/private runs/01X")
+    );
+    #[cfg(windows)]
+    assert_eq!(
+        rule_path(Path::new(r"C:\Users\dev\.upstroke\runs\01X")).as_deref(),
+        Some("//c/Users/dev/.upstroke/runs/01X")
+    );
+    let denials = private_denials(&root.join("runs").join("01X").to_string_lossy())
+        .expect("an absolute directory");
+    let spelled = rule_path(&root.join("runs").join("01X")).expect("spellable");
+    assert_eq!(
+        denials.get(..2),
+        Some([format!("Read({spelled})"), format!("Read({spelled}/**)")].as_slice()),
+        "the directory and everything under it, as recorded first"
+    );
+}
+
+#[test]
+fn each_calls_ceiling_is_what_is_left_of_the_cap() {
+    let fixture = fixture("decide-ceiling", 2, reviewer(), |log| {
+        log.raise("q-b", 0);
+        log.raise("q-a", 1);
+    });
+    let runner = Scripted::answering(vec![
+        claude_output(&reply(VALID), Some(1.25)),
+        claude_output(&reply(VALID), Some(1.0)),
+    ]);
+    decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+    let ceilings: Vec<Option<String>> = runner
+        .seen()
+        .iter()
+        .map(|request| flag_value(request, "--max-budget-usd"))
+        .collect();
+    assert_eq!(
+        ceilings,
+        [Some("5".to_owned()), Some("3.75".to_owned())],
+        "$5 for the first call, and the $3.75 the first left for the second"
+    );
+}
+
+#[test]
+fn a_decide_call_adds_only_its_own_flags_to_an_ordinary_reviewers_command() {
+    let fixture = one_question("decide-ordinary");
+    let runner = Scripted::answering(vec![claude_output(&reply(VALID), Some(0.25))]);
+    decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+    let seen = runner.seen();
+    let [request] = seen.as_slice() else {
+        panic!("one request: {seen:?}");
+    };
+
+    let reviewer = crate::review::profile_for("claude-code", "opus", "decide-opus", Effort::Medium);
+    assert!(
+        reviewer.extra_args.is_empty(),
+        "an ordinary reviewer's profile carries no decide flag"
+    );
+    let ordinary = TaskRun {
+        prompt: String::new(),
+        profile: reviewer.clone(),
+        workspace: fixture.repo.clone(),
+        gate_cmds: Vec::new(),
+        resume_session: None,
+        settings_path: request.command.settings_file.clone(),
+    };
+    let mut expected = crate::agent::claude::build_args(&ordinary);
+    assert!(
+        !expected
+            .iter()
+            .any(|arg| arg == "--max-budget-usd" || arg == "--strict-mcp-config"),
+        "an ordinary reviewer is built with neither: {expected:?}"
+    );
+    expected.extend(call_args(DEFAULT_MAX_COST_USD));
+    assert_eq!(
+        request.command.args, expected,
+        "the ordinary reviewer's arguments, then the decide call's own"
+    );
+    assert_eq!(
+        call_settings(&reviewer, &[]),
+        crate::agent::claude::permission_settings(&reviewer, &[]),
+        "a decide call's settings add deny rules only; the reviewer's are its own"
+    );
+}
+
+/// A mocked adapter: Claude Code's own `build` and `parse` under the id `id`, with each built
+/// command passed through `doctor`. It is never probed.
+struct Doctored {
+    id: &'static str,
+    doctor: fn(CommandSpec) -> CommandSpec,
+}
+
+impl AgentAdapter for Doctored {
+    fn id(&self) -> &'static str {
+        self.id
+    }
+
+    fn probe(&self, _runner: &dyn Runner) -> Result<Caps, UpstrokeError> {
+        Err(UpstrokeError::Refused {
+            message: "a mocked adapter is never probed".to_owned(),
+        })
+    }
+
+    fn build(&self, run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        crate::agent::claude::ClaudeCodeAdapter
+            .build(run)
+            .map(self.doctor)
+    }
+
+    fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        crate::agent::claude::ClaudeCodeAdapter.parse(out)
+    }
+}
+
+/// An adapter source that answers every id with one adapter.
+struct Only<'a>(&'a dyn AgentAdapter);
+
+impl AdapterSource for Only<'_> {
+    fn get(&self, _id: &str) -> Option<&dyn AgentAdapter> {
+        Some(self.0)
+    }
+}
+
+fn set_value(mut command: CommandSpec, flag: &str, value: &str) -> CommandSpec {
+    if let Some(at) = command.args.iter().position(|arg| arg == flag) {
+        if let Some(slot) = command.args.get_mut(at + 1) {
+            value.clone_into(slot);
+        }
+    }
+    command
+}
+
+fn drop_flag(mut command: CommandSpec, flag: &str, values: usize) -> CommandSpec {
+    if let Some(at) = command.args.iter().position(|arg| arg == flag) {
+        let end = (at + 1 + values).min(command.args.len());
+        command.args.drain(at..end);
+    }
+    command
+}
+
+#[test]
+fn a_mocked_adapter_whose_command_breaks_a_promise_is_refused_before_anything() {
+    type Doctor = fn(CommandSpec) -> CommandSpec;
+    let fixture = one_question("decide-mocked");
+    let cases: [(&str, Doctor, &str); 12] = [
+        (
+            "no ceiling",
+            |command| drop_flag(command, "--max-budget-usd", 1),
+            "does not keep a per-call dollar ceiling",
+        ),
+        (
+            "a ceiling above what is left",
+            |command| set_value(command, "--max-budget-usd", "5.01"),
+            "does not keep a per-call dollar ceiling",
+        ),
+        (
+            "text output",
+            |command| set_value(command, "--output-format", "text"),
+            "does not keep cost reporting",
+        ),
+        (
+            "permissions bypassed",
+            |command| set_value(command, "--permission-mode", "bypassPermissions"),
+            "does not keep no web access",
+        ),
+        (
+            "user settings loaded",
+            |command| set_value(command, "--setting-sources", "user"),
+            "does not keep no web access",
+        ),
+        (
+            "every MCP server",
+            |command| drop_flag(command, "--strict-mcp-config", 0),
+            "does not keep no web access",
+        ),
+        (
+            "another settings file",
+            |command| set_value(command, "--settings", "elsewhere.json"),
+            "does not name the settings written for it",
+        ),
+        (
+            "a web tool allowed",
+            |command| command.arg("--allowedTools").arg("WebFetch"),
+            "carries `--allowedTools`, which no decide call is built with",
+        ),
+        (
+            "a second permission mode",
+            |command| command.arg("--permission-mode").arg("bypassPermissions"),
+            "carries `--permission-mode` twice",
+        ),
+        (
+            "a flag with no value",
+            |command| command.arg("--max-turns"),
+            "ends with `--max-turns` and no value",
+        ),
+        (
+            "another program",
+            |mut command| {
+                "sh".clone_into(&mut command.program);
+                command
+            },
+            "starts `sh`, not Claude Code's CLI",
+        ),
+        (
+            "an environment overlay",
+            |command| command.env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9"),
+            "carries an environment overlay (ANTHROPIC_BASE_URL)",
+        ),
+    ];
+    for (case, doctor, needle) in cases {
+        let adapter = Doctored {
+            id: crate::agent::claude::ADAPTER_ID,
+            doctor,
+        };
+        let message = refused_before_anything(&fixture, &fixture.options(), &Only(&adapter), case);
+        assert!(
+            message.contains("the command built for `claude-code`") && message.contains(needle),
+            "{case}: {message}"
+        );
+        assert!(
+            message.contains("so it was not started"),
+            "{case}: {message}"
+        );
+    }
+
+    let unclaimed = Doctored {
+        id: "mock-agent",
+        doctor: |command| command,
+    };
+    let message = refused_before_anything(
+        &fixture,
+        &fixture.options(),
+        &Only(&unclaimed),
+        "an adapter that claims nothing",
+    );
+    assert!(
+        message.contains("`mock-agent` cannot guarantee cost reporting"),
+        "{message}"
+    );
+
+    let faithful = Doctored {
+        id: crate::agent::claude::ADAPTER_ID,
+        doctor: |command| command,
+    };
+    let runner = Scripted::answering(vec![claude_output(&reply(VALID), Some(0.25))]);
+    decide(&fixture.options(), &Only(&faithful), &runner)
+        .expect("the undoctored command keeps every promise");
+    assert_eq!(runner.seen().len(), 1, "and only that one is started");
 }
 
 /// The production region of a source file: everything before its trailing

@@ -5,20 +5,24 @@
 #![allow(clippy::disallowed_methods)]
 #![forbid(clippy::disallowed_types, clippy::disallowed_macros)]
 
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 
 use serde_json::{Value, json};
 
-use crate::agent::{AdapterSource, AgentAdapter, TaskRun};
+use crate::agent::{AdapterSource, AgentAdapter, TaskRun, claude};
+use crate::capacity::Pool;
 use crate::engine::topology::observe::{self, Observed, OpenAsked};
 use crate::error::UpstrokeError;
-use crate::ir::{Answer, Question};
+use crate::ir::{Answer, Question, WorkerProfile};
 use crate::runner::invocation::InvocationId;
-use crate::runner::{AgentId, Runner};
+use crate::runner::{AgentId, CommandSpec, Runner};
 use crate::topology::events::{
-    AttemptSettlement, SettlementTransition, TopologyEvent, TopologyEventBody,
+    AttemptSettlement, RunStarted4, RunnerKind, SettlementTransition, TopologyEvent,
+    TopologyEventBody,
 };
 
 pub const INPUT_BOUND: usize = 64 * 1024;
@@ -32,6 +36,142 @@ pub struct DecideOptions {
     pub question_id: Option<String>,
     pub max_cost_usd: f64,
     pub pools_path: Option<PathBuf>,
+    pub environment: Option<fn(&str) -> Option<OsString>>,
+}
+
+impl DecideOptions {
+    /// Where the credential preflight reads the coordinator's environment: this process's own
+    /// (as a run's preflight reads it) unless `environment` names a stand-in.
+    fn environment(&self) -> fn(&str) -> Option<OsString> {
+        self.environment
+            .unwrap_or(crate::engine::topology::preflight::coordinator_environment)
+    }
+}
+
+/// A promise every decide call has to keep. An adapter's word is not enough: `kept` checks
+/// each one on the command actually built for the call, before it is started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Guarantee {
+    /// The call reports what it cost in dollars, so `--max-cost-usd` can sum what was spent.
+    CostReporting,
+    /// The call stops at a dollar ceiling of its own: what is left of `--max-cost-usd`.
+    PerCallCeiling,
+    /// The call can fetch no web page and run no web search.
+    NoWebAccess,
+    /// The call can read nothing under the run's private directory.
+    PrivateRunDataUnreadable,
+}
+
+impl Guarantee {
+    const ALL: [Self; 4] = [
+        Self::CostReporting,
+        Self::PerCallCeiling,
+        Self::NoWebAccess,
+        Self::PrivateRunDataUnreadable,
+    ];
+
+    const fn named(self) -> &'static str {
+        match self {
+            Self::CostReporting => "cost reporting",
+            Self::PerCallCeiling => "a per-call dollar ceiling",
+            Self::NoWebAccess => "no web access",
+            Self::PrivateRunDataUnreadable => "the run's private data being unreadable",
+        }
+    }
+}
+
+/// The guarantees a decide call through the adapter `id` can keep. Claude Code keeps all four
+/// with flags and settings `kept` can see on the built command. Copilot and Codex report no
+/// dollar cost (`Caps::cost_reporting` is false for both), so neither could be summed or
+/// stopped at a ceiling, and nothing is claimed for them.
+fn guarantees_of(id: &str) -> &'static [Guarantee] {
+    if id == claude::ADAPTER_ID {
+        &Guarantee::ALL
+    } else {
+        &[]
+    }
+}
+
+/// The flags a decide call adds to the read-only profile: the call's own dollar ceiling, and no
+/// MCP server but the ones these arguments name (there are none).
+fn call_args(ceiling_usd: f64) -> Vec<String> {
+    vec![
+        "--max-budget-usd".to_owned(),
+        ceiling_usd.to_string(),
+        "--strict-mcp-config".to_owned(),
+    ]
+}
+
+/// The read-only profile's settings, with reads of the run's private directory denied too.
+fn call_settings(profile: &WorkerProfile, private_denials: &[String]) -> Value {
+    let mut settings = claude::permission_settings(profile, &[]);
+    if let Some(deny) = settings
+        .pointer_mut("/permissions/deny")
+        .and_then(Value::as_array_mut)
+    {
+        deny.extend(private_denials.iter().cloned().map(Value::String));
+    }
+    settings
+}
+
+/// Characters a path must not hold to be written into a permission rule exactly.
+const PATTERN_CHARACTERS: [char; 9] = ['*', '?', '[', ']', '{', '}', '(', ')', '\\'];
+
+/// `dir` in Claude Code's absolute rule spelling: `//`, then the path with `/` separators and
+/// a Windows drive as its lower-case letter. `None` when it cannot be spelled exactly.
+fn rule_path(dir: &Path) -> Option<String> {
+    let mut spelled = String::from("/");
+    let mut rooted = false;
+    for component in dir.components() {
+        match component {
+            Component::Prefix(prefix) => match prefix.kind() {
+                Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                    spelled.push('/');
+                    spelled.push(char::from(letter).to_ascii_lowercase());
+                }
+                _ => return None,
+            },
+            Component::RootDir => rooted = true,
+            Component::Normal(name) => {
+                let name = name.to_str()?;
+                if name
+                    .chars()
+                    .any(|c| c.is_control() || PATTERN_CHARACTERS.contains(&c))
+                {
+                    return None;
+                }
+                spelled.push('/');
+                spelled.push_str(name);
+            }
+            Component::CurDir | Component::ParentDir => return None,
+        }
+    }
+    (rooted && dir.is_absolute() && spelled.len() > 1).then_some(spelled)
+}
+
+/// The deny rules that keep `private_dir` unreadable: the directory and everything under it,
+/// as recorded and, where it resolves to another path, as resolved.
+fn private_denials(private_dir: &str) -> Result<Vec<String>, String> {
+    let recorded = PathBuf::from(private_dir);
+    let mut spellings = vec![recorded.clone()];
+    if let Ok(resolved) = std::fs::canonicalize(&recorded) {
+        if resolved != recorded {
+            spellings.push(resolved);
+        }
+    }
+    let mut rules = Vec::new();
+    for dir in &spellings {
+        let Some(spelled) = rule_path(dir) else {
+            return Err(format!(
+                "its private directory `{}` cannot be written into a permission rule exactly (it \
+                 must be an absolute, normalized, Unicode path with no pattern characters)",
+                dir.display()
+            ));
+        };
+        rules.push(format!("Read({spelled})"));
+        rules.push(format!("Read({spelled}/**)"));
+    }
+    Ok(rules)
 }
 
 #[derive(Debug)]
@@ -62,6 +202,7 @@ struct Decider<'a> {
     effort: crate::ir::Effort,
     timeout: std::time::Duration,
     credential: Option<PathBuf>,
+    private_denials: Vec<String>,
 }
 
 fn refused(message: String) -> UpstrokeError {
@@ -116,6 +257,7 @@ fn propose(
         opts.pools_path.as_deref(),
         &mut warnings,
     )?;
+    let private_denials = admit(opts, started, adapter, &config.pools)?;
     let credential = crate::capacity::pool_for(&primary.agent, &config.pools)
         .and_then(|pool| pool.profile.as_ref())
         .map(PathBuf::from);
@@ -129,6 +271,7 @@ fn propose(
             .pass_timeout()
             .unwrap_or(crate::config::DEFAULT_REVIEW_PASS_TIMEOUT),
         credential,
+        private_denials,
     };
     let plan_text = read_bounded(&opts.repo_root.join(&started.plan_path));
     let dir = proposals_dir(&opts.repo_root, &opts.run_id);
@@ -175,16 +318,14 @@ fn propose(
         };
         let prompt = build_prompt(observed, asked, &plan_text);
         let ordinal = u32::try_from(index + 1).unwrap_or(u32::MAX);
-        let asked_once = ask(
+        let call = prepare(
             &decider,
-            runner,
             &opts.repo_root,
-            &dir,
-            &id,
-            n,
-            ordinal,
+            &dir.join(format!("{id}.{n}-decide.json")),
             &prompt,
+            opts.max_cost_usd - spent,
         )?;
+        let asked_once = ask(&decider, runner, &call, &dir, &id, n, ordinal)?;
         match asked_once.cost_usd {
             Some(cost) => spent += cost,
             None => unknown_cost.push(id.clone()),
@@ -234,6 +375,59 @@ fn propose(
         report: out,
         refused: refusals,
     })
+}
+
+const NOTHING_DONE: &str = "nothing was written and no agent was asked";
+
+/// Refuses a run whose recorded reviewer environment a decide call cannot keep its promises in,
+/// before anything is written or any agent asked. Returns the deny rules that keep the run's
+/// private directory unreadable.
+fn admit(
+    opts: &DecideOptions,
+    started: &RunStarted4,
+    adapter: &dyn AgentAdapter,
+    pools: &[Pool],
+) -> Result<Vec<String>, UpstrokeError> {
+    let run = &opts.run_id;
+    if started.runner.kind != RunnerKind::Host {
+        return Err(refused(format!(
+            "run `{run}` was recorded on the container runner, and decide starts a reviewer on \
+             this host only, outside the boundary the run's own reviewers ran in; {NOTHING_DONE}"
+        )));
+    }
+    crate::engine::topology::preflight::refuse_unusable_profiles(
+        pools,
+        &started.runner,
+        opts.environment(),
+    )?;
+    let keeps = guarantees_of(adapter.id());
+    let missing: Vec<&str> = Guarantee::ALL
+        .into_iter()
+        .filter(|guarantee| !keeps.contains(guarantee))
+        .map(Guarantee::named)
+        .collect();
+    if let Some((last, rest)) = missing.split_last() {
+        let listed = if rest.is_empty() {
+            (*last).to_owned()
+        } else {
+            format!("{} or {last}", rest.join(", "))
+        };
+        return Err(refused(format!(
+            "run `{run}`'s primary reviewer `{}` cannot guarantee {listed}, and every decide call \
+             must keep all of cost reporting, a per-call dollar ceiling, no web access and the \
+             run's private data being unreadable; {NOTHING_DONE}",
+            adapter.id()
+        )));
+    }
+    if !(opts.max_cost_usd.is_finite() && opts.max_cost_usd > 0.0) {
+        return Err(refused(format!(
+            "--max-cost-usd {} is not a positive number of dollars, so no call could be given a \
+             ceiling; {NOTHING_DONE}",
+            opts.max_cost_usd
+        )));
+    }
+    private_denials(&started.private_dir)
+        .map_err(|reason| refused(format!("run `{run}`: {reason}; {NOTHING_DONE}")))
 }
 
 fn read_run(repo_root: &Path, run_id: &str) -> Result<Observed, UpstrokeError> {
@@ -512,50 +706,290 @@ struct Asked {
     raw_path: PathBuf,
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one call site; each is a distinct input"
-)]
-fn ask(
+/// One decide call, built and checked. Nothing of it is written yet.
+struct Call {
+    task_run: TaskRun,
+    command: CommandSpec,
+    settings: Value,
+}
+
+/// Builds the call for `prompt` with a dollar ceiling of `ceiling_usd`, and refuses it unless
+/// the command actually built carries no environment overlay and keeps every guarantee.
+/// Writes nothing and starts nothing.
+fn prepare(
     decider: &Decider<'_>,
-    runner: &dyn Runner,
     repo_root: &Path,
-    dir: &Path,
-    id: &str,
-    n: u32,
-    ordinal: u32,
+    settings_path: &Path,
     prompt: &str,
-) -> Result<Asked, UpstrokeError> {
-    std::fs::create_dir_all(dir).map_err(|source| UpstrokeError::Io {
-        path: dir.to_path_buf(),
-        source,
-    })?;
-    let profile = crate::review::profile_for(
+    ceiling_usd: f64,
+) -> Result<Call, UpstrokeError> {
+    let mut profile = crate::review::profile_for(
         &decider.agent,
         &decider.model,
         &format!("decide-{}", decider.model),
         decider.effort,
     );
-    let settings_path =
-        decider
-            .adapter
-            .materialize_permissions(&profile, &[], dir, &format!("{id}.{n}-decide"))?;
+    profile.extra_args = call_args(ceiling_usd);
+    let settings = call_settings(&profile, &decider.private_denials);
     let task_run = TaskRun {
         prompt: prompt.to_owned(),
         profile,
         workspace: repo_root.to_path_buf(),
         gate_cmds: Vec::new(),
         resume_session: None,
-        settings_path,
+        settings_path: Some(settings_path.to_path_buf()),
     };
     let command = decider
         .adapter
         .build(&task_run)?
         .stdin(decider.adapter.stdin_payload(&task_run).as_bytes().to_vec())
         .settings_file(task_run.settings_path.clone());
-    let mut request = crate::runner::decide_request(
+    let id = decider.adapter.id();
+    let refuse = |reason: String| {
+        refused(format!(
+            "the command built for `{id}` {reason}, so it was not started; {NOTHING_DONE} for \
+             this question"
+        ))
+    };
+    if !command.env.is_empty() {
+        let keys: Vec<&str> = command.env.iter().map(|(key, _)| key.as_str()).collect();
+        return Err(refuse(format!(
+            "carries an environment overlay ({}), and a decide call takes none",
+            keys.join(", ")
+        )));
+    }
+    let built = Built::read(
+        &command,
+        &settings,
+        settings_path,
+        ceiling_usd,
+        &decider.private_denials,
+    )
+    .map_err(refuse)?;
+    for guarantee in Guarantee::ALL {
+        kept(guarantee, &built)
+            .map_err(|reason| refuse(format!("does not keep {}: {reason}", guarantee.named())))?;
+    }
+    Ok(Call {
+        task_run,
         command,
-        task_run.workspace.clone(),
+        settings,
+    })
+}
+
+/// The flags a decide call is built with that take no value.
+const BARE_FLAGS: [&str; 2] = ["-p", "--strict-mcp-config"];
+/// The flags a decide call is built with that take one value each.
+const VALUED_FLAGS: [&str; 8] = [
+    "--output-format",
+    "--model",
+    "--permission-mode",
+    "--setting-sources",
+    "--effort",
+    "--max-turns",
+    "--settings",
+    "--max-budget-usd",
+];
+/// The tools a decide call's settings may allow: reading, and nothing else.
+const READ_TOOLS: [&str; 3] = ["Read", "Glob", "Grep"];
+
+/// A built Claude Code command, read flag by flag, beside the settings written for it.
+struct Built<'a> {
+    flags: BTreeMap<&'a str, Option<&'a str>>,
+    settings: &'a Value,
+    settings_named: bool,
+    ceiling_usd: f64,
+    private_denials: &'a [String],
+}
+
+impl<'a> Built<'a> {
+    /// Refuses a command that starts another program, or carries a flag no decide call is built
+    /// with, a flag twice, or a value-taking flag with no value.
+    fn read(
+        command: &'a CommandSpec,
+        settings: &'a Value,
+        settings_path: &Path,
+        ceiling_usd: f64,
+        private_denials: &'a [String],
+    ) -> Result<Self, String> {
+        let program = Path::new(&command.program)
+            .file_stem()
+            .and_then(std::ffi::OsStr::to_str);
+        if program != Some("claude") {
+            return Err(format!(
+                "starts `{}`, not Claude Code's CLI",
+                command.program
+            ));
+        }
+        let mut flags = BTreeMap::new();
+        let mut args = command.args.iter();
+        while let Some(arg) = args.next() {
+            let flag = arg.as_str();
+            let value = if BARE_FLAGS.contains(&flag) {
+                None
+            } else if VALUED_FLAGS.contains(&flag) {
+                let Some(value) = args.next() else {
+                    return Err(format!("ends with `{flag}` and no value"));
+                };
+                Some(value.as_str())
+            } else {
+                return Err(format!(
+                    "carries `{flag}`, which no decide call is built with"
+                ));
+            };
+            if flags.insert(flag, value).is_some() {
+                return Err(format!("carries `{flag}` twice"));
+            }
+        }
+        let named = settings_path.to_str();
+        let settings_named = named.is_some()
+            && flags.get("--settings") == Some(&named)
+            && command.settings_file.as_deref() == Some(settings_path);
+        Ok(Self {
+            flags,
+            settings,
+            settings_named,
+            ceiling_usd,
+            private_denials,
+        })
+    }
+
+    fn has(&self, flag: &str) -> Result<(), String> {
+        match self.flags.get(flag) {
+            Some(None) => Ok(()),
+            _ => Err(format!("it does not carry `{flag}`")),
+        }
+    }
+
+    fn value(&self, flag: &str) -> Result<&'a str, String> {
+        match self.flags.get(flag) {
+            Some(&Some(value)) => Ok(value),
+            _ => Err(format!("it does not carry `{flag}`")),
+        }
+    }
+
+    fn value_is(&self, flag: &str, wanted: &str) -> Result<(), String> {
+        let value = self.value(flag)?;
+        if value == wanted {
+            Ok(())
+        } else {
+            Err(format!(
+                "it carries `{flag} {value:?}`, not `{flag} {wanted:?}`"
+            ))
+        }
+    }
+
+    /// The settings the command names are the ones written for it, hold nothing but an allow
+    /// and a deny list, and allow reading tools only.
+    fn reads_only(&self) -> Result<(), String> {
+        if !self.settings_named {
+            return Err("its `--settings` does not name the settings written for it".to_owned());
+        }
+        let only = |value: &Value, keys: &[&str]| {
+            value
+                .as_object()
+                .is_some_and(|object| object.keys().all(|key| keys.contains(&key.as_str())))
+        };
+        if !only(self.settings, &["permissions"])
+            || !self
+                .settings
+                .get("permissions")
+                .is_some_and(|permissions| only(permissions, &["allow", "deny"]))
+        {
+            return Err(format!(
+                "its settings hold more than an allow and a deny list: {}",
+                self.settings
+            ));
+        }
+        let allow = self
+            .settings
+            .pointer("/permissions/allow")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "its settings carry no allow list".to_owned())?;
+        match allow
+            .iter()
+            .find(|rule| !rule.as_str().is_some_and(|rule| READ_TOOLS.contains(&rule)))
+        {
+            Some(rule) => Err(format!(
+                "its settings allow {rule}, which is more than reading"
+            )),
+            None => Ok(()),
+        }
+    }
+
+    fn denies<S: AsRef<str>>(&self, rules: &[S]) -> Result<(), String> {
+        let deny = self
+            .settings
+            .pointer("/permissions/deny")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "its settings carry no deny list".to_owned())?;
+        match rules
+            .iter()
+            .map(AsRef::as_ref)
+            .find(|rule| !deny.iter().any(|denied| denied.as_str() == Some(rule)))
+        {
+            Some(rule) => Err(format!("its settings do not deny `{rule}`")),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Whether `built` keeps `guarantee`, and if not, the first thing it lacks.
+fn kept(guarantee: Guarantee, built: &Built<'_>) -> Result<(), String> {
+    match guarantee {
+        Guarantee::CostReporting => {
+            built.has("-p")?;
+            built.value_is("--output-format", "json")
+        }
+        Guarantee::PerCallCeiling => {
+            let value = built.value("--max-budget-usd")?;
+            match value.parse::<f64>() {
+                Ok(usd) if usd.is_finite() && usd > 0.0 && usd <= built.ceiling_usd => Ok(()),
+                _ => Err(format!(
+                    "`--max-budget-usd {value}` is not a ceiling above $0 and at most the ${} \
+                     left of --max-cost-usd",
+                    built.ceiling_usd
+                )),
+            }
+        }
+        Guarantee::NoWebAccess => {
+            built.value_is("--permission-mode", "dontAsk")?;
+            built.value_is("--setting-sources", "")?;
+            built.has("--strict-mcp-config")?;
+            built.reads_only()?;
+            built.denies(&["WebFetch", "WebSearch"])
+        }
+        Guarantee::PrivateRunDataUnreadable => {
+            built.value_is("--setting-sources", "")?;
+            built.reads_only()?;
+            built.denies(&["Read(.upstroke/**)", "Read(**/.upstroke/**)"])?;
+            if built.private_denials.is_empty() {
+                return Err("no rule names the run's private directory".to_owned());
+            }
+            built.denies(built.private_denials)
+        }
+    }
+}
+
+fn ask(
+    decider: &Decider<'_>,
+    runner: &dyn Runner,
+    call: &Call,
+    dir: &Path,
+    id: &str,
+    n: u32,
+    ordinal: u32,
+) -> Result<Asked, UpstrokeError> {
+    std::fs::create_dir_all(dir).map_err(|source| UpstrokeError::Io {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    if let Some(settings_path) = &call.task_run.settings_path {
+        crate::util::write_json(settings_path, &call.settings)?;
+    }
+    let mut request = crate::runner::decide_request(
+        call.command.clone(),
+        call.task_run.workspace.clone(),
         AgentId::new(decider.adapter.id()),
         decider.timeout,
         InvocationId::Decide { ordinal },

@@ -463,6 +463,7 @@ fn execute(command: Command, _contained: Contained) -> anyhow::Result<ExitCode> 
                     question_id,
                     max_cost_usd,
                     pools_path: None,
+                    environment: None,
                 },
                 &engine::BuiltinAdapters,
                 &runner,

@@ -99,7 +99,7 @@ impl Account {
     }
 }
 
-pub(in crate::engine) fn coordinator_environment(key: &str) -> Option<OsString> {
+pub(crate) fn coordinator_environment(key: &str) -> Option<OsString> {
     std::env::var_os(key)
 }
 
@@ -241,7 +241,7 @@ impl RunnerPreflight for RunPreflight<'_> {
     }
 }
 
-pub(super) fn refuse_unusable_profiles(
+pub(crate) fn refuse_unusable_profiles(
     pools: &[Pool],
     policy: &RunnerPolicy,
     environment: fn(&str) -> Option<OsString>,
