@@ -112,9 +112,20 @@
 #   MUT-LEDGER-SECOND-HEADING    a body carrying the ledger heading twice -- exactly, or once with
 #                                trailing whitespace -- was read as one ledger of both sections'
 #                                rows instead of being refused, so an accepted row could come
-#                                from either; or a heading spelled with a carriage return, or
-#                                with trailing whitespace, stopped counting as one
-#   MUT-LEDGER-REPEATED-ID       one id in two rows was read and the audit took the first, instead
+#                                from either; or a heading spelled with a carriage return stopped
+#                                counting as one, or a second heading with trailing whitespace
+#                                stopped being refused
+#   MUT-LEDGER-NONCANONICAL-HEADING  a line differing from the ledger heading only in whitespace
+#                                opened the ledger, or was stepped over, instead of being refused:
+#                                a body whose only heading is `## Review finding ledger ` -- a
+#                                trailing space, or a trailing tab, LF or CRLF -- fails
+#                                validate-pr-body.sh, which compares the line exactly, and the
+#                                parser read the section under it, so a body edited after the audit
+#                                sampled the checks read READY at exit 0
+#                                (PR382-NONCANONICAL-LEDGER-HEADING-READY) instead of NOT-READY,
+#                                `ledger-parse-failed:1`; or the canonical heading, LF or CRLF,
+#                                stopped reading as it did
+#   MUT-LEDGER-REPEATED-ID      one id in two rows was read and the audit took the first, instead
 #                                of the ledger being refused, so a P3 `accepted-risk` row above a
 #                                P2 row for the same finding read READY
 #   MUT-LEDGER-TABBED-CELL       cells were trimmed of spaces only, so a tab around a policy-valid
@@ -8148,8 +8159,8 @@ expect "MUT-LEDGER-SHADOW-SECTION after" "$(ledger_rows "$tmp/shadow-after-ledge
 # TWO HEADINGS ARE REFUSED, whatever the sections hold. Distinct ids in the two, so it is the second
 # heading that is refused and not a repeated id. The body validator refuses the exact pair too; the
 # pair whose second heading carries trailing whitespace it passes, as one ledger and an ordinary
-# section, and the parser counts that line as the heading it renders as and refuses -- the stricter
-# side, by design.
+# section, and the parser refuses that line as a near miss of the heading it renders as -- the
+# stricter side, by design.
 ledger_policy_body "$tmp/two-headings.md" "$(
   printf '## Review finding ledger\n\n'; ledger_table ACCEPT-P3:P3:accepted-risk
   printf '\n## Review finding ledger\n\n'; ledger_table PR-OTHER:P2:fixed)"
@@ -8176,6 +8187,79 @@ expect "MUT-LEDGER-SECOND-HEADING carriage-return" "$(ledger_rows "$tmp/two-head
 while IFS= read -r crlf_line; do printf '%s\r\n' "$crlf_line"; done < "$tmp/body.md" > "$tmp/crlf-body.md"
 expect "MUT-LEDGER-SECOND-HEADING CRLF" "$(ledger_rows "$tmp/crlf-body.md")" \
   '0|A-DEFERRABLE:P3:deferred;B-FIXED:P2:fixed'
+
+# PR382-NONCANONICAL-LEDGER-HEADING-READY, the reviewer's witness. A body whose ONLY ledger heading
+# carries a trailing space fails the body validator, which compares the line exactly, and the parser
+# took the heading with its trailing whitespace stripped and read the rows under it. The audit
+# samples the required checks before it fetches the body, and an edit between the two does not move
+# the head, so that body read READY on rows the validator had refused. The heading is the exact line
+# now, and a line that differs from it only in whitespace is refused wherever it stands -- never
+# stepped over, which would leave a heading a reader sees and the parser does not read. Each body
+# is the canonical one below with its heading line changed and nothing else, and the canonical one
+# is asserted first, so a refusal is the heading's doing and not the fixture's.
+ledger_why() {  # ledger_why FILE: what one refused ledger parse said on stderr, and nothing on stdout
+  "$parser_python" scripts/pr-review-parse.py ledger "$1" 2>&1 > /dev/null || true
+}
+heading_body() {  # heading_body NAME HEADING: the canonical body, under HEADING, as $tmp/heading-NAME.md
+  ledger_policy_body "$tmp/heading-$1.md" "$(
+    printf '%s\n\n' "$2"; ledger_table ACCEPT-P3:P3:accepted-risk)"
+}
+heading_body canonical '## Review finding ledger'
+expect "MUT-LEDGER-NONCANONICAL-HEADING canonical policy" \
+  "$(body_policy "$tmp/heading-canonical.md")" pass
+expect "MUT-LEDGER-NONCANONICAL-HEADING canonical" "$(ledger_rows "$tmp/heading-canonical.md")" \
+  '0|ACCEPT-P3:P3:accepted-risk'
+expect "MUT-LEDGER-NONCANONICAL-HEADING canonical payload" \
+  "$(parse_nul ledger "$tmp/heading-canonical.md")" '0|ledger|1|ACCEPT-P3|P3|accepted-risk|'
+# A trailing space, a trailing tab -- the two the witness named -- and the other ways a line can be
+# the heading but for whitespace: a leading space, a doubled or tabbed gap, and a no-break space,
+# vertical tab or form feed at the end, written as bytes so what is tested does not depend on the
+# locale this runs under. Every one fails the body validator, and every one is a refusal here.
+near_miss_headings=(
+  'trailing-space|## Review finding ledger '
+  $'trailing-tab|## Review finding ledger\t'
+  $'trailing-space-tab|## Review finding ledger \t'
+  'leading-space| ## Review finding ledger'
+  'doubled-space|##  Review finding ledger'
+  $'inner-tab|## Review\tfinding ledger'
+  $'trailing-nbsp|## Review finding ledger\xc2\xa0'
+  $'trailing-vtab|## Review finding ledger\v'
+  $'trailing-formfeed|## Review finding ledger\f'
+)
+for near_miss in "${near_miss_headings[@]}"; do
+  heading_body "${near_miss%%|*}" "${near_miss#*|}"
+  near_miss_file="$tmp/heading-${near_miss%%|*}.md"
+  expect "MUT-LEDGER-NONCANONICAL-HEADING ${near_miss%%|*} policy" "$(body_policy "$near_miss_file")" fail
+  expect "MUT-LEDGER-NONCANONICAL-HEADING ${near_miss%%|*}" "$(ledger_rows "$near_miss_file")" '1|'
+  expect "MUT-LEDGER-NONCANONICAL-HEADING ${near_miss%%|*} payload" \
+    "$(parse_nul ledger "$near_miss_file")" '1|'
+  # and it refused for the reason this case is about: the diagnostic names the heading it refused.
+  contains "MUT-LEDGER-NONCANONICAL-HEADING ${near_miss%%|*} why" "$(ledger_why "$near_miss_file")" \
+    "ledger: the body carries the non-canonical ledger heading"
+done
+# The witness's own body, by name, so the message is shown to say which line it refused.
+contains "MUT-LEDGER-NONCANONICAL-HEADING trailing-space why" \
+  "$(ledger_why "$tmp/heading-trailing-space.md")" "heading '## Review finding ledger '"
+contains "MUT-LEDGER-NONCANONICAL-HEADING trailing-tab why" \
+  "$(ledger_why "$tmp/heading-trailing-tab.md")" "heading '## Review finding ledger\\t'"
+# CRLF line ends. The validator deletes every carriage return before it compares a line, and so does
+# the parser, so a CRLF body is its LF spelling to both: the canonical one passes the validator and
+# reads as it does in LF, and a space or tab before the CR is still there once the CR is gone, so the
+# CRLF spelling of each near miss fails the validator and is a refusal here.
+for crlf_name in canonical trailing-space trailing-tab; do
+  while IFS= read -r crlf_line; do printf '%s\r\n' "$crlf_line"; done \
+    < "$tmp/heading-$crlf_name.md" > "$tmp/heading-$crlf_name-crlf.md"
+done
+expect "MUT-LEDGER-NONCANONICAL-HEADING canonical CRLF policy" \
+  "$(body_policy "$tmp/heading-canonical-crlf.md")" pass
+expect "MUT-LEDGER-NONCANONICAL-HEADING canonical CRLF" \
+  "$(ledger_rows "$tmp/heading-canonical-crlf.md")" '0|ACCEPT-P3:P3:accepted-risk'
+for crlf_name in trailing-space trailing-tab; do
+  expect "MUT-LEDGER-NONCANONICAL-HEADING $crlf_name CRLF policy" \
+    "$(body_policy "$tmp/heading-$crlf_name-crlf.md")" fail
+  expect "MUT-LEDGER-NONCANONICAL-HEADING $crlf_name CRLF" \
+    "$(ledger_rows "$tmp/heading-$crlf_name-crlf.md")" '1|'
+done
 
 # ONE ID, ONE ROW. The validator refuses the repeat inside the canonical table, compared after
 # trimming, and so does the parser. A repeat in a row past the canonical table's end -- after a
@@ -8521,6 +8605,23 @@ for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
   expect "MUT-LEDGER-TABBED-CELL status [$accept_branch]" "${got%%|*}" 0
   [[ "$got" == *severity-mismatch* || "$got" == *NOT-READY* ]] \
     && error "MUT-LEDGER-TABBED-CELL: a tabbed P3 row still blocked on [$accept_branch]: [$got]"
+  # PR382-NONCANONICAL-LEDGER-HEADING-READY: the reviewer's witness, the trailing-space body the
+  # validator refuses, read READY at exit 0. It and the trailing-tab body, LF and CRLF, are refused
+  # now, and the refusal is the blocker.
+  for near_miss in trailing-space trailing-tab trailing-space-crlf trailing-tab-crlf; do
+    got="$(accept_run "$accept_branch" "$tmp/accept-p3.md" "$tmp/heading-$near_miss.md" "$accept_head_one")"
+    [[ "$got" == *" READY "* ]] \
+      && error "MUT-LEDGER-NONCANONICAL-HEADING: a [$near_miss] heading accepted ACCEPT-P3 on [$accept_branch]: [$got]"
+    contains "MUT-LEDGER-NONCANONICAL-HEADING $near_miss [$accept_branch]" "$got" " NOT-READY "
+    contains "MUT-LEDGER-NONCANONICAL-HEADING $near_miss [$accept_branch]" "$got" "ledger-parse-failed:1"
+  done
+  # and the canonical body those four were made from is the READY case it was, so the refusals
+  # above are the heading's doing and not the body's.
+  got="$(accept_run "$accept_branch" "$tmp/accept-p3.md" "$tmp/heading-canonical.md" "$accept_head_one")"
+  [[ "$got" == *NOT-READY* || "$got" == *ledger-parse-failed* || "$got" == *GH-UNSTUBBED* ]] \
+    && error "MUT-LEDGER-NONCANONICAL-HEADING: the canonical heading blocked on [$accept_branch]: [$got]"
+  contains "MUT-LEDGER-NONCANONICAL-HEADING canonical [$accept_branch]" "$got" " READY "
+  expect "MUT-LEDGER-NONCANONICAL-HEADING canonical status [$accept_branch]" "${got%%|*}" 0
 done
 
 # --- the canonical table by position, through main -------------------------------------------------

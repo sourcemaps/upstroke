@@ -1022,6 +1022,9 @@ def review_fields(result):
 
 
 LEDGER_HEADING = "## Review finding ledger"
+# The heading with every whitespace character taken out: a line that is not the heading and equals
+# this once ITS whitespace is taken out differs from the heading only in whitespace, and is refused.
+LEDGER_HEADING_UNSPACED = "".join(LEDGER_HEADING.split())
 # validate-pr-body.sh's `expected_header` and `expected_separator`, byte for byte.
 LEDGER_HEADER = (
     "| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category"
@@ -1065,22 +1068,37 @@ def ledger_result(args):
     read too and its rows came first; the audit takes the first row carrying a finding's id, and a
     draft row recording a P3 `accepted-risk` stood in for the real row recording P2 -- READY, where
     the real ledger says `severity-mismatch`. Now a ledger opens only at a line that IS the heading,
-    with trailing whitespace allowed and nothing else, and any other `## ` line closes it. A body
-    with more than one such line is refused, and so is a ledger with an id in more than one row:
-    either leaves two readings of one finding, and choosing between them is exactly what went wrong.
-    So every id this returns is returned once, and the audit's lookup has nothing to choose.
+    and any other `## ` line closes it. A body with more than one such line is refused, and so is a
+    ledger with an id in more than one row: either leaves two readings of one finding, and choosing
+    between them is exactly what went wrong. So every id this returns is returned once, and the
+    audit's lookup has nothing to choose.
+
+    THE HEADING IS THE VALIDATOR'S HEADING, CHARACTER FOR CHARACTER, AND A NEAR MISS IS REFUSED.
+    (PR382-NONCANONICAL-LEDGER-HEADING-READY) The heading used to be taken with trailing whitespace
+    allowed, so a body whose only ledger heading was `## Review finding ledger ` was a ledger here
+    and, to `validate-pr-body.sh`, a body missing its ledger section. The audit samples the required
+    checks before it fetches the body, and an edit between the two does not move the head, so that
+    body read READY: the validator had refused it and the audit read its rows. Now the heading is
+    the line equal to `LEDGER_HEADING`, compared exactly as the validator compares it, and a line
+    that differs from the heading only in whitespace -- trailing, leading, doubled or of another
+    kind -- is refused wherever it stands. Skipped instead, it would be a heading the parser did not
+    read standing where a reader sees one, and the validator would see a body without a ledger.
 
     THE LINES ARE THE VALIDATOR'S LINES. `validate-pr-body.sh` deletes every carriage return
     (`tr -d '\\r'`) and its command substitution drops every NUL before it compares a line, so both
     are deleted here first. Kept, `## Review fi<CR>nding ledger` was the heading to the validator
     and not to this, and a trailing-space copy elsewhere in the body was the only heading this saw:
-    the validator checked one section and the audit read another.
+    the validator checked one section and the audit read another. A body with CRLF line ends is
+    therefore the same body as its LF spelling to both, and the validator does not refuse it: the
+    `\\r` `mapfile` would keep is gone before `mapfile` runs. A space or tab before the CR is not a
+    carriage return, survives the deletion on both sides, and is a near miss here.
 
     AGAINST THE VALIDATORS this is stricter, and is never looser. `validate-pr-body.sh` takes the
-    heading only as the exact line and refuses a second one. Every line it takes this takes, so a
-    body it passes has one ledger section here too, and the same one. A body carrying the exact
-    heading and a copy with a trailing space passes there as one ledger and another section, and
-    is refused here. In the section, that validator takes as the header the one line equal to the
+    heading only as the exact line and refuses a second one. Every line it takes this takes, and
+    no other line is a heading here, so a body it passes has one ledger section here too, and the
+    same one; a line that differs from its heading only in whitespace is never a ledger here, only
+    a refusal. A body carrying the exact heading and a copy with a trailing space passes there as
+    one ledger and another section, and is refused here. In the section, that validator takes as the header the one line equal to the
     canonical header, wherever it falls. It refuses a second such line, wants the separator on the
     next line, and reads the rows from there to the first blank, non-`|` or `## ` line. This
     requires that header to be the section's FIRST `|` line, so a body this reads has the
@@ -1105,12 +1123,17 @@ def ledger_result(args):
     # separator, among the rows, or past the end of the table.
     place = "outside"
     for line in read_input(args[0]).replace("\r", "").replace(NUL, "").split("\n"):
-        if line.rstrip() == LEDGER_HEADING:
+        if line == LEDGER_HEADING:
             headings += 1
             if headings > 1:
                 raise Unparsed("the body carries more than one %r heading" % LEDGER_HEADING)
             place = "header"
             continue
+        if "".join(line.split()) == LEDGER_HEADING_UNSPACED:
+            raise Unparsed(
+                "the body carries the non-canonical ledger heading %r: the heading is exactly %r,"
+                " with no other whitespace" % (line, LEDGER_HEADING)
+            )
         if line.startswith("## "):
             if place in ("header", "separator"):
                 raise Unparsed("the ledger section ends before its header and separator")
