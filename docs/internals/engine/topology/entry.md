@@ -937,3 +937,21 @@ or on a thread that never armed, is unobserved. The acceptance record
 therefore asserts the exact number of runtimes each call constructed, and
 fails rather than silently missing one. Thread-local, so parallel tests never
 see each other's arming. Nothing of it is compiled into a production build.
+
+## `pub(crate) mod container_runtime {` › `pub(crate) struct Armed(PhantomData<*const ()>);`
+
+The guard `arm` returns. Its `Drop` clears the `ARMED` slot of the thread it
+runs on, so it must drop on the thread that armed it. The `PhantomData<*const ()>`
+field makes it not `Send`, so the compiler refuses to move it to another thread,
+and the drop can only clear the slot `arm` filled. This is how
+`runner::container`'s tests and `workspace_manager::fixture` mark their
+thread-bound fixtures. Every caller compiles unchanged, so none of them moves
+the guard to another thread. `entry::tests` holds a compile-time witness:
+a `const` item whose trait lookup is ambiguous for a `Send` type, so the test
+build stops compiling if the field goes back to `()`.
+
+Until G7-M2-REGRESSION-001-TLS-GUARD-SEND the field was `()`, so `Armed` was
+`Send`. A guard moved to another thread would have cleared that thread's slot
+and left the arming thread's journal armed after the guard was gone. Neither
+caller ever did that, and nothing was observed failing. The guard of
+[`initial_log_read_fault`] has the same shape, and that finding did not name it.
