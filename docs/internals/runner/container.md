@@ -1930,8 +1930,7 @@ shapes, in the direction that matters: an answered failure read as unreachable
 makes `census::proceeds_without` true, and a write command then proceeds with
 no container evidence over a runtime that answered and would not list a dead
 owner's containers. The daemon's phrases are its own; the label values and
-mount paths it quotes back are engine-supplied. Round six, the sweep of
-finding 1's class.
+mount paths it quotes back are engine-supplied.
 
 ## `pub fn classify_docker_failure(operation: RuntimeOp, detail: String) -> RuntimeError {`
 
@@ -1952,7 +1951,7 @@ stderr: [`daemon_answer_about`] is what decides which text they may be looked
 for in. `DockerCli::inspect` is the only caller that still turns this into an
 answer on its own, and on every path it reaches — an image, a volume, and the
 container reads inside `collect` and `create`'s read-back — an absent object
-is a refusal or an error and never a settled process (round six, §7.3).
+is a refusal or an error and never a settled process.
 
 ## `pub const REMOVAL_IN_PROGRESS: &str = "is already in progress";`
 
@@ -2146,9 +2145,9 @@ A free function taking the raw outcome rather than a `match` inside
 [`DockerCli::stop`], so the tolerance is reachable **without a daemon**: the
 branch that matters is one a real runtime only produces in a race, and a
 gated test is the wrong and only place it could otherwise be observed. Since
-round six it is a thin naming of [`settle`] over [`stop_answer`]: what it
-means to settle, and what a settlement has to be established against, is one
-function shared with `settle_remove`.
+the cover review of `9ee9784e` it is a thin naming of [`settle`] over
+[`stop_answer`]: what it means to settle, and what a settlement has to be
+established against, is one function shared with `settle_remove`.
 
 ## `const DAEMON_ANSWER: &str = "error response from daemon:";`
 
@@ -2284,7 +2283,7 @@ exit of **0** with no output, which no local failure can produce.
 Absence is read out of a listing that had to succeed, never out of a failed
 `container inspect`'s stderr: the phrase a diagnostic carries is text the
 environment shapes, and this is the observation every other settlement in the
-runtime is established against (round six, finding 1).
+runtime is established against.
 
 The listing is asked under the bound the caller names (K2): the invocation's
 deadline and cancellation for the supervision (`listing_within`), the
