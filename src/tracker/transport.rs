@@ -1,4 +1,4 @@
-//! The tracker's one way out of the machine: `curl`, as a subprocess, through
+//! The tracker's HTTP transport: `curl`, as a subprocess, through
 //! the Runner (DESIGN.md §4.2, §13).
 //!
 //! upstroke links no HTTP client. The engine never speaks HTTP, and the
