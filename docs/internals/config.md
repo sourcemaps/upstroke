@@ -1328,8 +1328,10 @@ refusal nor an acceptance from bytes it never held.
 
 ## `let repo = scratch("capturedpools-config.toml", "[engine]\nshell = \"bash\"\n");`
 
-Two files feed a load, and a capture that covered one of them would
-leave the other free to move unobserved between a check and its use.
+Up to three files feed a load: the repository's settings, the
+machine-level settings beside the pools file, and the pools file. A
+capture that covered only some of them would leave the rest free to
+move unobserved between a check and its use.
 
 ## `fs::write(`
 
