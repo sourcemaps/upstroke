@@ -1356,139 +1356,85 @@ are two claims.
 
 ## `fn the_cli_roles_of_the_grid_run_a_shim_shaped_program_through_the_funnel() {`
 
-And the shim shape through **every role that runs a CLI**, built by that
-role's own production builder.
-
-[`every_production_program_shape_reaches_the_containment_points`] varies
-the shape against one role, the way
-[`every_shipped_agent_binding_reaches_the_containment_points`] varies the
-binding against one role. This is the other half: the role grid itself
-carrying a batch-shim program, so a suppression keyed on the *pair*
-— a `.cmd` in the reviewer's hands, say — has nowhere left to be green.
-
-Three roles and not five: `gate` and `probe(shell)` run the recorded
-shell by production's own rule, which
-`the_role_grid_sends_the_shapes_production_sends` asserts, and a fixture
-that handed a gate an agent shim would be asserting something production
-never does.
+Every role that runs an agent CLI (implement, review, `probe(claude-code)`), each built by its own
+production builder, carries a batch-shim program through the funnel to every per-spawn containment
+point. `every_production_program_shape_reaches_the_containment_points` varies the shape against one
+role; this varies the role, so a suppression keyed on a role-and-shape pair has nowhere to pass.
+`gate` and `probe(shell)` are left out because production runs the recorded shell for them
+(`the_role_grid_sends_the_shapes_production_sends`); the case count is asserted against that rule.
 
 ## `fn the_cli_roles_of_the_grid_run_a_shim_shaped_program_through_the_funnel() {` › `std::fs::create_dir_all(&request.workspace).expect("the request's workspace");`
 
-A probe chooses its own workspace, so the run has to happen where
-the request says rather than where this test would prefer.
+A probe chooses its own workspace, so the run happens where the request says.
 
 ## `fn the_grids_agent_cli_child_runs_no_test_and_exits_zero() {`
 
-The grid's non-shell child really does run nothing.
-
-What the round-6 repair could get wrong: [`agent_cli_command`] executes
-**this test binary**, so a filter that ever matched something would have
-the role grid running tests inside its own fixtures — silently, three
-times per grid, with whatever those tests do to the filesystem — and a
-filter that stopped exiting 0 would fail the grid for a reason that has
-nothing to do with containment. Neither is visible from the grid itself,
-which only reads the exit code.
-
-So the child's own report is read: `libtest` prints the count it ran,
-and it must be none.
+`agent_cli_command` executes this test binary with a filter that must match no test. A filter that
+matched would run tests inside the grid's fixtures; one that stopped exiting 0 would fail the grid
+for a reason unrelated to containment. The grid reads only the exit code, so this reads libtest's
+own count, which must be `0 passed`, and requires the child to have settled.
 
 ## `fn every_role_reaches_the_containment_points_of_this_platform() {`
 
-Every role's spawn is observed at the containment points — not only the
-gate's.
+Every role's spawn, not only the gate's, is observed at the containment points. The packet's
+`scope` sends probes, workers, gates and reviews through the runner's funnel with containment hook
+points, and `proof_tests[3]` asks for containment sub-effect hook tests (ST-07 subset). The other
+runtime observers in this file build gate requests, so a funnel that passed `NoHooks` for any other
+role would pass them all. The probes matter most: `decisions.workspace_candidates.run_creation`
+orders P4 `RunnerPreflight` before P6 `run_started`, so their spawns are the prefixes ST-07 evidence
+over `Process.Spawn` is read as covering.
 
-`scope`: "HostRunner wraps proc supervision … through the process
-funnel with containment sub-effect hook points" and "**probes**,
-workers, gates, reviews go through the Runner"; `gating`: "process
-funnel sites recorded"; `proof_tests[3]`: "containment sub-effect hook
-tests (ST-07 subset)".
-
-Until this fixture existed every runtime containment observer in this
-file built its request with `ExecutionRole::Gate`, so a `run` that
-passed [`NoHooks`] for any *other* role emitted no hook evidence at all
-and the whole suite stayed green. The probe roles are what that costs
-most: `decisions.workspace_candidates.run_creation` orders P4
-`RunnerPreflight` before P6 `run_started`, so their spawns are the
-prefixes ST-07 evidence over `Process.Spawn` is read as covering.
-
-Three observations per role, not one — the points reached, the order
-they were reached in, and (on Unix) the kernel's answer that the
-containment *operation* ran for this role's child. A funnel that fired
-the hooks for a probe while skipping the operation would pass the first
-and fail the third.
+Three observations per role: the points reached, their order, and on Unix the kernel's answer that
+the containment operation ran for this child. A funnel that fired the hooks but skipped the
+operation passes the first and fails the third.
 
 `runner::contract::tests::the_spawn_site_files_every_role_under_one_context_and_the_count_says_which`
-does **not** discharge this: counting that two roles fall outside the
-site's declared context proves the mismatch exists; it does not prove
-the hooks execute on those roles. A counted admission is not runtime
-proof. This is the runtime proof, and it is asserted for all five roles
-rather than for the two the count names, because a suppression keyed on
-any single role is the same defect.
+does not discharge this: counting that two roles fall outside the site's declared context proves
+the mismatch exists, not that the hooks run for them. This is the runtime proof, asserted for all
+five roles because a suppression keyed on any one role is the same defect.
 
 ## `fn every_role_reaches_the_containment_points_of_this_platform() {` › `assert_eq!(`
 
-The same points, in the packet's order and each exactly once —
-so a role whose funnel reached them in another order, or twice,
-fails here too and not only the set above.
+The same points in the packet's order, each exactly once.
 
 ## `fn every_role_reaches_the_containment_points_of_this_platform() {` › `assert_eq!(`
 
-The funnel's other observation, and the evidence a fault
-injected at `child_created` would need.
+One spawn, one child: the funnel's `child_created` observation, which a fault injected there would
+need.
 
 ## `fn every_role_reaches_the_containment_points_of_this_platform() {` › `assert_eq!(`
 
-Unix: the containment *operation* — not only its hook — ran for
-this role. The witness is the kernel.
-
-The expected value is unchanged; the predicate behind it,
-`GroupObservation::leads_own_group`, now also accepts, on macOS, an
-exited, unreaped child whose record names its own pid
+Unix: the containment operation, not only its hook, ran for this role; the witness is the kernel.
+`GroupObservation::leads_own_group` also accepts, on macOS, an exited, unreaped child whose
+`proc_pidinfo` zombie record names its own pid as group and has status `SZOMB`
 ([`agent/proc` notes](../../agent/proc.md)).
 
-A passing role prints its record too, to stderr, after the assertion
-(`PR173-LIVE-RECORD-ANSWER-NEVER-PRINTED`: until then only a failing
-grid rendered them). On macOS the record carries what `proc_pidinfo`,
-given the non-zero argument that asks for an exited record, answered,
-so a record can show whether that call answers for a live process. That
-question is still open: the `agent/proc` notes read the answer from
-XNU's source, not from a printed record.
+A passing role prints its record to stderr after the assertion. On macOS the record carries what
+`proc_pidinfo`, asked for an exited record, answered, so a record can show whether that call answers
+for a live process. That question is still open: the `agent/proc` notes read the answer from XNU's
+source, not from a printed record.
 
-`before the look running` does not on its own make a record one that
-answers it. It is the first `waitid` poll's answer, taken before
-`getpgid` and `proc_pidinfo` were called: the child's state before the
-look, not during it. `observe_child_group` takes each observation in a
-separate call, and the child can exit between any two. A child seen
-running can have `getpgid` answer its own pid, then exit, and then
-`proc_pidinfo` returns its zombie's record. The assertion passes on
-`getpgid`'s answer alone, and the line still reads `before the look
-running`. So before reading a record as the call answering for a live
-process, check two more things in it:
+`before the look running` alone does not make a record answer it. It is the first `waitid` poll,
+taken before `getpgid` and `proc_pidinfo`; `observe_child_group` makes each observation in a
+separate call and the child can exit between any two, so a child seen running can have `getpgid`
+answer its own pid, exit, and then have `proc_pidinfo` return its zombie's record. Check two more
+fields:
 
-- The status `proc_pidinfo` answered. `status 5` is `SZOMB`: the record
-  is a zombie's, whatever the first poll saw, and says nothing about a
-  live process.
-- `after the look`, the second poll, taken after `proc_pidinfo`
-  returned. `running` says the child still had not exited once the call
-  was over. `exited, unreaped`, beside `before the look running`, says
-  it exited at some point between the two polls, and the poll alone
-  cannot say whether that was before the call or after it.
+- the status `proc_pidinfo` answered: `status 5` is `SZOMB`, a zombie's record, which says nothing
+  about a live process;
+- `after the look`, the poll taken after `proc_pidinfo` returned: `running` means the child had not
+  exited by the end of the call; `exited, unreaped` beside `before the look running` means it exited
+  between the polls, before or after the call.
 
-Only a record with a status other than `SZOMB` and `after the look
-running` can show the call answering while the child was alive, and
-even that record leaves one narrow case open: a child that had already
-begun exiting, which `proc_find_zombref` also finds ([`agent/proc`
-notes](../../agent/proc.md)), and was not yet waitable at the second
-poll. A call that failed with `No such process`, with both polls
-reading `running`, is the other answer: the call did not answer for a
-child that was alive across it. The grid's children are short-lived, so
-a run may hold no record that answers either way.
+Only a non-`SZOMB` status with `after the look running` can show the call answering for a live
+child, and even that leaves one case open: a child already exiting, which `proc_find_zombref` also
+finds ([`agent/proc` notes](../../agent/proc.md)), but not yet waitable at the second poll. A call
+failing with `No such process` with both polls `running` is the other answer. The grid's children
+are short-lived, so a run may hold no record that answers either way.
 
-libtest captures a passing test's output and shows it only under
-`--nocapture` or `--show-output`. CI's suite step passes neither, so
-its log does not carry these records; the measurement is a run of this
-test with one of those flags, on the macOS runner, read by the checks
-above, and it may take more than one run.
+libtest shows a passing test's output only under `--nocapture` or `--show-output`, which CI's suite
+step does not pass; the measurement is a run of this test with one of them on the macOS runner,
+read by the checks above, possibly more than once.
 
 ## `const SPAWN_KILL_POINT: &str = "UPSTROKE_SPAWN_KILL_POINT";`
 
@@ -1506,116 +1452,73 @@ A hook that kills the funnel at one named point and nowhere else.
 
 ## `impl SpawnHooks for KillAtPoint` › `fn point_mode(`
 
-A point consulted at **two** coordinates is killed at the one the
-kill mode belongs at, and not at the other one.
-
-`Spawn.AmbientJobJoined` is that point: its error-return coordinate
-is *before* the join and its kill coordinate is *after* it. The
-inherited default answers `point()` to both, so a hook armed for a
-kill would abort at the earlier, error-return coordinate — before
-there is an ambient handle to close, which is the state the point's
-kill claim says there is not. The grid would still see an abort and
-would still pass, while witnessing a coordinate the packet does not
-name. That is the same shape of false witness as the omitted point
-itself (`PR5-RD-002`), one layer in.
+A point consulted at two coordinates is killed only at its kill coordinate. `Spawn.AmbientJobJoined`
+is consulted for its error return before the join and for its kill after it. The inherited default
+answers `point()` to both, so a hook armed for a kill would abort before there is an ambient handle
+to close: the grid would still see an abort and pass while witnessing a coordinate the packet does
+not name, the false-witness shape of `PR5-RD-002`.
 
 ## `fn spawn_funnel_kill_helper() {`
 
-The child half of [`a_kill_armed_at_any_containment_point_actually_kills`].
+The child half of `a_kill_armed_at_any_containment_point_actually_kills`.
 
-A kill is `std::process::abort` for the reason [`proc::apply`] gives: the
-claim under test is what a coordinator that dies **without running any
-cleanup** does, and `panic!` and `exit` both run some. `panic!` unwinds and
-runs the stack's destructors — including the one that closes the very job
-handle whose close-on-death is the mechanism. `std::process::exit` runs no
-stack destructors, but it is the orderly exit and runs the process-exit
-handlers registered with the platform. `std::process::abort` runs neither.
-So the kill needs a process of its own.
+The kill is `std::process::abort`, as `apply` in `src/agent/proc/hooks.rs` does, because the claim is
+what a coordinator that dies without running any cleanup leaves. `panic!` unwinds and runs
+destructors, including the one that closes the job handle whose close-on-death is the mechanism;
+`std::process::exit` runs no stack destructors but does run the platform's process-exit handlers;
+`abort` runs neither. So the kill needs a process of its own.
 
-It **establishes containment first**, which is not decoration. On Windows
-a kill at `CreatedSuspended` leaves a suspended stub by construction —
-that is the state INV-18 exists for — and the only thing that reaps it is
-the ambient job's handle closing when this process dies. A helper that
-skipped the step would leak one suspended `cmd.exe` per point onto the
-machine running the suite, **measured** on the guest: the first run of
-this grid left three of them and a hung parent. On Unix the step is a no-op and the per-invocation reaper
-settles the group instead.
+It establishes containment first. On Windows a kill at `CreatedSuspended` leaves a suspended stub by
+construction (the state INV-18 exists for), and only the ambient job's handle closing when this
+process dies reaps it; without the step each point would leak a suspended `cmd.exe` onto the machine
+running the suite. On Unix the per-invocation reaper settles the group.
 
-**The startup step is where the arming happens for a startup point.**
-This used to run `start_write_command(&mut NoHooks)` unconditionally and
-only then install `KillAtPoint`, so `Spawn.AmbientJobJoined` — which is
-reached by that call and by nothing later — could not receive a kill at
-all, and six guest runs of a grid that claimed to cover it executed it
-zero times (`PR5-RD-002`). A startup point is now armed *on the startup
-call*, which is the only place it is consulted.
+A startup point (`STARTUP_POINTS`) is armed on the startup call itself, because that call is the only
+place it is consulted; establishing containment with `NoHooks` first would leave it unreachable in
+kill mode (`PR5-RD-002`).
 
 ## `fn spawn_funnel_kill_helper()` › `let _ = start_write_command(&mut KillAtPoint(point));`
 
-The point's kill coordinate is *inside* this call, after the real
-ambient join. Reaching the line after it means the kill never
-fired, and the parent reads a clean exit as exactly that.
+The kill coordinate is inside this call, after the real ambient join. Returning from it means the
+kill never fired, and the parent reads the clean exit that follows as exactly that.
 
 ## `fn spawn_funnel_kill_helper()` › `let _ = runner.run_blocking(&crate::runner::gate_request(`
 
-Every point this platform declares is reached by an ordinary spawn,
-which is what `every_role_reaches_the_containment_points_of_this_
-platform` establishes; the gate role is the cheapest of the five.
+Every per-spawn point is reached by an ordinary spawn
+(`every_role_reaches_the_containment_points_of_this_platform`); the gate role is the cheapest.
 
 ## `fn spawn_funnel_kill_helper()` › `std::process::exit(0);`
 
-Reached only if the kill did not fire, which the parent detects as a
-clean exit.
+Reached only if the kill did not fire, which the parent detects as a clean exit.
 
 ## `fn a_kill_armed_at_any_containment_point_actually_kills() {`
 
-`Injection::Kill` **aborts**, at every containment point that declares
-the mode on this platform.
+`Injection::Kill` aborts at every containment point that declares the mode on this platform.
+`decisions.effect_site_inventory.scope` requires every parent-side sub-effect point to be observed
+executed in every injection mode it supports, and every containment point declares `Kill`
+(`SubEffectPoint::modes`). The reach tests arm nothing and the fault grid injects `Injection::Error`,
+because an abort would take the test binary with it, so this grid is what executes the kill mode
+behind ST-07's kill claims about `Process.Spawn`.
 
-`decisions.effect_site_inventory.scope` requires "every parent-side
-sub-effect point observed **executed** at least once by the suite in
-every injection mode the point supports", and every containment point
-declares `Kill` (`SubEffectPoint::modes`). Nothing had ever let one
-fire: the runtime reach tests arm nothing, and the fault grid injects
-`Injection::Error` — deliberately, because an abort would take the test
-binary with it. So `Injection::Kill => Ok(())` in `proc::apply` passed
-the whole suite (`PR5-SEAMS-001`), and with it every ST-07 kill-mode
-claim about `Process.Spawn`.
+Same idiom as `events::log::tests::a_kill_at_each_append_point_leaves_the_shape_the_packet_tables`:
+a subprocess helper, and the death checked, not assumed — not a clean exit, no `panicked at` on
+stderr, and on Unix `SIGABRT` rather than another way of dying.
 
-This is the sibling of `events::log::tests::a_kill_at_each_append_point_
-leaves_the_shape_the_packet_tables`, and the same idiom: a subprocess
-helper, and the child's death **checked** rather than assumed — not a
-clean exit, no `panicked at` on stderr, and on Unix the signal is
-`SIGABRT` and not some other way of dying.
+The domain is `containment_points()`, every point this platform declares, read from
+`Process.Spawn`'s `sub_effects()` and each point's `platform()`, so a later point is covered by
+construction; a hand-written list once omitted `AmbientJobJoined` (`PR5-RD-002`). Both appliers are
+inside it: on Unix all four points go through `apply`; on Windows `AmbientJobJoined` goes through
+`apply` and the three per-spawn points through `apply_io`.
 
-The domain is [`containment_points()`] — **every** point this platform
-declares, read out of `Process.Spawn`'s own `sub_effects()` and each
-point's own `platform()`, so a point added later is covered by
-construction rather than by someone remembering to add it here. It was a
-hand-written three-element list, which omitted `AmbientJobJoined`
-(`PR5-RD-002`): the grid, its helper and this doc comment all agreed
-that the Windows ambient join was covered in kill mode, and it had never
-once executed in that mode on the guest.
-
-Both of the funnel's two appliers are inside the domain: on Unix all
-four points go through `proc::apply`, and on Windows `AmbientJobJoined`
-goes through `apply` while the three per-spawn points go through
-`apply_io`. That is the second reason the omission mattered — with
-`AmbientJobJoined` absent, no Windows run of this grid touched `apply`
-at all.
-
-**The helper's output goes to files, and this waits on the process
-rather than on its pipes.** `Command::output()` returns when the pipe
-write ends close, not when the child exits, and on Windows
-`CreateProcessW` inherits handles — so the grandchild this helper leaves
-**suspended by design** holds a duplicate of the pipe and `output()`
-blocks for ever. Measured on the guest, where it hung the whole run.
+The helper's output goes to files and the test waits on the process, not its pipes:
+`Command::output()` returns when the pipe write ends close, and on Windows `CreateProcessW` inherits
+handles, so the grandchild the helper leaves suspended by design would hold the pipe and `output()`
+would block for ever.
 
 ## `fn a_kill_armed_at_any_containment_point_actually_kills()` › `assert_eq!(`
 
-The count, so a domain that shrank would fail here rather than pass
-vacuously — four on **both** platforms, which is what the frozen
-inventory declares and what the omitted `AmbientJobJoined` made read
-as three.
+Four points on both platforms, as the frozen inventory declares, so a shrunken domain fails rather
+than passing vacuously.
 
 ## `struct FailAt(SubEffectPoint);`
 
@@ -1623,65 +1526,45 @@ A hook that fails the funnel at one named point and nowhere else.
 
 ## `fn a_fault_armed_at_any_containment_point_stops_any_role() {`
 
-The hooks are not merely *called* on every role — their answer is
-honoured, so every role is fault-injectable at every containment point
-this platform reaches.
+The hooks' answer is honoured, not merely asked: every role is fault-injectable at every per-spawn
+containment point. Observation and injection are separate claims and ST-07 spends the second; a
+funnel that ignored the observer's answer would satisfy
+`every_role_reaches_the_containment_points_of_this_platform` and inject nothing. The armed point is
+named in the caller's failure, so a funnel that collapsed the points into one arming site fails.
 
-Observation and injection are two claims, and the second is the one
-ST-07 spends: a funnel that consulted the observer and then ignored
-what it said would satisfy
-`every_role_reaches_the_containment_points_of_this_platform` and inject
-nothing. The armed point is named in the failure the caller receives,
-so this also pins *which* coordinate refused — a funnel that collapsed
-four points into one arming site would fail here.
-
-`Injection::Error` rather than `Injection::Kill` because `Kill` aborts
-the process: it is exercised by the Windows coordinator-death tests,
-which need a subprocess to survive it. The packet gives only
-`AmbientJobJoined` an error contract, so an `Error` at these points can
-come only from a hand-written observer — which is exactly what a fault
-injection is, and `apply`/`apply_io` surface it rather than dropping it.
+`Injection::Error`, because `Kill` aborts the process; the kill mode is exercised in subprocesses by
+`a_kill_armed_at_any_containment_point_actually_kills` and the Windows coordinator-death tests. The
+packet gives only `AmbientJobJoined` an error contract, so an `Error` at these points comes only from
+an observer, which is what a fault injection is, and `apply`/`apply_io` surface it.
 
 ## `fn the_pre_exec_containment_step_runs_in_the_forked_child() {`
 
-The operation of `Spawn.PreExecPgidAndRegister` really did happen in the
-forked child, and the funnel really did reach the four Unix points in
-the packet's order.
-
-The witness is the kernel, not this crate: `getpgid(pid) == pid` is true
-exactly when the closure's `setpgid(0, 0)` ran, and it is asked at
-`child_created` — the first instant the parent knows the pid.
+`Spawn.PreExecPgidAndRegister`'s operation ran in the forked child, and the funnel reached the four
+Unix points in the packet's order. The witness is the kernel: `getpgid(pid) == pid` exactly when the
+closure's `setpgid(0, 0)` ran, asked at `child_created`, the first instant the parent knows the pid.
 
 ## `fn a_containment_proof_exists_only_where_containment_was_established() {`
 
-A containment proof exists exactly when containment was established,
-and establishing it twice is establishing it once.
+A containment proof exists exactly when containment was established. `Contained` is what the
+engine's write coordinator requires and `containment_establishments` is what an entry-point census
+reads, so both are worth something only if a token cannot appear without the step. The token's own
+constructor increments the count, so this asserts the constructor is reachable no other way,
+including the refusal path, which returns before it.
 
-[`Contained`] is what the engine's write coordinator now requires, and
-[`containment_establishments`] is what an entry-point census reads, so
-both are only worth anything if a token cannot appear without the step
-having run. The count is incremented by the token's own constructor, so
-this is the assertion that the constructor is not reachable another way
-— including through the refusal path, which returns before it.
-
-Idempotence is not decoration either: the CLI establishes containment
-at dispatch and then calls `engine::run`, which establishes it again.
-The ambient job is a process-wide singleton (`join_ambient` memoises),
-so the second call must be a no-op that still hands back a proof — and
-on the platform where it does something, the process must still be a
-member afterwards.
+Establishing twice must work: the CLI establishes containment at dispatch and the engine establishes
+it again. The ambient job is a process-wide singleton (`join_ambient` memoises), so the second call
+joins nothing new, still returns a proof and is counted, and on Windows the process is still a member
+afterwards.
 
 ## `fn a_containment_proof_exists_only_where_containment_was_established() {` › `let _first = contain_write_command(&mut NoHooks).expect("containment establishes on this host");`
 
-The tokens are held rather than discarded: two live proofs at once is
-what a coordinator entered from an already-contained CLI has.
+The tokens are held: two live proofs at once is what a coordinator entered from an already-contained
+CLI has.
 
 ## `fn a_containment_proof_exists_only_where_containment_was_established() {` › `{`
 
-A refused establishment mints nothing. Only Windows can refuse — on
-Unix the step is the reaper and the isolated process group, and
-there is nothing that can fail — so the negative half is asserted
-where it exists.
+A refused establishment mints nothing. Only Windows can refuse; on Unix the step is the reaper and
+the isolated process group, and nothing can fail.
 
 ## `struct RefuseAmbientJoin {`
 
@@ -1696,92 +1579,62 @@ An observer that refuses the ambient join, for
 
 ## `fn windows_ambient_job_unavailable_refuses_before_effects()` › `struct Reporting {`
 
-The observer has to be readable after the run, and `with_hooks`
-takes ownership, so it reports through a channel.
+The observer must be readable after the run and `with_hooks` takes ownership, so it reports through
+a channel.
 
 ## `fn windows_ambient_job_unavailable_refuses_before_effects()` › `assert_eq!(`
 
-"The simulated failure left no real ambient job behind" — asserted
-on the *count* rather than on `ambient_job_established`, which is a
-process-wide latch and no longer a valid oracle here: the library's
-write coordinator establishes containment now
-(`engine::tests::every_public_write_coordinator_entry_point_establishes_containment`),
-so other tests in this binary legitimately join the real ambient job
-and the latch may already be true when this test runs. The count is
-per-thread and per-call, so it still says exactly what this test
-means: *this* refusal established nothing.
+The simulated failure established nothing, asserted on the per-thread, per-call count rather than on
+`ambient_job_established`: that is a process-wide latch other tests in this binary legitimately set,
+because the library's write coordinator establishes containment
+(`engine::tests::every_public_write_coordinator_entry_point_establishes_containment`).
 
 ## `fn the_production_containment_mint_propagates_a_join_refusal_and_mints_nothing() {`
 
-The production containment mint propagates a join refusal, and a
-refused join mints nothing.
+`contain_write_command` itself propagates a join refusal and mints nothing: `invariants_introduced[3]`
+(INV-18 host portion, refusal before any effect if the ambient job cannot be established) and
+`expected_failures_refusals[1]` (the write command refuses at startup with a diagnostic).
 
-`invariants_introduced[3]`: "INV-18 host portion: … refusal before any
-effect if the ambient job cannot be established", and
-`expected_failures_refusals[1]`: "ambient job cannot be created or
-joined (Windows) → write command refuses at startup with a diagnostic".
+It is the function `engine::run_harness`, `engine::resume_harness` and `src/main.rs`'s dispatch
+reach, and the only place that mints `Contained`. The other simulated ambient failures go through
+`HostRunner::start_write_command` or a closure injected at `run_contained`, so a mint that discarded
+the join's outcome and returned `Ok(Contained::new())` would leave them green while every Windows run
+dispatched with no ambient job; a coordinator killed between `CreateProcessW` and private-job
+assignment would then leave an ownerless suspended stub, which the ambient job exists to prevent.
 
-The subject is [`contain_write_command`] **itself** — the function
-`engine::run_harness`, `engine::resume_harness` and `src/main.rs`'s
-dispatch all reach, and the only place in the crate that mints a
-[`Contained`]. Every other simulated ambient failure in this suite goes
-through [`HostRunner::start_write_command`] or through a closure injected
-at `engine::run_contained`, so
-
-```text
-let _join_outcome = proc::join_ambient_job(hooks);
-Ok(Contained::new())
-```
-
-left the whole suite green while every facade run and every `upstroke run`
-on Windows dispatched with **no ambient job** — and a coordinator killed
-between `CreateProcessW` and private-job assignment then leaves a
-suspended stub with no owner, which is the one thing the ambient job
-exists to prevent.
-
-Windows only, and that is the invariant rather than a limitation of the
-test: on Unix [`proc::join_ambient_job`] returns `Ok` unconditionally and
-does not consult the observer at all — deliberately, so a Linux cell
-cannot record a Windows containment point as executed — so there is no
-failure on that platform for anything to propagate. The Linux suite
-cannot kill that mutation and does not claim to.
+Windows only, by invariant: on Unix `proc::join_ambient_job` returns `Ok` without consulting the
+observer, so a Linux cell cannot record a Windows containment point as executed, and there is no
+failure to propagate. The Linux suite cannot catch that mutation and does not claim to.
 
 ## `fn the_production_containment_mint_propagates_a_join_refusal_and_mints_nothing() {` › `let mut refusing = RefuseAmbientJoin::default();`
 
-The observer is borrowed rather than owned here, so it can simply be
-read afterwards — `with_hooks` takes ownership and needs a channel,
-this does not.
+The observer is borrowed, not owned, so it is read directly afterwards with no channel.
 
 ## `fn the_production_containment_mint_propagates_a_join_refusal_and_mints_nothing() {` › `let message = error.to_string();`
 
-The diagnostic reaches the caller. The three fragments are
-`proc::AMBIENT_REFUSAL_PREFIX` and `proc::AMBIENT_REFUSAL_SIMULATED`,
-named rather than matched whole: what the operator has to be told is
-that it is the ambient job, which invariant it enforces, and that
-nothing ran.
+The diagnostic reaches the caller. The three fragments come from `AMBIENT_REFUSAL_PREFIX` and
+`AMBIENT_REFUSAL_SIMULATED` in `src/agent/proc/ambient.rs`, named rather than matched whole: the
+operator must learn that it is the ambient job, which invariant it enforces, and that nothing ran.
 
 ## `fn the_production_containment_mint_propagates_a_join_refusal_and_mints_nothing() {` › `assert_eq!(`
 
-No effect precedes it: the funnel reached the join's own coordinate
-and nothing past it, and no child exists.
+No effect precedes the refusal: the funnel reached the join's own coordinate and nothing past it, and
+no child exists.
 
 ## `fn the_production_containment_mint_propagates_a_join_refusal_and_mints_nothing() {` › `assert_eq!(`
 
-And no proof was minted — which is the half the mutation above
-breaks. The count is per-thread and per-call, so it says exactly that
-*this* call established nothing, where `proc::ambient_job_established`
-is a process-wide latch other tests in this binary legitimately set.
+No proof was minted, the half a mint that discarded the refusal breaks. The count is per-thread and
+per-call, unlike the process-wide `proc::ambient_job_established` latch.
 
 ## `fn the_production_containment_mint_propagates_a_join_refusal_and_mints_nothing() {` › `let _proof = contain_write_command(&mut NoHooks).expect("the real join succeeds on this host");`
 
-The success direction, so the assertion above is about the refusal
-and not about a function that never mints at all.
+The success direction, so the assertion above is about the refusal and not a function that never
+mints.
 
 ## `fn the_production_containment_mint_propagates_a_join_refusal_and_mints_nothing() {` › `let mut refusing = RefuseAmbientJoin::default();`
 
-`start_write_command` is the same step for the caller with nothing to
-prove it to — `src/main.rs`'s dispatch, which is the CLI's whole
-write side — and it has a body of its own to drop the refusal in.
+`start_write_command` is the same step for `src/main.rs`'s dispatch, which has no proof to carry, and
+it has a body of its own that could drop the refusal.
 
 ## `const JOIN_RECORD: &str = "UPSTROKE_PR4_JOIN_RECORD";`
 
@@ -1789,39 +1642,27 @@ Where the join-ordering helper writes what it saw.
 
 ## `struct WitnessAmbientJoin {`
 
-Records, at each consultation of `Spawn.AmbientJobJoined`, whether the
-ambient job existed *at that instant*. The kernel is the oracle: the
-singleton is set only by a successful `AssignProcessToJobObject`.
+Records, at each consultation of `Spawn.AmbientJobJoined`, whether the ambient job existed at that
+instant. The singleton is set only by a successful `AssignProcessToJobObject`.
 
 ## `fn windows_the_ambient_join_is_observed_on_both_sides_of_the_join() {`
 
-The point named `AmbientJobJoined` is observed on the side of the join
-its own contract needs.
-
-`containment_sub_effects` gives it both an error contract ("failure
-refuses the write command", which stands in place of establishing the
-job) and a kill claim ("a coordinator kill after any of these leaves no
-host process — the ambient handle closes"), and those are opposite sides
-of one operation. So the error-return coordinate must see no job and the
-kill coordinate must see one.
-
-In a subprocess because the ambient job is a process-wide singleton:
-"not yet established" is observable once per process, and a test that
-depended on being the first in its binary would be a test whose meaning
-depended on test order.
+`containment_sub_effects` gives `AmbientJobJoined` an error contract (failure refuses the write
+command, in place of establishing the job) and a kill claim (a coordinator kill after it leaves no
+host process because the ambient handle closes): opposite sides of one operation. So the
+error-return coordinate must see no job (`ErrorReturn 0`) and the kill coordinate one (`Kill 1`).
+It runs in a subprocess because "not yet established" is observable once per process, and a test
+that relied on running first in its binary would depend on test order.
 
 ## `const POISON_AMBIENT: &str = "UPSTROKE_POISON_AMBIENT";`
 
-Set for the child that is to carry a **real** memoised ambient failure.
+Set for the child that is to carry a real memoised ambient failure.
 
 ## `fn poisoned_ambient_helper() {`
 
-The child half of
-[`a_real_memoised_ambient_failure_refuses_the_write_command`].
-
-It spends this process's one ambient cell, which is why it needs a
-process of its own: `AMBIENT` is a `OnceLock` and the test binary's
-other tests need it unspent.
+The child half of `a_real_memoised_ambient_failure_refuses_the_write_command`. It spends the
+process's one ambient cell (`AMBIENT` is a `OnceLock`), which the binary's other tests need unspent,
+so it runs in a process of its own.
 
 ## `fn poisoned_ambient_helper()` › `let error = proc::join_ambient_job(&mut proc::NoHooks)`
 
@@ -1833,43 +1674,29 @@ other tests need it unspent.
 
 ## `fn poisoned_ambient_helper()` › `start_write_command(&mut proc::NoHooks).expect_err("the CLI write path refuses too");`
 
-(3) And the CLI's unit-returning entry, which is what `src/main.rs`
-calls before any dispatch arm.
+(3) And the CLI's unit-returning entry, which `src/main.rs` calls before any dispatch arm.
 
 ## `fn a_real_memoised_ambient_failure_refuses_the_write_command() {`
 
-A **real** memoised ambient failure refuses the write command.
+A real memoised ambient failure refuses the write command (`crash_reconstruction`: refuse at startup
+with a diagnostic before any workspace effect, no degraded mode; `expected_failures_refusals[1]`).
+An observer refusing at `Spawn.AmbientJobJoined` fires before the memo is consulted, so it cannot
+show that a remembered `Err` survives `join_ambient`'s match; this carries a real one through it. An
+`Err(_) => Ok(())` there would have `contain_write_command` mint `Contained` and `run`/`resume` take
+workspace effects with no kill-on-close job.
 
-`crash_reconstruction`: "if the ambient job cannot be created or joined
-the write command refuses at startup with a diagnostic before any
-workspace effect (no degraded mode; deferred)", and
-`expected_failures_refusals[1]` requires the same refusal.
-
-`PR4-CONF-005` closed the *injected* half — an observer refusing at
-`Spawn.AmbientJobJoined`, which fires strictly **before** the memo is
-consulted. `PR5-CORRECTNESS-010` is the half beyond it: no test had ever
-carried an actual memoised `Err` through `join_ambient`'s match, so
-`Err(_) => Ok(())` there left `join_ambient_job` reporting success,
-`contain_write_command` minting `Contained`, and `run`/`resume` taking
-workspace effects with no ambient kill-on-close job.
-
-Windows only, and that is the invariant rather than a gap:
-`join_ambient_job` is a no-op on Unix and has no memo to poison. The
-platform-independent half of the same claim — that a remembered failure
-comes back as that failure — is `agent::proc::tests::
-a_memoised_establishment_failure_reaches_every_later_caller`, which runs
-everywhere.
+Windows only, by invariant: `join_ambient_job` is a no-op on Unix with no memo to poison. The
+platform-independent half, that a remembered failure comes back as that failure, is
+`agent::proc::tests::a_memoised_establishment_failure_reaches_every_later_caller`.
 
 ## `const STUB_RECORD: &str = "UPSTROKE_PR4_STUB_RECORD";`
 
-Where the coordinator helper writes the identity of the stub it created
-before it dies.
+Where the coordinator helper writes the identity of the stub it created before it dies.
 
 ## `fn point(&mut self, point: SubEffectPoint) -> crate::topology::effects::Injection {` › `crate::topology::effects::Injection::Kill`
 
-The kill hook: after `CreateProcess` and before private-job
-assignment. `apply_io` aborts, so no destructor runs and the
-ambient handle is closed only by the kernel.
+The kill hook: after `CreateProcess` and before private-job assignment. `apply_io` aborts, so no
+destructor runs and only the kernel closes the ambient handle.
 
 ## `fn windows_ambient_coordinator_helper()` › `let _ = runner.run_blocking(&request);`
 
@@ -1877,23 +1704,19 @@ Aborts inside `run`, at `CreatedSuspended`.
 
 ## `fn one_crash_cycle(tag: &str) -> (u32, u64, bool) {`
 
-Run one coordinator-death cycle and return the stub's identity and
-whether it was an ambient-job member at creation.
+Runs one coordinator-death cycle and returns the stub's identity and whether it was an ambient-job
+member at creation.
 
 ## `fn naming_grid() -> Vec<ProgramNaming> {`
 
 -----------------------------------------------------------------------
-program resolution (PR6D-001)
+program resolution
 -----------------------------------------------------------------------
 
 ## `fn naming_grid() -> Vec<ProgramNaming> {`
 
-Both naming rules, exhaustively.
-
-The `match` is what makes it exhaustive: a variant added later fails to
-compile here rather than quietly leaving every grid below, which is the
-failure `PR5-RD-002` recorded one level out — a hand-written domain that
-omitted a point while six guest runs reported covering it.
+Both naming rules, exhaustively: the `match` makes a later variant fail to compile here rather than
+silently leave every grid below, the hand-written-domain failure of `PR5-RD-002`.
 
 ## `fn composed(pairs: &[(&str, &OsStr)]) -> Vec<(OsString, OsString)> {`
 
@@ -1905,17 +1728,13 @@ A composed environment holding exactly the pairs given.
 
 ## `fn program_file(dir: &Path, file_name: &str) -> PathBuf {`
 
-An empty file the platform would accept as a program: on Unix the
-execute bit is set, because `execvp` requires it and
-[`ProgramNaming::Posix`] therefore checks it.
+An empty file the platform accepts as a program: on Unix the execute bit is set, because `execvp`
+requires it and `ProgramNaming::Posix` therefore checks it.
 
 ## `fn unexecutable_file(dir: &Path, file_name: &str) -> PathBuf {`
 
-A file that exists and is **not** a program: no execute bit.
-
-Unix only, because it is only there that a file's mode decides: Windows
-carries no execute bit, so "exists but is not executable" is not a state
-a fixture can construct on that platform at all.
+A file that exists and is not a program: no execute bit. Unix only; Windows has no execute bit, so
+the state cannot be constructed there.
 
 ## `const REAL_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL";`
 
@@ -1923,84 +1742,62 @@ The `PATHEXT` a Windows machine ships, in its order.
 
 ## `fn shim_file_name(name: &str) -> String {`
 
-The file name a bare `name` is installed under here: npm's two
-spellings, a batch shim on Windows and an extensionless script on Unix.
+The file name npm installs a bare `name` under: a batch shim on Windows, an extensionless script on
+Unix.
 
 ## `fn marker_shim(dir: &Path, file_name: &str, marker: &str) -> PathBuf {`
 
-A runnable shim that prints `marker` and its first argument.
-
-The **file name is the caller's**, so the extension is a field a test
-varies while the content is held constant, and the marker is the
-caller's so "a shim ran" and "*this* shim ran" are different
-observations.
-
-All three executable fixture builders, `marker_shim`, `transparency_shim`,
-and `forwarding_shim`, use `write_shim` to publish their scripts.
+A runnable shim that prints `marker` and its first argument. The file name is the caller's, so a
+test can vary the extension with the content fixed, and the marker is the caller's, so "a shim ran"
+and "this shim ran" are different observations. `marker_shim`, `transparency_shim` and
+`forwarding_shim` all publish their scripts through `write_shim`.
 
 ## `fn write_shim(path: &Path, script: &str) {`
 
-On Unix, a supervised `/bin/sh` child writes the script with `printf '%s'` and
-positional arguments. The harness never opens that inode for writing. A fork
-in another harness thread therefore cannot inherit its writer, which closes
-when the writer child exits. The 60-second supervision bound fails and cleans
-up a stuck writer. Windows retains the batch-file writer.
-
-This repairs `W2-HOST-TESTS-WRITE-THEN-EXEC-ETXTBSY` and the same writer pattern
-in the transparency and forwarding fixtures. The finding is recorded in
-`reviews/FINDINGS.md` §43. Closing the harness's original file descriptor, or
-renaming that inode, would leave an inherited writer alive. Moving the write
-into a separate process prevents that inheritance.
+On Unix a supervised `/bin/sh` child writes the script (`printf '%s'` with positional arguments), so
+the harness never opens the inode for writing and a fork in another harness thread cannot inherit a
+writer; the writer closes when that child exits, and the 60-second supervision bound fails and cleans
+up a stuck one. Closing the harness's own descriptor, or renaming the inode, would not do: an
+inherited copy would stay alive and the later exec would fail `ETXTBSY`. Windows writes the batch
+file directly. This repairs `W2-HOST-TESTS-WRITE-THEN-EXEC-ETXTBSY` (`reviews/FINDINGS.md` §43) for
+the marker, transparency and forwarding fixtures.
 
 ## `pub(crate) mod inherited_writer {`
 
-The Linux test `marker_shims_do_not_leave_writers_in_another_threads_fork`
-runs one isolated helper under a 180-second process-tree timeout. Its held
-forks cannot inherit descriptors from other tests in the outer harness.
+Linux only. `marker_shims_do_not_leave_writers_in_another_threads_fork` runs its helper in a process
+of its own under a 180-second process-tree timeout, so the helper's held forks cannot inherit
+descriptors from other tests in the outer harness.
 
-The regular-file control opens a writer, forks from another thread, closes
-the original descriptor, and requires `ETXTBSY` from executing that same inode.
-Execution succeeds after the forked holder exits.
+The regular-file control opens a writer, forks from another thread, closes the original descriptor,
+and requires `ETXTBSY` from executing that inode; execution succeeds once the forked holder exits.
 
-The ownership witness runs the actual `marker_shim` against a FIFO whose
-capacity is smaller than its script. `F_SETPIPE_SZ` rounds a request up to the
-page size and reports the capacity it installed, so the 4096-byte request
-installs 65536 on a 64 KiB-page kernel. `marker_exceeding` sizes the payload
-from that reported capacity, plus `MARKER_MARGIN`, rather than from the
-request. The margin is headroom over the capacity, not decoration: the oracle
-drains one byte before the fork, so the script has to exceed the pipe by more
-than the bytes drained for the writer to still be blocked when the fork
-happens. A payload fixed at 16 KiB instead both fails an exact-equality check
-on the return value and, without it, fits such a pipe whole: the writer would
-finish before the fork and the witness would observe nothing. That is
-`PR162-ASTRA-PAGE-SIZE`. `the_shim_script_exceeds_every_installed_pipe_capacity`
-holds the sizing for each page size Linux supports without needing one of those
-kernels to run on, and `shim_script` is the single spelling of the expected
-script that both it and the drain oracle read. Reading the first byte proves
-the writer is open; the undrained payload keeps it open while another thread
-forks.
-After draining exactly the expected script and joining the original writer,
-the reader must see EOF while the forked holder is still alive. An in-process
-writer leaves its descriptor in that holder and produces `WouldBlock` instead.
-The holder's lifetime is checked immediately before and after the EOF read.
-The path and marker include shell metacharacters to check literal transport.
+The ownership witness runs the real `marker_shim` against a FIFO whose capacity is smaller than the
+script. `F_SETPIPE_SZ` rounds a request up to the page size and returns the capacity installed (the
+4096-byte request installs 65536 on a 64 KiB-page kernel), so `marker_exceeding` sizes the payload
+from the returned capacity plus `MARKER_MARGIN`, not from the request. The margin is needed: the
+oracle drains one byte before the fork, so the script must exceed the pipe by more than that for the
+writer still to be blocked when the fork happens; a payload that fit would let the writer finish
+first and the witness observe nothing. `the_shim_script_exceeds_every_installed_pipe_capacity`
+checks the sizing for each page size Linux supports without needing such a kernel, and
+`shim_script` is the one spelling of the expected script that it and the oracle both read.
 
-Socket readiness and release establish the interleaving. Reads and writer
-supervision are bounded, the held child is reaped on return or unwinding, and
-the outer supervisor contains a wedged helper and its descendants. The
-adjacent source comments retain the fork safety proof and lifetime protocol.
-Linux CI executes the inheritance and `ETXTBSY` witness. The existing native
-Linux and macOS marker tests execute the Unix writer; Windows tests retain
-their existing batch-shim behavior.
+Reading the first byte proves the writer is open; the undrained rest keeps it blocked while another
+thread forks. After draining exactly the expected script and joining the writer, the reader must see
+EOF while the forked holder is still alive, checked immediately before and after the EOF read. An
+in-process writer would leave its descriptor in the holder and the read would give `WouldBlock`.
+The path and marker hold shell metacharacters to check literal transport.
+
+Socket readiness and release order the interleaving. Reads and writer supervision are bounded, the
+holder is reaped on return or unwinding (`HeldFork`'s drop), and the outer supervisor contains a
+wedged helper and its descendants. The fork safety argument and the lifetime protocol are under
+`HeldFork` and the `unsafe` headings below; the source comments at those sites carry only their
+first line. Linux CI executes this witness; the native Linux and macOS marker tests execute the Unix
+writer, and Windows keeps its batch-shim writer.
 
 ## `fn environment_on_path(dirs: &[&Path], pathext: Option<&str>) -> HostEnvironment {`
 
-This process's environment with `PATH` — and `PATHEXT` — replaced.
-
-The rest of the process environment is kept rather than emptied, because
-spawning a batch shim on Windows goes through `cmd.exe` and a child
-stripped to two variables would be testing something else. Only the two
-fields under test move.
+This process's environment with `PATH` and `PATHEXT` replaced. The rest is kept because a batch shim
+on Windows runs through `cmd.exe`, and a child stripped to two variables would test something else.
 
 ## `fn named_request(program: &str, argument: &str, workspace: &Path) -> RunnerRequest {`
 
@@ -2008,14 +1805,11 @@ A gate request for `program` with one argument.
 
 ## `const NAME_TABLE: &[(&str, bool, bool)] = &[`
 
-A program string, and whether each naming rule calls it a **name** (to
-search for) rather than a **location** (to use as given).
-
-Written here from the two platforms' own rules, not read from the code
-under test. The four rows the two rules disagree on are the point: on
-Unix a backslash and a colon are ordinary characters in a file name, and
-a rule that ignored its `self` would agree with itself on every row that
-only contains `/`.
+A program string, and whether each naming rule calls it a name (to search for) rather than a
+location (to use as given). Written from the two platforms' rules, not read from the code under
+test. The four rows the rules disagree on are the point: on Unix a backslash and a colon are
+ordinary file-name characters, and a rule that ignored its `self` would agree with itself on every
+row containing only `/`.
 
 ## `("claude", true, true),`
 
@@ -2023,70 +1817,46 @@ only contains `/`.
 
 ## `fn a_program_that_names_a_location_is_used_as_given_and_only_a_name_is_searched() {`
 
-A program that names a **location** is handed to `Command` as given, and
-only a bare name is searched for.
-
-This is the constraint the repair had to hold: "an absolute `program`
-must spawn exactly as today". It is asserted by construction rather than
-by a spawn — the environment carries no `PATH` at all, so a resolution
-that searched would have nothing to find and would refuse, and every
-location row instead comes back byte for byte.
-
-The second field held constant is the environment (empty, for every
-row); what varies is the program shape and the naming rule, and the four
-rows on which the two rules must **disagree** are counted so that a
-`is_bare_name` which ignored its platform reports it.
+A program that names a location is handed to `Command` as given, and only a bare name is searched
+for, so an absolute `program` spawns exactly as it would without resolution. Asserted by
+construction: the environment has no `PATH`, so a resolution that searched would refuse, and every
+location row instead comes back byte for byte. The environment is held constant; the program shape
+and naming rule vary, and the four rows on which the rules must disagree are counted, so an
+`is_bare_name` that ignored its platform is caught.
 
 ## `fn path_directory_order_decides_between_installations_and_pathext_only_within_one() {`
 
-`PATH` order decides between installations; `PATHEXT` order decides only
-**within** one directory.
+`PATH` order decides between installations; `PATHEXT` order decides only within one directory. A
+shell and `std::process::Command` answer this differently: std appends `.exe` only, so an earlier
+directory's `claude.cmd` is invisible to it and a later `claude.exe` wins, while a shell, and this
+runner, take the earlier directory. Both axes vary independently and the resolved files are counted
+as distinct values, so swapped loops collapse the count.
 
-The intersection this repair is most exposed to, and the one a shell and
-`std::process::Command` answer differently: std appends `.exe` and only
-`.exe`, so an earlier directory's `claude.cmd` is invisible to it and a
-later directory's `claude.exe` wins. A shell — and now this runner —
-takes the earlier directory. Both axes vary independently and the
-resolved files are counted as distinct values, so a nesting that swapped
-the loops collapses the count.
-
-Driven under [`ProgramNaming::Windows`] on **both** platforms, which is
-the whole reason that type exists: `PR6D-001` is a Windows rule, and a
-Windows rule only the Windows suite can execute — `test-windows-hosted`'s
-ten `windows-latest` legs, on every event — is a rule no Linux run
-tests. While only the guest could execute one, it shipped untested six
-days out of seven.
+Driven under `ProgramNaming::Windows` on both platforms, which is why that type exists: a Windows
+rule only the Windows suite could execute would be tested by no Linux run.
 
 ## `fn path_directory_order_decides_between_installations_and_pathext_only_within_one() {` › `assert_eq!(`
 
-`first/x.cmd`, `second/x.exe`, `both/x.com`, `both/x.cmd`,
-`both/x.exe` — one per way the two axes can decide, and a grid that
-reaches fewer has an axis that is not varying the answer.
+`first/x.cmd`, `second/x.exe`, `both/x.com`, `both/x.cmd`, `both/x.exe`: one per way the two axes
+can decide; fewer means an axis is not varying the answer.
 
 ## `fn a_windows_name_is_pathext_and_never_the_extensionless_file() {`
 
-What a Windows name may be is `PATHEXT`, and never the extensionless
-file beside it.
-
-Three things a resolution can get wrong here, each with its own row:
-widening (an extensionless `claude` in a `PATH` directory shadowing the
-real `claude.exe` — `CreateProcessW` appends `.exe` and `cmd.exe`
-appends `PATHEXT`, and neither would run it); not reading `PATHEXT` at
-all (a hard-coded list agrees with the default and diverges the moment
-an operator sets one); and treating an unusable `PATHEXT` as "this
-machine has no programs" rather than as a malformed variable.
-
-Every row holds the directory and the file set constant and varies only
-`PATHEXT` and the naming rule.
+A Windows name resolves through `PATHEXT`, never to the extensionless file beside it. Three errors,
+each with its own row: widening (an extensionless `claude` shadowing the real `claude.exe`, which
+neither `CreateProcessW`, appending `.exe`, nor `cmd.exe`, appending `PATHEXT`, would run); not
+reading `PATHEXT` (a hard-coded list matches the default and diverges once an operator sets one);
+and treating an unusable `PATHEXT` as "no programs" rather than as a malformed variable. The
+directory and file set are fixed; only `PATHEXT` and the naming rule vary.
 
 ## `fn a_windows_name_is_pathext_and_never_the_extensionless_file() {` › `for absent in [None, Some(""), Some(";;;"), Some("exe"), Some(".")] {`
 
-The default is the platform's, in the platform's order: `.COM` first.
+The default is the platform's, in its order: `.COM` first.
 
 ## `fn a_windows_name_is_pathext_and_never_the_extensionless_file() {` › `assert_eq!(`
 
-And it really is read, not assumed: a PATHEXT naming one extension
-nobody ships picks that file over the `.exe` sitting beside it.
+`PATHEXT` is read, not assumed: one naming an extension nobody ships picks that file over the `.exe`
+beside it.
 
 ## `fn a_windows_name_is_pathext_and_never_the_extensionless_file() {` › `assert!(`
 
@@ -2094,97 +1864,69 @@ The widening that must not happen: `x` exists and is never chosen.
 
 ## `fn a_windows_name_is_pathext_and_never_the_extensionless_file() {` › `for pathext in [None, Some(REAL_PATHEXT), Some(".FOO")] {`
 
-Unix has no extensions: the bare file is the only answer, and
-`PATHEXT` changes nothing.
+Unix has no extensions: the bare file is the only answer, and `PATHEXT` changes nothing.
 
 ## `fn a_windows_name_is_pathext_and_never_the_extensionless_file() {` › `let value = OsString::from(".FOO");`
 
-A name that carries an extension is tried verbatim first, under a
-PATHEXT that would otherwise send it elsewhere.
+A name carrying an extension is tried verbatim first, under a `PATHEXT` that would otherwise send it
+elsewhere.
 
 ## `fn a_windows_name_is_pathext_and_never_the_extensionless_file() {` › `let shadow = root.join("shadow");`
 
-And a directory is not a program, on either rule.
+A directory is not a program, under either rule.
 
 ## `fn a_candidate_without_the_execute_bit_is_skipped_the_way_execvp_skips_it() {`
 
-A candidate without the execute bit is skipped, the way `execvp` skips
-it.
-
-The regression this guards is silent and platform-specific: `execvp`
-walks past a non-executable file and finds the real installation further
-along `PATH`, so a resolution that stopped at the first *existing* file
-would refuse — or spawn `EACCES` — where the code it replaced ran. Two
-directories, same name, and the answer must be the second.
+`execvp` walks past a non-executable file to the real installation further along `PATH`, so a
+resolution that stopped at the first existing file would refuse, or spawn into `EACCES`, where
+`execvp` runs. Two directories, one name; the answer must be the second.
 
 ## `fn a_candidate_without_the_execute_bit_is_skipped_the_way_execvp_skips_it() {` › `assert_eq!(`
 
-Windows has no such bit, so the same file is a program there — the
-two rules must not be the same rule.
+Windows has no such bit, so the same file is a program there: the two rules differ.
 
 ## `fn a_name_that_matches_nothing_is_refused_and_an_empty_path_entry_is_never_searched() {`
 
-A name that matches nothing is refused, naming the name and the
-boundary — and an empty `PATH` entry is never searched.
-
-Fail-closed is the choice the repair round is held to: the alternative
-is handing the name to `Command` anyway and taking a `NotFound` that
-names no boundary, which on Windows is the failure an operator could not
-diagnose. The empty-entry rule is here because this is the site where it
-would actually execute: an empty `PATH` entry means "the current
-directory" to some shells, and this runner's current directory is the
-workspace — repository content, under automation.
+A name that matches nothing is refused, naming the name and the boundary, and an empty `PATH` entry
+is never searched. Fail-closed, because handing the name to `Command` anyway gives a `NotFound` that
+names no boundary, which on Windows an operator cannot diagnose. An empty `PATH` entry means "the
+current directory" to some shells, and this runner's current directory is the workspace:
+repository content, under automation.
 
 ## `fn a_name_that_matches_nothing_is_refused_and_an_empty_path_entry_is_never_searched() {` › `let mixed = path_of(&[Path::new(""), &dir]);`
 
-The empty entry is skipped rather than treated as "here", and a real
-directory beside it is still searched: the count is the observable.
+The empty entry is skipped, not treated as "here", and a real directory beside it is still searched;
+the count is the observable.
 
 ## `fn a_bare_name_that_only_pathext_resolves_runs_through_the_host_runner() {`
 
-**`PR6D-001`.** A bare name that only `PATHEXT` resolves is executed by
-the host runner — the npm-installed agent CLI, spawned the way
-production now spawns it.
+A bare name that only `PATHEXT` resolves, the npm-installed agent CLI, is executed by the host
+runner. `CreateProcessW` and Rust's `Command` append `.exe` and nothing else, so without the
+runner's resolution a `CommandSpec.program` of `claude` with `claude.cmd` on `PATH` fails with
+`NotFound` for every role. Fixtures that use an absolute `.cmd` path test a different property.
 
-`PATHEXT` lists `.CMD`; `CreateProcessW` appends `.exe` and nothing
-else, and neither does Rust's `Command`. So a `CommandSpec.program` of
-`claude` with `claude.cmd` on `PATH` failed with `NotFound` on every
-Windows host, for the probe, the worker, the gate, the review and the
-re-ask. The suite could not see it: every `.cmd` fixture in this crate
-used an **absolute** path, which is a different property, and the guest
-had none of the three CLIs installed.
-
-The platform fact is asserted **in this test**, not cited: the same
-bare name is handed to `std::process::Command` under the same composed
-environment first, and must fail with `NotFound`. Without that row the
-claim below would pass on a platform where the bug never existed. Two
-shims, two extensions, two markers and two arguments, counted as
-distinct values so a fixture that ran one shim twice reports it; what is
-held constant is the `PATH` directory, the runner and the composed
-environment.
+The platform fact is executed here, not cited: the same bare name goes to `std::process::Command`
+under the same composed environment first and must fail with `NotFound`, or the claim would pass
+where the problem does not exist. Two shims, extensions, markers and arguments, counted as distinct
+values so a fixture that ran one shim twice is caught; the `PATH` directory, the runner and the
+composed environment are fixed.
 
 ## `fn a_bare_name_that_only_pathext_resolves_runs_through_the_host_runner() {` › `let stem = format!("upstroke-d1-{}", crate::ulid::ulid());`
 
-Unique per run, so nothing on this machine's real PATH, in the
-application directory or in the system directories can satisfy it.
+Unique per run, so nothing on this machine's real `PATH`, application directory or system
+directories can satisfy it.
 
-Both arguments are **benign**, for `bin.rs`'s own reason: `%~1`
-strips the quotes the child received, so a `&` in the value would be
-re-parsed by `cmd.exe` as a command separator *inside the shim* and
-this case would be measuring batch re-parsing instead of resolution.
-Argument escaping through a batch target is
-`agent::bin::tests::arguments_reach_the_command_untouched`'s subject
-and is unaffected by which file a name resolved to. Measured on the
-guest: with `second & argument` the `.bat` shim exits 1 with
-"'argument' is not recognized", and the `.cmd` shim beside it — same
-resolution, benign argument — passes.
+Both arguments are benign, for `bin.rs`'s reason: `%~1` strips the child's quotes, so a `&` would be
+re-parsed by `cmd.exe` as a command separator inside the shim, and the case would measure batch
+re-parsing instead of resolution. Argument escaping through a batch target is
+`agent::bin::tests::arguments_reach_the_command_untouched`'s subject and does not depend on which
+file a name resolved to.
 
 ## `fn a_bare_name_that_only_pathext_resolves_runs_through_the_host_runner() {` › `let mut direct = Command::new(name);`
 
-The platform fact, executed. `std` searches the child PATH, the
-application directory, the system directories and the parent
-PATH, appending `.exe` to each — so a `.cmd`/`.bat` on PATH is
-invisible to it, and this is `PR6D-001` itself.
+The platform fact, executed. `std` searches the child `PATH`, the application directory, the system
+directories and the parent `PATH`, appending `.exe` to each, so a `.cmd`/`.bat` on `PATH` is
+invisible to it.
 
 ## `fn a_bare_name_that_only_pathext_resolves_runs_through_the_host_runner() {` › `let output = runner`
 
@@ -2192,37 +1934,23 @@ The claim: the same name, through the runner.
 
 ## `fn two_runners_in_one_process_resolve_one_name_against_their_own_environments() {`
 
-Two runners in one process resolve one name against **their own**
-environments.
-
-The hazard the container runner introduces and this repair must not
-reintroduce: a resolution remembered anywhere — a `OnceLock`, a field, a
-process-wide cache — hands the first boundary's answer to the second,
-and a value that is correct on first use and wrong on the second is
-invisible to any test that constructs one runner.
-`agent::adapter::built_program_tests` holds that for the adapters; this holds it
-for the boundary, with real spawns.
-
-Both orders, because "the first caller wins" is a property of order, and
-the markers are counted as distinct values.
+Two runners in one process resolve one name against their own environments. A resolution remembered
+anywhere process-wide (a `OnceLock`, a static cache) would hand the first boundary's answer to the
+second, which no single-runner test can see. `agent::adapter::built_program_tests` holds this for the
+adapters; this holds it for the boundary, with real spawns, in both orders (first-caller-wins is a
+property of order), with the markers counted as distinct values.
 
 ## `fn an_absolute_program_is_spawned_as_given_even_when_path_holds_that_name() {`
 
-An absolute program is spawned as given, even when a `PATH` directory
-holds a different file of the same name.
-
-"An absolute `program` must spawn exactly as today" is the constraint
-this repair was given, and a resolution that re-resolved one would be
-invisible to every existing fixture: they all put the *only* copy of the
-program at that path. Here there are two copies, so "used as given" and
-"searched for" produce different output. The space in the directory name
-is `bin.rs`'s own production shape, `C:\Users\John Smith\npm\`.
+An absolute program is spawned as given even when a `PATH` directory holds a different file of the
+same name. Fixtures that put the only copy at that path cannot see a re-resolution; here two copies
+make "used as given" and "searched for" produce different output. The space in the directory name
+is `bin.rs`'s production shape, `C:\Users\John Smith\npm\`.
 
 ## `fn an_absolute_program_is_spawned_as_given_even_when_path_holds_that_name() {` › `let by_name = runner`
 
-The control: the same runner, the same name without its directory,
-reaches the other file — so the two really are distinguishable and
-the row above is not passing by coincidence.
+The control: the same runner and the bare name reach the other file, so the two are
+distinguishable and the row above is not passing by coincidence.
 
 ## `struct ResolutionWitness {`
 
@@ -2234,238 +1962,158 @@ Everything one spawn's containment observers can see about resolution.
 
 ## `fn a_program_is_resolved_once_per_spawn_before_any_of_it_and_never_before_compose_refuses() {`
 
-One program name is resolved **once per spawn**, **before** any of the
-spawn, and **not at all** when the request is refused earlier.
+A program name is resolved once per spawn, before any of the spawn, and not at all when the request
+is refused earlier. These are independently droppable predicates that "the right file ran" does not
+hold. The observable is `program_resolutions` read at every containment point between
+`CreateProcess`/`fork` and the running child: a second resolution shows a second increment, a lazy
+one shows the baseline at the first point, and one before `compose` shows an increment on the
+request `compose` refuses.
 
-Ordering is a set of independently droppable predicates and a suite that
-proves only "the right file ran" holds none of them. The observable is
-the sequence: [`program_resolutions`] read at every containment point,
-which are the coordinates the funnel passes through between
-`CreateProcess`/`fork` and the running child. A resolution that happened
-twice shows a second increment; one that happened lazily at spawn time
-shows a count that is still at the baseline when the first point fires;
-one that happened before `compose` shows an increment on the request
-`compose` refuses.
-
-Both program shapes, because "once" must hold on both branches of the
-resolution — a bare name that is searched for, and an absolute path that
-is not — and the bare name is a `PATHEXT`-resolved batch shim, which is
-the intersection {a name to resolve} x {a file `CreateProcessW` reaches
-only through an interpreter} that no fixture in this crate had.
+Both program shapes, because "once" must hold on both branches: a bare name that is searched, and an
+absolute path that is not. The bare name is a `PATHEXT`-resolved batch shim, a name to resolve that
+`CreateProcessW` reaches only through an interpreter.
 
 ## `fn a_program_is_resolved_once_per_spawn_before_any_of_it_and_never_before_compose_refuses() {` › `let witness = ResolutionWitness::new();`
 
-A request the environment refuses is refused **before** anything is
-resolved: `compose` runs first, so a reserved-key overlay never
-reaches the filesystem and never reaches a containment point.
+A request the environment refuses is refused before anything is resolved: `compose` runs first, so a
+reserved-key overlay reaches neither the filesystem nor a containment point.
 
 ## `fn a_program_is_resolved_once_per_spawn_before_any_of_it_and_never_before_compose_refuses() {` › `let witness = ResolutionWitness::new();`
 
-And a name that resolves to nothing is refused **after** resolution
-and **before** any of the spawn: the count moves, the points do not.
+A name that resolves to nothing is refused after resolution and before any of the spawn: the count
+moves, the points do not.
 
 ## `fn every_bare_program_this_crate_ships_goes_through_one_resolution_rule() {`
 
-Every bare program this crate ships goes through **one** resolution
-rule.
-
-Two rules is how `PR6D-001` happened: the shells' bare names worked
-because a shell is an `.exe`, so nothing noticed that the agent CLIs'
-bare names — the same shape, one field over — did not. The names are
-written here rather than read from `ShellKind::program` and the adapter
-constants, and the exhaustive `match` below ties the written table to the
-enum so a sixth shell fails to compile rather than silently leaving the
-grid.
-
-What is held constant is the directory, the shim content and the naming
-rule; what varies is the name, and the resolved files are counted so a
-rule that special-cased one name collapses the count.
+Every bare program this crate ships goes through one resolution rule. With two rules, the shells'
+bare names work because a shell is an `.exe` while the agent CLIs' bare names, the same shape, fail.
+The names are written here rather than read from `ShellKind::program` and the adapter constants, and
+the exhaustive `match` ties the table to the enum, so a new shell fails to compile rather than
+leaving the grid. The directory, shim content and naming rule are fixed; the name varies, and the
+resolved files are counted, so a rule that special-cased one name collapses the count.
 
 ## `fn every_bare_program_this_crate_ships_goes_through_one_resolution_rule() {` › `const NAMES: [&str; 8] = [`
 
-The five shells `gates::ShellKind::spec` can put in a spec, and the
-three agent CLIs `bin::Invocation::named` can.
+The five shells `gates::ShellKind::spec` can put in a spec, and the three agent CLIs
+`bin::Invocation::named` can.
 
 ## `fn a_resolved_cmd_keeps_the_raw_tail_rule() {`
 
-Resolving `cmd` does not change `cmd.exe`'s raw-tail rule.
+Resolving `cmd` does not change `cmd.exe`'s raw-tail rule. `build_command`'s one Windows rule is
+keyed on the program, and the runner hands it the resolved program, an absolute path where the spec
+carried a bare name. `gates::ShellKind::command` says why the tail must reach the child un-re-quoted;
+a gate whose command line changed meaning with resolution would break that.
 
-`build_command`'s one Windows rule is keyed on the program, and the
-program the runner hands it is now the **resolved** one — an absolute
-path where the spec carried a bare name. A gate whose command line
-changed meaning depending on whether its shell had been resolved is not
-"adapter parsing unchanged"; `gates::ShellKind::command` says why the
-tail must reach the child un-re-quoted, and this is the half of that
-rule which the repair could have broken.
+This has to spawn: `Command::get_args` yields the same sequence for `arg` and `raw_arg`, so the
+built `Command` cannot tell them apart. Only the child's output can: std escapes an embedded quote
+as `\"`, which `cmd.exe` does not un-escape, so a re-quoted tail echoes `\"quoted`.
 
-**This has to spawn.** `Command::get_args` yields the same sequence for
-`arg` and for `raw_arg`, so an assertion over the built `Command` cannot
-tell the two apart — measured: the first version of this test was green
-under the mutation it was written for. What distinguishes them is the
-command line `CreateProcessW` receives, and the only oracle for that is
-the child's own output: std escapes an embedded quote as `\"`, which
-`cmd.exe` does not un-escape, so a re-quoted tail echoes `\"quoted`.
-
-The resolved path is the one **this runner** resolves, not a transcribed
-`C:\Windows\System32\cmd.exe`, so the case holds on a machine whose
-shell lives elsewhere; that it differs from `cmd` is asserted first, or
-the two spellings would be one.
+The resolved path is the one this runner resolves, not a transcribed `C:\Windows\System32\cmd.exe`,
+so the case holds wherever the shell lives; that it differs from `cmd` is asserted first.
 
 ## `fn a_resolved_cmd_keeps_the_raw_tail_rule()` › `let mut stdouts = BTreeSet::new();`
 
-Both spellings, spawned. The quotes must arrive as the operator wrote
-them, from the resolved path exactly as from the bare name.
+Both spellings, spawned: the quotes arrive as written, from the resolved path as from the bare name.
 
 ## `fn a_resolved_cmd_keeps_the_raw_tail_rule()` › `let workspace = scratch("raw-tail");`
 
-And through the production route, where the bare name is what the
-gate ships and the runner does the resolving.
+And through the production route, where the gate ships the bare name and the runner resolves it.
 
 ## `fn a_resolved_cmd_keeps_the_raw_tail_rule()` › `let shim = build_command_at(&spec, Path::new(r"C:\npm\claude.cmd"));`
 
-The control: a program that is not `cmd` does not get the rule at
-all, so the rows above are not true of everything. An npm shim named
-`claude.cmd` has the file stem `claude`, and a rule keyed on the
-extension rather than the stem would hand it a raw tail.
+The control: a program that is not `cmd` does not get the rule. An npm shim `claude.cmd` has the
+stem `claude`, so a rule keyed on the extension rather than the stem would give it a raw tail.
 
 ## `fn role_request_for(`
 
 -----------------------------------------------------------------------
-PR6-LANED-001: one boundary, one executable
+one boundary, one executable
 -----------------------------------------------------------------------
 
 ## `fn role_request_for(`
 
-The request **production** sends for `role`, carrying **this** program.
-
-[`production_request`] fixes the program per role because there the role
-is the subject; here the program is the subject and the role is what
-varies, so each role's own production builder is handed the same spec.
-`Probe(Shell)` returns `None` because its program is not a caller's to
-choose — [`shell_probe_request`] writes the recorded shell — and the
-`match` is exhaustive, so a role added later has to be classified here
-rather than silently leaving the grid.
+The request production sends for `role`, carrying this program. `production_request` fixes the
+program per role because there the role is the subject; here the program is, so each role's own
+production builder gets the same spec. `Probe(Shell)` returns `None` because its program is the
+recorded shell (`shell_probe_request`), and the `match` is exhaustive, so a new role must be
+classified here rather than silently leaving the grid.
 
 ## `fn one_boundary_executes_one_file_for_a_name_across_a_probe_and_the_attempt() {`
 
-**`PR6-LANED-001`.** One boundary executes **one** file for a name, even
-when the filesystem moves between pre-flight and the attempt.
+One boundary executes one file for a name, even when the filesystem moves between pre-flight and the
+attempt. The runner design commitments in `design/21_design_versioned_scope.md` route probes through
+the same runner so that pre-flight cannot certify a host CLI different from the one the attempt
+executes. Routing is necessary, not sufficient: with `PATH=first:second` and the name in both, the
+probe certifies `first/<name>`, `first/<name>` is removed, and a runner that searched per spawn would
+hand the attempt `second/<name>` under an unchanged `CommandSpec.program`. Comparing program strings
+cannot see that.
 
-DESIGN.md:612 — "Probes run through that same runner, **or pre-flight
-could certify a host CLI/version different from the one the attempt
-executes**". Routing the probe through the runner is necessary and is
-not sufficient, and this is the fixture that says so: `PATH=first:second`
-with the same name in both directories, the probe certifies
-`first/<name>`, `first/<name>` is then removed, and a runner that
-re-searched per spawn hands the attempt `second/<name>` — a different
-executable under an unchanged `CommandSpec.program`. A test asserting
-that the two *program strings* agree passes throughout, which is why the
-claim it supported was wrong.
+The control is the oracle: a fresh runner over the same environment, after the removal, reaches
+`second/<name>`, so the files are distinguishable, the removal changes the answer, and the memoised
+runner's refusal is the memo. One `HostEnvironment` serves every row; the role (`Probe(Agent)` then
+`Implement`) and the filesystem between them vary.
 
-**The control is the oracle**: a *fresh* runner over the same
-environment, after the removal, does reach `second/<name>` — so the two
-files are genuinely distinguishable, the removal genuinely changes the
-answer, and the memoised runner's refusal is the memo rather than a
-fixture that could not tell them apart.
-
-The second field held constant is the environment — one `HostEnvironment`
-for every row, composed the same way — and what varies is the role
-(`Probe(Agent)` then `Implement`, which is the pair the passage names)
-and the state of the filesystem between them.
-
-**Fail-closed on purpose.** The attempt does not get `second/<name>`; it
-gets a spawn failure naming the file pre-flight certified. An operator
-reading it learns that the CLI moved under a running run, which is true,
-instead of a `Caps.version` that quietly stopped describing anything.
+Fail-closed on purpose: the attempt gets a failure naming the file pre-flight certified, which tells
+the operator the CLI moved under a running run, rather than a `Caps.version` that silently stopped
+describing anything.
 
 ## `fn one_boundary_executes_one_file_for_a_name_across_a_probe_and_the_attempt() {` › `std::fs::remove_file(&first).expect("remove the certified installation");`
 
-The CLI moves under the run: the file pre-flight executed is gone,
-and the other one — same name, same PATH, different executable — is
-still there.
+The CLI moves under the run: the file pre-flight executed is gone, and the other one (same name,
+same `PATH`, different executable) is still there.
 
 ## `fn one_boundary_executes_one_file_for_a_name_across_a_probe_and_the_attempt() {` › `let fresh = HostRunner::new().with_environment(environment());`
 
-The oracle. A boundary that had not decided yet reaches `second`, so
-"resolve per spawn" really does change the answer here.
+The oracle: a boundary that has not decided yet reaches `second`, so per-spawn resolution would
+change the answer.
 
 ## `fn one_boundary_executes_one_file_for_a_name_across_a_probe_and_the_attempt() {` › `let outcome = runner.run_blocking(&attempt);`
 
-The claim. The runner that certified `first` does not silently run
-`second`.
-
-*What* the failure looks like is the platform's, and the two differ:
-on Unix the spawn of a vanished file is `ENOENT` and the runner
-returns an error naming it, while on Windows `std` runs a `.cmd`
-through `cmd.exe`, so the spawn succeeds and the interpreter exits
-non-zero. The claim is neither of those spellings — it is that the
-attempt did not run the *other* installation and did not report
-success — so it is asserted over everything the boundary handed back,
-whichever shape it came in.
-
-The text is the child's own, not a `{:?}` of it: a debug rendering
-escapes every backslash, and a Windows path searched for inside one
-would never be found however right the runner was.
+The claim: the runner that certified `first` does not run `second`. The failure's shape is the
+platform's: on Unix spawning the vanished file is `ENOENT` and the runner returns an error naming it;
+on Windows `std` runs a `.cmd` through `cmd.exe`, so the spawn succeeds and the interpreter exits
+non-zero. The claim is that the attempt neither ran the other installation nor reported success, so
+it is asserted over whatever the boundary returned. The text read is the child's own, not a `{:?}`
+rendering, which would escape every backslash and hide a Windows path.
 
 ## `fn one_name_is_searched_once_for_a_boundary_and_asked_for_once_per_spawn() {`
 
-One name is **searched once** for a whole run, and asked for once per
-spawn.
+One name is searched once per boundary and asked for once per spawn. The two predicates drop
+independently, so there are two counters: `program_resolutions` moves once per spawn
+(`a_program_is_resolved_once_per_spawn_…` holds that and its position) and `program_searches` once
+per boundary. A memo that never hits satisfies the first and breaks the pre-flight/attempt
+agreement; this is the fixture for the second.
 
-The identity predicate and the ordering predicate are independently
-droppable, so they have two counters: [`program_resolutions`] moves once
-per spawn (D1's `a_program_is_resolved_once_per_spawn_…` holds that and
-its position in the spawn) and [`program_searches`] moves once per
-boundary. A memo that never hits satisfies the first and reopens
-DESIGN.md:612; this is the fixture for the second.
+Across roles on purpose: `host-v1` supplies credential locations by role (`supplies_credentials`),
+so a probe's composed environment and a gate's differ, asserted first as a distinct-value count. A
+memo keyed on the composed environment would miss on exactly the pre-flight/attempt pair that must
+agree; the key is the fields that decide the answer, not the environment.
 
-**Across roles, and that is the point.** `host-v1` supplies credential
-locations *role-scoped* ([`supplies_credentials`]), so a probe's
-composed environment and a gate's differ — asserted here as a
-distinct-value count before anything else, because a memo keyed on the
-composed environment would miss on exactly the pre-flight/attempt pair
-:612 requires to agree, and this test would then be reporting that four
-spawns searched four times for a good reason. The key is the three
-fields that decide the answer, not the environment.
-
-`Probe(Shell)` is the one role absent: its program is the recorded
-shell, not a caller's choice. [`role_request_for`] is exhaustive over
-[`ExecutionRole`], so it is absent by classification rather than by
-omission.
+`Probe(Shell)` is absent because its program is the recorded shell; `role_request_for` is exhaustive
+over `ExecutionRole`, so it is absent by classification.
 
 ## `fn one_name_is_searched_once_for_a_boundary_and_asked_for_once_per_spawn() {` › `let on_path = environment_on_path(&[&bin], Some(REAL_PATHEXT));`
 
-`host-v1` supplies a credential location only when the *base* carries
-it, so the base has to carry one for the roles to differ at all —
-this machine's own environment has no `CLAUDE_CONFIG_DIR` and every
-role would otherwise compose the same thing.
+`host-v1` supplies a credential location only when the base carries it, so the base must carry one
+for the roles to differ; without it every role would compose the same environment.
 
 ## `fn one_name_is_searched_once_for_a_boundary_and_asked_for_once_per_spawn() {` › `let composed: BTreeSet<Vec<(OsString, OsString)>> = requests`
 
-The premise: these roles really do compose different environments, so
-"one answer for all of them" is a claim and not a tautology.
+The premise: these roles compose different environments, so one answer for all of them is a claim,
+not a tautology.
 
 ## `fn a_resolution_question_is_the_program_and_the_environment_that_answers_it() {`
 
-What the memo is keyed on: the program **and** the environment that
-answers for it.
+The memo is keyed on the program and the environment that answers for it. A memo keyed on the name
+alone would certify the wrong executable, and no fixture above could see it, because in production
+`PATH` is reserved and constant for a run. So this asks one boundary the same name under two
+environments and requires two answers.
 
-The hazard the repair introduces. A memo keyed on the program name alone
-is a new way to certify the wrong executable — the same defect one layer
-in — and it is invisible to every fixture above, because in production
-`PATH` is reserved and constant for a run. So this asks the boundary the
-same name under two environments and requires two answers.
-
-`program_for` directly rather than through `run`, because the only
-composed value a caller can vary within one runner *through* `run` is
-`PATHEXT` (an overlay may not name `PATH`, which is reserved), and
-`PATHEXT` decides nothing on Unix. Both fields of the key are then
-exercised on both platforms, which is the property D1's `ProgramNaming`
-exists to preserve.
-
-Held constant: the runner, the name, and the naming rule. Varied: the
-composed `PATH`, and — on Windows, where it decides anything — the
-composed `PATHEXT`. The resolved files are counted as distinct values.
+It calls `program_for` directly because through `run` the only composed value a caller can vary is
+`PATHEXT` (an overlay may not name the reserved `PATH`), and `PATHEXT` decides nothing on Unix;
+calling it directly exercises both fields of the key on both platforms. The runner, name and naming
+rule are fixed; the composed `PATH`, and on Windows `PATHEXT`, vary, and the resolved files are
+counted as distinct values.
 
 ## `fn a_resolution_question_is_the_program_and_the_environment_that_answers_it() {` › `{`
 
@@ -2473,23 +2121,13 @@ The other field of the key, where it decides anything.
 
 ## `fn a_refused_name_is_refused_identically_without_asking_the_filesystem_again() {`
 
-A name this boundary refused stays refused, in the same words, without
-asking the filesystem again.
+A name this boundary refused stays refused, in the same words, without asking the filesystem again.
+Without this, a run whose pre-flight could not find `claude` would find one at a later attempt
+because something installed it meanwhile: pre-flight certifying an absence the attempt ignores.
 
-The failure branch of the memo, and the one where fail-open would be
-easy: not remembering a refusal means a run whose pre-flight could not
-find `claude` silently finds one at the third attempt because something
-installed it meanwhile — pre-flight certifying an absence the attempt
-does not honour, which is DESIGN.md:612 with the polarity flipped.
-
-**The control is the oracle.** After the CLI appears, a *fresh* boundary
-does run it. So the second refusal is the memo holding, not a fixture in
-which nothing changed.
-
-The replayed error is required to be the first one **byte for byte**,
-which is what makes storing the refusal as its message safe:
-[`UpstrokeError::Refused`] displays as exactly its message, and if that
-ever stops being true this row says so.
+The control is the oracle: after the CLI appears, a fresh boundary runs it, so the second refusal is
+the memo holding. The replayed error must equal the first byte for byte, which is what makes storing
+the refusal as its message safe: `UpstrokeError::Refused` displays as exactly its message.
 
 ## `fn a_refused_name_is_refused_identically_without_asking_the_filesystem_again() {` › `marker_shim(&bin, &shim_file_name(&name), "LATE");`
 
@@ -2497,324 +2135,204 @@ The CLI appears under the run.
 
 ## `fn a_refused_name_is_refused_identically_without_asking_the_filesystem_again() {` › `let fresh = HostRunner::new().with_environment(environment());`
 
-The oracle: it really is installed now.
+The oracle: it is installed now.
 
 ## `fn production_reaches_a_spawn_through_one_host_runner_per_run() {`
 
-Production reaches every spawn of a run through **one** `HostRunner`.
+Production reaches every spawn of a run through one `HostRunner`. The memo is per boundary, so the
+probe and the attempts agree only while they share a runner, and nothing in the types enforces it:
+`run_harness_on` takes `&dyn Runner`, and an engine that built one per attempt would keep the suite
+green and break the agreement. Structural rather than behavioural, for
+`the_adapters_hold_no_process_wide_resolution_state`'s reason: per-attempt and per-run runners
+differ only in how often the filesystem is asked, which only a whole engine run against a moving
+filesystem could observe.
 
-The memo is per boundary, so "the probe and the attempts agree" is only
-true while the probe and the attempts share a runner. Nothing in the
-type system says so: `run_harness_on` takes `&dyn Runner`, and an engine
-that constructed one per attempt would leave the memo correct, the suite
-green, and DESIGN.md:612 reopened. This is the census that fails first.
+The expectation is written out, not counted from the tree (a count read from the tree grows with
+it): three construction sites, `run_harness` in `src/engine/coordinator.rs`, `resume_harness` in
+`src/engine/resume.rs`, and the schema-4 run's in `src/engine/topology/entry.rs`, and none in the
+engine's other files. The facade's entry points live in the conductor modules and the facade
+re-exports them, so the facade constructs nothing (`PR306-FACADE-INLINE-ESCAPE`).
 
-Structural rather than behavioural, for
-`the_adapters_hold_no_process_wide_resolution_state`'s reason: a runner
-constructed per attempt is indistinguishable from one constructed per run
-in every observation except how many times the filesystem was asked, and
-that observation belongs to a fixture that would have to drive a whole
-engine run against a moving filesystem.
-
-The expectation is written out — two construction sites, `run_harness` in
-`src/engine/coordinator.rs` and `resume_harness` in `src/engine/resume.rs` —
-rather than counted from the tree, because a count read from the tree grows
-with it. Until 2026-09-20 both were in `src/engine/mod.rs`: the facade's entry
-points moved into the conductor modules they drive so that the facade calls
-nothing denied and carries no allow (`PR306-FACADE-INLINE-ESCAPE`), the facade
-re-exports them, and the two constructions moved with them, one per file. The
-census still counts two in the engine and none anywhere else.
-
-`CONSTRUCTORS` is why the census survived `HostRunner::for_legacy_workspace`
-(PR #271): a second constructor is a second spelling of the same thing this
-counts, and one that the census did not know would have read as *no* runner
-in the file that constructs it rather than as a second one. Both spellings are
-counted and both appear in the control.
+Both constructor spellings in `CONSTRUCTORS`, `HostRunner::new` and
+`HostRunner::for_legacy_workspace`, are counted and both appear in the control; a spelling the
+census did not know would read as no runner rather than a second one.
 
 ## `fn production_reaches_a_spawn_through_one_host_runner_per_run() {` › `const SITES: [(&str, usize); 6] = [`
 
-Where a `HostRunner` is constructed in the engine's production code,
-and how many times in each file.
+Where a `HostRunner` is constructed in the engine's production code, and how many times in each
+file.
 
 ## `fn production_reaches_a_spawn_through_one_host_runner_per_run() {` › `assert_eq!(`
 
-The injected control contains comments, literals, a typed test function and one later production construction per constructor spelling. It must add exactly `CONSTRUCTORS.len()` counts alone and when appended to each of the six source files.
+The control holds comments, literals, a test-only function and one later production construction
+per constructor spelling. It must add exactly `CONSTRUCTORS.len()` to the count alone and when
+appended to each of the seven source files.
 
 ## `fn production_reaches_a_spawn_through_one_host_runner_per_run() {` › `let conductors = [`
 
-And the two are the run and the resume entry point the facade re-exports,
-each read from the conductor module that defines it, and each of which then
-borrows that one runner for pre-flight and every attempt.
+`run_harness` and `resume_harness`, each read from the conductor module that defines it, construct
+their runner in their own body, which then serves pre-flight and every attempt. The body runs to the
+first column-0 `}` after line endings are normalised to LF, so a CRLF checkout cuts at the same
+place.
 
 ## `fn an_npm_style_installation_runs_by_bare_name_exactly_as_it_runs_by_path() {`
 
-**`PR6-LANED-002` / refuted claim 3.** An **npm-style** installation of
-each of the three agent CLIs runs by bare name exactly as it runs by
-path.
+An npm-style installation of each of the three agent CLIs runs by bare name exactly as by path.
+`agent::adapter::built_program_tests::the_host_runner_executes_a_bare_program_name_as_it_executes_the_resolved_path`
+claims this equivalence with `git`, a native `.exe` that `CreateProcessW` reaches from a bare name
+whether or not this runner resolves anything. `npm install -g` writes `claude.cmd`, `codex.cmd` and
+`copilot.cmd`, reachable only through `PATHEXT`, so a fixture without that shape cannot fail.
 
-The equivalence `agent::adapter::built_program_tests::the_host_runner_executes_a_
-bare_program_name_as_it_executes_the_resolved_path` claims, over the
-installation shape that one cannot express. That row uses `git` — a
-native `.exe`, which `CreateProcessW` reaches from a bare name whether or
-not this runner resolves anything — so it was green on Windows while
-`PR6D-001` was live. The three agent CLIs are not installed that way:
-`npm install -g` writes `claude.cmd`, `codex.cmd`, `copilot.cmd`, and a
-`.cmd` is reachable only through `PATHEXT`. A fixture that cannot hold
-the failing installation is a correlated fixture, whatever it asserts.
+All three names, each with its own marker, counted, so a rule that special-cased one name collapses
+the count. The installation is `<name>.cmd` on Windows and an extensionless script on Unix, with no
+`.exe` beside it, on a `PATH` this test wrote. The bare name and the absolute path of the file it
+must resolve to both go through `HostRunner::run` and must produce the same output; the two program
+strings are asserted to differ first.
 
-**All three names, because the behaviour that was dropped was not one
-adapter's.** `PR6D-CODEX-STORE-ALIAS-WALK-DROPPED` records the deletion
-as codex's Windows-Store-alias walk; the same deletion took `.cmd`/`.bat`
-selection and `PATHEXT` away from `claude` and `copilot`, where a plain
-npm install fails with no Store alias and no competing `PATH` entry in
-sight. So the grid is the three names, each with its own marker, and the
-markers are counted — a rule that special-cased one name collapses the
-count.
-
-The installation is `<name>.cmd` on Windows and an extensionless script
-on Unix, with **no `.exe` beside it**, on a `PATH` this test wrote so
-that nothing installed on the machine can satisfy it. Both spellings —
-the bare name, and the absolute path of the file it must resolve to — go
-through the production route, `HostRunner::run`, and must produce the
-same output; the two program strings are asserted to differ first, or
-this would compare a thing with itself.
-
-It runs on **both** platforms. On Unix the property holds because
-`execvp` would have satisfied it anyway, which is precisely why the
-Windows arm needs a fixture that can fail rather than a `#[cfg(windows)]`
-afterthought; D1's `a_bare_name_that_only_pathext_resolves_…` holds the
-`NotFound` platform fact on `test-windows-hosted`'s ten `windows-latest`
-legs, and this holds the equivalence everywhere.
-
-What varies: the CLI name and the spelling of the program. Held constant:
-the runner, the environment, the argument and the files on disk — so a
-difference in output can only be a difference in which file ran.
+It runs on both platforms. On Unix `execvp` would satisfy it anyway, which is why the Windows arm
+needs a fixture that can fail; `a_bare_name_that_only_pathext_resolves_…` holds the `NotFound`
+platform fact on Windows, and this holds the equivalence everywhere. The CLI name and the program's
+spelling vary; the runner, environment, argument and files are fixed, so a difference in output can
+only be which file ran.
 
 ## `fn an_npm_style_installation_runs_by_bare_name_exactly_as_it_runs_by_path() {` › `const CLIS: [&str; 3] = ["claude", "codex", "copilot"];`
 
-The three names `bin::Invocation::named` ships, written here rather
-than read from the adapters' private `CLI` constants;
-`agent::adapter::built_program_tests::an_adapters_program_is_the_boundarys_…`
-is what ties each adapter to its own name.
+The three names `bin::Invocation::named` ships, written here rather than read from the adapters'
+private `CLI` constants; `agent::adapter::built_program_tests::an_adapters_program_is_the_boundarys_…`
+ties each adapter to its name.
 
 ## `fn an_npm_style_installation_runs_by_bare_name_exactly_as_it_runs_by_path() {` › `let mut contents: Vec<String> = std::fs::read_dir(&bin)`
 
-The installation really is the failing shape: one file per CLI, and
-on Windows not one of them is an `.exe`.
+The installation is the failing shape: one file per CLI, and on Windows none is an `.exe`.
 
 ## `const PATH_ENTRY_TABLE: &[(&str, bool, bool)] = &[`
 
 -----------------------------------------------------------------------
-PR6-LANED-003: the workspace is not a PATH directory
+the workspace is not a PATH directory
 -----------------------------------------------------------------------
 
 ## `const PATH_ENTRY_TABLE: &[(&str, bool, bool)] = &[`
 
-A `PATH` entry, and whether each platform calls it a location on its
-own.
-
-Written from the two platforms' rules rather than read from
-`Path::is_absolute`, and then checked against it for the platform this
-is running on — the Windows column on `test-windows-hosted`'s ten
-`windows-latest` legs, the Unix column here.
-Every entry is free of both `PATH` separators, so one entry stays one
-entry under `std::env::split_paths` on either platform. None holds a
-`"` either, so `path_of` hands each back exactly as written.
+A `PATH` entry, and whether each platform calls it a location on its own. Written from the
+platforms' rules, then checked against `Path::is_absolute` for the platform running the test. No
+entry holds either `PATH` separator, so each stays one entry under `std::env::split_paths`, and none
+holds a `"`, so `path_of` returns each as written.
 
 ## `("", false, false),`
 
 (entry, is a location under Unix, is a location under Windows)
 
-The empty entry: `PR6-LANED-003` itself. POSIX gives a null prefix
-the meaning "the current directory".
+The empty entry: POSIX gives a null prefix the meaning "the current directory".
 
 ## `("/usr/local/bin", true, false),`
 
-Rooted on Unix; on Windows a leading separator is relative to the
-*current drive*, so it is still a current-directory question.
+Rooted on Unix; on Windows a leading separator is relative to the current drive, so it is still a
+current-directory question.
 
 ## `(r"\\server\share\bin", false, true),`
 
-A UNC share names a location on Windows and is an ordinary file name
-on Unix.
-
-Which share it would name is never asked: the test's program name
-carries an interior NUL, so the first candidate under this entry is
-refused before any request leaves the process, and no answer from an
-SMB stack — "no such share", `os error 64` or none at all — can reach
-the verdict (`PR262-UNREACHABLE-PATH-ENTRY-ABORTS-PROGRAM-RESOLUTION`,
-below).
+A UNC share names a location on Windows and is an ordinary file name on Unix. Which share it names
+is never asked: the test's program name carries an interior NUL, so the first candidate under this
+entry is refused before any request leaves the process, and no SMB answer ("no such share",
+`os error 64`, or none) can reach the verdict.
 
 ## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {`
 
-Every `PATH` entry this runner searches names a location on its own.
+Every `PATH` entry this runner searches names a location on its own. A non-absolute entry resolves
+against a current directory, and this boundary has two: the coordinator's, which
+`ProgramNaming::is_program` inspects, and the workspace, where the child runs. Such an entry would
+let the runner certify one file and execute another, and the one executed is repository content
+under automation.
 
-**`PR6-LANED-003`**, as a rule rather than as one vector. A `PATH` entry
-that is not absolute is resolved against *a* current directory, and this
-boundary has two of them: the coordinator's, which is what
-`ProgramNaming::is_program` inspects, and the workspace, which is what
-the child actually runs in. So such an entry does not merely widen the
-search — it lets the runner certify one file and execute another, and
-the file it executes is repository content under automation
-(DESIGN.md:398-402).
+The written table is checked against `Path::is_absolute` first, so the row is a claim about
+`resolve_program`, not `std`. The entry varies; the program name, candidates and composed
+environment are fixed.
 
-The written table is checked against `Path::is_absolute` first, so the
-row below is a claim about `resolve_program` and not about `std`. What
-varies is the entry; what is held constant is the program name, the
-candidates and the composed environment.
-
-The table answers one question: **which entries are searched**. It is
-kept apart from the other one, **what a searched entry's candidates
-answer**, because the two were once fused. Each absolute entry used to
-be walked to its end and the count asserted, so whether the UNC row
-passed was the answer of whatever `\\server\share` reached: an answer
-meaning "no such share" maps to `NotFound` and the walk completed;
-`os error 64` ("the specified network name is no longer available")
-does not, so the deliberate stop fired instead and a required leg went
-red on byte-identical source. This repairs
-`PR262-UNREACHABLE-PATH-ENTRY-ABORTS-PROGRAM-RESOLUTION` without moving
-that policy: an unanswerable candidate still stops the search, mere
-absence is still walked past, and both are decided here by construction
-rather than by the machine the suite runs on, on any machine whose
-temporary directory can hold the positive case's own paths (below).
+The table answers which entries are searched. It is kept apart from what a searched entry's
+candidates answer: asserting a full walk of each absolute entry would make the UNC row depend on
+what `\\server\share` answers on the machine (`NotFound` is walked past, but `os error 64` stops the
+search). The policy is unchanged and decided here by construction: an unanswerable candidate stops
+the search, mere absence is walked past, on any machine whose temporary directory can hold the
+positive case's own paths (below).
 
 ## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `fn search_summary(message: &str) -> Option<&str> {`
 
-What a refusal says about the search itself: the parenthesised clause
-after "this runner composes", which gives the number of directories
-searched, the number of entries skipped as not absolute, and the
-candidates. Every assertion this test makes on a refusal's text reads
-that clause and nothing else.
+What a refusal says about the search: the parenthesised clause after "this runner composes", giving
+the directories searched, the entries skipped as not absolute, and the candidates. Every assertion
+on a refusal's text reads that clause and nothing else.
 
-The rest of the message is not the test's to read. It goes on to echo
-the `PATH` it was given, and a `PATH` built from the scratch root
-carries the spelling of the temporary directory, which belongs to the
-machine. Read whole, the message let that spelling decide: under a
-temporary directory named `temp-skipped`, a search that had finished
-without skipping anything read as skipped (`P335-PL-1`), and a spelling
-that holds `1 directory searched,` would have satisfied the count for a
-search that counted nothing. In a refusal the clause is written before
-the echo and holds only text this test constructs — the counts, its own
-program name and the default extensions — so the first opening is the
-resolver's own, and no spelling of the temporary directory can reach
-the clause, add to it or close it early. A refusal without the clause
-fails the assertion that reads it.
+The rest of the message echoes the `PATH`, which carries the temporary directory's spelling, which
+belongs to the machine: a temporary directory named `temp-skipped`, or one holding
+`1 directory searched,`, would otherwise decide the result. In a refusal the clause comes before the
+echo and holds only text this test constructs (the counts, its program name and the default
+extensions), so the first opening is the resolver's own and no spelling of the temporary directory
+can reach, extend or close it. A refusal without the clause fails the assertion that reads it.
 
-That holds of a refusal and of nothing else, so the clause is read from
-a refusal only. Both readers, the relative entries' and the absent
-entry's, first require `UpstrokeError::Refused`, and any other answer
-fails the case, naming its variant, before any of its text is read.
-Another error's message is no summary, and it can carry the machine's
-text: a `Filesystem` error's is "failed to stat" followed by the
-candidate's path, which begins with the temporary directory's spelling,
-and that spelling can hold the clause's own opening. Read as text, such
-an error passed for a finished search: under a temporary directory with
-a component named `this runner composes (1 directory searched,)`, long
-enough that the absent entry's candidate could not be asked, the
-resolver rightly stopped with `Filesystem`, and the test read the clause
-out of the path (`P335-R2-REG-1`).
+That holds only of a refusal, so both readers, for the relative entries and the absent entry, first
+require `UpstrokeError::Refused` and fail, naming the variant, on anything else before reading its
+text. Another error's message is no summary: a `Filesystem` error's is "failed to stat" and the
+candidate's path, which begins with the temporary directory and can contain the clause's opening.
 
 ## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let program = "upstroke\u{0}no-such-program";`
 
-The program every table entry is asked about: a bare name, so the walk
-runs, with an interior NUL, so no candidate under any entry can be
-answered. std refuses such a path before it reaches a system call — the
-property `undeterminable_directory` in `naming.rs`'s tests stands on —
-and the fixture asserts that up front for each entry it searches: the
-refusal is not `NotFound`, and it carries no operating-system error
-code, so nothing on the machine, local disk or network share, was asked.
-A platform that answered otherwise would fail the fixture rather than
-the rule.
+The program every table entry is asked about: a bare name, so the walk runs, with an interior NUL,
+so no candidate under any entry can be answered. std refuses such a path before any system call
+(the property `undeterminable_directory` in `naming.rs`'s tests stands on), and the fixture asserts
+that for each entry it searches: the refusal is not `NotFound` and carries no OS error code, so
+nothing on the machine was asked. A platform that answered otherwise fails the fixture, not the
+rule.
 
-So an absolute entry's walk stops at its first candidate, and that stop
-is what "searched" is read from: a `stat` failure whose path is a
-candidate directly under that entry and whose source is the refusal the
-probe met. A relative entry is never stat'ed at all and must report
-itself skipped. Neither outcome depends on what exists at
-`/usr/local/bin` or on what a network share answers, because neither is
-ever asked.
-
-The stop is the policy
-`an_undetermined_candidate_stops_the_search_before_a_later_match` pins;
-this test relies on it rather than restating it, so a change to that
-policy reddens both.
+So an absolute entry's walk stops at its first candidate, and "searched" is read from that stop: a
+`stat` failure whose path is a candidate directly under the entry and whose source is that refusal.
+A relative entry is never stat'ed and must report itself skipped. Neither depends on what exists at
+`/usr/local/bin` or what a share answers. The stop is the policy
+`an_undetermined_candidate_stops_the_search_before_a_later_match` pins; this test relies on it, so a
+change to that policy fails both.
 
 ## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let bin = root.join("bin");`
 
-The count of a finished search, `1 directory searched,`, is asserted
-only for an entry that is absent by construction: the positive case's
-own entry, `bin` under this test's scratch root, asked for the positive
-case's own program, `x`, before anything has created either, and checked
-to be `NotFound` up front. Its search asks exactly the paths the
-positive case's search asks once `program_file` has installed `x` — the
-same entry and the same candidates — while their directory does not
-exist yet, so each answers `NotFound` and the walk runs to its end and
-is counted, whatever a network share or `/usr/local/bin` would say.
+The count of a finished search, `1 directory searched,`, is asserted only for an entry absent by
+construction: the positive case's own entry, `bin` under the scratch root, asked for the positive
+case's program `x` before either exists, checked to be `NotFound` first. It asks exactly the paths
+the positive case asks once `program_file` installs `x`, while their directory does not exist, so
+each answers `NotFound` and the walk runs to its end.
 
-The candidates are the positive case's on purpose. A missing directory
-does not by itself make every path beneath it `NotFound`: a path longer
-than the platform allows is refused for its length first, whatever
-exists, as Linux's `ENAMETOOLONG` (os error 36). The directory this
-case once used, `never-created`, had a candidate 33 bytes longer than
-the positive case's file, so a temporary directory long enough for the
-positive case but not for that candidate stopped the search there and
-failed the test on unchanged source (`P335-R2-PL-1`). Asking only the
-positive case's own paths, the case asks nothing the positive case does
-not: under any temporary directory short enough for the positive case
-to install and find its program, this search runs to its end. Under one
-too long even for that, the test cannot pass at all, and this case
-fails openly — at its own absence check, or at the refusal it requires,
-naming the `Filesystem` stop — never on a count read from a path.
+The candidates are the positive case's on purpose. A missing directory does not make every path
+below it `NotFound`: a path longer than the platform allows is refused for its length first (Linux
+`ENAMETOOLONG`, os error 36). Asking only the positive case's paths, this search runs to its end
+under any temporary directory short enough for the positive case to work; under a longer one the
+test cannot pass at all and this case fails openly, at its absence check or at the refusal it
+requires, never on a count read from a path.
 
-Its `PATH` is built by `path_of`, as every `PATH` this test passes is —
-the table's entries and the positive case's — and as both witnesses
-build theirs with `std::env::join_paths`, so the one entry searched is
-the directory whose absence was just checked. Handed over as the raw
-path, a temporary directory spelled with the platform's separator, a
-`;` on Windows or a `:` on Unix, split into two entries, and the search
-ran somewhere this test had never checked (`P335-PL-2`). `join_paths`
-quotes a `;` on Windows and the search unquotes it again. A spelling no
-`PATH` can carry — a `:` on Unix, a `"` on Windows — is refused, never
-searched around: `path_of` refuses it as both witnesses' `join_paths`
-refuse it, and the test fails there rather than search anywhere in its
-place.
+Its `PATH` is built by `path_of`, like every `PATH` this test passes, and like both witnesses' with
+`std::env::join_paths`, so the one entry searched is the directory just checked. A raw path would
+split on a temporary directory spelled with the separator (`;` on Windows, `:` on Unix). `join_paths`
+quotes a `;` on Windows and the search unquotes it. A spelling no `PATH` can carry (`:` on Unix, `"`
+on Windows) is refused by `path_of`, as by `join_paths`, and the test fails there rather than search
+elsewhere.
 
 ## `fn every_path_entry_this_runner_searches_names_a_location_on_its_own() {` › `let found = program_file(&bin, &shim_file_name("x"));`
 
-And "searched" means searched: the one kind of entry that is not
-skipped does find a program in it — the same entry, once the program is
-installed there.
+"Searched" means searched: the entry that is not skipped finds the program once it is installed.
 
 ## `fn an_empty_path_entry_never_reaches_the_workspaces_own_copy_of_a_bare_name() {`
 
-**`PR6-LANED-003`.** An empty `PATH` entry never reaches the
-workspace's own copy of a bare name.
+An empty `PATH` entry never reaches the workspace's own copy of a bare name. A coordinator whose
+`PATH` holds an empty segment (`:/usr/bin`, what a profile appending to an unset `PATH` produces)
+and a workspace containing an executable `claude`: POSIX makes the null prefix the current
+directory, and this runner's current directory is the workspace, so a bare name handed to `Command`
+would run repository content with the coordinator's authority as the agent.
 
-The finding's vector, executed. A coordinator whose `PATH` holds an
-empty segment — `:/usr/bin`, which is what a shell profile that appends
-to an unset `PATH` produces — and a request workspace containing an
-executable called `claude`. POSIX gives the null prefix the meaning "the
-current directory", and this runner's current directory *is* the
-workspace, so a bare name handed to `Command` runs repository content
-with the coordinator's authority as the agent (DESIGN.md:398-402).
+The platform fact is executed: each row first spawns the bare name through `std::process::Command`
+with the same composed environment and working directory and compares it with a written
+expectation. In three of the four rows the raw spawn reaches the workspace and the runner must not,
+and that count is asserted.
 
-**The platform fact is executed, not cited**: every row spawns the same
-bare name through `std::process::Command` under the same composed
-environment and the same working directory first, and the outcome is
-compared against a written expectation. Three of the four rows are ones
-where the raw spawn reaches the workspace and the runner must not, and
-that count is asserted — a fixture in which the two agree everywhere
-proves nothing and says so.
-
-Unix only, and deliberately: the empty-entry-means-here rule is POSIX's,
-and the fixture's installations are shell scripts. The rule that closes
-it is not Unix-only —
-`every_path_entry_this_runner_searches_names_a_location_on_its_own`
-executes it on both platforms.
-
-What varies: where the empty entry sits, and whether a real installation
-is on the `PATH` at all. Held constant: the workspace, its planted
-executable, the name and the argument.
+Unix only: the empty-entry rule is POSIX's and the installations are shell scripts. The rule that
+closes it is executed on both platforms by
+`every_path_entry_this_runner_searches_names_a_location_on_its_own`. Where the empty entry sits,
+and whether a real installation is on `PATH`, vary; the workspace, its planted executable, the name
+and the argument are fixed.
 
 ## `fn an_empty_path_entry_never_reaches_the_workspaces_own_copy_of_a_bare_name() {` › `marker_shim(&workspace, &file, "WORKSPACE");`
 
@@ -2826,40 +2344,29 @@ Repository content, under automation: the workspace's own copy.
 
 ## `fn an_empty_path_entry_never_reaches_the_workspaces_own_copy_of_a_bare_name() {` › `let mut direct = Command::new(&name);`
 
-The platform fact. `execvp` searches the child's PATH from the
-child's working directory, so the empty entry is the workspace.
+The platform fact: `execvp` searches the child's `PATH` from the child's working directory, so the
+empty entry is the workspace.
 
 ## `fn an_empty_path_entry_never_reaches_the_workspaces_own_copy_of_a_bare_name() {` › `let witness = ResolutionWitness::new();`
 
-The claim, through the boundary, with an observer so that a
-refusal is a refusal *before* any spawn rather than a failed one.
+The claim, through the boundary, with an observer so a refusal is shown to come before any spawn.
 
 ## `fn a_relative_path_entry_is_refused_even_when_it_names_a_real_directory() {`
 
-A relative `PATH` entry that really does name a directory is refused
-rather than searched.
+A relative `PATH` entry that names a real directory is refused, not searched. The empty entry is its
+degenerate case; here the two current directories visibly differ: the entry resolves from the
+coordinator's working directory (asserted, so the row is hostile), while the child would resolve it
+from the workspace. Searching it would hand `Command` a relative program and certify a file that is
+not the one that runs.
 
-The empty entry of `PR6-LANED-003` is the degenerate case of this one,
-and this is the case where the two current directories the boundary has
-are visibly different: the entry resolves from the **coordinator's**
-working directory — asserted here, so the row is hostile — while the
-child would resolve it from the **workspace**. A runner that searched it
-would hand `Command` a relative program and certify a file that is not
-the one that runs.
-
-The entry is built out of `..` back to the root and down again, so it is
-genuinely relative and genuinely resolvable without anything being
-written inside the repository. Unix only: the same construction on
-Windows depends on the temporary directory and the working directory
-sharing a drive, and a row that silently stops applying is worse than
-one that is not there.
+The entry climbs with `..` to the root and descends again, so it is relative and resolvable without
+writing inside the repository. Unix only: on Windows the construction depends on the temporary and
+working directories sharing a drive, and a row that silently stops applying is worse than none.
 
 ## `fn a_relative_path_entry_is_refused_even_when_it_names_a_real_directory() {` › `let mut workspace = root.clone();`
 
-Deeper than the coordinator's own directory, so that the same
-relative entry names a *different* place from each of them — which is
-the whole hazard, and a workspace that happened to sit at the same
-depth would hide it.
+Deeper than the coordinator's directory, so the same relative entry names a different place from
+each; a workspace at the same depth would hide the hazard.
 
 ## `fn a_relative_path_entry_is_refused_even_when_it_names_a_real_directory() {` › `assert!(`
 
@@ -2871,168 +2378,162 @@ The oracle: the same directory, named as a location, does run.
 
 ## `#![allow(`
 
-Allowlist placement: the funnel section of `effects/allowlist.toml`, which
-carries this module's review clause. `effect_site_inventory.mechanism` (2).
+Allowlist placement: the funnel section of `effects/allowlist.toml`, which carries this module's
+review clause. `effect_site_inventory.mechanism` (2).
 
 ## `struct HeldFork {`
 
-This guard owns one forked child's lifetime. Its socket releases the child
-after observation; shutdown also releases it on failure. The child closes
-the parent's socket endpoint before announcing readiness and exits after
-release or its read timeout. Drop waits for that exact pid, never a group.
+Owns one forked child's lifetime. `hold_inherited_descriptors` forks it from a separate thread, so it
+inherits this process's descriptors as a fork in another harness thread would. The child closes its
+copy of the parent's socket endpoint, writes one readiness byte, then blocks reading its own
+endpoint; it exits 0 when the read sees EOF (released) and 1 otherwise, including when the endpoint's
+60-second read timeout expires. The parent's endpoint also reads with a 60-second timeout, so
+readiness is bounded.
+
+Drop is the release: it shuts down the write half of the parent's endpoint, which the child reads as
+EOF on success and failure alike, then waits for that exact pid, never a group, retrying on `EINTR`.
+Outside a panic it requires the release, the reap and a zero status, so the holder must have
+completed its socket protocol.
 
 ## `let waited = unsafe { libc::waitpid(self.pid, &mut status, libc::WNOHANG) };`
 
-SAFETY: pid is this guard's unreaped child and status is writable.
-WNOHANG observes whether it exited without waiting for release.
+SAFETY: pid is this guard's unreaped child and status is writable. WNOHANG observes whether it
+exited without waiting for release.
 
 ## `let result = unsafe { libc::waitpid(self.pid, &mut status, 0) };`
 
-SAFETY: pid is our unreaped direct child; status is a live,
-writable c_int. The socket's read timeout bounds the child.
+SAFETY: pid is our unreaped direct child; status is a live, writable c_int. The socket's read
+timeout bounds the child.
 
 ## `unsafe {`
 
-SAFETY: only the parent returns into Rust after fork. The child
-uses only close/write/read/_exit, all async-signal-safe, with live
-inherited fds and one-byte stack buffers. It never allocates,
-unwinds, drops Rust owners, or touches inherited locks. Closing
-parent_fd removes its copy of the release endpoint. The separate
-child endpoint stays live until _exit closes all inherited fds.
+SAFETY: only the parent returns into Rust after fork. The child uses only close/write/read/_exit,
+all async-signal-safe, with live inherited fds and one-byte stack buffers. It never allocates,
+unwinds, drops Rust owners, or touches inherited locks. Closing parent_fd removes its copy of the
+release endpoint. The separate child endpoint stays live until _exit closes all inherited fds.
 
 ## `let polled = unsafe { libc::poll(&mut ready, 1, 1000) };`
 
-SAFETY: ready is one initialized pollfd and remains live for this
-call; its descriptor is borrowed from reader. The wait is bounded.
+SAFETY: ready is one initialized pollfd and remains live for this call; its descriptor is borrowed
+from reader. The wait is bounded.
 
 ## `assert_eq!(`
 
-SAFETY: name is a live NUL-terminated path in our private scratch
-directory, and 0600 grants access only to this test's user.
+SAFETY: name is a live NUL-terminated path in our private scratch directory, and 0600 grants access
+only to this test's user.
 
 ## `let installed = unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_SETPIPE_SZ, 4096) };`
 
-SAFETY: reader owns a live FIFO descriptor. F_SETPIPE_SZ takes an
-integer size, and shrinking an empty pipe needs no extra privilege.
+SAFETY: reader owns a live FIFO descriptor. F_SETPIPE_SZ takes an integer size, and shrinking an
+empty pipe needs no extra privilege.
 
 ## `const CONTROL: &str = r##"`
 
-STRIP-CONTROL goes through the same whole-file blanker and counter as
-production. Its production constructions — one per spelling in
-`CONSTRUCTORS` — follow a test-only item, so truncating at the first
-#[cfg(test)] also fails this control, and each spelling is written into a
-comment, a string literal, a raw literal, a byte literal and a test item
-so that no spelling is counted from prose.
+STRIP-CONTROL goes through the same whole-file blanker and counter as production. Its production
+constructions, one per spelling in `CONSTRUCTORS`, follow a test-only item, so truncating at the
+first `#[cfg(test)]` also fails this control. Each spelling also appears in a comment, a nested block
+comment, a string, a raw string, a byte string, a raw byte string and a test-only function, so no
+spelling is counted from prose or test code.
 
 ## `let engine = crate::effects::production_code(include_str!("../../engine/mod.rs"));`
 
-And the two are the run and the resume facade, each of which then
-borrows that one runner for pre-flight and every attempt.
+Each conductor's production code, with CRLF made LF, is cut from its entry point (`fn run_harness(`
+or `fn resume_harness(`) to the first column-0 `}`, and that body must hold a construction: the runner
+it then lends to pre-flight and every attempt.
 
 ## `struct Witness {`
 
-A per-invocation `SpawnHooks` observer for PR11's tests: the pids `child_created` reported, the
-containment points in the order they fired, and the thread each child was created from. It is the
-observer a test hands one call through `RunnerCall::observed_by`, so what it records is that
-invocation's and no other's.
+A per-invocation `SpawnHooks` observer: the pids `child_created` reported, the containment points in
+the order they fired, and the thread each child was created from. A test hands it to one call through
+`RunnerCall::observed_by`, so it records that invocation and no other.
 
 ## `fn scratch_tree(tag: &str) -> crate::rundir::scratch_tree::ScratchTree {`
 
-The new tests take their scratch directory from `rundir::scratch_tree::acquire`, which refuses an
-occupied root and reclaims the tree when the guard drops, rather than from this file's older
-`scratch`, which leaves its directory behind.
+Scratch from `rundir::scratch_tree::acquire`, which refuses an occupied root and reclaims the tree
+when the guard drops, unlike this file's older `scratch`, which leaves its directory behind.
 
 ## `fn wait_for_file(path: &Path, within: Duration) -> bool {`
 
-The handshake the cancellation tests wait on: the child publishes a marker once it is running, and
-the test acts only after seeing it, bounded so a child that never starts fails the test instead of
-hanging it. A condition with a deadline, not a sleep standing in for one.
+The cancellation tests' handshake: the child publishes a marker once running and the test acts only
+after seeing it, within a bound, so a child that never starts fails the test instead of hanging it.
+A condition with a deadline, not a sleep.
 
 ## `fn the_blocking_adapter_supervises_the_process_on_the_calling_thread() {`
 
-Parity for the blocking adapter (the PR11 record, R-A): the child is created from the thread that
-called `run_blocking_with`, so the thread-scoped state on the spawn path — the reaper's cleanup-lease
-paths and the observation export's attribution — is the caller's, as it was when `run` was
-synchronous. The call's own observer also saw the spawn's containment points.
+The blocking adapter creates the child from the thread that called `run_blocking_with`, so the
+thread-scoped state on the spawn path (the reaper's cleanup-lease paths and the observation
+export's attribution) is the caller's. The call's own observer also sees the spawn's containment
+points.
 
 ## `fn a_call_cancelled_before_it_starts_spawns_nothing() {`
 
-A call cancelled before the runner looks at it is refused as `NeverStarted` with nothing spawned and
-nothing observed, and before the program name is even resolved — the resolution counter does not
-move.
+A call cancelled before the runner looks at it is refused as `NeverStarted`: nothing spawned, nothing
+observed, and the program name not resolved (the resolution counter does not move).
 
 ## `fn cancelling_a_running_invocation_terminates_it_and_reports_it_cancelled() {`
 
 The protocol's order on a real child, on every platform: the child announces itself, the test
-cancels from another thread, and the invocation reports `RunnerError::cancelled` with fate `Gone` —
-the Runner terminated the process before it reported. The bound on the time from the cancel to the
-report is against a child that would otherwise have run 300 seconds.
+cancels from another thread, and the invocation reports `RunnerError::cancelled` with fate `Gone`,
+the runner having terminated the process before reporting. The time from cancel to report is bounded
+against a child that would otherwise run 300 seconds.
 
 ## `fn cancelling_an_invocation_ends_every_process_of_its_tree() {`
 
 Unix. The tree, not just the child: the child opens a fifo for writing, starts a background
-grandchild that inherits the descriptor, and announces itself; the fifo's reading end reports
-`WouldBlock` (writers exist) before the cancel, so the end of file after it is not vacuous. After the
-Runner reports the invocation cancelled, every writer is gone and the fifo reads end of file — the
-same oracle `agent::proc`'s `kill_tree_settles_the_whole_unix_group_before_it_returns` uses for a
-timeout, with the same bounded read loop for the kernel's closing of a killed process's
-descriptors.
+grandchild that inherits the descriptor, and announces itself. The fifo's reading end reports
+`WouldBlock` (writers exist) before the cancel, so the end of file after it is not vacuous. Once the
+runner reports the invocation cancelled, every writer is gone and the fifo reads end of file: the
+oracle `agent::proc`'s `kill_tree_settles_the_whole_unix_group_before_it_returns` uses for a timeout,
+with the same bounded read loop while the kernel closes a killed process's descriptors.
 
 ## `fn rendezvous_helper() {`
 
-Subprocess helper (`--ignored`): publish this child's marker, wait — bounded — for the peer's, and
-print this process's pid. Two children that each wait for the other both succeed only if they ran at
-the same time.
+Subprocess helper (`--ignored`): publish this child's marker, wait, bounded, for the peer's, and
+print this process's pid. Two children waiting for each other both succeed only if they ran at the
+same time.
 
 ## `fn two_invocations_on_one_host_runner_run_at_once_each_carrying_its_own_observation() {`
 
-`HostRunner::hooks`' PR11 debt, discharged. Two invocations on one runner, each carrying its own
-observer, run at once — both rendezvous children exit 0 — and each observer saw exactly its own
-child's pid and exactly one spawn's containment points, the sequence a lone invocation records.
-Before PR11 the runner held its one observer's lock for a whole supervised run, and the pair could not
-overlap.
+Two invocations on one runner, each carrying its own observer, run at once (both rendezvous
+children exit 0), and each observer saw exactly its own child's pid and one spawn's containment
+points, the sequence a lone invocation records.
 
 ## `fn a_runner_level_observer_still_takes_invocations_one_at_a_time() {`
 
 The control, and the contract kept for every test that installs an observer: under `with_hooks` the
-same pair takes turns, so exactly one child outlives its (shortened) wait for the other. It also
-shows the rendezvous oracle can fail.
+same pair takes turns, so exactly one child outlives its shortened wait for the other. It also shows
+the rendezvous oracle can fail.
 
 ## `fn a_call_carrying_the_runs_cleanup_leases_is_reaped_by_a_reaper_that_holds_them() {`
 
-PR11's carried cleanup leases (the working record's R-Z). A pipeline thread
-has not entered the run's cleanup scope — the scope is thread-local and its
-owner is the coordinator's thread — so the Unix reaper of a process it spawns
-holds the run's R28 lease only if the call carries the lease paths. The
-control carries none, and nothing holds the lease while its child runs.
-After each call the hold must have ended with the reaper, read as a
-bounded wait under the test's own 60-second bound, the one its readiness
-handshake waits: a sibling test thread's fork can hold a copy of the lease
-for a moment after the reaper exits (the mechanism of
-`PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`), and a hold
-that outlives the bound fails the test.
+A pipeline thread has not entered the run's cleanup scope (the scope is thread-local and owned by
+the coordinator's thread), so the Unix reaper of a process it spawns holds the run's R28 lease only
+if the call carries the lease paths. The control carries none, and nothing holds the lease while its
+child runs. After each call the hold must end with the reaper, read as a wait bounded by the test's
+own 60 seconds, the bound its readiness handshake uses: a sibling test thread's fork can hold a copy
+of the lease briefly after the reaper exits
+(`PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`), and a hold that outlives the bound
+fails the test.
 
 ## `mod inherited_writer` › `pub(crate) fn writes_leave_no_writer_in_another_threads_fork(`
 
-The FIFO oracle, shared since PR11 follow-up A: a writer fills a FIFO larger than its pipe while
-another thread forks a holder of this process's inherited descriptors; once the writer is done,
-the reader sees end-of-file only if no fork holds a writer. The marker shims and the container
-fake's relay writer are each judged by it. The engine suite now uses it too, with `shim_script`:
-`engine::tests::gate_probe_writer_helper` judges the gate role's stand-in writer,
-`write_the_gate_probe_stand_in`, which is why this suite, this module, the oracle and
-`shim_script` are `pub(crate)`.
+The FIFO oracle: a writer fills a FIFO larger than its pipe while another thread forks a holder of
+this process's inherited descriptors; once the writer is done, the reader sees end of file only if
+no fork holds a writer. It judges the marker shims, the container fake's relay writer, and, from the
+engine suite with `shim_script`, the gate role's stand-in writer `write_the_gate_probe_stand_in`
+(`engine::tests::gate_probe_writer_helper`), which is why this module, the oracle and `shim_script`
+are `pub(crate)`.
 
 ## `mod inherited_writer` › `fn the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork() {`
 
-`R6-D3`: the relay stub a container reaper execs is written by
-`runner::container::write_program_in_its_own_process`, a process of its own, so no fork of the
-test process holds a writer of it and its `execv` cannot fail `ETXTBSY`. Written in-process
-instead (`fua-m11`), the reader never sees end-of-file.
+The relay stub a container reaper execs is written by
+`runner::container::write_program_in_its_own_process`, in a process of its own, so no fork of the
+test process holds a writer of it and its `execv` cannot fail `ETXTBSY`; written in-process, the
+reader would never see end of file.
 
-Its helper runs under `proc::test_support::run_test_isolated` and a 180-second deadline, not
-through the host funnel as its sibling's does (`FUA-I4-RELAY`, PR #328's implementation review
-round 4): the funnel's end waits for its reaper's acknowledged exit without a bound, by design,
-so a stopped reaper there held this test, and the suite with it.
+Its helper runs under `proc::test_support::run_test_isolated` with a 180-second deadline, not
+through the host funnel (`FUA-I4-RELAY`): the funnel's end waits without a bound, by design, for its
+reaper's acknowledged exit, so a stopped reaper there would hold this test and the suite.
 
 
 ## `const INHERITED_SELECTORS: [(&str, &str); 4] = [`
@@ -3120,17 +2621,14 @@ administrative directory.
 
 Three cases run their implement role under a runner that holds the managed
 repository, as a topology runner that starts roles in slots must: a relative
-`GIT_COMMON_DIR` with a common directory beside the slot, the draft's design
-lens's construction; an absolute `GIT_COMMON_DIR` with the run's `worktrees`
-directory a link into another repository (C4); and a relative one that names
-the run's common directory from the base and from the slot behind the same
-link (C5, the regression lens's construction). Each role's
-`--git-common-dir` is the run's, its `git add` writes into the run's object
-store, and the directory beside the slot, or the other repository's objects
-and refs, are byte-identical. `control` is a control, green at both; the other
-report cases and the relative case are red at `5c222ff2`; C4 and C5 are green
-there, and red when `GIT_COMMON_DIR` is removed in a work tree, and C5 also when
-only a relative value is.
+`GIT_COMMON_DIR` with a common directory beside the slot; an absolute `GIT_COMMON_DIR` with the
+run's `worktrees` directory a link into another repository (C4); and a relative one that names the
+run's common directory from the base and from the slot behind the same link (C5). Each role's
+`--git-common-dir` is the run's, its `git add` writes into the run's object store, and the directory
+beside the slot, or the other repository's objects and refs, are byte-identical. `control` passes
+with or without the shedding; the other report cases and the relative case fail at `5c222ff2`; C4
+and C5 pass there but fail when `GIT_COMMON_DIR` is removed in a work tree, and C5 also when only a
+relative value is.
 
 ## `fn slot_roles_helper() {`
 
@@ -3147,52 +2645,34 @@ commit then holds exactly the user's paths and the user's change. At
 is lost from it, because the slot add and the worker wrote the index the
 commit is being made from.
 
-**An unexplained macOS red.** CI run `42400918861`, attempt 1, job
-`128488261776` (`test (macos-latest)`), which checked out merge `134fdd30` of
-head `bb084ac8`, failed this test with `a plain commit in a linked checkout:
-the commit failed`, at the assertion on line 8591 of that head. The commit's
-`ProcessOutput` had code `None`, `timed_out` and `output_limited` both false,
-empty stdout and a duration of about 428 ms. Its stderr held the hook's
-`hook_started_slot_worker_helper` run passing (`1 passed`). On Unix,
-`ExitStatus::code` is `None` for an end by signal, but the stored output does
-not keep a signal number. Which signal, what sent it, and the cause are
-unknown, and so is any connection to the change set under test.
+On macOS CI the linked-checkout case has failed with the commit's `ProcessOutput` showing code
+`None` (on Unix, an end by signal, whose number the stored output does not keep), no timeout and no
+output limit, while the hook's helper had passed. The signal, its sender and the cause are unknown
+(`G7-CI-MACOS-HOOK-COMMIT-FLAKE`).
 
-**The Trace2 diagnostic.** Each case gives `GIT_TRACE2_EVENT` to the outer
-commit's `Command` alone, through that `Command`'s own environment. The value
-is a fresh absolute file directly under the case's scratch root:
-`trace2-main.event` or `trace2-linked.event`. It lies outside `M`, `L`, the
-hooks directory and the private root. The process environment and Git's
-configuration are unchanged. Git normally passes the variable on to the hook
-and to the Git commands started under it, so their events can share the file.
-That widens what the trace covers, but it does not prove which process wrote
-which event.
-
-When the funnel returns, the report is printed before the exit code is
-checked, while the scratch tree still exists. The printing is done by
-[`report_hook_commit_trace`], into the test's captured output. A passing run
-discards it; a failing run or a `--nocapture` run shows it.
-
-These are unchanged:
-- the command, the funnel and its 180 s bound;
-- both cases, the hook and its helper;
-- every assertion and the control flow.
+**The Trace2 diagnostic.** Each case sets `GIT_TRACE2_EVENT` on the outer commit's `Command` alone,
+to a fresh absolute file directly under the case's scratch root (`trace2-main.event` or
+`trace2-linked.event`), outside `M`, `L`, the hooks directory and the private root; the process
+environment and Git's configuration are unchanged. Git normally passes the variable on to the hook
+and the Git commands under it, so their events can share the file, which widens the trace but does
+not prove which process wrote which event. When the funnel returns, `report_hook_commit_trace`
+prints the report into the captured output before the exit code is checked, while the scratch tree
+still exists; a passing run discards it, a failing or `--nocapture` run shows it. The command, the
+funnel's 180 s bound, both cases, the hook, its helper, every assertion and the control flow are as
+they would be without it.
 
 **Limits.**
-- An `Err` from `run_with_timeout` still panics at once with no report,
-  because covering that path would change its control flow.
-- Git writes a `signal` event only for the signals it handles, and nothing for
-  `SIGKILL`, so a trace without one rules nothing out.
+- An `Err` from `run_with_timeout` panics at once with no report, because covering that path would
+  change its control flow.
+- Git writes a `signal` event only for signals it handles, and nothing for `SIGKILL`, so a trace
+  without one rules nothing out.
 - The report is a snapshot taken when the funnel returns.
 
-This is a diagnostic. It is not a fix, and it does not claim the red is
-explained or closed.
+It is a diagnostic, not a fix, and does not claim the failure is explained.
 
-**Quarantined on macOS.** From 2026-11-11, on the owner's decision, the test
-is ignored on macOS by a `cfg_attr` attribute whose reason names the finding
-`G7-CI-MACOS-HOOK-COMMIT-FLAKE`. It still runs on Linux and other Unix
-systems, and on macOS when asked for with `--ignored`. While the quarantine
-stands, the macOS job does not witness the failure. Lifting the quarantine is
+**Quarantined on macOS.** A `cfg_attr` ignores the test on macOS with a reason naming
+`G7-CI-MACOS-HOOK-COMMIT-FLAKE`. It still runs on Linux and other Unix systems, and on macOS under
+`--ignored`. While the quarantine stands the macOS job does not witness the failure; lifting it is
 part of the finding's repair.
 
 ## `const HOOK_COMMIT_TRACE_HEAD: u64 = 64 * 1024;`
