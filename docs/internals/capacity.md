@@ -1027,6 +1027,43 @@ spend. Earlier copies said "showing signals only" and "rests on rate-limit
 signals alone". Neither was true: the signals are in the same log, and a log
 that cannot be read yields none of them.
 
+An owner record under the machine directory that exists and leads to no log
+is counted in `Gathered::unread` too, beside its warning: one that cannot be
+read, is not an owner record, names another run than the private half it is
+in, or names a directory that is not that run's under a repository's
+`.upstroke/runs/`. Until 2026-11-23 these were warned of and not counted, so
+a machine whose one run had a torn `owner.json` was described as having no
+run, under a warning naming that run's record
+(`PR409-UNREAD-OWNER-SCOPE-COUNT`). Two private halves are still not counted.
+One with no owner record is a run of schemas 1–3 or a creation that never
+wrote one: neither can be located from here, and neither is a fault worth a
+line on every listing. And one whose run this repository lists is read from
+that listing, so its record leaves nothing out, whatever it holds. It is
+neither warned of nor counted, since counting it would call a folded run
+unread.
+
+The evidence of every run is put in one sequence by `evidence::merge`, by
+time, with each run's own order kept. Event times are whole seconds, so two
+runs can have evidence of the same second. Until 2026-11-23 that evidence
+went in the order the runs were listed, which puts the runs of the repository
+`gather` was started in first. A refusal on a pool in one repository's run
+and a success on it in another's, in the same second, then cleared the pool
+when asked from the first repository and left it exhausted when asked from
+the second: one machine, two answers (`PR409-MACHINE-CWD-TIE-ORDER`). Each
+run is now handed to `merge` keyed by its id and then its log's path, and at
+an equal time the order follows the evidence and the keys, never the listing.
+Evidence that marks a pool refused waits while another run's evidence of that
+second still to come proves the pool served. So a success in one run does not
+clear a refusal another run met in the same second, and the pool reads
+exhausted, which is the conservative reading of two facts of one second.
+Otherwise the run whose key sorts first goes first. A run's own order is kept
+throughout, so a refusal and then a success of one second in one run still
+clear the pool. The one case no order can keep is two runs whose refusals and
+successes of one second cross, one refusing `p` before it serves `q` and the
+other refusing `q` before it serves `p`. There the run whose key sorts first
+goes first and one of the two refusals is cleared, and the answer still does
+not depend on which repository asked.
+
 Pools are user-level (§17), so a listing outside a repo is still worth
 having, and with the machine scope it now says what other repositories drew.
 A repository with no run, on a machine with none, warns of nothing.
@@ -1061,12 +1098,13 @@ The line under the estimates says what the figures above it rest on, and each
 of its forms is true of that (`Gathered::describe`, in
 `src/capacity/machine.rs`). Runs that were folded are counted, with the
 repositories they belong to. Runs that were found and could not be read are
-counted too, beside the warnings that carry each error: "1 more run could not
-be read and nothing from it is shown", or, with none readable, "the 1 run
-found on this machine could not be read". Only a scope with no run at all
-says "no run on this machine yet". The unreadable form used to be that last
-one, which told an operator with an unreadable log that there was no run to
-look at; it then named the one latest run, and now counts every run it
+counted too, beside the warnings that carry each error, whether it was the
+log that could not be read or an owner record that leads to no log: "1 more
+run could not be read and nothing from it is shown", or, with none readable,
+"the 1 run found on this machine could not be read". Only a scope with no run
+at all says "no run on this machine yet". The unreadable form used to be that
+last one, which told an operator with an unreadable log that there was no run
+to look at; it then named the one latest run, and now counts every run it
 applies to.
 
 ## `pub(crate) mod tests {`
@@ -1077,7 +1115,8 @@ through `schema_4_run_signalling` and
 `schema_4_run_limited_then_drawing`. This file forbids the governed
 write primitives in its tests too, so every fixture here writes through a
 funnel (`rundir::create_public_dir`, `rundir::write_plan`, `EventLog`) or
-through `workspace_manager::fixture::write_file`.
+through `workspace_manager::fixture::write_file` and
+`workspace_manager::fixture::create_dir`.
 
 ## `fn an_unmeasured_pool_is_unknown_never_full()` › `let estimates = estimate(&[pool("claude-max")], &Observations::default());`
 
@@ -1322,6 +1361,54 @@ The other side of the same line: with no run directory at all the gatherer
 answers nothing folded and nothing unread, its own line reads "no run in
 this repository yet" for the repository scope it was asked for, and "no run
 on this machine yet" is what `report`, which folds the machine, renders.
+
+## `fn on_the_machine(`
+
+The gatherer over every run on a machine directory, started in `repo`, with
+`FIXTURE_NOW` for its clock and no pools: `folded` with the machine scope.
+`owner_record` writes a private half's `owner.json` with the bytes it is
+given, and `owner_record_of` writes the one a schema-4 run keeps, naming the
+run and its public directory, in the two fields the gatherer reads.
+
+## `fn review409_machine_signal_does_not_depend_on_launch_repository() {`
+
+The witness from `PR409-MACHINE-CWD-TIE-ORDER`'s review, ported. Two
+repositories on one machine, each with a schema-4 run that an owner record
+locates. The `refusing` run's attempt was refused on `shared`, with a
+signalled reset. The `serving` run was refused on `claude-max` and then landed
+an attempt on `shared`. The fixture stamps every event with one second, so
+that success and the other run's refusal are of the same second. Started in
+either repository, the gatherer folds two runs across two repositories and
+holds the same pools, `claude-max` and `shared`, each at its reset. Before the
+tie rule, started in `refusing`, the success came after the refusal and
+cleared `shared`, and started in `serving` it came first and `shared` stayed
+exhausted. The refusing run's id sorts first, so an order by run id alone
+would give one answer from both repositories with `shared` cleared. That is
+why the test asserts which pools are held, and not only that the two answers
+agree.
+
+## `fn unreadable_owner_must_be_counted_in_the_scope_line() {`
+
+The witness from `PR409-UNREAD-OWNER-SCOPE-COUNT`'s review, ported. The
+machine has one private half, whose `owner.json` is `{`, and the repository
+has no run. The gatherer folds nothing, counts one run unread, and warns once,
+naming the record as not an owner record. The scope line says the one run
+found on this machine could not be read, where it used to say there was no
+run on this machine yet.
+
+## `fn a_private_half_with_no_owner_record_is_not_counted() {`
+
+The other side: a private half with no `owner.json`, which a run of schemas
+1–3 leaves. Nothing is folded, counted or warned of, and the line says there
+is no run on this machine yet.
+
+## `fn an_owner_record_that_leads_nowhere_is_not_counted_for_a_run_read_from_its_repository() {`
+
+The repository lists a schema-4 run, and that run's private half holds a torn
+`owner.json`. Started in that repository, the gatherer folds the run from the
+listing and holds its pool at its reset, and it neither warns of the record
+nor counts it, since nothing is missing. Started in another repository, the
+record is the only way to the run, and it is counted.
 
 ## `fn self_metering_cannot_talk_an_exhausted_pool_back_up()` › `let mut p = pool("claude-max");`
 

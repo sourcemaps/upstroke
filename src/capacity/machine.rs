@@ -93,8 +93,14 @@ pub struct Gathered {
     pub runs: usize,
     /// Distinct repositories those logs belong to.
     pub repositories: usize,
-    /// Runs that were found and whose log could not be read. Each has a
-    /// warning naming it, and [`Gathered::describe`] counts them.
+    /// Runs that were found and could not be read: a log neither reader
+    /// accepts, or an owner record under the machine directory that exists
+    /// and leads to no log, because it cannot be read, is not an owner record,
+    /// names another run or names no run directory. Each has a warning naming
+    /// it, and [`Gathered::describe`] counts them. A private half with no
+    /// owner record is not counted, being a run of schemas 1–3 or a creation
+    /// that never wrote one, and neither is the record of a run this
+    /// repository lists, which is read from there.
     pub unread: usize,
 }
 
@@ -115,15 +121,25 @@ pub struct GatherOptions<'a> {
 /// Fold every run in scope and read every stored provider report.
 ///
 /// Never fails: a run whose log cannot be read is skipped with a warning and
-/// counted in [`Gathered::unread`], and a report that cannot be read is a
-/// warning and a note on its pool. What is left is an estimate over less
-/// evidence, which every estimate here already says it is.
+/// counted in [`Gathered::unread`], as is an owner record that leads to no
+/// log, and a report that cannot be read is a warning and a note on its pool.
+/// What is left is an estimate over less evidence, which every estimate here
+/// already says it is.
+///
+/// Which repository it is started in changes what is in scope and nothing
+/// about how it is folded: each run is handed to [`evidence::merge`] keyed by
+/// its id and then its log's path, so that evidence of one second from two
+/// runs is ordered by what it is and whose it is, never by which run was
+/// listed first.
 #[must_use]
 pub fn gather(opts: &GatherOptions<'_>, warnings: &mut Vec<String>) -> Gathered {
     let mut logs = repository_logs(opts.repo_root);
+    let mut unread = 0;
     let basis = match (opts.scope, opts.machine_dir) {
         (Scope::Machine, Some(machine_dir)) => {
-            logs.extend(machine_logs(machine_dir, warnings));
+            let (indexed, unfollowed) = machine_logs(machine_dir, &logs, warnings);
+            logs.extend(indexed);
+            unread += unfollowed;
             Basis::Machine
         }
         (Scope::Machine, None) => {
@@ -140,7 +156,6 @@ pub fn gather(opts: &GatherOptions<'_>, warnings: &mut Vec<String>) -> Gathered 
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
     let mut repositories: BTreeSet<PathBuf> = BTreeSet::new();
     let mut runs = Vec::new();
-    let mut unread = 0;
     for run in logs {
         // Canonical, so that a run listed from its repository and again from
         // its owner record is folded once. A path that does not resolve is
@@ -153,11 +168,11 @@ pub fn gather(opts: &GatherOptions<'_>, warnings: &mut Vec<String>) -> Gathered 
         }
         let found = evidence_in(&run);
         let repository = repository_of(&identity);
-        seen.insert(identity);
+        seen.insert(identity.clone());
         match found {
             Ok(found) => {
                 repositories.insert(repository);
-                runs.push(found);
+                runs.push(((run.run_id, identity), found));
             }
             Err(why) => {
                 unread += 1;
@@ -305,18 +320,28 @@ struct Located {
     public_dir: String,
 }
 
-fn machine_logs(machine_dir: &Path, warnings: &mut Vec<String>) -> Vec<RunLog> {
+/// The runs the machine index locates, and how many of its owner records
+/// lead to no log.
+///
+/// `listed` are the runs this repository lists. One of them is read from
+/// there, so a record of it that leads nowhere leaves nothing out of the
+/// estimates, and it is neither warned of nor counted.
+fn machine_logs(
+    machine_dir: &Path,
+    listed: &[RunLog],
+    warnings: &mut Vec<String>,
+) -> (Vec<RunLog>, usize) {
     let runs = machine_dir.join("runs");
     let entries = match std::fs::read_dir(&runs) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), 0),
         Err(error) => {
             warnings.push(format!(
                 "{} could not be listed ({error}), so runs in other repositories are missing \
                  from the estimates below",
                 runs.display()
             ));
-            return Vec::new();
+            return (Vec::new(), 0);
         }
     };
     let mut names: Vec<std::ffi::OsString> = Vec::new();
@@ -335,66 +360,78 @@ fn machine_logs(machine_dir: &Path, warnings: &mut Vec<String>) -> Vec<RunLog> {
     }
     names.sort();
 
+    let read_from_here = |name: &std::ffi::OsStr| {
+        listed
+            .iter()
+            .any(|run| name.to_str() == Some(run.run_id.as_str()))
+    };
     let mut logs = Vec::new();
+    let mut unfollowed = 0;
     for name in names {
-        let record = runs.join(&name).join(crate::rundir::OWNER_RECORD);
-        let bytes = match crate::util::read_file_bounded(&record) {
-            Ok(bytes) => bytes,
-            // No owner record: a run of schemas 1-3, or a creation that never
-            // reached it. Neither can be located from here, and neither is a
-            // fault worth a line on every listing.
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                continue;
+        match locate(&runs.join(&name).join(crate::rundir::OWNER_RECORD), &name) {
+            Ok(located) => logs.extend(located),
+            Err(_) if read_from_here(&name) => {}
+            Err(why) => {
+                warnings.push(why);
+                unfollowed += 1;
             }
-            Err(error) => {
-                warnings.push(format!(
-                    "{} could not be read ({error}), so that run is missing from the estimates \
-                     below",
-                    record.display()
-                ));
-                continue;
-            }
-        };
-        let located: Located = match serde_json::from_slice(&bytes) {
-            Ok(located) => located,
-            Err(error) => {
-                warnings.push(format!(
-                    "{} is not an owner record ({error}), so that run is missing from the \
-                     estimates below",
-                    record.display()
-                ));
-                continue;
-            }
-        };
-        if name.to_str() != Some(located.run_id.as_str()) {
-            warnings.push(format!(
-                "{} names run `{}`, not the directory it is in, so it is not followed",
-                record.display(),
-                located.run_id
-            ));
-            continue;
         }
-        let public = PathBuf::from(&located.public_dir);
-        let Some(repo_root) = repository_holding(&public, &located.run_id) else {
-            warnings.push(format!(
-                "{} names `{}`, which is not that run's directory under a repository's \
-                 `.upstroke/runs/`, so it is not followed",
-                record.display(),
-                located.public_dir
-            ));
-            continue;
-        };
-        logs.push(RunLog {
-            run_id: located.run_id,
-            repo_root,
-        });
     }
-    logs
+    (logs, unfollowed)
+}
+
+/// The run the owner record at `record`, in the private half `name`, leads
+/// to: `None` where there is no record, and why it leads nowhere where there
+/// is one that does.
+fn locate(record: &Path, name: &std::ffi::OsStr) -> Result<Option<RunLog>, String> {
+    let bytes = match crate::util::read_file_bounded(record) {
+        Ok(bytes) => bytes,
+        // No owner record: a run of schemas 1-3, or a creation that never
+        // reached it. Neither can be located from here, and neither is a
+        // fault worth a line on every listing.
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(format!(
+                "{} could not be read ({error}), so that run is missing from the estimates \
+                 below",
+                record.display()
+            ));
+        }
+    };
+    let located: Located = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "{} is not an owner record ({error}), so that run is missing from the estimates \
+             below",
+            record.display()
+        )
+    })?;
+    if name.to_str() != Some(located.run_id.as_str()) {
+        return Err(format!(
+            "{} names run `{}`, not the directory it is in, so it is not followed",
+            record.display(),
+            located.run_id
+        ));
+    }
+    let public = PathBuf::from(&located.public_dir);
+    let Some(repo_root) = repository_holding(&public, &located.run_id) else {
+        return Err(format!(
+            "{} names `{}`, which is not that run's directory under a repository's \
+             `.upstroke/runs/`, so it is not followed",
+            record.display(),
+            located.public_dir
+        ));
+    };
+    Ok(Some(RunLog {
+        run_id: located.run_id,
+        repo_root,
+    }))
 }
 
 /// `<repo>/.upstroke/runs/<run-id>/events.jsonl` is four components below its
