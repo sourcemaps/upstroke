@@ -470,9 +470,9 @@ witness: since `af6cb53a`,
 `an_answer_left_on_disk_under_a_budget_stop_is_ingested_once_by_the_resume_in_its_epoch_and_never_again`
 in `src/engine/topology/recover/tests.rs` ingests through `poll` and then asserts the file is
 retained byte for byte. The finding these tests close measured at `7e0110a1`, before that test
-existed, that a reader removing or rewriting the file passed every test. `resolve`'s two reads had
-no witness at all; the tests below add the first for each of them, plus one for `poll` at this
-layer.
+existed, that a reader removing the file passed every committed test; that a rewriting reader
+would pass too was reasoned there, not measured. `resolve`'s two reads had no witness at all;
+the tests below add the first for each of them, plus one for `poll` at this layer.
 
 Measured when the three tests were added: removing the file after each of the three reads (in
 `poll`, in `resolve`'s immediate branch, in its waiting branch) fails each read's own test on the
