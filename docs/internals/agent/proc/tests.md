@@ -1733,6 +1733,15 @@ so a cell that neither waits nor reclaims fails the witness rather than
 passing or hanging it. The bound can only fail the witness, and each
 poll tests a published state rather than waiting for time to pass.
 
+The gate is published through `publish_drain_gate`, which reports a
+gate it could not create on stderr rather than panicking: the hook runs
+inside the drain's drop, which also runs while a failure unwinds, and a
+panic there would abort the test process. On the passing path such a
+gate still fails the witness, through its journal assertion: the hold
+then ends only at its bound, journalling `rm hold expired`, or at the
+reclaim, after which the late writes find no tree: creating `removed`
+journals a failed status and the second listing's line is missing.
+
 What fails at the old ordering, exactly: a write that finds no tree,
 not the native `ENOTEMPTY`. The hold moves the late write past the
 whole reclaim, so it never races `remove_dir_all`; the witness pins the
@@ -1785,8 +1794,9 @@ runs under the limit the process had. All of it runs under
 `catch_unwind`.
 
 The gate hook runs inside the drain's drop while the failure unwinds,
-so it reports a gate it could not create on stderr rather than
-panicking, which would abort the helper; the stub's bounded hold then
+so it publishes the gate through `publish_drain_gate`, which reports a
+gate it could not create on stderr rather than panicking, which would
+abort the helper; the stub's bounded hold then
 journals `rm hold expired`, and the journal assertion fails.
 
 Then, in order: whether the reaper's group still has a member, probed
@@ -1852,8 +1862,9 @@ the test's own, so the cell never reads its reaper's pid:
 
 No limit is lowered and nothing is refused, so it runs in the test
 process, under `catch_unwind`. The drain hook records the group it is
-handed and publishes the gate, reporting a gate it could not create
-rather than panicking inside the drain's drop. Then, as in the helper
+handed and publishes the gate through `publish_drain_gate`, which
+reports a gate it could not create, under the case's name, rather than
+panicking inside the drain's drop. Then, as in the helper
 above: whether that group still has a member, probed at once with
 signal 0 alone; a wait of at most 30 s for it to end, so the journal is
 final; the journal. Only then does it assert. The panic must be its
@@ -2175,6 +2186,40 @@ therefore not witnessed on macOS is this one path: a guard unwinding
 while no process can be created. The guards' other tests,
 `children_spawned_before_a_failing_spawn_are_ended_and_collected`
 among them, run on every Unix as before.
+
+## `fn publish_drain_gate(gate: &Path, context: &str) {`
+
+The drain hook the three witnesses of the reaper's drain share:
+`the_container_cell_reclaims_its_tree_only_after_the_reapers_last_write`,
+`a_dying_cell_refused_after_its_reaper_started_helper` and
+`a_cell_failing_before_it_arms_its_drain_drains_its_reaper_before_its_reclaim`.
+It creates the drain's gate, the empty file `LATE_WRITES_STUB`'s hold
+waits for. The hook is `on_drain_wait`, which `ReaperDrain`'s drop
+calls through `drain_reaper_group`, and that drop also runs while a
+failure unwinds, so a panic here is a panic inside a destructor during
+unwinding and aborts the process. A gate it could not create is
+therefore reported, as one line on stderr naming the caller's context,
+the gate's path and the error, and the hook returns. The line is
+written with `writeln!` and its result dropped, not with `eprintln!`,
+which panics when the write fails. A gate not published fails the
+witness that needed it through that witness's journal assertion, not
+here.
+
+## `fn a_drains_gate_that_cannot_be_created_is_reported_and_never_panics() {`
+
+The witness for `publish_drain_gate`'s failing path. In a scratch tree
+of its own it publishes a gate under a directory that does not exist:
+the call must return, under `catch_unwind`, and the gate must not exist
+(`symlink_metadata` answering an error), so the creation did fail and
+was reported rather than raised. It then publishes a gate in the tree
+itself, which must then be a file, so the hook still publishes.
+
+MEASURED. With `publish_drain_gate`'s report replaced by
+`.expect("publish the drain's gate")`, this test failed and every other
+test of this module passed: the call panicked with "publish the drain's
+gate: Os { code: 2, kind: NotFound, message: \"No such file or
+directory\" }", and the test's assertion that the call returned failed.
+With the report restored, it passes.
 
 ## `const READINESS_ROLE: &str = "UPSTROKE_READINESS_ROLE";`
 

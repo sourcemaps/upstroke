@@ -3652,7 +3652,7 @@ impl Drop for ReaperDrain<'_> {
 fn group_member(pgid: i32) -> ChildGuard {
     use std::os::unix::process::CommandExt as _;
 
-    Command::new("/bin/sh")
+    Command::new(Path::new("/bin/sh"))
         .args(["-c", "read -r line"])
         .process_group(pgid)
         .stdin(Stdio::piped())
@@ -3903,9 +3903,7 @@ fn the_container_cell_reclaims_its_tree_only_after_the_reapers_last_write() {
             ("UPSTROKE_WITNESS_JOURNAL", journal.as_os_str()),
             ("UPSTROKE_WITNESS_GATE", gate.as_os_str()),
         ],
-        |_| {
-            std::fs::File::create(gate.as_path()).expect("publish the drain's gate");
-        },
+        |_| publish_drain_gate(&gate, "the late-write witness"),
         |_, _| {},
         |_, join| join(),
     )
@@ -3971,15 +3969,7 @@ fn a_dying_cell_refused_after_its_reaper_started_helper() {
                 ("UPSTROKE_WITNESS_JOURNAL", journal.as_os_str()),
                 ("UPSTROKE_WITNESS_GATE", gate.as_os_str()),
             ],
-            |_| {
-                if let Err(error) = std::fs::File::create(&gate) {
-                    let _ = writeln!(
-                        std::io::stderr(),
-                        "publishing the drain's gate {}: {error}",
-                        gate.display()
-                    );
-                }
-            },
+            |_| publish_drain_gate(&gate, "the refused cell"),
             |_, _| {},
             |cell, join| {
                 started = Some((cell.tree.to_path_buf(), cell.agent, cell.reaper));
@@ -4107,13 +4097,7 @@ fn a_cell_failing_before_it_arms_its_drain_drains_its_reaper_before_its_reclaim(
                 ],
                 |reaper| {
                     drained = Some(reaper);
-                    if let Err(error) = std::fs::File::create(&gate) {
-                        let _ = writeln!(
-                            std::io::stderr(),
-                            "{case}: publishing the drain's gate {}: {error}",
-                            gate.display()
-                        );
-                    }
+                    publish_drain_gate(&gate, case);
                 },
                 |cell_tree, published| {
                     tree = Some(cell_tree.to_path_buf());
@@ -4208,7 +4192,7 @@ fn a_cell_failing_before_it_arms_its_drain_drains_its_reaper_before_its_reclaim(
 fn a_reaper_group_drain_fails_at_its_bound_without_signalling_the_group() {
     use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 
-    let mut member = Command::new("/bin/sh")
+    let mut member = Command::new(Path::new("/bin/sh"))
         .args(["-c", "read -r line"])
         .process_group(0)
         .stdin(Stdio::piped())
@@ -4852,6 +4836,45 @@ fn a_guard_unwinding_with_no_process_to_spare_ends_and_collects_its_child() {
             "ended and collected the child spawned before a spawn refused with no process to spare"
         ),
         "the isolated helper ran its setup to its end: {ended}"
+    );
+}
+
+#[cfg(unix)]
+fn publish_drain_gate(gate: &Path, context: &str) {
+    if let Err(error) = std::fs::File::create(gate) {
+        let _ = writeln!(
+            std::io::stderr(),
+            "{context}: publishing the drain's gate {}: {error}",
+            gate.display()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_drains_gate_that_cannot_be_created_is_reported_and_never_panics() {
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "drain-gate")
+        .expect("a scratch tree");
+
+    let uncreatable = tree.path().join("no such directory").join("gate");
+    let returned =
+        std::panic::catch_unwind(|| publish_drain_gate(&uncreatable, "an uncreatable gate"));
+    assert!(
+        returned.is_ok(),
+        "publishing a gate that cannot be created panicked instead of reporting"
+    );
+    assert!(
+        std::fs::symlink_metadata(&uncreatable).is_err(),
+        "a gate under a missing directory was created at {}",
+        uncreatable.display()
+    );
+
+    let gate = tree.path().join("gate");
+    publish_drain_gate(&gate, "a creatable gate");
+    assert!(
+        std::fs::symlink_metadata(&gate).is_ok_and(|metadata| metadata.is_file()),
+        "the gate was not published at {}",
+        gate.display()
     );
 }
 
