@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `upstroke decide` is new: it asks the run's primary reviewer, read-only, to propose an answer to
+  each open question of a run, checks the reply (an offered option, never giving up), prints it and
+  saves it under `.upstroke/proposals/`. It writes no answer, at most two proposals per question,
+  and stops at `--max-cost-usd` (default 5).
 - Capacity is now tracked for the machine rather than for a repository; `[capacity] scope = "repo"`
   or `upstroke capacity --scope repo` folds only this repository. Nothing routes on any of this yet.
   Only an attempt that passed, in a run of any schema, clears another run's rate limit on its pool,

@@ -57,6 +57,7 @@ On Windows, Codex can review but not implement.
 | `upstroke run plan.md --budget 15` | Runs for real on a `upstroke/run-<id>` branch; needs a clean working tree. |
 | `upstroke status [<run-id>]` | The ledger: attempts, models, cost. |
 | `upstroke answer <question-id>` | Answers a question that parked a task. |
+| `upstroke decide <run-id> [<question-id>]` | An agent proposes an answer to a parked question; it answers nothing. |
 | `upstroke resume <run-id> [--budget 30]` | Continues a stopped run from its event log. |
 | `upstroke export-decisions <run-id> [--format csv]` | Exports a finished run's routing decisions. |
 
