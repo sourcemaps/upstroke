@@ -21751,7 +21751,8 @@ fn container_acceptance_record() {
 
 /// The container-runtime seam observes only while armed, only on the arming
 /// thread, and only by wrapping what production constructs; unarmed, and on any
-/// other thread, it constructs exactly what production does and journals nothing.
+/// other thread, it journals nothing, and constructs for an inspection the runtime
+/// that answers as an absent one and for a runner exactly what production does.
 #[test]
 fn the_container_runtime_seam_observes_only_while_armed_and_only_on_its_own_thread() {
     use crate::engine::topology::entry::container_runtime;
@@ -21819,6 +21820,78 @@ fn the_container_runtime_seam_observes_only_while_armed_and_only_on_its_own_thre
         snapshot["operations"].as_array().is_some_and(Vec::is_empty),
         "constructing a runtime performs no operation"
     );
+}
+
+/// Unarmed, the seam's inspection runtime asks no container runtime: every
+/// question is answered as an absent runtime answers it, under the question's own
+/// operation and the seam's one detail.
+#[test]
+fn an_unarmed_inspection_runtime_answers_as_an_absent_runtime() {
+    use crate::engine::topology::entry::container_runtime;
+    use crate::runner::container::runtime::{
+        CreateSpec, QuestionBound, RuntimeError, RuntimeOp, StopMode,
+    };
+    use crate::runner::container::{CoveredCreate, CoveredStart};
+
+    #[track_caller]
+    fn absent<T: std::fmt::Debug>(operation: RuntimeOp, answer: Result<T, RuntimeError>) {
+        assert_eq!(
+            answer.map(|answered| format!("{answered:?}")),
+            Err(RuntimeError::Unreachable {
+                operation,
+                detail: container_runtime::UNARMED.to_owned(),
+            }),
+            "the unarmed inspection runtime answers `{operation}` as an absent runtime"
+        );
+    }
+
+    let name = "upstroke-unarmed-seam-question";
+    let image = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    let spec = CreateSpec {
+        name: name.to_owned(),
+        image_id: image.to_owned(),
+        labels: std::collections::BTreeMap::new(),
+        mounts: Vec::new(),
+        env: Vec::new(),
+        command: Vec::new(),
+        workdir: None,
+        read_only_root: true,
+        user: None,
+        open_stdin: false,
+    };
+    let runtime = container_runtime::for_inspection();
+    // Each question is asked only once the one before it was answered as absent,
+    // and the effects come last, so a runtime that answers is never asked to act.
+    absent(RuntimeOp::Probe, runtime.probe());
+    absent(
+        RuntimeOp::InspectImageByReference,
+        runtime.image_by_reference(name),
+    );
+    absent(RuntimeOp::InspectImageById, runtime.image_by_id(image));
+    absent(
+        RuntimeOp::InspectImageById,
+        runtime.image_environment(image),
+    );
+    absent(RuntimeOp::InspectVolume, runtime.volume_present(name));
+    absent(
+        RuntimeOp::ListByLabel,
+        runtime.containers_with_label(name, name),
+    );
+    absent(
+        RuntimeOp::Observe,
+        runtime.observe(name, QuestionBound::Runtime),
+    );
+    absent(RuntimeOp::Collect, runtime.collect(name));
+    absent(
+        RuntimeOp::Create,
+        runtime.create(CoveredCreate::without_a_reaper(&spec)),
+    );
+    absent(
+        RuntimeOp::Start,
+        runtime.start(CoveredStart::without_a_reaper(name)),
+    );
+    absent(RuntimeOp::Stop, runtime.stop(name, StopMode::Graceful));
+    absent(RuntimeOp::Remove, runtime.remove(name));
 }
 
 /// P12-W14 (D4). At width 1 the production composition through the step loop

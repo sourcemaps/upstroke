@@ -1630,10 +1630,18 @@ pub(crate) mod container_runtime {
     use std::panic::Location;
     use std::sync::MutexGuard;
 
-    use crate::runner::container::DockerCli;
     use crate::runner::container::exec::RunIdentity;
     use crate::runner::container::observed::Journal;
-    use crate::runner::container::runtime::ContainerRuntime;
+    use crate::runner::container::runtime::{
+        ContainerExecution, ContainerRuntime, CreatedContainer, DiscoveredContainer,
+        ImageInspection, Liveness, QuestionBound, RuntimeError, RuntimeOp, Settled, StopMode,
+    };
+    use crate::runner::container::{CoveredCreate, CoveredStart, DockerCli};
+
+    /// What the unarmed inspection runtime answers to every question.
+    pub(crate) const UNARMED: &str = "the unarmed test-mode seam \
+                                      `engine::topology::entry::container_runtime` asks no \
+                                      container runtime";
 
     thread_local! {
         static ARMED: RefCell<Option<Journal>> = const { RefCell::new(None) };
@@ -1655,24 +1663,96 @@ pub(crate) mod container_runtime {
 
     #[track_caller]
     pub(crate) fn for_inspection() -> Box<dyn ContainerRuntime> {
-        observed_or_plain(Location::caller(), None)
+        match observed(Location::caller(), None) {
+            Some(observed) => observed,
+            None => Box::new(AbsentRuntime),
+        }
     }
 
     #[track_caller]
     pub(crate) fn for_runner(identity: &RunIdentity) -> Box<dyn ContainerRuntime> {
-        observed_or_plain(Location::caller(), Some(identity))
+        match observed(Location::caller(), Some(identity)) {
+            Some(observed) => observed,
+            None => Box::new(DockerCli::default()),
+        }
     }
 
-    fn observed_or_plain(
+    fn observed(
         site: &Location<'_>,
         identity: Option<&RunIdentity>,
-    ) -> Box<dyn ContainerRuntime> {
-        match ARMED.with(|armed| armed.borrow().clone()) {
-            Some(journal) => Box::new(journal.observe(
-                &format!("{}:{}", site.file().replace('\\', "/"), site.line()),
-                identity,
-            )),
-            None => Box::new(DockerCli::default()),
+    ) -> Option<Box<dyn ContainerRuntime>> {
+        let journal = ARMED.with(|armed| armed.borrow().clone())?;
+        Some(Box::new(journal.observe(
+            &format!("{}:{}", site.file().replace('\\', "/"), site.line()),
+            identity,
+        )))
+    }
+
+    /// The unarmed inspection runtime: no runtime is asked, and every question is
+    /// answered as an absent runtime answers it.
+    struct AbsentRuntime;
+
+    fn absent(operation: RuntimeOp) -> RuntimeError {
+        RuntimeError::Unreachable {
+            operation,
+            detail: UNARMED.to_owned(),
+        }
+    }
+
+    impl ContainerRuntime for AbsentRuntime {
+        fn probe(&self) -> Result<(), RuntimeError> {
+            Err(absent(RuntimeOp::Probe))
+        }
+
+        fn image_by_reference(&self, _: &str) -> Result<Option<ImageInspection>, RuntimeError> {
+            Err(absent(RuntimeOp::InspectImageByReference))
+        }
+
+        fn image_by_id(&self, _: &str) -> Result<Option<ImageInspection>, RuntimeError> {
+            Err(absent(RuntimeOp::InspectImageById))
+        }
+
+        fn image_environment(
+            &self,
+            _: &str,
+        ) -> Result<Option<Vec<(String, String)>>, RuntimeError> {
+            Err(absent(RuntimeOp::InspectImageById))
+        }
+
+        fn volume_present(&self, _: &str) -> Result<bool, RuntimeError> {
+            Err(absent(RuntimeOp::InspectVolume))
+        }
+
+        fn containers_with_label(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<DiscoveredContainer>, RuntimeError> {
+            Err(absent(RuntimeOp::ListByLabel))
+        }
+
+        fn observe(&self, _: &str, _: QuestionBound<'_>) -> Result<Liveness, RuntimeError> {
+            Err(absent(RuntimeOp::Observe))
+        }
+
+        fn collect(&self, _: &str) -> Result<ContainerExecution, RuntimeError> {
+            Err(absent(RuntimeOp::Collect))
+        }
+
+        fn create(&self, _: CoveredCreate<'_>) -> Result<CreatedContainer, RuntimeError> {
+            Err(absent(RuntimeOp::Create))
+        }
+
+        fn start(&self, _: CoveredStart<'_>) -> Result<(), RuntimeError> {
+            Err(absent(RuntimeOp::Start))
+        }
+
+        fn stop(&self, _: &str, _: StopMode) -> Result<Settled, RuntimeError> {
+            Err(absent(RuntimeOp::Stop))
+        }
+
+        fn remove(&self, _: &str) -> Result<Settled, RuntimeError> {
+            Err(absent(RuntimeOp::Remove))
         }
     }
 }
