@@ -7,10 +7,13 @@
   report no run.
 - A schema-4 run's pre-flight, on `upstroke run` and on `upstroke resume`, now refuses the run when
   an agent's account, or a pool's `profile`, is not signed in, as the agent's CLI reports it
-  (`claude auth status --json` for Claude Code), before anything is spawned for the run. Such a
-  run used to start and fail at its first attempt on that agent
-  (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`). A CLI that cannot say whether it is signed in still
-  passes.
+  (`claude auth status --json` for Claude Code), before anything is spawned for the run. It checks
+  every account the agent's pools use, each once: each `profile` they name, and the agent's
+  default account when any of them names none or the agent has no pool. Such a run used to start
+  and fail at its first attempt on that agent (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`). A CLI that
+  cannot say whether it is signed in still passes, and so does a Codex that reports itself signed
+  out while `CODEX_API_KEY`, `OPENAI_API_KEY` or `CODEX_ACCESS_TOKEN` is set, since it
+  authenticates from them.
 - When a usage limit stops a schema-4 worker and the pools file has another pool for the same agent
   that the run has not seen exhausted, the task now runs again at once on that pool, in a fresh
   session under its `profile`, instead of waiting for the reset; with every pool of the agent
