@@ -762,6 +762,8 @@ durability idiom: `File::sync_all` with write access (`fsync`, `F_FULLFSYNC` on 
 `fsync` on Unix, nothing on Windows). Each failure refuses before anything is removed.
 Whether the calls are those system calls, and what a successful fsync means on a disk, is
 reasoned; the order was traced on Linux (record §5.17).
+`write_copy_syncs_the_written_file_then_renames_it_then_syncs_its_parent` holds that order in the
+source; see its section.
 
 ## `impl Workspace` › `fn relative_to_root(`
 
@@ -1573,6 +1575,28 @@ that Git's next split write of the checkout's own index removes the orphans, is 
 not the record: the package excludes `reviews/` and `findings/`. Git's behaviour is unchanged,
 so no behaviour test can guard the sentence; the reviewer's sequence, executed again on Git
 2.43.0 and 2.55.0, is the evidence. Red on round 4's notes.
+
+## `fn write_copy_syncs_the_written_file_then_renames_it_then_syncs_its_parent() {`
+
+The guard `FUD-FULL-COPYBARRIER` asked for (F4 of the owner's full review of #331): nothing held
+the order of `write_copy`'s durability barrier, and with the file's `sync_all` removed and
+`sync_parent` made a no-op every engine and workspace test stayed green. A source-order pin,
+reading this file as the census does: comments and string literals blanked by
+`crate::effects::blank_comments_and_strings`, the test module taken out by `test_module_span`,
+`fn write_copy(` found exactly once in what is left, its body taken through the brace that
+balances it, and its whitespace removed. In that body the written file is opened with write
+access and bound to `written` (`OpenOptions::new().write(true).open(partial)`), `written` is
+synced (`sync_all`), the `.partial` is renamed to the copy's name (`fs::rename(partial, copy)`),
+and the copy's directory is synced (`sync_parent(copy)`): each exactly once, and each only after
+the one before it ends. Red with the file's sync deleted from `write_copy`, which the pin reports
+as `written.sync_all()` found nowhere; green with it restored.
+
+What it cannot see, because it reads the order in the source and not the calls made:
+`sync_parent` becoming a no-op on Unix (on Windows it is one by design, and the directory entry's
+durability there is reasoned); a step whose error is dropped rather than returned; and the whole
+`copy_pin` call moving after the revert in `discard_held`, where a crash after the revert could
+find the only copy of what the discard removed not yet durable. A step moved into a helper fails
+it, and whoever moves one changes the pin with it.
 
 ## `struct InheritedSelection {`
 

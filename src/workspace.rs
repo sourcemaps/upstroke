@@ -6108,6 +6108,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn write_copy_syncs_the_written_file_then_renames_it_then_syncs_its_parent() {
+        let source = include_str!("workspace.rs");
+        let mut code = crate::effects::blank_comments_and_strings(source);
+        assert_eq!(
+            code.len(),
+            source.len(),
+            "the blanking keeps every byte at its offset, or the span taken out below is not \
+             the test module's"
+        );
+        let (attribute, end) =
+            test_module_span(&code).expect("the one test module this pin does not read");
+        code.replace_range(attribute..=end, &" ".repeat(end + 1 - attribute));
+
+        let definitions: Vec<usize> = code
+            .match_indices("fn write_copy(")
+            .map(|(at, _)| at)
+            .collect();
+        let [start] = definitions.as_slice() else {
+            panic!("one `write_copy` in the production region, found at {definitions:?}");
+        };
+        let open = start
+            + code
+                .get(*start..)
+                .and_then(|rest| rest.find('{'))
+                .expect("its body");
+        let mut depth = 0_usize;
+        let mut close = None;
+        for (at, byte) in code.bytes().enumerate().skip(open) {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(at);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let close = close.expect("its body closes");
+        let body: String = code
+            .get(open..=close)
+            .expect("its body's span")
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+
+        let mut reached = 0_usize;
+        for (step, call) in [
+            (
+                "open the written file with write access",
+                "letwritten=OpenOptions::new().write(true).open(partial)",
+            ),
+            ("sync that file", "written.sync_all()"),
+            ("rename it to the copy's name", "fs::rename(partial,copy)"),
+            ("sync the copy's directory", "sync_parent(copy)"),
+        ] {
+            let found: Vec<usize> = body.match_indices(call).map(|(at, _)| at).collect();
+            let [at] = found.as_slice() else {
+                panic!(
+                    "`write_copy` must {step} (`{call}`) once, and it is at {found:?} in: {body}"
+                );
+            };
+            assert!(
+                *at >= reached,
+                "`write_copy` must {step} (`{call}`) only after the step before it: {body}"
+            );
+            reached = at + call.len();
+        }
+    }
+
     #[cfg(unix)]
     const SELECTION_ROOT: &str = "UPSTROKE_LEGACY_SELECTION_ROOT";
     #[cfg(unix)]
