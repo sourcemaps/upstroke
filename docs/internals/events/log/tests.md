@@ -214,7 +214,7 @@ Byte identity with the pre-move writer
 
 ## `fn open_grid() -> Vec<(&'static str, Option<Vec<u8>>)> {`
 
-Every log shape the open path can meet, each varying one axis.
+Thirteen selected log shapes exercise the open path with specific prefix and tail combinations.
 
 `None` is "the file does not exist"; the rest are exact byte strings. The torn tails are 1, 5 and
 11 bytes of ASCII, a whole 53-byte JSON line, and the first two bytes of a three-byte character;
