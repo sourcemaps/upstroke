@@ -3298,23 +3298,23 @@ Collects every case's outcome before asserting, so a red run reports every case'
 
 ## `mod tests` › `fn a_review_input_read_failing_in_a_staging_checkout_whose_registration_is_not_whole_is_refused_at_width_three()`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-4, width 3.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-4, width 3. Each of its 4 cases runs under its own `BOUND` (`f_bounded_case`, in `f_policy_cases`).
 
 ## `mod tests` › `fn a_review_input_read_failing_in_a_staging_checkout_whose_registration_is_not_whole_is_refused_at_width_one()`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-4, width 1.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-4, width 1. Each of its 4 cases runs under its own `BOUND` (`f_bounded_case`, in `f_policy_cases`).
 
 ## `mod tests` › `fn a_review_input_git_error_in_a_whole_staging_registration_settles_an_outage_at_both_widths() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-4's control: a corrupt index in a whole registration is the outage it was, at C and under F (option A, not A′).
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-4's control: a corrupt index in a whole registration is the outage it was, at C and under F (option A, not A′). Each of its 2 cases runs under its own `BOUND` (`bounded`, named by the case).
 
 ## `mod tests` › `fn a_review_input_problem_read_through_a_deleted_staging_index_is_refused_not_hidden() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-4-ANS: with the staging `index` deleted the legacy policy answers no problem (E8); at C the verification is judged and published; under F the read is refused.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-4-ANS: with the staging `index` deleted the legacy policy answers no problem (E8); at C the verification is judged and published; under F the read is refused. Each of its 2 cases runs under its own `BOUND` (`f_bounded_case`).
 
 ## `mod tests` › `fn a_review_input_problem_in_a_whole_staging_registration_is_a_review_input_failure() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-4-ANS's control, at C and under F.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-4-ANS's control, at C and under F. Each of its 2 cases runs under its own `BOUND` (`bounded`, named by the case).
 
 ## `mod tests` › `fn f_attempt_run(`
 
@@ -3338,11 +3338,11 @@ An act, once, removing one name from the only task slot's entry.
 
 ## `mod tests` › `fn an_attempts_review_input_problem_read_through_a_deleted_index_is_refused_not_hidden() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-AP, widths 1 and 3: at C the attempt is judged without its review-input failure; under F the read is refused.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-AP, widths 1 and 3: at C the attempt is judged without its review-input failure; under F the read is refused. Each of its 2 cases runs under its own `BOUND` (`f_bounded_case`).
 
 ## `mod tests` › `fn an_attempts_review_input_problem_in_a_whole_registration_fails_the_attempt() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-AP's control, at C and under F.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-AP's control, at C and under F. Each of its 2 cases runs under its own `BOUND` (`bounded`, named by the case).
 
 ## `mod tests` › `fn f_no_change_responder() -> crate::engine::topology::scaffold::Responder {`
 
@@ -3350,11 +3350,11 @@ A worker that completes and changes nothing (an empty diff).
 
 ## `mod tests` › `fn an_attempts_failure_assessed_in_a_slot_whose_registration_is_not_whole_is_refused_not_spent()`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P3 (a) and (b), widths 1 and 3: a failed worker, or one with no change, the slot's `gitdir` or `index` removed at the `After` phase of `Object.CandidateWriteTree`, so that no check meets the deletion before placement 3 (the policy is bypassed and never called). At C the attempt is spent; under F placement 3 refuses. The engine suite has no seam after the assessment, so the deletion lands after the capture's last check, where nothing reads the index before placement 3.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P3 (a) and (b), widths 1 and 3: a failed worker, or one with no change, the slot's `gitdir` or `index` removed at the `After` phase of `Object.CandidateWriteTree`, so that no check meets the deletion before placement 3 (the policy is bypassed and never called). At C the attempt is spent; under F placement 3 refuses. The engine suite has no seam after the assessment, so the deletion lands after the capture's last check, where nothing reads the index before placement 3. Each of its 6 cases runs under its own `BOUND` (`f_bounded_case`).
 
 ## `mod tests` › `fn an_attempts_failure_assessed_in_a_whole_registration_is_spent() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P3's control, at C and under F.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P3's control, at C and under F. Each of its 2 cases runs under its own `BOUND` (`bounded`, named by the case).
 
 ## `mod tests` › `struct FReview {`
 
@@ -3416,25 +3416,29 @@ A case's registry refusal naming the given words, or why not.
 
 One case of the three not-whole matrices below under `bounded()`: its setup, its run, the read of its outcome and the drop of its run all happen inside one `BOUND`, named by the case, and its outcome comes back for `f_report`. The bound is the case's because the cases are independent and run one after another: one `BOUND` around a whole 12- or 16-case matrix measured how many cases a test chains and how loaded the runner was, not whether any one case was wedged, and it fired on the Windows guest's full suite while every case was progressing (`G6-F-MATRIX-AGGREGATE-BOUND`). A case that never ends still fails its test within `BOUND`, naming the case; the cases stay sequential, and `f_report` still reads every outcome.
 
+## `mod tests` › `fn no_f_test_runs_a_loop_of_cases_under_one_bound() {`
+
+Reads this file's source and fails when an F test's `bounded("f-…")` call, with a literal name, still runs a loop of cases (over `F_MATRIX` or widths) or reports collected cases (`f_report`) under its one `BOUND`. Such a test must bound each case on its own, through `f_bounded_case` or one `bounded` call per case, named after the test plus the case, so a red names the case that did not end. Before this rule was set, 21 F tests shared one `BOUND` across their cases.
+
 ## `mod tests` › `fn a_gate_verdict_read_in_a_snapshot_whose_registration_is_not_whole_is_refused() {`
 
 The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-GATE: pruned whole, `HEAD`, `commondir`, and the index gate's `index`. At C a verification is rejected and an attempt spent; under F placement 2 refuses. Each of its 16 cases runs under its own `BOUND` (`f_bounded_case`).
 
 ## `mod tests` › `fn a_genuinely_failing_gate_in_a_whole_snapshot_is_judged() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-GATE's control, at C and under F.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-GATE's control, at C and under F. Each of its 4 cases runs under its own `BOUND` (`bounded`, named by the case).
 
 ## `mod tests` › `fn a_gate_that_passes_through_a_deleted_index_is_refused_not_published() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-PASS: at C the gate passes through the empty index and the candidate is published or promoted; under F refused.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-PASS: at C the gate passes through the empty index and the candidate is published or promoted; under F refused. Each of its 4 cases runs under its own `BOUND` (`f_bounded_case`).
 
 ## `mod tests` › `fn a_gate_reading_a_whole_index_fails_on_the_forbidden_file() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-PASS's control, at C and under F.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-PASS's control, at C and under F. Each of its 4 cases runs under its own `BOUND` (`bounded`, named by the case).
 
 ## `mod tests` › `fn a_passing_gate_that_reads_no_git_state_in_a_pruned_snapshot_is_refused() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-PASS's liveness control: a genuine pass in a pruned snapshot is refused under F (§3.4's cost, pinned).
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-PASS's liveness control: a genuine pass in a pruned snapshot is refused under F (§3.4's cost, pinned). Each of its 4 cases runs under its own `BOUND` (`f_bounded_case`).
 
 ## `mod tests` › `fn f_gate_of(subject: FSubject, invocation: &InvocationId) -> bool {`
 
@@ -3494,15 +3498,15 @@ The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-
 
 ## `mod tests` › `fn a_container_gate_launched_in_a_whole_snapshot_is_judged() {`
 
-F-R1's control: the same production container runner and Git-view reader over an intact registration materialize every gate's view, and the run completes with no outage, at `157c9cab` and under the repair.
+F-R1's control: the same production container runner and Git-view reader over an intact registration materialize every gate's view, and the run completes with no outage, at `157c9cab` and under the repair. Each of its 4 cases runs under its own `BOUND` (`bounded`, named by the case).
 
 ## `mod tests` › `fn a_gate_launch_failing_in_a_whole_snapshot_is_the_outage_it_was() {`
 
-F-R1's control: a container gate whose create the runtime refuses in a whole snapshot (`NeverStarted`) settles a verification's outage as it did, and ends an attempt's command with the Runner's error, at `157c9cab` and under the repair (option A, not A′).
+F-R1's control: a container gate whose create the runtime refuses in a whole snapshot (`NeverStarted`) settles a verification's outage as it did, and ends an attempt's command with the Runner's error, at `157c9cab` and under the repair (option A, not A′). Each of its 4 cases runs under its own `BOUND` (`bounded`, named by the case).
 
 ## `mod tests` › `fn a_cancelled_or_unresolved_gate_run_ends_the_command_as_it_did_whatever_the_registration() {`
 
-F-R1's control: with `HEAD` removed, a cancelled gate run ends the command with the Runner's cancellation at every cell, and an unresolved one with the Runner's error at width 1 and with the coordinator's refusal for the unresolved process at width 3, at `157c9cab` and under the repair: the check reads neither.
+F-R1's control: with `HEAD` removed, a cancelled gate run ends the command with the Runner's cancellation at every cell, and an unresolved one with the Runner's error at width 1 and with the coordinator's refusal for the unresolved process at width 3, at `157c9cab` and under the repair: the check reads neither. Each of its 8 cases runs under its own `BOUND` (`f_bounded_case`).
 
 ## `mod tests` › `fn a_review_verdict_read_in_a_snapshot_whose_registration_is_not_whole_is_refused() {`
 
@@ -3510,7 +3514,7 @@ The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-
 
 ## `mod tests` › `fn a_review_verdict_read_in_a_whole_snapshot_is_judged() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-REVIEW's control, at C and under F.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C1-P2-REVIEW's control, at C and under F. Each of its 4 cases runs under its own `BOUND` (`bounded`, named by the case).
 
 ## `mod tests` › `fn a_review_whose_process_count_disagrees_keeps_that_refusal_when_its_snapshot_is_not_whole() {`
 
@@ -3538,7 +3542,7 @@ One task whose first attempt's gate fails, so its generation is retained; at tha
 
 ## `mod tests` › `fn a_retained_retry_over_a_pruned_populated_slot_refuses_and_keeps_the_generation_retained() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-RETAINED, widths 1 and 3: under F the retry refuses, the `Retry` reservation is cancelled (no entitlement held), nothing is appended, the generation stays `RetainedIdle` and the slot is kept byte for byte; at C the generation is closed and the slot scrubbed.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-RETAINED, widths 1 and 3: under F the retry refuses, the `Retry` reservation is cancelled (no entitlement held), nothing is appended, the generation stays `RetainedIdle` and the slot is kept byte for byte; at C the generation is closed and the slot scrubbed. Each of its 2 cases runs under its own `BOUND` (`f_bounded_case`).
 
 ## `mod tests` › `fn f_closed_worktree_missing_of_alpha(events: &[TopologyEvent]) -> bool {`
 
@@ -3546,11 +3550,11 @@ A `generation_closed{WorktreeMissing}` of the first task.
 
 ## `mod tests` › `fn a_retained_retry_over_a_whole_slot_that_no_longer_holds_its_tree_closes_and_scrubs() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-RETAINED's control: a genuine tree mismatch in a whole registration closes and scrubs, at C and under F.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-RETAINED's control: a genuine tree mismatch in a whole registration closes and scrubs, at C and under F. Each of its 2 cases runs under its own `BOUND` (`bounded`, named by the case).
 
 ## `mod tests` › `fn a_retained_retry_reading_residue_closes_and_scrubs_whatever_the_registration() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-RETAINED-RESIDUE: a held `index.lock` and a lost `index` read as residue, closed and scrubbed at C and under F — the limit the K-texts and P-6′ state.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12 — T-C2-RETAINED-RESIDUE: a held `index.lock` and a lost `index` read as residue, closed and scrubbed at C and under F — the limit the K-texts and P-6′ state. Each of its 2 cases runs under its own `BOUND` (`bounded`, named by the case).
 
 ## `mod tests` › `fn f_open_generation_left(tag: &str) -> Wide {`
 
@@ -3642,7 +3646,7 @@ The first task's policy waits until beta is blocked, so that an append follows; 
 
 ## `mod tests` › `fn a_verification_refused_after_its_passes_were_charged_records_them_under_o14b() {`
 
-The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12.6 — T-O14B-F, which replaces T-O14A-F now that O14(b) is on the base: refused at placement 2 at pass 1 (unavailable, and passing), after both passes were charged, at width 1 and at width 3. Before the command ends the log holds one `merge_verification_charged`, for the refused sequence, with both passes at their cost, and no terminal for it; the live spend and the replay agree, the record carrying the two passes. The next resume appends that sequence's `merge_verification_interrupted` and no second record, and its replay counts both passes once. Width 1 records in `TopologyRun::integrate`, width 3 in `Coordinator::integrate` or `finish`, the points `design/26` names. Mutation M-C1e (the review's check before `account.charge`) leaves pass 1 uncharged and unrecorded, so the record holds one pass and this test is red.
+The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-WORKTREES-REGISTRATION`, its design's §12.6 — T-O14B-F, which replaces T-O14A-F now that O14(b) is on the base: refused at placement 2 at pass 1 (unavailable, and passing), after both passes were charged, at width 1 and at width 3. Before the command ends the log holds one `merge_verification_charged`, for the refused sequence, with both passes at their cost, and no terminal for it; the live spend and the replay agree, the record carrying the two passes. The next resume appends that sequence's `merge_verification_interrupted` and no second record, and its replay counts both passes once. Width 1 records in `TopologyRun::integrate`, width 3 in `Coordinator::integrate` or `finish`, the points `design/26` names. Mutation M-C1e (the review's check before `account.charge`) leaves pass 1 uncharged and unrecorded, so the record holds one pass and this test is red. Each of its 4 cases runs under its own `BOUND` (`bounded`, named by the case).
 
 ## `mod tests` › `struct FCostedReviewStub {`
 
