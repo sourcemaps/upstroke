@@ -56,19 +56,22 @@ source, documentation, workflows, release machinery and this file.
    slowest shard was predicted at about 14.4 minutes and the slowest macOS leg at about 11.8.
    Run 44736631711 measured both re-splits for the first time: the slowest Windows leg took
    18.1 minutes and the slowest macOS leg 16.0.
-   In a Windows leg's log, the result line of each test the leg runs now ends with its time on
-   the hosted runner (`test <name> ... ok <0.123s>`, libtest's `--report-time`); an ignored test
-   is not run, and its line carries no time. libtest writes the time apart
+   Since #405, in a Windows leg's log, the result line of each test the leg runs ends with its
+   time on the hosted runner (`test <name> ... ok <0.123s>`, libtest's `--report-time`); an
+   ignored test is not run, and its line carries no time. libtest writes the time apart
    from the result, so a child a test starts on the harness's console can write between them
    and move the time to the next line; the `mklink` that `link_dir` in `src/rundir/tests.rs`
-   starts was one, and `link_dir` now captures its output. The packing of tests into legs is to
-   be weighed by those times in a later change. On 2026-11-22 the tests were packed into
-   fourteen Windows shards and five macOS legs by the per-test Windows times of CI run
-   45045067738, scaled for macOS by each macOS leg's measured ratio to Windows: whole modules,
-   split by name prefix only where a module exceeded a leg's budget, each leg but the last
-   named by several filters, which are in `ci.yml`. Each Windows job was predicted at about 521
-   to 542 seconds and each macOS leg at about 568 to 608, and the two Linux legs were left as
-   they were.
+   starts was one, and `link_dir` now captures its output. On 2026-11-22 the tests were first
+   packed into fourteen Windows shards and five macOS legs by the per-test Windows times of CI
+   run 45045067738, scaled for macOS by each macOS leg's measured ratio to Windows: whole
+   modules, split by name prefix only where a module exceeded a leg's budget, each leg but the
+   last named by several filters, which are in `ci.yml`. Each Windows job was predicted at about
+   521 to 542 seconds and each macOS leg at about 568 to 608, and the two Linux legs were left
+   as they were. Run 45233912312 measured that packing at 358 to 693 seconds on Windows and 248
+   to 699 on macOS. On 2026-11-23 the tests were packed again, whole module by whole module as
+   before, by the mean of each test's Windows times over three timed runs, 45045067738,
+   45161322179 and 45233912312; each Windows job is predicted at about 503 to 519 seconds and
+   each macOS leg at about 578 to 610.
    Single tests set a floor under every Windows leg: a leg takes no less than its longest test
    plus the job's fixed minutes. In CI run 45045067738 the longest single Windows tests were
    `engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect`

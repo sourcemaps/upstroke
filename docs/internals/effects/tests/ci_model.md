@@ -369,10 +369,12 @@ run, and its line carries no time. libtest writes the time apart from
 the result, so a child a test starts on the harness's console can write
 between them and move the time to the next line; the `mklink` that
 `link_dir` in `src/rundir/tests.rs` starts was one, and `link_dir` now
-captures its output. The packing of tests into legs
-([`WINDOWS_SHARD_FILTERS`]) is to be weighed by those times in a later
-change (`MAINTAINING.md` step 3). The `test result:` lines the count reads are the same with the
-times as without them.
+captures its output. The tests were packed into legs
+([`WINDOWS_SHARD_FILTERS`]) by those times: on 2026-11-22 by CI run
+45045067738's, and again on 2026-11-23 by the mean of each test's times over
+CI runs 45045067738, 45161322179 and 45233912312 (`MAINTAINING.md` step 3).
+The `test result:` lines the count reads are the same with the times as
+without them.
 
 `RUSTC_BOOTSTRAP` reaches only the harnesses the build made, and what they
 start, because of three crates this one builds: `anyhow`, `thiserror` and
