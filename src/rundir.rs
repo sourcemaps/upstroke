@@ -1723,20 +1723,39 @@ pub fn remove_public_husk(public: &Path, hooks: &mut dyn RunDirHooks) -> Result<
 ///
 /// - [`UnboundShape::Bare`]: `fs::remove_dir(public)` and nothing else.
 /// - [`UnboundShape::StagedMarkerOnly`]: the staged marker
-///   ([`MARKER_STAGED`]) is removed if present, then `fs::remove_dir(public)`.
+///   ([`MARKER_STAGED`]) is unlinked only while it is still a regular file,
+///   asked again here with `fs::symlink_metadata` and never followed; then
+///   `fs::remove_dir(public)` either way.
 /// - [`UnboundShape::TargetAbsent`]: exactly [`remove_public_husk`] — the
 ///   directory is listed and emptied with the published marker last. That
 ///   shape is decided by the marker's private target, not by what the public
 ///   directory holds, so there is no list of contents to keep to.
 ///
-/// **Content that arrived after the plan is never removed under the first
-/// two shapes.** `remove_dir` refuses a directory that is not empty, so an
-/// entry written after the proof answered (a creator's marker, an event log)
-/// turns the removal into an error, and the entry and the directory are left
-/// for the next census to classify again. Under `StagedMarkerOnly` the
-/// staged marker is already gone when `remove_dir` fails. A staged marker
-/// binds nothing, because no private half is created before the marker is
-/// published, so the next census classifies the directory by what it holds.
+/// **Content that arrived after the plan is not removed under the first two
+/// shapes, within the two limits below.** `remove_dir` refuses a directory
+/// that is not empty, so an entry written after the proof answered (a
+/// creator's marker, an event log) turns the removal into an error, and the
+/// entry and the directory are left for the next census to classify again.
+/// That includes an entry put in the staged marker's place under its name: a
+/// directory, a link or anything else that is not a regular file is not
+/// unlinked, so it keeps the directory non-empty and both stay
+/// (`PR369-STAGED-REPLACEMENT-DELETED`). A regular file put there is
+/// indistinguishable from the staged marker and is unlinked as it. Under
+/// `StagedMarkerOnly` a staged marker that is still a regular file is already
+/// gone when `remove_dir` fails. A staged marker binds nothing, because no
+/// private half is created before the marker is published, so the next census
+/// classifies the directory by what it holds.
+///
+/// The two limits:
+///
+/// - **The type is asked, then the name is unlinked: two calls.** An entry
+///   that replaces the regular file between them is unlinked, and nothing
+///   here closes that window.
+/// - **On Windows a reparse point can answer as a regular file**
+///   (`PR369-WINDOWS-REPARSE-AS-STAGED`, deferred). `FileType` counts a reparse
+///   point as a link only when its tag is a name surrogate, so one that is
+///   not and is not a directory answers `is_file()`, and is unlinked as the
+///   staged marker.
 ///
 /// The hook is consulted once per call, `Before` and `After` around the one
 /// primitive for the shape, as in [`remove_public_husk`]; the site inventory
@@ -1760,7 +1779,9 @@ pub fn remove_unbound_husk(
         || match shape {
             UnboundShape::Bare => remove_empty_public_dir(public),
             UnboundShape::StagedMarkerOnly => {
-                remove_file_if_present(&public.join(MARKER_STAGED))?;
+                if staged_marker_is_a_regular_file(public) {
+                    remove_file_if_present(&public.join(MARKER_STAGED))?;
+                }
                 remove_empty_public_dir(public)
             }
             UnboundShape::TargetAbsent => remove_listed_husk_marker_last(public),
@@ -1786,6 +1807,28 @@ fn remove_listed_husk_marker_last(public: &Path) -> Result<(), UpstrokeError> {
     }
     remove_file_if_present(&public.join(MARKER))?;
     remove_empty_public_dir(public)
+}
+
+/// Whether `public`'s staged marker ([`MARKER_STAGED`]) is a regular file
+/// now: `fs::symlink_metadata` of it succeeds and answers
+/// `file_type().is_file()`.
+///
+/// The name is asked and never followed, so a link of that name (a POSIX
+/// symlink, a Windows junction or symbolic link) answers false whatever it
+/// reaches, and so do a directory, any other kind of entry, and a stat that
+/// fails, `NotFound` included. It is the one question both readers of the
+/// staged name ask: the ownership proof's `unbound_shape` plans
+/// [`UnboundShape::StagedMarkerOnly`] only when it answers true, and
+/// [`remove_unbound_husk`] unlinks the name under that plan only when it
+/// answers true again (`PR369-STAGED-REPLACEMENT-DELETED`). It answers for the
+/// moment it is asked, and nothing holds the entry still afterwards.
+///
+/// **Windows is not closed** (`PR369-WINDOWS-REPARSE-AS-STAGED`, deferred).
+/// `FileType` counts a reparse point as a link only when its tag is a name
+/// surrogate, so a reparse point that is not one and is not a directory answers
+/// `is_file()` there, and is taken for the staged marker.
+fn staged_marker_is_a_regular_file(public: &Path) -> bool {
+    fs::symlink_metadata(public.join(MARKER_STAGED)).is_ok_and(|stat| stat.file_type().is_file())
 }
 
 /// `fs::remove_dir(public)`, which fails if anything is inside.

@@ -772,15 +772,23 @@ now visible in the signature as well as in the body.
 what the directory holds when `apply` runs. `scan` and `apply` look at the
 directory at two different times, and it can change in between. For `Bare`
 and `StagedMarkerOnly`, `rundir::remove_unbound_husk` does not list the
-directory again. It runs one `remove_dir`, after removing the staged marker
-for `StagedMarkerOnly`, and `remove_dir` refuses a directory that is not
-empty. So an entry that arrived after the plan is an error,
-`FailedStep::PublicHalf`, and the entry and the directory stay for the next
-census to classify again. A husk that carries a marker is still swept
-whole, on its marker's authority. `TargetAbsent` is decided by the marker's
-private target, not by what the public directory holds, so that shape still
-lists and empties the directory with the marker last, as `remove_public_husk`
-does for both halves under the proof (the next arm).
+directory again. It runs one `remove_dir`, and `remove_dir` refuses a
+directory that is not empty. For `StagedMarkerOnly` it first unlinks the
+staged marker, but only while that name is still a regular file, asked with
+`fs::symlink_metadata` and never followed. So an entry that arrived after the
+plan is an error, `FailedStep::PublicHalf`, and the entry and the directory
+stay for the next census to classify again. That includes a directory, a link
+or anything else that is not a regular file put in the staged marker's place
+under its name. A regular file put there is indistinguishable from the staged
+marker and is unlinked as it. Two limits remain. The type is asked and then
+the name is unlinked, two calls, so an entry that replaces the file between
+them is unlinked. On Windows a reparse point that is not a name surrogate and
+not a directory answers as a regular file and is unlinked as the staged marker
+(`PR369-WINDOWS-REPARSE-AS-STAGED`, deferred). A husk that carries a marker
+is still swept whole, on its marker's authority. `TargetAbsent` is decided by
+the marker's private target, not by what the public directory holds, so that
+shape still lists and empties the directory with the marker last, as
+`remove_public_husk` does for both halves under the proof (the next arm).
 
 This arm used to call `remove_public_husk`, which listed the directory again
 and removed everything it found. Take a committed run whose public directory

@@ -1872,11 +1872,12 @@ fn stat_after_error<R: UnpublishedRoot + ?Sized>(
             }
             // **Removed by the shape the proof answered**, not by what a fresh
             // listing finds, as the census's `apply` does: for `Bare` and
-            // `StagedMarkerOnly` this is one `remove_dir` (after the staged
-            // marker), which refuses a directory that gained an entry after
-            // the proof, so that entry and the directory stay for the next
-            // census to classify again. `TargetAbsent` still lists and empties
-            // the directory with the marker last.
+            // `StagedMarkerOnly` this is one `remove_dir` (after unlinking the
+            // staged marker, only while it is still a regular file), which
+            // refuses a directory that gained an entry after the proof, so
+            // that entry and the directory stay for the next census to
+            // classify again. `TargetAbsent` still lists and empties the
+            // directory with the marker last.
             //
             // Best-effort, as in the proven arm: every failure leaves a husk
             // the next census classifies and reclaims or reports on its own,

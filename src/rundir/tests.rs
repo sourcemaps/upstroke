@@ -4175,10 +4175,12 @@ fn husk_with_staged_name(tag: &str, plant: impl FnOnce(&BoundHusk, &Path)) -> Bo
 /// A directory named `.creating.tmp` is content, not the staged marker
 /// (`PR369-STAGED-NAME-NOT-A-FILE`), and is retained with what it holds.
 ///
-/// `StagedMarkerOnly` is removed by `remove_file`, which a directory refuses
-/// (`EISDIR` on Linux) on every census, so a proof that answered it from the
-/// name alone planned a removal that could never succeed while `status` said
-/// the next write command would reclaim the husk. The base swept such a
+/// `StagedMarkerOnly` was removed by `remove_file`, which a directory refuses
+/// (`EISDIR` on Linux); it is now unlinked only while it is a regular file,
+/// and the `remove_dir` that follows refuses the husk while the directory is
+/// still in it. Either way, on every census, so a proof that answered it from
+/// the name alone planned a removal that could never succeed while `status`
+/// said the next write command would reclaim the husk. The base swept such a
 /// directory whole instead, deleting content no listing showed. The answer is
 /// neither: a marker-less husk carrying content.
 ///
@@ -4359,6 +4361,62 @@ fn a_bare_or_staged_plan_leaves_a_file_the_directory_gained_since() {
             "{shape:?}: and its bytes are untouched"
         );
         assert!(public.is_dir(), "{shape:?}: so is the directory");
+    }
+}
+
+/// A `StagedMarkerOnly` plan applied after the staged marker was replaced by
+/// a link of the same name leaves the link, what it reaches and the directory
+/// (`PR369-STAGED-REPLACEMENT-DELETED`).
+///
+/// The proof planned the shape while `.creating.tmp` was a regular file; the
+/// removal used to unlink that name unconditionally, so whatever stood there
+/// when it ran went, the directory was empty, and `remove_dir` removed it too.
+/// The reviewer's replacement was a live Unix socket; a directory link is the
+/// same "not a regular file" on every platform and has no `sun_path` length
+/// limit. Measured: with the unlink made unconditional again, this fails on
+/// Linux.
+#[test]
+fn a_staged_marker_replaced_by_a_link_is_left_in_place() {
+    let husk = unbound_husk("staged-replaced-link", UnboundShape::StagedMarkerOnly);
+    let public = husk.public();
+    let staged = public.join(MARKER_STAGED);
+    let target = husk.root.join("reached-by-the-replacement");
+    let reached: &[u8] = b"content the replacement reaches";
+    write(&target.join("inside.txt"), reached);
+    fs::remove_file(&staged).expect("the planned staged marker goes");
+    link_dir(&staged, &target);
+    let before = snapshot_tree(&target);
+
+    let error = remove_unbound_husk(&public, UnboundShape::StagedMarkerOnly, &mut NoHooks)
+        .expect_err("a staged name that is no longer a regular file is not removed");
+
+    match &error {
+        UpstrokeError::Io { path, .. } => assert_eq!(
+            path, &public,
+            "the error names the directory remove_dir refused"
+        ),
+        other => panic!("a refused remove_dir is an Io error: {other:?}"),
+    }
+    assert!(
+        fs::symlink_metadata(&staged).is_ok(),
+        "the link is left in place"
+    );
+    assert_eq!(
+        fs::read(staged.join("inside.txt")).expect("the link still reaches its target"),
+        reached,
+        "through it, the bytes it reached"
+    );
+    assert_eq!(
+        snapshot_tree(&target),
+        before,
+        "and what it reaches is untouched"
+    );
+    assert!(public.is_dir(), "so is the public directory");
+    match husk.prove() {
+        PrivateHalfOwnership::Retained(reason) => {
+            assert_eq!(reason.kind(), "markerless-with-content", "{reason}");
+        }
+        other => panic!("the next census retains the link as content: {other:?}"),
     }
 }
 
