@@ -40,8 +40,11 @@ pub(super) fn pools_file_at(agents: &[AgentReport], written_at: &str) -> String 
              Whether your installed CLI's own model listing was checked against it is stated per\n\
              agent below; where it was not, nothing here was confirmed against what that CLI accepts.\n\
              \n\
-             `profile` selects between several accounts on one vendor (§13). It is parsed, shown by\n\
-             `upstroke capacity`, carried across --force, and acted on by nothing in v0.1.",
+             `profile` is the absolute path of a directory handed to Claude Code as its credential\n\
+             location (CLAUDE_CONFIG_DIR), so one vendor can back several pools (§13, §17). You\n\
+             write it; `upstroke connect` never does, and carries it across --force. A run refuses a\n\
+             profile it cannot honour, a relative path (`~` is not expanded) and a missing directory\n\
+             among them.",
             env!("CARGO_PKG_VERSION"),
         ),
     );
@@ -483,6 +486,13 @@ mod tests {
             pools_file_at(&[], "2026-09-05T00:00:00Z").starts_with(&format!("{WRITTEN_BY} v")),
             "the prefix is the first thing in the file"
         );
+    }
+
+    #[test]
+    fn the_header_says_what_profile_does() {
+        let file = pools_file_at(&[], "2026-09-05T00:00:00Z");
+        assert!(file.contains("CLAUDE_CONFIG_DIR"), "{file}");
+        assert!(!file.contains("acted on by nothing"), "{file}");
     }
 
     #[test]

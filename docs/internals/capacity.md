@@ -24,8 +24,10 @@ the fold that collects those observations from a run's event log.
 the estimator so `upstroke capacity` and the dry-run preview can show what each
 strategy *would* do, and v0.2 wires it into the binder once the estimates
 have been watched for a while. So `pool_for` fills `WorkerProfile.pool` for
-**attribution only** — the binder still picks models from the catalog and
-pins, exactly as it did before this module existed.
+attribution, and it also selects the profile an agent runs under (see
+[Credential profiles](#credential-profiles) below). Nothing routes on it: the
+binder still picks models from the catalog and pins, exactly as it did before
+this module existed.
 
 The estimator is a pure function over plain values ([`estimate`]), so every
 rule in §13 is exercisable with no CLI installed and no file on disk. Only
@@ -172,8 +174,11 @@ Rolling window, e.g. `"5h"`.
 ## `pub struct Pool` › `pub profile: Option<String>,`
 
 §13's credential-profile seam: an operator-writable config-directory
-path identifying *which account* this pool draws from. Parsed, carried,
-and displayed; **nothing acts on it in v0.1** (see the module docs).
+path identifying *which account* this pool draws from. Parsed, carried
+and displayed, and acted on for Claude Code on the host runner of a
+schema-4 run, which sets it as `CLAUDE_CONFIG_DIR` on the work, review
+and probe processes of the agent whose bound pool this is (see the
+module docs).
 
 ## `pub struct Pool` › `pub usable: bool,`
 
@@ -194,8 +199,11 @@ Which pool an attempt on `agent` drains: the first matching entry, table
 order as preference — the same convention `different_family_at` uses, so
 moving a pool up the file promotes it.
 
-**Attribution only.** Nothing routes on the answer in v0.1; it fills
-`WorkerProfile.pool` so the ledger can say which subscription paid.
+**Attribution and profile, never routing.** Nothing routes on the answer
+in v0.1. It fills `WorkerProfile.pool` so the ledger can say which
+subscription paid, and it also selects the profile an agent runs under:
+the answer for an agent is its bound pool, and only that pool's `profile`
+is set on the agent's processes (`src/engine/topology/profiled.rs`).
 
 ## `pub struct Spend {`
 

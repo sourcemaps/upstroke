@@ -17,12 +17,12 @@ not a leak, and it is the same posture §9 sets for plan importers.
 
 Two things this deliberately does not do:
 
-- **It never invents a profile.** §13 wants `connect` to enumerate
-  credential profiles, not just binaries, so that one vendor can back
-  several pools. There is no vendor registry of profiles to enumerate — the
-  mechanism is a config-directory environment variable, not a list — so v0.1
-  writes one pool per agent and leaves `profile` for the operator to add by
-  hand. See [`crate::capacity`]'s module docs for the v0.2 sketch.
+- **It never invents a profile.** §13 says `connect` does not enumerate
+  credential profiles, because no vendor lists them: the mechanism is a
+  config-directory environment variable, not a registry. So `connect` writes
+  one pool per agent, and `profile` is the operator's to add by hand, which
+  `connect` then carries across a `--force`. See [`crate::capacity`]'s module
+  docs for what a run does with a profile.
 - **It never clobbers.** §17 calls the pools file hand-editable, and it is
   the file that says which subscriptions exist. An existing file whose
   *settings* differ is printed and the command exits asking for `--force`;
@@ -304,6 +304,7 @@ beside the old ones, and an added key leaves this test passing, since it
 names only the frozen keys. A renamed or dropped key fails it, and so does a
 changed default name, which would break `--force`'s carrying by pool name.
 
+## `let tree = scratch("clobber");`
 
 §17 says the file is hand-editable, so silently overwriting a hand
 edit destroys the operator's own record of their subscriptions.

@@ -57,13 +57,13 @@ in there, and the engine handles no token. The host runner sets it from the pool
 is bound to, which is the first pool in the file naming the attempt's agent. It applies to that
 agent's work, review and probe processes, and a gate gets no credential location. The value is
 used as written, with no `~` expansion, so it must be an absolute path. A profile is supported
-for Claude Code on the host runner only. Before anything runs, the engine refuses a profile on
-the container runner, a profile for another agent, a relative path (`~/…` among them), or one
-whose directory is missing or not a directory, checking every pool that names one. It also
+for Claude Code on the host runner only. Before any agent CLI is started, the engine refuses a
+profile on the container runner, a profile for another agent, a relative path (`~/…` among them),
+or one whose directory is missing or not a directory, checking every pool that names one. It also
 refuses any profile while `CLAUDE_CODE_OAUTH_TOKEN` is set, because that token overrides a
-profile's credentials. A fresh run makes these checks before its creation begins, so a refused
-run leaves no run directory and no private half. A resume makes them first in its pre-flight. The
-refusals are the same, word for word, on both. Pre-flight then runs the agent CLI's capability
+profile's credentials. A fresh run makes these checks in `prepare_fresh`, before its lease, so a
+refused run leaves no run directory and no private half. A resume makes them first in its
+pre-flight, under its locks. The refusals are the same, word for word, on both. Pre-flight then runs the agent CLI's capability
 probe under the profile. It does not check sign-in, so a profile that is not signed in passes
 pre-flight and fails at its first attempt (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`). The legacy
 (schema 1–3) coordinator refuses any pool that names a profile.

@@ -261,6 +261,16 @@ The parent's `stable_content` filters exactly one line by prefix; if
 the timestamp ever appeared on a second line, or the first line
 stopped starting with the prefix, every re-connect would rewrite.
 
+## `fn the_header_says_what_profile_does() {`
+
+The header is where an operator reading the pools file learns what
+`profile` is for. It used to say the key was acted on by nothing, and
+that went on being printed after the host runner began setting a
+pool's `profile` as Claude Code's `CLAUDE_CONFIG_DIR`. The test holds
+both halves of the correction: the header names the variable a
+profile becomes, and the old claim is gone. It renders with no agents
+because the sentence is in the header, which every file carries.
+
 ## `let pool = || Pool::discovered("x", PoolKind::Credits, "x", vec![Source::Signals]);`
 
 The type admits four combinations of outcome and pool; the parent

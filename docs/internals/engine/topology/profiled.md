@@ -10,8 +10,8 @@ in the linked module, using the enclosing item to distinguish repeated lines.
 
 Each agent request carries its agent's bound credential profile.
 
-A pool in `upstroke.toml` may name a `profile`: the credential directory its
-agent's CLI is to run under. The runners already honour
+A pool in the pools file, `~/.upstroke/pools.toml`, may name a `profile`: the
+credential directory its agent's CLI is to run under. The runners already honour
 `RunnerRequest::credential_profile` (the host runner composes the child's
 environment from it; the container runner refuses it before starting anything);
 what was missing is anything that sets it. This module is that: a private
@@ -25,15 +25,18 @@ an assembly detail of `entry`: nothing outside the topology engine builds a
 run's runner.
 
 **What it does not do.** It does not check the profile. Pre-flight does,
-where a refusal can be reported before anything runs: the profile must be an
-absolute path and an existing directory. The agent's capability probe then
-runs under the profile, through this wrapper. Nothing checks sign-in, so a
-profile that is not signed in passes pre-flight and fails at its first
-attempt (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`). It does not expand `~/`: the
+where a refusal can be reported before any agent CLI is started: a fresh run
+refuses in `prepare_fresh`, before its lease, and a resume in its pre-flight,
+under its locks. The profile must be an absolute path and an existing
+directory. The agent's capability probe then runs under the profile, through
+this wrapper. Nothing checks sign-in, so a profile that is not signed in
+passes pre-flight and fails at its first attempt
+(`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`). It does not expand `~/`: the
 configuration has no helper for that (the only home lookup is
 `util::user_upstroke_dir`, which finds the home but does not rewrite paths),
-so the profile is the string written in `upstroke.toml`, used as a path, and
-pre-flight refuses a `~/` one as relative.
+so the profile is the string written in the pools file,
+`~/.upstroke/pools.toml`, used as a path, and pre-flight refuses a `~/` one
+as relative.
 
 ## `pub(super) fn profiled(inner: Arc<dyn Runner>, pools: &[Pool]) -> Arc<dyn Runner> {`
 
