@@ -2212,6 +2212,41 @@ root `workspace.default-members = [...]` are one table to Cargo and three
 different strings to a line scan, which is how the first two versions of
 this check read and how each was shown a spelling it missed.
 
+## `fn host_unit_complaints(root: &Path) -> Vec<String> {`
+
+The units Cargo compiles for the host rather than for `--target`, as the
+package at `root` declares them: a `build.rs` at its root, which Cargo
+builds as a build script unless `[package] build` is `false`; any other
+`[package] build`, which declares one; `[lib] proc-macro = true` or
+`proc_macro = true`; and a `[workspace]` table, under which another member
+could be any of these. One complaint per unit found, each naming its cause.
+The manifest goes through TOML's parser, as the workspace check above does,
+so no spelling of a key hides it.
+
+## `fn no_repository_file_adds_a_host_unit_the_macos_cross_checks_cannot_reach() {`
+
+The package has no host unit, and this is what keeps the macOS cross checks
+complete.
+
+Since #412, `lint (macos)` and the macOS `msrv` entry run on `ubuntu-latest`
+with `--target aarch64-apple-darwin` rather than on a Mac. `cfg` follows
+the target for the package's target code, so Clippy and the MSRV check see
+every `#[cfg(target_os = "macos")]` region of it as a Mac would. A host
+unit -- a build script or a proc-macro -- compiles for the host instead,
+which there is Linux: its macOS branches would be neither linted nor
+compiled at the MSRV, and both legs would still pass. Absence is the
+contract, as for the files above: adding a host unit is a deliberate act,
+and the same change restores a native `macos-latest` Clippy and MSRV leg
+(`PR412-MACOS-HOST-UNITS-UNLINTED`).
+
+## `fn no_repository_file_host_unit_check_names_each_host_unit() {`
+
+The check's own witness. The live tree has none of the four, so the test
+above would pass as well against a helper that read none of them. Each
+fixture here declares one host unit and must draw exactly one complaint,
+naming its cause; a plain package, and a `build.rs` that `build = false`
+switches off, are the controls and must draw none.
+
 ## `const WINDOWS_SUITE_TIMES: &str = "-Z unstable-options --report-time";`
 
 What the Windows shards hand each test harness after the leg's selection,
@@ -3219,9 +3254,13 @@ for each target, a gate job whose `runs-on:` is the target's `check_runner`
 and which runs its `clippy_gate`. Linux and Windows are linted natively.
 `lint (macos)` runs on `ubuntu-latest` with `--target aarch64-apple-darwin`:
 `cfg` follows the target, not the host, so it evaluates every
-`#[cfg(target_os = "macos")]` region as a Mac would, and it left
-`macos-latest` because GitHub runs at most five macOS jobs at once for the
-account and each run asked for seven (run 45175187088).
+`#[cfg(target_os = "macos")]` region of the package's target code as a Mac
+would; a host unit -- a build script or a proc-macro -- would compile for
+Linux, and
+`no_repository_file_adds_a_host_unit_the_macos_cross_checks_cannot_reach`
+refuses one, and it left `macos-latest` because GitHub runs at most five
+macOS jobs at once for the account and each run asked for seven (run
+45175187088).
 
 **Why this is one test and not three.** `PR5D-MSVC-CLIPPY-NEVER-RUN` and
 `PR5-MACOS-CLIPPY-NEVER-RUN` are the same defect on two platforms, found
