@@ -6085,37 +6085,51 @@ fn the_hosted_windows_shards_run_the_suite_on_the_compiler_they_install() {
 #[test]
 fn the_shard_tables_run_every_test_in_exactly_one_shard() {
     let windows = shard_selections(&WINDOWS_SHARD_FILTERS);
-    assert_eq!(
-        windows,
-        [
-            "engine::topology::coordinator::tests::a_p",
-            "engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_p",
-            "engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r",
-            "engine::topology::coordinator:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_",
-            "engine::topology::recover:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator::",
-            "engine::tests::a --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover::",
-            "runner:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::a",
-            "workspace_manager:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::a --skip runner::",
-            "engine::tests:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::a --skip runner:: --skip workspace_manager::",
-            "--skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::a --skip runner:: --skip workspace_manager:: --skip engine::tests::",
-        ],
-        "the Windows shards' libtest arguments are not the ten written out here: each shard's \
-         are its filter and a `--skip` for every filter before it, and the last shard's are \
-         only the skips"
-    );
     let macos = shard_selections(&MACOS_SHARD_FILTERS);
-    assert_eq!(
-        macos,
-        [
-            "engine::topology::coordinator::tests::a_",
-            "engine::topology:: --skip engine::topology::coordinator::tests::a_",
-            "engine:: --skip engine::topology::coordinator::tests::a_ --skip engine::topology::",
-            "runner:: --skip engine::topology::coordinator::tests::a_ --skip engine::topology:: --skip engine::",
-            "--skip engine::topology::coordinator::tests::a_ --skip engine::topology:: --skip engine:: --skip runner::",
-        ],
-        "the macOS shards' libtest arguments are not the five written out here"
-    );
     let linux = shard_selections(&LINUX_SHARD_FILTERS);
+    for (table, selections, filters, shards) in [
+        ("Windows", &windows, WINDOWS_SHARD_FILTERS.as_slice(), 14),
+        ("macOS", &macos, MACOS_SHARD_FILTERS.as_slice(), 5),
+        ("Linux", &linux, LINUX_SHARD_FILTERS.as_slice(), 2),
+    ] {
+        assert_eq!(
+            selections.len(),
+            shards,
+            "the {table} table yields {} shards, not {shards}: one for each filter list and a \
+             last one for every test no list selects",
+            selections.len()
+        );
+        assert_eq!(
+            selections.first().map(String::as_str),
+            filters.first().map(|first| first.join(" ")).as_deref(),
+            "the {table} table's first shard's libtest arguments are not its first filter list, \
+             space-separated, with no skip"
+        );
+    }
+    let windows_filters: Vec<&str> = WINDOWS_SHARD_FILTERS
+        .iter()
+        .flat_map(|list| list.iter().copied())
+        .collect();
+    assert_eq!(
+        windows_filters.len(),
+        73,
+        "the Windows table holds {} filters, not 73",
+        windows_filters.len()
+    );
+    assert_eq!(
+        windows.last().map(String::as_str),
+        Some(
+            windows_filters
+                .iter()
+                .map(|filter| format!("--skip {filter}"))
+                .collect::<Vec<String>>()
+                .join(" ")
+                .as_str()
+        ),
+        "the last Windows shard's libtest arguments are not exactly a `--skip` for each of the \
+         table's filters in order: each shard's are its own filters and a `--skip` for every \
+         filter of every shard before it, and the last shard's are only the skips"
+    );
     assert_eq!(
         linux,
         ["engine::", "--skip engine::"],
@@ -6131,26 +6145,26 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
     for (name, windows_shard, macos_shard, linux_shard) in [
         (
             "engine::topology::coordinator::tests::a_pipeline_is_served_while_an_intent_removals_repair_plan_waits_on_a_torn_registration",
-            1,
-            1,
+            2,
+            3,
             1,
         ),
         (
             "engine::topology::coordinator::tests::a_registry_refusal_after_two_paid_passes_is_recorded_with_both_at_width_one",
-            2,
-            1,
+            12,
+            3,
             1,
         ),
         (
             "engine::topology::coordinator::tests::a_budget_stop_drains",
+            14,
             3,
-            1,
             1,
         ),
         (
             "engine::topology::coordinator::tests::halt_cancels_in_flight_attempt_at_width_three",
-            4,
-            2,
+            14,
+            5,
             1,
         ),
         (
@@ -6168,41 +6182,41 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
         (
             "engine::topology::attempt::tests::kill_after_the_snapshot_intent_before_its_worktree_is_reclaimed",
             10,
-            2,
+            3,
             1,
         ),
-        ("engine::tests::host_acceptance_record", 9, 3, 1),
+        ("engine::tests::host_acceptance_record", 14, 5, 1),
         (
             "engine::tests::a_kept_pin_is_written_whatever_head_is_when_the_snapshot_is_refused",
-            6,
-            3,
+            10,
+            4,
             1,
         ),
         (
             "runner::container::tests::container_capability_record",
-            7,
-            4,
+            3,
+            1,
             2,
         ),
         (
             "workspace_manager::tests::engine::a_name_with_a_filter_inside_it",
-            8,
-            3,
+            2,
+            1,
             1,
         ),
         (
             "workspace_manager::tests::a_reservation_is_released",
-            8,
-            5,
+            13,
+            1,
             2,
         ),
         (
             "effects::tests::the_workflow_shape_oracle_refuses_every_escape_the_ledger_names",
-            10,
+            14,
             5,
             2,
         ),
-        ("tests::a_test_of_the_binary_harness", 10, 5, 2),
+        ("tests::a_test_of_the_binary_harness", 14, 5, 2),
     ] {
         for (table, selections, expected) in [
             ("Windows", &windows, windows_shard),
@@ -6226,11 +6240,17 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
         }
     }
 
-    for (table, filters) in [
+    for (table, lists) in [
         ("WINDOWS_SHARD_FILTERS", WINDOWS_SHARD_FILTERS.as_slice()),
         ("MACOS_SHARD_FILTERS", MACOS_SHARD_FILTERS.as_slice()),
         ("LINUX_SHARD_FILTERS", LINUX_SHARD_FILTERS.as_slice()),
     ] {
+        assert!(
+            lists.iter().all(|list| !list.is_empty()),
+            "`{table}` holds an empty filter list, so that shard has no filter and runs every \
+             test no earlier shard ran, the last shard's tests among them"
+        );
+        let filters: Vec<&str> = lists.iter().flat_map(|list| list.iter().copied()).collect();
         let malformed: Vec<&str> = filters
             .iter()
             .copied()
@@ -6249,8 +6269,8 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
         assert_eq!(
             distinct.len(),
             filters.len(),
-            "`{table}` names a filter twice, so the later of the two shards skips its own \
-             filter and selects no test"
+            "`{table}` names a filter twice, so a later shard skips one of its own filters and \
+             loses the tests it selects, or one shard names a filter twice"
         );
     }
 
@@ -6267,8 +6287,8 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
         WINDOWS_SHARD_FLOORS.iter().sum::<u32>(),
         WINDOWS_TEST_FLOOR,
         "the Windows shards' floors {WINDOWS_SHARD_FLOORS:?} do not sum to {WINDOWS_TEST_FLOOR}, \
-         the floor the whole suite was held to as one job: the ten legs together must not \
-         accept fewer passing tests"
+         the floor the whole suite was held to as one job: the legs together must not accept \
+         fewer passing tests"
     );
 }
 

@@ -3203,37 +3203,37 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the last shard, the one with no filter, gains a `--skip effects::`. Every test \
                  of that shard whose name contains `effects::` then runs in no leg, this \
                  oracle's among them. The leg's floor is about half of its count, so where the \
-                 skip takes less than the other half all ten legs are green over a suite that \
-                 lost those tests",
+                 skip takes less than the other half all fourteen legs are green over a suite \
+                 that lost those tests",
         job: Some("test-windows-hosted"),
-        anchor: "          - shard: \"10 of 10\"\n            tests: \"",
-        replacement: "          - shard: \"10 of 10\"\n            tests: \"--skip effects:: ",
+        anchor: "          - shard: \"14 of 14\"\n            tests: \"",
+        replacement: "          - shard: \"14 of 14\"\n            tests: \"--skip effects:: ",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-LAST-SHARD-SKIPS-MORE",
-        escape: "the same skip put last in the last shard's arguments, after the nine the table \
+        escape: "the same skip put last in the last shard's arguments, after the 73 the table \
                  derives. Every test of that shard whose name contains `effects::` runs in no \
                  leg, as under `MUT-TEST-WINDOWS-HOSTED-SHARD-NARROWED`; here the string opens \
                  as the table's does and every word of the table's is in its place, so a \
                  reading that stopped at the table's last word would pass it",
         job: Some("test-windows-hosted"),
-        anchor: "--skip engine::tests::\"\n            floor: 965\n",
-        replacement: "--skip engine::tests:: --skip effects::\"\n            floor: 965\n",
+        anchor: "--skip engine::tests::a_d\"\n            floor: 969\n",
+        replacement: "--skip engine::tests::a_d --skip effects::\"\n            floor: 969\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-DROPPED",
         escape: "the second shard's entry gone from the `include:` list, its three lines. Its \
-                 tests are the coordinator's whose names open `a_r`, which the first shard's \
-                 filter does not name: every later leg skips them and no leg left asks for \
-                 them, so they run on no hosted leg. The nine legs left each clear their own \
-                 floor, the job's result is `success`, and the aggregate reads a Windows suite \
-                 that passed",
+                 tests, the coordinator's whose names open `a_p` among them, are named by none \
+                 of the first shard's filters: every later leg skips them and no leg left asks \
+                 for them, so they run on no hosted leg. The thirteen legs left each clear their \
+                 own floor, the job's result is `success`, and the aggregate reads a Windows \
+                 suite that passed",
         job: Some("test-windows-hosted"),
-        anchor: "          - shard: \"2 of 10\"\n\
-                 \x20           tests: \"engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_p\"\n\
-                 \x20           floor: 13\n",
+        anchor: "          - shard: \"2 of 14\"\n\
+                 \x20           tests: \"effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner engine::topology::coordinator::tests::a_p engine::topology::recover::tests::a_c workspace_manager::tests::e workspace_manager::tests::s engine::tests::f --skip engine::topology::coordinator::tests::a_c --skip engine::topology::coordinator::tests::o --skip engine::topology::coordinator::tests::s --skip engine::topology::recover::tests::a_f --skip engine::topology::recover::tests::a_r --skip engine::topology::recover::tests::a_t --skip engine::tests::l\"\n\
+                 \x20           floor: 36\n",
         replacement: "",
         refused_as: "test-windows-hosted-matrix",
     },
@@ -3243,20 +3243,20 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  step still tests the count against `matrix.floor`, so its pin holds, and a leg \
                  that executed one test clears the floor the matrix now hands it",
         job: Some("test-windows-hosted"),
-        anchor: "            floor: 965\n",
+        anchor: "            floor: 969\n",
         replacement: "            floor: 1\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-ZEROED",
         escape: "the last shard's floor set to zero in the table, the script untouched. It is \
-                 the largest of the ten, 965 of 1700, the floor the whole suite was held to as \
-                 one job, and with it gone the leg is green having executed nothing: the count \
-                 the step sums is never below zero. \
+                 the largest of the fourteen, 969 of 1700, the floor the whole suite was held \
+                 to as one job, and with it gone the leg is green having executed nothing: the \
+                 count the step sums is never below zero. \
                  `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED`'s floor of 1 still asks for one \
                  test; this asks for none, which is the arrival the count exists to refuse",
         job: Some("test-windows-hosted"),
-        anchor: "            floor: 965\n",
+        anchor: "            floor: 969\n",
         replacement: "            floor: 0\n",
         refused_as: "test-windows-hosted-matrix",
     },
@@ -3272,11 +3272,11 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-MATRIX-AXIS-ADDED",
-        escape: "an axis beside the `include:` list, which still names all ten shards. By \
+        escape: "an axis beside the `include:` list, which still names all fourteen shards. By \
                  GitHub's documented rule for `include:`, each entry is added to the axis's one \
                  combination instead of making a leg of its own, and a later entry overwrites \
                  the `shard`, `tests` and `floor` an earlier one added: one leg runs, the last \
-                 shard's, it clears its own floor, the job's result is `success`, and nine \
+                 shard's, it clears its own floor, the job's result is `success`, and thirteen \
                  shards' tests ran nowhere",
         job: Some("test-windows-hosted"),
         anchor: "      matrix:\n        include:\n",
@@ -3286,7 +3286,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-EXCLUDED",
         escape: "an `exclude:` naming the second shard, beside the `include:` list that still \
-                 names all ten. Were it to remove that leg, the shard's tests would run on no \
+                 names all fourteen. Were it to remove that leg, the shard's tests would run on no \
                  hosted leg while every reading of the list passed. GitHub documents that \
                  `include:` entries are processed after `exclude:`, so by that rule it removes \
                  no leg of a list with no axis; that is the rule as documented, and no workflow \
@@ -3296,16 +3296,17 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         job: Some("test-windows-hosted"),
         anchor: "        include:\n",
         replacement: "        exclude:\n\
-                      \x20         - shard: \"2 of 10\"\n\
+                      \x20         - shard: \"2 of 14\"\n\
                       \x20       include:\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED",
         escape: "the line that runs the harnesses loses the leg's selection, so each harness runs \
-                 whole again, the table and the floors untouched: each of the ten legs runs the \
-                 whole suite. Measured on 2026-11-15 at 59 to 76 minutes a job, that is ten legs \
-                 cancelled at their limit; on a faster runner it is ten green legs and no shard",
+                 whole again, the table and the floors untouched: each of the fourteen legs runs \
+                 the whole suite. Measured on 2026-11-15 at 59 to 76 minutes a job, that is \
+                 fourteen legs cancelled at their limit; on a faster runner it is fourteen green \
+                 legs and no shard",
         job: Some("test-windows-hosted"),
         anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
         replacement: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '-Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
@@ -3316,13 +3317,13 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the line that runs the harnesses names one filter, `engine::`, where it read \
                  the leg's `matrix.tests`, the table and the floors untouched. Every leg then \
                  runs the one subset, and every test outside it runs on no hosted leg. By the \
-                 counts the floors were set from, the first six shards and the ninth, whose \
-                 filters each contain `engine::`, are 50 + 27 + 99 + 76 + 235 + 195 + 120 = 802 \
-                 passing tests, above nine of the ten floors. The subset also holds the rest of \
-                 `engine::topology::`, which no filter names now and which was 484 tests by \
-                 the counts the floors of 2026-11-19 were set from; and 802 + 484 = 1,286 is \
-                 above the last leg's 965 too: ten green legs over a suite that lost every \
-                 test whose name does not contain `engine::`",
+                 counts the ten-shard floors of 2026-11-20 were set from, the first six of \
+                 those shards and the ninth, whose filters each contained `engine::`, were 50 + \
+                 27 + 99 + 76 + 235 + 195 + 120 = 802 passing tests, and the rest of \
+                 `engine::topology::`, which none of them named, was 484 tests by the counts \
+                 the floors of 2026-11-19 were set from. 802 + 484 = 1,286 is above every one \
+                 of the fourteen floors, the last leg's 969 among them: fourteen green legs \
+                 over a suite that lost every test whose name does not contain `engine::`",
         job: Some("test-windows-hosted"),
         anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
         replacement: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList 'engine:: -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
@@ -3344,14 +3345,14 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-MACOS-LAST-SHARD-SKIPS-MORE",
-        escape: "the same skip put last in the last macOS leg's arguments, after the four the \
+        escape: "the same skip put last in the last macOS leg's arguments, after the eleven the \
                  table derives. Every test of that leg whose name contains `effects::` runs on \
                  no macOS leg, as under `MUT-TEST-MACOS-SHARD-NARROWED`, and no floor is there \
                  to say so; here the string opens as the table's does, so a reading that stopped \
                  at the table's last word would pass it",
         job: Some("test"),
-        anchor: "--skip runner::\"\n    steps:\n",
-        replacement: "--skip runner:: --skip effects::\"\n    steps:\n",
+        anchor: "--skip engine::tests::t\"\n    steps:\n",
+        replacement: "--skip engine::tests::t --skip effects::\"\n    steps:\n",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
@@ -3853,17 +3854,20 @@ fn mutate_job(text: &str, job: &str, anchor: &str, replacement: &str) -> String 
     )
 }
 
-pub(super) fn shard_selections(filters: &[&str]) -> Vec<String> {
-    (0..=filters.len())
+pub(super) fn shard_selections(table: &[&[&str]]) -> Vec<String> {
+    (0..=table.len())
         .map(|shard| {
-            let skips = filters
+            let skips = table
                 .iter()
                 .take(shard)
-                .flat_map(|earlier| ["--skip", *earlier]);
-            filters
+                .flat_map(|earlier| earlier.iter())
+                .flat_map(|filter| ["--skip", *filter]);
+            table
                 .get(shard)
                 .copied()
-                .into_iter()
+                .unwrap_or_default()
+                .iter()
+                .copied()
                 .chain(skips)
                 .collect::<Vec<&str>>()
                 .join(" ")
