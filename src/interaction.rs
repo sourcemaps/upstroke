@@ -771,7 +771,7 @@ mod tests {
             after: Mutex::new(2),
         };
         let answers = EventLogAnswers::with_poll(
-            dir,
+            dir.clone(),
             Duration::from_secs(60),
             Duration::from_secs(1),
             &arriving,
@@ -781,6 +781,34 @@ mod tests {
             Answer::Answered {
                 text: "opaque cursors".to_owned()
             }
+        );
+
+        // The bytes publishing this record writes, taken from the writer itself
+        // in a directory `resolve` never saw rather than spelled out here.
+        let fresh = scratch("answer-wait-fresh");
+        write_answer(
+            fresh.path(),
+            &question().id,
+            &AnswerRecord::unattributed(Answer::Answered {
+                text: "opaque cursors".to_owned(),
+            }),
+        )
+        .expect("publish the same record elsewhere");
+        let published = std::fs::read(answer_path(fresh.path(), &question().id))
+            .expect("the freshly published answer file");
+
+        let read = answer_path(&dir, &question().id);
+        assert!(
+            read.is_file(),
+            "the waiting read is never a take: the answer file `resolve` returned is still \
+             published at {}",
+            read.display()
+        );
+        assert_eq!(
+            std::fs::read(&read).expect("the answer file `resolve` read"),
+            published,
+            "the waiting read is never a take: the answer file `resolve` returned holds, byte \
+             for byte, what publishing that answer writes"
         );
     }
 
