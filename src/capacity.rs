@@ -2982,6 +2982,61 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_capacity_report_refuses_a_routing_that_is_not_a_table() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-refused-routing-type");
+        let repo = tree.path();
+
+        match report_under(repo, "routing = \"not-a-table\"\n") {
+            Ok(report) => panic!(
+                "the report read it with strategy `{}`: {:?}",
+                report.strategy, report.warnings
+            ),
+            Err(error) => {
+                let message = error.to_string();
+                assert!(!message.contains("would refuse"), "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_capacity_report_names_an_explicit_settings_file_its_warning_is_about() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-refused-explicit-file");
+        let repo = tree.path();
+        let settings = repo.join("elsewhere-settings.toml");
+        crate::workspace_manager::fixture::write_file(
+            &settings,
+            b"[routing.strategy]\nmode = \"value-max\"\n[[pins]]\ntier = \"frontier\"\n\
+              agent = \"claude-code\"\nmodel = \"no-such-model\"\n",
+        );
+
+        let report = match report(
+            &CapacityOptions {
+                config_path: Some(settings),
+                pools_path: Some(claude_max_pools_file(repo)),
+                repo_root: repo.to_path_buf(),
+                scope: None,
+                now_unix: Some(FIXTURE_NOW),
+            },
+            &NoAdapters,
+        ) {
+            Ok(report) => report,
+            Err(error) => panic!("the report refused the file: {error}"),
+        };
+
+        assert_eq!(report.strategy, "value-max");
+        let refusals: Vec<&String> = report
+            .warnings
+            .iter()
+            .filter(|warning| warning.contains(WOULD_REFUSE))
+            .collect();
+        assert_eq!(refusals.len(), 1, "{:?}", report.warnings);
+        assert!(
+            refusals[0].contains("elsewhere-settings.toml"),
+            "the warning names the file read: {refusals:?}"
+        );
+    }
+
+    #[test]
     fn a_capacity_report_on_an_accepted_file_warns_of_no_refusal() {
         let tree = crate::workspace_manager::fixture::scratch("capacity-accepted-file");
         let repo = tree.path();
