@@ -167,7 +167,7 @@ pub fn frozen_sampling_n(declarations: &str, site: EffectSiteId) -> Result<Optio
 pub const ADAPTER_UNIT_TEST_MODULES: &[&str] = &[
     "workspace_manager::hooks::tests::",
     "engine::topology::seams::tests::",
-    "runner::tests::",
+    "runner::contract::tests::",
 ];
 
 #[must_use]

@@ -11,6 +11,48 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+#[test]
+fn every_adapter_exclusion_names_a_module_that_holds_a_test() {
+    for entry in ADAPTER_UNIT_TEST_MODULES {
+        let module = entry
+            .strip_suffix("tests::")
+            .unwrap_or_else(|| panic!("{entry}: expected a tests:: suffix"));
+        let mut path = repo_root().join("src");
+        path.extend(module.trim_end_matches("::").split("::"));
+        let tests_path = path.join("tests.rs");
+        let external = tests_path.exists();
+        let file = if external {
+            tests_path
+        } else {
+            path.with_extension("rs")
+        };
+        let source = std::fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("{entry}: cannot read {}: {error}", file.display()));
+        if external {
+            assert!(
+                source.contains("#[test]"),
+                "{entry}: {} must hold a test",
+                file.display()
+            );
+        } else {
+            let mut lines = source.lines();
+            assert!(
+                lines.any(|line| {
+                    let line = line.trim();
+                    line.starts_with("mod tests {") || line.starts_with("pub(crate) mod tests {")
+                }),
+                "{entry}: {} must hold an inline test module",
+                file.display()
+            );
+            assert!(
+                lines.any(|line| line.contains("#[test]")),
+                "{entry}: {} must hold a test after the inline test module declaration",
+                file.display()
+            );
+        }
+    }
+}
+
 fn rust_sources(dir: &Path, into: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
