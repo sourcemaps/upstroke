@@ -11039,8 +11039,6 @@ fn a_gates_worktree_setting_answers_what_the_probe_answers_when_nothing_tears() 
 #[cfg(unix)]
 #[test]
 fn the_gate_role_sets_its_worktree_value_again_only_past_another_registrations_empty_commondir() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tree = temp_engine_scratch("w924-gate-probe");
     let other = "fatal: failed to read /r/.git/worktrees/upstroke-gates-2/commondir: Success";
     let own = "fatal: failed to read /r/.git/worktrees/upstroke-gates-1/commondir: Success";
@@ -11107,9 +11105,14 @@ fn the_gate_role_sets_its_worktree_value_again_only_past_another_registrations_e
         let calls = place.join("calls");
         let answered = place.join("answered");
         let git = bin.join("git");
-        fs::write(
+        // Written by a process of its own, never through a descriptor of this
+        // test process: a fork another test thread makes while this process
+        // held the stand-in open for writing keeps that writer until it execs,
+        // and the gate role's exec of the stand-in then fails with ETXTBSY.
+        // The helper also makes it executable.
+        crate::runner::container::write_program_in_its_own_process(
             &git,
-            format!(
+            &format!(
                 "#!/bin/sh\n\
                  if [ \"$3 $4 $5 $6\" = 'config --worktree core.useReplaceRefs true' ]; then\n\
                  \x20 echo probed >> \"$UPSTROKE_W924_CALLS\"\n\
@@ -11122,9 +11125,7 @@ fn the_gate_role_sets_its_worktree_value_again_only_past_another_registrations_e
                  fi\n\
                  exit 1\n"
             ),
-        )
-        .expect("the case's Git");
-        fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).expect("an executable Git");
+        );
         Command::new(std::env::current_exe().expect("this test binary"))
             .args([
                 "--exact",

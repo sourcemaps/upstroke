@@ -2982,7 +2982,11 @@ first answer's standard error after one call for the same line with exit 1,
 from a Git `SIGKILL` ended (no inherited disposition can ignore it), unfinished,
 or with an empty line after it, and for the gate's own registration and an
 unrelated failure. With the call site put back to `probe_git`, the first case
-records `FAIL`.
+records `FAIL`. The stand-in is written by
+`runner::container::write_program_in_its_own_process`, from a process of its
+own, because a fork another test thread made while this process held it open
+for writing kept that writer and the gate role's exec of it failed with "Text
+file busy" (`CI-FLAKE-GATE-PROBE-TEXT-FILE-BUSY`).
 
 ## `fn the_v1_include_names_the_managed_repository_however_its_path_is_spelled() {`
 
