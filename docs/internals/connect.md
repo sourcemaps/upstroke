@@ -29,7 +29,11 @@ Two things this deliberately does not do:
   one that already says the same thing reports "unchanged" and rewrites
   nothing. `--force` still carries the operator's own keys across, because
   `profile`, `monthly_allowance` and `endpoint` are things discovery cannot
-  supply and replacing the file must not quietly delete.
+  supply and replacing the file must not quietly delete. Before writing,
+  `connect` also checks that the file's presence and bytes still match the
+  snapshot read before discovery. A difference refuses the write and asks
+  for another run, even with `--force`. The comparison and write are separate
+  steps; this does not provide exclusive access against another writer.
 
 ## `#![allow(clippy::disallowed_methods, clippy::disallowed_macros)]`
 
@@ -44,7 +48,8 @@ it, so no test can reach the operator's real pools file.
 
 ## `pub force: bool,`
 
-Overwrite an existing file that differs.
+Overwrite an existing file whose settings differ, subject to the saved Codex
+roster protection and the check for changes during discovery.
 
 ## `#[derive(Debug, Clone, Copy, PartialEq, Eq)]`
 
@@ -97,12 +102,17 @@ Returns a refusal when no destination can be determined, an I/O error
 when the existing file cannot be read, or a filesystem error naming a
 failed directory creation or file write. A saved Codex pool also causes a
 refusal on `CodexRosterUpgrade`, even with `--force`, before any file write.
+A change in presence or bytes at the pre-write check returns a refusal
+asking the operator to run `connect` again; `--force` does not override it.
 
 ## `fn has_codex_pool(text: &str) -> bool {`
 
-A parsed `[pools]` table containing any pool with `agent = "codex"` identifies
-saved configuration, including an operator-renamed pool. It does not require
-today's discovery to succeed or discard operator settings to establish this.
+A parsed `[pools]` table containing a pool named `codex` or any pool with
+`agent = "codex"` identifies saved configuration, including a partial default
+pool with no `agent` key and an operator-renamed pool. A named pool holding only
+`reserve` is protected even though that key is not carried across a force
+rewrite. Detection does not require today's discovery to succeed or discard
+operator settings to establish this.
 When the adapter reports that the earlier roster still passes but the added
 requirements fail, the whole file stays byte-for-byte unchanged and the error
 asks for a compatible CLI and retry. Fresh discovery, malformed TOML, genuinely
@@ -114,10 +124,21 @@ full roster still carries the established operator keys by pool name.
 
 The returned report owns its path independently of these options.
 
-## `let existing_text = match fs::read_to_string(&path) {`
+## `let existing_bytes = read_pools(&path)?;`
 
 Read before anything is written: `--force` must not silently discard the
-keys only an operator can supply.
+keys only an operator can supply. Keep the bytes and presence for the later
+comparison, and borrow UTF-8 text from this snapshot to read its settings.
+Invalid UTF-8 at the start remains an I/O error with `InvalidData`, even with
+`--force`; its owned error path identifies the file independently of the
+options and snapshot.
+
+## `fn read_pools(path: &std::path::Path) -> Result<Option<Vec<u8>>, UpstrokeError> {`
+
+Both the initial read and the read immediately before writing use this private
+helper. Only `NotFound` means absence; other read failures retain their source
+and an owned path. Raw bytes allow the comparison to detect even an invalid
+UTF-8 save during discovery without interpreting or normalizing its content.
 
 ## `if seen.contains(&id) {`
 
@@ -156,6 +177,19 @@ settings comparison meant a login between two connects reported
 the other way made every re-connect a conflict resolvable only by
 `--force`, the flag that discards hand edits.
 
+## `if read_pools(&path)? != existing_bytes {`
+
+Every proposed write re-reads the destination and compares its presence and
+every byte with the initial snapshot. Creation, deletion, a comment-only edit
+or a settings edit during discovery refuses the write and asks for another
+run, even with `--force`. In particular, if a probe saves a Codex pool after a
+comment-only initial file and then reports `CodexRosterUpgrade`, the initial
+snapshot has no pool to protect, but this comparison still preserves the save.
+An absent file and a present empty file are different snapshots.
+
+The comparison and write are two steps, not an exclusive operation. Another
+writer can still change the file after the comparison and before the write.
+
 ## `write_pools(&path, &content)?;`
 
 The write boundary already names the operation and failed path.
@@ -164,7 +198,8 @@ The write boundary already names the operation and failed path.
 
 Replace the file after the caller has decided that replacement is allowed.
 This reports creation and write failures separately; it provides no atomic
-publication or durability guarantee beyond the underlying filesystem calls.
+publication, exclusivity or durability guarantee beyond the underlying
+filesystem calls.
 
 ## `fn settings_match(existing: &str, proposed: &str) -> bool {`
 

@@ -126,15 +126,24 @@ float `1e16` and requires `--force` once. No universal cross-version `Unchanged`
 promised. Malformed TOML, including malformed comments, requires `--force`. A read error other
 than a missing file is reported even with `--force`.
 
-There is one roster-upgrade exception: if the existing TOML contains a pool whose `agent` is
-`codex`, and the installed CLI satisfies the entire earlier two-model roster and its five
-efforts but fails an added model or effort requirement, `connect` refuses even with `--force`.
+There is one roster-upgrade exception: if the TOML read at the start contains a pool named
+`codex` or any pool whose `agent` is `codex`, and the installed CLI satisfies the entire earlier
+two-model roster and its five efforts but fails an added model or effort requirement, `connect`
+refuses even with `--force`. A partial `[pools.codex]` with no `agent` key is protected too,
+including one holding only operator keys or only `reserve`.
 It leaves the existing file byte-for-byte intact, including all operator settings, and asks
 the operator to restore a compatible Codex CLI and retry. This is not evidence that the saved
 provider disappeared. Fresh discovery without a saved Codex pool retains the normal unusable-agent
 report; genuinely absent CLIs, failures of the earlier requirements and unrelated providers
 retain their existing behavior. Once the full roster passes, a deliberate `--force` rewrite
 works as below.
+
+Before any write, `connect` re-reads the pools file and compares its presence and bytes with
+the snapshot read before discovery. If either differs, it refuses, leaves the saved bytes
+alone and asks the operator to run `connect` again; `--force` does not override this check.
+This includes a file created or removed during discovery and a comment-only edit. Both reads
+use the same private helper. The comparison and write are two separate steps, not an exclusive
+operation: a change after the comparison and before the write can still be overwritten.
 
 *Should* it be rewritten: if anything but the first generated write-time header differs,
 comments included, so a login between two runs updates the auth comment while an
