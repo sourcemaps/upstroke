@@ -1430,6 +1430,7 @@ contains MUT-LANE-LABEL-SPLIT-ON-SPACES "$got" "blockers=pr-lookup-failed"
 command -v python3 > /dev/null || command -v python > /dev/null \
   || { echo "test-pr-ready-audit: needs python3 or python to run the review parser" >&2; exit 1; }
 parser_python="$(command -v python3 || command -v python)"
+"$parser_python" .github/scripts/test-pr-movement.py || error "typed Git movement contracts failed"
 review_rows() {  # review_rows FILE: "<status>|<kind>/<head>/<verdict>/<base>/<stray>[;<sev>:<id>:<flags>]..."
   local out status=0
   out="$("$parser_python" scripts/pr-review-parse.py review "$1" 2>/dev/null)" || status=$?
@@ -6750,15 +6751,55 @@ printf 'Reviewed head: %s\n\n```json\n{"reviewed_sha":"%s","base_sha":"%s","verd
   '{"id":"IN-CODE","severity":"P3","location":"src/x.rs:12"}' > "$tmp/probe-drive-located.md"
 expect MUT-BODY-LOCATION-FLAG "$(review_rows "$tmp/probe-drive-located.md")" \
   "0|json/$revived_head/CHANGES_REQUIRED/$revived_base/-;P3:IN-BODY:4;P3:IN-CODE:0"
+# Movement reads repository objects, so its drive needs ordinary history as well as arguments.
+# GIT_DIR pins that scratch repository while the probe runs from its own scratch directory.
+# No code is excluded from the probe: these drives enter the tree/commit loops just as the
+# review documents above enter the Markdown loops. Detailed movement assertions live in
+# test-pr-movement.py; here the same decoder invariant must hold over the new subcommand too.
+probe_git="$tmp/probe-git"
+git init -q "$probe_git"
+git -C "$probe_git" config user.name Test
+git -C "$probe_git" config user.email test@example.invalid
+git -C "$probe_git" config commit.gpgsign false
+printf 'source\n' > "$probe_git/source.txt"
+git -C "$probe_git" add .
+git -C "$probe_git" commit -qm base
+probe_git_base="$(git -C "$probe_git" rev-parse HEAD)"
+mkdir -p "$probe_git/findings" "$probe_git/reviews/findings"
+printf 'one\n' > "$probe_git/findings/one.md"
+git -C "$probe_git" add .
+git -C "$probe_git" commit -qm addition
+probe_git_add="$(git -C "$probe_git" rev-parse HEAD)"
+printf 'archive\n' > "$probe_git/reviews/FINDINGS.md"
+printf 'old\n' > "$probe_git/reviews/findings/old.md"
+git -C "$probe_git" add .
+git -C "$probe_git" commit -qm historical
+probe_git_reviewed="$(git -C "$probe_git" rev-parse HEAD)"
+printf 'two\n' > "$probe_git/findings/two.md"
+printf 'new\n' > "$probe_git/reviews/findings/new.md"
+printf 'archive edited\n' > "$probe_git/reviews/FINDINGS.md"
+git -C "$probe_git" add .
+git -C "$probe_git" commit -qm ledger
+probe_git_ledger="$(git -C "$probe_git" rev-parse HEAD)"
+printf 'edit\n' > "$probe_git/findings/two.md"
+mv "$probe_git/source.txt" "$probe_git/findings/moved.md"
+printf 'quoted\n' > "$probe_git/findings/tab"$'\t'"name.md"
+git -C "$probe_git" add --all
+git -C "$probe_git" commit -qm repairs
+probe_git_repairs="$(git -C "$probe_git" rev-parse HEAD)"
 # Only the verdict line is asserted, and deliberately: which functions refuse and what the drives
 # returned are the parser's own business -- a second decoder that genuinely refuses adds its name
 # to them and must stay green. `decoded=yes` is the limb that makes the rest mean something: a
 # parser with no decode left for the probe to watch satisfies every count and fails here.
-got="$(decode_probe scripts/pr-review-parse.py \
+got="$(GIT_DIR="$probe_git/.git" decode_probe scripts/pr-review-parse.py \
   "review|$tmp/one-findings.md" "review --nul|$tmp/one-findings.md" \
   "review|$tmp/dup-findings.md" "review|$tmp/dup-deep.md" "review|$tmp/one-bare.md" \
   "review|$tmp/probe-drive-prose.md" "review|$tmp/probe-drive-quoted.md" \
-  "review|$tmp/probe-drive-located.md" "ledger --nul|$tmp/probe-drive-ledger.md")"
+  "review|$tmp/probe-drive-located.md" "ledger --nul|$tmp/probe-drive-ledger.md" \
+  "movement --nul $probe_git_base $probe_git_add $probe_git_base|" \
+  "movement --nul $probe_git_reviewed $probe_git_ledger $probe_git_base|" \
+  "movement --nul $probe_git_reviewed $probe_git_repairs $probe_git_base|" \
+  "movement --nul $probe_git_base $probe_git_base $probe_git_base|")"
 [[ "${got%% | *}" == 'decoded=yes unrefusing=- unproven=- skipped=-' ]] \
   || error "MUT-JSON-REPEATED-NAME-CHOSEN: got [$got], want the verdict [decoded=yes unrefusing=- unproven=- skipped=-]"
 # THAT THE SWEEP IS EMPTY IS NOT ASSERTED, and the reason is round 2's finding: an empty sweep
@@ -9296,47 +9337,22 @@ esac
 exec "$accept_gh" "$@"
 GH
 chmod +x "$ledger_push_gh/gh"
-# The real git for every call but the push's status read, which LEDGER_STATUS_MODE answers: `fail`
-# exits 128, `empty` exits 0 having printed nothing, `spaces` prints git's own answer with each tab
-# made a space. Each of the rest prints git's own answer with one thing wrong in it: `lower` a status
-# `A` made `a`, `no-status` that status dropped, `no-path` a one-record answer with its path dropped,
-# `two-tabs` each tab doubled, and `ledger-line` only the records adding under findings/. And
-# `dup-lower` prints git's own answer whole and then once more each record whose status is `A`,
-# that `A` made `a`: every touched path still has its well-formed record, so this is the one
-# shape in which only the malformed-record check can fire, and the loop below asserts it blocks.
-# Unset, it is the real git throughout, which is this wrapper's own control.
+# Movement now derives statuses from checked trees. Inject at that read boundary; the direct
+# reader tests also cover successful short reads, malformed records and archive lookup errors.
 ledger_push_git="$tmp/ledger-push-git"
 mkdir -p "$ledger_push_git"
 printf '#!/usr/bin/env bash\nreal_git=%q\n' "$(command -v git)" > "$ledger_push_git/git"
 cat >> "$ledger_push_git/git" <<'GIT'
-for arg in "$@"; do
-  [[ "$arg" == --name-status ]] || continue
+if [[ "${LEDGER_STATUS_MODE:-}" == archive && "$1 $2 $3" == '--no-replace-objects cat-file blob' ]]; then
+  echo "fatal: the archived ledger object read, made to fail" >&2
+  exit 128
+fi
+if [[ "$1 $2 $3" == '--no-replace-objects cat-file tree' ]]; then
   case "${LEDGER_STATUS_MODE:-}" in
     fail)   echo "fatal: the push's status read, made to fail" >&2; exit 128 ;;
     empty)  exit 0 ;;
-    spaces) out="$("$real_git" "$@")" || exit $?
-            printf '%s\n' "${out//$'\t'/ }"; exit 0 ;;
-    lower)  out="$("$real_git" "$@")" || exit $?
-            printf '%s\n' "${out//A$'\t'/a$'\t'}"; exit 0 ;;
-    no-status) out="$("$real_git" "$@")" || exit $?
-            printf '%s\n' "${out//A$'\t'/$'\t'}"; exit 0 ;;
-    no-path) out="$("$real_git" "$@")" || exit $?
-            printf '%s\t\n' "${out%%$'\t'*}"; exit 0 ;;
-    two-tabs) out="$("$real_git" "$@")" || exit $?
-            printf '%s\n' "${out//$'\t'/$'\t\t'}"; exit 0 ;;
-    ledger-line) out="$("$real_git" "$@")" || exit $?
-            while IFS= read -r one; do
-              if [[ "$one" == A$'\t'findings/* ]]; then printf '%s\n' "$one"; fi
-            done <<< "$out"
-            exit 0 ;;
-    dup-lower) out="$("$real_git" "$@")" || exit $?
-            printf '%s\n' "$out"
-            while IFS= read -r one; do
-              if [[ "$one" == A$'\t'* ]]; then printf 'a%s\n' "${one#A}"; fi
-            done <<< "$out"
-            exit 0 ;;
   esac
-done
+fi
 exec "$real_git" "$@"
 GIT
 chmod +x "$ledger_push_git/git"
@@ -9583,33 +9599,21 @@ lp_case "outside the ledger" ledger-push-pass no-findings-body "$lp_head_outside
 # wrapper passing the read through is the neighbour itself, READY, so it is the read and not the
 # wrapper that blocks.
 #
-# A STATUS RECORD THE WALK CANNOT READ IS A FAILED READ (PR433-MALFORMED-LEDGER-STATUS). A line that
-# is not a status, one tab and a path was `repairs`, NEEDS-ATTEST with no blocker: the tabs made
-# spaces, a status in lower case or none at all, a record with no path, and one with a second tab
-# are each NOT-READY on `ledger-status-read-failed` now.
+# Invalid modes, paths, record framing and truncated successes are exercised directly against
+# the byte reader in test-pr-movement.py. No externally supplied status token is accepted now.
 lp_case "status read passed through" ledger-push-new-p3 ledger-push-deferred "$lp_head_add" \
   ledger-only READY 1 pass
-for lp_mode in fail empty spaces lower no-status no-path two-tabs dup-lower; do
+for lp_mode in fail empty; do
   lp_case "status read [$lp_mode]" ledger-push-new-p3 ledger-push-deferred "$lp_head_add" \
-    repairs NOT-READY 0 "$lp_mode"
+    indeterminate NOT-READY 0 "$lp_mode"
   contains "MUT-LEDGER-PUSH-REWRITES-FINDING status read [$lp_mode]" "$lp_got" \
     "blockers=ledger-status-read-failed "
 done
-# THE STATUS READ MUST COVER EVERY TOUCHED PATH. A mixed push -- NEW-P3's file and a repair -- read
-# with only the finding file's line came back `ledger-only`. Short of the repair's record it is
-# NOT-READY now; the neighbour, the full read, is `repairs`, NEEDS-ATTEST with no blocker. And the
-# same short read of a push that touched nothing else is the whole read, so it is READY: it is the
-# missing record that blocks, and not the wrapper.
+# A mixed push is still an ordinary repair when the evidence is complete.
 lp_case "mixed push, full read" ledger-push-new-p3 ledger-push-deferred "$lp_head_mixed" \
   repairs NEEDS-ATTEST 0
 [[ "$lp_got" == *blockers=* ]] \
   && error "MUT-LEDGER-PUSH-REWRITES-FINDING: [mixed push, full read] blocked: [$lp_got]"
-lp_case "mixed push, read short" ledger-push-new-p3 ledger-push-deferred "$lp_head_mixed" \
-  repairs NOT-READY 0 ledger-line
-contains "MUT-LEDGER-PUSH-REWRITES-FINDING mixed push, read short" "$lp_got" \
-  "blockers=ledger-status-read-failed "
-lp_case "ledger push, the same read" ledger-push-new-p3 ledger-push-deferred "$lp_head_add" \
-  ledger-only READY 1 ledger-line
 
 # --- a finding located in the body -------------------------------------------------------------------
 # MUT-BODY-LOCATION-FLAG. The review driver hands the reviewer the body as `pr.md`, so a finding whose
@@ -9668,6 +9672,23 @@ bf_review code-witnessed "{$bf_code_p3,$bf_witness}"
 bf_review p1-witnessed "{\"id\":\"NEW-P1\",\"severity\":\"P1\",\"location\":\"pr.md:12\",$bf_witness}"
 accept_ledger "$tmp/bf-fixed.md" NEW-P3 P3 fixed
 accept_ledger "$tmp/bf-p1-fixed.md" NEW-P1 P1 fixed
+# PR433-ARCHIVE-LOOKUP-ERROR / INVALID-LEDGER-STATUS-TOKEN: indeterminate evidence must not
+# clear either a code witness or a body witness on a fixed row. These audits are read-only;
+# all GitHub reads use the existing offline stub, and no enqueue is requested.
+for evidence_review in bf-code-witnessed bf-body-witnessed; do
+  for evidence_mode in fail empty archive; do
+    evidence_out="$(cd "$enqueue_repo" && STUB_BRANCH=feature/a-slug \
+      STUB_REVIEW_BODY="$tmp/$evidence_review.md" STUB_LEDGER_BODY="$tmp/bf-fixed.md" \
+      STUB_HEAD="$lp_head_outside" LEDGER_STATUS_MODE="$evidence_mode" \
+      PATH="$ledger_push_git:$ledger_push_gh:$PATH" \
+      bash "$root/scripts/pr-ready-audit.sh" 999 2>&1)"
+    contains "indeterminate [$evidence_review/$evidence_mode] state" "$evidence_out" " NOT-READY "
+    contains "indeterminate [$evidence_review/$evidence_mode] movement" "$evidence_out" "moved=indeterminate"
+    contains "indeterminate [$evidence_review/$evidence_mode] read" "$evidence_out" "ledger-status-read-failed"
+    contains "indeterminate [$evidence_review/$evidence_mode] witness" "$evidence_out" "witnessed:NEW-P3"
+    [[ "$evidence_out" == *GH-UNSTUBBED* ]] && error "indeterminate evidence made an unmodelled call"
+  done
+done
 for bf_body in bf-fixed bf-p1-fixed; do
   expect "MUT-BODY-FIXED-UNREAD [$bf_body] policy" "$(body_policy "$tmp/$bf_body.md")" pass
 done

@@ -3,8 +3,10 @@
 
     scripts/pr-review-parse.py review [--nul] [--out FILE] COMMENT-BODY-FILE
     scripts/pr-review-parse.py ledger [--nul] [--out FILE] PULL-REQUEST-BODY-FILE
+    scripts/pr-review-parse.py movement [--nul] [--out FILE] REVIEWED HEAD BASE
 
-Each subcommand reads one file and has exactly two outcomes. Either it builds the whole result,
+Review and ledger read one file; movement reads Git objects in the current repository.
+Each subcommand has exactly two outcomes. Either it builds the whole result,
 writes it, confirms the write, and exits 0; or it writes no result at all, says why on stderr, and
 exits non-zero. There is no third outcome and no partial one, and that is the entire point of this
 program existing.
@@ -133,10 +135,12 @@ and after to establish that it changed none.
 """
 
 import collections
+import hashlib
 import html.entities
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 
@@ -355,6 +359,7 @@ NUMBERED_FINDING = re.compile(r"[0-9]+\. \*\*(P[0-3])")
 
 USAGE = (
     "usage: pr-review-parse.py {review|ledger} [--nul] [--out FILE] FILE\n"
+    "       pr-review-parse.py movement [--nul] [--out FILE] REVIEWED HEAD BASE\n"
     "  review: the review's kind, reviewed commit, verdict, base, stray token and findings\n"
     "  ledger: the pull-request body's ledger rows, each as its id, severity and disposition"
 )
@@ -1212,11 +1217,252 @@ def ledger_fields(result):
     return fields
 
 
+# ---- complete, typed Git evidence for head movement ----------------------------------------------
+
+GitEntry = collections.namedtuple("GitEntry", "mode oid")
+GitCommit = collections.namedtuple("GitCommit", "tree parents")
+GitChange = collections.namedtuple("GitChange", "commit status path old new")
+GIT_MODES = {b"40000", b"100644", b"100755", b"120000", b"160000"}
+REGULAR_MODES = {b"100644", b"100755"}
+OBJECT_ID = re.compile(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
+
+
+def object_id(raw):
+    if OBJECT_ID.fullmatch(raw) is None or not raw.strip(b"0"):
+        raise Unparsed("invalid Git object id")
+    return raw.decode("ascii")
+
+
+def parse_commit(data, oid_size):
+    """Only a whole commit header can supply a tree and ALL parents."""
+    header, separator, _ = data.partition(b"\n\n")
+    if not separator:
+        raise Unparsed("unterminated Git commit header")
+    lines = header.split(b"\n")
+    tree = None
+    parents = []
+    for number, line in enumerate(lines):
+        if line.startswith(b" ") and number:
+            continue  # continuation of a signed/extended header
+        key, space, value = line.partition(b" ")
+        if not space or not key or not value or b"\0" in line:
+            raise Unparsed("malformed Git commit header")
+        if key in (b"tree", b"parent"):
+            if len(value) != oid_size:
+                raise Unparsed("wrong length Git commit reference")
+            ref = object_id(value)
+            if key == b"tree":
+                if number != 0 or tree is not None:
+                    raise Unparsed("misplaced Git commit tree")
+                tree = ref
+            else:
+                parents.append(ref)
+    if tree is None or len(parents) != len(set(parents)):
+        raise Unparsed("missing tree or repeated Git commit parent")
+    return GitCommit(tree, tuple(parents))
+
+
+def parse_tree(data, oid_bytes):
+    """Git's native tree framing: MODE SP NAME NUL, then a fixed-width binary object id.
+
+    No quoting or text decoding can lose a path byte. Even the last record must contain its
+    terminator and its whole id. The caller checks the object hash as well: ending at a record
+    boundary does not prove that every record arrived.
+    """
+    entries = {}
+    offset = 0
+    previous = None
+    while offset < len(data):
+        end = data.find(b"\0", offset)
+        if end < 0 or end + 1 + oid_bytes > len(data):
+            raise Unparsed("incomplete Git tree record")
+        mode, space, name = data[offset:end].partition(b" ")
+        if mode not in GIT_MODES or not space or not name or b"/" in name or name in (b".", b"..", b".git"):
+            raise Unparsed("invalid Git tree mode or path")
+        order = name + (b"/" if mode == b"40000" else b"\0")
+        if name in entries or (previous is not None and order <= previous):
+            raise Unparsed("duplicate or unordered Git tree path")
+        previous = order
+        oid = object_id(data[end + 1:end + 1 + oid_bytes].hex().encode("ascii"))
+        entries[name] = GitEntry(mode, oid)
+        offset = end + 1 + oid_bytes
+    return entries
+
+
+class GitEvidence:
+    """Read-only, repository-backed evidence. Failed I/O never means absence.
+
+    Checking the requested object's hash is the completeness guarantee for both commits and
+    trees, including a successful cat-file that returns only complete PREFIX records. Reading
+    parents from checked commits and walking each edge also avoids trusting a possibly short
+    rev-list/log listing. No name-status text, unique-path count, or endpoint diff is evidence.
+    """
+
+    def __init__(self):
+        self.commits = {}
+        self.trees = {}
+
+    def command(self, *args):
+        # Disabling replacements makes the named object's bytes authoritative. Read operations
+        # inherit cwd and PATH, like the shell audit, but never invoke a shell.
+        result = subprocess.run(["git", "--no-replace-objects", *args],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if result.returncode != 0:
+            raise Unparsed("Git evidence read failed: %s" % args[0])
+        return result.stdout
+
+    def resolve(self, ref):
+        data = self.command("rev-parse", "--verify", "--end-of-options", ref + "^{commit}")
+        if not data.endswith(b"\n"):
+            raise Unparsed("unterminated Git commit resolution")
+        return object_id(data[:-1])
+
+    def object(self, kind, oid):
+        object_id(oid.encode("ascii"))
+        data = self.command("cat-file", kind, oid)
+        header = ("%s %d\0" % (kind, len(data))).encode("ascii")
+        digest = hashlib.new("sha1" if len(oid) == 40 else "sha256", header + data).hexdigest()
+        if digest != oid:
+            raise Unparsed("incomplete or mismatched Git %s object" % kind)
+        return data
+
+    def commit(self, oid):
+        if oid not in self.commits:
+            self.commits[oid] = parse_commit(self.object("commit", oid), len(oid))
+        return self.commits[oid]
+
+    def tree(self, oid):
+        if oid not in self.trees:
+            self.trees[oid] = parse_tree(self.object("tree", oid), len(oid) // 2)
+        return self.trees[oid]
+
+    def ancestor(self, older, newer):
+        result = subprocess.run(["git", "--no-replace-objects", "merge-base", "--is-ancestor", older, newer],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if result.returncode not in (0, 1) or result.stdout or result.stderr:
+            raise Unparsed("Git ancestry lookup failed")
+        return result.returncode == 0
+
+    def branch_commits(self, reviewed, head, base):
+        pending = [head]
+        seen = set()
+        result = []
+        while pending:
+            oid = pending.pop()
+            if oid in seen:
+                continue
+            seen.add(oid)
+            if oid in (reviewed, base) or self.ancestor(oid, reviewed) or self.ancestor(oid, base):
+                continue
+            commit = self.commit(oid)
+            pending.extend(commit.parents)
+            if len(commit.parents) <= 1:
+                result.append((oid, commit))
+        return result
+
+    def leaves(self, tree):
+        result = {}
+        pending = [(b"", tree)]
+        while pending:
+            prefix, oid = pending.pop()
+            for name, entry in self.tree(oid).items():
+                path = prefix + name
+                if entry.mode == b"40000":
+                    pending.append((path + b"/", entry.oid))
+                else:
+                    result[path] = entry
+        return result
+
+    def archive(self, tree, path, modes):
+        """present / absent / wrong-type, or an exception for an indeterminate read.
+
+        Absence is answered only by a complete, successfully read containing tree. Symlinks and
+        gitlinks cannot stand for the historical ledger file or directory.
+        """
+        parts = path.split(b"/")
+        for name in parts[:-1]:
+            entry = self.tree(tree).get(name)
+            if entry is None:
+                return "absent"
+            if entry.mode != b"40000":
+                return "wrong-type"
+            tree = entry.oid
+        entry = self.tree(tree).get(parts[-1])
+        if entry is None:
+            return "absent"
+        if entry.mode not in modes:
+            return "wrong-type"
+        # The containing tree establishes the path and mode; the target read establishes
+        # that the archive object actually exists with that type, and is complete too.
+        if entry.mode == b"40000":
+            self.tree(entry.oid)
+        else:
+            self.object("blob", entry.oid)
+        return "present"
+
+    def changes(self, oid, commit):
+        old = self.leaves(self.commit(commit.parents[0]).tree) if commit.parents else {}
+        new = self.leaves(commit.tree)
+        changes = []
+        for path in sorted(old.keys() | new.keys()):
+            before, after = old.get(path), new.get(path)
+            if before == after:
+                continue
+            if before is None:
+                status = "A"
+            elif after is None:
+                status = "D"
+            elif before.mode[:3] != after.mode[:3]:
+                status = "T"
+            else:
+                status = "M"
+            # A move is deliberately two records, retaining the deletion as well as the addition.
+            # Commit identity stays attached; a later M of an earlier A is never deduplicated.
+            changes.append(GitChange(oid, status, path, before, after))
+        return changes
+
+
+def ledger_change(change, closed, legacy):
+    path = change.path
+    # Preserve the audit's conservative treatment of names Git's default text format quotes.
+    if any(byte < 32 or byte >= 127 or byte in (34, 92) for byte in path):
+        return False
+    if path == b"reviews/FINDINGS.md":
+        return (closed == "present" and change.status == "M"
+                and change.old.mode in REGULAR_MODES and change.new.mode in REGULAR_MODES)
+    return (change.status == "A" and (path.startswith(b"findings/")
+            or (legacy == "present" and path.startswith(b"reviews/findings/"))))
+
+
+def movement_result(args):
+    if len(args) != 3:
+        raise Unparsed("movement takes REVIEWED HEAD BASE")
+    git = GitEvidence()
+    reviewed, head, base = (git.resolve(ref) for ref in args)
+    commits = git.branch_commits(reviewed, head, base)
+    changes = []
+    for oid, commit in commits:
+        changes.extend(git.changes(oid, commit))
+    if not changes:
+        moved = "merges-only"
+    else:
+        tree = git.commit(reviewed).tree
+        closed = git.archive(tree, b"reviews/FINDINGS.md", REGULAR_MODES)
+        legacy = git.archive(tree, b"reviews/findings", {b"40000"})
+        moved = "ledger-only" if all(ledger_change(one, closed, legacy) for one in changes) else "repairs"
+    return {"tag": "movement", "moved": moved}
+
+
+def movement_fields(result):
+    return ["movement", result["moved"], "0"]
+
+
 # ---- rendering and the one write ----------------------------------------------------------------
 
 SUBCOMMANDS = {
     "review": (review_result, review_fields),
     "ledger": (ledger_result, ledger_fields),
+    "movement": (movement_result, movement_fields),
 }
 
 

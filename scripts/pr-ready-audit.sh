@@ -129,7 +129,7 @@
 # as `ledger-parse-failed` and `ledger-parse-incomplete`, a review that records no reviewed commit as
 # `review-records-no-reviewed-sha`, a finding-file listing that errored as
 # `finding-file-lookup-failed`, a push whose per-path statuses could not be read -- or came back in
-# a line the walk cannot parse, or short of a path the push touched -- as
+# an object that cannot be parsed or whose hash does not match its complete bytes -- as
 # `ledger-status-read-failed`, and a gate-edit check that could not run as
 # `gate-edit-check-failed`; an unreadable ruleset list or open-pull-request list refuses the whole
 # run before the first pull request is judged. Every list request is paginated, because a first
@@ -281,6 +281,27 @@ run_review_parser() {
   "$review_python" "$review_parser" "$1" --nul --out "$3" "$2"
 }
 
+# Only this typed answer crosses into Bash. Git bytes remain in the Python reader until whole
+# commit/tree objects have been checked; indeterminate evidence is never a repair or witness credit.
+read_movement() {
+  local output status=0
+  [[ -n "$review_python" ]] || return 127
+  output="$(mktemp)" || return 1
+  "$review_python" "$review_parser" movement --nul --out "$output" "$1" "$2" "$3" || status=$?
+  if ((status == 0)); then
+    if ! read_parser_fields "$output" movement 3 0 || [[ "${fields[2]}" != 0 ]]; then
+      status=1
+    else
+      case "${fields[1]}" in
+        ledger-only | merges-only | repairs) moved="${fields[1]}" ;;
+        *) status=1 ;;
+      esac
+    fi
+  fi
+  rm -f "$output"
+  return "$status"
+}
+
 # read_parser_fields FILE TAG HEAD-COUNT PER-RECORD: fills the global array `fields` from the
 # parser's payload and returns non-zero unless the whole of it arrived.
 #
@@ -301,6 +322,7 @@ read_parser_fields() {
   local file="$1" tag="$2" head_count="$3" per_record="$4" one count
   fields=()
   while IFS= read -r -d '' one; do fields+=("$one"); done < "$file"
+  [[ -z "${one:-}" ]] || return 1   # an unterminated trailing field is not end-of-input
   ((${#fields[@]} >= head_count)) || return 1
   [[ "${fields[0]}" == "$tag" ]] || return 1
   count="${fields[$((head_count - 1))]}"
@@ -1182,9 +1204,7 @@ audit_one() {
       # resolution or a third parent is a new change that `--no-merges` below would hide), the
       # branch's diff against its base is byte-identical before and after the merge, and the pull
       # request edits no gate. Anything wider is reviewed again.
-      local merge_edits="" merges m expected before after touched t rest outside statuses line st
-      local status_read_failed shaped carried carries_closed carries_legacy
-      local -A status_paths=()
+      local merge_edits="" merges m expected before after
       merges="$(git rev-list --merges "$reviewed..$head" --not "origin/$base")"
       for m in $merges; do
         local parents
@@ -1215,116 +1235,14 @@ audit_one() {
         fi
       fi
       # Commits the base already has arrived through a merge-in; only the branch's own count.
-      touched="$(git log --no-merges --name-only --format= "$reviewed..$head" --not "origin/$base" | sort -u)"
+      # The helper walks checked commit parents and derives every per-commit change from checked
+      # trees. A pathname repeated in another commit is another change; a move retains both sides.
+      # Failed reads, incomplete objects and unknown types block, without granting repair credit.
       if [[ -n "$merge_edits" ]]; then
         moved="merge-edits:${merge_edits:0:7}"
-      elif [[ -z "$touched" ]]; then
-        moved="merges-only"
-      elif ! statuses="$(git log --no-merges --no-renames --name-status --format= "$reviewed..$head" --not "origin/$base")"; then
-        # What the push did to each path, over the range `touched` was read from. Unread, no path
-        # is known to be an addition, and "I could not look" is not one.
+      elif ! read_movement "$reviewed" "$head" "origin/$base"; then
         blockers+=("ledger-status-read-failed")
-        moved="repairs"
-      else
-        # A PUSH KEEPS THE REVIEW ONLY IF IT ADDS FILES UNDER findings/, OR -- WHERE THE REVIEWED
-        # TREE CARRIES THE ARCHIVED LEDGER -- ADDS THEM UNDER reviews/findings/ OR EDITS
-        # reviews/FINDINGS.md IN PLACE. One that modifies, deletes or renames a finding file is a
-        # repair, NEEDS-ATTEST: judged by name alone, a push rewriting an open finding's `id:` to a
-        # new P3's unfiled the old one and filed the new, and an `rm` unfiled it outright, each READY
-        # (PR382-ACCEPTED-P3-REPURPOSES-FINDING-FILE). So the status is read per commit:
-        # `--no-renames` makes a rename the deletion it contains, and a file added then edited in the
-        # range has an `M` line, which is a repair too.
-        #
-        # Walked by expansion. Written as `! grep -vE ... <<< "$touched"` this was the exemption
-        # granted by a read that did not happen: a here-string bash could not spill returns grep's
-        # 1, "every path is in the ledger", with grep never run -- a repair audited as READY.
-        #
-        # THE ARCHIVED LEDGER KEEPS THE REVIEW ONLY ON A BRANCH THAT CARRIES IT
-        # (PR433-ARCHIVED-LEDGER-KEEPS-REVIEW). reviews/FINDINGS.md kept it whatever its status, so a
-        # push ADDING that file to a head cut after the move -- a tree that never held it -- read
-        # `ledger-only`, READY, and called merge; reviews/findings/ was the same door one directory
-        # down. The closed ledger now keeps it only as an edit (`M`) of the file the reviewed tree
-        # holds, and the old prefix only as an addition under the directory the reviewed tree holds.
-        # Each is asked once for this pull request, its status read into a variable, and any answer
-        # but 0 -- the path absent, or a read that failed -- is "not carried": a repair, never the
-        # ledger.
-        carried=0
-        git cat-file -e "$reviewed:reviews/FINDINGS.md" 2>/dev/null || carried=$?
-        carries_closed=0
-        if ((carried == 0)); then carries_closed=1; fi
-        carried=0
-        git cat-file -e "$reviewed:reviews/findings" 2>/dev/null || carried=$?
-        carries_legacy=0
-        if ((carried == 0)); then carries_legacy=1; fi
-        outside=0
-        status_read_failed=0
-        status_paths=()
-        rest="$statuses"
-        while [[ -n "$rest" ]]; do
-          line="${rest%%$'\n'*}"
-          if [[ "$rest" == *$'\n'* ]]; then rest="${rest#*$'\n'}"; else rest=""; fi
-          [[ -n "$line" ]] || continue   # git's blank line between one commit's paths and the next's
-          # A STATUS RECORD THE WALK CANNOT READ IS A FAILED READ, NOT A REPAIR
-          # (PR433-MALFORMED-LEDGER-STATUS). Read as "outside", a line with no tab in it, or with a
-          # status git never prints, made the push `repairs` -- NEEDS-ATTEST, no blocker -- out of a
-          # read that never said what the push did. Exactly a status (capitals, then digits if any,
-          # as git's `R100`), one tab and a path that is not empty, or the read failed and the walk
-          # stops. The shape is tested for and not against, so a test that cannot answer fails
-          # toward the blocker; the set is spelled out for the reason valid_login spells its own.
-          st=""; t=""; shaped=0
-          if [[ "$line" == *$'\t'* ]]; then
-            st="${line%%$'\t'*}"
-            t="${line#*$'\t'}"
-            if [[ -n "$t" && "$t" != *$'\t'* \
-                  && "$st" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZ]+[0123456789]*$ ]]; then
-              shaped=1
-            fi
-          fi
-          if ((shaped == 0)); then status_read_failed=1; break; fi
-          # Keyed `:<path>`, so that no key is `@` or `*`, which a subscript reads as the whole set.
-          status_paths[":$t"]=1
-          # A path git quoted (`"` first) is a record of a path whose bytes the names below cannot
-          # see: it matches none of them and is outside, as before.
-          if [[ "$t" == reviews/FINDINGS.md ]]; then
-            # The closed ledger FILE, edited in place on a branch cut before 2026-09-12. It differs
-            # from the moved directory only in case.
-            if [[ "$st" == M ]] && ((carries_closed == 1)); then continue; fi
-          elif [[ "$st" == A && "$t" == findings/* ]]; then
-            continue
-          elif [[ "$st" == A && "$t" == reviews/findings/* ]] && ((carries_legacy == 1)); then
-            # Either ledger prefix, for the reason finding_file_count gives: `$reviewed..$head` is
-            # the caller's range, and a pre-move head carries the ledger at reviews/findings/.
-            continue
-          fi
-          # Not a `break`: every record's path is wanted by the check below.
-          outside=1
-        done
-        # THE STATUS READ MUST COVER EVERY TOUCHED PATH. A read that came back short -- a mixed
-        # push's ledger addition and nothing else -- was walked whole and read `ledger-only`: the
-        # source file beside it was never seen, and "not in the read" is not "not in the push". So
-        # each path `touched` names must be the path of some record above; `--name-only` quotes a
-        # path as `--name-status` does, so a quoted path compares as itself. Checked only after a
-        # walk that read every record, since one that stopped has failed already. A read with no
-        # record in it fails here too: `touched` named paths, and none was recorded.
-        if ((status_read_failed == 0)); then
-          rest="$touched"
-          while [[ -n "$rest" ]]; do
-            t="${rest%%$'\n'*}"
-            if [[ "$rest" == *$'\n'* ]]; then rest="${rest#*$'\n'}"; else rest=""; fi
-            [[ -n "$t" ]] || continue   # `--format=`'s blank line, which `sort -u` keeps once
-            [[ "${status_paths[":$t"]+recorded}" == recorded ]] && continue
-            status_read_failed=1
-            break
-          done
-        fi
-        if ((status_read_failed)); then
-          blockers+=("ledger-status-read-failed")
-          moved="repairs"
-        elif ((outside)); then
-          moved="repairs"
-        else
-          moved="ledger-only"
-        fi
+        moved="indeterminate"
       fi
     fi
   fi
