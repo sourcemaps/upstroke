@@ -768,6 +768,9 @@ mod tests {
         let arriving = ArrivingSleeper {
             dir: dir.clone(),
             id: question().id,
+            record: AnswerRecord::unattributed(Answer::Answered {
+                text: "opaque cursors".to_owned(),
+            }),
             after: std::cell::Cell::new(2),
         };
         let answers = EventLogAnswers::with_poll(
@@ -802,15 +805,8 @@ mod tests {
     struct ArrivingSleeper {
         dir: std::path::PathBuf,
         id: QuestionId,
+        record: AnswerRecord,
         after: std::cell::Cell<usize>,
-    }
-
-    impl ArrivingSleeper {
-        fn record() -> AnswerRecord {
-            AnswerRecord::unattributed(Answer::Answered {
-                text: "opaque cursors".to_owned(),
-            })
-        }
     }
 
     impl Sleeper for ArrivingSleeper {
@@ -821,7 +817,7 @@ mod tests {
             }
             self.after.set(remaining - 1);
             if remaining == 1 {
-                write_answer(&self.dir, &self.id, &Self::record())
+                write_answer(&self.dir, &self.id, &self.record)
                     .expect("publish the arriving answer");
             }
         }
@@ -836,9 +832,24 @@ mod tests {
         let arriving = ArrivingSleeper {
             dir: blocker.join("answers"),
             id: question().id,
+            record: AnswerRecord::unattributed(Answer::Declined),
             after: std::cell::Cell::new(1),
         };
         arriving.sleep(Duration::from_secs(1));
+    }
+
+    const CITATION: &str =
+        "design checklist item 2: the pagination contract is settled before execution";
+
+    fn both_shapes(answer: Answer) -> [AnswerRecord; 2] {
+        let convicted = AnswerRecord::convicted(answer.clone(), CITATION.to_owned())
+            .expect("a cited conviction is writable");
+        assert_ne!(
+            serde_json::to_string_pretty(&convicted).expect("the convicted record"),
+            serde_json::to_string_pretty(&answer).expect("the bare answer"),
+            "the attributed shape carries bytes a bare `Answer` cannot reproduce"
+        );
+        [AnswerRecord::unattributed(answer), convicted]
     }
 
     fn assert_read_never_took(path: &Path, published: &[u8], read: &str) {
@@ -858,76 +869,82 @@ mod tests {
 
     #[test]
     fn polling_a_published_answer_reads_it_and_leaves_the_file_byte_identical() {
-        let tree = scratch("poll-read");
-        let dir = tree.path().to_path_buf();
-        let record = AnswerRecord::unattributed(Answer::Answered {
+        for record in both_shapes(Answer::Answered {
             text: "retry on frontier".to_owned(),
-        });
-        write_answer(&dir, &question().id, &record).expect("publish");
-        let path = answer_path(&dir, &question().id);
-        let published = std::fs::read(&path).expect("the published answer");
+        }) {
+            let tree = scratch("poll-read");
+            let dir = tree.path().to_path_buf();
+            write_answer(&dir, &question().id, &record).expect("publish");
+            let path = answer_path(&dir, &question().id);
+            let published = std::fs::read(&path).expect("the published answer");
 
-        let idle = CountingSleeper::default();
-        let answers = EventLogAnswers::new(dir, Duration::from_secs(60), &idle);
-        assert_eq!(answers.poll(&question()).expect("poll"), record.answer);
-        assert_read_never_took(&path, &published, "`poll`");
+            let idle = CountingSleeper::default();
+            let answers = EventLogAnswers::new(dir, Duration::from_secs(60), &idle);
+            assert_eq!(answers.poll(&question()).expect("poll"), record.answer);
+            assert_read_never_took(&path, &published, "`poll`");
+        }
     }
 
     #[test]
     fn resolving_a_published_answer_reads_it_at_once_and_leaves_the_file_byte_identical() {
-        let tree = scratch("resolve-read");
-        let dir = tree.path().to_path_buf();
-        let record = AnswerRecord::unattributed(Answer::Declined);
-        write_answer(&dir, &question().id, &record).expect("publish");
-        let path = answer_path(&dir, &question().id);
-        let published = std::fs::read(&path).expect("the published answer");
+        for record in both_shapes(Answer::Declined) {
+            let tree = scratch("resolve-read");
+            let dir = tree.path().to_path_buf();
+            write_answer(&dir, &question().id, &record).expect("publish");
+            let path = answer_path(&dir, &question().id);
+            let published = std::fs::read(&path).expect("the published answer");
 
-        let counting = CountingSleeper::default();
-        let answers = EventLogAnswers::new(dir, Duration::from_secs(60), &counting);
-        assert_eq!(
-            answers.resolve(&question()).expect("resolve"),
-            record.answer
-        );
-        assert_eq!(
-            counting.count(),
-            0,
-            "the immediate read returned the answer: `resolve` never waited"
-        );
-        assert_read_never_took(&path, &published, "`resolve`'s immediate read");
+            let counting = CountingSleeper::default();
+            let answers = EventLogAnswers::new(dir, Duration::from_secs(60), &counting);
+            assert_eq!(
+                answers.resolve(&question()).expect("resolve"),
+                record.answer
+            );
+            assert_eq!(
+                counting.count(),
+                0,
+                "the immediate read returned the answer: `resolve` never waited"
+            );
+            assert_read_never_took(&path, &published, "`resolve`'s immediate read");
+        }
     }
 
     #[test]
     fn an_answer_published_during_the_wait_is_read_by_the_loop_and_left_byte_identical() {
-        let tree = scratch("wait-read");
-        let dir = tree.path().to_path_buf();
-        let path = answer_path(&dir, &question().id);
+        for record in both_shapes(Answer::Answered {
+            text: "opaque cursors".to_owned(),
+        }) {
+            let tree = scratch("wait-read");
+            let dir = tree.path().to_path_buf();
+            let path = answer_path(&dir, &question().id);
 
-        let reference = scratch("wait-read-bytes");
-        write_answer(reference.path(), &question().id, &ArrivingSleeper::record())
-            .expect("publish the reference");
-        let published = std::fs::read(answer_path(reference.path(), &question().id))
-            .expect("the bytes `write_answer` publishes for the arriving record");
+            let reference = scratch("wait-read-bytes");
+            write_answer(reference.path(), &question().id, &record).expect("publish the reference");
+            let published = std::fs::read(answer_path(reference.path(), &question().id))
+                .expect("the bytes `write_answer` publishes for the arriving record");
 
-        let arriving = ArrivingSleeper {
-            dir: dir.clone(),
-            id: question().id,
-            after: std::cell::Cell::new(1),
-        };
-        let answers = EventLogAnswers::with_poll(
-            dir,
-            Duration::from_secs(60),
-            Duration::from_secs(1),
-            &arriving,
-        );
-        assert!(
-            !path.exists(),
-            "nothing is published before `resolve`, so its immediate read finds nothing"
-        );
-        assert_eq!(
-            answers.resolve(&question()).expect("resolve"),
-            ArrivingSleeper::record().answer
-        );
-        assert_read_never_took(&path, &published, "`resolve`'s waiting read");
+            let arriving = ArrivingSleeper {
+                dir: dir.clone(),
+                id: question().id,
+                record: record.clone(),
+                after: std::cell::Cell::new(1),
+            };
+            let answers = EventLogAnswers::with_poll(
+                dir,
+                Duration::from_secs(60),
+                Duration::from_secs(1),
+                &arriving,
+            );
+            assert!(
+                !path.exists(),
+                "nothing is published before `resolve`, so its immediate read finds nothing"
+            );
+            assert_eq!(
+                answers.resolve(&question()).expect("resolve"),
+                record.answer
+            );
+            assert_read_never_took(&path, &published, "`resolve`'s waiting read");
+        }
     }
 
     #[test]
@@ -992,15 +1009,15 @@ mod tests {
             Answer::Answered {
                 text: "use base64 cursors".to_owned(),
             },
-            "design checklist item 2: the pagination contract is settled before execution"
-                .to_owned(),
+            CITATION.to_owned(),
         )
         .expect("a cited conviction is writable");
         write_answer(&dir, &id, &convicted).expect("write");
+        let path = answer_path(&dir, &id);
+        let published = std::fs::read(&path).expect("the published answer");
 
         let on_disk: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(answer_path(&dir, &id)).expect("file"))
-                .expect("json");
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("file")).expect("json");
         let mut keys: Vec<&str> = on_disk
             .as_object()
             .expect("an object")
@@ -1021,15 +1038,15 @@ mod tests {
         assert_eq!(back, convicted);
         assert_eq!(
             back.effective_attribution(),
-            EffectiveAttribution::Convicted {
-                citation: "design checklist item 2: the pagination contract is settled before execution"
-            }
+            EffectiveAttribution::Convicted { citation: CITATION }
         );
+        assert_read_never_took(&path, &published, "`read_answer_record`");
         assert_eq!(
             read_answer(&dir, &id).expect("read").as_ref(),
             Some(&convicted.answer),
             "the legacy reader sees the answer and nothing of the ruling"
         );
+        assert_read_never_took(&path, &published, "`read_answer`");
 
         let declined = AnswerRecord::discovered(Answer::Declined);
         write_answer(&dir, &QuestionId::from("q-DECLINED"), &declined).expect("write");
