@@ -7,9 +7,9 @@
   session under its `profile`, instead of waiting for the reset; with every pool of the agent
   exhausted, the run waits for the earliest reset among them. If one of those resets has already
   passed, the run waits only until two minutes past it, and once that time has gone there is no
-  reset wait, only the ordinary back-off. A reset is spent once its pool refuses again after it:
-  the run no longer waits for it or returns to the pool on it. An agent with one pool, and a
-  reviewer's limit, still wait only for a reset ahead, as before.
+  reset wait, only the ordinary back-off. A reset is spent once its pool refuses again two minutes
+  or more past it: the run no longer waits for it or returns to the pool on it. An agent with one
+  pool, and a reviewer's limit, still wait only for a reset ahead, as before.
 - A schema-4 run whose remaining tasks are deferred on a usage limit now waits until two minutes
   past the reset Claude Code reported, if that is at most 5 h 15 min away, instead of three short
   back-offs and a question; it prints what it is waiting for and records the wait as one deferral.

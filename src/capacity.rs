@@ -594,7 +594,9 @@ pub fn strategy_preview(mode: &str, estimates: &[PoolEstimate]) -> Vec<String> {
     if !exhausted.is_empty() {
         lines.push(format!(
             "exhausted now: {} — under a capacity-driven binder these would demote or defer \
-             (§13); today a rate limit still only defers the task that hit it (§19)",
+             (§13); today a rate limit only defers the task that hit it, except that a schema-4 \
+             run runs a worker's task again at once on another pool of the same agent it does \
+             not hold exhausted (§19)",
             exhausted.join(", ")
         ));
     }
@@ -1666,5 +1668,22 @@ mod tests {
                 "{mode}: {lines:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_strategy_preview_names_the_failover_for_an_exhausted_pool() {
+        let mut obs = Observations::default();
+        obs.exhausted.insert("claude-max".to_owned(), None);
+        let estimates = estimate(&[pool("claude-max")], &obs);
+        let lines = strategy_preview("conserve", &estimates);
+        let today = "today a rate limit only defers the task that hit it, except that a \
+                     schema-4 run runs a worker's task again at once on another pool of the \
+                     same agent it does not hold exhausted (§19)";
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("exhausted now: claude-max — ") && l.ends_with(today)),
+            "{lines:?}"
+        );
     }
 }
