@@ -6,9 +6,10 @@
 
 A headless orchestration engine for AI coding agents. You and a frontier model design a piece of
 work; `upstroke` runs it unattended: the plan becomes a dependency graph of typed tasks, each task
-goes to an existing coding-agent CLI with a model chosen per task, gates and an independent review
-check every result, and only what passes is committed. It never edits a file, never runs an
-agentic loop and never calls a model API. It is the conductor, not an instrument.
+goes to an existing coding-agent CLI with a model chosen per task, gates and a review check every
+result (independent unless configured otherwise; see [Guarantees](#guarantees)), and only what
+passes is committed. It never edits a file, never runs an agentic loop and never calls a model
+API. It is the conductor, not an instrument.
 
 ## Status
 `0.1.0` is released on crates.io and works end to end. v0.2 (worktree-per-task parallelism, a merge
@@ -31,7 +32,7 @@ abrupt conductor death.
 | `upstroke connect` | Discovers agent CLIs and writes `~/.upstroke/pools.toml`. |
 | `upstroke validate plan.md` | Prints the task graph and sourced model chains, at zero spend. |
 | `upstroke run plan.md --dry-run` | Everything except the agents. |
-| `upstroke capacity` | Each pool's auth state and estimated remaining. |
+| `upstroke capacity` | Checks sign-in once per agent and shows each pool's estimated remaining. |
 | `upstroke run plan.md --budget 15` | Runs for real, committing per task on a `upstroke/run-<id>` branch. |
 | `upstroke status [<run-id>]` | The ledger: attempts, models, cost. |
 | `upstroke answer <question-id>` | Answers a question that parked a task. |
@@ -57,7 +58,7 @@ while you are present.
 
 ## Configuration
 Pools are user-level, in `~/.upstroke/pools.toml`, written by `upstroke connect`; routing, gates and
-budgets are repo-level, in `upstroke.toml`. Zero config works; every key is in
+budgets are repo-level, in `upstroke.toml`. Zero config works; the configuration reference is
 [design/17](design/17_design_configuration_reference.md).
 ```toml
 [routing]
@@ -76,8 +77,12 @@ cmd = "cargo test"
 - **Narrow permissions; reviewers are read-only.**
 - **Independent review, with an explicit fallback** ([design/11](design/11_design_verification_ladder.md)).
   Where a task runs on the model that would review it, the review is rebound to another model
-  family; if that alternative cannot be probed, the run warns and falls back to the
-  frozen same-model reviewer rather than claiming independence. A configured blast-radius
+  family. On `master` a fresh run (schema 4) probes every reviewer its plan names, and is not
+  created if the alternative cannot be probed ([design/17](design/17_design_configuration_reference.md));
+  a run an older binary created (schema 1–3) warns and falls back to the
+  frozen same-model reviewer rather than claiming independence. With
+  `[routing] review = { cross_family = false }`, or where no other family is configured, no
+  alternative is named and the same model can review its own work. A configured blast-radius
   second opinion is stricter: it needs both families, and both must pass.
 - **An empty diff can never pass.**
 - **Estimates are never optimistic.**
