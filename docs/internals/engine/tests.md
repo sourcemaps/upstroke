@@ -5116,3 +5116,31 @@ present, creates the run, records both agents as probed, and completes it.
 
 This prose sat above the test in the source until the execution root moved into the create protocol
 at P3c; the refusal used to be reported after P3b, and the root was made before creation began.
+
+## `fn an_absent_alternative_reviewer_cli_refuses_creation_while_cross_family_is_unset() {`
+
+CAP-CROSS-FAMILY-REVIEWER-CANNOT-BE-DROPPED at run creation, the half that refuses; its partner is
+the next test. The tasks are implemented on the frontier rung, which the topology stub serves as
+Claude Code's frontier model, so the primary reviewer, `claude-code/claude-opus-5`, is the model
+that wrote the work, and with `cross_family` unset the run names another family's reviewer to take
+its place. The harness drives `codex` and not `copilot`, so that reviewer is Codex's, and its CLI is
+absent. Run creation probes every agent in the probe set it derives from `review_plan.agents()`, so
+`run_with` refuses at P3c, before the commit record, naming the alternative's program as one that
+could not be executed. The `codex` adapter was probed once and never built, and the creation left
+nothing behind, by the same assertions as the configured-reviewer test above: no execution root,
+no run directory, no private half holding `committed.json`, no integration ref.
+
+## `fn an_absent_alternative_reviewer_cli_is_never_probed_once_cross_family_is_false() {`
+
+The partner: the same plan, stub and absent Codex CLI, with `[routing] review = { cross_family =
+false }`. The run is created and completes with both tasks committed. Its first logged line records
+`claude-code` alone as probed, the `codex` adapter was neither probed nor built, and the primary
+reviewed each task its own model implemented. The run's warnings hold exactly one that mentions
+`cross_family = false`, and it names the primary.
+
+The pair was measured before commit against two changes to the probe set in
+`engine::topology::entry::prepare_fresh`. With `codex` added whenever the harness has it, this test
+fails with the refusal the finding observed ("creating run … stopped at P3c", naming the absent
+CLI), and its partner still passes. With the probe set taken from `review_plan.required_agents()`,
+which leaves the alternative out, the partner fails because creation no longer refuses, and this
+test still passes.
