@@ -311,9 +311,12 @@ Twelve tasks parked without a commit.
 So one rule sits beside the phrases, in `hits_a_quota_window`: the text, in
 lower case, contains "hit your " followed immediately by a quota window and
 then " limit" as a whole word (the boundary is set out in the next section).
-There are exactly three windows: a number of hours, written as
-one or more ASCII digits and then "-hour" ("5-hour"); "session"; and
-"weekly". Every occurrence of "hit your " is checked, not only the first, so
+There are three windows that signal on their own: a number of hours, written
+as one or more ASCII digits and then "-hour" ("5-hour"); "session"; and
+"weekly". A fourth form signals only with a reset: any other name of one
+word of ASCII letters, such as a model's ("Fable", "Opus"), when the next
+word after "limit" is "resets" ("hit your Fable limit · resets Nov 14, 9am
+(UTC)"). Every occurrence of "hit your " is checked, not only the first, so
 an ordinary "the patch hit your branch" earlier in the text does not hide a
 limit message after it. "hit your usage limit" needs no window: "usage limit"
 is one of the twelve phrases.
@@ -321,23 +324,27 @@ is one of the twelve phrases.
 The rule is narrow on purpose. A rate-limit signal is ground truth about
 capacity (§13): the ladder does not count the attempt, defers it, and after
 three deferrals asks a human. So "You've hit your context-window limit",
-"hit your rate of change limit" and a bare "hit your limit" do not signal.
-They are task failures, to be retried or escalated like any other.
+"hit your rate of change limit", "hit your token limit" with no reset after
+it and a bare "hit your limit" do not signal. They are task failures, to be
+retried or escalated like any other.
 
 The rule splits the already lower-cased text on "hit your " and reads each
-piece with `trim_start_matches`, `strip_prefix` and `starts_with`. Those
-return slices of the same string, so it allocates nothing more, and nothing
-in it indexes or unwraps, so it cannot panic.
+piece with `trim_start_matches`, `strip_prefix`, `strip_suffix` and
+`starts_with`. Those return slices of the same string or `None`, so it
+allocates nothing more, and nothing in it indexes or unwraps, so it cannot
+panic.
 
-Two forms have been observed. The five-hour form is the one from run
+Three forms have been observed. The five-hour form is the one from run
 `01M740JX5N8HB94RNC7W2MM777` above (2026-11-11, exit code 1). The session
 form, `You've hit your session limit`, is in `reviews/FINDINGS.md`, in the
 record of a worker that returned rc=1 with that message while its wrapper
-reported success. The weekly form is covered on the expectation that it is
-worded alike. It has not been observed. A limit message in any other wording
-is not recognised and is read as `AgentError`. That spends an attempt, which
-is the safer mistake: a false rate-limit signal would tell the capacity
-engine an untouched pool is exhausted.
+reported success. The model form, `You've hit your Fable limit · resets Nov
+14, 9am (UTC)`, was printed on the build machine on 2026-11-12, when one
+model's weekly allowance was spent. The weekly form is covered on the
+expectation that it is worded alike. It has not been observed. A limit
+message in any other wording is not recognised and is read as `AgentError`.
+That spends an attempt, which is the safer mistake: a false rate-limit
+signal would tell the capacity engine an untouched pool is exhausted.
 
 Only ever consulted for a FAILED attempt: a successful task *about* rate
 limiting ("added backoff for 429 responses") must never be read as the pool
@@ -345,12 +352,44 @@ being exhausted, or verified work gets rolled back.
 
 ## `fn hits_a_quota_window(lower: &str) -> bool {`
 
-The quota-window rule described in the section above. After the window, the
-text must continue with " limit", and "limit" must then end: at the end of
-the text, or at a character that is not an ASCII letter, ASCII digit or
-underscore. A full stop, a space, a semicolon or the " · resets" of the
-observed five-hour message all end it; "limiter", "limitation" and "limited"
-do not.
+The quota-window rule described in the section above. Each piece after
+"hit your " is read one of two ways:
+
+- If it starts with ASCII digits, the window is those digits and "-hour".
+- Otherwise the window is the run of ASCII letters it starts with, which
+  must not be empty. "session" and "weekly" signal on their own. Any other
+  word, a model name such as "fable" or "opus", signals only if
+  `says_when_it_resets` holds for what follows the limit.
+
+Either way the window must be followed by " limit" as a whole word, which
+`after_a_whole_limit` checks. The window is one word: "context window" and
+"context-window" stop at the space or the hyphen, which is not " limit", and
+"fable4" stops at the digit. So none of them signals, with a reset or
+without.
+
+The model form was added after the pull request that reads resets from limit
+messages. Its parser test read the observed Fable message with
+`reset_at_from_limit_message` directly, and nothing checked that the message
+was a rate limit at all. It was not: none of the twelve phrases matches it,
+and this rule then accepted only the three windows. So an attempt that
+printed it was read as `AgentError`, the coordinator never recorded
+`pool_exhausted`, and the ladder kept spending attempts against an exhausted
+pool.
+
+A name signals only with a reset because, unlike "session" and "weekly", it
+is not a known window. "token" and "context" are names too, and "You've hit
+your token limit" with nothing after it is about the prompt, not the pool.
+The reset is what makes it a quota: the message says when the allowance comes
+back. "session", "weekly" and the hours window are unchanged, and still
+signal with or without a reset.
+
+## `fn after_a_whole_limit(window_end: &str) -> Option<&str> {`
+
+What follows " limit" right after a window, if "limit" is a whole word
+there. "limit" must end at the end of the text, or at a character that is
+not an ASCII letter, ASCII digit or underscore. A full stop, a space, a
+semicolon or the " · resets" of the observed five-hour message all end it;
+"limiter", "limitation" and "limited" do not, and give `None`.
 
 The boundary was added after a round-two review of the first form, which
 checked only that the rest began with " limit". That accepted "limiter",
@@ -363,6 +402,24 @@ The check strips " limit" with `strip_prefix` and asks `starts_with` whether
 the next character is a word character. Both work on slices of the same
 string, so the rule still allocates nothing more and cannot panic. The
 character test is ASCII only, like the lower-casing before it.
+
+## `fn says_when_it_resets(after_limit: &str) -> bool {`
+
+Whether the next word after the limit is "resets", followed by a space, as
+in " · resets Nov 14, 9am (UTC)". Only characters that are neither letters,
+digits (in any script) nor underscores may come between: spaces, `·`, `∙`,
+punctuation. So "hit your token limit; the cache resets 9am (UTC)" does not
+count: the next word is "the".
+
+The test is for the word only, not for a reset that parses. A reset in
+another zone, which `reset_at_from_limit_message` refuses, still says the
+allowance comes back, so the message is still a rate limit; its `reset_at`
+is just unknown. "resets " with a space is the same word
+`reset_at_from_limit_message` looks for.
+
+The gap test uses Unicode letters and digits, not ASCII ones, so that a word
+in another script between "limit" and "resets" is a word and stops the
+match, rather than being skipped as punctuation.
 
 ## `pub fn reset_at_from_limit_message(text: &str, now_unix: u64) -> Option<String> {`
 
@@ -443,7 +500,7 @@ time to format; only a clock read near the epoch can meet one.
 
 What follows the first `resets ` that begins a word: at the start of the
 text, or after a character that is not an ASCII letter, ASCII digit or
-underscore, the boundary `hits_a_quota_window` uses. Without it,
+underscore, the boundary `after_a_whole_limit` uses. Without it,
 `loaded presets 5:30am (UTC)` would read as a reset.
 
 ## `const MONTHS: [&str; 12] = [`
@@ -595,14 +652,15 @@ phrases matches it. Remove "session" from the windows and this test fails.
 
 A context-window limit is a fault in the task, not a quota window: a shorter
 prompt fixes it and waiting does not. "hit your " is followed by
-"context-window", which is none of the three windows, so the text does not
-signal. Under the earlier rule, which took any "limit" after "hit your", it
+"context-window", which is none of the three windows and not a name of one
+word, so the text does not signal. Under the earlier rule, which took any
+"limit" after "hit your", it
 did, and the ladder would have deferred a real failure three times and asked
 a human.
 
 ## `mod tests` › `fn hit_your_limit_with_no_window_does_not_signal() {`
 
-"you hit your limit" names no window. The rule needs one of the three
+"you hit your limit" names no window. The rule needs a window or a name
 between "hit your " and " limit", so this does not signal. A rule that made
 the window optional would fail this test.
 
@@ -674,6 +732,58 @@ text is the one `a_hit_your_weekly_limit_message_signals` uses; it is here
 again to pin the end-of-text half of the boundary beside the full stop
 above. A boundary that demanded a following character, as a check reading
 the next character without allowing for none would, fails this test.
+
+## `mod tests` › `fn the_observed_hit_your_fable_limit_message_signals() {`
+
+The message Claude Code printed on the build machine on 2026-11-12, when the
+Fable model's own weekly allowance was spent: `FABLE`, the same text the
+reset tests below read. None of the twelve phrases matches it, so only the
+name form of the quota-window rule can make it signal. Before that form
+existed this test failed, and an attempt that printed the message was an
+`AgentError` that spent an attempt against an exhausted pool.
+
+## `mod tests` › `fn a_hit_your_opus_limit_message_with_a_reset_signals() {`
+
+The same form with another model's name and a time-only reset. It has not
+been observed. It witnesses that the rule accepts any one-word name and not
+"fable" alone: a rule that listed the observed name would fail this test.
+
+## `mod tests` › `fn a_hit_your_token_limit_message_without_a_reset_does_not_signal() {`
+
+"hit your token limit" and "hit your context limit", the first with nothing
+after it and the second with a semicolon and advice. Both are about the
+prompt, not the pool. "token" and "context" are one-word names, but neither
+text says when anything resets, so neither signals. A rule that took a name
+without a reset would fail this test.
+
+## `mod tests` › `fn a_model_named_limit_without_a_reset_does_not_signal() {`
+
+The observed Fable message with its reset cut off. A model's name is not
+enough on its own: the rule cannot tell "Fable" from "token", so it is the
+reset that makes the message a quota. It witnesses that the reset is required
+for every name, model names included.
+
+## `mod tests` › `fn a_named_limit_whose_next_word_is_not_resets_does_not_signal() {`
+
+"resets" appears after the limit, but the next word after "limit" is "the".
+The reset has to follow the limit, as in the observed message, not merely
+appear later in the text. A rule that looked for "resets" anywhere after the
+limit would fail this test.
+
+## `mod tests` › `fn a_named_limiter_with_a_reset_does_not_signal() {`
+
+The observed Fable message with "limiter" for "limit". The name form keeps
+the same whole-word boundary as the three windows, so the reset after it does
+not help. A name form that skipped `after_a_whole_limit` would fail this
+test.
+
+## `mod tests` › `fn a_name_of_more_than_one_word_with_a_reset_does_not_signal() {`
+
+Three names that are not one word of ASCII letters, each followed by a
+limit and a reset: "context window", "context-window" and "Fable4". The name
+stops at the space, the hyphen and the digit, and what follows is not
+" limit", so none signals. A rule that took everything up to " limit" as the
+name would fail this test.
 
 ## `mod tests` › `const NOV_11_2026: u64 = 1_794_355_200;`
 

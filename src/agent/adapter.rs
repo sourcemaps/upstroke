@@ -224,21 +224,35 @@ pub fn looks_rate_limited(text: &str) -> bool {
 fn hits_a_quota_window(lower: &str) -> bool {
     lower.split("hit your ").skip(1).any(|after| {
         let hours = after.trim_start_matches(|character: char| character.is_ascii_digit());
-        let window_end = if hours.len() < after.len() {
-            hours.strip_prefix("-hour")
-        } else {
-            after
-                .strip_prefix("session")
-                .or_else(|| after.strip_prefix("weekly"))
+        if hours.len() < after.len() {
+            return hours
+                .strip_prefix("-hour")
+                .and_then(after_a_whole_limit)
+                .is_some();
+        }
+        let window_end = after.trim_start_matches(|character: char| character.is_ascii_lowercase());
+        let Some(after_limit) = after_a_whole_limit(window_end) else {
+            return false;
         };
-        window_end
-            .and_then(|rest| rest.strip_prefix(" limit"))
-            .is_some_and(|after_limit| {
-                !after_limit.starts_with(|character: char| {
-                    character.is_ascii_alphanumeric() || character == '_'
-                })
-            })
+        match after.strip_suffix(window_end) {
+            Some("session" | "weekly") => true,
+            Some(name) => !name.is_empty() && says_when_it_resets(after_limit),
+            None => false,
+        }
     })
+}
+
+fn after_a_whole_limit(window_end: &str) -> Option<&str> {
+    window_end.strip_prefix(" limit").filter(|after_limit| {
+        !after_limit
+            .starts_with(|character: char| character.is_ascii_alphanumeric() || character == '_')
+    })
+}
+
+fn says_when_it_resets(after_limit: &str) -> bool {
+    after_limit
+        .trim_start_matches(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .starts_with("resets ")
 }
 
 pub fn reset_at_from_limit_message(text: &str, now_unix: u64) -> Option<String> {
@@ -663,6 +677,56 @@ mod tests {
     fn limit_at_the_very_end_of_the_text_signals() {
         let text = "You've hit your weekly limit";
         assert!(looks_rate_limited(text), "should signal: {text}");
+    }
+
+    #[test]
+    fn the_observed_hit_your_fable_limit_message_signals() {
+        assert!(looks_rate_limited(FABLE), "should signal: {FABLE}");
+    }
+
+    #[test]
+    fn a_hit_your_opus_limit_message_with_a_reset_signals() {
+        let text = "You've hit your Opus limit · resets 3pm (UTC)";
+        assert!(looks_rate_limited(text), "should signal: {text}");
+    }
+
+    #[test]
+    fn a_hit_your_token_limit_message_without_a_reset_does_not_signal() {
+        for text in [
+            "You've hit your token limit",
+            "You've hit your context limit; shorten the prompt",
+        ] {
+            assert!(!looks_rate_limited(text), "should not signal: {text}");
+        }
+    }
+
+    #[test]
+    fn a_model_named_limit_without_a_reset_does_not_signal() {
+        let text = "You've hit your Fable limit";
+        assert!(!looks_rate_limited(text), "should not signal: {text}");
+    }
+
+    #[test]
+    fn a_named_limit_whose_next_word_is_not_resets_does_not_signal() {
+        let text = "You've hit your token limit; the cache resets 9am (UTC)";
+        assert!(!looks_rate_limited(text), "should not signal: {text}");
+    }
+
+    #[test]
+    fn a_named_limiter_with_a_reset_does_not_signal() {
+        let text = "You've hit your Fable limiter · resets Nov 14, 9am (UTC)";
+        assert!(!looks_rate_limited(text), "should not signal: {text}");
+    }
+
+    #[test]
+    fn a_name_of_more_than_one_word_with_a_reset_does_not_signal() {
+        for text in [
+            "You've hit your context window limit · resets 9am (UTC)",
+            "You've hit your context-window limit · resets 9am (UTC)",
+            "You've hit your Fable4 limit · resets 9am (UTC)",
+        ] {
+            assert!(!looks_rate_limited(text), "should not signal: {text}");
+        }
     }
 
     const FIVE_HOUR: &str = "You've hit your 5-hour limit · resets 5:30am (UTC)";
