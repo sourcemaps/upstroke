@@ -121,21 +121,6 @@ Wall clock from spawn to process exit (not including pipe drain).
 The child exceeded the bounded stdout or stderr capture allowance and
 its owned process tree was terminated.
 
-## `thread_local! {` › `static LAST_REAPED_SIGNAL: std::cell::Cell<Option<i32>>`
-
-Test builds on Unix only (`#[cfg(all(test, unix))]`; a production build has
-none of it). The funnel clears it when a run begins and sets it, where the
-Unix supervision loop reaps a child that exited by itself, to
-`ExitStatusExt::signal` of that status. `code` is `None` both for a run the
-funnel ended and for a child a signal ended, and the signal number is dropped
-at that reap. A test that sees `code: None` needs the number to tell which
-signal it was: the hook test's macOS failure printed `code: None`, and the
-leading explanation of that failure predicts one particular signal. A
-thread-local is enough because the funnel reaps on the thread that called it
-(the supervising closure runs inline). There is no field on `ProcessOutput`,
-because some twenty files construct that struct. The Windows reap records
-nothing: a Windows exit has no signal.
-
 ## `const DRAIN_GRACE_EXIT: Duration = Duration::from_secs(2);`
 
 How long to keep draining pipes after the process is gone. Normally EOF is
@@ -266,6 +251,37 @@ its input, the three bounds that end a run early (timeout, output limit, stop), 
 carried leases and the observer are each a caller's choice, and bundling any two of
 them would make the one supervised entry take a struct its two callers build for
 this call alone. The reason string is on the attribute.
+
+## `run_with_timeout_and_limit` › `if cfg!(test) {`
+
+Test builds record the signal that ended the child, for
+`test_support::last_reaped_signal` (below). The funnel clears the record when a
+run begins (`record_reaped_signal(None)`), and where the Unix supervision loop
+reaps a child that exited by itself it sets the record to
+`ExitStatusExt::signal` of that status. The Windows reap records nothing: a
+Windows exit has no signal.
+
+Both calls are `if cfg!(test)` expressions, never `#[cfg(test)]` attributes. In
+a production build the condition is a constant `false` and the branch is
+removed, so that build behaves exactly as it did; the name the branch calls
+resolves there to a no-op (`fn record_reaped_signal(_: Option<i32>) {}`,
+below).
+
+An attribute would move this file's production-code cutoff. The source checks
+decide where production code ends by text: `effects::production_region` cuts a
+file at the first `#[cfg(test)]` outside comments and strings. In this file
+that is the original one, on `Job::contains` in `mod windows_job`, far below the
+funnel. The first version of this record put `#[cfg(test)]` on the reap
+statement, which moved the cutoff into the supervision loop. Every check that
+scans the production region then stopped looking at the rest of the funnel and
+everything after it. A review placed a public function returning
+`std::process::Command` in that gap: the base's check reported it, and the
+check on that version did not. So nothing above that original `#[cfg(test)]`
+may carry the attribute.
+`a_hook_started_commit_signal_record_leaves_the_funnels_production_region_whole`
+in `src/runner/host/tests.rs` holds this. It fails if the production region of
+this file stops short of `run_with_timeout_and_limit` or of
+`finish_pipe_reports`, which follows the funnel.
 
 ## `run_with_timeout_and_limit` › `} else if stop() {`
 
@@ -3547,6 +3563,43 @@ the `errno` this call left alone and is an enumeration of nothing; an ordinary
 listing, where a stale `errno` cannot make a non-zero return unknown because a
 non-zero return is the syscall's own success; and a buffer filled to its last
 byte or a negative return, neither of which is an enumeration.
+
+## `#[cfg(not(test))]` › `fn record_reaped_signal(_: Option<i32>) {}`
+
+The name the funnel's two `if cfg!(test)` branches call, defined in both
+builds. A test build imports `test_support::record_reaped_signal` (the
+`#[cfg(test)] use` above this), which writes the record. A production build has
+this no-op instead, so the removed branch still names a function that exists,
+and no thread-local is compiled in. Both definitions sit below this file's
+original first `#[cfg(test)]`, so neither one moves the production-region
+cutoff that `run_with_timeout_and_limit` › `if cfg!(test) {` describes.
+
+## `pub(crate) mod test_support` › `static LAST_REAPED_SIGNAL: std::cell::Cell<Option<i32>> =`
+
+The signal that ended the child this thread's funnel last reaped. It is `None`
+for a normal exit, for a run the funnel ended itself, and before any run.
+
+Test builds only. It sits in `test_support`, below the file's first
+`#[cfg(test)]`, so a production build has none of it.
+`record_reaped_signal` writes it, called from the funnel's two `if cfg!(test)`
+branches; `last_reaped_signal` reads it.
+
+`code` is `None` both for a run the funnel ended and for a child a signal
+ended, and the signal number is dropped at that reap. A test that sees
+`code: None` needs the number to tell which signal it was: the hook test's
+macOS failure printed `code: None`, and the leading explanation of that
+failure predicts one particular signal. A thread-local is enough because the
+funnel reaps on the thread that called it (the supervising closure runs
+inline). There is no field on `ProcessOutput`, because some twenty files
+construct that struct.
+
+## `pub(crate) mod test_support` › `pub(crate) fn last_reaped_signal() -> Option<i32> {`
+
+The signal that ended the child the funnel last reaped on this thread, or
+`None` when the child exited normally or the funnel ended the run itself. Unix
+only, as its readers are: `hook_commit_signal` and its witness in
+`src/runner/host/tests.rs`. Call it on the thread that ran the child, before
+that thread runs anything else through the funnel.
 
 ## `pub(crate) mod test_support` › `pub(crate) struct RetainedMockReaper {`
 

@@ -3563,12 +3563,13 @@ failure. The quarantine ends with the repair of
 
 ## `fn hook_commit_signal(output: &proc::ProcessOutput) -> String {`
 
-The clause the test above adds to its `the commit failed` message. It is empty
-when the commit has an exit code. Otherwise it is `, ended by signal N`, or a
-note that no signal was recorded at the reap, which is the case for a run the
-funnel ended itself. It must be called on the thread that ran the commit,
-before that thread runs anything else through the funnel: the record is a
-thread-local holding the last reap's value.
+The clause the test above adds to its `the commit failed` message, about how
+the commit ended. It is empty when the commit has an exit code. Otherwise it is
+`, ended by signal N`, N being the signal the funnel recorded when it reaped the
+commit, or a note that no signal was recorded at the reap, which is the case for
+a run the funnel ended itself. It must be called on the thread that ran the
+commit, before that thread runs anything else through the funnel: the record is
+a thread-local holding the last reap's value.
 
 ## `fn a_hook_started_commit_failure_names_the_signal_a_child_ended_itself_by() {`
 
@@ -3581,17 +3582,93 @@ the clause reads `, ended by signal 15`. It lives here rather than in
 `runner::host::tests::a_hook_started`, and
 `cargo test --all-features --lib runner::host::tests::a_hook_started` runs it.
 
+## `fn a_hook_started_commit_signal_record_leaves_the_funnels_production_region_whole() {`
+
+The regression for where `src/agent/proc.rs`'s production code ends. It takes
+`effects::production_region` of that file and requires it to still contain
+`fn run_with_timeout_and_limit(` and `fn finish_pipe_reports<T>(`, the
+function that follows the funnel. A `#[cfg(test)]` attribute in the funnel, or
+anywhere above that file's original first one, cuts the region short of them,
+and this fails. The first version of the signal record did exactly that: it
+moved the cutoff into the supervision loop and hid the rest of the funnel from
+every production-region check. `src/agent/proc.rs`'s notes, under
+`run_with_timeout_and_limit` › `if cfg!(test) {`, carry the whole account.
+
+Witnessed failing with `#[cfg(test)]` put back on the funnel's
+`record_reaped_signal(signal);` statement: the region kept 10874 bytes and
+ended before `fn finish_pipe_reports<T>(`.
+
+It lives here, beside the signal witness and the quarantine pin. The checks
+that use `production_region` are in `src/effects.rs`, which is not a file the
+repair that added this test could write, and the quarantine pin below is the
+one other check of source text in the files that repair touched. Its name puts
+it under the quick gate's filter, `runner::host::tests::a_hook_started`. It is
+a check of source text, so it runs on every platform.
+
+## `fn attributes_applying_to(source: &str, item: usize) -> Result<(usize, Vec<String>), String> {`
+
+The attributes that apply to the item starting at byte `item` of `source`, in
+source order, with the byte offset of the first one's `#` (`item` when there are
+none). Attributes apply across blank lines and comments, so it reads
+`effects::blank_comments_and_strings` of the source, the repository's own lexer
+for its source checks. That copy has every comment blanked: line, doc and block
+comments, nested and spanning lines. The contents of every string and character
+literal are blanked too, and byte offsets are unchanged. It walks backward over
+the copy's whitespace, so blank lines and comments of any form are skipped. At
+each `]` it finds the matching `[` by counting brackets, which in that copy
+cannot come from a string, and it requires a `#` before that `[`. Each
+attribute is returned as the source spells it, `\r\n` folded to `\n`.
+
+The walk ends only at the start of the text or at a `}`, `;` or `{`, which is the
+end of the previous item or the start of the enclosing one. Anything else
+before the item is an `Err` that names it: a `]` that closes no outer
+attribute, an inner attribute, or any other code. So an attribute it cannot
+read fails the pin instead of being taken for the end of the attributes.
+
+Until the second repair of this pin, the walk went line by line. It skipped only
+`//` comments, and it matched brackets in the raw text. So a `/* … */` comment
+between an extra attribute and the block ended the walk early, and an extra
+attribute whose string held an unmatched bracket was not read. Both left exactly
+the expected attributes and passed the pin while the test was ignored on Linux.
+
 ## `fn a_hook_started_commit_test_is_quarantined_on_macos_only_until_its_finding_is_repaired() {`
 
 The witness for the macOS quarantine of
 `a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it`,
-on the owner's decision of 2026-11-11. It reads this file's own source and
-requires the attribute block above that test's signature to be exactly
-`#[cfg(unix)]`, `#[test]` and the `cfg_attr` that ignores it on macOS alone,
-naming `G7-CI-MACOS-HOOK-COMMIT-FLAKE`. So the test cannot be ignored on
-another platform, or everywhere, without this failing. It runs on every
-platform and falls under the quick gate's filter. The repair of the finding
-removes the quarantine and this test with it.
+on the owner's decision of 2026-11-11. It reads this file's own source and,
+through `attributes_applying_to`, every attribute that applies to that test:
+there must be exactly `#[cfg(unix)]`, `#[test]` and the `cfg_attr` that ignores
+it on macOS alone, naming `G7-CI-MACOS-HOOK-COMMIT-FLAKE`, in that order. So
+the test cannot be ignored on another platform, or everywhere, without this
+failing. It runs on every platform and falls under the quick gate's filter. The
+repair of the finding removes the quarantine and this test with it.
+
+Until the first repair of this pin, it read only the lines after the last blank
+line above the test. An attribute placed above a blank line still applies, so
+one that ignored the test on Linux too passed it. The reader that replaced it
+missed two more shapes, which `attributes_applying_to` records.
+
+The second half of the test feeds the reader three copies of this file. Each has
+a `#[cfg_attr(target_os = "linux", ignore = "…")]` inserted above the block,
+and the reader must report it first in each:
+
+- separated from the block by a blank line, a `//` comment and another blank
+  line;
+- separated by a blank line, a `/* … */` comment over two lines, a one-line
+  `/* … */` comment and another blank line;
+- with an unmatched `[` in its reason, separated by a blank line.
+
+A last case gives the reader an item with an unreadable line above its
+attribute and requires an `Err`, so text the reader cannot read is never
+treated as the end of the attributes.
+
+Witnessed failing twice. First, with
+`#[cfg_attr(target_os = "linux", ignore = "mutation witness")]` and a blank line
+added above the hook test's attributes. Then, after the second repair, with
+`#[cfg_attr(target_os = "linux", ignore = "mutation [ witness")]`, a blank line
+and `/* comment */` added there, which is the review's shape with the bracket
+added. Each time the hook test reported `ignored`, and this test failed with the
+extra attribute first in what it found.
 
 ## `const HOOK_COMMIT_TRACE_HEAD: u64 = 64 * 1024;`
 

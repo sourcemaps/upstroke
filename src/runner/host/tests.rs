@@ -8612,9 +8612,6 @@ fn a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it()
     );
 }
 
-/// What the hook test's failure message adds about how the commit ended: the
-/// signal the funnel recorded when it reaped a commit that has no exit code,
-/// and nothing when the commit exited with a code.
 #[cfg(unix)]
 fn hook_commit_signal(output: &proc::ProcessOutput) -> String {
     if output.code.is_some() {
@@ -8626,10 +8623,6 @@ fn hook_commit_signal(output: &proc::ProcessOutput) -> String {
     }
 }
 
-/// The witness for [`hook_commit_signal`]: a child that ends itself by
-/// `SIGTERM` (15), run through the same funnel as the hook test's commit,
-/// is reported as ended by that signal. Named so that the quick gate's filter
-/// `runner::host::tests::a_hook_started` selects it.
 #[cfg(unix)]
 #[test]
 fn a_hook_started_commit_failure_names_the_signal_a_child_ended_itself_by() {
@@ -8651,33 +8644,133 @@ fn a_hook_started_commit_failure_names_the_signal_a_child_ended_itself_by() {
 }
 
 #[test]
+fn a_hook_started_commit_signal_record_leaves_the_funnels_production_region_whole() {
+    let region = crate::effects::production_region(include_str!("../../agent/proc.rs"));
+    for name in [
+        "fn run_with_timeout_and_limit(",
+        "fn finish_pipe_reports<T>(",
+    ] {
+        assert!(
+            region.contains(name),
+            "the production region of src/agent/proc.rs ends before `{name}`, so a \
+             `#[cfg(test)]` attribute sits in or above the funnel and every source check of the \
+             production region stops short of it ({} bytes kept)",
+            region.len()
+        );
+    }
+}
+
+fn attributes_applying_to(source: &str, item: usize) -> Result<(usize, Vec<String>), String> {
+    let blanked = crate::effects::blank_comments_and_strings(source);
+    let bytes = blanked.as_bytes();
+    let code_before = |end: usize| {
+        bytes[..end]
+            .iter()
+            .rposition(|byte| !byte.is_ascii_whitespace())
+    };
+    let mut attributes = Vec::new();
+    let mut first = item;
+    while let Some(close) = code_before(first) {
+        match bytes[close] {
+            b'}' | b';' | b'{' => break,
+            b']' => {}
+            other => {
+                return Err(format!(
+                    "`{}` at byte {close} precedes the item and is neither an attribute nor the \
+                     end of an item",
+                    char::from(other)
+                ));
+            }
+        }
+        let mut depth = 0_usize;
+        let open = (0..=close).rev().find(|&at| {
+            match bytes[at] {
+                b']' => depth += 1,
+                b'[' => depth -= 1,
+                _ => {}
+            }
+            depth == 0
+        });
+        let Some(hash) = open
+            .and_then(code_before)
+            .filter(|&hash| bytes[hash] == b'#')
+        else {
+            return Err(format!("the `]` at byte {close} closes no outer attribute"));
+        };
+        attributes.push(source[hash..=close].replace("\r\n", "\n"));
+        first = hash;
+    }
+    attributes.reverse();
+    Ok((first, attributes))
+}
+
+#[test]
 fn a_hook_started_commit_test_is_quarantined_on_macos_only_until_its_finding_is_repaired() {
     let source = include_str!("tests.rs");
     let signature = concat!(
         "fn a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it",
         "() {"
     );
-    let lines: Vec<&str> = source.lines().collect();
-    let at = lines
-        .iter()
-        .position(|line| *line == signature)
+    let item = source
+        .match_indices(signature)
+        .map(|(at, _)| at)
+        .find(|&at| at == 0 || source[..at].ends_with('\n'))
         .expect("the hook-commit test is defined in this file");
-    let start = lines[..at]
-        .iter()
-        .rposition(|line| line.trim().is_empty())
-        .map_or(0, |blank| blank + 1);
+    let expected = [
+        "#[cfg(unix)]",
+        "#[test]",
+        concat!(
+            "#[cfg_attr(\n",
+            "    target_os = \"macos\",\n",
+            "    ignore = \"quarantined on macOS: G7-CI-MACOS-HOOK-COMMIT-FLAKE\"\n",
+            ")]"
+        ),
+    ];
+    let (first, found) = attributes_applying_to(source, item)
+        .unwrap_or_else(|error| panic!("the hook-commit test's attributes are read: {error}"));
     assert_eq!(
-        lines[start..at],
-        [
-            "#[cfg(unix)]",
-            "#[test]",
-            "#[cfg_attr(",
-            "    target_os = \"macos\",",
-            "    ignore = \"quarantined on macOS: G7-CI-MACOS-HOOK-COMMIT-FLAKE\"",
-            ")]",
-        ],
+        found, expected,
         "the hook-commit test runs on every Unix but macOS, and is ignored there only, naming \
          its finding"
+    );
+
+    let linux_ignore =
+        |reason: &str| format!("#[cfg_attr(target_os = \"linux\", ignore = \"{reason}\")]");
+    for (case, extra, between) in [
+        (
+            "a line comment",
+            linux_ignore("ignored on Linux too"),
+            "\n// a line comment\n\n",
+        ),
+        (
+            "block comments",
+            linux_ignore("ignored on Linux too"),
+            "\n/* a block comment\n   over two lines */\n/* and one on its line */\n\n",
+        ),
+        (
+            "an unmatched bracket in its reason",
+            linux_ignore("ignored on Linux [ too"),
+            "\n",
+        ),
+    ] {
+        let inserted = format!("{extra}\n{between}");
+        let copy = format!("{}{inserted}{}", &source[..first], &source[first..]);
+        let (_, found) = attributes_applying_to(&copy, item + inserted.len())
+            .unwrap_or_else(|error| panic!("{case}: the attributes are read: {error}"));
+        assert_eq!(
+            found,
+            [extra.as_str(), expected[0], expected[1], expected[2]],
+            "{case}: an attribute above a blank line still applies to the hook-commit test, so \
+             the reader must see it"
+        );
+    }
+
+    let unreadable = "x\n#[test]\nfn f() {}\n";
+    let item = unreadable.find("fn f").expect("the fixture's item");
+    assert!(
+        attributes_applying_to(unreadable, item).is_err(),
+        "text above an item that is neither an attribute nor the end of an item is refused, \
+         never read as the end of the attributes"
     );
 }
 
