@@ -13764,6 +13764,61 @@ fn sampled_git_child_runs_the_resolved_real_git_on_windows() {
     }
 }
 
+/// A sampled git's own children die with its kill, on every platform: git
+/// runs an alias whose shell writes `started`, sleeps three seconds and then
+/// writes `late`; once `started` exists the child is killed and waited for,
+/// and five seconds later `late` does not exist. On Unix the process-group
+/// kill passes it and a kill of the direct child alone (`Child::kill`) fails
+/// it, because the shell runs on and writes `late`; on Windows it is what
+/// shows the job's kill reaches what git started.
+///
+/// The alias holds no quote of its own: bare words, `>` and `&&` mean the
+/// same to Git for Windows' `sh` and to a Unix `sh`, and an argument with no
+/// quote in it passes through Windows' command line back to git unchanged.
+#[test]
+fn a_sampled_childs_own_children_die_with_its_kill() {
+    let tree = scratch("sampled-git-own-children");
+    let repository = tree.path();
+    git(repository, &["init", "-q"]);
+    let started = repository.join("started");
+    let late = repository.join("late");
+    let mut child = SampledChild::spawn(
+        repository,
+        &[
+            "-c".to_owned(),
+            "alias.hold=!echo started > started && sleep 3 && echo late > late".to_owned(),
+            "hold".to_owned(),
+        ],
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut seen = started.exists();
+    while !seen && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        seen = started.exists();
+    }
+    // Killed and reaped whether or not the shell got going, so a failure
+    // below leaves nothing running.
+    let killed = child.kill();
+    let status = child.wait().expect("reap the sampled git child");
+    assert!(
+        seen,
+        "the alias's shell never wrote {} within 10 s; git ended {status:?}",
+        started.display()
+    );
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    assert!(
+        !late.exists(),
+        "{} exists: a process the sampled git started outlived its kill (the kill answered \
+         {killed:?})",
+        late.display()
+    );
+    assert_eq!(
+        launch_end(&status),
+        LaunchEnd::Killed,
+        "the sampled git ended {status:?}, not by the kill (the kill answered {killed:?})"
+    );
+}
+
 /// One site's sampling run: the packet's record, and the per-sample
 /// observations it was tallied from.
 ///
@@ -14552,9 +14607,10 @@ struct SampledLaunch {
     /// asserted on — see the note at that printing.
     kill_error: Option<String>,
     end: LaunchEnd,
-    /// How long after the leader's reap its whole process group was gone
-    /// (`fixture::await_group_end`): zero off Unix, where the child is no
-    /// group.
+    /// How long after the child's reap every process it started was gone
+    /// ([`SampledChild::wait`]): on Unix its whole process group
+    /// (`fixture::await_group_end`), on Windows its job, once the job's
+    /// active process count read 0.
     group_ended: std::time::Duration,
 }
 
@@ -14611,9 +14667,27 @@ static SAMPLED_LAUNCHES: std::sync::Mutex<Vec<SampledLaunch>> = std::sync::Mutex
 /// records ([`Self::spawned_program`]) is not that: it is the same `git` for
 /// all four commands, so it tells none of them from another.
 ///
+/// **Its kill reaches every process git starts, on each platform.** On Unix
+/// the child leads a process group of its own, which the kill ends whole
+/// (`fixture::kill_process_group`) and the wait awaits empty
+/// (`fixture::await_group_end`). On Windows it runs in a private job of its
+/// own (`agent::proc::ChildInJob`): created suspended and assigned to the job
+/// before its first instruction runs, so every process it starts is in the
+/// job; the kill terminates the job and the wait awaits it empty. There the
+/// kill was `Child::kill` until this, which ends the direct child alone,
+/// while `git worktree add`'s `reset --hard` and the children of the other
+/// commands ran on. The job is closed, with
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, when this drops.
+///
 /// [`Child::kill`]: std::process::Child::kill
 struct SampledChild {
+    /// The child. On Unix the leader of a process group of its own
+    /// ([`Self::command`]); on Windows in a private job of its own, which
+    /// derefs to the [`std::process::Child`] ([`Self::spawn_command`]).
+    #[cfg(not(windows))]
     child: std::process::Child,
+    #[cfg(windows)]
+    child: crate::agent::proc::ChildInJob,
     /// Started once [`Command::spawn`] has returned, so what [`Self::kill`]
     /// reads off it is time the child was left *running* rather than the
     /// cost of starting it — and so an unwaited kill reads as the ~0 it is.
@@ -14625,8 +14699,9 @@ struct SampledChild {
     /// What the clock said when a kill fired at this child, or `None` if
     /// none ever did. Written only by [`Self::kill`].
     fired: Option<std::time::Duration>,
-    /// How long after the leader's reap its whole process group was gone
-    /// (`fixture::await_group_end`), or `None` until [`Self::wait`] has run.
+    /// How long after the child's reap every process it started was gone —
+    /// its process group on Unix, its job on Windows — or `None` until
+    /// [`Self::wait`] has run.
     group_ended: Option<std::time::Duration>,
 }
 
@@ -14663,8 +14738,9 @@ impl SampledChild {
 
     /// The command [`Self::spawn`] starts: `program -C cwd -c
     /// core.fsmonitor=false <args>`, its streams discarded, in a process
-    /// group of its own on Unix. Taking `program` as an argument lets a test
-    /// show that what runs is the program given, on every platform.
+    /// group of its own on Unix (on Windows the job is
+    /// [`Self::spawn_command`]'s). Taking `program` as an argument lets a
+    /// test show that what runs is the program given, on every platform.
     fn command(program: &Path, cwd: &Path, args: &[String]) -> Command {
         let mut command = Command::new(program);
         command
@@ -14683,19 +14759,34 @@ impl SampledChild {
         command
     }
 
-    /// Spawn the child in a process group of its own on Unix, so that
-    /// [`Self::kill`] reaches the children git starts — `git worktree add`'s
-    /// `reset --hard` — and not the leader alone. Until PR10's round 5 this
-    /// sampler killed the leader alone (round 2's group kill reached
+    /// Spawn the child in a process group of its own on Unix and in a
+    /// private job of its own on Windows, so that [`Self::kill`] reaches the
+    /// children git starts — `git worktree add`'s `reset --hard` — and not
+    /// the leader alone. Until PR10's round 5 this sampler killed the leader
+    /// alone on Unix (round 2's group kill reached
     /// `fixture::KillableGitChild`, the other samplers' child), and CI's
     /// macOS leg at `869e336a` met that child still populating the checkout
-    /// — `PR136`'s first fingerprint — at the forced removal.
+    /// — `PR136`'s first fingerprint — at the forced removal. On Windows it
+    /// killed the leader alone until the job.
     fn spawn(cwd: &Path, args: &[String]) -> Self {
-        let mut command = Self::command(Self::program(), cwd, args);
+        Self::spawn_command(Self::command(Self::program(), cwd, args))
+    }
+
+    /// Spawn `command` as the sampled child: as it is on Unix, where
+    /// [`Self::command`] gave it a process group of its own; on Windows
+    /// suspended, assigned to a new private job before its first instruction
+    /// runs and only then resumed (`agent::proc::ChildInJob::spawn`), so that
+    /// every process it starts is in the job. Apart from [`Self::spawn`] so
+    /// that a test can hand it a command whose streams it changed.
+    fn spawn_command(mut command: Command) -> Self {
         // Read off the `Command` that spawns the child, before the spawn, so
         // the clock read below stays the first thing after it.
         let spawned_program = PathBuf::from(command.get_program());
+        #[cfg(not(windows))]
         let child = command.spawn().expect("spawn the sampled git child");
+        #[cfg(windows)]
+        let child = crate::agent::proc::ChildInJob::spawn(&mut command)
+            .expect("spawn the sampled git child in a private job");
         Self {
             child,
             spawned: std::time::Instant::now(),
@@ -14705,13 +14796,18 @@ impl SampledChild {
         }
     }
 
-    /// Kill the child, recording when the kill fired.
+    /// Kill the child and every process it started, recording when the kill
+    /// fired. On Unix that is `SIGKILL` to its process group
+    /// (`fixture::kill_process_group`). On Windows it is `TerminateJobObject`
+    /// on its job, with exit code 1 for every process in it, the code
+    /// `Child::kill` gives too and the one `fixture::died_by_kill` reads as a
+    /// kill there. Neither waits: [`Self::wait`] does.
     ///
     /// The clock is read at the instant of the kill and stored *after* the
     /// kill has returned. Read at that instant, the value is the kill's
     /// actual timing rather than the timing it was asked for; stored after
     /// the call, the record cannot outlive the call's removal, because
-    /// deleting `self.child.kill()` leaves `outcome` unbound and the module
+    /// deleting the call that kills leaves `outcome` unbound and the module
     /// stops compiling. The kill's own answer is returned and recorded by the
     /// caller; nothing here decides what it means.
     ///
@@ -14721,28 +14817,69 @@ impl SampledChild {
     /// but a real kill produces.
     fn kill(&mut self) -> std::io::Result<()> {
         let fired = self.spawned.elapsed();
+        #[cfg(not(windows))]
         let outcome = super::fixture::kill_process_group(&mut self.child);
+        #[cfg(windows)]
+        let outcome = self.child.terminate();
         self.fired = Some(fired);
         outcome
     }
 
-    /// Reap the leader, then wait until its whole process group is gone
-    /// (`fixture::await_group_end`, bounded): the proof `recover_sample`
-    /// runs under is that no writer the child started is alive, and the
-    /// leader's reap alone is not that proof.
+    /// Reap the child, then wait until every process it started is gone,
+    /// bounded by `fixture::GROUP_END_BOUND`, and record how long that took
+    /// in [`Self::group_ended`]: the proof `recover_sample` runs under is
+    /// that no writer the child started is alive, and the child's reap alone
+    /// is not that proof. On Unix that is its whole process group
+    /// (`fixture::await_group_end`); on Windows its job, polled until the
+    /// job's active process count is 0 (`Self::await_job_end`). Past the
+    /// bound it panics, in the same words on both.
     fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         let status = self.child.wait()?;
-        let pgid = self.pgid();
-        self.group_ended = Some(
-            super::fixture::await_group_end(pgid).unwrap_or_else(|outlived| {
-                panic!("the sampled git child's group outlived its leader: {outlived}")
-            }),
-        );
+        #[cfg(not(windows))]
+        let ended = super::fixture::await_group_end(self.pgid());
+        #[cfg(windows)]
+        let ended = self.await_job_end();
+        self.group_ended = Some(ended.unwrap_or_else(|outlived| {
+            panic!("the sampled git child's group outlived its leader: {outlived}")
+        }));
         Ok(status)
     }
 
+    /// How long after the child's reap its job had no active process, polled
+    /// once a millisecond as `fixture::await_group_end` polls a group, or
+    /// what the job still held when `fixture::GROUP_END_BOUND` ran out. An
+    /// accounting query that fails is answered at once, and never as an
+    /// empty job.
+    #[cfg(windows)]
+    fn await_job_end(&self) -> Result<std::time::Duration, String> {
+        let started = std::time::Instant::now();
+        let pid = self.child.id();
+        loop {
+            let active = self.child.active_processes().map_err(|error| {
+                format!(
+                    "the job of pid {pid} could not be counted {:?} after its leader was \
+                     reaped: {error}",
+                    started.elapsed()
+                )
+            })?;
+            if active == 0 {
+                return Ok(started.elapsed());
+            }
+            let waited = started.elapsed();
+            if waited >= super::fixture::GROUP_END_BOUND {
+                return Err(format!(
+                    "the job of pid {pid} still had {active} active processes {waited:?} after \
+                     its leader was reaped (the bound is {:?})",
+                    super::fixture::GROUP_END_BOUND
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     /// The child's pid, which on Unix is also its process group's id:
-    /// [`Self::command`] makes it the leader of a group of its own.
+    /// [`Self::command`] makes it the leader of a group of its own. On
+    /// Windows it is the pid alone, which the report names beside the job.
     fn pgid(&self) -> i32 {
         i32::try_from(self.child.id()).expect("a pid fits in i32")
     }
@@ -14750,22 +14887,24 @@ impl SampledChild {
 
 /// What [`kill_git_child`] recorded for the one child it launched, handed
 /// back to the sample that launched it: the very record it pushed to
-/// [`SAMPLED_LAUNCHES`], and the child's process group.
+/// [`SAMPLED_LAUNCHES`], and the child itself, reaped.
 struct SampleKill {
     launch: SampledLaunch,
-    /// [`SampledChild::pgid`]: the group [`report_sample`] asks about on
-    /// Unix; elsewhere the child's pid, which the report only names.
-    pgid: i32,
+    /// The reaped child, kept so that [`report_sample`] can ask whether a
+    /// process of the sample is alive ([`sample_alive`]): its process group
+    /// on Unix, its job on Windows. The job stays open, and so can be
+    /// counted, until this drops.
+    child: SampledChild,
 }
 
 fn kill_git_child(cwd: &Path, args: &[String], after: std::time::Duration) -> SampleKill {
     let mut child = SampledChild::spawn(cwd, args);
     std::thread::sleep(after);
-    // Kept, not discarded. A kill of a child that has already reached its own
-    // exit legitimately fails on Windows -- `TerminateProcess` answers
-    // `ERROR_ACCESS_DENIED` for an exited process -- so this is not an
-    // `expect`; what it is is evidence, and the per-shape assertion pairs it
-    // with how the child ended.
+    // Kept, not discarded. A kill can answer an error without anything being
+    // wrong -- while the Windows kill was `Child::kill`, `TerminateProcess`
+    // answered `ERROR_ACCESS_DENIED` for a child that had already exited --
+    // so this is not an `expect`; what it is is evidence, and the per-shape
+    // assertion pairs it with how the child ended.
     let kill_error = child.kill().err().map(|error| error.to_string());
     // Reaped rather than discarded: this status is the whole observation.
     let status = child.wait().expect("reap the sampled git child");
@@ -14781,10 +14920,7 @@ fn kill_git_child(cwd: &Path, args: &[String], after: std::time::Duration) -> Sa
         .lock()
         .expect("the launch log")
         .push(launch.clone());
-    SampleKill {
-        launch,
-        pgid: child.pgid(),
-    }
+    SampleKill { launch, child }
 }
 
 /// Which of [`recover_sample`]'s two removals refused, with its error.
@@ -14802,17 +14938,25 @@ enum RecoveryRefused {
 /// worktree and its intent, which is the before-phase action every
 /// `Internal` residue routes to and is idempotent for the other two.
 ///
+/// It runs under [`WriterProof::NoWriterAlive`], which [`SampledChild::wait`]
+/// established on each platform before it: on Unix the child's process group
+/// awaited empty, on Windows its job, until no process in it was active.
+///
 /// `Ok` says whether the slot and its registration are gone; `Err` is a
 /// removal that refused.
 fn recover_sample(fixture: &Fixture, slot: &Slot) -> Result<bool, RecoveryRefused> {
-    // The sampled child's whole process group is gone before this runs —
-    // the leader reaped and every member it started, `git worktree add`'s
-    // own `reset --hard` among them, dead and reaped
-    // (`fixture::await_group_end`; until PR10's round 5 the leader alone was
-    // killed and reaped here, and CI's macOS leg at `869e336a` met the
-    // member still writing: `PR136`'s first fingerprint) — so no writer of
-    // the execution root is alive: the proof under which a registration the
-    // kill left naming nothing is passed over rather than refused.
+    // Every process the sampled child started is gone before this runs —
+    // the child reaped and everything it started, `git worktree add`'s own
+    // `reset --hard` among them, dead. On Unix that is its whole process
+    // group, every member dead and reaped (`fixture::await_group_end`; until
+    // PR10's round 5 the leader alone was killed and reaped here, and CI's
+    // macOS leg at `869e336a` met the member still writing: `PR136`'s first
+    // fingerprint). On Windows it is its job, terminated whole and polled
+    // until its active process count was 0 (`SampledChild::wait`); until the
+    // job the direct child alone was killed there, and a writer it started
+    // could outlive the reap. So no writer of the execution root is alive:
+    // the proof under which a registration the kill left naming nothing is
+    // passed over rather than refused.
     fixture
         .manager
         .remove_worktree_proving(&mut NoHooks, slot, WriterProof::NoWriterAlive)
@@ -14857,7 +15001,8 @@ const REPORTED_REFLOG_BYTES: usize = 4096;
 /// the recovery, which deletes the slot; it prints it only when the
 /// classifier refused or the recovery failed, so a green run prints what it
 /// printed before. It reads and never writes: `git rev-parse`, a file read,
-/// `kill(-pgid, 0)` and `git cat-file -e`.
+/// `kill(-pgid, 0)` on Unix or the job's accounting on Windows, and
+/// `git cat-file -e`.
 fn report_sample(
     fixture: &Fixture,
     slot: &Path,
@@ -14865,7 +15010,7 @@ fn report_sample(
     refusal: Option<&str>,
 ) -> String {
     // First, so "now" is as near the classifier's run as the report gets.
-    let alive = sample_alive(kill.pgid);
+    let alive = sample_alive(&kill.child);
     let launch = &kill.launch;
     let fired = match launch.fired {
         Some(fired) if fired >= launch.after => format!(
@@ -14900,15 +15045,16 @@ fn report_sample(
     lines.join("\n")
 }
 
-/// Whether a process of the sample whose child had the process group
-/// `pgid` is alive at this moment, in [`report_sample`]'s words.
+/// Whether a process of the sample whose child is `child` is alive at this
+/// moment, in [`report_sample`]'s words.
 ///
 /// On Unix the child led a group of its own, and every process Git started
 /// is in it, so the question is [`super::fixture::group_has_a_member`]'s.
-/// Elsewhere this report does not observe it yet: the child is no process
-/// group there, so its pid alone does not say whether what Git started
-/// still runs.
-fn sample_alive(pgid: i32) -> String {
+/// On Windows the child ran in a job of its own, and every process Git
+/// started is in that, so the answer is the job's active process count; a
+/// count that cannot be read is said as that, never as no.
+fn sample_alive(child: &SampledChild) -> String {
+    let pgid = child.pgid();
     #[cfg(unix)]
     {
         if super::fixture::group_has_a_member(pgid) {
@@ -14917,9 +15063,17 @@ fn sample_alive(pgid: i32) -> String {
             format!("no: process group {pgid} has no member")
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        format!("not observed off Unix (the child was pid {pgid})")
+        match child.child.active_processes() {
+            Ok(0) => format!("no: the job of pid {pgid} has an active process count of 0"),
+            Ok(active) => {
+                format!("yes: the job of pid {pgid} has an active process count of {active}")
+            }
+            Err(error) => {
+                format!("not answered: the job of pid {pgid} could not be counted: {error}")
+            }
+        }
     }
 }
 
@@ -15026,10 +15180,10 @@ fn object_presence(base: &Path, id: &str) -> String {
 /// The reflog is written where the store binds the worktree's registration
 /// (`registration_of`), not where the report looks for it, so a report that
 /// read another reflog misses these bytes. The alive answer is asked twice,
-/// of a child in a process group of its own that waits on its stdin and then
-/// of the same group once it has ended, so neither a constant answer nor a
-/// dropped one passes on Unix. Elsewhere the report says it does not observe
-/// it, and that is what is asserted there.
+/// of a child spawned as a sampled child is that waits on its stdin, and
+/// then of the same child once it has ended, so neither a constant answer
+/// nor a dropped one passes: on Unix it is the child's process group that
+/// is asked, on Windows its job's active process count.
 #[test]
 fn the_census_sample_report_names_what_a_failed_sample_left() {
     let site = EffectSiteId::Object(ObjectSite::ProposalCherryPick);
@@ -15059,19 +15213,18 @@ fn the_census_sample_report_names_what_a_failed_sample_left() {
     );
     write_file(&reflog_file, reflog.as_bytes());
 
-    // A child that lives until its stdin closes, in a process group of its
-    // own on Unix as a sampled child is.
+    // A child that lives until its stdin closes, spawned as a sampled child
+    // is: in a process group of its own on Unix, in a job of its own on
+    // Windows.
     let mut waiting = SampledChild::command(
         SampledChild::program(),
         &path,
         &["cat-file".to_owned(), "--batch".to_owned()],
     );
     waiting.stdin(Stdio::piped());
-    let mut live = waiting
-        .spawn()
-        .expect("spawn a git child that waits on its stdin");
-    let pgid = i32::try_from(live.id()).expect("a pid fits in i32");
-    let kill = SampleKill {
+    let live = SampledChild::spawn_command(waiting);
+    let pgid = live.pgid();
+    let mut kill = SampleKill {
         launch: SampledLaunch {
             argv: sampled_command(site, &fixture, &slot).0,
             after: std::time::Duration::from_millis(3),
@@ -15080,7 +15233,7 @@ fn the_census_sample_report_names_what_a_failed_sample_left() {
             end: LaunchEnd::Failed(Some(7)),
             group_ended: std::time::Duration::from_micros(250),
         },
-        pgid,
+        child: live,
     };
     // fsck's words, naming the missing object twice, a present one once, and
     // a run of hex digits too short to be an id.
@@ -15134,25 +15287,28 @@ fn the_census_sample_report_names_what_a_failed_sample_left() {
         )),
         "the report holds when the kill fired against its rung: {report}"
     );
+    // On Windows the count is git's to make, so only that it is a "yes" with
+    // a count is asserted while the child lives.
     let alive_while_live = if cfg!(unix) {
         format!("alive: yes: process group {pgid} still has a member")
     } else {
-        format!("alive: not observed off Unix (the child was pid {pgid})")
+        format!("alive: yes: the job of pid {pgid} has an active process count of ")
     };
     assert!(
         report.contains(&alive_while_live),
         "the report answers whether a process of the sample is alive: {report}"
     );
 
-    drop(live.stdin.take());
-    let status = live.wait().expect("reap the waiting git child");
+    drop(kill.child.child.stdin.take());
+    // The sampler's own wait: the reap, then the group (Unix) or the job
+    // (Windows) awaited empty within `fixture::GROUP_END_BOUND`.
+    let status = kill.child.wait().expect("reap the waiting git child");
     assert!(status.success(), "the waiting child ended {status:?}");
-    super::fixture::await_group_end(pgid).expect("the waiting child's group ends");
     let ended = report_sample(&fixture, &path, &kill, None);
     let alive_once_ended = if cfg!(unix) {
         format!("alive: no: process group {pgid} has no member")
     } else {
-        alive_while_live
+        format!("alive: no: the job of pid {pgid} has an active process count of 0")
     };
     assert!(
         ended.contains(&alive_once_ended),

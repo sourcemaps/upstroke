@@ -3595,10 +3595,12 @@ impl std::fmt::Display for GroupOutlivedItsLeader {
 /// runs its `reset --hard` as a child of its own, and a kill of the leader
 /// alone leaves that child populating the worktree after the sample is
 /// taken — and to the direct child elsewhere. Both samplers' children are
-/// killed through here since PR10's round 5; until then only
+/// killed through here on Unix since PR10's round 5; until then only
 /// [`KillableGitChild`]'s were (round 2), and PR5's own sampler killed its
 /// leader alone (`PR136`'s first fingerprint, met on CI's macOS leg at
-/// `869e336a`).
+/// `869e336a`). On Windows PR5's sampler (`mod tests`'s `SampledChild`)
+/// kills a private job of its own instead, which holds every process its git
+/// started.
 #[cfg(unix)]
 pub(crate) fn kill_process_group(child: &mut std::process::Child) -> std::io::Result<()> {
     let pid =
