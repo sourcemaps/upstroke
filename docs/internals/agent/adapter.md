@@ -641,10 +641,11 @@ The reading is linear in the text's length, because each limit has only its
 next word read, which ends before the next "hit your " begins, and the rest
 of a line is searched for a `resets` once, after the line's last limit,
 rather than once for every limit on it. That was finding
-`PR380-QUOTA-PHRASE-QUADRATIC-SCAN`: a CLI result of one line holding
-"hit your session limit x " 300,000 times, 7.5 MB, had the rest of its line
-read at each limit, over a terabyte per reading, and the coordinator reads a
-result after the agent's process timeout no longer bounds the run.
+`PR380-QUOTA-PARSER-QUADRATIC-REPEATED-LIMITS`: a CLI result of one line
+holding "hit your session limit x " 300,000 times, 7.5 MB, had the rest
+of its line read at each limit, over a terabyte per reading, and the
+coordinator reads a result after the agent's process timeout no longer
+bounds the run.
 
 Asking only the last limit on a line gives the answer asking each one did.
 What follows a later limit is a suffix of what follows an earlier one on the
@@ -675,8 +676,9 @@ with `the_only_reset` behind it reading a text's sole `resets` wherever it
 was. Finding `PR380-UNRELATED-LONE-RESET-ATTRIBUTED` removed that fallback
 (see `reset_at_from_limit_message`), and the next-line case it had covered
 moved into `the_reset_a_limit_gives`, which read one limit's reset from the
-rest of the text after it. Finding `PR380-QUOTA-PHRASE-QUADRATIC-SCAN`
-folded it back into this walk, so that the rest of a line is read once.
+rest of the text after it. Finding
+`PR380-QUOTA-PARSER-QUADRATIC-REPEATED-LIMITS` folded it back into this
+walk, so that the rest of a line is read once.
 
 ## `fn after_each_limit_on<'text>(`
 
