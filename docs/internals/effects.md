@@ -2009,17 +2009,12 @@ manifest holds, and the previous derivation held it as a rule about file
 stems instead. A rule cannot be wrong quietly the way a stem test can:
 when the authority is unavailable the census stops.
 
-## `pub(crate) enum InventoryRefusal` › `NotRun {`
-
-`cargo metadata` could not be started at all.
-
-## `pub(crate) enum InventoryRefusal` › `Failed {`
-
-It ran and exited non-zero.
-
 ## `pub(crate) enum InventoryRefusal` › `Unreadable {`
 
-Its output is not the JSON document this reads.
+The metadata is not the JSON document this reads, or its pre-test acquisition
+cannot establish a readable manifest with the recorded fingerprint. Cargo process
+failures now belong to the standalone pre-test inventory; this test-only enum no
+longer represents process starts.
 
 ## `pub(crate) enum InventoryRefusal` › `NoPackage {`
 
@@ -2069,9 +2064,10 @@ a time.
 The inventory in one `cargo metadata --format-version 1` document,
 for the package whose manifest is `manifest`.
 
-Pure over the document, which is what makes every refusal below
-drivable: the acquisition is a process start and lives in
-[`crate::effects::tests`], where this crate's governance puts one.
+Pure over the document, which is what makes every refusal below drivable.
+[`crate::effects::tests`] reads checked-in metadata and validates its manifest
+fingerprint. The standalone category inventory compares it with Cargo before
+tests start, so a running native self-check never invokes Cargo.
 
 ## `impl CrateRoots` › `pub(crate) fn package_dir(&self) -> &std::path::Path {`
 

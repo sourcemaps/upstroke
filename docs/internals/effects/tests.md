@@ -59,19 +59,27 @@ Reading the tree and the artifacts
 
 ## `pub(in crate::effects) fn crate_roots() -> &'static CrateRoots {`
 
-This package's target inventory, read once from `cargo metadata`.
+This package's target inventory, read once from `REPOSITORY_TARGET_METADATA`.
+No running test starts Cargo to discover roots, including when native CI sets
+`RUSTC_BOOTSTRAP=1`. The parser and module resolution remain in the test-only
+[`census_domain`](crate::effects::census_domain); acquisition belongs to the
+standalone pre-test inventory in `.github/scripts/test-categories.py`.
 
-**The acquisition lives here and the authority lives in
-[`census_domain`](crate::effects::census_domain).** Reading a manifest means
-starting a process, and `effects/allowlist.toml` records `allows = []` for
-`src/effects.rs` on the strength of that file carrying no attribute and
-reaching no denied primitive — "a stronger claim than any other entry in
-this section makes", in the row's own words. This file is where the
-machinery that drives a toolchain already lives, for the reason its prologue
-gives: it is a whole-file test module, so a `Command::new(` in it is not in
-any production census's domain. So the process start is here, the parse and
-the resolution are beside the census that uses them, and neither half is
-somewhere it would have to be argued for.
+The `check` action compares both metadata constants against offline Cargo
+metadata before building or listing the native harnesses. It projects every
+target's `src_path`, without filtering by kind, and compares the complete set.
+Thus implicit targets added without editing the manifest are checked too.
+The custom manifest is the literal `CUSTOM_TARGET_MANIFEST`, used by both the
+pre-test check and the Rust fixture. `check` and `refresh-targets` refuse to
+start a subprocess while `RUSTC_BOOTSTRAP` is present.
+
+After changing a manifest or adding/removing an automatically discovered target,
+run `python3 .github/scripts/test-categories.py refresh-targets`, then the
+standalone category check. Review the two updated metadata constants with the
+manifest change. `generate`, `contract` and `prove --harness` remain Cargo-free.
+The snapshot is checked in so ordinary local tests need no preparatory command
+or environment variable. Its manifest fingerprint is checked on every acquisition;
+the standalone inventory supplies the independent Cargo comparison.
 
 ### Panics
 
@@ -84,22 +92,22 @@ instead of announcing themselves.
 
 ## `pub(in crate::effects) fn crate_roots_of(`
 
-The inventory of the package whose manifest sits in `manifest_dir`.
+The inventory of the package whose manifest sits in `manifest_dir`, from supplied
+pre-test metadata. It checks SHA-256 of the UTF-8 manifest, normalizing CRLF to LF
+for Windows checkouts, then uses `CrateRoots::from_metadata_json` to read the
+package-relative target paths and again after relocating them to `manifest_dir`.
+Paths are resolved through `Path`, never inferred from their stems.
 
 Separate from [`crate_roots`] and taking a directory, because a control that
 only ever runs against this tree's own manifest cannot show what the reader
 does with an arbitrary `[[bin]] path` — and an arbitrary `[[bin]] path` is
 the whole of what the stem rule got wrong.
 
-## `fn cargo_metadata_json(manifest: &Path) -> Result<String, InventoryRefusal> {`
-
-`cargo metadata` for one manifest, as its stdout.
-
-`--no-deps` because only this package's targets are wanted, `--offline`
-because a census must not depend on a network, and the cargo the test binary
-was built by rather than whichever one is first on `PATH`: the MSRV job runs
-`cargo +1.85.0`, and an inventory read by a different toolchain than the one
-compiling the tree is an inventory of something else.
+Missing or unreadable manifests, malformed metadata, absent fingerprints and
+stale fingerprints are refusals. Missing packages, missing target paths and empty
+target sets retain the existing parser's refusals. Acquisition never falls back
+to Cargo or to a rule about filenames. The standalone checker uses its existing
+Cargo wrapper selection with `metadata --format-version 1 --no-deps --offline`.
 
 ## `fn scanned_sources() -> Vec<(String, String)> {`
 
@@ -3143,8 +3151,8 @@ systems still supply their own inventories in CI.
 
 ## `fn the_category_check_refuses_bootstrap_before_starting_a_subprocess() {`
 
-Run `check` with `RUSTC_BOOTSTRAP` set to `1`, `0`, and the empty string in
-its child environment. Replace Python's subprocess constructor with a
+Run `check` and `refresh-targets` with `RUSTC_BOOTSTRAP` set to `1`, `0`, and
+the empty string in each child environment. Replace Python's subprocess constructor with a
 refusal so that even a regression cannot start Cargo from this control.
 Require exit code 1 and the exact bootstrap diagnostic, distinguishing the
 intended early refusal from the subprocess trap or any other failure.
@@ -4431,6 +4439,13 @@ exercises an arbitrary bin path at all. The **exact inventory** is asserted,
 not a membership test, and the stem rule this replaces is written out beside
 it and shown to disagree — a control that both readings pass is a control
 that measures neither.
+
+The fixture consumes `CUSTOM_TARGET_METADATA`, independently checked against
+`CUSTOM_TARGET_MANIFEST` by the pre-test inventory. This test also refuses
+unavailable manifests and absent, malformed or stale metadata, and accepts CRLF
+checkouts of the same manifest. The category inventory's controlled Cargo fixture
+proves that newly discovered arbitrary repository targets and changed custom
+targets are rejected until refreshed, without starting Cargo inside a test.
 
 ## `fn the_crate_roots_come_from_the_manifest_and_an_arbitrary_bin_path_is_one() {` › `fn by_stem(file: &Path) -> PathBuf {`
 

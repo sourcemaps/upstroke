@@ -3,10 +3,13 @@
 
 The Rust table is the only registry. Planning inventories and timings are not
 inputs to this program. No check ever executes an unmatched test.
+The standalone check also verifies the crate-root metadata consumed by tests;
+refresh-targets updates those snapshots after a manifest or target change.
 """
 import argparse
 import ast
 from collections import Counter, namedtuple
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,10 +17,12 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL = ROOT / "src/effects/tests/ci_model.rs"
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
+TARGET_SOURCE = ROOT / "src/effects/tests.rs"
 PLATFORMS = ("ubuntu", "macos", "windows")
 Registration = namedtuple("Registration", "harness name")
 
@@ -203,6 +208,49 @@ def native_platform():
     return {"linux": "ubuntu", "darwin": "macos", "win32": "windows"}[sys.platform]
 
 
+def target_constant(source, name):
+    matches = list(re.finditer(rf'(?ms)^const {name}: &str = r#"(.*?)"#;', source))
+    if len(matches) != 1:
+        raise ValueError(f"expected one target inventory constant {name}")
+    return matches[0]
+
+
+def target_metadata(manifest):
+    manifest = manifest.resolve(strict=True)
+    document = json.loads(checked(cargo() + [
+        "metadata", "--format-version", "1", "--no-deps", "--offline",
+        "--manifest-path", str(manifest),
+    ]))
+    packages = [package for package in document["packages"]
+                if Path(package["manifest_path"]) == manifest]
+    if len(packages) != 1 or not packages[0]["targets"]:
+        raise ValueError(f"Cargo did not report one nonempty target inventory for {manifest}")
+    paths = sorted({Path(os.path.relpath(target["src_path"], manifest.parent)).as_posix()
+                    for target in packages[0]["targets"]})
+    return dict(manifest_sha256=hashlib.sha256(
+        manifest.read_text(encoding="utf-8").encode("utf-8")).hexdigest(), packages=[dict(
+            manifest_path="Cargo.toml", targets=[dict(src_path=path) for path in paths])])
+
+
+def sync_target_metadata(refresh=False):
+    source = TARGET_SOURCE.read_text(encoding="utf-8")
+    with tempfile.TemporaryDirectory(prefix="upstroke-targets-") as directory:
+        fixture = Path(directory) / "Cargo.toml"
+        fixture.write_text(target_constant(source, "CUSTOM_TARGET_MANIFEST").group(1),
+                           encoding="utf-8")
+        for name, manifest in (("REPOSITORY_TARGET_METADATA", ROOT / "Cargo.toml"),
+                               ("CUSTOM_TARGET_METADATA", fixture)):
+            match = target_constant(source, name)
+            actual = target_metadata(manifest)
+            if not refresh and json.loads(match.group(1)) != actual:
+                raise ValueError(f"stale {name}; run python3 .github/scripts/test-categories.py "
+                                 "refresh-targets before testing")
+            if refresh:
+                source = source[:match.start(1)] + json.dumps(actual, indent=2) + source[match.end(1):]
+    if refresh:
+        TARGET_SOURCE.write_text(source, encoding="utf-8")
+
+
 def built_harnesses():
     output = checked(cargo() + ["test", "--all-targets", "--all-features", "--no-run",
                                 "--message-format=json"])
@@ -290,7 +338,7 @@ def sync_workflow(rows, check=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("generate", "check", "prove", "contract"))
+    parser.add_argument("action", choices=("generate", "check", "prove", "contract", "refresh-targets"))
     parser.add_argument("--check", action="store_true", help="refuse a stale generated matrix")
     parser.add_argument("--platform", choices=PLATFORMS, default=native_platform())
     parser.add_argument("--harness", help="already built native libtest executable")
@@ -298,20 +346,23 @@ def main():
                         help="require a unit/cli registration (always required by check)")
     parser.add_argument("--explain", action="store_true", help="show subcategory counts and later matches")
     args = parser.parse_args()
-    if args.action == "check" and "RUSTC_BOOTSTRAP" in os.environ:
-        raise ValueError("check refuses to run Cargo while RUSTC_BOOTSTRAP is set; "
+    if args.action in ("check", "refresh-targets") and "RUSTC_BOOTSTRAP" in os.environ:
+        raise ValueError(f"{args.action} refuses to run Cargo while RUSTC_BOOTSTRAP is set; "
                          "use prove --harness for a running libtest")
     rows = registry()
     if args.action == "contract":
         print(json.dumps(dict(registry=rows, legs={p: legs(rows, p) for p in PLATFORMS})))
     elif args.action == "generate":
         sync_workflow(rows, check=args.check)
+    elif args.action == "refresh-targets":
+        sync_target_metadata(refresh=True)
     elif args.action == "prove":
         if not args.harness:
             parser.error("prove requires --harness")
         prove(rows, args.platform, args.harness, require_cli=args.require_cli)
     else:
         sync_workflow(rows, check=True)
+        sync_target_metadata()
         harnesses = built_harnesses()
         registrations = inventory(harnesses)
         counts = validate(rows, args.platform, registrations, require_cli=True)
@@ -331,7 +382,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, KeyError, SyntaxError) as error:
+    except (ValueError, KeyError, SyntaxError, OSError) as error:
         print(error, file=sys.stderr)
         sys.exit(1)
 

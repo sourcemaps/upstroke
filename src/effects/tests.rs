@@ -37,44 +37,106 @@ fn repo_root() -> PathBuf {
 
 pub(in crate::effects) fn crate_roots() -> &'static CrateRoots {
     static ROOTS: std::sync::OnceLock<CrateRoots> = std::sync::OnceLock::new();
-    ROOTS.get_or_init(|| crate_roots_of(&repo_root()).unwrap_or_else(|refusal| panic!("{refusal}")))
+    ROOTS.get_or_init(|| {
+        crate_roots_of(&repo_root(), REPOSITORY_TARGET_METADATA)
+            .unwrap_or_else(|refusal| panic!("{refusal}"))
+    })
 }
+
+const REPOSITORY_TARGET_METADATA: &str = r#"{
+  "manifest_sha256": "391c74025ed65cf367654dbb4b25c081dd1fc34ebd3d6d9ade0323caba278c6f",
+  "packages": [
+    {
+      "manifest_path": "Cargo.toml",
+      "targets": [
+        {
+          "src_path": "examples/probe.rs"
+        },
+        {
+          "src_path": "src/lib.rs"
+        },
+        {
+          "src_path": "src/main.rs"
+        }
+      ]
+    }
+  ]
+}"#;
+
+const CUSTOM_TARGET_MANIFEST: &str = r#"[package]
+name = "upstroke-inventory-fixture"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "odd"
+path = "src/tools/odd.rs"
+
+[[bin]]
+name = "nested"
+path = "src/deep/nest/main.rs"
+
+[workspace]
+"#;
+
+const CUSTOM_TARGET_METADATA: &str = r#"{
+  "manifest_sha256": "f21f319ef88a5052e360a9254cdaaf3474f821ebf314f02bf27df1809e73be52",
+  "packages": [
+    {
+      "manifest_path": "Cargo.toml",
+      "targets": [
+        {
+          "src_path": "src/deep/nest/main.rs"
+        },
+        {
+          "src_path": "src/lib.rs"
+        },
+        {
+          "src_path": "src/tools/odd.rs"
+        }
+      ]
+    }
+  ]
+}"#;
 
 pub(in crate::effects) fn crate_roots_of(
     manifest_dir: &Path,
+    metadata: &str,
 ) -> Result<CrateRoots, InventoryRefusal> {
-    let manifest = manifest_dir.join("Cargo.toml");
-    CrateRoots::from_metadata_json(&cargo_metadata_json(&manifest)?, &manifest)
-}
+    use sha2::{Digest, Sha256};
 
-fn cargo_metadata_json(manifest: &Path) -> Result<String, InventoryRefusal> {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let output = std::process::Command::new(cargo)
-        .args([
-            "metadata",
-            "--format-version",
-            "1",
-            "--no-deps",
-            "--offline",
-        ])
-        .arg("--manifest-path")
-        .arg(manifest)
-        .output()
-        .map_err(|error| InventoryRefusal::NotRun {
-            manifest: manifest.to_path_buf(),
-            why: error.to_string(),
-        })?;
-    if !output.status.success() {
-        return Err(InventoryRefusal::Failed {
-            manifest: manifest.to_path_buf(),
-            status: output.status.to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        });
-    }
-    String::from_utf8(output.stdout).map_err(|error| InventoryRefusal::Unreadable {
+    let manifest = manifest_dir.join("Cargo.toml");
+    let refuse = |why: String| InventoryRefusal::Unreadable {
         manifest: manifest.to_path_buf(),
-        why: error.to_string(),
-    })
+        why,
+    };
+    let source = fs::read_to_string(&manifest)
+        .map_err(|error| refuse(format!("cannot read the manifest: {error}")))?;
+    let digest = format!("{:x}", Sha256::digest(source.replace("\r\n", "\n")));
+    let document: serde_json::Value = serde_json::from_str(metadata)
+        .map_err(|error| refuse(format!("invalid pre-test target metadata: {error}")))?;
+    if document
+        .get("manifest_sha256")
+        .and_then(serde_json::Value::as_str)
+        != Some(digest.as_str())
+    {
+        return Err(refuse(format!(
+            "stale pre-test target metadata; manifest SHA-256 is {digest}; \
+             run python3 .github/scripts/test-categories.py refresh-targets before testing"
+        )));
+    }
+    let relative = CrateRoots::from_metadata_json(metadata, Path::new("Cargo.toml"))?;
+    let targets: Vec<_> = relative
+        .roots()
+        .map(|path| serde_json::json!({"src_path": manifest_dir.join(path)}))
+        .collect();
+    let relocated = serde_json::json!({
+        "packages": [{"manifest_path": manifest, "targets": targets}]
+    });
+    CrateRoots::from_metadata_json(&relocated.to_string(), &manifest)
 }
 
 fn scanned_sources() -> Vec<(String, String)> {
@@ -6498,6 +6560,8 @@ fn category_fixture() -> ScratchTree {
         ".github/scripts/test-categories.py",
         ".github/workflows/ci.yml",
         "src/effects/tests/ci_model.rs",
+        "src/effects/tests.rs",
+        "Cargo.toml",
     ] {
         let destination = directory.path().join(relative);
         fs::create_dir_all(destination.parent().expect("fixture file parent"))
@@ -6860,6 +6924,7 @@ mod util {
 from collections import Counter
 import importlib.util
 import json
+from pathlib import Path
 import sys
 
 spec = importlib.util.spec_from_file_location("categories", sys.argv[1])
@@ -6874,9 +6939,21 @@ artifacts.append(dict(reason="compiler-artifact", profile=dict(test=False), exec
 artifacts.append(dict(reason="build-finished", success=True))
 native_checked = tool.checked
 builds = []
+metadata_calls = []
+repository_targets = ["examples/probe.rs", "src/lib.rs", "src/main.rs"]
+custom_targets = ["src/deep/nest/main.rs", "src/lib.rs", "src/tools/odd.rs"]
 
 def checked(command):
     if command[0] == "fixture-cargo":
+        if command[1] == "metadata":
+            assert command[1:7] == ["metadata", "--format-version", "1", "--no-deps",
+                                    "--offline", "--manifest-path"], command
+            manifest = Path(command[7])
+            assert manifest.is_file(), manifest
+            targets = repository_targets if manifest == tool.ROOT / "Cargo.toml" else custom_targets
+            metadata_calls.append(command)
+            return json.dumps(dict(packages=[dict(manifest_path=str(manifest), targets=[
+                dict(src_path=str(manifest.parent / path)) for path in targets])]))
         assert command == ["fixture-cargo", "test", "--all-targets", "--all-features",
                            "--no-run", "--message-format=json"], command
         builds.append(command)
@@ -6907,6 +6984,26 @@ for harness in harnesses[:2]:
 sys.argv = [sys.argv[1], "check", "--explain"]
 tool.main()
 assert len(builds) == 2
+assert len(metadata_calls) == 2
+repository_targets.append("src/tools/another-name.rs")
+try:
+    tool.sync_target_metadata()
+except ValueError as error:
+    assert "stale REPOSITORY_TARGET_METADATA" in str(error), error
+else:
+    raise AssertionError("a newly discovered arbitrary target was omitted")
+tool.sync_target_metadata(refresh=True)
+tool.sync_target_metadata()
+snapshot = json.loads(tool.target_constant(
+    tool.TARGET_SOURCE.read_text(encoding="utf-8"), "REPOSITORY_TARGET_METADATA").group(1))
+assert {target["src_path"] for target in snapshot["packages"][0]["targets"]} == set(repository_targets)
+custom_targets.append("tools/a-different-fixture.rs")
+try:
+    tool.sync_target_metadata()
+except ValueError as error:
+    assert "stale CUSTOM_TARGET_METADATA" in str(error), error
+else:
+    raise AssertionError("stale custom-target fixture metadata was accepted")
 "#,
         ])
         .arg(directory.path().join(".github/scripts/test-categories.py"))
@@ -6971,10 +7068,12 @@ fn the_category_selectors_agree_with_the_native_libtest_inventory() {
 #[test]
 fn the_category_check_refuses_bootstrap_before_starting_a_subprocess() {
     for bootstrap in ["1", "0", ""] {
-        let output = std::process::Command::new(if cfg!(windows) { "python" } else { "python3" })
-            .args([
-                "-c",
-                r#"
+        for action in ["check", "refresh-targets"] {
+            let output =
+                std::process::Command::new(if cfg!(windows) { "python" } else { "python3" })
+                    .args([
+                        "-c",
+                        r#"
 import runpy
 import subprocess
 import sys
@@ -6983,21 +7082,27 @@ def refuse_subprocess(*args, **kwargs):
     raise AssertionError("check attempted a subprocess while RUSTC_BOOTSTRAP was set")
 
 subprocess.Popen = refuse_subprocess
-sys.argv = [sys.argv[1], "check"]
+sys.argv = [sys.argv[1], sys.argv[2]]
 runpy.run_path(sys.argv[0], run_name="__main__")
 "#,
-            ])
-            .arg(repo_root().join(".github/scripts/test-categories.py"))
-            .env("RUSTC_BOOTSTRAP", bootstrap)
-            .output()
-            .expect("run the category checker with bootstrap set and subprocesses forbidden");
-        assert_eq!(output.status.code(), Some(1), "bootstrap={bootstrap:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&output.stderr).trim(),
-            "check refuses to run Cargo while RUSTC_BOOTSTRAP is set; \
-             use prove --harness for a running libtest",
-            "bootstrap={bootstrap:?}"
-        );
+                    ])
+                    .arg(repo_root().join(".github/scripts/test-categories.py"))
+                    .arg(action)
+                    .env("RUSTC_BOOTSTRAP", bootstrap)
+                    .output()
+                    .expect(
+                        "run the category checker with bootstrap set and subprocesses forbidden",
+                    );
+            assert_eq!(output.status.code(), Some(1), "bootstrap={bootstrap:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr).trim(),
+                format!(
+                    "{action} refuses to run Cargo while RUSTC_BOOTSTRAP is set; \
+                     use prove --harness for a running libtest"
+                ),
+                "bootstrap={bootstrap:?}"
+            );
+        }
     }
 }
 
@@ -9220,29 +9325,10 @@ fn the_crate_roots_come_from_the_manifest_and_an_arbitrary_bin_path_is_one() {
 
     let tree = scratch_dir("inventory");
     let scratch = tree.path();
-    fs::write(
-        scratch.join("Cargo.toml"),
-        "[package]\n\
-         name = \"upstroke-inventory-fixture\"\n\
-         version = \"0.0.0\"\n\
-         edition = \"2021\"\n\
-         \n\
-         [lib]\n\
-         path = \"src/lib.rs\"\n\
-         \n\
-         [[bin]]\n\
-         name = \"odd\"\n\
-         path = \"src/tools/odd.rs\"\n\
-         \n\
-         [[bin]]\n\
-         name = \"nested\"\n\
-         path = \"src/deep/nest/main.rs\"\n\
-         \n\
-         [workspace]\n",
-    )
-    .expect("the fixture manifest");
+    fs::write(scratch.join("Cargo.toml"), CUSTOM_TARGET_MANIFEST).expect("the fixture manifest");
 
-    let inventory = crate_roots_of(scratch).expect("cargo reads the fixture manifest");
+    let inventory = crate_roots_of(scratch, CUSTOM_TARGET_METADATA)
+        .expect("read the fixture's pre-test target metadata");
     assert_eq!(inventory.package_dir(), scratch);
     assert_eq!(
         inventory.roots().collect::<Vec<_>>(),
@@ -9287,12 +9373,45 @@ fn the_crate_roots_come_from_the_manifest_and_an_arbitrary_bin_path_is_one() {
     let missing = scratch.join("no-such-package");
     assert!(
         matches!(
-            crate_roots_of(&missing),
-            Err(InventoryRefusal::Failed { .. })
+            crate_roots_of(&missing, CUSTOM_TARGET_METADATA),
+            Err(InventoryRefusal::Unreadable { .. })
         ),
         "a manifest that does not exist is a refusal, not an empty inventory"
     );
     let manifest = scratch.join("Cargo.toml");
+    for document in ["", "not json", "{}", REPOSITORY_TARGET_METADATA] {
+        assert!(
+            matches!(
+                crate_roots_of(scratch, document),
+                Err(InventoryRefusal::Unreadable { .. })
+            ),
+            "missing, invalid or stale target metadata must be refused: {document}"
+        );
+    }
+    fs::write(&manifest, CUSTOM_TARGET_MANIFEST.replace('\n', "\r\n"))
+        .expect("a manifest checked out with CRLF");
+    assert_eq!(
+        crate_roots_of(scratch, CUSTOM_TARGET_METADATA),
+        Ok(inventory),
+        "checkout line endings do not stale the target metadata"
+    );
+    fs::write(&manifest, "not a Cargo manifest").expect("an invalid manifest");
+    assert!(
+        matches!(
+            crate_roots_of(scratch, CUSTOM_TARGET_METADATA),
+            Err(InventoryRefusal::Unreadable { .. })
+        ),
+        "changed manifest bytes must not reuse a previously valid inventory"
+    );
+    fs::remove_file(&manifest).expect("remove the fixture manifest");
+    fs::create_dir(&manifest).expect("an unavailable manifest input");
+    assert!(
+        matches!(
+            crate_roots_of(scratch, CUSTOM_TARGET_METADATA),
+            Err(InventoryRefusal::Unreadable { .. })
+        ),
+        "an unreadable manifest must be refused"
+    );
     let refusals: Vec<InventoryRefusal> = [
         "this is not json",
         "{}",
