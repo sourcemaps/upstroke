@@ -797,8 +797,13 @@ path = "src/tracker.rs"
 allows = ["clippy::disallowed_methods"]
 packet = "none: not a module the retired packet names. Added on 2026-11-23 with the capacity tracker (DESIGN.md §4 invariant 2, §13), as CODING_STANDARDS.md §2 requires of a new effect: reviewed into this file in the change that introduces it"
 review = """
-The capacity tracker's entry point and its one effect on disk. It is the only \
-module that asks a provider usage endpoint over HTTPS, and it is not the engine: \
+The capacity tracker's entry points and its one effect on disk. The opt-in \
+`reset_credits` entry reads only the fixed Claude reset-metadata endpoint \
+through the existing transport, independently of pools, and stores nothing. \
+It accepts only the dedicated operator-provided, provider-authorized bearer; \
+missing or invalid credentials send no request. Its pure `reset` child \
+forbids all three governed lints and is not covered by this allowance. The \
+tracker asks provider usage endpoints over HTTPS, and it is not the engine: \
 `run` and `resume` never call it (DESIGN.md §4.2). \
 WHAT IT NEEDS THE ALLOWANCE FOR, measured by denying the lint and counting the \
 errors on the library target: `clippy::disallowed_methods`, 5 production sites. \
@@ -815,6 +820,8 @@ which build the pools files, the sequential run directories and the owner \
 records its fixtures read (the schema-4 run they fold is written through the \
 event funnel, by a fixture of `capacity`'s), and 20 calls of the module's own \
 two denied entry points, `refresh` 15 and `publish` 5. \
+The reset reader adds no production call of a denied primitive; its three \
+test call sites of `reset_credits` use this existing allowance. \
 `clippy::disallowed_types` and `clippy::disallowed_macros` are FORBIDDEN in this \
 file rather than left to `-D warnings`: it names no `std::process::Command` and \
 prints nothing. \
@@ -838,7 +845,8 @@ writes it again. A report is validated against the reader's bounds before the \
 first effect. \
 HANDLES: no item returns a `File`, an `OpenOptions` or a `Command`. `publish` \
 returns the destination path. \
-ITS ENTRY POINTS ARE DENIED. `refresh` and `publish` are effectful rows of \
+ITS ENTRY POINTS ARE DENIED. `refresh`, `reset_credits` and `publish` are \
+effectful rows of \
 `effects/wrappers.toml` and entries of `clippy.toml`, so a module that states \
 no allowance cannot call them; `tracker::tests::only_the_cli_reaches_the_tracker` \
 covers the frozen legacy modules, which do state one, by reading every \

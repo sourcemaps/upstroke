@@ -54,6 +54,7 @@ On Windows, Codex can review but not implement.
 | `upstroke run plan.md --dry-run` | The same preview; no agent is started. |
 | `upstroke capacity` | Checks sign-in once per agent and shows each pool's estimated remaining, from every run on this machine. |
 | `upstroke capacity --refresh` | First asks each pool's billing endpoint what it has drawn this month, for pools you opted in. |
+| `upstroke capacity --reset-credits claude` | Reads advisory voluntary reset grants: count, kind and use-by, independently of pools. Requires provider-authorized `UPSTROKE_CLAUDE_RESET_TOKEN`; native-app-only credentials are unsuitable without that authorization. |
 | `upstroke run plan.md --budget 15` | Runs for real on a `upstroke/run-<id>` branch; needs a clean working tree. |
 | `upstroke status [<run-id>]` | The ledger: attempts, models, cost. |
 | `upstroke answer <question-id>` | Answers a question that parked a task. |
@@ -106,7 +107,9 @@ cmd = "cargo test"
 - **The engine never calls a model API.** Models run only inside the vendors' own CLIs.
 - **A run makes no network request of its own.** One command does, and only when asked:
   `upstroke capacity --refresh` reads the documented billing endpoint of each pool you opted in,
-  through `curl`, with a key from an environment variable you name
+  through `curl`, with a key from an environment variable you name. The separate opt-in
+  `capacity --reset-credits claude` reads the fixed first-party reset endpoint with an explicitly
+  provider-authorized bearer; it stores nothing and does not redeem credits
   ([design/13](design/13_design_capacity_engine.md)).
 - **Ground truth is the diff, not the transcript.** Gates and reviewers get the diff the engine
   captured.

@@ -19,10 +19,10 @@ seven, the ones a change is most likely to trip over:
 
 - **Agents edit files; the engine owns git.** Agents are told never to commit.
 - **The engine never speaks HTTP.** All model interaction is inside agent subprocesses. The
-  capacity tracker (`src/tracker.rs`, `upstroke capacity --refresh`) is the one thing that does,
-  through a `curl` subprocess, and it is not the engine: `run` and `resume` never call it, its
-  entry points are on the effect denylist, and it asks only endpoints their provider documents
-  (`DESIGN.md` §13).
+  capacity tracker (`src/tracker.rs`, the opt-in `capacity --refresh` and `--reset-credits`)
+  does, through a `curl` subprocess, and it is not the engine: `run` and `resume` never call it.
+  Its entry points are on the effect denylist, and it asks only explicitly admitted first-party
+  read-only endpoints with provider-authorized credentials (`DESIGN.md` §13).
 - **Ground truth is the diff, not the transcript.**
 - **Every state transition is an event.** State is derived by replaying `events.jsonl`; resume is
   replay-then-continue. There is no second path.

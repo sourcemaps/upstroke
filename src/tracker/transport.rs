@@ -384,6 +384,40 @@ mod tests {
     }
 
     #[test]
+    fn reset_request_is_exactly_one_bounded_get_with_only_the_authorized_headers() {
+        let runner = Scripted::answering(Some(0), "{}\n200", "");
+        let transport = CurlTransport::new(&runner);
+        let request =
+            super::super::reset::request(Secret::new("synthetic-reset-secret".to_owned()));
+        transport.get(&request).expect("the fake runner answers");
+        let seen = runner.seen();
+        assert_eq!(seen.len(), 1);
+        let ran = seen.first().expect("one request");
+        assert_eq!(ran.command.program, "curl");
+        assert_eq!(ran.command.args, arguments());
+        assert_eq!(ran.timeout, PROCESS_TIMEOUT);
+        assert!(ran.command.env.is_empty());
+        assert_eq!(
+            std::str::from_utf8(&ran.command.stdin).expect("text config"),
+            "url = \"https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1\"\n\
+             header = \"anthropic-beta: oauth-2025-04-20\"\n\
+             header = \"Authorization: Bearer synthetic-reset-secret\"\n"
+        );
+        for forbidden in [
+            "--request",
+            "-X",
+            "--data",
+            "--data-raw",
+            "--location",
+            "-L",
+            "--user-agent",
+        ] {
+            assert!(!ran.command.args.iter().any(|arg| arg == forbidden));
+        }
+        assert!(!format!("{:?}", ran.command).contains("synthetic-reset-secret"));
+    }
+
+    #[test]
     fn the_arguments_disable_curlrc_first_and_allow_nothing_but_https() {
         let arguments = arguments();
         assert_eq!(arguments.first().map(String::as_str), Some("-q"));

@@ -1837,15 +1837,17 @@ effect_free = [
 path = "src/tracker.rs"
 crate_path = "upstroke::tracker"
 funnel = []
-# The capacity tracker. Both are denied by path, which is what keeps the one
+# The capacity tracker. All three are denied by path, which is what keeps the one
 # module that speaks HTTP out of reach of every module that states no allowance
 # (DESIGN.md §4 invariant 2). `refresh` starts `curl` through the Runner for each
 # pool that names a provider and reaches `publish` without leaving its file;
 # `publish` creates the report directory, stages a file and renames it, and
 # removes the staged file when the write or the rename fails.
+# `reset_credits` reads a fixed Claude reset endpoint without storing anything.
 effectful = [
     "publish",
     "refresh",
+    "reset_credits",
 ]
 effectful_unnameable = []
 effect_free = [

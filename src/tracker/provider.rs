@@ -1,12 +1,11 @@
 //! The provider usage endpoints the tracker knows: what to ask each one, and
 //! how to read what it answers (DESIGN.md §13).
 //!
-//! Every endpoint here is one its provider **documents** and authenticates
-//! with a credential issued for the purpose (an organization admin key, a
-//! fine-grained token with a billing permission). That is the admission rule,
-//! and it is invariant 5 applied to HTTP: an undocumented endpoint, or one
-//! that takes a credential issued to a vendor's own application, is not added
-//! here however widely it is used.
+//! The billing endpoints here are documented and use credentials issued for
+//! the purpose (organization admin keys or billing tokens). The separate
+//! `reset` module reads the owner-admitted undocumented Claude reset endpoint
+//! under §13; endpoint admission never authorizes reuse of credentials
+//! restricted to native applications.
 //!
 //! All four report **spend for the current calendar month**, which is what a
 //! billing endpoint knows. None reports what is left; the pool's

@@ -67,10 +67,17 @@ enum Command {
         #[arg(long)]
         pools: Option<PathBuf>,
         #[arg(
-            help = "First ask each pool's usage_provider over HTTPS (through curl) and store what it reports. Only this flag reaches a network; run and resume never do"
+            help = "First ask each pool's usage_provider over HTTPS (through curl) and store what it reports. Network access is opt-in; run and resume never do this"
         )]
         #[arg(long)]
         refresh: bool,
+        #[arg(
+            long,
+            value_enum,
+            conflicts_with_all = ["refresh", "scope", "config", "pools"],
+            help = "Read advisory Claude reset grants through curl using provider-authorized UPSTROKE_CLAUDE_RESET_TOKEN; no pools required"
+        )]
+        reset_credits: Option<ResetProvider>,
         #[arg(
             help = "Which runs feed the estimates, overriding [capacity] scope: every run on this machine, or this repository's alone"
         )]
@@ -163,6 +170,11 @@ enum Interaction {
     Never,
     OnBlock,
     OnMilestone,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ResetProvider {
+    Claude,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -269,7 +281,22 @@ fn dispatch(
     execute(command, contained)
 }
 
-fn execute(command: Command, _contained: Contained) -> anyhow::Result<ExitCode> {
+fn execute(command: Command, contained: Contained) -> anyhow::Result<ExitCode> {
+    execute_with_reset_reader(command, contained, || {
+        let runner = upstroke::runner::host::HostRunner::new();
+        tracker::reset_credits(
+            &tracker::CurlTransport::new(&runner),
+            &|variable| std::env::var(variable).ok(),
+            None,
+        )
+    })
+}
+
+fn execute_with_reset_reader(
+    command: Command,
+    _contained: Contained,
+    read_reset: impl FnOnce() -> tracker::reset::ResetReport,
+) -> anyhow::Result<ExitCode> {
     match command {
         Command::Connect { force, pools } => {
             let report = connect::run(&connect::ConnectOptions {
@@ -287,7 +314,13 @@ fn execute(command: Command, _contained: Contained) -> anyhow::Result<ExitCode> 
             pools,
             refresh,
             scope,
+            reset_credits,
         } => {
+            if let Some(ResetProvider::Claude) = reset_credits {
+                let report = read_reset();
+                print!("{}", report.render());
+                return Ok(ExitCode::SUCCESS);
+            }
             let repo_root = std::env::current_dir().context("resolving current directory")?;
             if refresh {
                 let runner = upstroke::runner::host::HostRunner::new();
@@ -541,7 +574,8 @@ mod tests {
                 &[
                     "Repo config path (default: ./upstroke.toml, optional)",
                     "Pools file path (default: ~/.upstroke/pools.toml)",
-                    "First ask each pool's usage_provider over HTTPS (through curl) and store what it reports. Only this flag reaches a network; run and resume never do",
+                    "First ask each pool's usage_provider over HTTPS (through curl) and store what it reports. Network access is opt-in; run and resume never do this",
+                    "Read advisory Claude reset grants through curl using provider-authorized UPSTROKE_CLAUDE_RESET_TOKEN; no pools required",
                     "Which runs feed the estimates, overriding [capacity] scope: every run on this machine, or this repository's alone",
                 ],
             ),
@@ -710,6 +744,7 @@ mod tests {
                 plain,
                 Command::Capacity {
                     refresh: false,
+                    reset_credits: None,
                     scope: None,
                     ..
                 }
@@ -746,6 +781,65 @@ mod tests {
     }
 
     #[test]
+    fn reset_credits_is_an_exclusive_opt_in_tracker_command() {
+        let command = Cli::try_parse_from(["upstroke", "capacity", "--reset-credits", "claude"])
+            .expect("the reset inventory command parses")
+            .command;
+        assert_eq!(command_class(&command), CommandClass::ReadOnly);
+        assert!(matches!(
+            command,
+            Command::Capacity {
+                reset_credits: Some(ResetProvider::Claude),
+                refresh: false,
+                ..
+            }
+        ));
+        for args in [
+            vec!["capacity", "--reset-credits", "codex"],
+            vec!["capacity", "--reset-credits", "https://example.test"],
+            vec!["capacity", "--reset-credits", "claude", "--refresh"],
+            vec!["capacity", "--reset-credits", "claude", "--scope", "repo"],
+            vec!["capacity", "--reset-credits", "claude", "--pools", "x"],
+            vec!["capacity", "--reset-credits", "claude", "--config", "x"],
+            vec!["run", "plan.md", "--reset-credits", "claude"],
+            vec!["resume", "01ABCDEF", "--reset-credits", "claude"],
+            vec!["validate", "plan.md", "--reset-credits", "claude"],
+        ] {
+            assert!(Cli::try_parse_from(std::iter::once("upstroke").chain(args)).is_err());
+        }
+    }
+
+    #[test]
+    fn reset_dispatch_returns_before_configuration_or_agent_probes() {
+        let command = Command::Capacity {
+            config: Some(PathBuf::from(ABSENT_PLAN)),
+            pools: Some(PathBuf::from(ABSENT_PLAN)),
+            refresh: false,
+            reset_credits: Some(ResetProvider::Claude),
+            scope: None,
+        };
+        let contained = containment::establish(&command, || panic!("read-only command"))
+            .expect("no containment needed");
+        let called = std::cell::Cell::new(false);
+        let result = execute_with_reset_reader(command, contained, || {
+            called.set(true);
+            tracker::reset::ResetReport::Unavailable(tracker::reset::Unavailable::MissingCredential)
+        });
+        assert_eq!(result.expect("unavailable is advisory"), ExitCode::SUCCESS);
+        assert!(called.get());
+
+        let command = Cli::try_parse_from(["upstroke", "validate", ABSENT_PLAN])
+            .expect("parse a non-tracker command")
+            .command;
+        let contained = containment::establish(&command, || panic!("read-only command"))
+            .expect("no containment needed");
+        let result = execute_with_reset_reader(command, contained, || {
+            panic!("ordinary commands never read reset credits")
+        });
+        assert!(result.is_err(), "validate still reads its own plan");
+    }
+
+    #[test]
     fn no_command_but_capacity_takes_a_refresh() {
         for argv in [
             vec!["upstroke", "run", "plan.md", "--refresh"],
@@ -756,8 +850,7 @@ mod tests {
         ] {
             assert!(
                 Cli::try_parse_from(&argv).is_err(),
-                "{argv:?} parsed: the capacity tracker is `capacity --refresh` and nothing else \
-                 (DESIGN.md §4.2, §13)"
+                "{argv:?} parsed: only capacity admits tracker flags (DESIGN.md §4.2, §13)"
             );
         }
     }

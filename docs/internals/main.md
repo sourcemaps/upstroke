@@ -70,7 +70,7 @@ Pools file path (default: ~/.upstroke/pools.toml)
 ## `enum Command` › `refresh: bool,`
 
 First ask each pool's usage_provider over HTTPS (through curl) and store what
-it reports. Only this flag reaches a network; run and resume never do
+it reports. Network access is opt-in; run and resume never do this
 
 This is the capacity tracker (DESIGN.md §13), and the arm below is its one
 caller: `upstroke::tracker::refresh` is on the effect denylist, this file's
@@ -80,6 +80,22 @@ production file names the module. The arm supplies the two things the tracker
 is deliberately not given the means to reach for itself: a host Runner to
 start `curl` through, and the one read of the process environment, for the
 variable a pool names in `usage_token_env`.
+
+## `enum Command` › `reset_credits: Option<ResetProvider>,`
+
+`capacity --reset-credits claude` calls the denied tracker entry point `reset_credits` with
+its existing host Runner transport and an environment resolver. Only the dedicated
+`UPSTROKE_CLAUDE_RESET_TOKEN` is requested, and provider authorization for this integration is
+required; native-app-only credentials are unsuitable without it. The early return precedes
+current-directory resolution, pool/config loading and sign-in probes. It conflicts with the
+billing refresh and report options. Unavailable is an advisory result, printed with exit 0.
+The inventory is not persisted, redeemed or used in pool arithmetic. Tests inject credentials
+and transport responses rather than reading live credentials.
+
+`execute_with_reset_reader` injects only the reset read for CLI dispatch tests; production
+`execute` supplies the existing Runner-backed tracker operation. The closure is called only
+in the reset arm. A failing configuration path cannot block the reset result, and an ordinary
+command never invokes that closure.
 
 ## `enum Command` › `scope: Option<Scope>,`
 
@@ -335,23 +351,23 @@ Establish containment, then execute. The ambient join is a parameter so a
 test can drive a failure that no machine here can produce, and so the
 ordering between the two is testable rather than merely written down.
 
-## `fn execute(command: Command, _contained: Contained) -> anyhow::Result<ExitCode> {` › `if report.refused() {`
+## `fn execute_with_reset_reader(` › `if report.refused() {`
 
 A refusal to clobber is not something a retry fixes, and a script
 that cannot tell it from success would go on to run against a
 pools file that says something else entirely.
 
-## `fn execute(command: Command, _contained: Contained) -> anyhow::Result<ExitCode> {` › `status::follow(`
+## `fn execute_with_reset_reader(` › `status::follow(`
 
 History first, then live events: dropping a reader into the
 middle of a run tells them less than showing how it got here.
 
-## `fn execute(command: Command, _contained: Contained) -> anyhow::Result<ExitCode> {` › `let settled = status::load(&repo_root, Some(&followed))?;`
+## `fn execute_with_reset_reader(` › `let settled = status::load(&repo_root, Some(&followed))?;`
 
 Re-read: the run has moved since the summary would have been
 computed, and the closing summary is the useful one.
 
-## `fn execute(command: Command, _contained: Contained) -> anyhow::Result<ExitCode> {` › `(None, None, false) => Reply::Text(prompt_for_answer(&repo_root, &question_id)?),`
+## `fn execute_with_reset_reader(` › `(None, None, false) => Reply::Text(prompt_for_answer(&repo_root, &question_id)?),`
 
 Nothing given: show the question and read one line, so the
 common case is `upstroke answer <id>` and then just type.
@@ -428,9 +444,9 @@ installed agent CLIs through the adapter probes in `connect::run_with` and
 `capacity::report`; neither
 drives a run, so neither is the "coordinator" whose ambient job INV-18
 names. Since 2026-11-23 `capacity --refresh` also starts `curl`, once per
-pool that names a usage provider, through the same host Runner: it is the
-same command, so the count stands at two, and it is the only child any
-command starts in order to reach a network.
+pool that names a usage provider, through the same host Runner. The opt-in
+`capacity --reset-credits claude` also starts curl, once, with a usable credential;
+it does not probe agents. Both are capacity operations, so the count stands at two.
 
 ## `mod tests` › `fn a_write_command_refuses_before_any_effect_when_containment_fails() {`
 

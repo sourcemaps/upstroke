@@ -26,16 +26,18 @@ from every run on the machine (§13), or from this repository's alone with `--sc
 `[capacity] scope = "repo"`, the flag outranking the setting, and whatever provider reports the
 capacity tracker stored. It prints one `scope:` line saying which, from how many runs and
 repositories. It also probes each agent's CLI for its sign-in, which is why probing lives here
-and not in `validate`. **`--refresh` is the capacity tracker** (§13) and the only flag of any
-command that reaches a network: before the report, it asks the usage endpoint of each pool that
+and not in `validate`. **`--refresh` is the billing operation of the capacity tracker** (§13):
+before the report, it asks the usage endpoint of each pool that
 names a `usage_provider` (§17), through `curl`, and prints one line per such pool — `stored`
 with what was reported, `skipped` with what was missing (no `usage_token_env`, a variable that
 is not set, no account), or `failed` with the provider's status or `curl`'s own error — and then
 the report, which now reads what was stored. A refresh that stores nothing is not an error: the
 command exits `0` once the report is printed, and each pool's line is where its outcome is.
-Without `--refresh` the command asks no provider, and no other command ever does. To keep the
-reports current, schedule `upstroke capacity --refresh` with the machine's own scheduler; there
+Without `--refresh` or `--reset-credits`, the command asks no provider, and no other command ever
+does. To keep the reports current, schedule `upstroke capacity --refresh` with the machine's own scheduler; there
 is no daemon.
+
+`capacity --reset-credits claude` is the tracker's separate opt-in read of voluntary account reset grants (§13). It bypasses pool/config loading and agent probes and conflicts with `--refresh`, `--scope`, `--config` and `--pools`. It reads only `UPSTROKE_CLAUDE_RESET_TOKEN`, which must hold an explicitly provider-authorized bearer; ordinary native-app-only credentials are unsuitable without that authorization. Missing credentials send no request. It prints advisory count, kind, use-by, expiry and availability, preserves unknowns and distinguishes an explicit empty inventory from unavailable data. Results, including unavailable, exit `0`; no inventory is stored or redeemed and no pool estimate changes.
 
 **`capacity serve`, decided 2026-11-25 (not built).** The capacity handler (§13) will be a
 subcommand of the one binary, `upstroke capacity serve`, started explicitly by the operator, under

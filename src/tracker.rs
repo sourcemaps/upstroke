@@ -1,7 +1,10 @@
 //! The capacity tracker: the one part of upstroke that speaks HTTP, and the
 //! reason it is not the engine (DESIGN.md §4.2, §13).
 //!
-//! **What it is.** `upstroke capacity --refresh`. For each pool that names a
+//! **What it is.** Two opt-in reads: `capacity --refresh` for billing and
+//! `capacity --reset-credits claude` for advisory voluntary reset inventory.
+//! The latter needs no pool, reads only an explicitly provider-authorized
+//! operator bearer, and stores nothing. For each billing pool that names a
 //! `usage_provider`, it asks that provider's documented usage endpoint how
 //! much the account has drawn, and stores the answer under the machine
 //! directory (`~/.upstroke/capacity/usage/`). Nothing else: it dispatches no
@@ -14,9 +17,10 @@
 //! event log and the files on disk, and a network answer that arrived or did
 //! not arrive mid-run is neither.
 //!
-//! **How the split is held.** [`refresh`] is on `clippy.toml`'s denylist as an
-//! effectful wrapper, so a module that states no allowance for governed lints
-//! cannot name it, and every topology module forbids them. The frozen legacy
+//! **How the split is held.** [`refresh`] and [`reset_credits`] are on
+//! `clippy.toml`'s denylist as effectful wrappers, so a module that states no
+//! allowance for governed lints cannot name them, and every topology module
+//! forbids them. The frozen legacy
 //! modules do carry an allowance, so the denylist alone does not cover them:
 //! `tests::only_the_cli_reaches_the_tracker` reads every production source
 //! file and fails if anything but `src/main.rs` names this module.
@@ -46,10 +50,42 @@ use crate::capacity::{MAX_TOKEN_ENV_CHARS, Pool, UsageProvider};
 use crate::error::UpstrokeError;
 
 pub mod provider;
+pub mod reset;
 pub mod transport;
 
 pub use self::provider::Secret;
 pub use self::transport::{CurlTransport, UsageTransport};
+
+/// Read Claude's voluntary reset inventory, independently of billing pools.
+/// Only `reset::TOKEN_ENV` is resolved; the caller supplies the environment
+/// read and transport. Nothing is stored. Missing or invalid credentials
+/// start no request. Failures are advisory and contain no provider text.
+/// `now_unix` dates the observation; `None` reads the clock after the response.
+pub fn reset_credits(
+    transport: &dyn UsageTransport,
+    credential: &dyn Fn(&str) -> Option<String>,
+    now_unix: Option<u64>,
+) -> reset::ResetReport {
+    use reset::{ResetReport, Unavailable};
+
+    let Some(token) = credential(reset::TOKEN_ENV).filter(|value| !value.is_empty()) else {
+        return ResetReport::Unavailable(Unavailable::MissingCredential);
+    };
+    if !token.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return ResetReport::Unavailable(Unavailable::InvalidCredential);
+    }
+    let request = reset::request(Secret::new(token));
+    let response = match transport.get(&request) {
+        Ok(response) => response,
+        // Runner and curl errors can contain arbitrary text. Expose only the
+        // category here, including when a fake transport echoes a credential.
+        Err(error) => return ResetReport::Unavailable(Unavailable::from_transport(&error)),
+    };
+    reset::parse(
+        &response,
+        now_unix.unwrap_or_else(crate::util::unix_seconds_now),
+    )
+}
 
 /// What to refresh, found the way `upstroke capacity` finds it.
 #[derive(Debug, Clone, Default)]
@@ -506,6 +542,85 @@ agent = \"claude-code\"
             "OPENAI_ADMIN_KEY" => Some("sk-admin-test".to_owned()),
             "GH_PLAN_TOKEN" => Some("github_pat_test".to_owned()),
             _ => None,
+        }
+    }
+
+    #[test]
+    fn reset_inventory_needs_only_its_dedicated_credential_and_no_pool() {
+        let table = Table::new(&[(
+            "api.anthropic.com",
+            Ok((200, r#"{"cedar_ember":{"eligible":true,"grants":[]}}"#)),
+        )]);
+        let variables = RefCell::new(Vec::new());
+        let report = reset_credits(
+            &table,
+            &|name| {
+                variables.borrow_mut().push(name.to_owned());
+                Some("synthetic-reset-secret".to_owned())
+            },
+            Some(NOON),
+        );
+        assert_eq!(*variables.borrow(), vec![reset::TOKEN_ENV]);
+        assert!(report.render().contains("explicitly empty inventory"));
+        assert!(!format!("{report:?}").contains("synthetic-reset-secret"));
+        let asked = table.asked.borrow();
+        assert_eq!(asked.len(), 1);
+        let request = asked.first().expect("one request");
+        assert_eq!(
+            request.url,
+            "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"
+        );
+        assert_eq!(
+            request.headers,
+            vec![("anthropic-beta", "oauth-2025-04-20".to_owned())]
+        );
+        assert_eq!(request.credential.header, "Authorization");
+        assert_eq!(request.credential.scheme, "Bearer ");
+        assert!(!format!("{request:?}").contains("synthetic-reset-secret"));
+    }
+
+    #[test]
+    fn missing_or_invalid_reset_credentials_send_zero_requests() {
+        let table = Table::new(&[]);
+        for token in [
+            None,
+            Some(""),
+            Some("secret\nurl = evil"),
+            Some(" secret"),
+            Some("secret\0"),
+        ] {
+            let report = reset_credits(&table, &|_| token.map(str::to_owned), Some(NOON));
+            let text = report.render();
+            assert!(text.contains("unavailable"));
+            assert!(text.contains(reset::TOKEN_ENV));
+            assert!(text.contains("no request sent"));
+            assert!(!text.contains("secret"));
+        }
+        assert!(table.asked.borrow().is_empty());
+    }
+
+    #[test]
+    fn reset_failures_never_repeat_process_output_or_credentials() {
+        for error in [
+            TransportError::NotStarted("synthetic-reset-secret".to_owned()),
+            TransportError::Failed {
+                code: "synthetic-reset-secret".to_owned(),
+                stderr: "synthetic-reset-secret\nforged output".to_owned(),
+            },
+            TransportError::TimedOut,
+            TransportError::TooLarge,
+            TransportError::NoStatus,
+        ] {
+            let table = Table::new(&[("api.anthropic.com", Err(error))]);
+            let report = reset_credits(
+                &table,
+                &|_| Some("synthetic-reset-secret".to_owned()),
+                Some(NOON),
+            );
+            assert!(report.render().contains("unavailable"));
+            assert!(!report.render().contains("synthetic-reset-secret"));
+            assert!(!format!("{report:?}").contains("synthetic-reset-secret"));
+            assert_eq!(table.asked.borrow().len(), 1, "no automatic retry");
         }
     }
 
@@ -2039,7 +2154,7 @@ agent = \"claude-code\"
             reaches_the_tracker(&sources),
             vec!["src/lib.rs", "src/main.rs"],
             "the tracker speaks HTTP and the engine never does (DESIGN.md §4.2): the library \
-             root declares the module, the CLI calls it for `capacity --refresh`, and nothing \
+             root declares the module, the CLI calls its opt-in tracker operations, and nothing \
              else may name it. A run reads the reports the tracker stored; it never asks for one"
         );
     }

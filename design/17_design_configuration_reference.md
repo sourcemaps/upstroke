@@ -91,6 +91,8 @@ Other agents' sign-in is not checked at pre-flight, so a signed-out Codex fails 
 attempt (`PR408-CODEX-SIGN-IN-NOT-PREFLIGHTED`). The legacy
 (schema 1–3) coordinator refuses any pool that names a profile.
 
+The independent `capacity --reset-credits claude` reader needs no pool or usage keys. Its only credential source is the operator-provided `UPSTROKE_CLAUDE_RESET_TOKEN`, explicitly provider-authorized for this integration (§13); native-app-only credentials are unsuitable without that authorization. It does not select or change account profiles.
+
 **What the usage keys do.** They opt a pool into the capacity tracker (§13), and only an operator
 writes them. `usage_provider` names which documented usage endpoint `upstroke capacity --refresh`
 asks for this pool: `anthropic-cost`, `openai-cost`, `github-ai-credits` or
