@@ -1533,7 +1533,10 @@ compiler sees; but a *name this contract never thought of* decides whether
 the compiled thing runs at all. `CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER`
 pointed at a script that exits zero makes `cargo test` build every harness
 and execute none, on the Windows target only, which no Unix leg would
-notice. Cargo documents that setting as applying to `cargo test`. Pinning
+notice. Cargo documents that setting as applying to `cargo test`. The
+Windows legs' suite step no longer runs its harnesses through `cargo test`:
+it builds with `--no-run` and starts them itself, which a runner does not
+reach. The two capture steps after it still run `cargo test`. Pinning
 the whole map refuses every such name at once, including the ones nobody
 here has thought of yet. Measured, `MUT-WORKFLOW-ENV-TARGET-RUNNER`.
 

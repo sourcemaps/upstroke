@@ -2228,9 +2228,12 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-WORKFLOW-ENV-TARGET-RUNNER",
-        escape: "a Cargo target runner at workflow scope: every Windows test harness compiles \
-                 and none executes, because Cargo hands each one to `cmd /c echo`, which prints \
-                 the path it was given and exits zero. No Unix leg reads a Windows-target \
+        escape: "a Cargo target runner at workflow scope: a harness that `cargo test` runs on a \
+                 Windows leg compiles and does not execute, because Cargo hands it to \
+                 `cmd /c echo`, which prints the path it was given and exits zero. That was \
+                 every Windows test harness until the suite step began starting the harnesses \
+                 itself, which a runner does not reach; it is still the two capture steps \
+                 after it, which run `cargo test`. No Unix leg reads a Windows-target \
                  variable, and the command, shell, labels and checkout all still match.",
         job: None,
         anchor: "  RUSTFLAGS: -D warnings\n",

@@ -1098,7 +1098,10 @@ Every way the workflow's own `env:` is not the pinned mapping.
 The whole map, as an equality. A guard per name can only refuse names
 somebody thought of, and the dangerous ones are the others: a Cargo target
 runner bound here makes `cargo test` build every harness and run none, on
-one target, which no other platform's leg would notice. Refusing the map
+one target, which no other platform's leg would notice. The Windows legs'
+suite step no longer runs its harnesses through `cargo test`: it builds
+with `--no-run` and starts them itself, which a runner does not reach. The
+two capture steps after it still run `cargo test`. Refusing the map
 wholesale refuses that class rather than that instance.
 Measured, `MUT-WORKFLOW-ENV-TARGET-RUNNER`.
 
