@@ -163,6 +163,15 @@ is the job's only failure.
 - **Not established:** which process held the pipes' writer, or the errno of the last read
   (ruling r78 step 6).
 - **Not established: the rate.**
+- `CI-FLAKE-MACOS-TERMINAL-INTERRUPT-LEFT-THE-AGENT-TREE-ALIVE`
+  (`findings/P3_correctness_202611220300_a-terminal-interrupt-left-the-agent-tree-alive-on-hosted-macos.md:123-127`)
+  names this test, `kill_tree_settles_the_whole_unix_group_before_it_returns`, as a different test
+  from its own, with a different assertion.
+- `PR292-MACOS-ZOMBIE-ONLY-GROUP-EPERM-FAILS-KILL-TREE`
+  (`findings/P3_portability_202609150527_macos-eperm-on-a-zombie-only-group-fails-the-kill.md:17`,
+  `:56-58`) records a group of zombies refused a signal, `EPERM`, and says it is not this
+  fingerprint, which it describes as a live grandchild still holding the pipes after `kill_tree`
+  returns.
 
 ## What the change that takes this up should do
 
