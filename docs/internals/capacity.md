@@ -1086,8 +1086,10 @@ in flight and `capacity` and `validate` did not. The legacy reader keeps that
 gap: it folds the committed log alone, and `status::load`'s
 `settle_interrupted` is not applied here.
 
-- An error from either reader folds nothing from that run, counts it in
-  `Gathered::unread`, and pushes one warning naming the run and the error.
+- An error from either reader folds nothing from that log. Where no other
+  log of the run can be read, it counts the run in `Gathered::unread` and
+  pushes one warning naming the run and the error; where one can, that log is
+  folded and the warning names both (below).
 
 The warning says nothing from that run is shown, neither its signals nor its
 spend. Earlier copies said "showing signals only" and "rests on rate-limit
@@ -1108,6 +1110,38 @@ line on every listing. And one whose run this repository lists is read from
 that listing, so its record leaves nothing out, whatever it holds. It is
 neither warned of nor counted, since counting it would call a folded run
 unread.
+
+**A run is folded once, by its id.** Until 2026-11-24 `gather` folded each
+log once by its canonical path. That still makes a log listed from its
+repository and again from its owner record one log, but it never made two
+logs of one run one run. A repository copied to a second directory with its
+run artifacts, `.upstroke/` included, holds a second log of each of its runs,
+with the same id and the same events. While the machine's owner record still
+names the original, both logs are found from the copy, and from anywhere else
+only the original's: a run that spent $20 counted $40 from the copy and $20
+from the original, and nothing said so (`PR409-COPIED-RUN-COUNTED-TWICE`).
+Before the gatherer, when only the latest run of one repository was read, a
+copy could not count twice.
+
+The logs that carry one id, each once by its canonical path, are now one run,
+and `log_to_fold` folds one of them. Of those that can be read, that is the
+one the run's owner record names, else the one holding the most committed
+events, else the first by path. The choice is made from the logs and the
+record alone, never from the repository the command was started in or the
+order the logs were listed in. Logs that hold the same committed events are
+one run seen twice, and nothing is said of them. A log that holds other
+events is named in a warning beside the one folded, with the run's id and why
+that one was chosen, and so is a log that cannot be read beside one that can.
+Neither is counted in `Gathered::unread`, which counts a run once, by its id,
+and only when none of its logs can be read; `Gathered::runs` and
+`Gathered::repositories` count the logs folded. So the scope line still says
+what the estimates rest on: a run whose evidence is shown is never also "1
+more run could not be read". The events compared are the committed ones
+(`Observed::events`) and not `accounting_events`, whose added settlements are
+dated when the log is read. Today a run has at most two logs in scope, the one
+this repository lists and the one its owner record names, so where both can
+be read the record decides. The other two rules make the choice total, and
+`capacity::machine`'s own tests pin them.
 
 The evidence of every run is put in one sequence by `evidence::merge`, by
 time, with each run's own order kept. Event times are whole seconds, so two
@@ -1163,10 +1197,11 @@ capacity on a machine missing one vendor still wants the other.
 
 The line under the estimates says what the figures above it rest on, and each
 of its forms is true of that (`Gathered::describe`, in
-`src/capacity/machine.rs`). Runs that were folded are counted, with the
-repositories they belong to. Runs that were found and could not be read are
-counted too, beside the warnings that carry each error, whether it was the
-log that could not be read or an owner record that leads to no log: "1 more
+`src/capacity/machine.rs`). Runs that were folded are counted, each once
+however many logs carry its id, with the repositories of the logs folded.
+Runs that were found and could not be read are counted too, beside the
+warnings that carry each error, whether it was the log that could not be
+read or an owner record that leads to no log: "1 more
 run could not be read and nothing from it is shown", or, with none readable,
 "the 1 run found on this machine could not be read". Only a scope with no run
 at all says "no run on this machine yet". The unreadable form used to be that
@@ -1494,6 +1529,47 @@ The repository lists a schema-4 run, and that run's private half holds a torn
 listing and holds its pool at its reset, and it neither warns of the record
 nor counts it, since nothing is missing. Started in another repository, the
 record is the only way to the run, and it is counted.
+
+## `fn copy_run(from: &std::path::Path, to: &std::path::Path, run_id: &str) {`
+
+A repository copied with its run artifacts: every file of a run's public
+directory under `from`, written to the same place under `to`. `canonical_log`
+is a run's log as the gatherer names it, by its canonical path, which is how
+the warnings below name both logs.
+
+## `fn a_copied_run_is_not_counted_as_a_second_machine_draw() {`
+
+The witness from `PR409-COPIED-RUN-COUNTED-TWICE`'s review, ported. A schema-4
+run in `original` was refused on `limited` and then drew $20 on `api`. Its
+public directory is copied to `copied`, and the machine's owner record names
+the original. The pools file beside that record gives `api` an allowance of
+100 with no margin and no reserve. Asked from either repository, `report`
+warns of nothing and shows `api`'s draw as $20 over one attempt: from the copy
+the two logs hold the same events, so the run is folded once and nothing is
+said. Before the fix the copy counted $40 over two attempts, so at most 60% of
+the pool was left where the original showed 80%. The witness restamped the
+log's events with the time it ran and read the wall clock; the port reads at
+`FIXTURE_NOW`, in the month the fixture's events are dated, so it does not
+depend on the day it runs.
+
+## `fn copies_of_a_run_that_differ_fold_the_one_its_owner_record_names_and_warn() {`
+
+Two logs of one run that differ. The original's, which the owner record names,
+holds the refusal on `limited`. The copy's holds that refusal and then a $20
+draw on `api`, so it holds more events. From the original only its own log is
+found; from the copy both are, and the one the owner record names is folded,
+although the other is longer, with one warning naming the run, both logs and
+why. The two answers are one `Gathered`: one run across one repository, `limited`
+held at its reset, and no draw on `api`.
+
+## `fn a_copy_that_cannot_be_read_beside_one_that_is_folded_is_named_and_not_counted() {`
+
+A copy whose log the reader refuses at its sixth line, beside the original the
+owner record names. The run is folded from the original, and the copy is not
+counted unread: one warning names both logs and the refusal, and the scope
+line says one run was folded. Counting it would add "1 more run could not be
+read and nothing from it is shown", which is false of a run whose evidence is
+shown.
 
 ## `fn self_metering_cannot_talk_an_exhausted_pool_back_up()` › `let mut p = pool("claude-max");`
 

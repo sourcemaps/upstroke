@@ -2981,6 +2981,177 @@ pub(crate) mod tests {
         );
     }
 
+    fn copy_run(from: &std::path::Path, to: &std::path::Path, run_id: &str) {
+        let public = crate::rundir::public_dir(from, run_id);
+        for entry in std::fs::read_dir(&public).expect("list the run's artifacts") {
+            let entry = entry.expect("one of the run's artifacts");
+            if entry.path().is_file() {
+                let bytes = std::fs::read(entry.path()).expect("read the artifact");
+                crate::workspace_manager::fixture::write_file(
+                    &crate::rundir::public_dir(to, run_id).join(entry.file_name()),
+                    &bytes,
+                );
+            }
+        }
+    }
+
+    fn canonical_log(repo: &std::path::Path, run_id: &str) -> std::path::PathBuf {
+        let log = crate::rundir::public_dir(repo, run_id).join(crate::rundir::EVENT_LOG);
+        std::fs::canonicalize(log).expect("the run's log")
+    }
+
+    #[test]
+    fn a_copied_run_is_not_counted_as_a_second_machine_draw() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-copied-run");
+        let original = tree.path().join("original");
+        let copied = tree.path().join("copied");
+        let machine = tree.path().join("machine");
+        let run = schema_4_run_limited_then_drawing(
+            &original,
+            SCHEMA_4_RUN,
+            ("limited", FIVE_THIRTY),
+            ("api", 20.0),
+        );
+        drop(run);
+        copy_run(&original, &copied, SCHEMA_4_RUN);
+        owner_record_of(&machine, &original, SCHEMA_4_RUN);
+        let pools = machine.join("pools.toml");
+        crate::workspace_manager::fixture::write_file(
+            &pools,
+            b"[pools.api]\nkind = \"api-key\"\nagent = \"claude-code\"\nmonthly_allowance = 100\n\
+              safety_margin = 0.0\nreserve = 0.0\n",
+        );
+        let draw = |repo: &std::path::Path| {
+            let report = report(
+                &CapacityOptions {
+                    pools_path: Some(pools.clone()),
+                    repo_root: repo.to_path_buf(),
+                    now_unix: Some(FIXTURE_NOW),
+                    ..CapacityOptions::default()
+                },
+                &NoAdapters,
+            )
+            .expect("report loads");
+            assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+            let estimate = report
+                .estimates
+                .iter()
+                .find(|estimate| estimate.pool == "api")
+                .expect("api pool");
+            estimate.self_spend.clone().expect("the pool drew")
+        };
+        let from_original = draw(&original);
+        assert_eq!(from_original.usd, Some(20.0));
+        assert_eq!(from_original.attempts, 1);
+        assert_eq!(
+            draw(&copied),
+            from_original,
+            "copying an existing run's artifacts must not double the machine's consumption"
+        );
+    }
+
+    #[test]
+    fn copies_of_a_run_that_differ_fold_the_one_its_owner_record_names_and_warn() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-copies-differ");
+        let original = tree.path().join("original");
+        let copied = tree.path().join("copied");
+        let machine_dir = tree.path().join("machine");
+        drop(schema_4_run_signalling(
+            &original,
+            SCHEMA_4_RUN,
+            "limited",
+            FIVE_THIRTY,
+        ));
+        drop(schema_4_run_limited_then_drawing(
+            &copied,
+            SCHEMA_4_RUN,
+            ("limited", FIVE_THIRTY),
+            ("api", 20.0),
+        ));
+        owner_record_of(&machine_dir, &original, SCHEMA_4_RUN);
+
+        let (from_original, warnings) = on_the_machine(&original, &machine_dir);
+        assert_eq!(warnings, Vec::<String>::new());
+        let (from_copy, warnings) = on_the_machine(&copied, &machine_dir);
+        assert_eq!(
+            from_copy, from_original,
+            "one machine, one answer, from either copy"
+        );
+        assert_eq!(
+            (from_copy.runs, from_copy.repositories, from_copy.unread),
+            (1, 1, 0)
+        );
+        assert_eq!(
+            from_copy.observations.exhausted,
+            exhausted(&[("limited", Some(FIVE_THIRTY))])
+        );
+        assert!(
+            !from_copy.observations.self_spend.contains_key("api"),
+            "the draw on `api` is in the log the owner record does not name, so it is not folded, \
+             although that log holds more events"
+        );
+        assert_eq!(
+            warnings,
+            vec![format!(
+                "run {SCHEMA_4_RUN} is folded once, from {}, the log the run's owner record \
+                 names; {} logs it too, with other events, and nothing from that log is shown",
+                canonical_log(&original, SCHEMA_4_RUN).display(),
+                canonical_log(&copied, SCHEMA_4_RUN).display()
+            )]
+        );
+        assert_eq!(
+            from_copy.describe(),
+            "signals and self-metered draw are folded from 1 run across 1 repository on this \
+             machine; the draw counts this calendar month (UTC)"
+        );
+    }
+
+    #[test]
+    fn a_copy_that_cannot_be_read_beside_one_that_is_folded_is_named_and_not_counted() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-copies-unread");
+        let original = tree.path().join("original");
+        let copied = tree.path().join("copied");
+        let machine_dir = tree.path().join("machine");
+        drop(schema_4_run_signalling(
+            &original,
+            SCHEMA_4_RUN,
+            "limited",
+            FIVE_THIRTY,
+        ));
+        schema_4_run_signalling(&copied, SCHEMA_4_RUN, "limited", FIVE_THIRTY)
+            .rewritten_with(NOT_AN_EVENT);
+        owner_record_of(&machine_dir, &original, SCHEMA_4_RUN);
+
+        let (gathered, warnings) = on_the_machine(&copied, &machine_dir);
+        assert_eq!(
+            (gathered.runs, gathered.repositories, gathered.unread),
+            (1, 1, 0),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            gathered.observations.exhausted,
+            exhausted(&[("limited", Some(FIVE_THIRTY))])
+        );
+        let [warning] = warnings.as_slice() else {
+            panic!("one warning names the run and both logs: {warnings:?}");
+        };
+        let named = format!(
+            "run {SCHEMA_4_RUN} is folded once, from {}; it is also listed at {}, which could \
+             not be read (",
+            canonical_log(&original, SCHEMA_4_RUN).display(),
+            canonical_log(&copied, SCHEMA_4_RUN).display()
+        );
+        assert!(
+            warning.starts_with(&named) && warning.contains("line 6"),
+            "{warning}"
+        );
+        assert_eq!(
+            gathered.describe(),
+            "signals and self-metered draw are folded from 1 run across 1 repository on this \
+             machine; the draw counts this calendar month (UTC)"
+        );
+    }
+
     #[test]
     fn self_metering_cannot_talk_an_exhausted_pool_back_up() {
         let mut p = pool("claude-max");

@@ -31,6 +31,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::events::Event;
+use crate::topology::events::TopologyEvent;
+
 use super::evidence::{self, Evidence};
 use super::usage::{self, UsageReport};
 use super::{Allowance, Basis, Observations, Pool, Reported, UsageSource};
@@ -89,18 +92,22 @@ pub struct Gathered {
     /// Per pool, what a stored report could not say, and why.
     pub report_notes: BTreeMap<String, Vec<String>>,
     pub basis: Basis,
-    /// Event logs folded.
+    /// Runs folded, each from one log however many logs carry its id
+    /// ([`gather`]).
     pub runs: usize,
-    /// Distinct repositories those logs belong to.
+    /// Distinct repositories the logs folded belong to.
     pub repositories: usize,
-    /// Runs that were found and could not be read: a log neither reader
-    /// accepts, or an owner record under the machine directory that exists
-    /// and leads to no log, because it cannot be read, is not an owner record,
-    /// names another run or names no run directory. Each has a warning naming
-    /// it, and [`Gathered::describe`] counts them. A private half with no
-    /// owner record is not counted, being a run of schemas 1–3 or a creation
-    /// that never wrote one, and neither is the record of a run this
-    /// repository lists, which is read from there.
+    /// Runs that were found and could not be read: a run none of whose logs
+    /// either reader accepts, or an owner record under the machine directory
+    /// that exists and leads to no log, because it cannot be read, is not an
+    /// owner record, names another run or names no run directory. Each has a
+    /// warning naming it, and [`Gathered::describe`] counts them. A run is
+    /// counted once, by its id, and not at all when another of its logs was
+    /// folded: the log that could not be read is then named in a warning
+    /// beside the one folded. A private half with no owner record is not
+    /// counted, being a run of schemas 1–3 or a creation that never wrote one,
+    /// and neither is the record of a run this repository lists, which is
+    /// read from there.
     pub unread: usize,
 }
 
@@ -120,11 +127,17 @@ pub struct GatherOptions<'a> {
 
 /// Fold every run in scope and read every stored provider report.
 ///
-/// Never fails: a run whose log cannot be read is skipped with a warning and
-/// counted in [`Gathered::unread`], as is an owner record that leads to no
+/// Never fails: a run none of whose logs can be read is skipped with a warning
+/// and counted in [`Gathered::unread`], as is an owner record that leads to no
 /// log, and a report that cannot be read is a warning and a note on its pool.
 /// What is left is an estimate over less evidence, which every estimate here
 /// already says it is.
+///
+/// A run is folded once, by its id. A repository copied to a second place
+/// with its run artifacts holds a second log of each of its runs, and while
+/// the machine's owner record still names the first, both are found from the
+/// copy; folded once per path, every draw in them counted twice. Of the logs
+/// that carry one id, `log_to_fold` says which is folded.
 ///
 /// Which repository it is started in changes what is in scope and nothing
 /// about how it is folded: each run is handed to [`evidence::merge`] keyed by
@@ -153,35 +166,39 @@ pub fn gather(opts: &GatherOptions<'_>, warnings: &mut Vec<String>) -> Gathered 
         (Scope::Repo, _) => Basis::Repository,
     };
 
-    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
-    let mut repositories: BTreeSet<PathBuf> = BTreeSet::new();
-    let mut runs = Vec::new();
+    let mut listed: BTreeMap<PathBuf, RunLog> = BTreeMap::new();
     for run in logs {
-        // Canonical, so that a run listed from its repository and again from
-        // its owner record is folded once. A path that does not resolve is
-        // kept as written: the read below then fails and names the run, which
-        // is where a missing log is reported.
+        // Canonical, so that a log listed from its repository and again from
+        // its owner record is one log, still the one that record names. A
+        // path that does not resolve is kept as written: the read then fails
+        // and names the run, which is where a missing log is reported.
         let log = run.log();
         let identity = std::fs::canonicalize(&log).unwrap_or(log);
-        if seen.contains(&identity) {
+        if let Some(held) = listed.get_mut(&identity) {
+            if held.run_id == run.run_id {
+                held.named_by_owner |= run.named_by_owner;
+            }
             continue;
         }
-        let found = evidence_in(&run);
-        let repository = repository_of(&identity);
-        seen.insert(identity.clone());
-        match found {
-            Ok(found) => {
-                repositories.insert(repository);
-                runs.push(((run.run_id, identity), found));
+        listed.insert(identity, run);
+    }
+    let mut copies: BTreeMap<String, Vec<(PathBuf, RunLog)>> = BTreeMap::new();
+    for (identity, run) in listed {
+        copies
+            .entry(run.run_id.clone())
+            .or_default()
+            .push((identity, run));
+    }
+
+    let mut repositories: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut runs = Vec::new();
+    for (run_id, logs) in copies {
+        match log_to_fold(&run_id, logs, warnings) {
+            Some((log, found)) => {
+                repositories.insert(repository_of(&log));
+                runs.push(((run_id, log), found));
             }
-            Err(why) => {
-                unread += 1;
-                warnings.push(format!(
-                    "run {} could not be read ({why}); nothing from it is shown, neither its \
-                     rate-limit signals nor its self-metered spend",
-                    run.run_id
-                ));
-            }
+            None => unread += 1,
         }
     }
     let folded = runs.len();
@@ -274,11 +291,14 @@ impl Gathered {
     }
 }
 
-/// One run to fold: its id and the repository it belongs to, which is what
-/// the readers below are given.
+/// One log of a run to fold: the run's id and the repository the log is in,
+/// which is what the readers below are given.
 struct RunLog {
     run_id: String,
     repo_root: PathBuf,
+    /// Whether the machine's owner record for the run names this log, which
+    /// is what decides between two logs of one run that differ.
+    named_by_owner: bool,
 }
 
 impl RunLog {
@@ -293,6 +313,7 @@ fn repository_logs(repo_root: &Path) -> Vec<RunLog> {
         .map(|run_id| RunLog {
             run_id,
             repo_root: repo_root.to_path_buf(),
+            named_by_owner: false,
         })
         .collect()
 }
@@ -431,6 +452,7 @@ fn locate(record: &Path, name: &std::ffi::OsStr) -> Result<Option<RunLog>, Strin
     Ok(Some(RunLog {
         run_id: located.run_id,
         repo_root,
+        named_by_owner: true,
     }))
 }
 
@@ -443,7 +465,110 @@ fn repository_of(log: &Path) -> PathBuf {
         .map_or_else(|| log.to_path_buf(), Path::to_path_buf)
 }
 
-/// One run's capacity evidence, read by the reader of its log's own schema.
+/// The one of `copies` that run `run_id` is folded from, and the evidence
+/// read from it. `copies` are the logs that carry the run's id, each by its
+/// canonical path. `None` when none of them could be read; a warning then
+/// names each.
+///
+/// Of the logs that could be read, the one folded is the one the machine's
+/// owner record names, else the one holding the most events, else the first
+/// by path. That reads the logs and the record and nothing else, so it is the
+/// same choice whichever repository the command was started in and whatever
+/// order the logs were listed in. Logs that hold the same events are one run
+/// seen twice, and nothing is said of them. A log that holds other events, or
+/// that could not be read, is named in a warning beside the log folded, and
+/// nothing from it is shown.
+///
+/// Today a run has at most two logs in scope, the one this repository lists
+/// and the one its owner record names, so where both can be read the record
+/// decides; the other two rules make the choice total.
+fn log_to_fold(
+    run_id: &str,
+    copies: Vec<(PathBuf, RunLog)>,
+    warnings: &mut Vec<String>,
+) -> Option<(PathBuf, Vec<Evidence>)> {
+    let mut read = Vec::new();
+    let mut unreadable = Vec::new();
+    for (log, run) in copies {
+        match evidence_in(&run) {
+            Ok(found) => read.push((log, run.named_by_owner, found)),
+            Err(why) => unreadable.push((log, why)),
+        }
+    }
+    // The log the owner record names, then more events, then the path.
+    read.sort_by(
+        |(one, one_named, one_read), (other, other_named, other_read)| {
+            other_named
+                .cmp(one_named)
+                .then_with(|| other_read.events.count().cmp(&one_read.events.count()))
+                .then_with(|| one.cmp(other))
+        },
+    );
+    unreadable.sort();
+    let mut ranked = read.into_iter();
+    let Some((folded, named, found)) = ranked.next() else {
+        for (_, why) in unreadable {
+            warnings.push(format!(
+                "run {run_id} could not be read ({why}); nothing from it is shown, neither its \
+                 rate-limit signals nor its self-metered spend"
+            ));
+        }
+        return None;
+    };
+    for (other, _, theirs) in ranked {
+        if theirs.events == found.events {
+            continue;
+        }
+        let why = if named {
+            "the log the run's owner record names"
+        } else if found.events.count() > theirs.events.count() {
+            "the log holding more events"
+        } else {
+            "the first by path"
+        };
+        warnings.push(format!(
+            "run {run_id} is folded once, from {}, {why}; {} logs it too, with other events, \
+             and nothing from that log is shown",
+            folded.display(),
+            other.display()
+        ));
+    }
+    for (other, why) in unreadable {
+        warnings.push(format!(
+            "run {run_id} is folded once, from {}; it is also listed at {}, which could not be \
+             read ({why})",
+            folded.display(),
+            other.display()
+        ));
+    }
+    Some((folded, found.evidence))
+}
+
+/// What one log gave: the evidence to fold, and the committed events that
+/// tell it from another log of its run.
+struct Read {
+    evidence: Vec<Evidence>,
+    events: Logged,
+}
+
+/// A log's committed events, as the reader of its schema parsed them.
+#[derive(PartialEq)]
+enum Logged {
+    Topology(Vec<TopologyEvent>),
+    Legacy(Vec<Event>),
+}
+
+impl Logged {
+    fn count(&self) -> usize {
+        match self {
+            Self::Topology(events) => events.len(),
+            Self::Legacy(events) => events.len(),
+        }
+    }
+}
+
+/// One log's capacity evidence, read by the reader of its own schema, and its
+/// committed events.
 ///
 /// A schema-4 log is read by the observer `status` reads it with
 /// (`engine::topology::observe`): a stable read of its committed lines and a
@@ -458,16 +583,27 @@ fn repository_of(log: &Path) -> PathBuf {
 /// another process holds is folded as committed. A log of schemas 1–3 is read
 /// by the sequential reader.
 ///
+/// The events kept beside the evidence are the committed ones
+/// (`Observed::events`), never the settlements `accounting_events` adds: those
+/// are dated when the log is read, so two reads of one log would not hold the
+/// same events, nor would two copies of it.
+///
 /// An incomplete final line is not reported from here: both readers fold the
 /// committed lines, which is all the evidence there is, and what a torn tail
 /// means for the run is `status`'s to say.
-fn evidence_in(run: &RunLog) -> Result<Vec<Evidence>, String> {
+fn evidence_in(run: &RunLog) -> Result<Read, String> {
     match crate::engine::topology::observe::observe(&run.repo_root, &run.run_id) {
-        Ok(Some(observed)) => Ok(evidence::of_topology(&observed.accounting_events())),
+        Ok(Some(observed)) => Ok(Read {
+            evidence: evidence::of_topology(&observed.accounting_events()),
+            events: Logged::Topology(observed.events().to_vec()),
+        }),
         Ok(None) => {
             let mut torn_tail = Vec::new();
             crate::events::read_all(&run.log(), &mut torn_tail)
-                .map(|events| evidence::of_legacy(&events))
+                .map(|events| Read {
+                    evidence: evidence::of_legacy(&events),
+                    events: Logged::Legacy(events),
+                })
                 .map_err(|error| error.to_string())
         }
         Err(error) => Err(error.to_string()),
@@ -715,6 +851,7 @@ fn other_source(report: &UsageReport, source: &UsageSource) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::{schema_4_run_limited_then_drawing, schema_4_run_signalling};
     use super::super::usage::UsageWindow;
     use super::super::{PoolKind, Source, UsageProvider};
     use super::*;
@@ -1335,6 +1472,133 @@ mod tests {
         assert_eq!(repository_of(log), Path::new("/work/alpha"));
         let short = Path::new("events.jsonl");
         assert_eq!(repository_of(short), short);
+    }
+
+    const COPIED_RUN: &str = "01CAPACITYCOPIED0000000001";
+    const FIVE_THIRTY: &str = "2026-11-11T05:30:00Z";
+
+    /// `run_id`'s log in `repo`, as `gather` lists it from that repository:
+    /// by its canonical path, and named by no owner record.
+    fn listed(repo: &Path, run_id: &str) -> (PathBuf, RunLog) {
+        let run = RunLog {
+            run_id: run_id.to_owned(),
+            repo_root: repo.to_path_buf(),
+            named_by_owner: false,
+        };
+        let log = std::fs::canonicalize(run.log()).expect("the fixture run's log");
+        (log, run)
+    }
+
+    /// Two logs of one run and no owner record naming either, which `gather`
+    /// does not meet today: of the two logs it can find, one is always the
+    /// one the record names. The shorter log is the first by path, so it is
+    /// the count of events that decides, and it decides alike whichever log
+    /// is given first.
+    #[test]
+    fn with_no_owner_record_the_log_holding_more_events_is_folded() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-copies-unowned");
+        let shorter = tree.path().join("a");
+        let longer = tree.path().join("b");
+        drop(schema_4_run_signalling(
+            &shorter,
+            COPIED_RUN,
+            "limited",
+            FIVE_THIRTY,
+        ));
+        drop(schema_4_run_limited_then_drawing(
+            &longer,
+            COPIED_RUN,
+            ("limited", FIVE_THIRTY),
+            ("api", 20.0),
+        ));
+        let (short_log, short_run) = listed(&shorter, COPIED_RUN);
+        let (long_log, long_run) = listed(&longer, COPIED_RUN);
+        assert!(short_log < long_log);
+        let drawn = evidence_in(&long_run).expect("the longer log").evidence;
+        assert_ne!(
+            drawn,
+            evidence_in(&short_run).expect("the shorter log").evidence
+        );
+
+        for copies in [
+            vec![listed(&shorter, COPIED_RUN), listed(&longer, COPIED_RUN)],
+            vec![listed(&longer, COPIED_RUN), listed(&shorter, COPIED_RUN)],
+        ] {
+            let mut warnings = Vec::new();
+            assert_eq!(
+                log_to_fold(COPIED_RUN, copies, &mut warnings),
+                Some((long_log.clone(), drawn.clone()))
+            );
+            assert_eq!(
+                warnings,
+                vec![format!(
+                    "run {COPIED_RUN} is folded once, from {}, the log holding more events; {} \
+                     logs it too, with other events, and nothing from that log is shown",
+                    long_log.display(),
+                    short_log.display()
+                )]
+            );
+        }
+    }
+
+    /// With no owner record and as many events in each, the first log by path
+    /// is folded; and logs that hold the same events fold once with nothing
+    /// said.
+    #[test]
+    fn with_no_owner_record_and_as_many_events_the_first_log_by_path_is_folded() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-copies-even");
+        let first = tree.path().join("a");
+        let other = tree.path().join("b");
+        let same = tree.path().join("c");
+        drop(schema_4_run_signalling(
+            &first,
+            COPIED_RUN,
+            "limited",
+            FIVE_THIRTY,
+        ));
+        drop(schema_4_run_signalling(
+            &other,
+            COPIED_RUN,
+            "elsewhere",
+            FIVE_THIRTY,
+        ));
+        drop(schema_4_run_signalling(
+            &same,
+            COPIED_RUN,
+            "limited",
+            FIVE_THIRTY,
+        ));
+        let (first_log, first_run) = listed(&first, COPIED_RUN);
+        let (other_log, _) = listed(&other, COPIED_RUN);
+        let signalled = evidence_in(&first_run).expect("the first log").evidence;
+
+        let mut warnings = Vec::new();
+        let copies = vec![listed(&other, COPIED_RUN), listed(&first, COPIED_RUN)];
+        assert_eq!(
+            log_to_fold(COPIED_RUN, copies, &mut warnings),
+            Some((first_log.clone(), signalled.clone()))
+        );
+        assert_eq!(
+            warnings,
+            vec![format!(
+                "run {COPIED_RUN} is folded once, from {}, the first by path; {} logs it too, \
+                 with other events, and nothing from that log is shown",
+                first_log.display(),
+                other_log.display()
+            )]
+        );
+
+        let mut warnings = Vec::new();
+        let copies = vec![listed(&same, COPIED_RUN), listed(&first, COPIED_RUN)];
+        assert_eq!(
+            log_to_fold(COPIED_RUN, copies, &mut warnings),
+            Some((first_log, signalled))
+        );
+        assert_eq!(
+            warnings,
+            Vec::<String>::new(),
+            "two logs that hold the same events are one run seen twice"
+        );
     }
 
     #[test]
