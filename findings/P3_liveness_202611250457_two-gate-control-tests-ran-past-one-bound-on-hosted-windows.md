@@ -42,7 +42,7 @@ At `681f429f`, in `src/engine/topology/coordinator.rs`:
 |---|---|---|---|---|---|
 | `45542041793` | `138962631949`, `test (windows-latest, 5 of 14)` | `pull_request` | #421 | `18d9206e` | 2026-11-25T03:44:28Z |
 
-Read from the raw job log, `evidence/job-45542041793-138962631949.log`, SHA-256
+Read from the job log as GitHub's API serves it, with ANSI escape sequences removed, `evidence/job-45542041793-138962631949.log`, SHA-256
 `83670a1823679c135c0c17d2c028d6f315d8ba062f033e9c051f90cde8814db4`:
 
 - Line 109, the checkout:
@@ -132,6 +132,6 @@ the same panic site, `src/engine/topology/coordinator.rs:11345`, for two other t
 
 ## What the change that takes this up should do
 
-It keeps both tests' assertions and their 120 s bound per scenario, with no retry, skip or weaker assertion, and it
+It keeps both tests' assertions and a 120 s bound, applied to each scenario, with no retry, skip or weaker assertion, and it
 makes each of the four `F_MATRIX` runs observable on its own: each run gets its own bound, as `f_bounded_case` gives
 each case of the refusal siblings. The guard names the change.
