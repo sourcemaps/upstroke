@@ -2164,8 +2164,8 @@ line of the comment-stripped text, and whether the file contained the test
 command anywhere; both survive an `echo`, and the strip existed only because
 the job's own comment spelled the needle.
 
-Every platform, and now every leg: the Linux suite runs as two shards in
-`test-linux` and the macOS suite as five in `test-macos`, and the oracle
+Every platform, and now every leg: the Linux suite runs as five shards in
+`test-linux` and the macOS suite as twelve in `test-macos`, and the oracle
 holds each job's matrix to the legs it derives from that job's row of
 `TEST_JOBS` (`test_leg_matrix_complaints` in the workflow notes).
 
