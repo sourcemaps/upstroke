@@ -176,7 +176,17 @@ command runs this?". A parsed document has no comments in it at all, so that
 class is gone by construction rather than by a strip whose bite had to be
 asserted.
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite = scalar(step, "run") == Some(TEST_COMMAND);`
+## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite = scalar(step, "run") == Some(TEST_SHARD_COMMAND);`
+
+The suite step is the one whose `run:` is [`TEST_SHARD_COMMAND`], the
+command with the leg's `matrix.tests` handed to libtest, and it is recognised
+by that text everywhere this function asks for it: for the step's field set
+and case-fold map here, for the count of exactly one suite step
+(`test-job-command`), and for the capture's place immediately after it
+([`capture_complaints`]). A step that ran the bare [`TEST_COMMAND`] instead
+would be an unpinned script, and the count of suite steps would be zero.
+Measured, `MUT-CI-CARGO-TEST-STEP-DELETED` and
+`MUT-TEST-SHARD-SELECTION-DROPPED`.
 
 The step that runs the suite, and the host acceptance capture step after it
 ([`HOST_ACCEPTANCE_CAPTURE`]), are the two steps in this job that may carry
@@ -198,7 +208,9 @@ The suite step's three rows anchor on its `run:` line together with the
 `env:` lines. The capture step repeats the same `env:` text, and
 [`mutate_workflow`] measures nothing unless an anchor occurs exactly once in
 its job. Each row's mutation, target and code are what they were before the
-capture existed.
+capture existed. The `run:` line gained ` -- ${{ matrix.tests }}` when the
+macOS suite was divided, and the three rows were re-spelled with it; nothing
+else in them moved.
 
 The container capability observation after the capture
 ([`CAPABILITY_OBSERVATION`]) is the third step that may carry an `env:`, and
@@ -227,22 +239,37 @@ hosted runner. Each must be the platform default: a workflow-level
 default swaps every one of them at once, which is the mutation the
 step-only reading could not see.
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let expected_runners: BTreeSet<String> = CI_TARGETS`
+## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `out.extend(test_leg_matrix_complaints(job));`
 
-The matrix is the platform half of the same claim, and it is compared
-against the same derived runner set the Clippy legs are, less the one
-platform whose suite runs in its own job: a fixture that runs on one
-platform proves nothing about the other.
+The matrix is the platform half of the same claim: a fixture that runs on
+one platform proves nothing about the other. It is held to the legs
+[`TEST_LEGS`] derives, and the table's runners to the same derived runner set
+the Clippy legs are compared against, less the one platform whose suite runs
+in its own job ([`test_leg_matrix_complaints`]).
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `match field(job, "strategy") {`
+## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(job, "runs-on") != Some("${{ matrix.os }}") {`
 
-The WHOLE strategy mapping, not just `matrix.os`. `exclude:` removes
-combinations that `os:` still lists, so a job that names three platforms
-can run on one while every check that reads `os:` passes; `include:` can
-add a fourth nobody declared, and `max-parallel`/`fail-fast` are the rest
-of what a strategy may say. An equality over the field set refuses all of
-them, including the ones GitHub adds next. Measured,
-`MUT-TEST-MATRIX-EXCLUDED`.
+A leg's `os:` is its runner only because `runs-on:` reads it. Under a
+literal every leg runs on one machine, the macOS shards among them, with the
+matrix still equal to its table. Code `test-job-matrix`, as before the legs
+were an `include:` list.
+
+## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(job, "name") != Some(TEST_JOB_NAME) {`
+
+The job's `name:`, as the workflow writes it ([`TEST_JOB_NAME`]). Nothing
+reads a leg's name but a person and the API's listing, and that is the
+reason to hold it: the name is how a run tells its legs apart, and under
+`matrix.os`, which it read until the macOS suite was divided, the three
+macOS shards publish one name. Code `test-job-name`. Measured,
+`MUT-TEST-LEGS-NAMED-BY-RUNNER`.
+
+## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let minutes = field(job, "timeout-minutes").and_then(Yaml::as_i64);`
+
+The job's limit, exactly [`TEST_TIMEOUT_MINUTES`] and an integer: one number
+for every leg. The expression the job carried while the macOS suite ran
+whole, 45 minutes on macOS and 30 on ubuntu, reads as a string here and is
+refused as no number at all. Code `test-job-timeout`. Measured,
+`MUT-TEST-TIMEOUT-RAISED-FOR-MACOS`.
 
 ## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let toolchains: Vec<&Yaml> = steps_of(job)`
 
@@ -256,6 +283,110 @@ them, including the ones GitHub adds next. Measured,
 
 Whether a [`CI_TARGETS`] runner hosts its platform's tests in the `test`
 matrix -- every platform but the one whose suite runs in its own job.
+
+## `struct TestLeg {`
+
+One leg of the `test` job's matrix as the oracle compares it: the runner,
+the leg's label, and the libtest arguments. The expected legs and the legs
+read from `ci.yml` are both made of it, as the twin's are of [`ShardLeg`], so
+the comparison is one equality and a refusal prints both sides field by
+field.
+
+## `fn test_legs() -> Vec<TestLeg> {`
+
+The table the `test` job's matrix must equal, derived and never written
+out: for each runner of [`TEST_LEGS`], in order, one leg for each string
+[`shard_selections`] makes of that runner's filters, in order.
+
+- `os` is the runner.
+- `tests` is the string. A runner with no filter has one, the empty string:
+  no arguments, the whole suite.
+- `leg` is the runner alone where it has that one leg, and otherwise the
+  runner, a comma and the shard's place, `k of n`. The count is the number
+  of strings, so a filter added to a runner's list renames that runner's
+  legs and no label is written down.
+
+Today that is four legs: `ubuntu-latest`, and `macos-latest, 1 of 3` to
+`macos-latest, 3 of 3`. The label is what GitHub puts in the leg's job name
+in place of `${{ matrix.leg }}` ([`TEST_JOB_NAME`]), so the Linux leg is
+still listed as `test (ubuntu-latest)`, the name it had while the matrix was
+an `os:` axis.
+
+## `fn test_leg(entry: &Yaml) -> Option<TestLeg> {`
+
+One `include:` entry of `ci.yml` read as a leg, or nothing: a mapping with
+exactly the keys `os`, `leg` and `tests`, each a string. A fourth key is
+refused rather than ignored, for [`shard_leg`]'s reason: an `include:` entry
+may set anything a step or the job reads from `matrix`, and a key this
+contract does not model is one whose reader it has not looked for. The Linux
+leg's `tests: ""` is a string, the empty one, and reads as a leg; a bare
+`tests:` is YAML's null, which is no string, and does not.
+
+## `fn test_leg_matrix_complaints(job: &Yaml) -> Vec<String> {`
+
+The `test` job's `strategy:`, whole, under the one code `test-job-matrix`.
+Five things, each its own complaint:
+
+1. The runners of [`TEST_LEGS`] are, in order and once each, the
+   [`CI_TARGETS`] runners that host tests ([`hosts_tests`]). This one reads
+   no workflow. The matrix is held to the table, so a platform dropped from
+   the table and from `ci.yml` together would satisfy the fifth check; the
+   table is therefore held to the platform list the Clippy legs and the MSRV
+   leg are derived from, and a platform cannot leave this job that way.
+2. `strategy:` declares exactly `fail-fast` and `matrix`. `max-parallel` is
+   the rest of what a strategy may say today; an equality over the field set
+   refuses it and whatever GitHub adds next.
+3. `fail-fast` is `false`. Otherwise the first leg to fail cancels the legs
+   still running, and a run reports one platform's or one shard's failures
+   and none of the others'.
+4. `matrix:` declares exactly `include`. An axis beside the list changes
+   what the list means, by the rule [`windows_shard_matrix_complaints`]
+   records for the twin, and `exclude:` removes combinations of an axis. The
+   legs are the list and nothing else.
+5. `include:` is, in order, exactly [`test_legs`]' entries, each read by
+   [`test_leg`].
+
+Until the macOS suite was divided the matrix was one `os:` axis, compared as
+a set with the runners that host tests, and `include:` was refused with
+`exclude:` as a key that could add a platform nobody declared. The legs are
+now the `include:` list because an axis cannot say them: three of the four
+share a runner and differ in what they are handed. The platform claim the
+set equality made is the first and fifth checks together.
+
+In order, though GitHub does not run the legs in order: within a runner the
+order is the shard table's, each leg skipping the filters of the legs before
+it, and an equality over an ordered list is the plain way to hold every leg
+to its own row.
+
+These legs hold no count of passing tests to a floor, where each of the
+twin's does, and the fifth check is what stands in for one here. A shard's
+floor refuses a leg whose filter matched almost nothing; in this job such a
+leg is green, and the tests its filter no longer matches are run by a later
+leg, since every later leg only skips that filter. That holds while every
+macOS leg's arguments are the table's, which is this equality.
+
+Measured, `MUT-TEST-MATRIX-EXCLUDED`, `MUT-CI-TEST-MATRIX-NARROWED`,
+`MUT-TEST-MATRIX-KEEPS-WINDOWS` and `MUT-TEST-MACOS-SHARD-NARROWED`. The
+first three were written for the `os:` axis and were re-spelled for the
+list: an `exclude:` beside `include:`, the Linux leg's entry deleted, and a
+Windows entry added. Of an `include:` list GitHub documents that its entries
+are processed after `exclude:`, so by that rule the first removes no leg
+today, and the row says so; it is refused as a key the contract does not
+read. The second deletes the Linux leg rather than the macOS three because
+their anchor would spell the shards' arguments, which are written out in the
+oracle in one test and nowhere else.
+
+A deleted macOS leg and the first check were measured by hand instead, on
+2026-11-17, each in the tree and then restored. With the third macOS entry's
+three lines removed from `ci.yml`, three tests of `super` failed, each with
+the fifth complaint and both tables printed --
+`the_workflow_shape_oracle_refuses_every_escape_the_ledger_names` at its
+clean-workflow check,
+`the_workflow_that_runs_these_tests_installs_the_compiler_they_need` and
+`every_platform_this_crate_configures_for_has_a_clippy_gate_the_aggregate_requires`.
+With `macos-latest` removed from [`TEST_LEGS`] and its three entries from
+`ci.yml` together, the same three failed with the first complaint and no
+other.
 
 ## `fn installs_a_toolchain(step: &Yaml) -> bool {`
 
@@ -899,7 +1030,8 @@ the value is checked against `Cargo.toml` above.
 ## `pub(super) fn ci_msrv_job_complaints(doc: &Yaml) -> Vec<String> {` › `let expected_runners: BTreeSet<String> = CI_TARGETS`
 
 The platform half, compared against the same derived runner set the Clippy
-legs and the `test` matrix are. A floor is a per-platform fact: a
+legs are, and the `test` job's table of legs is. A floor is a per-platform
+fact: a
 dependency that raises its MSRV behind a `cfg` fails on that target only.
 
 ## `pub(super) fn ci_msrv_job_complaints(doc: &Yaml) -> Vec<String> {` › `let install_at = steps_of(job).iter().position(|step| {`
@@ -1098,7 +1230,9 @@ both tables' strings to written-out literals.
 One function, so that the tables and anything derived from them cannot
 disagree about the rule. The hosted twin's matrix is the first thing derived
 from one: [`windows_shard_legs`] takes each leg's arguments from here, and
-`ci.yml` is held to them.
+`ci.yml` is held to them. The `test` job's matrix is the second:
+[`test_legs`] takes the three macOS legs' arguments from here, and the Linux
+leg's from the empty list, whose one string is the whole suite.
 
 ## `pub(super) fn libtest_runs(selection: &str, name: &str) -> bool {`
 

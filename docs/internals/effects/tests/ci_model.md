@@ -37,7 +37,35 @@ aggregate settle green over a platform Clippy never examined.
 
 ## `pub(super) const TEST_COMMAND: &str = "cargo test --all-targets --all-features";`
 
-The command that executes this file's fixtures, character for character.
+The command that executes this file's fixtures, character for character:
+the whole suite, with no selection. The guest's Windows job runs it so, as
+line 3 of [`WINDOWS_TEST_WITNESS`]. The hosted legs each run it over a
+selection: the `test` job's as [`TEST_SHARD_COMMAND`], and the hosted twin's
+as line 3 of [`WINDOWS_SHARD_WITNESS`].
+
+## `pub(super) const TEST_SHARD_COMMAND: &str =`
+
+The `test` job's suite step, character for character: [`TEST_COMMAND`], then
+` -- ${{ matrix.tests }}`. The expression is text here, as it is in
+`ci.yml`; GitHub replaces it with the leg's `tests:` value from the job's
+matrix ([`TEST_LEGS`]) before bash reads the line. What follows `--` goes to
+libtest in every harness `--all-targets` builds.
+
+- On the Linux leg the value is the empty string. The line ends at `--`,
+  libtest is handed nothing, and the leg runs the whole suite, as it did
+  when the step was [`TEST_COMMAND`] alone.
+- On a macOS leg it is the shard's filter, if it has one, and a `--skip` for
+  each filter of the legs before it. Without the selection each of the three
+  runs the whole suite.
+
+One step for every leg, so nothing in it varies by leg except through that
+expression and the case-fold map's ([`TEST_STEP_ENV`]); what the expression
+evaluates to is the matrix check's to hold. The oracle recognises the suite
+step by this text, and
+`the_workflow_that_runs_these_tests_installs_the_compiler_they_need` holds
+it to [`TEST_COMMAND`] with the selection appended and nothing else, so the
+two constants cannot drift apart with each pin holding. Measured,
+`MUT-CI-CARGO-TEST-STEP-DELETED` and `MUT-TEST-SHARD-SELECTION-DROPPED`.
 
 ## `pub(super) const WINDOWS_BUILD_WITNESS: &str = "cargo build --all-targets --all-features";`
 
@@ -81,7 +109,8 @@ Measured, `MUT-TEST-WINDOWS-RUN-RETARGETED` and `MUT-TEST-RUN-RETARGETED`.
 
 ## `pub(super) const TEST_SCRIPTS: [&str; 4] = [`
 
-Every script the hosted test job may run: the identity script, the suite,
+Every script the hosted test job may run: the identity script, the suite
+over the leg's selection ([`TEST_SHARD_COMMAND`]),
 [`HOST_ACCEPTANCE_CAPTURE`] and [`CAPABILITY_OBSERVATION`]. Each is one exact
 string; the list grows by one pinned script at a time, and nothing in it is a
 pattern.
@@ -271,8 +300,10 @@ twin's evidence, on the first run sent there.
 ## `pub(super) const HOST_ACCEPTANCE_CAPTURE: &str = r#"set -o pipefail`
 
 The hosted `test` job's capture of the native HOST acceptance record (G7,
-root direction `087fea89`), character for character. It runs on both legs in
-GitHub's default `bash -e` and must stand immediately after the suite step.
+root direction `087fea89`), character for character. It runs on every leg in
+GitHub's default `bash -e` and must stand immediately after the suite step;
+each of the three macOS legs runs it after its own share of the suite, so a
+run prints three macOS records where it printed one.
 Line by line:
 
 1. `set -o pipefail`. Under `bash -e` a pipeline takes its status from its
@@ -341,8 +372,9 @@ and not a local one. Measured in the oracle:
 
 The hosted `test` job's container capability observation (G7, root direction
 `ecf15a9c`, contract version 2 under its root audit 2), character for
-character. It runs on both legs in GitHub's default `bash -e` and must stand
-immediately after [`HOST_ACCEPTANCE_CAPTURE`]. Line by line:
+character. It runs on every leg in GitHub's default `bash -e`, the three
+macOS legs each, and must stand immediately after
+[`HOST_ACCEPTANCE_CAPTURE`]. Line by line:
 
 1. `set -eo pipefail`. Under `bash -e` a pipeline takes its status from `tee`;
    with `pipefail` it takes Cargo's. It is spelled with `-e` because the bare
@@ -739,11 +771,85 @@ a whole-suite control in the same run.
 
 The same kind of list for the macOS suite, under the same rule: two filters,
 three shards -- `engine::topology::`, the rest of `engine::`, and everything
-else. Nothing in `ci.yml` reads this one yet: the macOS suite is still one
-leg of the `test` matrix.
+else. The `test` job's three macOS legs are derived from it, through
+[`TEST_LEGS`]; until the macOS suite was divided nothing in `ci.yml` read
+it, and the suite was one leg of the `test` matrix.
 `the_shard_tables_run_every_test_in_exactly_one_shard` holds its three
 derived argument strings to literals and places the same eight names, and
 holds its filters to the same shape.
+
+The table has no floors beside it, where the Windows one has
+[`WINDOWS_SHARD_FLOORS`]. The `test` job's legs held no count of passing
+tests before the shards and gained none with them. A filter here that
+matches no test only moves tests to a later leg; none stops running.
+
+## `pub(super) const TEST_JOB_NAME: &str = "test (${{ matrix.leg }})";`
+
+The `test` job's `name:`, an expression, held as the workflow writes it.
+GitHub lists each leg under the name with its `leg:` in place:
+`test (ubuntu-latest)`, and `test (macos-latest, 1 of 3)` to
+`test (macos-latest, 3 of 3)`. The Linux leg's is the name it had while the
+name read `matrix.os`; under that expression the three macOS legs would
+share one name, and a red one would not say which shard's tests failed.
+
+No check reads these names. Branch protection requires the aggregate's
+context alone ([`REQUIRED_CONTEXT`]), and the picker selects the guest's job
+and the pickers by theirs ([`PICK_WINDOWS_HOME_SCRIPT`]); its fixtures in
+`super` list a `test (ubuntu-latest)` among another run's jobs as one it
+passes over. Code `test-job-name`. Measured,
+`MUT-TEST-LEGS-NAMED-BY-RUNNER`.
+
+## `pub(super) const TEST_TIMEOUT_MINUTES: i64 = 30;`
+
+The `test` job's limit: 30 minutes for every leg, on every lane, and an
+integer in `ci.yml`.
+
+While the macOS suite ran whole the limit was an expression, 45 minutes on
+the macOS leg and 30 on ubuntu. In two merge-queue entries of one head on
+2026-10-29, runs 40834103792 and 40838006947, `test (macos-latest)` exceeded
+the 30 minutes it then had and was cancelled; the second job log contains
+every closing test summary, each ok, and printed summaries are not a
+successful exit. The 45 minutes named no cause for either cancellation and
+repaired no test. Under them `test (macos-latest)` was the slowest job of
+every run that does not wait for the guest: 32m 23s of run 43705001427's
+32m 32s on 2026-11-15, the harness 1,777 s for 3,888 tests on three
+processors, 72% of that limit.
+
+The three shards of [`MACOS_SHARD_FILTERS`] ran on macOS in draft pull
+request #339 on 2026-10-18, run 39146387106: 10m 13s, 12m 10s and 12m 17s a
+leg. The whole leg has taken 27 to 37 minutes since. No shard was timed at
+the suite the shards landed on; the CI run of the pull request that landed
+them is that measurement. 30 minutes is about twice the slowest shard
+expected, and the limit the Linux leg already had. Code `test-job-timeout`.
+Measured, `MUT-TEST-TIMEOUT-RAISED-FOR-MACOS`.
+
+## `pub(super) const TEST_LEGS: [(&str, &[&str]); 2] = [`
+
+The `test` job's legs, as data: each runner that hosts its platform's tests
+there, with the ordered filters that divide its suite. `ubuntu-latest` has
+none and runs the suite whole, as one leg. `macos-latest` has
+[`MACOS_SHARD_FILTERS`] and runs it as three.
+
+The matrix is derived from this table rather than written beside it.
+`test_legs` in `super::workflow` makes one leg for each string
+`shard_selections` makes of a runner's filters, four today, and
+`test_leg_matrix_complaints` requires the `include:` list of `ci.yml` to be
+those legs, entry for entry and in order: each entry's `os:` the runner, its
+`leg:` the label [`TEST_JOB_NAME`] reads, and its `tests:` the string
+[`TEST_SHARD_COMMAND`] hands to libtest.
+
+A filter list for each runner, not one for the job. What divides a suite is
+how long it takes on that runner, and the Linux leg, whole, was never the
+slow one ([`TEST_TIMEOUT_MINUTES`]). Giving `ubuntu-latest` filters is an
+edit to this table and to `ci.yml`, and nothing else.
+
+The runners here must be the [`CI_TARGETS`] runners that host tests, in
+order and once each; the same function refuses any other list. Without that
+the table and the workflow could lose a platform together with the equality
+between them still holding. Windows is absent for the reason it is absent
+from the matrix: its suite runs in [`TEST_WINDOWS_JOB`] or
+[`TEST_WINDOWS_HOSTED_JOB`]. Measured rows and the two measurements made by
+hand are under `test_leg_matrix_complaints` in the workflow notes.
 
 ## `pub(super) const PICK_WINDOWS_HOME_JOB: &str = "pick-windows-home";`
 
@@ -1077,7 +1183,9 @@ runs on.
 
 The whole `env:` map of the hosted step that runs the suite, as an equality.
 The value is an expression over the matrix -- `1` on `macos-latest`, empty on
-`ubuntu-latest` -- so one step declares for both legs. Pinned whole, the way
+`ubuntu-latest` -- so one step declares for every leg: it reads `matrix.os`,
+which each `include:` entry carries, the three macOS shards' alike
+([`TEST_LEGS`]). Pinned whole, the way
 [`WORKFLOW_ENV`] and the aggregate's map are: a dropped binding makes the leg
 observe the casefold branch instead of requiring it, so a temporary directory
 that stopped folding case would pass unreported (undeclared on ext4 the alias
@@ -1142,7 +1250,10 @@ leaves the required context missing rather than red.
 
 ## `pub(super) const TEST_JOB_FIELDS: [&str; 5] =`
 
-The fields the job that runs these fixtures declares.
+The fields the job that runs these fixtures declares. Each is pinned by
+value as well: `name` by [`TEST_JOB_NAME`], `runs-on` as `${{ matrix.os }}`,
+`timeout-minutes` by [`TEST_TIMEOUT_MINUTES`], `strategy`, whole, by the
+legs [`TEST_LEGS`] derives, and the steps' scripts by [`TEST_SCRIPTS`].
 
 ## `pub(super) const TEST_WINDOWS_JOB_FIELDS: [&str; 6] =`
 

@@ -12,13 +12,16 @@ pub(super) const CLIPPY_GATE: &str = "cargo clippy --all-targets --all-features 
 
 pub(super) const TEST_COMMAND: &str = "cargo test --all-targets --all-features";
 
+pub(super) const TEST_SHARD_COMMAND: &str =
+    "cargo test --all-targets --all-features -- ${{ matrix.tests }}";
+
 pub(super) const WINDOWS_BUILD_WITNESS: &str = "cargo build --all-targets --all-features";
 
 pub(super) const GIT_IDENTITY_SCRIPT: &str = "git config --global user.email \"ci@upstroke.local\"\ngit config --global user.name \"upstroke CI\"\n";
 
 pub(super) const TEST_SCRIPTS: [&str; 4] = [
     GIT_IDENTITY_SCRIPT,
-    TEST_COMMAND,
+    TEST_SHARD_COMMAND,
     HOST_ACCEPTANCE_CAPTURE,
     CAPABILITY_OBSERVATION,
 ];
@@ -167,6 +170,14 @@ pub(super) const WINDOWS_SHARD_FILTERS: [&str; 4] = [
 pub(super) const WINDOWS_SHARD_FLOORS: [u32; 5] = [95, 30, 340, 150, 1085];
 
 pub(super) const MACOS_SHARD_FILTERS: [&str; 2] = ["engine::topology::", "engine::"];
+
+pub(super) const TEST_JOB_NAME: &str = "test (${{ matrix.leg }})";
+pub(super) const TEST_TIMEOUT_MINUTES: i64 = 30;
+
+pub(super) const TEST_LEGS: [(&str, &[&str]); 2] = [
+    ("ubuntu-latest", &[]),
+    ("macos-latest", &MACOS_SHARD_FILTERS),
+];
 
 pub(super) const PICK_WINDOWS_HOME_JOB: &str = "pick-windows-home";
 pub(super) const PICK_WINDOWS_HOME_NAME: &str = "pick windows home";

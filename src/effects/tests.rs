@@ -5381,9 +5381,10 @@ mod workflow;
 use ci_model::{
     CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, MACOS_SHARD_FILTERS, MSRV_COMMAND, MSRV_JOB,
     OVERRIDING_REPO_FILES, PICK_WINDOWS_HOME_NAME, PICK_WINDOWS_HOME_SCRIPT, RUSTFLAGS_KEY,
-    TEST_COMMAND, TEST_WINDOWS_CONDITION, TEST_WINDOWS_HOSTED_CONDITION, TEST_WINDOWS_HOSTED_JOB,
-    TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM, WINDOWS_SHARD_FILTERS,
-    WINDOWS_SHARD_FLOORS, WINDOWS_SHARD_WITNESS, WINDOWS_TEST_FLOOR, WINDOWS_TEST_WITNESS,
+    TEST_COMMAND, TEST_SHARD_COMMAND, TEST_WINDOWS_CONDITION, TEST_WINDOWS_HOSTED_CONDITION,
+    TEST_WINDOWS_HOSTED_JOB, TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM,
+    WINDOWS_SHARD_FILTERS, WINDOWS_SHARD_FLOORS, WINDOWS_SHARD_WITNESS, WINDOWS_TEST_FLOOR,
+    WINDOWS_TEST_WITNESS,
 };
 use workflow::{
     WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_pick_windows_home_complaints,
@@ -5482,6 +5483,13 @@ fn the_workflow_that_runs_these_tests_installs_the_compiler_they_need() {
         complaints.is_empty(),
         "the `test` job does not run these fixtures the way they need:\n{}",
         complaints.join("\n")
+    );
+    assert_eq!(
+        TEST_SHARD_COMMAND,
+        format!("{TEST_COMMAND} -- ${{{{ matrix.tests }}}}"),
+        "the `test` job's suite step is not `{TEST_COMMAND}` with the leg's `matrix.tests` \
+         handed to libtest and nothing else, so what a leg runs over its selection is not the \
+         command the Windows suite jobs run"
     );
 }
 

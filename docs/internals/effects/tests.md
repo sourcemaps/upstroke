@@ -2124,6 +2124,18 @@ line of the comment-stripped text, and whether the file contained the test
 command anywhere; both survive an `echo`, and the strip existed only because
 the job's own comment spelled the needle.
 
+Every platform, and now every leg: the job's matrix is four legs, the Linux
+suite whole and the macOS suite as three shards, and the oracle holds the
+matrix to the legs it derives from `TEST_LEGS`
+(`test_leg_matrix_complaints` in the workflow notes).
+
+One relation the oracle's pins do not state, each being against its own
+constant: `TEST_SHARD_COMMAND`, the suite step every leg runs, is
+`TEST_COMMAND` followed by ` -- ${{ matrix.tests }}` and nothing else. So a
+leg runs the command the guest's Windows job runs whole, over the selection
+its matrix entry hands it, and the two constants cannot drift apart with
+both pins holding.
+
 ## `fn the_windows_leg_runs_these_fixtures_on_the_runner_each_lane_pins() {`
 
 The guest's Windows suite job runs these fixtures on the curated guest for a
@@ -2651,9 +2663,10 @@ mutated.
 The two shard tables of the CI model, `WINDOWS_SHARD_FILTERS` and
 `MACOS_SHARD_FILTERS`, each divide the suite: every test runs in exactly one
 shard. The test reads no workflow. It was the proof that came before any
-line of `ci.yml` was derived from a table; the hosted twin's matrix now is,
-and `windows_shard_matrix_complaints` in the workflow notes is what holds
-`ci.yml` to the Windows table. Nothing in `ci.yml` reads the macOS one.
+line of `ci.yml` was derived from a table. Both matrices now are:
+`windows_shard_matrix_complaints` in the workflow notes is what holds the
+hosted twin's to the Windows table, and `test_leg_matrix_complaints` what
+holds the `test` job's three macOS legs to the macOS one.
 
 Five claims.
 
