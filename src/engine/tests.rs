@@ -11036,7 +11036,6 @@ fn a_gates_worktree_setting_answers_what_the_probe_answers_when_nothing_tears() 
     }
 }
 
-/// Writes the gate-probe cases' stand-in `git` from a process of its own, then gives it mode 0700.
 #[cfg(unix)]
 fn write_the_gate_probe_stand_in(git: &Path, script: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -11045,7 +11044,6 @@ fn write_the_gate_probe_stand_in(git: &Path, script: &str) {
     fs::set_permissions(git, fs::Permissions::from_mode(0o700)).expect("an executable Git");
 }
 
-/// The scratch directory the gate-probe cases' isolated child works in.
 #[cfg(unix)]
 const GATE_PROBE_TREE: &str = "UPSTROKE_W924_GATE_PROBE_TREE";
 
@@ -11140,10 +11138,6 @@ fn the_gate_role_probe_cases_child() {
         let calls = place.join("calls");
         let answered = place.join("answered");
         let git = bin.join("git");
-        // Written by a process of its own, never through a descriptor of this
-        // test process: a fork another thread makes while this process held
-        // the stand-in open for writing keeps that writer until it execs, and
-        // the gate role's exec of the stand-in then fails with ETXTBSY.
         write_the_gate_probe_stand_in(
             &git,
             &format!(

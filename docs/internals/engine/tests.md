@@ -2986,23 +2986,32 @@ records `FAIL`.
 
 The cases and their assertions run in `the_gate_role_probe_cases_child`, an
 isolated child that this test starts through
-`agent::proc::test_support::run_test_isolated` under a 300-second deadline, and
-the test asserts that the child passed and recorded that it reached the end of
-its cases. The child writes the stand-in through `write_the_gate_probe_stand_in`:
-`runner::container::write_program_in_its_own_process` writes it from a process
-of its own, because a fork another thread made while this process held it open
-for writing kept that writer and the gate role's exec of it failed with "Text
-file busy" (`CI-FLAKE-GATE-PROBE-TEXT-FILE-BUSY`), and `fs::set_permissions`
-then gives it mode 0700, as before that fix (the helper makes it 0755). The
-helper's end waits for its reaper without a bound, so it is called only inside
-an isolated, bounded child (`FUA-I4-RELAY`); until this round the test called it
-from its own process.
+`agent::proc::test_support::run_test_isolated` under a 300-second deadline,
+naming in `GATE_PROBE_TREE` (`UPSTROKE_W924_GATE_PROBE_TREE`) the scratch
+directory the child works in, and the test asserts that the child passed and
+recorded that it reached the end of its cases. The child writes the stand-in
+through `write_the_gate_probe_stand_in`, never through a descriptor of its own
+process: `runner::container::write_program_in_its_own_process` writes it from a
+process of its own, because a fork another thread made while this process held
+it open for writing kept that writer until it execed, and the gate role's exec
+of the stand-in failed with "Text file busy"
+(`CI-FLAKE-GATE-PROBE-TEXT-FILE-BUSY`), and `fs::set_permissions` then gives it
+mode 0700, as before that fix (the helper makes it 0755). The helper's end
+waits for its reaper without a bound. This test's call to it is bounded, by the
+isolated child it runs in and that child's deadline (`FUA-I4-RELAY`); until this
+round the test called it from its own process. Other callers of the helper are
+not all bounded: ordinary tests call it with no outer bound through `git_shim`,
+`a_fake_cmd`, `delivery_program` and two Docker-stub sites.
 
 Nothing fails if the stand-in is written by `fs::write` again. The
 inherited-writer technique of `runner::host::tests` needs a fork taken while the
 writer's descriptor is open. `fs::write` opens, writes and closes a regular file
-in one call, and a write to a regular file never blocks, so a test can reach
-that window only by racing. The host oracle makes the window deterministic by
+in one call. A write to a regular file can block when the device has to act, and
+a file on a filesystem that can hold a write could be used to place a fork
+inside it, but this tree has no practical, portable way to hold the stand-in's
+write open while another thread forks, so a test here could reach that window
+only by racing and no deterministic witness is added. The host oracle makes the
+window deterministic by
 blocking the writer on a FIFO. A FIFO cannot be executed (`execve` refuses it
 with `EACCES`), so that oracle cannot end in `ETXTBSY`. The host suite's
 `ETXTBSY` control opens a writer of its own, so it passes whichever writer made
