@@ -111,7 +111,7 @@ job this test was the only failure.
   reflog entry <oid>` (oids `5fa4dc79…`, `f53abf9e…`, `0c394ebe…`, `07b2d272…`). The site's
   summary line is `Object.ProposalCherryPick: n=8 none=0 internal=2 after=2 unclassified=4`. Line
   763: `319 passed; 1 failed; 19 ignored`. The same tree passed: run `45291107344` on `b8522a9f`
-  (an empty commit on `680ba5f7`) checked out `40b1922c`, whose tree is `5d2d35d9`'s (`98554cae`),
+  (an empty commit on `680ba5f7`) checked out `40b1922e`, whose tree is `5d2d35d9`'s (`98554cae`),
   and this test passed.
 
 - **Run `45355876016`** (`evidence/job-45355876016-138313434575.log`, SHA-256
@@ -178,23 +178,30 @@ commit, then read the reflog after Git had appended the entry naming it.
 **Not established: the rate.** Four sightings, on 2026-11-20, 2026-11-23 (two) and 2026-11-24,
 each followed by a pass of the same tree. The runs of this test in that period were not counted.
 
-**The test's rate across this row and PR249-KILL-SAMPLER-WINDOWS-WRAPPER, counted 2026-11-24.** Of
-the 110 CI runs that completed (success or failure, superseded runs excluded) from 2026-11-22 00:00Z
-to 2026-11-24 10:50Z,
-`workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered` failed
-six: runs 44970652323 and 45019915010 and 45376131057 under PR249's fingerprints, and 45232814168,
-45282352517 and 45355876016 under this row's. Of the 46 completed from 2026-11-23 12:00Z, it failed
-four. Every one was its job's only failure. Each cost a CI re-run, and the one in a merge-queue run
-ejected that pull request from the queue: the test now costs merge throughput, not only a rare red.
+**The test's rate across this row and PR249-KILL-SAMPLER-WINDOWS-WRAPPER, counted 2026-11-24.** The
+population is every run of the `CI` workflow created from 2026-11-22 00:00Z to 2026-11-24 10:50Z
+that ended with a conclusion of success or failure: 111 runs, all ended by 11:12:59Z (six runs in
+that span were cancelled when a later event superseded them, and are not counted). A run counts as
+failed on the test when one of its jobs reports
+`workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered ...
+FAILED`. Six of the 111 did: runs 44970652323, 45019915010 and 45376131057 under PR249's
+fingerprints, and 45232814168, 45282352517 and 45355876016 under this row's. Of the 47 runs in the
+population created from 2026-11-23 12:00Z, four did. In each of the six the test was its job's only
+failure. Five of the six were followed by a run made because of the red: 44978559642 (an empty
+commit on #400), 45239059571 (#410 entering the merge queue again after the red ejected it),
+45291107344 (#412), 45364092561 (#411) and 45384932886 (#413). The push run on `master`,
+45019915010, was not run again.
 
 ## Related, not the same
 
 - **`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`**
   (`findings/P2_correctness_202609090020_pr5s-census-sampler-kills-gits-launcher-on-windows.md`)
   is the launcher cause: `SampledChild::spawn` runs `git` by name, so on Windows the kill can end
-  the launcher and not Git. Its fingerprints are recovery failures at `Worktree.Add` on the
-  self-hosted guest (`test (winguest)`): a forced removal denied access to a registration's
-  `locked`, and `record.recovered` failing. This one is a classifier refusal at
+  the launcher and not Git. Its first three fingerprints, on the self-hosted guest
+  (`test (winguest)`), are recovery failures at `Worktree.Add`: a forced removal denied access to a
+  registration's `locked`, and `record.recovered` failing. The hosted-runner fingerprints that row
+  gained on 2026-11-24 include a forced removal during `ProposalCherryPick`'s sampling, refused
+  with os error 32, which is still a recovery failure. This one is a classifier refusal at
   `ProposalCherryPick`, on a GitHub-hosted runner, raised before any recovery was asserted. It
   belongs to that finding only if the kill is shown to have reached only the launcher. Routing the
   spawn through `fixture::sampled_git`, the change that finding prescribes, is not shown to cure
