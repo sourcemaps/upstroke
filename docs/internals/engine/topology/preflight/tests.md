@@ -178,7 +178,9 @@ The sentence every profile refusal ends in, on a fresh run and on a resume
 alike: no agent CLI was started and no event was appended, and the operator
 corrects the pools file or the environment and runs the same command again. It
 carries the full stop that ends the sentence before it, so `ends_with` holds the
-closing to being a sentence of its own. Spelled out here rather than read from
+closing to being a sentence of its own, and none at its own end, so `ends_with`
+also holds the message to `Display` text's lack of a trailing period
+(`standards/07`). Spelled out here rather than read from
 `profile_refused`, so a change of wording is a change to this test as well, and
 to `engine::tests`' `assert_a_profile_refusal_created_nothing`, which spells the
 same closing for the fresh path. It replaces `refused`'s closing, which said the

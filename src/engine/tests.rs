@@ -27563,7 +27563,7 @@ fn assert_a_profile_refusal_created_nothing(
     assert!(
         said.ends_with(
             ". No agent CLI was started and no event was appended; correct the pools file or \
-             the environment and run the same command again."
+             the environment and run the same command again"
         ),
         "a profile refusal ends in its own closing sentence, true of a fresh run: {said}"
     );

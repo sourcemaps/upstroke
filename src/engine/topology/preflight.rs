@@ -253,7 +253,7 @@ fn profile_refused(what: &str) -> UpstrokeError {
     UpstrokeError::Refused {
         message: format!(
             "pre-flight: {what}. No agent CLI was started and no event was appended; correct \
-             the pools file or the environment and run the same command again."
+             the pools file or the environment and run the same command again"
         ),
     }
 }
@@ -270,7 +270,7 @@ fn refused(policy: &RunnerPolicy, what: &str) -> UpstrokeError {
         message: format!(
             "pre-flight: {what}. It was probed inside {boundary}, which is the only observation \
              of shell and CLI availability inside this run's boundary; nothing was spawned for \
-             the run and no recovery event was appended, so the run is resumable."
+             the run and no recovery event was appended, so the run is resumable"
         ),
     }
 }

@@ -379,7 +379,8 @@ measured exactly that before the repair: each run completed.
 The refusal shape every profile refusal takes: `pre-flight: `, what is wrong,
 and one closing sentence of its own — "No agent CLI was started and no event
 was appended; correct the pools file or the environment and run the same
-command again."
+command again". Like [`refused`]'s, it ends without a full stop, since
+`Display` text takes no trailing period (`standards/07`).
 
 Not [`refused`], whose closing describes a probe: what was probed and inside
 which boundary, and that the run is resumable. A profile refusal probes nothing,

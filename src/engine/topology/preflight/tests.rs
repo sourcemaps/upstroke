@@ -539,7 +539,7 @@ fn profiled_preflight<'a>(
 
 const PROFILE_REFUSAL_CLOSING: &str = concat!(
     ". No agent CLI was started and no event was appended; ",
-    "correct the pools file or the environment and run the same command again."
+    "correct the pools file or the environment and run the same command again"
 );
 
 fn refused_before_anything_ran(
