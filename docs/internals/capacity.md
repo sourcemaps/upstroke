@@ -36,6 +36,18 @@ and reads the provider reports the capacity tracker stored.
 the one module that speaks HTTP, is `src/tracker.rs`, and nothing in this
 module or its children starts its transport: they read what it wrote.
 
+What it writes is one report per pool, in its store under the machine
+directory (`~/.upstroke/capacity/usage/` by default), through
+`tracker::publish`. Each is written to a staging file beside its destination
+and renamed into place, so a reader finds the old report or the new one and
+never part of either, and a failed write or rename leaves no staging file:
+`publish` removes it after either. Until 2026-11-24 only a failed rename
+removed it, and a write that failed part way, at a full disk or a file-size
+limit, left what it had written in the store as a `.staged-*.tmp`, one more
+for every refresh that failed the same way. A write that fails before
+creating the file leaves nothing to remove, and that is no failure to clean
+up.
+
 §13's sequencing is the reason no estimate routes anything yet: v0.1 ships
 the estimator so `upstroke capacity` and the dry-run preview can show what each
 strategy *would* do, and v0.2 wires it into the binder once the estimates
