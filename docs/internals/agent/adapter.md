@@ -8,79 +8,63 @@ as it is in the source, so the heading is the grep string that finds the code.
 
 ## Module
 
-The agent adapter contract and its registry: `AuthState`, `Discovery`, `Caps` and `TaskRun`; `probe_workspace` and `probe_request`; the `AgentAdapter` and `AdapterSource` traits, `BuiltinAdapters`, `ADAPTERS` and `by_id`; the help-text readers; and the tests that hold the three shipped adapters to one supervision table. Every item was `src/agent/mod.rs`'s until #318's third round moved it here, unchanged, and re-exported it from the root (`pub use adapter::*`), so `upstroke::agent::AgentAdapter` and the rest resolve as they did.
+The agent adapter contract and its registry: `AuthState`, `Discovery`, `Caps` and `TaskRun`;
+`probe_workspace` and `probe_request`; the `AgentAdapter` and `AdapterSource` traits,
+`BuiltinAdapters`, `ADAPTERS` and `by_id`; the help-text readers; the rate-limit and reset readers;
+and the tests that hold the three shipped adapters to one supervision table. `src/agent/mod.rs`
+re-exports it (`pub use adapter::*`), so `upstroke::agent::AgentAdapter` and the rest resolve at
+the root.
 
 ## `#![forbid(`
 
-The three governed lints are `forbid` here: nothing in this file, its test
-modules included, allows a governed lint (the file has no row in
-`effects/allowlist.toml`), so the fence compiles, and under it a downgrade
-however written or generated is `E0453` at the lint gate. The file exists so
-that the module root can hold nothing but declarations and re-exports: a
-`deny` at the root is a level an inner `allow` lowers, and a root that holds
-production code under a `deny` was an open host for the route
-`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL` recorded --
-executed on the fenced tree in #318's third round and closed by this move
-(`~/orch-pr10/repair-318-r3-evidence/plan-class/M4c-*`).
+The three governed lints are `forbid` here: nothing in this file, its test modules included,
+allows a governed lint (the file has no row in `effects/allowlist.toml`), so the fence compiles,
+and under it a downgrade however written is `E0453` at the lint gate. The code lives here so that
+the module root holds only declarations and re-exports: a `deny` at the root is a level an inner
+`allow` lowers, and production code under a root `deny` is the route
+`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-CALL` recorded.
 
 ## `pub enum AuthState {`
 
 Whether the vendor's CLI says it is signed in.
 
-Three states, not two. "Could not tell" must never render as "not
-connected": `upstroke connect` writes a file an operator then trusts, and a
-confident *wrong* "you are not logged in" sends them to re-authenticate an
-account that was fine.
+Three states, not two. "Could not tell" must never render as "not connected": `upstroke connect`
+writes a file an operator then trusts, and a confident *wrong* "you are not logged in" sends them
+to re-authenticate an account that was fine.
 
 ## `impl std::fmt::Display for AuthState {`
 
-One rendering, used by `connect` and `capacity` alike.
-
-There were two: a terse `Display` here and a fuller `describe_auth` in
-`connect`, so the same fact read as "not authenticated" from one command and
-"NOT signed in — log in with the vendor's own CLI before running" from the
-other, and an operator comparing them could not tell whether they described
-the same thing. The rule this enum exists to enforce — "could not tell"
-never renders as "not connected" — was then enforced in one place and merely
-observed in the other.
+One rendering, used by `connect` and `capacity` alike, so the same fact reads the same from both
+and "could not tell" never renders as "not connected" in either.
 
 ## `pub struct Discovery {`
 
-What one agent's CLI could be got to say about itself, without the network
-and without touching a credential (invariants 2 and 5).
+What one agent's CLI could be got to say about itself, without the network and without touching
+a credential (invariants 2 and 5).
 
 ## `pub struct Discovery` › `pub models: Vec<String>,`
 
-The models the CLI itself advertises.
-
-Empty on Claude Code and Copilot today: as of Aug 2026 neither offers
-non-interactive model enumeration. Codex exposes its local roster via
-`debug models`; its adapter validates model × effort support at probe
-and reports the slugs here. The seam lets every real listing be
-cross-checked against the shipped catalog; [`Caps::model_list`] is the
-gate.
+The models the CLI itself advertises. Empty on Claude Code and Copilot, whose adapters list none.
+Codex's adapter reads its local roster from `debug models` and reports the slugs here; `connect`
+and `capacity` check a listing against the shipped catalog.
 
 ## `pub struct Discovery` › `pub shape: Option<PoolKind>,`
 
-§13's pool-kind hint, read from whatever the CLI says about the account
-it is signed into. `None` means it said nothing conclusive, and the
-caller picks a documented default rather than guessing.
+§13's pool-kind hint, read from whatever the CLI says about the account it is signed into. `None`
+means it said nothing conclusive, and the caller picks a documented default rather than guessing.
 
 ## `pub struct Discovery` › `pub notes: Vec<String>,`
 
-Everything the operator should know about how this was worked out —
-including what could not be.
+What the operator should know about how this was worked out, including what could not be.
 
 ## `impl Discovery` › `pub fn unknown() -> Self {`
 
-What an adapter that does not implement discovery reports: nothing,
-said out loud.
+What an adapter that does not implement discovery reports: nothing, said out loud.
 
 ## `pub struct Caps {`
 
-Capabilities discovered by `probe()` at pre-flight (§14). Copilot's CLI
-has shipped breaking flag removals, so capability probing is load-bearing,
-not decorative.
+Capabilities discovered by `probe()` at pre-flight (§14). Copilot's CLI has shipped breaking flag
+removals, so capability probing is load-bearing, not decorative.
 
 ## `pub struct Caps` › `pub version: String,`
 
@@ -88,9 +72,8 @@ Version string as reported by the binary, best-effort.
 
 ## `pub struct TaskRun {`
 
-Everything an adapter needs to build one attempt's subprocess. The engine
-materializes the prompt (§14: body + acceptance + artifacts + conventions
-brief) — adapters never re-derive it.
+Everything an adapter needs to build one attempt's subprocess. The engine materializes the prompt
+(§14: body + acceptance + artifacts + conventions brief); adapters never re-derive it.
 
 ## `pub struct TaskRun` › `pub prompt: String,`
 
@@ -102,54 +85,41 @@ Working directory for the subprocess (the workspace repo root).
 
 ## `pub struct TaskRun` › `pub gate_cmds: Vec<String>,`
 
-The gate commands this profile may run, and nothing else (§20). Empty
-for reviewers, which run nothing at all.
-
-Carried on the run rather than only handed to
-[`AgentAdapter::materialize_permissions`] because not every agent has a
-settings file to put them in: Copilot's permission surface is argv, so
-its `build` needs them at command-construction time.
+The gate commands this profile may run, and nothing else (§20). Empty for reviewers, which run
+nothing at all. Carried on the run rather than only handed to `materialize_permissions` because
+Copilot's permission surface is argv, so its `build` needs them at command-construction time.
 
 ## `pub struct TaskRun` › `pub resume_session: Option<String>,`
 
-Same-rung retry: resume this session with feedback instead of starting
-fresh (§11.4).
+Same-rung retry: resume this session with feedback instead of starting fresh (§11.4).
 
 ## `pub struct TaskRun` › `pub settings_path: Option<PathBuf>,`
 
 Per-run permission settings file, materialized by the engine from
-[`claude::permission_settings`]-style generators (§20).
+`claude::permission_settings`-style generators (§20).
 
 ## `pub fn probe_workspace() -> PathBuf {`
 
-Where a pre-flight process runs.
-
-The coordinator's own working directory, which is exactly what a probe
-inherited before probes went through the Runner — a probe asks a CLI about
-itself and has no workspace of its own. Absolute rather than `"."` because
-`runner::host::HostRunner::run` clears the environment, and on Windows the
-`=X:` drive-relative variables go with it; every process it starts is given
-an absolute directory so none of them can be resolving a drive-relative
+Where a pre-flight process runs: the coordinator's own working directory, since a probe asks a CLI
+about itself and has no workspace of its own. Absolute (falling back to `"."` only when the working
+directory cannot be read) because `runner::host::HostRunner::run` clears the environment, and on
+Windows the `=X:` drive-relative variables go with it, so a probe must not resolve a drive-relative
 path.
 
 ## `pub fn probe_request(`
 
-One pre-flight process of `agent`, as a [`RunnerRequest`].
+One pre-flight process of `agent`, as a `RunnerRequest`.
 
-`decisions.pr_sequence[5].scope`: "**probes**, workers, gates, reviews go
-through the Runner", and INV-18 accounts an agent probe the way it accounts
-an attempt — "every agent CLI invocation **incl. agent probes** acquires
-its atomic {agent, pool?} pair" — so the role is `probe(<agent>)`, it is
-slotted, and `agent` is set so `host-v1` supplies that agent's credential
-location (a probe that could not see the credential directory would certify
-a CLI in a state the attempt never runs in).
+Probes go through the Runner, as workers, gates and reviews do (design/21's runner commitments:
+"Probes run through that same runner"). An agent probe is accounted the way an attempt is: the
+role is `probe(<agent>)`, it is slotted, and `agent` is set so `host-v1` supplies that agent's
+credential location (a probe that could not see the credential directory would certify a CLI in a
+state the attempt never runs in). The wording quoted for this was the retired design packet's
+`decisions.pr_sequence[5].scope` and its `INV-18`, which are not in this repository.
 
-`ordinal` is **which of this adapter's pre-flight processes this is**. A
-pre-flight that runs `--version` and then `--help` runs two processes, and
-"unique per process" is the packet's property, so each adapter fixes a
-named ordinal per step rather than counting: a counter would renumber every
-later step the first time an earlier one was skipped (codex's binary
-resolution caches, so its second call skips one), and the identities of one
+`ordinal` is **which of this adapter's pre-flight processes this is**. Invocation identities are
+unique per process, so each adapter fixes a named ordinal per step rather than counting: a counter
+would renumber every later step whenever an earlier one was skipped, and the identities of one
 machine's pre-flight would stop being a function of the pre-flight.
 
 ### Errors
@@ -159,18 +129,15 @@ identity — see [`InvocationId::probe`]. Every shipped id is `[a-z-]`.
 
 ## `pub trait AgentAdapter: Send + Sync {`
 
-DESIGN.md §8 `AgentAdapter`.
+design/08's `AgentAdapter`.
 
 ## `pub trait AgentAdapter: Send + Sync` › `fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError>;`
 
-Locate the binary and report version + capabilities. Ran at pre-flight;
-a missing binary is a refusal to start, not a task failure (§19).
-
-Takes the runner because DESIGN.md:209 does — `probe(&self, runner:
-&dyn Runner)`, annotated "probes the boundary that will execute" — and
-DESIGN.md:612 says why: "Probes run through that same runner, or
-pre-flight could certify a host CLI/version different from the one the
-attempt executes."
+Locate the binary and report version + capabilities. Ran at pre-flight; a missing binary is a
+refusal to start, not a task failure (§19). Takes the runner because design/08's signature does,
+"probes the boundary that will execute", and design/21 says why: "Probes run through that same
+runner, or pre-flight could certify a host CLI/version different from the one the attempt
+executes."
 
 ### Errors
 
@@ -179,14 +146,10 @@ or a runner refusal.
 
 ## `pub trait AgentAdapter: Send + Sync` › `fn build(&self, run: &TaskRun) -> Result<CommandSpec, UpstrokeError>;`
 
-Turn one attempt into a **data-only** [`CommandSpec`].
-
-DESIGN.md:117: an adapter "does not decide where the process runs". A
-`build` that returned a live `std::process::Command` could carry a cwd,
-an environment, or a spawn past the runner, and PR6's container runner
-would inherit the hole — so what comes back is a value with a program,
-arguments, an environment **overlay** and stdin bytes, and nothing that
-names a machine.
+Turn one attempt into a **data-only** `CommandSpec`. An adapter "does not decide where the process
+runs" (design/06): a live `std::process::Command` could carry a cwd, an environment, or a spawn
+past the runner, so what comes back is a program, arguments, an environment **overlay** and stdin
+bytes, and nothing that names a machine.
 
 ### Errors
 
@@ -195,7 +158,7 @@ be located.
 
 ## `pub trait AgentAdapter: Send + Sync` › `fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError>;`
 
-Read one attempt's process output as an [`Outcome`].
+Read one attempt's process output as an `Outcome`.
 
 ### Errors
 
@@ -203,24 +166,19 @@ Output this adapter cannot interpret at all.
 
 ## `pub trait AgentAdapter: Send + Sync` › `fn discover`
 
-§13's `upstroke connect`: ask this agent's CLI about the account behind
-it — signed in or not, what shape its quota is, which models it offers.
+§13's `upstroke connect`: ask this agent's CLI about the account behind it — signed in or not,
+what shape its quota is, which models it offers.
 
-Subprocesses the vendor's own CLI and parses what came back. No HTTP, no
-token ever handled, no credential file read: a vendor CLI talking to its
-own vendor is the design (invariant 2), the same posture §9 sets for
-plan importers.
+Subprocesses the vendor's own CLI and parses what came back. No HTTP, no token ever handled, no
+credential file read: a vendor CLI talking to its own vendor is the design (invariant 2), the same
+posture §9 sets for plan importers.
 
-Takes the `Caps` the caller already probed rather than re-probing:
-discovery always runs beside a probe (a CLI that cannot report its own
-version is in no state to be asked about its account), and an adapter
-that called `probe()` again spawned `--version` and `--help` a second
-time — four subprocesses where two would do, each carrying the probe
-timeout.
+Takes the `Caps` the caller already probed rather than re-probing: discovery always runs beside a
+probe (a CLI that cannot report its own version is in no state to be asked about its account), and
+probing again would spawn the probe's processes a second time, each carrying the probe timeout.
 
-The default reports nothing rather than being required, so an adapter
-cannot silently claim discovery it does not do — [`Discovery::unknown`]
-is an honest "could not tell", and every consumer treats it as one.
+The default reports nothing rather than being required, so an adapter cannot silently claim
+discovery it does not do: `Discovery::unknown` is an honest "could not tell".
 
 ### Errors
 
@@ -229,47 +187,39 @@ never fails: it asks nothing.
 
 ## `pub trait AgentAdapter: Send + Sync` › `fn stdin_payload<'a>(&self, run: &'a TaskRun) -> &'a str {`
 
-What to write to the child's stdin. Delivery is the adapter's call:
-CLIs that take the prompt as an argument instead return empty here.
+What to write to the child's stdin. Delivery is the adapter's call: CLIs that take the prompt as
+an argument instead return empty here.
 
 ## `pub trait AgentAdapter: Send + Sync` › `fn materialize_permissions(`
 
-Materialize this agent's permission surface (§20) into `dir`, returning
-the file the command should reference. Claude Code writes a settings
-JSON; Copilot will encode permissions as argv flags and write nothing.
+Materialize this agent's permission surface (§20) into `dir`, returning the file the command
+should reference. Claude Code writes a settings JSON and returns it; Copilot and Codex take
+permissions as argv flags, write an audit-only JSON record and return `None`, as the default does
+without writing anything.
 
 ## `pub trait AdapterSource {`
 
-Where a caller finds agent adapters. Injectable so the engine, `connect`
-and `capacity` are all fully testable without any real agent CLI on the
-machine.
-
-Lives here rather than in `engine` because resolving an adapter id has
-nothing to do with running a plan: `capacity` documents itself as a pure
-estimator over plain values, and `connect` executes nothing at all, yet both
-had to import the execution engine for this two-line trait.
+Where a caller finds agent adapters. Injectable so the engine, `connect` and `capacity` are
+testable without any real agent CLI on the machine. Lives here rather than in `engine` because
+resolving an adapter id has nothing to do with running a plan.
 
 ## `pub trait AdapterSource` › `fn shared(&self) -> Option<Arc<dyn AdapterSource + Send + Sync>> {`
 
 An owned, thread-shareable handle on the same registry, or `None`.
 
-The schema-4 coordinator (`engine::topology::coordinator`) runs each
-pipeline on a thread of its own and hands every one an
-`Arc<dyn AdapterSource + Send + Sync>`, while the public entry points
-(`run_with`, `run_harness`, `resume_with`, `resume_harness`) take a borrowed
-`&dyn AdapterSource`. A borrow cannot become an owned, `'static` handle, so
-a source says whether it can give one. The default is `None`: a test
-double that holds borrowed state, or one that is not `Sync`, keeps
-compiling unchanged and simply cannot be shared. The production entry
-(`engine::topology::entry`) refuses a run wider than one before any lock
-when its source answers `None`, and drives a width-1 run on the
-single-threaded step loop instead (PR12's D4).
+The schema-4 coordinator (`engine::topology::coordinator`) runs each pipeline on a thread of its
+own and hands every one an `Arc<dyn AdapterSource + Send + Sync>`, while the public entry points
+(`run_with`, `run_harness`, `resume_with`, `resume_harness`) take a borrowed `&dyn AdapterSource`.
+A borrow cannot become an owned, `'static` handle, so a source says whether it can give one. The
+default is `None`: a test double that holds borrowed state, or one that is not `Sync`, keeps
+compiling and simply cannot be shared. The production entry (`engine::topology::entry`) refuses a
+run wider than one before any lock when its source answers `None`, and drives a width-1 run on the
+single-threaded step loop instead.
 
 ## `impl AdapterSource for BuiltinAdapters` › `fn shared(&self) -> Option<Arc<dyn AdapterSource + Send + Sync>> {`
 
-The built-in registry is a unit struct over a `static` table, so sharing it
-is a fresh `Arc` of the same zero-sized value: every handle resolves every
-id to the same `&'static dyn AgentAdapter`.
+The built-in registry is a unit struct over a `static` table, so sharing it is a fresh `Arc` of
+the same zero-sized value, and every handle resolves an id to the same `&'static dyn AgentAdapter`.
 
 ## `pub static ADAPTERS: &[&dyn AgentAdapter] = &[`
 
@@ -277,93 +227,64 @@ Registry in routing order; ids match `WorkerProfile.agent`.
 
 ## `pub(crate) fn missing_effort_levels(help: &str) -> Vec<Effort> {`
 
-Shared effort levels the help entry for `--effort` actually advertises.
-
-Looking only for the flag proves too little: several CLI versions exposed
-`--effort` with a narrower enum. The option's own wrapped help block is
-parsed so unrelated words elsewhere in `--help` cannot masquerade as a
-supported value.
+The shared effort levels the help entry for `--effort` does not advertise: all of them when help
+has no `--effort` line. Looking only for the flag proves too little, since CLI versions have
+exposed `--effort` with a narrower enum. The option's own wrapped help block is parsed so unrelated
+words elsewhere in `--help` cannot masquerade as a supported value.
 
 ## `pub(crate) fn advertises_flag(help: &str, flag: &str) -> bool {`
 
-Whether help advertises `flag` as a whole option token.
-
-Short flags need this instead of substring search: `-p` occurs inside
-`--permission-mode`, and `-s` inside several unrelated long options.
+Whether help advertises `flag` as a whole option token. Short flags need this instead of substring
+search: `-p` occurs inside `--permission-mode`.
 
 ## `pub fn looks_rate_limited(text: &str) -> bool {`
 
-Rate-limit signals are ground truth for the capacity engine (§13), so both
-adapters read from one vocabulary rather than two that drift apart.
+Rate-limit signals are ground truth for the capacity engine (§13), so the shipped adapters read
+from one vocabulary rather than several that drift apart. The twelve phrases cover the
+subscription-window wording Claude Code prints ("5-hour limit reached", "Weekly limit reached"),
+Copilot's credit and premium-request wording (§13's two billing shapes), and API-level errors
+underneath either.
 
-Phrases cover the subscription-window wording Claude Code prints ("5-hour
-limit reached", "Weekly limit reached"), Copilot's credit and premium-request
-wording (§13's two billing shapes), and API-level errors underneath either.
+None of the twelve matches Claude Code's newer wording, `You've hit your 5-hour limit · resets
+5:30am (UTC)`, so one rule sits beside the phrases, in `hits_a_quota_window`: the text, in lower
+case, contains "hit your " followed immediately by a quota window and then " limit" as a whole
+word (the boundary is set out under `after_a_whole_limit`). Three windows signal on their own: a
+number of hours, written as one or more ASCII digits and then "-hour" ("5-hour"); "session"; and
+"weekly". A fourth form signals only with a reset: one of the names of Claude's model families,
+"Opus", "Sonnet", "Haiku" or "Fable", when the next word after "limit" is "resets" ("hit your Fable
+limit · resets Nov 14, 9am (UTC)"). The names are compared in lower case, like the rest of the
+rule. Every occurrence of "hit your " is checked, not only the first, so an ordinary "the patch hit
+your branch" earlier in the text does not hide a limit message after it. "hit your usage limit"
+needs no window: "usage limit" is one of the twelve phrases.
 
-Claude Code has since changed that wording. In run
-`01M740JX5N8HB94RNC7W2MM777` (2026-11-11), the CLI exited with code 1 and
-the event log recorded `You've hit your 5-hour limit · resets 5:30am (UTC)`.
-None of the twelve phrases matches that text. Before this rule existed,
-twenty-one attempts in that run were read as `AgentError` and spent an
-attempt each, when they should have been read as `RateLimited` and deferred.
-Twelve tasks parked without a commit.
+The rule is narrow on purpose. A rate-limit signal is ground truth about capacity (§13): the
+ladder does not count the attempt, defers it, and after three deferrals asks a human. So "You've
+hit your context-window limit", "hit your rate of change limit", "hit your token limit", "hit your
+context limit · resets after compaction", "hit your request limit · resets 9am (UTC)" and a bare
+"hit your limit" do not signal. They are task failures, to be retried or escalated like any other.
 
-So one rule sits beside the phrases, in `hits_a_quota_window`: the text, in
-lower case, contains "hit your " followed immediately by a quota window and
-then " limit" as a whole word (the boundary is set out in the next section).
-There are three windows that signal on their own: a number of hours, written
-as one or more ASCII digits and then "-hour" ("5-hour"); "session"; and
-"weekly". A fourth form signals only with a reset: one of the names of
-Claude's model families, "Opus", "Sonnet", "Haiku" or "Fable", when the
-next word after "limit" is "resets" ("hit your Fable limit · resets Nov 14,
-9am (UTC)"). Like the rest of the rule, the names are compared in lower
-case, so "OPUS" and "opus" count as well. Every occurrence of "hit your " is
-checked, not only the first, so
-an ordinary "the patch hit your branch" earlier in the text does not hide a
-limit message after it. "hit your usage limit" needs no window: "usage limit"
-is one of the twelve phrases.
-
-The rule is narrow on purpose. A rate-limit signal is ground truth about
-capacity (§13): the ladder does not count the attempt, defers it, and after
-three deferrals asks a human. So "You've hit your context-window limit",
-"hit your rate of change limit", "hit your token limit", "hit your context
-limit · resets after compaction", "hit your request limit · resets 9am
-(UTC)" and a bare "hit your limit" do not signal. They are task failures, to
-be retried or escalated like any other.
-
-The rule splits the already lower-cased text on "hit your " and reads each
-piece with `trim_start_matches`, `strip_prefix`, `get` and `starts_with`.
-Those return slices of the same string or `None`, so it
-allocates nothing more, and nothing in it indexes or unwraps, so it cannot
+The rule splits the already lower-cased text on "hit your " and reads each piece with
+`trim_start_matches`, `strip_prefix`, `get` and `starts_with`. Those return slices of the same
+string or `None`, so it allocates nothing more, and nothing in it indexes or unwraps, so it cannot
 panic.
 
-Three forms have been observed. The five-hour form is the one from run
-`01M740JX5N8HB94RNC7W2MM777` above (2026-11-11, exit code 1). The session
-form, `You've hit your session limit`, is in `48f2af7a:reviews/FINDINGS.md`, in the
-record of a worker that returned rc=1 with that message while its wrapper
-reported success. The model form, `You've hit your Fable limit · resets Nov
-14, 9am (UTC)`, was printed on the build machine on 2026-11-12, when one
-model's weekly allowance was spent. The weekly form is covered on the
-expectation that it is worded alike. It has not been observed. A limit
-message in any other wording is not recognised and is read as `AgentError`.
-That spends an attempt, which is the safer mistake: a false rate-limit
-signal would tell the capacity engine an untouched pool is exhausted.
+The five-hour, session and model forms were seen from Claude Code; the weekly form has not been,
+and is covered on the expectation that it is worded alike. A limit message in any other wording is
+not recognised and is read as `AgentError`. That spends an attempt, which is the safer mistake: a
+false rate-limit signal would tell the capacity engine an untouched pool is exhausted.
 
-Only ever consulted for a FAILED attempt: a successful task *about* rate
-limiting ("added backoff for 429 responses") must never be read as the pool
-being exhausted, or verified work gets rolled back.
+Consulted only for a failed attempt: a successful task *about* rate limiting ("added backoff for
+429 responses") must never be read as the pool being exhausted, or verified work gets rolled back.
 
 ## `fn hits_a_quota_window(lower: &str) -> bool {`
 
-The quota-window rule described in the section above: some piece after
-"hit your " starts with a quota window and its limit, as
-`after_a_quota_window` reads it.
+The quota-window rule described in the section above: some piece after "hit your " starts with a
+quota window and its limit, as `after_a_quota_window` reads it.
 
 ## `fn after_a_quota_window(after: &str) -> Option<&str> {`
 
-What follows " limit", when `after`, the lower-cased text after a
-"hit your ", starts with a quota window and its limit; otherwise `None`. It
-is read one of two ways:
+What follows " limit", when `after`, the lower-cased text after a "hit your ", starts with a quota
+window and its limit; otherwise `None`. It is read one of two ways:
 
 - If it starts with ASCII digits, the window is those digits and "-hour".
 - Otherwise the window is the run of ASCII letters it starts with.
@@ -372,141 +293,102 @@ is read one of two ways:
   reset in what follows the limit. Any other word, and an empty run, gives
   `None`.
 
-Either way the window must be followed by " limit" as a whole word, which
-`after_a_whole_limit` checks. The window is one word: "context window" and
-"context-window" stop at the space or the hyphen, which is not " limit", and
-"fable4" stops at the digit. So none of them signals, with a reset or
-without.
+Either way the window must be followed by " limit" as a whole word, which `after_a_whole_limit`
+checks. The window is one word: "context window" and "context-window" stop at the space or the
+hyphen, which is not " limit", and "fable4" stops at the digit. So none of them signals, with a
+reset or without.
 
-It is one function, rather than the body of `hits_a_quota_window`, so that
-`the_limits_reset` recognises exactly the limits that signal, and nothing
-else, when it looks for the reset that follows one. What it returns is a
-suffix of `after`, so a caller that knows where `after` ends knows where the
-limit ends.
+It is one function, rather than the body of `hits_a_quota_window`, so that `the_limits_reset`
+recognises exactly the limits that signal, and nothing else, when it looks for the reset that
+follows one. What it returns is a suffix of `after`, so a caller that knows where `after` ends
+knows where the limit ends. The window is `after` cut short by the length of what follows it, with
+`get`, not stripped with `strip_suffix`: from `the_limits_reset` the rest runs to the end of the
+text, and comparing it byte by byte would cost the rest of the text at every limit.
 
-The window is `after` cut short by the length of what follows it, with
-`get`. It was `after` with that rest stripped by `strip_suffix`, which
-compares the whole rest byte by byte; from `the_limits_reset` the rest runs
-to the end of the text, so that cost the rest of the text at every limit.
+A model name signals only with a reset because, unlike "session" and "weekly", it is not a window:
+a message that only names a model says what was spent, and the reset is what says the allowance
+comes back. "session", "weekly" and the hours window signal with or without a reset.
 
-The model form was added after the pull request that reads resets from limit
-messages. Its parser test read the observed Fable message with
-`reset_at_from_limit_message` directly, and nothing checked that the message
-was a rate limit at all. It was not: none of the twelve phrases matches it,
-and this rule then accepted only the three windows. So an attempt that
-printed it was read as `AgentError`, the coordinator never recorded
-`pool_exhausted`, and the ladder kept spending attempts against an exhausted
-pool.
+The names are a closed list: "opus", "sonnet", "haiku" and "fable", and nothing else. This matcher
+is shared by every agent, and a reset alone does not make a limit a quota: a Copilot or Codex
+message `You've hit your context limit · resets after compaction` read as a rate limit would make
+the coordinator record `pool_exhausted` for a pool that is not, and the ladder defer the task three
+times and ask a human, where it should retry or escalate. "context", "token" and "request" limits
+are about the prompt or the call, and waiting fixes none of them.
 
-A model name signals only with a reset because, unlike "session" and
-"weekly", it is not a window: a message that only names a model says what
-was spent, and the reset is what says the allowance comes back. "session",
-"weekly" and the hours window are unchanged, and still signal with or
-without a reset.
-
-The names are a closed list: "opus", "sonnet", "haiku" and "fable", and
-nothing else. When the model form was first added it took any one word of
-ASCII letters before " limit", so long as a reset followed. A round-three
-review found that too wide. This matcher is shared by every agent, not only
-Claude Code, and a reset alone does not make a limit a quota: a Copilot or
-Codex message `You've hit your context limit · resets after compaction` read
-as a rate limit, so the coordinator recorded `pool_exhausted` for a pool that
-was not, and the ladder deferred the task three times and asked a human,
-where it should have retried or escalated. "context", "token" and "request"
-limits are about the prompt or the call, and waiting fixes none of them.
-
-The list is closed, rather than open with a list of words to refuse, because
-the mistakes are not alike. A model limit message with a name not in the
-list is read as `AgentError` and spends an attempt, the safer mistake set out
-above. A word wrongly let in tells the capacity engine that an untouched pool
-is exhausted. And the words that are not model names cannot be listed, while
-the model names can: they are the names of Claude's model families, the only
-models whose own allowance Claude Code reports in this form. A new family
-name has to be added here by hand, with a test, when it is first seen.
+The list is closed, rather than open with a list of words to refuse, because the mistakes are not
+alike. A model limit message with a name not in the list is read as `AgentError` and spends an
+attempt, the safer mistake set out above. A word wrongly let in tells the capacity engine that an
+untouched pool is exhausted. And the words that are not model names cannot be listed, while the
+model names can: they are the names of Claude's model families, the only models whose own allowance
+Claude Code reports in this form. A new family name has to be added here by hand, with a test, when
+it is first seen.
 
 ## `fn after_a_whole_limit(window_end: &str) -> Option<&str> {`
 
-What follows " limit" right after a window, if "limit" is a whole word
-there. "limit" must end at the end of the text, or at a character that is
-not an ASCII letter, ASCII digit or underscore. A full stop, a space, a
-semicolon or the " · resets" of the observed five-hour message all end it;
-"limiter", "limitation" and "limited" do not, and give `None`.
+What follows " limit" right after a window, if "limit" is a whole word there. "limit" must end at
+the end of the text, or at a character that is not an ASCII letter, ASCII digit or underscore. A
+full stop, a space, a semicolon or the " · resets" of the observed five-hour message all end it;
+"limiter", "limitation" and "limited" do not, and give `None`. Without the boundary, a failed
+attempt whose error read `The request hit your session limiter and returned an internal error.`
+would be read as `RateLimited`: the ladder would not count it, defer it three times and ask a
+human, when a real failure should be retried or escalated.
 
-The boundary was added after a round-two review of the first form, which
-checked only that the rest began with " limit". That accepted "limiter",
-"limitation" and "limited" as well, so a failed attempt whose error read
-`The request hit your session limiter and returned an internal error.` was
-read as `RateLimited`: the ladder did not count it, deferred it three times
-and asked a human, when a real failure should be retried or escalated.
-
-The check strips " limit" with `strip_prefix` and asks `starts_with` whether
-the next character is a word character. Both work on slices of the same
-string, so the rule still allocates nothing more and cannot panic. The
-character test is ASCII only, like the lower-casing before it.
+The check strips " limit" with `strip_prefix` and asks `starts_with` whether the next character is
+a word character. Both work on slices of the same string, so the rule still allocates nothing more
+and cannot panic. The character test is ASCII only, like the lower-casing before it.
 
 ## `fn when_it_resets(after_limit: &str) -> Option<&str> {`
 
-What follows "resets " when the next word after the limit is "resets",
-followed by a space, as in " · resets Nov 14, 9am (UTC)"; otherwise `None`.
-Only characters that are neither letters, digits (in any script) nor
-underscores may come between: spaces, `·`, `∙`, punctuation. So "hit your
-token limit; the cache resets 9am (UTC)" does not count: the next word is
-"the".
+What follows "resets " when the next word after the limit is "resets", followed by a space, as in
+" · resets Nov 14, 9am (UTC)"; otherwise `None`. Only characters that are neither letters, digits
+(in any script) nor underscores may come between: spaces, `·`, `∙`, punctuation. So "hit your
+token limit; the cache resets 9am (UTC)" does not count: the next word is "the". The gap test uses
+Unicode letters and digits, not ASCII ones, so that a word in another script between "limit" and
+"resets" is a word and stops the match, rather than being skipped as punctuation.
 
-`after_a_quota_window` asks only whether there is one. The test there is for
-the word only, not for a reset that parses. A reset in another zone, which
-`reset_at_from_limit_message` refuses, still says the allowance comes back,
-so the message is still a rate limit; its `reset_at` is just unknown.
-"resets " with a space is the same word `reset_at_from_limit_message` looks
-for, and `the_limits_reset` uses what this returns as the reset to read. It was `says_when_it_resets`, which returned only whether; it returns
-the rest so that both read one rule for which reset belongs to the limit.
-
-The gap test uses Unicode letters and digits, not ASCII ones, so that a word
-in another script between "limit" and "resets" is a word and stops the
-match, rather than being skipped as punctuation.
+`after_a_quota_window` asks only whether there is one: the word, not a reset that parses. A reset
+in another zone, which `reset_at_from_limit_message` refuses, still says the allowance comes back,
+so the message is still a rate limit; its `reset_at` is just unknown. `the_limits_reset` uses what
+this returns as the reset to read, so both read one rule for which reset belongs to the limit.
 
 ## `pub fn names_a_quota_limit(text: &str) -> bool {`
 
-Whether the text holds a limit `reset_at_from_limit_message` would read a
-reset from: a "hit your" limit that `after_a_quota_window` accepts, the
-limits `hits_a_quota_window` signals on (see `the_limits_reset` for the one
-spelling where the two differ). It says nothing about whether that limit
-gave a reset, or whether the reset parses. The older "5-hour limit reached"
-and the other fixed phrases of `looks_rate_limited` are not such limits:
-they signal, but nothing in them says which reset is theirs.
+Whether the text holds a limit `reset_at_from_limit_message` would read a reset from: a "hit your"
+limit that `after_a_quota_window` accepts, the limits `hits_a_quota_window` signals on (see
+`the_limits_reset` for the one spelling where the two differ). It says nothing about whether that
+limit gave a reset, or whether the reset parses. The older "5-hour limit reached" and the other
+fixed phrases of `looks_rate_limited` are not such limits: they signal, but nothing in them says
+which reset is theirs.
 
-It exists for the coordinator, which has more than one text for a failure
-(the stderr that signalled the limit, then the reason) and must read the
-first that names a limit and only that one: a text with a limit whose reset
-is unreadable decides `None`, and the next text is read only when this one
-names no limit at all. It is `the_limits_reset` asked only whether it found
-a limit, so the two cannot disagree about what a limit is.
+The coordinator and `capacity` have more than one text for a failure (the limit message, then the
+reason) and read the first that names a limit and only that one: a text with a limit whose reset
+is unreadable decides `None`, and the next text is read only when this one names no limit at all.
+It is `the_limits_reset` asked only whether it found a limit, so the two cannot disagree about what
+a limit is.
 
 ## `pub fn reset_at_from_limit_message(text: &str, now_unix: u64) -> Option<String> {`
 
-When a usage limit says it lifts, read from the limit message itself, as an
-RFC 3339 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`). The coordinator records it as
-`reset_at` on the `pool_exhausted` event, and calls this only when the agent
-that failed is Claude Code: the shape below is Claude Code's, and another
-vendor's text that happens to fit it is not a reset this knows how to read.
+When a usage limit says it lifts, read from the limit message itself, as an RFC 3339 UTC
+timestamp (`YYYY-MM-DDTHH:MM:SSZ`). The coordinator records it as `reset_at` on the
+`pool_exhausted` event, and calls this only when the agent that failed is Claude Code: the shape
+below is Claude Code's, and another vendor's text that happens to fit it is not a reset this knows
+how to read.
 
-Two messages carry one. Both were printed by Claude Code on the build machine:
+Two messages carry one. Both were printed by Claude Code:
 
-- `You've hit your 5-hour limit · resets 5:30am (UTC)` (2026-11-11);
-- `You've hit your Fable limit · resets Nov 14, 9am (UTC)` (2026-11-12).
+- `You've hit your 5-hour limit · resets 5:30am (UTC)`;
+- `You've hit your Fable limit · resets Nov 14, 9am (UTC)`.
 
-So a reset is the word `resets` and a space, then an optional date, then a
-time of day, then a space and `(UTC)`. The date is a three-letter month
-(`Jan` to `Dec`), a space, a day of the month in one or two digits, a comma
-and a space. The time of day is an hour from 1 to 12 in one or two digits,
-optionally `:` and exactly two minute digits, then `am` or `pm`. `12am` is
-midnight and `12pm` noon. The spelling is matched exactly, case included, as
-it was printed.
+So a reset is the word `resets` and a space, then an optional date, then a time of day, then a
+space and `(UTC)`. The date is a three-letter month (`Jan` to `Dec`), a space, a day of the month
+in one or two digits, a comma and a space. The time of day is an hour from 1 to 12 in one or two
+digits, optionally `:` and exactly two minute digits, then `am` or `pm`. `12am` is midnight and
+`12pm` noon. The spelling is matched exactly, case included, as it was printed.
 
-Neither message gives a year, and the time-only one gives no date. Both are
-completed against `now_unix`, the moment the message is read, by one rule:
-the reset is the occurrence nearest to `now_unix`. There are three
-candidates, in order:
+Neither message gives a year, and the time-only one gives no date. Both are completed against
+`now_unix`, the moment the message is read, by one rule: the reset is the occurrence nearest to
+`now_unix`. There are three candidates, in order:
 
 - for a time only, that time yesterday, today and tomorrow;
 - for a month and day, that date at that time in the year before
@@ -514,249 +396,172 @@ candidates, in order:
   real date, such as 29 February in a common year, is not a candidate, and
   if none is, the answer is `None`.
 
-The candidate with the smallest absolute distance from `now_unix` is the
-reset, and on a tie the later one. So a message read well before its reset
-gets the coming one: `5:30am` read the evening before is the next morning's,
-and `Jan 2` read on 30 December is the coming 2 January. A message read just
-after its reset keeps its own reset, a moment in the past, rather than one a
-day or a year away: `5:30am` read at 05:30:01 is that morning's, and
-`Dec 31, 11pm` read at 00:30 on 1 January is the day before's, in the year
-before. Either way the reset is never more than half a day from `now_unix`
-for a time only, nor more than half a year for a date every year has.
-`Feb 29` is the exception, since at most one of the three years has it: read
-in 2027 it is 29 February 2028, more than a year ahead; read in 2029 it is
-29 February 2028, in the past; read in 2026, with no leap year among 2025,
-2026 and 2027, it is `None`.
+The candidate with the smallest absolute distance from `now_unix` is the reset, and on a tie the
+later one. So a message read well before its reset gets the coming one: `5:30am` read the evening
+before is the next morning's, and `Jan 2` read on 30 December is the coming 2 January. A message
+read just after its reset keeps its own reset, a moment in the past, rather than one a day or a
+year away: `5:30am` read at 05:30:01 is that morning's, and `Dec 31, 11pm` read at 00:30 on 1
+January is the day before's, in the year before. Either way the reset is never more than half a
+day from `now_unix` for a time only, nor more than half a year for a date every year has. `Feb 29`
+is the exception, since at most one of the three years has it: read in 2027 it is 29 February
+2028, more than a year ahead; read in 2029 it is 29 February 2028, in the past; read in 2026, with
+no leap year among 2025, 2026 and 2027, it is `None`.
 
-This rule replaced two, after the frontier review found a defect in each. A
-time only was the first such time at or after `now_unix`, so a message read
-a second after its reset was recorded a day ahead. A month and day was in
-`now_unix`'s year unless that was more than a day past, so the previous year
-was never a candidate and a `Dec 31` reset read on 1 January was recorded a
-year ahead.
+`None` means the text gave no reset this can stand behind: no recognised limit, no reset that
+belongs to one, a zone other than `(UTC)`, or any part of the limit's reset that does not parse (an
+hour outside 1 to 12, minutes outside 0 to 59 or not two digits, a month not in the list, a day the
+month does not have, a missing comma or space). A reset in another zone is refused rather than
+converted: converting `(Europe/London)` needs a time-zone database, which is a dependency, and a
+guess at the offset would be a wrong timestamp recorded as fact. `None` means the reset is
+unknown.
 
-`None` means the text gave no reset this can stand behind: no recognised
-limit, no reset that belongs to one, a zone other than `(UTC)`, or any part
-of the limit's reset that does not parse (an hour
-outside 1 to 12, minutes outside 0 to 59 or not two digits, a month not in
-the list, a day the month does not have, a missing comma or space). A
-reset in another zone is refused rather than converted: converting
-`(Europe/London)` needs a time-zone database, which is a dependency, and a
-guess at the offset would be a wrong timestamp recorded as fact. `None` is
-what `reset_at` held before this existed, and the estimate already says
-what it means: the reset is unknown.
-
-Which reset is read is decided before any of it is parsed, and only a reset
-the limit itself gives is ever read (`the_limits_reset`). A limit is one
-`hits_a_quota_window` would accept, and the reset it gives is:
+Which reset is read is decided before any of it is parsed, and only a reset the limit itself
+gives is ever read (`the_limits_reset`). A limit is one `hits_a_quota_window` would accept, and the
+reset it gives is:
 
 - `resets` as the next word after the limit, on the limit's line;
 - or, when nothing after the limit on its line is a `resets`, a `resets`
   that begins the very next line, as when the message is wrapped after
   "limit".
 
-If the text has several limits, the first that gives a reset is the one
-read. A reset anywhere else is not the limit's and is never read: not one
-with no limit before it, not one on a later line that does not directly
-follow the limit's, not one after another word on the limit's line ("the
-queue resets").
+If the text has several limits, the first that gives a reset is the one read. A reset anywhere
+else is not the limit's and is never read: not one with no limit before it, not one on a later line
+that does not directly follow the limit's, not one after another word on the limit's line ("the
+queue resets"). Claude Code's stderr can carry other lines before the limit message, and a reset
+taken from one of them would record another thing's reset as the pool's.
 
-So `MCP cache resets 9am (UTC)` on one line and `You've hit your 5-hour
-limit · resets 5:30am (UTC)` on the next give 05:30, in either order, and
-`You've hit your session limit` with `resets 5:30am (UTC)` on the next line
-gives 05:30 whatever other lines the text has. The two observed messages,
-each alone, read as they always have. `MCP cache resets 5:30am (UTC)` alone
-gives `None`, as does the session limit with that reset a line further
-down.
+So `MCP cache resets 9am (UTC)` on one line and `You've hit your 5-hour limit · resets 5:30am
+(UTC)` on the next give 05:30, in either order, and `You've hit your session limit` with `resets
+5:30am (UTC)` on the next line gives 05:30 whatever other lines the text has. `MCP cache resets
+5:30am (UTC)` alone gives `None`, as does the session limit with that reset a line further down.
 
-The chosen reset is the only one parsed. When the limit's reset is
-malformed or in another zone the answer is `None`, even if another reset in
-the text parses: the limit's is the one the message gave, and the other is
-about something else.
+The chosen reset is the only one parsed. When the limit's reset is malformed or in another zone
+the answer is `None`, even if another reset in the text parses: the limit's is the one the message
+gave, and the other is about something else. A limit with no reset of its own gives `None`, an
+unknown reset, which is the honest answer.
 
-The rule was the first `resets` in the text until finding
-`PR380-RESET-PARSER-TAKES-UNRELATED-FIRST-RESET` showed it taking an
-unrelated one. Claude Code's stderr can
-carry other lines before the limit message, and with `MCP cache resets 9am
-(UTC)` above the five-hour message the recorded `reset_at` was 09:00, three
-and a half hours after the pool came back. The fix that followed still read
-a text's only reset when no limit gave one, wherever it was, and
-`PR380-UNRELATED-LONE-RESET-ATTRIBUTED` showed that taking an unrelated one
-too: `You've hit your session limit` with `MCP cache resets 9am (UTC)`
-elsewhere in the text recorded 09:00 as the subscription's reset, though
-nothing tied the cache's reset to the limit. So that fallback is gone, and
-the next-line case it covered is now a rule about the limit's own text. A
-limit with no reset of its own gives `None`, an unknown reset, which is the
-honest answer.
+It never panics, on any text and any `now_unix`. The text is read with `split_inclusive`,
+`match_indices`, `strip_prefix`, `strip_suffix`, `starts_with`, `get` and `split_at_checked`, each
+of which returns a slice of the same string or `None`; the only indices come from `find`,
+`match_indices` and the lengths of the lines `split_inclusive` gives, or are a string's length less
+that of one of its suffixes (with `checked_sub`), so they fall on character boundaries. The clock
+arithmetic is checked: a `now_unix` past `i64::MAX`, or a candidate whose seconds would overflow,
+gives `None`. So does a nearest candidate before 1970, which has no unix time to format; only a
+clock read near the epoch can meet one.
 
-It never panics, on any text and any `now_unix`. The text is read with
-`split_inclusive`, `match_indices`, `strip_prefix`, `strip_suffix`,
-`starts_with`, `get` and `split_at_checked`, each of which returns a slice
-of the same string or `None`; the only indices come from `find`,
-`match_indices` and the lengths of the lines `split_inclusive` gives, or are
-a string's length less that of one of its suffixes (with `checked_sub`), so
-they fall on character boundaries. The clock arithmetic is checked: a
-`now_unix` past `i64::MAX`, or a candidate whose seconds would overflow,
-gives `None`. So does a nearest candidate before 1970, which has no unix
-time to format; only a clock read near the epoch can meet one.
-
-So does a nearest candidate whose year is outside 0000 to 9999, and that
-check comes before `util::rfc3339_utc` is called, so it is never handed an
-instant whose year it cannot write in four digits. RFC 3339 has only a
-four-digit year, and `rfc3339_utc` writes the year with `{year:04}`, which
-pads to four digits and does not stop there: the five-hour message read at
-10000-01-01T00:00:00Z had 05:30 that morning as its nearest candidate and
-returned `10000-01-01T05:30:00Z`, a `reset_at` a strict reader of the
-`pool_exhausted` event refuses. That was finding
-`PR380-RESET-PARSER-NON-RFC3339-YEAR`. The check is on the chosen
-candidate, not on `now_unix` nor on the other candidates: `Dec 31, 11pm`
-read at 00:30 on 1 January 10000 is still 9999-12-31T23:00:00Z, and a
-candidate in 10000 that is not the nearest changes nothing. Only a clock
-read in 9999 or later can meet the bound (`Feb 29` read anywhere in 9999 is
-29 February 10000), and since an instant before 1970 is refused anyway, it
-is the upper end that is met. `util::rfc3339_utc` itself
-is unchanged; its other callers format the clock.
+So does a nearest candidate whose year is outside 0000 to 9999, and that check comes before
+`util::rfc3339_utc` is called, so it is never handed an instant whose year it cannot write in four
+digits. RFC 3339 has only a four-digit year, and `rfc3339_utc` writes the year with `{year:04}`,
+which pads to four digits and does not stop there, so a reset in 10000 would be a `reset_at` a
+strict reader of the `pool_exhausted` event refuses (finding `PR380-RESET-PARSER-NON-RFC3339-YEAR`). The check is on the
+chosen candidate, not on `now_unix` nor on the other candidates: `Dec 31, 11pm` read at 00:30 on 1
+January 10000 is still 9999-12-31T23:00:00Z, and a candidate in 10000 that is not the nearest
+changes nothing. Only a clock read in 9999 or later can meet the bound (`Feb 29` read anywhere in
+9999 is 29 February 10000), and since an instant before 1970 is refused anyway, it is the upper end
+that is met.
 
 ## `enum LimitsReset<'a> {`
 
-What a text says about its limit's reset, before any of it is parsed:
-`NoLimit`, it holds no recognised limit; `NoReset`, it holds one and no
-limit in it gives a reset; `Reset`, the text after `resets ` that the first
-limit giving one gives, to the end of that line.
+What a text says about its limit's reset, before any of it is parsed: `NoLimit`, it holds no
+recognised limit; `NoReset`, it holds one and no limit in it gives a reset; `Reset`, the text after
+`resets ` that the first limit giving one gives, to the end of that line.
 
-The two `None`s that `reset_at_from_limit_message` returns differ here, and
-the difference is what the coordinator needs. `NoLimit` says the text is
-about something other than a limit, so another text about the same failure
-may still be read. `NoReset`, and a `Reset` that does not parse, say the
-text's limit was found and gave nothing this can read, so no other reset,
-in this text or another, may stand in for it.
+The two `None`s that `reset_at_from_limit_message` returns differ here, and the difference is what
+the coordinator needs. `NoLimit` says the text is about something other than a limit, so another
+text about the same failure may still be read. `NoReset`, and a `Reset` that does not parse, say
+the text's limit was found and gave nothing this can read, so no other reset, in this text or
+another, may stand in for it.
 
 ## `fn the_limits_reset(text: &str) -> LimitsReset<'_> {`
 
-The reset of the first recognised limit that gives one. The text is
-lower-cased once, for `after_a_quota_window`, and walked line by line, the
-limits on each line (`after_each_limit_on`) taken left to right. Lines are
-those of `str::lines`, so a `\r\n` ending is a line ending too.
-`to_ascii_lowercase` changes only ASCII letters, byte for byte, so the two
-strings have the same length, with characters at the same offsets. The
-limit's end is found in the lower-cased text, where "Fable" reads as a
-window, and carried to the original line by its distance from the end. The
-reset is read from the original, so "resets " must be printed in lower case,
-as the rest of the grammar is matched exactly.
+The reset of the first recognised limit that gives one. The text is lower-cased once, for
+`after_a_quota_window`, and walked line by line, the limits on each line (`after_each_limit_on`)
+taken left to right. Lines are those of `str::lines`, so a `\r\n` ending is a line ending too.
+`to_ascii_lowercase` changes only ASCII letters, byte for byte, so the two strings have the same
+length, with characters at the same offsets. The limit's end is found in the lower-cased text,
+where "Fable" reads as a window, and carried to the original line by its distance from the end.
+The reset is read from the original, so "resets " must be printed in lower case, as the rest of the
+grammar is matched exactly.
 
-On the limit's own line, the reset is `when_it_resets`'s: `resets` as the
-next word. Failing that, and only when nothing after the limit on its line
-is a `resets` at all (`carries_a_reset`), a `resets ` that begins the very
-next line, at its first character, is the limit's: the message wrapped after
-"limit", as in `You've hit your session limit` then `resets 5:30am (UTC)`.
-A line with another reset after the limit (`; the queue resets 5:30am
-(UTC)`) is about something else, and so is anything after it. A reset with a
-blank line, or any other line, between it and the limit is not the limit's
-either.
+On the limit's own line, the reset is `when_it_resets`'s: `resets` as the next word. Failing that,
+and only when nothing after the limit on its line is a `resets` at all (`carries_a_reset`), a
+`resets ` that begins the very next line, at its first character, is the limit's: the message
+wrapped after "limit", as in `You've hit your session limit` then `resets 5:30am (UTC)`. A line
+with another reset after the limit (`; the queue resets 5:30am (UTC)`) is about something else,
+and so is anything after it. A reset with a blank line, or any other line, between it and the limit
+is not the limit's either.
 
-The reading is linear in the text's length, because each limit has only its
-next word read, which ends before the next "hit your " begins, and the rest
-of a line is searched for a `resets` once, after the line's last limit,
-rather than once for every limit on it. That was finding
-`PR380-QUOTA-PARSER-QUADRATIC-REPEATED-LIMITS`: a CLI result of one line
-holding "hit your session limit x " 300,000 times, 7.5 MB, had the rest
-of its line read at each limit, over a terabyte per reading, and the
-coordinator reads a result after the agent's process timeout no longer
-bounds the run.
+The reading is linear in the text's length, because each limit has only its next word read, which
+ends before the next "hit your " begins, and the rest of a line is searched for a `resets` once,
+after the line's last limit, rather than once for every limit on it. Reading the rest of the line
+at each limit is quadratic in a line that repeats a limit, and the coordinator reads a result after
+the agent's process timeout no longer bounds the run.
 
-Asking only the last limit on a line gives the answer asking each one did.
-What follows a later limit is a suffix of what follows an earlier one on the
-same line, and it begins with a character that is not a word character
-(`after_a_whole_limit`), so a `resets` that begins a word after the later
-limit begins one after the earlier limit too. So if any limit on the line
-has no `resets` after it, the last has none; and if a later limit's next
-word is `resets`, every earlier limit has a `resets` after it and could not
-have taken the next line's reset first.
+Asking only the last limit on a line gives the answer asking each one would. What follows a later
+limit is a suffix of what follows an earlier one on the same line, and it begins with a character
+that is not a word character (`after_a_whole_limit`), so a `resets` that begins a word after the
+later limit begins one after the earlier limit too. So if any limit on the line has no `resets`
+after it, the last has none; and if a later limit's next word is `resets`, every earlier limit has
+a `resets` after it and could not have taken the next line's reset first.
 
-A limit that gives no reset makes the answer `NoReset` rather than
-`NoLimit`, and the walk goes on to the next limit, so `You've hit your
-session limit` on one line and `You've hit your weekly limit · resets Nov
-14, 5pm (UTC)` on the next read the weekly limit's reset: it is a limit's
-own, which is the rule. The walk stops at the first limit that gives a
-reset at all, before it is parsed, so a malformed reset there is `None` and
-no later limit's stands in.
+A limit that gives no reset makes the answer `NoReset` rather than `NoLimit`, and the walk goes on
+to the next limit, so `You've hit your session limit` on one line and `You've hit your weekly limit
+· resets Nov 14, 5pm (UTC)` on the next read the weekly limit's reset: it is a limit's own, which
+is the rule. The walk stops at the first limit that gives a reset at all, before it is parsed, so a
+malformed reset there is `None` and no later limit's stands in.
 
-Each "hit your " is tried as in `hits_a_quota_window`, so the two recognise
-the same limits, but the piece after it runs to the end of the text rather
-than to the next "hit your ". The two differ only for a limit with
-"hit your " directly against it ("limithit your"), which one reads as a
-limit with nothing after it and the other not as a limit; neither has a
-reset to take.
-
-It was a walk over lines that returned the first line's reset or nothing,
-with `the_only_reset` behind it reading a text's sole `resets` wherever it
-was. Finding `PR380-UNRELATED-LONE-RESET-ATTRIBUTED` removed that fallback
-(see `reset_at_from_limit_message`), and the next-line case it had covered
-moved into `the_reset_a_limit_gives`, which read one limit's reset from the
-rest of the text after it. Finding
-`PR380-QUOTA-PARSER-QUADRATIC-REPEATED-LIMITS` folded it back into this
-walk, so that the rest of a line is read once.
+Each "hit your " is tried as in `hits_a_quota_window`, so the two recognise the same limits, but
+the piece after it runs to the end of the text rather than to the next "hit your ". The two differ
+only for a limit with "hit your " directly against it ("limithit your"), which one reads as a limit
+with nothing after it and the other not as a limit; neither has a reset to take.
 
 ## `fn after_each_limit_on<'text>(`
 
-What follows each recognised limit on `line`, to the end of the line, in
-order. `lower_from_line` is the lower-cased text from the line's start to the
-end of the text, not only to the end of the line: `after_a_quota_window`
-reads the limit there, as `the_limits_reset` always gave it the rest of the
-text, so a model limit whose `resets` begins the next line ("hit your Fable
-limit" then "resets Nov 14, 9am (UTC)") is still a limit.
+What follows each recognised limit on `line`, to the end of the line, in order. `lower_from_line`
+is the lower-cased text from the line's start to the end of the text, not only to the end of the
+line: `after_a_quota_window` reads the limit there, so a model limit whose `resets` begins the next
+line ("hit your Fable limit" then "resets Nov 14, 9am (UTC)") is still a limit.
 
 ## `fn without_its_ending(line: &str) -> &str {`
 
-A line of `split_inclusive('\n')` as `str::lines` would give it: without its
-`\n`, and without a `\r` just before that. `the_limits_reset` walks
-`split_inclusive` rather than `lines` because it needs each line's length
-with its ending, to know where the line starts in the lower-cased text.
+A line of `split_inclusive('\n')` as `str::lines` would give it: without its `\n`, and without a
+`\r` just before that. `the_limits_reset` walks `split_inclusive` rather than `lines` because it
+needs each line's length with its ending, to know where the line starts in the lower-cased text.
 
 ## `fn carries_a_reset(text: &str) -> bool {`
 
-Whether `resets ` begins a word anywhere in the text: at its start, or after
-a character that is not an ASCII letter, ASCII digit or underscore, the
-boundary `after_a_whole_limit` uses. So `loaded presets 5:30am (UTC)` after
-a limit does not stop the next line's reset from being the limit's. This
-was `resets_in`, which yielded what followed each such word so that
-`the_only_reset` could count them; with that gone, only whether there is one
-is asked.
+Whether `resets ` begins a word anywhere in the text: at its start, or after a character that is
+not an ASCII letter, ASCII digit or underscore, the boundary `after_a_whole_limit` uses. So `loaded
+presets 5:30am (UTC)` after a limit does not stop the next line's reset from being the limit's.
 
 ## `const MONTHS: [&str; 12] = [`
 
-The twelve abbreviations, in order, so the position gives the month's
-number. `Sept` and `November` are not in it, and are refused rather than
-guessed at: neither has been printed.
+The twelve abbreviations, in order, so the position gives the month's number. `Sept` and
+`November` are not in it, and are refused rather than guessed at: neither has been printed.
 
 ## `fn leading_month(text: &str) -> Option<(i64, &str)> {`
 
-A month abbreviation and the space after it. `None` here is not yet a
-refusal: the reset may be a time only. A text that starts with neither a
-month nor an hour is refused by `time_of_day`.
+A month abbreviation and the space after it. `None` here is not yet a refusal: the reset may be a
+time only. A text that starts with neither a month nor an hour is refused by `time_of_day`.
 
 ## `fn leading_digits(text: &str) -> Option<(i64, &str)> {`
 
-One or two ASCII digits at the start of the text, as a number. Three digits
-or none are refused, and so is a sign, which `str::parse` would otherwise
-accept.
+One or two ASCII digits at the start of the text, as a number. Three digits or none are refused,
+and so is a sign, which `str::parse` would otherwise accept.
 
 ## `fn time_of_day(text: &str) -> Option<(i64, &str)> {`
 
-The time of day as seconds after midnight, and what follows it. `hour % 12`
-is what makes `12am` midnight and `12pm` noon: the twelve wraps to zero and
-`pm` adds twelve hours.
+The time of day as seconds after midnight, and what follows it. `hour % 12` is what makes `12am`
+midnight and `12pm` noon: the twelve wraps to zero and `pm` adds twelve hours.
 
 ## `fn epoch_day(year: i64, month: i64, day: i64) -> Option<i64> {`
 
-The day number of a date, counted from 1970-01-01, or `None` when the month
-does not have that day. `util::days_from_civil` counts a missing day on into
-the next month, so the date is converted back with `util::civil_from_days`
-and must come back unchanged. That is how `Feb 29` is a candidate in 2028
-and not in 2027, and how `Nov 31` is a candidate in no year, so it gives
-`None`. It returns days rather than seconds so that a date the month lacks
-and a time that overflows stay apart: the first only drops a candidate, the
-second refuses the whole reset.
+The day number of a date, counted from 1970-01-01, or `None` when the month does not have that
+day. `util::days_from_civil` counts a missing day on into the next month, so the date is converted
+back with `util::civil_from_days` and must come back unchanged. That is how `Feb 29` is a candidate
+in 2028 and not in 2027, and how `Nov 31` is a candidate in no year, so it gives `None`. It returns
+days rather than seconds so that a date the month lacks and a time that overflows stay apart: the
+first only drops a candidate, the second refuses the whole reset.
 
 ## `mod tests` › `fn a_successful_answer_from(id: &str) -> String {`
 
