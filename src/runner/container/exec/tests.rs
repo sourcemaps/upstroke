@@ -6408,15 +6408,7 @@ fn real_docker_a_container_descendant_test_is_gated_to_linux() {
             .join("tests.rs"),
     )
     .expect("read this module");
-    let signature = format!("\nfn {GUARDED}() {{");
-    let at = source
-        .find(&signature)
-        .unwrap_or_else(|| panic!("`{GUARDED}` is not a test here"));
-    let attributes: Vec<&str> = source[..at]
-        .lines()
-        .rev()
-        .take_while(|line| line.starts_with("#["))
-        .collect();
+    let attributes = attributes_of_test(&source, GUARDED);
     assert!(
         attributes.contains(&"#[cfg(target_os = \"linux\")]"),
         "`{GUARDED}` finds its container's processes through the host's own `/proc`, which a \
@@ -6424,6 +6416,37 @@ fn real_docker_a_container_descendant_test_is_gated_to_linux() {
          after its invocation instead of observing anything; its attributes are \
          {attributes:?} (`PR366-MACOS-PROC-SAMPLER`)"
     );
+}
+
+/// The attribute lines directly above `fn {name}() {` in `source`, nearest
+/// first, each with its trailing whitespace removed so that a CRLF checkout
+/// (the Windows guest's) reads the same as an LF one: `str::lines` keeps the
+/// `\r` of the last line, because `source[..at]` ends before its `\n`.
+fn attributes_of_test<'a>(source: &'a str, name: &str) -> Vec<&'a str> {
+    let signature = format!("\nfn {name}() {{");
+    let at = source
+        .find(&signature)
+        .unwrap_or_else(|| panic!("`{name}` is not a test here"));
+    source[..at]
+        .lines()
+        .rev()
+        .map(str::trim_end)
+        .take_while(|line| line.starts_with("#["))
+        .collect()
+}
+
+#[test]
+fn real_docker_a_container_descendant_gate_reads_lf_and_crlf_alike() {
+    let lf = "}\n\n#[test]\n#[cfg(target_os = \"linux\")]\nfn guarded() {\n}\n";
+    let crlf = lf.replace('\n', "\r\n");
+    assert!(crlf.contains("\r\n#[cfg"), "the CRLF fragment is not CRLF");
+    for source in [lf, crlf.as_str()] {
+        assert_eq!(
+            attributes_of_test(source, "guarded"),
+            ["#[cfg(target_os = \"linux\")]", "#[test]"],
+            "the attributes of {source:?}"
+        );
+    }
 }
 
 #[cfg(unix)]
