@@ -6298,7 +6298,7 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos());
     let pid = std::process::id();
-    let namespace = std::fs::metadata("/proc/self/ns/pid")
+    let namespace = std::fs::metadata(Path::new("/proc/self/ns/pid"))
         .map_or(0, |found| std::os::unix::fs::MetadataExt::ino(&found));
     let leader_marker = format!("1{pid:07}.{namespace:020}{clock:039}");
     let descendant_marker = format!("2{pid:07}.{namespace:020}{clock:039}");
@@ -9558,23 +9558,38 @@ fn children_of(pid: &str) -> Result<Vec<libc::pid_t>, String> {
                 Err(error) => Err(error),
             }
         },
+        std::thread::sleep,
     )
     .map_err(|error| format!("{}: {error}", task_dir.display()))
 }
 
 /// The rule of [`children_of`], over `list_tasks`, which lists a process's task
-/// ids, `read_children`, which reads one task's children list, and
+/// ids, `read_children`, which reads one task's children list,
 /// `running_normally`, which says whether a task is still running normally:
-/// neither ending nor gone.
+/// neither ending nor gone, and `pause`, which waits the time it is given
+/// between a discarded pass and the next.
 #[cfg(target_os = "linux")]
 fn children_in_passes<T: Ord + std::fmt::Debug>(
     mut list_tasks: impl FnMut() -> std::io::Result<BTreeSet<T>>,
     mut read_children: impl FnMut(&T) -> std::io::Result<String>,
     mut running_normally: impl FnMut(&T) -> std::io::Result<bool>,
+    mut pause: impl FnMut(std::time::Duration),
 ) -> Result<Vec<libc::pid_t>, String> {
     const PASSES: usize = 5;
+    // The pause before the second pass, the third, the fourth and the fifth:
+    // growing, so that the passes span long enough for a thread that is
+    // ending, and still listed in its dead state, to be released.
+    const PAUSES: [std::time::Duration; PASSES - 1] = [
+        std::time::Duration::from_millis(1),
+        std::time::Duration::from_millis(5),
+        std::time::Duration::from_millis(20),
+        std::time::Duration::from_millis(50),
+    ];
     let mut last = String::new();
-    for _ in 0..PASSES {
+    for pass in 0..PASSES {
+        if let Some(wait) = pass.checked_sub(1).and_then(|before| PAUSES.get(before)) {
+            pause(*wait);
+        }
         let before = list_tasks().map_err(|error| error.to_string())?;
         let mut children = Vec::new();
         let mut changed = Vec::new();
@@ -9650,6 +9665,7 @@ fn an_engines_children_are_not_lost_when_a_task_ends_after_its_list_was_opened()
             Ok(list.to_owned())
         },
         |_| Ok(true),
+        |_| {},
     );
     assert_eq!(
         answer,
@@ -9698,6 +9714,7 @@ fn an_engines_children_are_not_lost_when_a_task_still_listed_is_ending() {
             assert_eq!(*task, expected, "the states asked follow the listed tasks");
             Ok(running)
         },
+        |_| {},
     );
     assert_eq!(
         answer,
@@ -9714,6 +9731,99 @@ fn an_engines_children_are_not_lost_when_a_task_still_listed_is_ending() {
         "two passes, each asking every listed task's state after its reads and before its second \
          listing"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_engines_children_are_found_after_pauses_when_a_task_stays_listed_while_ending() {
+    // B has handed its child to A and stays listed, ending, for three passes;
+    // on the fourth it is gone and the child is in A's list.
+    let events = std::cell::RefCell::new(Vec::new());
+    let mut pauses = Vec::new();
+    let ending = || BTreeSet::from(["A", "B"]);
+    let mut listings = [
+        ending(),
+        ending(),
+        ending(),
+        ending(),
+        ending(),
+        ending(),
+        BTreeSet::from(["A"]),
+        BTreeSet::from(["A"]),
+    ]
+    .into_iter();
+    let mut reads = [
+        ("A", ""),
+        ("B", ""),
+        ("A", ""),
+        ("B", ""),
+        ("A", ""),
+        ("B", ""),
+        ("A", "4242 "),
+    ]
+    .into_iter();
+    let mut states = [
+        ("A", true),
+        ("B", false),
+        ("A", true),
+        ("B", false),
+        ("A", true),
+        ("B", false),
+        ("A", true),
+    ]
+    .into_iter();
+    let answer = children_in_passes(
+        || {
+            events.borrow_mut().push("list".to_owned());
+            listings
+                .next()
+                .ok_or_else(|| std::io::Error::other("no listing is scripted"))
+        },
+        |task| {
+            events.borrow_mut().push(format!("read {task}"));
+            let (expected, list) = reads.next().expect("a read the script holds");
+            assert_eq!(*task, expected, "the reads follow the listed tasks");
+            Ok(list.to_owned())
+        },
+        |task| {
+            events.borrow_mut().push(format!("state {task}"));
+            let (expected, running) = states.next().expect("a state the script holds");
+            assert_eq!(*task, expected, "the states asked follow the listed tasks");
+            Ok(running)
+        },
+        |wait| {
+            events.borrow_mut().push("pause".to_owned());
+            pauses.push(wait);
+        },
+    );
+    assert_eq!(
+        pauses,
+        [
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(20),
+        ],
+        "a pause after each of the three discarded passes, each longer than the one before"
+    );
+    assert_eq!(
+        answer,
+        Ok(vec![4242]),
+        "the child B handed to A is found by the fourth pass, made after B, ending through three \
+         passes, was released"
+    );
+    let pass_with_b_ending = [
+        "list", "read A", "read B", "state A", "state B", "list", "pause",
+    ];
+    let mut expected = pass_with_b_ending.repeat(3);
+    expected.extend(["list", "read A", "state A", "list"]);
+    assert_eq!(
+        events.into_inner(),
+        expected,
+        "three passes discarded for B ending, each followed by a pause, then a fourth that counts"
+    );
+    assert_eq!(listings.next(), None, "every scripted listing was made");
+    assert_eq!(reads.next(), None, "every scripted read was made");
+    assert_eq!(states.next(), None, "every scripted state was asked");
 }
 
 #[cfg(target_os = "linux")]
@@ -9743,6 +9853,7 @@ fn an_engines_children_are_read_in_another_pass_when_a_list_is_not_found() {
                 .ok_or_else(|| std::io::ErrorKind::NotFound.into())
         },
         |_| Ok(true),
+        |_| {},
     );
     assert_eq!(
         answer,
@@ -9761,6 +9872,7 @@ fn an_engines_children_are_read_in_another_pass_when_a_list_is_not_found() {
 #[test]
 fn an_engines_tasks_that_change_under_every_pass_end_in_an_error_after_five_passes() {
     let mut listed = 0;
+    let mut pauses = Vec::new();
     let answer = children_in_passes(
         || {
             listed += 1;
@@ -9771,6 +9883,7 @@ fn an_engines_tasks_that_change_under_every_pass_end_in_an_error_after_five_pass
         },
         |_| Ok("4242 ".to_owned()),
         |_| Ok(true),
+        |wait| pauses.push(wait),
     );
     assert_eq!(
         answer,
@@ -9785,6 +9898,16 @@ fn an_engines_tasks_that_change_under_every_pass_end_in_an_error_after_five_pass
     assert_eq!(
         listed, 10,
         "five passes, each listing the tasks before and after its reads"
+    );
+    assert_eq!(
+        pauses,
+        [
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(20),
+            std::time::Duration::from_millis(50),
+        ],
+        "a growing pause between each pass and the next, and none after the fifth"
     );
 }
 

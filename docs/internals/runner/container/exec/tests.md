@@ -3180,7 +3180,17 @@ the second listing holds exactly the task ids of the first. A thread that ended 
 pass is missing from the second listing, whichever way its read went; a thread that began
 to end during the pass and is still listed is reported as not running normally. A pass that
 does not count is discarded whole, the lists it did read included, and another is made,
-within the same five. A pass that counts answers its children sorted and without repeats.
+within the same five, after a pause. A pass that counts answers its children sorted and
+without repeats.
+
+**The pauses.** A thread that is ending stays listed, in its dead state, until the kernel
+releases it, and it can be descheduled in that window. Five passes made one straight after
+another take a few microseconds, so all five could see the same ending thread, be
+discarded, and end in the error, which callers that `expect` the helper turn into the
+intermittent failure this repair set out to remove. So between a discarded pass and the
+next the helper waits, and the wait grows: 1 ms before the second pass, 5 ms before the
+third, 20 ms before the fourth and 50 ms before the fifth, about 76 ms in all, and none
+after the fifth. The waits are a margin for the release, not a measurement of it.
 
 **Running normally,** as the helper reads it, is the state field of the task's own
 `/proc/<pid>/task/<tid>/stat`, the first field after the command, which closes at the last
@@ -3222,12 +3232,17 @@ with scripted closures.
 
 ## `#[cfg(target_os = "linux")]` › `fn children_in_passes<T: Ord + std::fmt::Debug>(`
 
-The rule of `children_of`, over three closures: `list_tasks` lists a process's task ids,
-`read_children` reads one task's children list, and `running_normally` says whether one task
-is still running normally, neither ending nor gone. `children_of` gives it the three readers
-of the proc filesystem: the entry names of `/proc/<pid>/task`, which are the task ids, the
-text of `<task>/children`, and the state field of `<task>/stat` (zombie, dead, or a `stat`
-gone is not running normally). A read's error keeps its kind, which is how a not-found read
+The rule of `children_of`, over four closures: `list_tasks` lists a process's task ids,
+`read_children` reads one task's children list, `running_normally` says whether one task
+is still running normally, neither ending nor gone, and `pause` waits the time it is given.
+`children_of` gives it the three readers of the proc filesystem: the entry names of
+`/proc/<pid>/task`, which are the task ids, the text of `<task>/children`, and the state
+field of `<task>/stat` (zombie, dead, or a `stat` gone is not running normally); and, as
+`pause`, `std::thread::sleep`. The core chooses the waits, 1, 5, 20 and 50 ms, and asks
+`pause` for the next one before each pass after the first, that is after each discarded
+pass that has a pass after it, so at most four pauses and none after the fifth pass. The
+scripted tests give a `pause` that records the wait it is asked for and does not sleep.
+A read's error keeps its kind, which is how a not-found read
 is told from every other failure. After a pass's reads the core asks `running_normally` of
 every task of the first listing, in order, and only then lists the tasks again; a task
 reported not running normally discards the pass, and a failure to answer is returned at
@@ -3267,6 +3282,23 @@ answer (its `Ok(true)` arm made `Ok(_)`, so a task reported ending is taken as r
 this test fails at its first assertion, `left: Ok([])` against `right: Ok([4242])`: the
 first pass counted and the child was lost. The other three tests of the core still pass.
 
+## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_found_after_pauses_when_a_task_stays_listed_while_ending() {`
+
+The ending thread that stays listed, scripted across passes. B has handed its child, 4242,
+to A and is reported not running normally on each of the first three passes, while both
+listings of each of those passes hold A and B and both lists read empty. On the fourth pass
+B is gone: both listings hold A alone, and A's list holds 4242. The core must answer 4242
+from that fourth pass, and must have asked `pause` for 1, 5 and 20 ms, one wait after each
+of the three discarded passes, growing. The test records every call to the four closures
+in one log and requires that order exactly, each discarded pass followed by its pause, and
+requires that every scripted listing, read and state was used.
+
+Measured witness, restored byte-for-byte: with the core's call to `pause` removed, so that
+the passes follow one another with no wait, this test fails at its first assertion, on its
+count of pauses, `left: []` against `right: [1ms, 5ms, 20ms]`. The test of tasks changing
+under every pass fails too, on its pauses, `left: []` against
+`right: [1ms, 5ms, 20ms, 50ms]`; the other three tests of the core still pass.
+
 ## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_read_in_another_pass_when_a_list_is_not_found() {`
 
 A read that fails with not-found makes another pass. The first pass's two listings agree, A
@@ -3285,7 +3317,8 @@ Every listing holds a task id that no listing before it held, so the two listing
 pass differ, while every read finds a child. The core must answer an error after exactly
 five passes, ten listings, saying what changed in the last pass, and never the child its
 reads found. The scripted lister refuses an eleventh listing, so a core that lost its bound
-fails here rather than looping.
+fails here rather than looping. The core must also have asked `pause` for exactly four
+waits, 1, 5, 20 and 50 ms, one between each pass and the next and none after the fifth.
 
 ## `#[cfg(target_os = "linux")]` › `fn helper_reaper_candidates(`
 
