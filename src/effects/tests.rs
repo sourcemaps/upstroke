@@ -5755,8 +5755,10 @@ fn windows_suite_start(selection: &str) -> String {
         "$env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) {{ $suite = Start-Process \
          -FilePath $h -ArgumentList '{selection} {WINDOWS_SUITE_TIMES}' -NoNewWindow -PassThru \
          -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; \
-         $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try {{ Get-Content \
-         \"$out.part\" | Add-Content $out }} catch {{ \"copying the output of $h failed: $_\"; \
+         $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try {{ \
+         $harnessLog = @(Get-Content \"$out.part\"); $harnessLog | Add-Content $out; \
+         $harnessLogs += @{{ Harness = $h; Lines = $harnessLog }} }} \
+         catch {{ \"copying the output of $h failed: $_\"; \
          if ($code -eq 0) {{ throw }} }}; try {{ Get-Content \"$err.part\" | Add-Content $err }} \
          catch {{ \"copying the errors of $h failed: $_\"; if ($code -eq 0) {{ throw }} }}; \
          if ($code -ne 0) {{ break }} }}"
@@ -5789,7 +5791,7 @@ fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {
     let collects = "$harnesses = @(Get-Content $built | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -ceq 'compiler-artifact' -and $_.profile.test -and $_.executable } | ForEach-Object { $_.executable }); if ($harnesses.Count -eq 0) { throw \"Cargo built no test harness, so this shard would run nothing\" }";
     let bootstraps = "$env:RUSTC_BOOTSTRAP = '1'; ";
     let runs = "$suite = Start-Process ";
-    let stops = "$suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n";
+    let stops = "$suite.WaitForExit(); $code = $suite.ExitCode; try { $harnessLog = @(Get-Content \"$out.part\"); $harnessLog | Add-Content $out; $harnessLogs += @{ Harness = $h; Lines = $harnessLog } } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n";
     let lines: Vec<&str> = script.lines().collect();
     let line_of = |text: &str| lines.iter().position(|line| line.contains(text));
     let build_at = line_of(builds);
@@ -5800,11 +5802,14 @@ fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {
         line.to_ascii_lowercase()
             .match_indices("start-process")
             .all(|(at, _)| {
-                let started = line[..at]
-                    .strip_suffix(" = ")
+                let started = line
+                    .get(..at)
+                    .and_then(|before| before.strip_suffix(" = "))
                     .and_then(|before| before.rsplit([' ', '{', ';', '(']).next())
                     .filter(|name| name.len() > 1 && name.starts_with('$'));
-                let statement_ends = line[at..].find(';').map(|end| &line[at + end..]);
+                let statement_ends = line
+                    .get(at..)
+                    .and_then(|after| after.find(';').and_then(|end| after.get(end..)));
                 started.zip(statement_ends).is_some_and(|(name, rest)| {
                     rest.starts_with(&format!("; $null = {name}.Handle; {name}.WaitForExit();"))
                 })
@@ -5838,9 +5843,10 @@ fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {
         );
     }
     let builds_whole = build_at.is_some_and(|at| {
-        lines[at].contains(&format!("{builds}{}", windows_suite_build_arguments()))
-            && lines[at].ends_with("; $code = $build.ExitCode")
-            && lines.get(at + 1).copied() == Some(build_exits)
+        lines.get(at).is_some_and(|line| {
+            line.contains(&format!("{builds}{}", windows_suite_build_arguments()))
+                && line.ends_with("; $code = $build.ExitCode")
+        }) && lines.get(at + 1).copied() == Some(build_exits)
     });
     if !builds_whole {
         out.push(
@@ -5881,8 +5887,9 @@ fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {
         );
     }
     let timed = run_at.is_some_and(|at| {
-        lines[at]
-            .split_once(runs)
+        lines
+            .get(at)
+            .and_then(|line| line.split_once(runs))
             .and_then(|(_, start)| start.split_once("-ArgumentList '"))
             .and_then(|(_, listed)| listed.split_once('\''))
             .is_some_and(|(arguments, _)| arguments.ends_with(&format!(" {WINDOWS_SUITE_TIMES}")))
@@ -6002,12 +6009,101 @@ fn the_windows_leg_counts_the_tests_it_ran() {
         "the compiler check comes after the build, so the suite has already been built on the \
          wrong compiler by the time the step refuses"
     );
-    let floor = WINDOWS_SHARD_WITNESS.lines().nth(12);
     let refuses = "if ($passed -lt ${{ matrix.floor }}) { throw ";
-    assert!(
-        floor.is_some_and(|line| line.starts_with(refuses)),
-        "line 13 of the shards' suite step, {floor:?}, does not refuse a count below the leg's \
+    assert_eq!(
+        WINDOWS_SHARD_WITNESS
+            .lines()
+            .filter(|line| line.starts_with(refuses))
+            .count(),
+        1,
+        "the shards' suite step does not refuse a count below the leg's \
          `matrix.floor`, so the floors the oracle holds the matrix to are floors no leg tests"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn the_windows_floor_counts_top_level_harnesses_and_requires_complete_results() {
+    let workflow = parse_workflow(&ci_workflow_text()).expect(CI_WORKFLOW);
+    let job = field(
+        field(&workflow, "jobs").expect("workflow jobs"),
+        TEST_WINDOWS_HOSTED_JOB,
+    )
+    .expect("Windows job");
+    let script = steps_of(job)
+        .into_iter()
+        .filter_map(|step| scalar(step, "run"))
+        .find(|script| script.contains("$passed = 0\n"))
+        .expect("Windows suite count");
+    let count = script
+        .split_once("$passed = 0\n")
+        .and_then(|(_, rest)| rest.split_once("if ($passed -lt"))
+        .map(|(body, _)| format!("$passed = 0\n{body}"))
+        .expect("count between suite cleanup and floor check");
+    let fixtures = r#"
+$zero = @{ Harness = 'empty.exe'; Lines = @('running 0 tests', 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.00s', '') }
+$nested = @{ Harness = 'lib.exe'; Lines = @(
+  '', 'running 96 tests',
+  'test parent ... running 4 tests',
+  'test helper ... running 5 tests',
+  'test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s',
+  'test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s',
+  'test parent ... ok <0.030s>',
+  'test result: ok. 94 passed; 0 failed; 2 ignored; 0 measured; 25 filtered out; finished in 1.23s', ''
+) }
+$binary = @{ Harness = 'bin.exe'; Lines = @('running 5 tests', 'test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.01s') }
+$cases = @(
+  @{ Name = '99 top-level passes and nine helper passes'; Logs = @($nested, $binary, $zero); Harnesses = 3; Passed = 99 },
+  @{ Name = 'genuine zero'; Logs = @($zero); Harnesses = 1; Passed = 0 },
+  @{ Name = 'missing output'; Logs = @(@{ Harness = 'missing.exe'; Lines = @() }); Harnesses = 1; Passed = $null },
+  @{ Name = 'missing harness'; Logs = @($binary); Harnesses = 2; Passed = $null },
+  @{ Name = 'unfinished zero'; Logs = @(@{ Harness = 'zero.exe'; Lines = @('running 0 tests') }); Harnesses = 1; Passed = $null },
+  @{ Name = 'helper result without outer result'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 5 tests') + $binary.Lines }); Harnesses = 1; Passed = $null },
+  @{ Name = 'truncated result'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 0 tests', 'test result: ok. 0 passed') }); Harnesses = 1; Passed = $null },
+  @{ Name = 'result without start'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s') }); Harnesses = 1; Passed = $null },
+  @{ Name = 'inconsistent total'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 1 test', 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s') }); Harnesses = 1; Passed = $null }
+)
+foreach ($case in $cases) {
+  $failure = $null; $actual = $null
+  try { $actual = & $measure $case.Logs $case.Harnesses } catch { $failure = $_ }
+  if ($null -eq $case.Passed) {
+    if ($null -eq $failure) { throw "$($case.Name): accepted incomplete evidence as $actual" }
+  } elseif ($null -ne $failure -or $actual -ne $case.Passed) {
+    throw "$($case.Name): expected $($case.Passed), got $actual; $failure"
+  }
+}
+'Windows floor fixtures passed'
+"#;
+    let directory = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "windows-floor")
+        .expect("private Windows floor fixture directory");
+    let path = directory.path().join("count.ps1");
+    fs::write(
+        &path,
+        format!(
+            "$ErrorActionPreference = 'Stop'\n\
+             $measure = {{ param($harnessLogs, $expectedHarnesses)\n\
+             $harnesses = [object[]]::new($expectedHarnesses)\n\
+             {count}\n$passed\n}}\n{fixtures}"
+        ),
+    )
+    .expect("write native Windows count fixture");
+    let mut command = std::process::Command::new("pwsh");
+    command
+        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
+        .arg(path)
+        .current_dir(directory.path());
+    let output = crate::agent::proc::test_support::run_with_timeout(
+        command,
+        "",
+        std::time::Duration::from_secs(120),
+    )
+    .expect("execute the workflow's count with native PowerShell");
+    assert_eq!(output.code, Some(0), "{output:?}");
+    assert!(!output.timed_out && !output.output_limited, "{output:?}");
+    assert_eq!(
+        output.stdout.trim(),
+        "Windows floor fixtures passed",
+        "{output:?}"
     );
 }
 
@@ -6243,9 +6339,9 @@ fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {
             "the harness's standard output copied outside a `try` of its own",
             replaced(
                 script,
-                "try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the \
+                "try { $harnessLog = @(Get-Content \"$out.part\"); $harnessLog | Add-Content $out; $harnessLogs += @{ Harness = $h; Lines = $harnessLog } } catch { \"copying the \
                  output of $h failed: $_\"; if ($code -eq 0) { throw } }",
-                "Get-Content \"$out.part\" | Add-Content $out",
+                "$harnessLog = @(Get-Content \"$out.part\"); $harnessLog | Add-Content $out; $harnessLogs += @{ Harness = $h; Lines = $harnessLog }",
             ),
             stops,
         ),

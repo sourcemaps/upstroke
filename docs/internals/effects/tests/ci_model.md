@@ -287,8 +287,9 @@ whitespace, and the list closes only if Cargo stops growing. A count does
 not enumerate them: a wrapper that executes nothing and prints nothing
 leaves no `test result: ok.` line, whichever route installed it, and that
 is every misconfiguration and every lazy substitution. It is not every
-substitution. A wrapper written to print libtest's summary line clears the
-floor, and so does a decoy crate whose `harness = false` main prints it;
+substitution. A wrapper written to print libtest's start and completed
+summary can clear the floor, as can a decoy crate whose `harness = false`
+main prints them;
 both are a forgery, on the machine or in the diff, and the paragraph below
 is where forgeries are bounded. Since the legs report their tests' times
 the four runner routes no longer reach them: Cargo only builds, and the
@@ -357,9 +358,11 @@ Between the compiler check and the count is the suite itself, lines 3 to
    copy in a `try` of its own: a copy that fails is printed, and its `catch`
    throws again only where the harness passed, so a failed copy cannot end
    the step in place of a failed harness's code. The loop stops at the first harness whose exit is not zero, as Cargo's
-   own `test` stops at the first harness that fails.
+   own `test` stops at the first harness that fails. The standard-output
+   read is also retained with the executable's name in `$harnessLogs`,
+   initialised on line 3, so counting does not lose executable boundaries.
 8. One `try` block, which reads and then lists. It prints the two files
-   and keeps standard output as `$log` for the count; the job log carries
+   and keeps standard output as `$log` for display; the job log carries
    the suite's output once the loop has ended, not as it runs. It then lists
    every process named `upstroke*` that is still running, with its command
    line, and asks Windows to stop each one; the test harnesses are
@@ -519,7 +522,7 @@ it reads this text's letters. It is drawn unless all of these hold:
    with its dots escaped as line 2 writes them.
 3. The line that starts the build holds `cargo`, in any letter case, once,
    and no other line after line 2 holds it at all. The words
-   `Cargo compiled the harnesses`, in line 13's message, and
+   `Cargo compiled the harnesses`, in the floor check's message, and
    `Cargo built no test harness`, in line 6's, are set aside before the
    count.
 4. `Start-Process` occurs twice: the build's and the loop's.
@@ -546,26 +549,38 @@ never spells still passes it:
 constant or to the workflow is the owner's to read. The rule does not bound
 one, as no pin here bounds a hostile candidate (above).
 
-After the suite, lines 12 to 14 are the count:
+After the suite, the count starts on line 12 and has three stages:
 
-12. The sum of every `test result: ok.` line's passed count, over every
-    harness the loop ran.
-13. The refusal of a sum below `${{ matrix.floor }}`. The message names the
-    shard and its floor.
-14. The sum, the shard and the floor, printed. A leg that passes then says
-    in its log how far above its floor it ran, which is what a later change
-    to a floor is measured from.
+1. Require one retained output for every compiled executable. Within each
+   output, track libtest's running/result pairs. Nested helper results close
+   nested runs and contribute no passes; only the completed outer result
+   contributes. Require its passed, failed, ignored and measured total to
+   match the outer start, with status `ok` and zero failures. A complete
+   zero-test harness contributes zero. Missing output, an unclosed run, a
+   truncated result, a result without a start or a second outer run fails.
+2. Refuse a sum below `${{ matrix.floor }}`. The message names the shard
+   and its floor.
+3. Print the sum, shard and floor, so a later floor change has a measurement.
+
+The previous count summed every success summary in the merged output,
+including helper processes. The acceptance reference for Windows engine 4
+is 99 top-level passes plus nine helper passes: its floor input is 99,
+not 108. The native Windows fixture in `super` exercises this count from
+the workflow with multiple executable outputs, nested helpers and a zero
+harness, plus incomplete inputs. It starts no selected suite a second time.
+The count still follows output display, survivor cleanup and the failing
+harness's exit, so a counting refusal cannot replace that exit code.
 
 The floor is not in this text. It reaches the script from the matrix, so
-the equality over the script holds that line 13 reads `matrix.floor` and
+the equality over the script holds that the floor check reads `matrix.floor` and
 the oracle's check of the matrix holds what each leg's floor is
 (`category_legs`' summed Windows contributions); a lowered floor in the workflow leaves this pin
 intact and is refused there. The same division holds the selection: this
 text says line 7 reads `matrix.tests`, and the matrix check says what each
 leg's is (`category_legs`' selectors).
-`the_windows_leg_counts_the_tests_it_ran` holds line 13 to opening with the
+`the_windows_leg_counts_the_tests_it_ran` holds exactly one line to opening with the
 test of `matrix.floor`, so the floors the oracle holds the matrix to are
-floors a leg tests. Line 14 is held by the oracle's pin alone.
+floors a leg tests. The final report is held by the oracle's pin alone.
 
 Measured, for the selection,
 `MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED` and

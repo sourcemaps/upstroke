@@ -689,6 +689,15 @@ Each row in this section edits the workflow alone and is refused under
 constant, and `the_windows_leg_counts_the_tests_it_ran` holds its build
 line, its loop line and its floor line to what the model makes them.
 
+The loop's standard-output copy now retains each executable's lines in
+`$harnessLogs` as well as appending them to the ordinary job output. The
+directly affected fixture anchors include this retention and its initial
+empty array. The witness-removal fixture removes the complete per-harness
+count block and the floor/report lines. The native Windows fixture in
+`super` exercises the count with normal nested helper output and incomplete
+inputs: only a completed outer result contributes to the floor. Existing
+exit, cleanup, timeout, build inventory and single-run checks still apply.
+
 ## `fn ci_test_windows_hosted_job_complaints_for(` › `let selected = field(step, "with").and_then(|with| scalar(with, "toolchain"));`
 
 The install selects [`GOLDEN_IMAGE_TOOLCHAIN`], exactly: the compiler the

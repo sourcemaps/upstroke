@@ -2353,7 +2353,9 @@ of the line is fixed text: the two streams sent to `.part` files beside the
 suite's, the handle taken, `WaitForExit()`, the harness's exit kept as
 `$code`, the two files appended to the suite's, each in a `try` of its own
 whose `catch` prints the failure and throws again only where `$code` is
-zero, and the loop left at the first harness whose exit is not zero.
+zero, and the loop left at the first harness whose exit is not zero. The
+standard-output copy also retains the lines with their executable name in
+`$harnessLogs`, before another executable overwrites the `.part` file.
 
 [`the_windows_leg_counts_the_tests_it_ran`] compares a whole line of the
 script with this one, so nothing can be added to the harnesses' arguments,
@@ -2771,7 +2773,7 @@ starts the harnesses itself (`WINDOWS_SHARD_WITNESS` in the CI model notes).
 The script is pinned as text by the oracle; this test holds what the text
 must agree with outside itself -- the compiler version in the three
 questions to the constant, line 4 to `TEST_COMMAND`, line 7 to the leg's
-selection and [`WINDOWS_SUITE_TIMES`], line 13 to the matrix's floor -- and
+selection and [`WINDOWS_SUITE_TIMES`], the floor check to the matrix's floor -- and
 requires the compiler check to come before the build, since a refusal
 after it has already built the suite on the wrong compiler.
 
@@ -2798,11 +2800,11 @@ One exact line is not one run of the suite. The count of lines equal to
 [`windows_suite_start`]'s sees copies of that line and no other line that
 runs Cargo or a harness, which is what the ninth of the ten refuses.
 
-Line 13 must open `if ($passed -lt ${{ matrix.floor }}) { throw `. No floor
+Exactly one line must open `if ($passed -lt ${{ matrix.floor }}) { throw `. No floor
 is a number in the text: the matrix hands each leg its own, and the oracle
 holds the matrix to `category_legs`' summed Windows floors. Without this assertion those
 could be floors no leg tests, with the workflow and the constant edited
-together and the pin holding. The fourteenth line, which prints the count,
+together and the pin holding. The final line, which prints the count,
 is held by the oracle's pin alone.
 
 Every other assertion here reads `ci.yml` and concludes what CI was *asked*
@@ -2817,10 +2819,11 @@ legs report their tests' times the runner routes no longer reach them:
 Cargo builds with `--no-run`, and the step starts the harnesses itself. The
 `[workspace]` route still does.
 
-So each leg counts instead of enumerating: a shard that did not execute
-reports no `test result: ok.` line, and a leg that cannot reach its floor
-fails. It is pinned like every other script, and the pin is what stops the
-count being deleted or its floor lowered to a number nothing has to clear.
+So each leg counts instead of enumerating: every executable must report a
+completed outer libtest run, and a leg that cannot reach its floor fails.
+Nested helpers' result lines contribute no passes. It is pinned like every
+other script, and the pin is what stops the count being deleted or its floor
+lowered to a number nothing has to clear.
 
 It is not a defence against a pull request, and nothing in this file is: an
 edit to `ci.yml` deletes this step as easily as any other, and the decision
@@ -2838,7 +2841,27 @@ assertion on that line failed. The assertion was then
 `the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler`'s,
 and is this test's now. It has not been mutated since the script became
 eleven lines, nor since it became fourteen, when the floor moved to line
-13.
+13. The count now spans several lines; the floor assertion locates the
+floor check by its condition rather than its line number.
+
+## `fn the_windows_floor_counts_top_level_harnesses_and_requires_complete_results() {`
+
+This Windows-only fixture executes the actual counting block extracted from
+the Windows job in `ci.yml`, using the runner's `pwsh`. It does not copy
+the parser into a second implementation or run the selected test suites.
+The ordinary-output fixture has three top-level executables: 94 passes
+and two ignores, five passes, and zero tests. The first contains two nested
+helper runs with four and five passes. The floor input must be 99, excluding
+the nine helper passes, matching the reviewed engine 4 acceptance reference.
+
+Invalid inputs cover missing output, a missing executable's output, an
+unfinished zero-test run, helpers completing without their outer result,
+a truncated result, a result without a start, and a mismatched total.
+An isolated completed zero-test harness returns zero. The fixture executes
+in a private scratch directory under the process runner's 120-second bound
+and process-tree cleanup, without a PowerShell profile or interactive input.
+Linux and macOS do not claim to execute PowerShell; their effects tests
+continue to check the pinned workflow and its process-order assertions.
 
 ## `fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {`
 
@@ -2984,7 +3007,7 @@ matrix's floor. Both relations went with the guest's job and the picker.
 What the second held of the shards' script by itself is
 [`the_windows_leg_counts_the_tests_it_ran`]'s now, as the script stands
 since the legs reported their tests' times: line 4, the build; line 7, the
-run; line 13, the floor; and the ten things about the processes it starts.
+run; the floor check; and the ten things about the processes it starts.
 
 Measured, before the shards and under the test's earlier name, by setting
 the job's install back to `stable` in the workflow and restoring it: this

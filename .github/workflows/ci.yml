@@ -757,6 +757,12 @@ jobs:
       # throws: the suite passed, and a test leaves a process running. If
       # the inference is wrong and a harness itself does not end, the
       # listing is never reached, and the job's limit still ends the leg.
+      # Keep each executable's output separately for the floor. A helper
+      # can print its own running/result pair on the parent's stdout; only
+      # the outer completed run contributes passes. An unfinished outer
+      # run is missing evidence, including when a helper has reported zero.
+      # A completed zero-test harness contributes zero. Counting happens
+      # after the output, process cleanup and failing-exit handling above.
       - name: Uncategorised (must list zero tests)
         run: python .github/scripts/test-categories.py check
 
@@ -766,16 +772,36 @@ jobs:
         run: |
           $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()
           if ($rustc -notmatch '^rustc 1\.97\.1 ' -or $path_rustc -notmatch '^rustc 1\.97\.1 ' -or $cargo -notmatch '^cargo 1\.97\.1 ') { throw "the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow" }
-          $out = Join-Path $env:RUNNER_TEMP 'suite-stdout.log'; $err = Join-Path $env:RUNNER_TEMP 'suite-stderr.log'; $built = Join-Path $env:RUNNER_TEMP 'suite-build.json'
+          $out = Join-Path $env:RUNNER_TEMP 'suite-stdout.log'; $err = Join-Path $env:RUNNER_TEMP 'suite-stderr.log'; $built = Join-Path $env:RUNNER_TEMP 'suite-build.json'; $harnessLogs = @()
           $build = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features --no-run --message-format=json-render-diagnostics' -NoNewWindow -PassThru -RedirectStandardOutput $built -RedirectStandardError $err; $null = $build.Handle; $build.WaitForExit(); $code = $build.ExitCode
           if ($code -ne 0) { try { Get-Content $err } catch { "reading the build's errors failed: $_" }; exit $code }
           $harnesses = @(Get-Content $built | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -ceq 'compiler-artifact' -and $_.profile.test -and $_.executable } | ForEach-Object { $_.executable }); if ($harnesses.Count -eq 0) { throw "Cargo built no test harness, so this shard would run nothing" }
-          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput "$out.part" -RedirectStandardError "$err.part"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content "$out.part" | Add-Content $out } catch { "copying the output of $h failed: $_"; if ($code -eq 0) { throw } }; try { Get-Content "$err.part" | Add-Content $err } catch { "copying the errors of $h failed: $_"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }
+          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput "$out.part" -RedirectStandardError "$err.part"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { $harnessLog = @(Get-Content "$out.part"); $harnessLog | Add-Content $out; $harnessLogs += @{ Harness = $h; Lines = $harnessLog } } catch { "copying the output of $h failed: $_"; if ($code -eq 0) { throw } }; try { Get-Content "$err.part" | Add-Content $err } catch { "copying the errors of $h failed: $_"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }
           try { Get-Content $err; $log = Get-Content $out; $log; $left = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'upstroke%'"); foreach ($p in $left) { "left running after the suite: pid $($p.ProcessId): $($p.CommandLine)"; Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } }
           catch { if ($code -ne 0) { "reading the suite's output or listing the processes it left failed: $_" } else { throw } }
           if ($code -ne 0) { exit $code }
           if ($left.Count -gt 0) { throw "$($left.Count) test process(es) outlived the suite, listed above: a test leaves a process running, which would hold this step open" }
-          $passed = [int](($log | Select-String -Pattern '^test result: ok\. (\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)
+          $passed = 0
+          if ($harnessLogs.Count -ne $harnesses.Count) { throw "missing output from a top-level test harness" }
+          foreach ($harnessLog in $harnessLogs) {
+            $depth = 0; $complete = $false; $harnessPassed = $null; $expected = $null
+            foreach ($line in $harnessLog.Lines) {
+              if ($line -cmatch '(?:^|\s)running ([0-9]+) tests?$') {
+                if ($complete) { throw "extra test run in $($harnessLog.Harness)" }
+                if ($depth -eq 0) { $expected = [int]$Matches[1] }
+                $depth++
+              } elseif ($line -cmatch '(?:^|\s)test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured; [0-9]+ filtered out; finished in [0-9]+\.[0-9]+s$') {
+                if ($depth -le 0) { throw "test result without a start in $($harnessLog.Harness)" }
+                $depth--
+                if ($depth -eq 0) {
+                  if ($Matches[1] -cne 'ok' -or [int]$Matches[3] -ne 0 -or ([int]$Matches[2] + [int]$Matches[3] + [int]$Matches[4] + [int]$Matches[5]) -ne $expected) { throw "inconsistent top-level test result in $($harnessLog.Harness)" }
+                  $harnessPassed = [int]$Matches[2]; $complete = $true
+                }
+              }
+            }
+            if (-not $complete -or $depth -ne 0) { throw "missing or incomplete top-level test result in $($harnessLog.Harness)" }
+            $passed += $harnessPassed
+          }
           if ($passed -lt ${{ matrix.floor }}) { throw "shard ${{ matrix.shard }} reported $passed passing tests, below its floor of ${{ matrix.floor }}: Cargo compiled the harnesses and executed almost none of this shard's tests" }
           "shard ${{ matrix.shard }} reported $passed passing tests; its floor is ${{ matrix.floor }}"
 
