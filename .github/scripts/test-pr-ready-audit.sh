@@ -9300,8 +9300,11 @@ chmod +x "$ledger_push_gh/gh"
 # exits 128, `empty` exits 0 having printed nothing, `spaces` prints git's own answer with each tab
 # made a space. Each of the rest prints git's own answer with one thing wrong in it: `lower` a status
 # `A` made `a`, `no-status` that status dropped, `no-path` a one-record answer with its path dropped,
-# `two-tabs` each tab doubled, and `ledger-line` only the records adding under findings/. Unset, it
-# is the real git throughout, which is this wrapper's own control.
+# `two-tabs` each tab doubled, and `ledger-line` only the records adding under findings/. And
+# `dup-lower` prints git's own answer whole and then once more each record whose status is `A`,
+# that `A` made `a`: every touched path still has its well-formed record, so this is the one
+# shape in which only the malformed-record check can fire, and the loop below asserts it blocks.
+# Unset, it is the real git throughout, which is this wrapper's own control.
 ledger_push_git="$tmp/ledger-push-git"
 mkdir -p "$ledger_push_git"
 printf '#!/usr/bin/env bash\nreal_git=%q\n' "$(command -v git)" > "$ledger_push_git/git"
@@ -9324,6 +9327,12 @@ for arg in "$@"; do
     ledger-line) out="$("$real_git" "$@")" || exit $?
             while IFS= read -r one; do
               if [[ "$one" == A$'\t'findings/* ]]; then printf '%s\n' "$one"; fi
+            done <<< "$out"
+            exit 0 ;;
+    dup-lower) out="$("$real_git" "$@")" || exit $?
+            printf '%s\n' "$out"
+            while IFS= read -r one; do
+              if [[ "$one" == A$'\t'* ]]; then printf 'a%s\n' "${one#A}"; fi
             done <<< "$out"
             exit 0 ;;
   esac
@@ -9580,7 +9589,7 @@ lp_case "outside the ledger" ledger-push-pass no-findings-body "$lp_head_outside
 # are each NOT-READY on `ledger-status-read-failed` now.
 lp_case "status read passed through" ledger-push-new-p3 ledger-push-deferred "$lp_head_add" \
   ledger-only READY 1 pass
-for lp_mode in fail empty spaces lower no-status no-path two-tabs; do
+for lp_mode in fail empty spaces lower no-status no-path two-tabs dup-lower; do
   lp_case "status read [$lp_mode]" ledger-push-new-p3 ledger-push-deferred "$lp_head_add" \
     repairs NOT-READY 0 "$lp_mode"
   contains "MUT-LEDGER-PUSH-REWRITES-FINDING status read [$lp_mode]" "$lp_got" \
