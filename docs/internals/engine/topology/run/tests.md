@@ -949,6 +949,45 @@ toward 05:32 and answered `Waiting`. With the failover and `awaited_reset` as it
 only the pool the last attempt ran on, the task is deferred as asserted and the wait is 14,520
 seconds, to 07:02.
 
+This is also the witness for the third case of `awaited_reset`: with every recorded reset still
+ahead, the wait is the one `interaction::reset_wait_until` chooses. It passes unchanged with
+the two cases for a reset already passed decided before that rule is asked.
+
+## `fn a_held_pool_whose_reset_and_margin_have_passed_takes_the_ordinary_back_off() {`
+
+The regression reviewer's witness for #395 (`regression-witness-b657ba7.rs`), renamed, with its
+comments moved here. Generation 0 is limited on `claude-max` with a reset at 03:01, a minute
+ahead of `RunClock`'s 03:00, and fails over. The run is then stepped at 03:05
+(`AtThreeOhFive`), when `claude-max`'s reset and its two-minute margin have both passed. That
+step tries the spare, `claude-max-2`, which refuses until 07:00, so both pools are held and the
+task is deferred. The back-off that follows is the ordinary one, and the sleeper records exactly
+60 seconds: `claude-max` serves again from 03:03 (`serving_pool`), so there is no reset to wait
+for.
+
+Before the failover (`b73d347a`), the first limit deferred the task, so the back-off ran at
+once, found the 03:01 reset behind the clock and slept the same minute. With the failover and
+`awaited_reset` asking `interaction::reset_wait_until` alone, that rule dropped the passed 03:01
+reset and the run slept 14,220 seconds, to 07:02, two minutes past the spare's reset.
+
+## `fn a_held_pool_whose_reset_passed_inside_the_margin_is_waited_for_only_to_two_minutes_past_it() {`
+
+The frontier pass's mixed case for #395, with its pool names. `primary` refuses generation 0
+with `LIMIT_RESET_A_MINUTE_AGO`, a reset at 02:59, and the task fails over to `spare`, which
+refuses generation 1 with `FIVE_HOUR_LIMIT`'s 05:30. Both pools are then held, each with its
+own reset, and the task is `Deferred` with `defers` 1.
+
+At 03:00, `primary`'s reset has passed but its two-minute margin has not, so `primary` serves
+again from 03:01 (`serving_pool`). The test asks `awaited_reset` for the target directly,
+because a wait of a single slice answers `Waited` and never the `Progress::Waiting` that
+reports it. The target is 03:01, for `primary` and its 02:59 reset. The run sleeps 60
+seconds and records one `defer_wait_elapsed`, of 60,000 in round 1. The one line the notifier
+gets names `primary`, 02:59 and a one-minute wait. As in the earliest-reset test, the notifier
+is a leaked `WaitingLines`.
+
+With `awaited_reset` asking `interaction::reset_wait_until` alone, that rule dropped the 02:59
+reset as behind the clock and chose `spare`'s, to 05:32. The test fails at the target. The run
+would have slept 9,120 seconds and left `primary` idle from 03:01.
+
 ## `fn a_rate_limit_with_no_other_pool_for_the_agent_still_defers() {`
 
 The pools are `claude-max` for the implementing agent and `copilot-pool` for `REVIEW_AGENT`,

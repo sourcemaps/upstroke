@@ -3227,6 +3227,170 @@ fn with_every_pool_of_the_agent_exhausted_the_run_waits_for_the_earliest_reset_a
 }
 
 #[test]
+fn a_held_pool_whose_reset_and_margin_have_passed_takes_the_ordinary_back_off() {
+    use crate::engine::topology::scaffold::{AGENT, ScaffoldAdapters, Wide, WidePlans, WideTask};
+    struct AtThreeOhFive;
+    impl TimeSource for AtThreeOhFive {
+        fn now_rfc3339(&self) -> String {
+            "2026-11-11T03:05:00Z".to_owned()
+        }
+    }
+    let tasks = [WideTask::independent("alpha")];
+    let mut wide = Wide::started_with(
+        "pr395-reset-passed-regression",
+        &tasks,
+        1,
+        WidePlans {
+            pools: vec![
+                (AGENT, Some("claude-max".to_owned())),
+                (AGENT, Some("claude-max-2".to_owned())),
+            ],
+            ..WidePlans::default()
+        },
+        limited_runner(
+            &tasks,
+            &[
+                (
+                    TaskKey(0),
+                    GenerationId(0),
+                    "You've hit your 5-hour limit · resets 3:01am (UTC)",
+                ),
+                (
+                    TaskKey(0),
+                    GenerationId(1),
+                    "You've hit your 5-hour limit · resets 7am (UTC)",
+                ),
+            ],
+            &[],
+        ),
+    );
+    let mut hooks = wide.env.hooks();
+    let first = step_answered_by(&mut wide, ScaffoldAdapters::rate_limiting(), &mut hooks);
+    assert!(matches!(
+        first,
+        Progress::Settled {
+            accepted: false,
+            ..
+        }
+    ));
+    assert_eq!(pools_exhausted(&wide), [signal("2026-11-11T03:01:00Z")]);
+
+    let sleeper = RecordingSleeper::default();
+    let _steps = stepped_until_waited(&mut wide, &AtThreeOhFive, &sleeper, None, &mut hooks);
+    let total = sleeper.slept().iter().sum::<std::time::Duration>();
+    assert_eq!(
+        total,
+        std::time::Duration::from_secs(60),
+        "pool claude-max reset at 03:01 and is eligible again by 03:03; at 03:05 do not wait \
+         until the spare's 07:02"
+    );
+}
+
+#[test]
+fn a_held_pool_whose_reset_passed_inside_the_margin_is_waited_for_only_to_two_minutes_past_it() {
+    use crate::engine::topology::scaffold::{AGENT, ScaffoldAdapters, Wide, WidePlans, WideTask};
+
+    let tasks = [WideTask::independent("alpha")];
+    let mut wide = Wide::started_with(
+        "reset-passed-inside-the-margin",
+        &tasks,
+        1,
+        WidePlans {
+            pools: vec![
+                (AGENT, Some("primary".to_owned())),
+                (AGENT, Some("spare".to_owned())),
+            ],
+            ..WidePlans::default()
+        },
+        limited_runner(
+            &tasks,
+            &[
+                (TaskKey(0), GenerationId(0), LIMIT_RESET_A_MINUTE_AGO),
+                (TaskKey(0), GenerationId(1), FIVE_HOUR_LIMIT),
+            ],
+            &[],
+        ),
+    );
+    let mut hooks = wide.env.hooks();
+    let limited: Vec<Progress> = (0..2)
+        .map(|_| step_answered_by(&mut wide, ScaffoldAdapters::rate_limiting(), &mut hooks))
+        .collect();
+    assert!(
+        matches!(
+            limited.as_slice(),
+            [
+                Progress::Settled {
+                    key: TaskKey(0),
+                    accepted: false,
+                    ..
+                },
+                Progress::Settled {
+                    key: TaskKey(0),
+                    accepted: false,
+                    ..
+                },
+            ]
+        ),
+        "generation 0 is limited on `primary` and fails over, and generation 1 is limited on \
+         `spare` in the very next step: {limited:?}"
+    );
+    assert_eq!(
+        pools_exhausted(&wide),
+        [
+            (
+                "primary".to_owned(),
+                Some("2026-11-11T02:59:00Z".to_owned())
+            ),
+            ("spare".to_owned(), Some("2026-11-11T05:30:00Z".to_owned())),
+        ],
+        "`primary`'s reset is a minute behind the 03:00 clock and `spare`'s is ahead of it"
+    );
+    assert_eq!(
+        deferral_of(&wide, TaskKey(0)),
+        (TaskState::Deferred, 1),
+        "with both of the agent's pools held exhausted, the second limit defers the task, once"
+    );
+
+    let now = unix_seconds_of(&RunClock.now_rfc3339()).expect("`RunClock` reads as UTC");
+    assert_eq!(
+        wide.run.awaited_reset(now, wide.env.seams().plans),
+        Some(AwaitedReset {
+            pool: "primary".to_owned(),
+            reset_at: "2026-11-11T02:59:00Z".to_owned(),
+            until_unix: unix_seconds_of("2026-11-11T03:01:00Z").expect("a UTC reading"),
+        }),
+        "the wait runs to 03:01, two minutes past `primary`'s 02:59 reset, when `primary` serves \
+         again, and not to 05:32, two minutes past `spare`'s"
+    );
+
+    let lines: &'static WaitingLines =
+        Box::leak(Box::new(WaitingLines(std::sync::Mutex::new(Vec::new()))));
+    wide.run.notifiers = vec![lines];
+    let sleeper = RecordingSleeper::default();
+    let steps = stepped_until_waited(&mut wide, &RunClock, &sleeper, None, &mut hooks);
+
+    assert_eq!(
+        sleeper.slept().iter().sum::<std::time::Duration>(),
+        std::time::Duration::from_secs(60),
+        "the run sleeps from 03:00:00 to 03:01:00 and not to 05:32:00: {steps:?}"
+    );
+    assert_eq!(
+        steps.last().map(|step| step.defer_waits.clone()),
+        Some(vec![(60_000, 1)]),
+        "exactly one `defer_wait_elapsed`, for the whole wait, in the first round: {steps:?}"
+    );
+    assert_eq!(
+        lines.lines(),
+        [crate::interaction::reset_wait_line(
+            "primary",
+            "2026-11-11T02:59:00Z",
+            std::time::Duration::from_secs(60),
+        )],
+        "the wait is announced for `primary`, the pool whose margin it runs out"
+    );
+}
+
+#[test]
 fn a_rate_limit_with_no_other_pool_for_the_agent_still_defers() {
     use crate::engine::topology::scaffold::{
         AGENT, REVIEW_AGENT, ScaffoldAdapters, Wide, WidePlans, WideTask,

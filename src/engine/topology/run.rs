@@ -1845,9 +1845,18 @@ impl TopologyRun {
             .filter_map(|key| self.resets_awaited_by(key, plans))
             .flatten()
             .collect();
-        let until_unix =
-            interaction::reset_wait_until(now_unix, known.iter().map(|(reset, ..)| *reset))?;
-        let chosen = until_unix.checked_sub(interaction::RESET_WAIT_MARGIN.as_secs())?;
+        let margin = interaction::RESET_WAIT_MARGIN.as_secs();
+        let &(earliest, ..) = known.iter().min_by_key(|(reset, ..)| *reset)?;
+        let until_unix = if earliest <= now_unix {
+            let available = earliest.checked_add(margin)?;
+            if available <= now_unix {
+                return None;
+            }
+            available
+        } else {
+            interaction::reset_wait_until(now_unix, known.iter().map(|(reset, ..)| *reset))?
+        };
+        let chosen = until_unix.checked_sub(margin)?;
         let (_, pool, reset_at) = known.iter().find(|(reset, ..)| *reset == chosen)?;
         Some(AwaitedReset {
             pool: (*pool).clone(),

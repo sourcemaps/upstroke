@@ -1528,10 +1528,12 @@ With no wait held and no known reset in range, the arm is the plain
 backoff, unchanged. That covers a limit naming a reset more than
 `interaction::RESET_WAIT_BOUND` ahead (the weekly one, usually), a pool
 exhausted with no reset recorded, a recorded reset that does not read as
-a date ([`unix_seconds_of`]), a recorded reset the clock had already
-passed when the back-off began, a worker's limit one of whose agent's
-pools has been freed since it deferred the task, and a deferred queue
-verification, which names no pool. A reset the clock passes during a held
+a date ([`unix_seconds_of`]), an earliest recorded reset the clock had
+already passed, two-minute margin and all, when the back-off began (one
+still inside its margin is waited out to the margin's end,
+[`Self::awaited_reset`]), a worker's limit one of whose agent's pools has
+been freed since it deferred the task, and a deferred queue verification,
+which names no pool. A reset the clock passes during a held
 wait is not one of these: that wait is continued to its target.
 
 ## `impl TopologyRun` › `fn wait_elapsed(`
@@ -1550,10 +1552,32 @@ memory of exhausted pools:
 
 1. each task the fold holds `Deferred`, and the resets that task waits on
    ([`Self::resets_awaited_by`]);
-2. the earliest of all those resets that is ahead of the run's clock by at
-   most `interaction::RESET_WAIT_BOUND`, the one
-   `interaction::reset_wait_until` waits for. With none ahead within the
-   bound it answers `None`.
+2. the earliest of all those resets, which decides the wait:
+   - **passed, and its margin too.** If the clock is at or past both the
+     earliest reset and the two minutes after it
+     (`interaction::RESET_WAIT_MARGIN`), there is no wait and it answers
+     `None`. That pool can serve now ([`serving_pool`] serves a held pool
+     from its reset plus the margin), so `back_off` takes the plain backoff's
+     minute and the task wakes onto it.
+   - **passed, its margin not.** If the clock is at or past the earliest
+     reset but short of the two minutes after it, the wait runs to two
+     minutes past that reset, under two minutes, for that pool.
+   - **ahead.** Otherwise every reset is ahead of the clock, and the wait is
+     for the earliest one ahead by at most `interaction::RESET_WAIT_BOUND`,
+     the one `interaction::reset_wait_until` waits for. With none within
+     the bound it answers `None`.
+
+A pool's reset plus the margin is when it can serve again, so the earliest
+reset is also the earliest a pool comes back, passed or not. The two cases
+for a passed reset are decided here, before `interaction::reset_wait_until`
+is asked, because that rule waits only for a reset still ahead. Asked alone,
+it dropped a held pool whose reset had passed and waited for a later pool's.
+With `claude-max` reset at 03:01 and `claude-max-2` refusing until 07:00, a
+back-off at 03:05 slept to 07:02, though `claude-max` could serve from 03:03
+(`tests::a_held_pool_whose_reset_and_margin_have_passed_takes_the_ordinary_back_off`).
+With `primary` reset at 02:59 and `spare` refusing until 05:30, a back-off at
+03:00 slept to 05:32, though `primary` could serve from 03:01
+(`tests::a_held_pool_whose_reset_passed_inside_the_margin_is_waited_for_only_to_two_minutes_past_it`).
 
 The pool and reset text come back with the target, for the line
 [`Self::announce_reset_wait`] prints. They are those of the pool whose reset
