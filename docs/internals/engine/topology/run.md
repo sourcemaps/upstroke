@@ -1638,9 +1638,10 @@ Which pools those are depends on who was limited:
   resets. So it waits on all their resets, and the earliest is the one
   `awaited_reset` takes.
 - **A reviewer's limit: the reviewer's pool.** `capacity::limited_pool`
-  names it, as `capacity::retire_signals` does. A reviewer runs on its
-  agent's first pool whatever is held, so no other pool's reset helps it.
-  This is the pool `awaited_reset` read for every limit before.
+  names it, and the capacity evidence fold reads it through the same
+  function. A reviewer runs on its agent's first pool whatever is held, so
+  no other pool's reset helps it. This is the pool `awaited_reset` read for
+  every limit before.
 
 If any candidate is not in `exhausted_pools`, the task waits on no reset. A
 pool a later attempt proved serving, for another task perhaps, can take this
