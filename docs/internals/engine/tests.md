@@ -5105,6 +5105,11 @@ namespace, content included, is untouched. Before the repair the root was made b
 and stayed with no record naming it. Then the branch is born, and a fresh run on it completes and
 records the root it created; the other run's root is still untouched.
 
+## `fn probe_an_absent_cli(`
+
+A probe, for `adapter`, that asks the run's own runner to start `program`, which is not on `PATH`,
+and refuses the way a real adapter does when its CLI is absent (`agent::bin::boundary_refused`).
+
 ## `fn a_configured_reviewer_whose_cli_is_absent_fails_creation_before_p5b_and_commits_nothing() {`
 
 P12-W17 (D9). A configured reviewer whose CLI is absent fails creation before P5b, and nothing is
@@ -5116,6 +5121,41 @@ present, creates the run, records both agents as probed, and completes it.
 
 This prose sat above the test in the source until the execution root moved into the create protocol
 at P3c; the refusal used to be reported after P3b, and the root was made before creation began.
+
+## `fn assert_a_refused_creation_left_nothing(repo: &Path, said: &str) {`
+
+What a creation refused at P3c leaves in `repo`, whose refusal said `said`: no execution root, no
+run directory, no private half carrying a commit record, and no integration ref.
+
+The walk of the private `runs` directory reads every directory and entry or panics naming the path:
+one it cannot read is not certified as holding no commit record. Only the `runs` directory itself
+being absent counts as empty, since then there is nothing under it to hold one.
+
+## `fn an_absent_alternative_reviewer_cli_refusal_check_fails_on_a_runs_it_cannot_list() {`
+
+The refusal check the absent-alternative tests lean on does not certify a private `runs` it cannot
+list: here a file stands where the directory would, so listing it fails with an error other than
+its absence, and the check fails rather than reading it as holding no commit record.
+
+## `const ABSENT_ALTERNATIVE_CLI: &str = "upstroke-absent-codex-alternative-cli";`
+
+The program the alternative reviewer's adapter, `codex`, asks the runner for. Nothing installs it.
+
+## `struct AbsentAlternativeCli {`
+
+A `codex` adapter whose CLI is not installed, as [`AbsentReviewerCli`] is a `copilot` one, counting
+what the run asks of it: every probe and every build.
+
+## `const FRONTIER_IMPLEMENTS_CONFIG: &str =`
+
+Implementation held to the frontier rung, which the topology stub serves as Claude Code's frontier
+model, one attempt per task. The review tier is the frontier too, so the primary reviewer is the
+model that implemented each task, and with `cross_family` unset the run names another family's
+reviewer to take its place: on a harness that drives `codex`, Codex's.
+
+## `const FRONTIER_IMPLEMENTS_CROSS_FAMILY_OFF_CONFIG: &str = "[routing]\`
+
+The same, with the switch off: no other family's reviewer is named.
 
 ## `fn an_absent_alternative_reviewer_cli_refuses_creation_while_cross_family_is_unset() {`
 
