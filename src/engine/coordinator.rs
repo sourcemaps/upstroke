@@ -537,7 +537,7 @@ impl Run<'_> {
                 })?;
 
             let progress = self.progress_of(index)?;
-            let attempt = progress.attempts + 1;
+            let attempt = progress.attempts.saturating_add(1);
             let resume = progress
                 .resume_next
                 .then(|| progress.session.clone())
