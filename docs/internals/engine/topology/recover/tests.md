@@ -4610,6 +4610,12 @@ hard-blocks; an answer staged and published into `answers/` while the
 engine is away is ingested by the next incarnation's first step, `via`
 `event-log`, before anything else is selected.
 
+R21 at the layer the loop calls: ingestion through `EventLogAnswers` is a read, never a take. The
+published bytes are read once the answer is published, and after the loop's ingestion the test
+asserts the file is still present and byte-identical to them. Before this, the test checked only
+the appended `question_answered`, so a reader that removed or rewrote the file after reading it
+passed it.
+
 ## `const ANSWER_INGEST_KILL_CHILD: &str =`
 
 The kill child of the two `Answer.Ingest` witnesses below.

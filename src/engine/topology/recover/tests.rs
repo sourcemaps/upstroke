@@ -14139,6 +14139,8 @@ fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnatio
     );
     crate::rundir::publish_answer(&paths.answers(), &component, &mut crate::rundir::NoHooks)
         .expect("and published");
+    let published = paths.answers().join(format!("{component}.json"));
+    let published_bytes = std::fs::read(&published).expect("the published answer");
 
     let driven = drive_observing(
         &fixture,
@@ -14182,6 +14184,15 @@ fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnatio
         "the record names the production reader that ingested it"
     );
     assert_eq!(answers[0].question, question.id);
+    assert!(
+        published.is_file(),
+        "R21: the loop's ingestion is a read, never a take: the answer file is never pruned"
+    );
+    assert_eq!(
+        std::fs::read(&published).expect("the ingested answer file"),
+        published_bytes,
+        "R21: the loop's ingestion leaves the answer file byte-identical to what was published"
+    );
 }
 
 const ANSWER_INGEST_KILL_CHILD: &str = "engine::topology::recover::tests::answer_ingest_kill_child";
