@@ -854,27 +854,32 @@ for each open question that binds no agent, asks the run's recorded primary \
 reviewer for a proposal, read-only, through the Runner. It is not the engine: no \
 engine module names it, and it never answers -- it calls no `write_answer`, no \
 `AnswerSource` and no coordinator. \
-WHAT IT NEEDS THE ALLOWANCE FOR, counted on the library target: \
-`clippy::disallowed_methods`, 6 production sites -- in \
-`ProposalsDir::establish`, `std::fs::create_dir` 1 (each missing directory of \
-`.upstroke/proposals/<run-id>`, one level at a time, so no link is created \
-through) and `util::fsync_dir` 1 (the parent of a directory it created), and, \
-in the private `create_durably` that every reservation, settings file, \
-proposal and raw output goes through, `std::fs::File::create_new` 1, \
-`std::io::Write::write_all` 1, `util::fsync_file` 1 and `util::fsync_dir` 1. \
-`admit`'s `std::fs::canonicalize`, and the `symlink_metadata`, `metadata` and \
-`read_dir` reads of the proposals directory, are not denied. The test region \
-adds 52 more, counted the same way with `--all-targets` on Linux (58 in all, \
-on 2026-11-26): `std::fs::create_dir_all` 8 \
-and `std::fs::write` 8, which build the fixture repository's plan file, pools \
-files, credential profile directory, private directory, a schema-3 run, \
-earlier proposal history and stray files (the schema-4 run is written through \
-the event funnel); `std::fs::rename` 2, one moving the whole fixture \
-repository to show a proposal's raw-output reference still names its file, \
-and one with `std::fs::create_dir` 1 replacing the proposals directory while a \
-call is in flight; on Unix, `std::fs::set_permissions` 1 and \
-`std::os::unix::fs::symlink` 1, which make an untrusted one; and 31 calls of \
-the module's own denied entry point, `decide`. \
+WHAT IT NEEDS THE ALLOWANCE FOR, counted on the library target on Linux: \
+`clippy::disallowed_methods`, 8 production sites -- `std::fs::create_dir` 2, \
+one in `ensure_dir` (`.upstroke` or `.upstroke/proposals` where missing, one \
+level at a time, so no link is created through) and one in `claim` (the run's \
+own directory, created exclusively: the claim); on Unix \
+`std::fs::set_permissions` 1, in `make_owner_only`, narrowing a directory it \
+has just created to its owner; `util::fsync_dir` 1, in `sync_parent`, the \
+parent of each directory of the chain whoever created it; and, in the private \
+`create_durably` that every settings file, raw output and proposal goes \
+through, `std::fs::File::create_new` 1, `std::io::Write::write_all` 1, \
+`util::fsync_file` 1 and `util::fsync_dir` 1. `admit`'s \
+`std::fs::canonicalize` and the `symlink_metadata` and `metadata` reads of \
+the chain's directories are not denied; nothing lists or reads the proposals \
+directory. The test region adds 51 more, counted the same way with \
+`--all-targets` on Linux (59 in all, on 2026-11-26): `std::fs::create_dir_all` \
+8 and `std::fs::write` 9, which build the fixture repository's plan file, pools \
+files, credential profile directory, private directory, a schema-3 run, an \
+earlier claim of the run with its files, a directory of another mode or \
+elsewhere, and stray files (the schema-4 run is written through the event \
+funnel); `std::fs::rename` 1, moving the whole fixture repository to show a \
+proposal's raw-output reference still names its file; `std::fs::create_dir` \
+1, an earlier claim; on Unix, `std::fs::set_permissions` 1, which gives the \
+fixture's `.upstroke` the common umask's mode and each chain directory the mode \
+a case needs, and `std::os::unix::fs::symlink` 2, a link at the run's name and \
+at `.upstroke/proposals`; and 29 calls of the module's own denied entry point, \
+`decide`. \
 `clippy::disallowed_types` and `clippy::disallowed_macros` are FORBIDDEN in this \
 file: it names no `std::process::Command` or `OpenOptions` and prints nothing. \
 NO PROCESS IS STARTED HERE. The agent is the adapter's data-only `CommandSpec`, \
@@ -888,16 +893,20 @@ run's private directory unreadable; only Claude Code claims them), a \
 `--max-cost-usd` that is not a positive number and a private directory no \
 permission rule can name, and before `prepare` has refused a command that \
 carries an environment overlay or does not keep each guarantee as built. \
-CONTAINMENT. Every write is under `<repo>/.upstroke/proposals/<run-id>/`, a \
-chain of real directories (no link, no reparse point; on Unix the \
-repository owner's and not writable by every user) whose last one keeps the \
-identity it had when the call was reserved, checked before each file is \
-created. The run id is the exact name of an existing run directory and the \
-question id is one the run's own log froze; each is written into a file name \
-only when it is a plain component. Nothing is written under a run's public or private \
-directory or an answers directory, no file is overwritten (every file, the \
-call's settings file and each reservation included, is `create_new`), and \
-nothing is deleted. \
+CONTAINMENT. Every file is written under `<repo>/.upstroke/proposals/<run-id>/`, \
+which the run's first call claims by creating it exclusively, immediately \
+before that call: anything already at the name refuses the command with \
+nothing written and no agent asked, and the directory is never removed, so a \
+run is asked once. The chain is real directories (no link, no reparse point; \
+on Unix the repository owner's, `.upstroke` writable by no other user, and \
+`proposals` and `<run-id>` created owner-only and open to no other user), \
+checked before anything is created under each, with each one's parent synced \
+whoever created it. The run id is the exact name of an existing run directory \
+and the question id is one the run's own log froze; each is written into a \
+file name only when it is a plain component. Nothing is written under a run's \
+public or private directory or an answers directory, no file is overwritten \
+(every file, the call's settings file included, is `create_new`), and nothing \
+is deleted. \
 HANDLES: no item returns a `File`, an `OpenOptions` or a `Command`. \
 ITS ENTRY POINT IS DENIED. `decide` is an effectful row of \
 `effects/wrappers.toml` and an entry of `clippy.toml`."""

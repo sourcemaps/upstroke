@@ -167,7 +167,7 @@ enum Command {
         )]
         question_id: Option<String>,
         #[arg(
-            help = "The run's dollar allowance, shared by every decide call of the run; no question is started once its calls have reserved or spent it"
+            help = "The run's dollar allowance: a run is decided once, each call is capped at what is left, and no question is started once the calls have spent it"
         )]
         #[arg(long, default_value_t = upstroke::decide::DEFAULT_MAX_COST_USD)]
         max_cost_usd: f64,

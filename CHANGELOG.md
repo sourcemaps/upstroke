@@ -6,15 +6,18 @@
   each open question of a run (one that chooses an agent is skipped), checks the reply (one fenced
   `json` block, an offered option, never giving up), prints it and saves it under
   `.upstroke/proposals/<run-id>/`, naming its raw output by a path from the repository root; any
-  refused reply makes it exit non-zero after the report. It writes no answer and replaces no file.
-  Before each call it durably reserves one of the question's two slots and all that is left of the
-  run's `--max-cost-usd` allowance (default 5, shared by every decide call of the run, across
-  commands and concurrent launchers); an interrupted, failed or unpriced call keeps both, and
-  history it cannot account for starts no call. It asks only a Claude Code reviewer of a host run
-  whose pools pass the credential pre-flight a resume would run, giving each call the reserved
-  remainder as its own `--max-budget-usd`, no web access, no read of the run's private directory
-  and no environment overlay, each checked on the command as built; any other run or command is
-  refused before anything is written or asked.
+  refused reply, or a question it stopped before, makes it exit non-zero after the report. It
+  writes no answer and replaces no file. A run is decided once: immediately before its first call
+  the command claims the run by creating its proposals directory exclusively, owner-only, and a
+  run whose directory exists is refused with nothing written; the claim stays after a failure or
+  an interruption. Each question gets at most one call, each call is capped at what is left of the
+  run's `--max-cost-usd` allowance (default 5), and only a clean, successful, priced call is
+  counted, at its price; any other outcome is saved as refused and ends the command, naming the
+  questions left. It asks only a Claude Code reviewer of a host run whose pools pass the
+  credential pre-flight a resume would run, giving each call that remainder as its own
+  `--max-budget-usd`, no web access, no read of the run's private directory and no environment
+  overlay, each checked on the command as built; any other run or command is refused before
+  anything is written or asked.
 - Capacity is now tracked for the machine rather than for a repository; `[capacity] scope = "repo"`
   or `upstroke capacity --scope repo` folds only this repository. Nothing routes on any of this yet.
   Only an attempt that passed, in a run of any schema, clears another run's rate limit on its pool,

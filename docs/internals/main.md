@@ -249,8 +249,8 @@ and that agent's descendants have to be contained as `run`'s are: a decider
 that is killed or times out must not leave a process tree behind it, and the
 ambient job is how the Runner guarantees that. Joining the job costs nothing
 the command needs, and a containment failure refusing it before any agent
-starts is the behaviour wanted. It writes nothing into a run: its
-reservations, call settings, raw outputs and proposals go under
+starts is the behaviour wanted. It writes nothing into a run: its claim of
+the run, call settings, raw outputs and proposals go under
 `.upstroke/proposals/<run-id>/` (`docs/internals/decide.md`). Its admission
 (`decide::admit`) refuses a run recorded on the container runner before
 anything is written or asked, so the only agent it ever starts is on this

@@ -64,22 +64,28 @@ refused before it is written or started unless it carries no environment overlay
 `--output-format json`, `--max-budget-usd` at most what is left of the allowance,
 `--permission-mode dontAsk`, `--setting-sources ""`, `--strict-mcp-config` and no flag besides
 the call's own, and settings that allow `Read`, `Glob` and `Grep` at most and deny `WebFetch`,
-`WebSearch`, and reads of `.upstroke/**` and of the run's private directory. `--max-cost-usd` (default 5) is the
-run's dollar allowance, shared by every decide call of the run, across commands and concurrent
-launchers. Before each call it durably reserves one of the question's two slots and all that is
-left of the allowance, which the call is given as its own `--max-budget-usd`; an interrupted,
-failed or unpriced call keeps both, so a third call on a question is refused and a call is never
-re-asked. Once nothing is left no question is started, and the report names those left. A reply
+`WebSearch`, and reads of `.upstroke/**` and of the run's private directory. A run is decided
+once: immediately before its first call the command claims it by creating its proposals directory
+exclusively (§15), and a run whose directory exists, complete, partial, of an older format or
+anything else at that name, is refused with nothing written and no agent asked; the claim is never
+removed, after a failure or an interruption included. Each question gets at most one call.
+`--max-cost-usd` (default 5) is the run's dollar allowance, which a run's one command keeps in
+memory: each call is given what is left as its own `--max-budget-usd`, and only a clean, successful
+and priced call (exit 0 within its limits, an outcome the adapter reads as completed, a cost of $0
+or more) is counted, at its price. Any other outcome a call returns is saved as refused and ends
+the command, since what it spent is unknown. Once nothing is left, or when the command stops on
+such an outcome or on a write that fails, no further question is started, and the report names
+those left. A reply
 is accepted only when it holds exactly one fenced block, every block counted whatever its info
 string and whether closed or left open, and that block is a closed `json` block, its fences whole
 lines, holding `choice`, `guidance`, `reasons`, `confidence`, `needs_a_person` and `citations`,
 whose `choice` is one of the question's options and never one that gives up, or `null` where
 there are none. Each reply,
 accepted or refused, is saved as §15 lays out. The report gives each question's decider, status,
-choice and the reply's fields, cost and saved path, then the total cost, naming any reply that
-reported none, and ends saying nothing was answered. Agent text, question text and file names are
+choice and the reply's fields, cost and saved path, then the total cost, naming any call that did
+not settle, the directory that claims the run, and ends saying nothing was answered. Agent text, question text and file names are
 data inside a line, sanitized as `status` sanitizes them. The command exits non-zero, after the
-whole report, when any reply or question was refused.
+whole report, when any reply or question was refused or any question was left.
 
 `--dry-run` executes everything except agents: parse, route, and print task → kind → chain (with source of each decision: config/annotation/override) → gates → pool + strategy effect, at zero spend. It exists from day one; it is both the config-iteration loop and the sales demo.
 
