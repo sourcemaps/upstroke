@@ -692,7 +692,7 @@ pub fn latest_run_observations(
         return LatestRun::default();
     };
     let folded = match crate::engine::topology::observe::observe(repo_root, &run_id) {
-        Ok(Some(observed)) => Ok(observe_topology(observed.events())),
+        Ok(Some(observed)) => Ok(observe_topology(&observed.accounting_events())),
         Ok(None) => {
             let path = crate::rundir::public_dir(repo_root, &run_id).join(crate::rundir::EVENT_LOG);
             crate::events::read_all(&path, warnings).map(|events| observe(&events))
@@ -2154,6 +2154,76 @@ pub(crate) mod tests {
                 "claude-max: exhausted [signal] — this run drew $1.0000? over 2 attempt(s)"
             ),
             "{rendered}"
+        );
+    }
+
+    #[test]
+    fn an_unresumed_runs_in_flight_attempt_counts_once_unpriced_on_the_pool_it_started_on() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-schema4-in-flight");
+        let repo = tree.path();
+        let mut run = Schema4Run::started(repo, SCHEMA_4_RUN);
+
+        run.begin_attempt(ALPHA, "claude-max");
+        run.push(finished(failed(
+            priced(settled(Some("claude-max"), Vec::new()), 1.0),
+            FailureKind::RateLimited,
+            FailureOrigin::Worker,
+        )));
+
+        run.begin_attempt(BETA, "claude-max");
+
+        let mut warnings = Vec::new();
+        let latest = latest_run_observations(repo, &mut warnings);
+
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(latest.run_id.as_deref(), Some(SCHEMA_4_RUN));
+        assert_eq!(
+            latest.observations.self_spend,
+            BTreeMap::from([(
+                "claude-max".to_owned(),
+                Spend {
+                    usd: Some(1.0),
+                    attempts: 2,
+                    unpriced: 1,
+                },
+            )]),
+            "nothing holds the run, so the attempt its log leaves in flight was cut off on the \
+             pool it started on, at a cost nothing recorded"
+        );
+
+        let status = crate::status::render(
+            &crate::status::load(repo, Some(SCHEMA_4_RUN)).expect("the run's status"),
+        );
+        assert!(
+            status.contains("claude-max: 2 attempt(s), $1.0000?"),
+            "`status` counts the in-flight attempt the same way: {status}"
+        );
+
+        let rendered = reported(repo).render();
+        assert!(
+            rendered.contains(
+                "claude-max: exhausted [signal] — this run drew $1.0000? over 2 attempt(s)"
+            ),
+            "{rendered}"
+        );
+
+        let _held = crate::rundir::RunLock::acquire(&crate::rundir::public_dir(repo, SCHEMA_4_RUN))
+            .expect("hold the run as its coordinator would");
+        let mut warnings = Vec::new();
+        let latest = latest_run_observations(repo, &mut warnings);
+
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(
+            latest.observations.self_spend,
+            BTreeMap::from([(
+                "claude-max".to_owned(),
+                Spend {
+                    usd: Some(1.0),
+                    attempts: 1,
+                    unpriced: 0,
+                },
+            )]),
+            "a live coordinator still owns the attempt in flight, so it is not counted yet"
         );
     }
 
