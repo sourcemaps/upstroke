@@ -3229,7 +3229,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the shards' suite step keeps the suite command and loses the count: the line \
                  that sums it, the line that holds it to the shard's floor and the line that \
                  prints it. A Cargo target runner in the runner's environment or Cargo home \
-                 then hands every harness to a wrapper that exits zero, and each of the ten \
+                 then hands every harness to a wrapper that exits zero, and each of the fourteen \
                  legs is green having executed nothing, on every event: no other job runs the \
                  Windows suite",
         job: Some("test-windows-hosted"),
@@ -3277,7 +3277,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-ON-THE-GUEST",
-        escape: "the ten legs moved onto the labels of a self-hosted guest deleted on \
+        escape: "the fourteen legs moved onto the labels of a self-hosted guest deleted on \
                  2026-11-20, which no runner carries: every leg of every run is queued for a \
                  machine that does not exist, and the Windows suite starts on no event",
         job: Some("test-windows-hosted"),
@@ -3362,7 +3362,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-CHECKOUT-REF",
-        escape: "the shards check out `master`: on every event the ten legs test a tree the \
+        escape: "the shards check out `master`: on every event the fourteen legs test a tree the \
                  candidate never touched, and the Windows suite is green over a candidate it \
                  never ran",
         job: Some("test-windows-hosted"),
@@ -3717,7 +3717,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  shard reported its tests and did not end before its job's limit. By the \
                  inference the step is written against, a test process that outlives its \
                  harness holds that pipe, so a leg whose tests all passed is cancelled at its \
-                 40 minutes with no failing test to show for it, on whichever of the ten legs \
+                 40 minutes with no failing test to show for it, on whichever of the fourteen legs \
                  runs the test that leaves the process",
         job: Some("test-windows-hosted"),
         anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
@@ -3727,9 +3727,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SURVIVOR-ALLOWED",
         escape: "line 11 of the shards' suite step, the throw for a test process left running, \
-                 is gone, on all ten legs at once. Each leg still lists the `upstroke*` \
+                 is gone, on all fourteen legs at once. Each leg still lists the `upstroke*` \
                  processes left and asks Windows to stop them, then counts and clears its \
-                 floor: the leg whose tests leave a process is green beside the other nine, \
+                 floor: the leg whose tests leave a process is green beside the other thirteen, \
                  the process is forgotten whether or not it stopped, and which test leaves it, \
                  the question both runs that did not end left open, is asked by nothing",
         job: Some("test-windows-hosted"),
@@ -3743,7 +3743,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  line sets it again. The build then runs in the bootstrap mode the variable \
                  exists for: Cargo and every compiler it starts accept unstable features, and a \
                  build script that asks whether the compiler does is answered yes, so the \
-                 harnesses all ten legs test can be built otherwise than the ones the other \
+                 harnesses all fourteen legs test can be built otherwise than the ones the other \
                  platforms' legs build and a user builds, from a tree nobody changed",
         job: Some("test-windows-hosted"),
         anchor: "          $out = Join-Path $env:RUNNER_TEMP 'suite-stdout.log'; $err = Join-Path $env:RUNNER_TEMP 'suite-stderr.log'; $built = Join-Path $env:RUNNER_TEMP 'suite-build.json'\n",
@@ -3783,7 +3783,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the harnesses started without `-Z unstable-options --report-time`, the leg's \
                  `matrix.tests` still theirs: every leg runs its shard, clears its floor and is \
                  green, and no line of any leg's log carries the time a test took on the hosted \
-                 runner. The times the step exists to record are lost on all ten legs at once, \
+                 runner. The times the step exists to record are lost on all fourteen legs at once, \
                  and nothing fails to say so",
         job: Some("test-windows-hosted"),
         anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
@@ -3846,7 +3846,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-WINDOWS-HOSTED-BUILD-RUNS-THE-SUITE",
         escape: "the build started without `--no-run`: Cargo runs every harness it builds, over \
                  the whole suite, with no selection and no times, and only then does the loop \
-                 run the leg's shard again. Each of the ten legs runs the whole suite once and \
+                 run the leg's shard again. Each of the fourteen legs runs the whole suite once and \
                  its own shard a second time, and on 2026-11-15 the whole suite alone took \
                  3,311 to 4,292 s in the harness on this runner, more than a leg's 40 minutes",
         job: Some("test-windows-hosted"),
@@ -3896,7 +3896,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-WINDOWS-HOSTED-CONDITIONED",
         escape: "a job-level `if:` that excludes the merge queue: the routing by event that \
                  this workflow dropped on 2026-11-20, put back. A pull request and a push still \
-                 run the ten legs; on a queue entry the job is skipped, the aggregate reads \
+                 run the fourteen legs; on a queue entry the job is skipped, the aggregate reads \
                  `skipped` and fails, and no entry lands. Not a false green: the oracle refuses \
                  it before it is pushed, where the queue would refuse it one entry at a time",
         job: Some("test-windows-hosted"),
@@ -3920,7 +3920,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-WINDOWS-HOSTED-RUN-RETARGETED",
         escape: "the shards' identity step fetches `master` and checks it out detached before \
                  the suite runs. The runner, the fields, the shells, the input-free checkout \
-                 and the suite's script all still match; all ten legs test `master`, on every \
+                 and the suite's script all still match; all fourteen legs test `master`, on every \
                  event, and are green over a candidate they never ran",
         job: Some("test-windows-hosted"),
         anchor: "          git config --global user.name \"upstroke CI\"\n",

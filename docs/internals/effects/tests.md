@@ -2108,7 +2108,7 @@ on conforming input is one nobody has seen refuse anything -- the rule this
 file states in its own header and the reason `PR5-C-DOCTEST-FIXTURES-NEVER-RAN`
 exists.
 
-The ledger is 161 rows. It was 195 until 2026-11-20, when the guest's
+The ledger is 166 rows. It was 195 until 2026-11-20, when the guest's
 Windows job and the job that picked the suite's home were removed from the
 workflow. The rows written for either, and for the rule that ran exactly
 one of two Windows suite jobs, went with them, and ten were written for what
@@ -2136,7 +2136,9 @@ the Windows legs, `MUT-TEST-WINDOWS-HOSTED-FILTER-DROPPED-FROM-ITS-LEG`,
 `-FILTERS-COMMA-JOINED`, and three on the macOS legs,
 `MUT-TEST-MACOS-FILTER-DROPPED-FROM-ITS-LEG`, `-SKIP-DROPPED` and
 `-FILTER-MOVED-BETWEEN-LEGS` (each under its matrix check in the workflow
-notes). The test asserts no count. It requires every row to change the document and to be refused under
+notes). Those eight were counted from 153 to 161 before the five
+cross-target rows of #412 were merged in from `master`, which made 166.
+The test asserts no count. It requires every row to change the document and to be refused under
 the code the row names, and no two rows to share a name; a row taken out of
 the ledger is a claim nothing measures, and that is the diff's to show.
 
@@ -2265,8 +2267,11 @@ and its line carries no time. libtest writes the time apart from the
 result, so a child a test starts on the harness's console can write between
 them and move the time to the next line; the `mklink` that `link_dir` in
 `src/rundir/tests.rs` starts was one, and `link_dir` now captures its
-output. The packing of tests into legs (`WINDOWS_SHARD_FILTERS`) is to be
-weighed by those times in a later change (`MAINTAINING.md` step 3).
+output. The tests were packed into legs (`WINDOWS_SHARD_FILTERS`) by those
+times on 2026-11-22 and re-packed from three timed runs on 2026-11-23, as
+`MAINTAINING.md` step 3 records, then rebalanced by the median of each
+test's times over five runs, as the notes on `WINDOWS_SHARD_FILTERS` in
+`docs/internals/effects/tests/ci_model.md` record.
 `--report-time` is unstable: libtest takes it only after
 `-Z unstable-options`, and on a stable compiler takes that only where
 `RUSTC_BOOTSTRAP` is set in the harness's own environment, which line 7 of
