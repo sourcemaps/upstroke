@@ -54,7 +54,7 @@ marker was written. `helper.complete()` (`:2822`) runs before the assertion, so 
 |---|---|---|---|---|---|
 | `44968824584` (`pull_request`) | `137043863243`, `test (macos-latest, 5 of 5)` | a GitHub-hosted `macos-latest` runner | 2026-11-22 | #399 | `144485c7` |
 
-Read from the raw job log (`evidence/job-137043863243.log`, SHA256
+Read from the job's log as GitHub's API serves it, with ANSI escape sequences removed (`evidence/job-137043863243.log`, SHA256
 `0af2a1e08c691b0d0bcaf3a79fdb3439eb182c0df9d50b837a4ed35e96bf0167`):
 
 - Line 670: `test agent::proc::tests::terminal_interrupt_kills_the_isolated_tree ... FAILED`.
@@ -87,14 +87,11 @@ the source, and not run. The log does not tell them apart.
 The signal path matters to all three. Upstroke's handler for a terminating signal only records it
 (`record_signal`, `src/agent/proc.rs:2058`, stores it in `PENDING_TERMINATION`). A separate monitor
 thread (`monitor`, `src/agent/proc.rs:2173`) later sees the recorded signal, sends `SIGKILL` to the
-registered groups, and then re-raises the signal to end Upstroke. So three events follow one
-another: the test submits the signal, the monitor kills the group, and Upstroke exits. Time can
-pass between each of them.
+registered groups, and then re-raises the signal to end Upstroke. That `SIGKILL` is only submitted: `signal_groups` (`src/agent/proc.rs:4698`) discards `kill`'s result, and the monitor re-raises without observing the group empty. So four events are distinct: the test submits the signal, the monitor submits `SIGKILL`, the group's members end, and Upstroke exits. The monitor does not order the last two.
 
 1. **A live tree.** *Inferred, read from source, not run.* The interrupt terminated Upstroke, but
    the kill of the isolated tree that it should cause did not reach the worker. The worker outlived
-   Upstroke, its timer ran out, and it wrote the marker after Upstroke exited, during the test's
-   1.3 s sleep. That is a real defect in the supervisor's handling of a terminal interrupt.
+   Upstroke, its timer ran out, and it wrote the marker after Upstroke exited and before the test looked. That is a real defect in the supervisor's handling of a terminal interrupt.
 2. **The worker's timer ran out before the signal.** *Inferred, read from source, not run.* The
    worker's one-second timer starts before the shell's two `ps` calls and its `ready` file
    (`:2458-2462`). Before the interrupt can land, the shell must fork `ps` and `tr` twice and write
@@ -103,23 +100,14 @@ pass between each of them.
    worker wrote the marker before any signal was sent. The tree's kill may then have worked, and the
    test failed on its own timing. This job's shard finished in 346.87 s. Nothing in the log measures
    how long the shell took to become ready.
-3. **The timer ran out between the signal and the group's kill.** *Inferred, read from source, not
+3. **The timer ran out between the signal and the monitor's `SIGKILL`.** *Inferred, read from source, not
    run.* `ready` appears and the test sends `SIGINT`. The handler records it, but the monitor thread
    is descheduled before it acts. Meanwhile the worker's timer runs out and it writes the marker.
-   The monitor then kills the group, and Upstroke exits. The worker did not outlive Upstroke and the
-   kill worked, yet the marker was written after the signal was sent. The test failed on its own
-   timing, as in the second reading.
+   The monitor then submits `SIGKILL` to the group, and Upstroke exits. The marker was written after the signal was sent and before any `SIGKILL` was submitted, so it does not show a kill that failed.
 
-**What would establish each.** The failure would distinguish the signal's submission (the test's
-`kill(-pid, signal)` returning), the group's termination (the monitor's `SIGKILL`) and the
-supervisor's exit (the test's wait for Upstroke returning). It would print what of the agent tree
-was still alive, meaning the processes still in the supervised group (`supervised_pgid`) when the
-assertion ran. It would also print when the marker was written relative to Upstroke's exit, and
-relative to the signal's submission. Whether the worker outlived Upstroke is decided by comparing the
-marker against Upstroke's exit, not against the time the signal was sent. A live worker or shell
-after the exit, or a marker written after the exit, is the first reading. An empty group and a
-marker written before the signal's submission is the second. An empty group and a marker written
-after the submission but before the exit is the third. The test records none of these today.
+**Not established: whether the tree outlived Upstroke.** Only the first reading says it did. The second and third do not say it did not: a member may have remained when Upstroke exited and ended before the test looked.
+
+**What would establish each.** The marker's write placed among four events: the signal's submission, the monitor's submission of `SIGKILL`, the end of the group's last member, and Upstroke's exit. The test records none of these today, and it sees the last two only after the fact: its wait polls every 20 ms (`wait_for_exit`, `:2747`), so its return is an upper bound on the exit, and a supervised group (`supervised_pgid`) found empty at the assertion was not thereby empty at the exit. This file gives no rule for telling the readings apart.
 
 **Not established: the rate.** One sighting. Other runs of this test were not counted.
 

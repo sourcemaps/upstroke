@@ -59,8 +59,8 @@ print it today.
 |---|---|---|---|---|---|
 | `44983136029` (`pull_request`) | `137087841949`, `test (windows-latest, 10 of 10)` | a GitHub-hosted `windows-latest` runner | 2026-11-22 | #399 | `2e72fba8`, an empty commit whose tree is `144485c7`'s |
 
-Read from the raw job log (`evidence/job-137087841949.log`, SHA256
-`59f5519d5b8603d1938fc21f1b7d9df51662d2a5dd6b16731056080820adb9d1`):
+Read from the job's log as GitHub's API serves it, with ANSI escape sequences removed (`evidence/job-137087841949.log`, SHA256
+`ec4fa44094f98ccde842958734d710f5256eb2b53f721253665dbe84bac29ea2`):
 
 - Line 2410: `test
   workspace::tests::a_snapshot_removal_beside_a_tear_its_writer_finishes_takes_the_registration
@@ -134,8 +134,7 @@ directory and not the registration, or the access succeeded while Git still regi
    500 ms, the access returned `RegistryRefused` (`src/workspace_manager.rs:2562-2570`) before an
    attempt ran past the finished tear. Or the later attempts could not take a registration whose
    directory was already gone. The drop discarded the refusal (`:2672`), and the cleanup never
-   reached the intent. On this runner a single refused `git worktree add` took 3.39 s against the
-   same 500 ms (`CI-FLAKE-WINDOWS-ADD-REFUSAL-PAST-REGISTRY-DEADLINE`, below). Which step of Git's
+   reached the intent. The log does not say how long this test's Git children took. Which step of Git's
    removal the tear fails, and whether Git removes a registration whose directory is gone, were not
    read here.
 2. **The access succeeded while Git still registered the snapshot.** *Inferred, read from source,
@@ -174,10 +173,8 @@ the failed assertion, so this run never reached it.
   hosted runner, not a recurrence that finding records. It is a relative, not a parent.
 - **`CI-FLAKE-WINDOWS-ADD-REFUSAL-PAST-REGISTRY-DEADLINE`**
   (`findings/P3_correctness_202611211600_an-add-refused-at-once-took-three-seconds-on-hosted-windows.md`)
-  records one `git worktree add` attempt taking 3.39 s on a hosted Windows runner, against the same
-  500 ms test deadline. That is a different test, with a different assertion: a wall-time bound on
-  an add. If the first reading above holds, the two share a cause: Git children slower on hosted
-  Windows than the test deadline allows. One sighting cannot show it.
+  records one whole `add_worktree` call taking 3.39 s, in another job on 2026-11-20, against the same 500 ms test deadline. It marks as inferred, not established, that the time was spent in the `git worktree add` attempt. That is a different test, with a different assertion: a wall-time bound on
+  an add. Whether the two share a cause is not established.
 
 Both ids were found as written. No other finding names this test or its tear fixture.
 

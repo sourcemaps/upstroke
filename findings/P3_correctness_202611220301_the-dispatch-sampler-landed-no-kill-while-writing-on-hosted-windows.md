@@ -41,7 +41,7 @@ failed.**
 |---|---|---|---|---|---|
 | `44975798003` (`pull_request`) | `137065317614`, `test (windows-latest, 10 of 10)` | a GitHub-hosted `windows-latest` runner | 2026-11-22 | #399 | `fe4bfa4e`, an empty commit on `144485c7` |
 
-Read from the raw job log (`evidence/job-137065317614.log`, SHA256
+Read from the job's log as GitHub's API serves it, with ANSI escape sequences removed (`evidence/job-137065317614.log`, SHA256
 `f1d33a829afe39a9952de72a8202683a9445054c9c81daaa7939feee9dd280b3`):
 
 - Line 1154: `test
