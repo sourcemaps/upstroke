@@ -1142,15 +1142,16 @@ between shell gate files and Linux lint invocations is retained: lint also runs 
 new shell gate. This adds listing/build overhead to that existing job, not a test
 leg. No hosted overhead measurement is claimed.
 
-The native-libtest proof first checks Cargo's real all-target inventory and
-requires nonzero CLI membership. The check's `--explain` option prints the count
-for every subcategory and each name also matched by a later row. A nested Cargo
-listing reuses its caller-owned build slot without setting a target directory.
-The proof then lists the real library harness separately with each
-generated selector and compares the sets to first-match ownership. A compiled
+The standalone `check` builds and lists the native all-target, all-feature
+inventory across all harnesses and requires nonzero CLI membership. It starts
+Cargo, so it never runs from a test. Its `--explain` option prints the count
+for every subcategory and each name also matched by a later row. Separately,
+the native-libtest test uses `prove --harness` on the current library executable
+to list each generated selector and compare the sets to first-match ownership,
+without starting Cargo. A compiled
 fixture proves the CLI prefix, ordinary and ignored registrations, and rejection
 of an inert ignored registration named `newly_registered_unclassified`. Its bodies
-panic if executed; the check only lists them.
+panic if executed; the proof only lists them.
 
 Planning evidence was checked from all three recorded runs, 45732809453,
 45733917605 and 45733836381, after the split-family remaps and CLI rename:

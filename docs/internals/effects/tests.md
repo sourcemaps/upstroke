@@ -3032,10 +3032,11 @@ Run `prove --harness` on the current library harness: libtest itself
 lists each generated selection, and each set must equal the first-match
 owner's set. Across legs every registration must occur exactly once, and the
 all-skipped list must be empty. Ignored registrations are included. This
-proof starts no Cargo process inside the running test. The standalone
-`check` still builds and lists the native all-target, all-feature inventory
-and requires nonzero `unit/cli` membership. These are native proofs, so the
-other operating systems still supply their own inventories in CI.
+proof starts no Cargo process inside the running test. Separately, standalone
+`check` starts Cargo to build and list the native all-target, all-feature
+inventory across all harnesses and requires nonzero `unit/cli` membership.
+It never runs from a test. These are native proofs, so the other operating
+systems still supply their own inventories in CI.
 
 ## `fn the_category_check_refuses_bootstrap_before_starting_a_subprocess() {`
 

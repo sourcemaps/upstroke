@@ -81,7 +81,8 @@ The generator changes only the three `BEGIN TEST_CATEGORIES` / `END TEST_CATEGOR
 blocks in `.github/workflows/ci.yml`. Commit the table and its generated matrices together; do
 not hand-edit the generated selectors. `generate --check` refuses stale blocks. The local
 check builds and lists the native all-target, all-feature inventory, including ignored tests,
-without executing test bodies. It checks one correct leg per name and lists again with all
+without executing test bodies. This standalone check starts Cargo, so it never runs from a test.
+It checks one correct leg per name and lists again with all
 category filters skipped: that remainder must be empty. It requires at least one registration
 owned by `unit/cli`. `--explain` reports subcategory counts and later matches. The script uses
 `upstroke-build cargo` when that wrapper is available; it does not assign a target directory.
