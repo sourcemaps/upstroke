@@ -19955,7 +19955,7 @@ fn host_acceptance_frame(record: &[u8]) -> String {
 /// reconstruction whose digests all agree.
 #[test]
 #[ignore = "native host acceptance record: run only by CI's capture step, which selects it by \
-            its exact name after the full suite"]
+            its exact name after the suite, or after a shard's share of it"]
 fn host_acceptance_record() {
     use std::io::Write as _;
 
