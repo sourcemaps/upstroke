@@ -207,8 +207,11 @@ command failure without selecting a provider CLI.
 `configured_fixture_preserves_directory_bytes_through_the_runner` exercises probe,
 discovery, execution, absence and restoration under a directory containing invalid
 UTF-8, shell metacharacters and trailing newlines. It checks the local call record
-and parsed verdict through the real host runner. Like the fixture, this regression
-runs on the native Linux and macOS test legs; it is excluded on Windows.
+and parsed verdict through the real host runner. This test is compiled on Linux only
+and run by the `test-linux` legs; APFS refuses the name with `EILSEQ` (run
+45895906029, `test (macos-latest, 12 of 12)`). A Linux filesystem that refuses the
+name fails the test at the fixture's `create_dir_all`. The fixture still runs on
+macOS through the connect and engine tests.
 
 ## `fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError> {` › `json_output: true,`
 

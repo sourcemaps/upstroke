@@ -1021,6 +1021,7 @@ exec sh "$CODEX_FIXTURE/cli.sh" "$@"
         }
 
         #[test]
+        #[cfg(target_os = "linux")]
         fn configured_fixture_preserves_directory_bytes_through_the_runner() {
             use crate::runner::invocation::AttemptRole;
             use crate::runner::{AgentId, InvocationId, worker_request};
