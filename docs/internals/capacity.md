@@ -295,15 +295,32 @@ Fold a schema-4 run's events into observations: `observe`'s sibling for a
 `TopologyRun` starts from, so the report and the run cannot disagree about
 which pools a log holds exhausted.
 
-`self_spend` sums every settled attempt's record through `accumulate`, the
-worker's pool and each review's, as `observe` does. A schema-4 attempt
-settles exactly once. A failed one settles as `attempt_finished`, and the
-fold refuses an `attempt_finished` whose record says success. An accepted
-one settles as `candidate_prepared` and writes no `attempt_finished`. So
-the two arms name disjoint attempts, and reading both counts each attempt
-once. `attempt_interrupted` carries no record in a schema-4 log, so an
-interrupted attempt adds nothing here. The legacy `attempt_interrupted`
-carries one, and `observe` counts it.
+`self_spend` counts every settled attempt once. A schema-4 attempt settles
+exactly once, in one of three ways. A failed one settles as
+`attempt_finished`, and the fold refuses an `attempt_finished` whose record
+says success. An accepted one settles as `candidate_prepared` and writes no
+`attempt_finished`. Both carry the attempt's record, and it is summed
+through `accumulate`, the worker's pool and each review's, as `observe`
+does.
+
+The third settlement is `attempt_interrupted`, which a resume writes for an
+attempt the process ended on. It carries no record in a schema-4 log, so
+its pool is read from the `attempt_started` of the same
+`(key, generation, attempt)`, as `RunReport::from_topology` reads it. That
+pool gets one attempt of unknown cost: `attempts` and `unpriced` each rise
+by one and `usd` does not move, so the pool's dollars read as a floor (the
+`?` in `PoolEstimate::describe`). An interrupted attempt has no review
+passes to count. The three arms name disjoint attempts, so reading all
+three counts each attempt once.
+
+When the log records no `attempt_started` for the interrupted attempt, or
+its start names no pool, nothing can be attributed to a pool and the fold
+adds nothing. That is `accumulate`'s rule for a record naming no pool.
+
+An interrupted attempt used to add nothing here at all. A pool it had drawn
+on then showed its dollars as complete, while the same run's report
+(`RunReport::from_topology`) showed that pool's drain as a floor. The
+legacy `attempt_interrupted` carries a record, and `observe` counts it.
 
 It is effect-free in `effects/wrappers.toml`.
 
@@ -911,7 +928,8 @@ with the fold's own refusal, so no test here reads a log that
 
 `task_dispatched` and `attempt_started` for a task's first attempt, with
 the region and the rung binding the fold itself derives. The settlement
-that follows is the existing `finished` (task 0) or `prepared` (task 1).
+that follows is the existing `finished` (task 0) or `prepared` (task 1), or
+`interrupted` for either.
 
 ## `fn rewritten_with(self, line: &[u8]) {`
 
@@ -954,6 +972,24 @@ The other is accepted and settles as `candidate_prepared`: $1.25 and
 $0.75. Each pool reads the sum over exactly two attempts: $1.75 and
 $1.00. An accepted attempt has no `attempt_finished`, so a fold reading
 only that arm would report $0.50 and $0.25 over one attempt each.
+
+## `fn a_schema_4_logs_interrupted_attempt_counts_once_unpriced_on_the_pool_it_started_on() {`
+
+The third settlement. One attempt is refused and settles as
+`attempt_finished`: $1.00 on `claude-max`. A second, on the other task,
+starts on the same pool and is settled by `attempt_interrupted`. The pool
+reads $1.00 over two attempts, one of them unpriced, and `report` renders
+its draw as `$1.0000? over 2 attempt(s)`. A fold that skips
+`attempt_interrupted` reports $1.00 over one attempt, with no mark that
+anything is missing from it.
+
+## `fn an_interrupted_attempt_whose_start_names_no_pool_adds_to_no_pools_spend() {`
+
+The two cases with no pool to charge, folded from plain events with no run
+directory. In the first, no `attempt_started` names the interrupted
+attempt; the other task's start is in the log, on a pool, and is not taken
+for it. In the second, its start names no pool. Each leaves every pool's
+`Spend` as the settled attempt alone left it: $1.00 over one attempt.
 
 ## `fn the_latest_run_reader_folds_a_legacy_log_as_observe_over_read_all_does() {`
 

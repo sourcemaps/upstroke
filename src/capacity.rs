@@ -223,14 +223,30 @@ pub fn observe(events: &[Event]) -> Observations {
 }
 
 pub fn observe_topology(events: &[TopologyEvent]) -> Observations {
-    let mut self_spend = BTreeMap::new();
+    let mut self_spend: BTreeMap<String, Spend> = BTreeMap::new();
+    let mut started_on = BTreeMap::new();
     for event in events {
         match &event.body {
+            TopologyEventBody::AttemptStarted { data } => {
+                started_on.insert(
+                    (data.key, data.generation, data.attempt),
+                    data.pool.as_ref(),
+                );
+            }
             TopologyEventBody::AttemptFinished { data } => {
                 accumulate(&mut self_spend, &data.record);
             }
             TopologyEventBody::CandidatePrepared { data } => {
                 accumulate(&mut self_spend, &data.attempt);
+            }
+            TopologyEventBody::AttemptInterrupted { data } => {
+                let pool = started_on
+                    .get(&(data.key, data.generation, data.attempt))
+                    .copied()
+                    .flatten();
+                if let Some(pool) = pool {
+                    self_spend.entry(pool.clone()).or_default().add(None);
+                }
             }
             _ => {}
         }
@@ -1468,13 +1484,35 @@ pub(crate) mod tests {
         })
     }
 
-    fn interrupted() -> TopologyEvent {
+    fn started(key: crate::topology::registry::TaskKey, pool: Option<&str>) -> TopologyEvent {
+        use crate::topology::events::{AttemptNumber, AttemptStarted4, GenerationId, RungBinding};
+        topology(TopologyEventBody::AttemptStarted {
+            data: AttemptStarted4 {
+                key,
+                generation: GenerationId(0),
+                attempt: AttemptNumber(1),
+                rung: 0,
+                binding: RungBinding {
+                    tier: crate::ir::Tier::Mid,
+                    agent: crate::agent::claude::ADAPTER_ID.to_owned(),
+                    model: "m".to_owned(),
+                    pinned: false,
+                    effort: crate::ir::Effort::High,
+                },
+                pool: pool.map(str::to_owned),
+                resume_session: None,
+                materialization_observed: None,
+            },
+        })
+    }
+
+    fn interrupted(key: crate::topology::registry::TaskKey) -> TopologyEvent {
         use crate::topology::events::{
             AttemptInterrupted4, AttemptNumber, GenerationId, LeaseDisposition,
         };
         topology(TopologyEventBody::AttemptInterrupted {
             data: AttemptInterrupted4 {
-                key: crate::topology::registry::TaskKey(0),
+                key,
                 generation: GenerationId(0),
                 attempt: AttemptNumber(1),
                 lease: LeaseDisposition::PredictedReleased,
@@ -1529,7 +1567,10 @@ pub(crate) mod tests {
     fn a_topology_log_ending_in_pool_exhausted_holds_that_pool_at_that_reset() {
         for events in [
             vec![signalled("claude-max", Some(FIVE_THIRTY))],
-            vec![signalled("claude-max", Some(FIVE_THIRTY)), interrupted()],
+            vec![
+                signalled("claude-max", Some(FIVE_THIRTY)),
+                interrupted(ALPHA),
+            ],
         ] {
             assert_eq!(
                 exhausted_pools_of(&events),
@@ -2061,6 +2102,90 @@ pub(crate) mod tests {
             latest.observations.exhausted,
             BTreeMap::new(),
             "the accepted attempt's review passed on the pool the earlier one was refused on"
+        );
+    }
+
+    #[test]
+    fn a_schema_4_logs_interrupted_attempt_counts_once_unpriced_on_the_pool_it_started_on() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-schema4-interrupted");
+        let repo = tree.path();
+        let mut run = Schema4Run::started(repo, SCHEMA_4_RUN);
+
+        run.begin_attempt(ALPHA, "claude-max");
+        run.push(finished(failed(
+            priced(settled(Some("claude-max"), Vec::new()), 1.0),
+            FailureKind::RateLimited,
+            FailureOrigin::Worker,
+        )));
+
+        run.begin_attempt(BETA, "claude-max");
+        run.push(interrupted(BETA));
+
+        let mut warnings = Vec::new();
+        let latest = latest_run_observations(repo, &mut warnings);
+
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(latest.run_id.as_deref(), Some(SCHEMA_4_RUN));
+        assert_eq!(
+            latest.observations.self_spend,
+            BTreeMap::from([(
+                "claude-max".to_owned(),
+                Spend {
+                    usd: Some(1.0),
+                    attempts: 2,
+                    unpriced: 1,
+                },
+            )]),
+            "the interrupted attempt drew on the pool it started on, at a cost nothing recorded"
+        );
+
+        let rendered = reported(repo).render();
+        assert!(
+            rendered.contains(
+                "claude-max: exhausted [signal] — this run drew $1.0000? over 2 attempt(s)"
+            ),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn an_interrupted_attempt_whose_start_names_no_pool_adds_to_no_pools_spend() {
+        let settled_on_the_pool = [
+            started(ALPHA, Some("claude-max")),
+            finished(failed(
+                priced(settled(Some("claude-max"), Vec::new()), 1.0),
+                FailureKind::RateLimited,
+                FailureOrigin::Worker,
+            )),
+        ];
+        let before = observe_topology(&settled_on_the_pool).self_spend;
+        assert_eq!(
+            before,
+            BTreeMap::from([(
+                "claude-max".to_owned(),
+                Spend {
+                    usd: Some(1.0),
+                    attempts: 1,
+                    unpriced: 0,
+                },
+            )]),
+            "the premise: one settled attempt, priced, on the pool"
+        );
+
+        let mut no_start = settled_on_the_pool.to_vec();
+        no_start.push(interrupted(BETA));
+        assert_eq!(
+            observe_topology(&no_start).self_spend,
+            before,
+            "no `attempt_started` names this attempt, and another attempt's start is not its own"
+        );
+
+        let mut no_pool = settled_on_the_pool.to_vec();
+        no_pool.extend([started(BETA, None), interrupted(BETA)]);
+        assert_eq!(
+            observe_topology(&no_pool).self_spend,
+            before,
+            "its `attempt_started` names no pool"
         );
     }
 
