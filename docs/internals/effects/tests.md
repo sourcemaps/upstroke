@@ -200,7 +200,7 @@ rather than the only one.
 
 Every needle here is contained in one line, deliberately: `PR72-WIN-EOL-003`
 was two controls that searched for byte sequences spanning a line, which are
-`\r\n` on the guest and hold on Unix and nowhere else. A needle that cannot
+`\r\n` in a Windows checkout and hold on Unix and nowhere else. A needle that cannot
 span a line ending cannot have that bug, so the records are written to keep
 their phrases on one line rather than being folded back together here.
 
@@ -1487,9 +1487,9 @@ is written out rather than counted.
 ## `fn every_platform_conditional_denial_names_something_real()` › `"libc::pipe2",`
 
 Real on Linux, no module on Darwin: `libc` does not define `pipe2`
-for macOS. Added after CI's macOS job found it -- this project has
-a Windows guest and no macOS host, which is `PR5-MACOS-CLIPPY-NEVER-
-RUN`. The suppression is what keeps the `lint (macos)` job green;
+for macOS. Added after CI's macOS job found it -- this project had
+a Windows guest until 2026-11-20 and has no macOS host, which is
+`PR5-MACOS-CLIPPY-NEVER-RUN`. The suppression is what keeps the `lint (macos)` job green;
 `host_conditional_paths` still asserts the path is unresolved there,
 because that test strips `allow-invalid` before it probes.
 
@@ -3146,8 +3146,8 @@ The two functions that may name the primitive, and how many times each.
 
 ## `fn every_file_durability_barrier_in_a_funnel_module_goes_through_one_call() {` › `let util = artifact_content(`
 
-Line endings normalized before any structural search: the guest checks this
-tree out with CRLF, and `find("\n}\n")` does not match `\r\n}\r\n`. Measured —
+Line endings normalized before any structural search: a Windows checkout can
+land this tree with CRLF, and `find("\n}\n")` does not match `\r\n}\r\n`. Measured —
 this census passed on Linux and panicked "the function ends" on Windows
 Server 2025, which is the platform half of the same lesson the rest of this
 round is about. `artifact_content` exists for exactly this reason.
@@ -3526,7 +3526,7 @@ identifier rather than as the keyword it names.
 
 ## `fn the_module_scan_reads_ancestry_and_visibility_rather_than_text_after_an_attribute() {` › `for fixture in [`
 
-(16) **CRLF.** The guest checks this tree out with CRLF, and every
+(16) **CRLF.** A Windows checkout can land this tree with CRLF, and every
 structural answer above has to be the same there. Driven by converting
 each fixture rather than by trusting that nothing here reads a line.
 
@@ -3938,8 +3938,8 @@ The two claims, over one spelling of the file.
 
 **Structural, and therefore line-ending-blind.** The first draft
 searched for the literal `"#[cfg(test)]\npub(crate) mod lint_levels {"`,
-which is a search for a spelling of a newline: the guest checks this
-tree out with CRLF and that needle is `\r\n` there, so the assertion
+which is a search for a spelling of a newline: a Windows checkout can
+land this tree with CRLF and that needle is `\r\n` there, so the assertion
 held on Unix and on nothing else. What actually has to be true is that
 the item is **removed by** [`crate::effects::production_code`], which is
 what `#[cfg(test)]` means to every census in this crate — and that is
@@ -3947,7 +3947,7 @@ read from the region, not from a byte sequence spanning a line.
 
 ## `fn the_file_level_lint_reader_is_a_census_instrument_and_not_a_shipped_api() {` › `let crlf = source.replace('\n', "\r\n");`
 
-The same file with the line endings the Windows guest gives it.
+The same file with the line endings a Windows checkout can give it.
 
 ## `fn the_file_level_lint_reader_is_a_census_instrument_and_not_a_shipped_api() {` › `assert!(`
 
@@ -4137,7 +4137,7 @@ not the file module's.
 
 ## `fn the_file_level_lint_reader_answers_what_rustc_does()` › `assert_eq!(`
 
-The same prologue with the line endings the Windows guest gives it.
+The same prologue with the line endings a Windows checkout can give it.
 
 ## `fn the_file_level_lint_reader_answers_what_rustc_does()` › `assert!(`
 

@@ -26,7 +26,7 @@ bash .github/scripts/test-internals-notes.sh
 bash .github/scripts/test-pr-ready-audit.sh
 ```
 
-`test-release-record.sh` and `cargo test` on Linux need `jq` and fail, saying so, without it;
+`test-release-record.sh` needs `jq` and fails, saying so, without it;
 `test-pr-policy.sh` is run by path, as above: by bare name from inside `.github/scripts/` it fails.
 
 Use the pull-request template to record the exact commands, implementation provenance, reviewed

@@ -1355,7 +1355,7 @@ deletion when declared so, and is governed once when the index holds it
 unmerged too. And `names_in_another_case` folds per character: `ΟΣ` beside
 `οσ` and `AΣ` beside `aσ` are aliases, which the contextual string fold
 denied (PR #249's fourth-round manifest-contract and adequacy reviews), and
-`ς` against `σ` is not one, as the Windows guest's filesystem also says.
+`ς` against `σ` is not one, as the Windows guest's filesystem also said.
 
 ## `fn an_already_present_source_proceeds_as_an_ordinary_attempt_whose_empty_diff_fails_honestly() {`
 

@@ -610,8 +610,9 @@ Where the four Unix containment points are compiled in.
 (`cfg(unix)`): the cleanup reaper survives coordinator death, settles
 the dead coordinator's process groups while holding R28" — not for
 Linux. Narrowing any of these gates to `target_os = "linux"` would take
-macOS out of the containment contract, and no test on this box or on the
-Windows guest would notice: the emission would simply stop existing on a
+macOS out of the containment contract, and no test on this box or on
+`test-windows-hosted`'s ten `windows-latest` legs would notice: the
+emission would simply stop existing on a
 platform neither of them is. CI does run `macos-latest`, so this is an
 ordinary coverage gap rather than an unmeasurable one, and a census
 closes it without a macOS machine.

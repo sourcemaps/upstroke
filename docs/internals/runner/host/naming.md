@@ -49,7 +49,8 @@ with more at stake: `PR6D-001` is a rule whose Windows arm no Linux machine
 could reach, and it shipped because every fixture that could have caught it
 was `#[cfg(windows)]` and every Windows fixture used an absolute path. Both
 variants are constructible on both platforms, so the Windows naming rule is
-executed by the Linux suite on every run and not only by the guest.
+executed by the Linux suite on every run and not only by the Windows suite,
+`test-windows-hosted`'s ten `windows-latest` legs.
 
 The *file* predicate is platform-native and cannot be gridded — Windows has
 no mode bits — so [`Self::is_program`] degrades to "is a file" wherever the

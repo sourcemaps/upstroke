@@ -1104,7 +1104,7 @@ The previous version of this case hid `pwsh.exe` by composing a base
 environment with `PATH` removed and ran in-process. Windows CI proved
 that oracle invalid — `CreateProcess` also searches the *parent's*
 `PATH`, so an emptied child `PATH` hides nothing the runner itself can
-see, and the guest passed only because that machine has no `pwsh` at
+see, and the guest passed only because that machine had no `pwsh` at
 all. A process cannot rewrite its own `PATH` for one test without racing
 every other test in the binary, so the absence is constructed where it
 can be: in a child whose entire `PATH` is one directory this suite
@@ -1949,8 +1949,8 @@ a kill at `CreatedSuspended` leaves a suspended stub by construction —
 that is the state INV-18 exists for — and the only thing that reaps it is
 the ambient job's handle closing when this process dies. A helper that
 skipped the step would leak one suspended `cmd.exe` per point onto the
-guest, **measured**: the first run of this grid left three of them and a
-hung parent. On Unix the step is a no-op and the per-invocation reaper
+machine running the suite, **measured** on the guest: the first run of
+this grid left three of them and a hung parent. On Unix the step is a no-op and the per-invocation reaper
 settles the group instead.
 
 **The startup step is where the arming happens for a startup point.**
@@ -2464,8 +2464,10 @@ the loops collapses the count.
 
 Driven under [`ProgramNaming::Windows`] on **both** platforms, which is
 the whole reason that type exists: `PR6D-001` is a Windows rule, and a
-Windows rule only the guest can execute is a rule that ships untested
-six days out of seven.
+Windows rule only the Windows suite can execute — `test-windows-hosted`'s
+ten `windows-latest` legs, on every event — is a rule no Linux run
+tests. While only the guest could execute one, it shipped untested six
+days out of seven.
 
 ## `fn path_directory_order_decides_between_installations_and_pathext_only_within_one() {` › `assert_eq!(`
 
@@ -2562,7 +2564,7 @@ else, and neither does Rust's `Command`. So a `CommandSpec.program` of
 Windows host, for the probe, the worker, the gate, the review and the
 re-ask. The suite could not see it: every `.cmd` fixture in this crate
 used an **absolute** path, which is a different property, and the guest
-has none of the three CLIs installed.
+had none of the three CLIs installed.
 
 The platform fact is asserted **in this test**, not cited: the same
 bare name is handed to `std::process::Command` under the same composed
@@ -2993,8 +2995,8 @@ It runs on **both** platforms. On Unix the property holds because
 `execvp` would have satisfied it anyway, which is precisely why the
 Windows arm needs a fixture that can fail rather than a `#[cfg(windows)]`
 afterthought; D1's `a_bare_name_that_only_pathext_resolves_…` holds the
-`NotFound` platform fact on the guest, and this holds the equivalence
-everywhere.
+`NotFound` platform fact on `test-windows-hosted`'s ten `windows-latest`
+legs, and this holds the equivalence everywhere.
 
 What varies: the CLI name and the spelling of the program. Held constant:
 the runner, the environment, the argument and the files on disk — so a
@@ -3025,7 +3027,8 @@ own.
 
 Written from the two platforms' rules rather than read from
 `Path::is_absolute`, and then checked against it for the platform this
-is running on — the Windows column on the guest, the Unix column here.
+is running on — the Windows column on `test-windows-hosted`'s ten
+`windows-latest` legs, the Unix column here.
 Every entry is free of both `PATH` separators, so one entry stays one
 entry under `std::env::split_paths` on either platform. None holds a
 `"` either, so `path_of` hands each back exactly as written.

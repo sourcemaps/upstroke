@@ -560,8 +560,9 @@ The environment variable that turns a skip into a failure.
 
 A gated suite that skips silently everywhere is the "green because the test
 could not run" failure this project keeps paying for. On a machine with
-Docker the suite is run **with this set**, so a skip is a red test; CI and
-the Windows guest have no container runtime and run without it.
+Docker the suite is run **with this set**, so a skip is a red test; CI has
+no container runtime and runs without it, as did the Windows guest until
+2026-11-20.
 
 ## `pub(crate) const DOCKER_GATED_TESTS: &[&str] = &[`
 
