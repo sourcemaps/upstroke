@@ -2449,9 +2449,11 @@ builds the library on this tree. The superset is safe because `rustc` finds
 each dependency of the crate by its file prefix, `lib<name>-<hash>`, and by
 the hash recorded in the crate's metadata, so a directory holding another
 build's units supplies nothing the crate did not ask for. Its cost is length.
-A build directory that has gathered several hundred units would bring the
-command line near Windows' 32,767-character limit, which the old single
-directory never approached.
+A build directory that has gathered about 235 to 280 unit directories, which
+one toolchain update without `cargo clean` can reach on a Windows developer's
+machine, takes the command line past Windows' 32,767-character limit, which
+the old single directory never approached. That is the open finding
+`PR376-R7-WINDOWS-ARGV-BOUND`.
 
 ## `pub(crate) fn crate_under_test() -> CrateUnderTest {`
 
