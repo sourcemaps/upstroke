@@ -14015,3 +14015,32 @@ fn a_public_directory_that_cannot_be_listed_is_retained() {
         "and it removed nothing: the event log is still there"
     );
 }
+
+/// An entry whose read fails after the directory opened fails the whole
+/// listing, never drops out of it (`SWEEP-CLASSIFY-009`).
+#[test]
+fn an_entry_that_fails_mid_listing_fails_the_whole_listing() {
+    const FAILURE: &str = "an entry read failed after the directory opened";
+    let entries = |fail: bool| {
+        [
+            Some(Ok(OsString::from("a"))),
+            fail.then(|| Err(std::io::Error::other(FAILURE))),
+            Some(Ok(OsString::from("events.jsonl"))),
+        ]
+        .into_iter()
+        .flatten()
+    };
+
+    let error = collect_entry_names(entries(true))
+        .expect_err("a listing with an entry that failed is an error, not a shorter list");
+    assert_eq!(
+        error.to_string(),
+        FAILURE,
+        "the listing returns the entry's own failure"
+    );
+    assert_eq!(
+        collect_entry_names(entries(false)).expect("the same entries without the failure"),
+        [OsString::from("a"), OsString::from("events.jsonl")],
+        "the same entries without the failure list, sorted"
+    );
+}

@@ -1700,10 +1700,7 @@ pub fn remove_public_husk(public: &Path, hooks: &mut dyn RunDirHooks) -> Result<
         hooks,
         EffectSiteId::RunDir(RunDirSite::RemovePublicHusk),
         || {
-            let entries = read_dir_names(public).map_err(|source| UpstrokeError::Io {
-                path: public.to_path_buf(),
-                source,
-            })?;
+            let entries = read_dir_names(public)?;
             for entry in entries {
                 if entry == OsStr::new(MARKER) {
                     continue;
@@ -1784,17 +1781,30 @@ fn remove_file_if_present(path: &Path) -> Result<(), UpstrokeError> {
 ///
 /// # Errors
 ///
-/// `read_dir`'s error for anything but `NotFound`, and the first error
-/// reading an entry.
-fn read_dir_names(dir: &Path) -> io::Result<Vec<OsString>> {
+/// [`UpstrokeError::Io`] for `dir`, carrying `read_dir`'s error for anything
+/// but `NotFound`, or the first error reading an entry.
+fn read_dir_names(dir: &Path) -> Result<Vec<OsString>, UpstrokeError> {
+    let io_error = |source| UpstrokeError::Io {
+        path: dir.to_path_buf(),
+        source,
+    };
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
+        Err(error) => return Err(io_error(error)),
     };
-    let mut names = entries
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<io::Result<Vec<OsString>>>()?;
+    collect_entry_names(entries.map(|entry| entry.map(|entry| entry.file_name()))).map_err(io_error)
+}
+
+/// The names `entries` yields, sorted, or the first error it yields.
+///
+/// Split from [`read_dir_names`] so a failure on an entry *after* the
+/// directory opened can be witnessed: dropping that entry instead would make
+/// a committed run's public directory read as bare (`SWEEP-CLASSIFY-009`).
+fn collect_entry_names(
+    entries: impl IntoIterator<Item = io::Result<OsString>>,
+) -> io::Result<Vec<OsString>> {
+    let mut names = entries.into_iter().collect::<io::Result<Vec<OsString>>>()?;
     names.sort();
     Ok(names)
 }
