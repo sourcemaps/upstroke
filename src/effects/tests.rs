@@ -3403,9 +3403,10 @@ fn unresolved_paths(dir: &Path, tag: &str) -> BTreeSet<String> {
         .arg(&out)
         .args(built.rustc_args());
     for (name, path) in extern_dependencies(&built.dependency_dirs) {
-        command
-            .arg("--extern")
-            .arg(format!("{name}={}", path.display()));
+        let mut pair = OsString::from(name);
+        pair.push("=");
+        pair.push(path);
+        command.arg("--extern").arg(pair);
     }
     let output = command
         .arg(&source)
@@ -5172,9 +5173,10 @@ fn lint_fixture(dir: &Path, tag: &str, body: &str) -> (bool, Vec<(String, String
         .arg(&out)
         .args(built.rustc_args());
     for (name, path) in extern_dependencies(&built.dependency_dirs) {
-        command
-            .arg("--extern")
-            .arg(format!("{name}={}", path.display()));
+        let mut pair = OsString::from(name);
+        pair.push("=");
+        pair.push(path);
+        command.arg("--extern").arg(pair);
     }
     let output = command
         .arg(&source)

@@ -1449,6 +1449,12 @@ dependency at all, so it would have linked no `libc`. That is the half of
 directory that cannot be read contributes nothing, as the one directory
 always did.
 
+Its two callers, `unresolved_paths` and `lint_fixture`, pass each pair as
+`--extern <name>=<rlib>`, built the way `rustc_args` builds its own: an
+`OsString` holding the name and `=`, with the path pushed onto it. No path is
+formatted with `Path::display`, so a dependency directory whose name is not
+UTF-8 reaches the compiler as it is on disk.
+
 ## `fn every_platform_conditional_denial_names_something_real() {`
 
 The platform-conditional denials name something this tree really calls.
@@ -2431,7 +2437,11 @@ census's domain.
 One `-L dependency=<dir>` per dependency directory, then
 `--extern upstroke=<rlib>`, ready for `Command::args`. Each argument is built
 by pushing the path onto an `OsString`, not by formatting `Path::display`, so a
-directory whose name is not UTF-8 reaches the compiler as it is on disk.
+directory whose name is not UTF-8 reaches the compiler as it is on disk. That
+holds for every fixture compiler: `typecheck` and `compile_against_this_crate`
+pass only these arguments, and this file's two, `unresolved_paths` and
+`lint_fixture`, also pass the dependency rlibs from [`extern_dependencies`] as
+`--extern` pairs built the same way.
 
 Under the per-unit layout the `-L` list is every unit's `out` directory in the
 build directory. That is a superset of the 41 Cargo hands `rustc` when it
@@ -2483,13 +2493,21 @@ and this change keeps it.
 
 ### Panics
 
-When neither layout yields a `libupstroke-*.rlib`. The message names the
-directory beside the executable. Under the per-unit layout it also names the
-package's `*/out` pattern and how many unit directories it searched; under the
-other it says no other layout was searched. `cargo test --lib` alone builds
-only the test harness and never compiles the library as an rlib, so the
-message says which build does: `cargo build`, or `cargo test --all-targets`,
-which builds the library for the binaries and is CI's command.
+* When neither layout yields a `libupstroke-*.rlib`. The message names the
+  directory beside the executable. Under the per-unit layout it also names the
+  package's `*/out` pattern and how many unit directories it searched; under
+  the other it says no other layout was searched. `cargo test --lib` alone
+  builds only the test harness and never compiles the library as an rlib, so
+  the message says which build does: `cargo build`, or
+  `cargo test --all-targets`, which builds the library for the binaries and is
+  CI's command.
+* When `current_exe` fails, or the executable's path has no parent directory
+  (the two `expect`s on the executable).
+* Under the per-unit layout, when the package directory has no parent, so
+  there is no build directory to list (the `expect` on the package).
+* When a directory it lists cannot be read: the build directory, through
+  `unit_out_dirs`, or the directory beside the executable or one of the
+  package's unit `out` directories, through `newest_upstroke_rlib`.
 
 ## `fn per_unit_package(beside: &Path) -> Option<&Path> {`
 
@@ -2503,13 +2521,26 @@ script's `OUT_DIR` is one such.
 
 Every `<package>/<unit>/out` directory under `<profile>/build`. They are
 sorted, so the `-L` order does not depend on the order the directory is
-listed in. An entry that cannot be listed as a directory is skipped.
+listed in. Below the build directory nothing is fatal: an entry whose read
+fails is skipped, a package entry that cannot be listed as a directory is
+skipped, and a unit with no `out` directory contributes nothing.
+
+### Panics
+
+When `build` itself cannot be listed. The message names the build directory
+and the error.
 
 ## `fn newest_upstroke_rlib(dirs: &[&Path]) -> Option<PathBuf> {`
 
-The most recently modified `libupstroke-*.rlib` in any of `dirs`, or `None`.
-A file whose modification time cannot be read sorts as the epoch, as it did
-in the lookup this replaces.
+The most recently modified `libupstroke-*.rlib` in any of `dirs`, or `None`
+when they hold none. An entry whose read fails, or whose name is not UTF-8,
+is skipped. A file whose modification time cannot be read sorts as the epoch,
+as it did in the lookup this replaces.
+
+### Panics
+
+When one of `dirs` cannot be listed. The message names that artifact
+directory and the error.
 
 ## `fn every_externally_reachable_fn_of_a_legacy_or_shared_module_is_classified() {`
 
