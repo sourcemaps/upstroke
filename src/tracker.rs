@@ -816,6 +816,45 @@ agent = \"claude-code\"
         }
     }
 
+    /// Finding PR441-READER-UNRELATED-RESPONSE-FIELD's witness, ported into the
+    /// crate. A typed progress event carrying its own `response` field was read
+    /// as a control response before its type was checked, so the 12% reading
+    /// that follows it became unavailable.
+    #[test]
+    fn unrelated_event_with_response_metadata() {
+        let read = |output: crate::agent::ProcessOutput| {
+            let runner = subscription_runner(Some(output));
+            let report = subscription_usage(
+                subscription::Auth::Cli,
+                &runner,
+                &Table::new(&[]),
+                &|_| panic!("CLI must never resolve the bearer"),
+                &|_| false,
+                Some(NOON),
+            );
+            assert_eq!(runner.seen.lock().expect("seen lock").len(), 1);
+            report.render()
+        };
+        let alone = read(subscription_output());
+        assert!(alone.contains("five-hour: used: 12%"), "{alone}");
+        for metadata in [
+            "{\"elapsed_ms\":7,\"status\":\"synthetic-secret-account\"}",
+            "{\"request_id\":\"usage-only\",\"subtype\":\"error\"}",
+            "\"synthetic-secret-account\"",
+            "[1,2]",
+            "null,\"response\":{}",
+        ] {
+            let mut output = subscription_output();
+            output.stdout = format!(
+                "{{\"type\":\"tool_progress\",\"response\":{metadata}}}\n{}",
+                output.stdout
+            );
+            let text = read(output);
+            assert!(text.contains("five-hour: used: 12%"), "{metadata}: {text}");
+            assert!(!text.contains("synthetic-secret-account"), "{text}");
+        }
+    }
+
     #[test]
     fn subscription_cli_failures_are_advisory_redacted_and_never_fall_back() {
         for failure in 0..8 {
@@ -976,6 +1015,86 @@ agent = \"claude-code\"
             assert!(runner.seen.lock().expect("seen lock").is_empty());
             assert!(table.asked.borrow().is_empty());
         }
+    }
+
+    /// Finding PR441-READER-DUPLICATE-VOIDS-OTHER-GROUP's two independent-group
+    /// assertions, ported into the crate. A key repeated in one bearer response
+    /// group voided the whole body: duplicate `resets_left` fields discarded a
+    /// valid 31% five-hour reading, and duplicate `five_hour.utilization` fields
+    /// discarded an explicitly empty grant inventory, on the reset-only route too.
+    #[test]
+    fn a_duplicate_in_one_bearer_group_leaves_the_other_reported() {
+        let bearer = |body: &str| {
+            let table = Table::new(&[("api.anthropic.com", Ok((200, body)))]);
+            let runner = subscription_runner(None);
+            let report = subscription_usage(
+                subscription::Auth::Bearer,
+                &runner,
+                &table,
+                &|_| Some("synthetic-bearer".to_owned()),
+                &|_| false,
+                Some(NOON),
+            );
+            assert!(runner.seen.lock().expect("seen lock").is_empty());
+            assert_eq!(table.asked.borrow().len(), 1);
+            report
+        };
+        let reset_only = |body: &str| {
+            let table = Table::new(&[("api.anthropic.com", Ok((200, body)))]);
+            reset_credits(&table, &|_| Some("synthetic-bearer".to_owned()), Some(NOON))
+        };
+        let ends_at = crate::util::rfc3339_utc(NOON + 3_600);
+        let not_reported = reset::ResetReport::Unavailable(reset::Unavailable::NotReported);
+
+        let grant_repeats = format!(
+            r#"{{"five_hour":{{"utilization":31}},"cedar_ember":{{"eligible":true,"grants":[{{"resets_left":0,"resets_left":1,"ends_at":"{ends_at}","type":"weekly","paused":false,"usable_now":true}}]}}}}"#
+        );
+        let text = bearer(grant_repeats.as_str()).render();
+        assert!(text.contains("five-hour: used: 31%"), "{text}");
+        assert!(text.contains(&not_reported.render()), "{text}");
+        assert!(!text.contains("count:"), "{text}");
+        assert_eq!(reset_only(grant_repeats.as_str()), not_reported);
+
+        let window_repeats = r#"{"five_hour":{"utilization":31,"utilization":4},"seven_day":{"utilization":70},"cedar_ember":{"eligible":false,"grants":[]}}"#;
+        let text = bearer(window_repeats).render();
+        assert!(text.contains("explicitly empty inventory"), "{text}");
+        assert!(text.contains("five-hour: used: unknown"), "{text}");
+        assert!(text.contains("seven-day: used: 70%"), "{text}");
+        assert!(!text.contains("31%") && !text.contains("4%"), "{text}");
+        let report = reset_only(window_repeats);
+        assert!(
+            matches!(&report, reset::ResetReport::Inventory(inventory) if inventory.grants.is_empty()),
+            "{report:?}"
+        );
+        assert!(report.render().contains("explicitly empty inventory"));
+
+        for (body, windows) in [
+            (
+                r#"{"rate_limits_available":true,"rate_limits_available":false,"five_hour":{"utilization":31},"cedar_ember":{"grants":[]}}"#,
+                "windows: unavailable",
+            ),
+            (
+                r#"{"model_scoped":[{"display_name":"Opus","utilization":5,"utilization":6}],"limits":[{"kind":"weekly_scoped","scope":{"model":{"display_name":"Sonnet"}},"percent":9}],"cedar_ember":{"grants":[]}}"#,
+                "model windows: not reported",
+            ),
+        ] {
+            let text = bearer(body).render();
+            assert!(text.contains(windows), "{text}");
+            assert!(!text.contains("31%"), "{text}");
+            assert!(!text.contains("used: 9%"), "{text}");
+            assert!(text.contains("explicitly empty inventory"), "{text}");
+        }
+        let text = bearer(
+            r#"{"five_hour":{"utilization":31},"cedar_ember":{"grants":[]},"cedar_ember":{"eligible":true,"grants":[]}}"#,
+        )
+        .render();
+        assert!(text.contains("five-hour: used: 31%"), "{text}");
+        assert!(text.contains(&not_reported.render()), "{text}");
+        assert_eq!(
+            bearer(r#"{"five_hour":{"utilization":31,"utilization":4}}"#),
+            subscription::Report::Unavailable(reset::Unavailable::NotReported),
+            "a body with no group left reports nothing"
+        );
     }
 
     const ANTHROPIC_BODY: &str =

@@ -14,7 +14,7 @@
 use serde_json::Value;
 
 use super::provider::{Credential, Secret, UsageRequest, UsageResponse};
-use super::subscription::UniqueValue;
+use super::subscription;
 use super::transport::{MAX_BODY_BYTES, TransportError};
 
 /// An operator-provided bearer explicitly authorized by the provider for
@@ -187,8 +187,10 @@ pub fn parse(response: &UsageResponse, now_unix: u64) -> ResetReport {
 }
 
 /// Shared status, size and JSON checks for the single fixed bearer response.
-/// A key repeated in any object is two competing readings, so the body is
-/// not reported. Errors carry only a fixed category, never the response body.
+/// A key repeated in a response group is two competing readings, so that
+/// group alone is unreported (`subscription::bearer_groups`): windows never
+/// gate grants or vice versa. A body with no group left is not reported.
+/// Errors carry only a fixed category, never the response body.
 pub(super) fn response_value(response: &UsageResponse) -> Result<Value, Unavailable> {
     let unavailable = match response.status {
         200 => None,
@@ -202,9 +204,7 @@ pub(super) fn response_value(response: &UsageResponse) -> Result<Value, Unavaila
     if response.body.len() > MAX_BODY_BYTES {
         return Err(Unavailable::TooLarge);
     }
-    serde_json::from_str(&response.body)
-        .map(|UniqueValue(value)| value)
-        .map_err(|_| Unavailable::NotReported)
+    subscription::bearer_groups(&response.body).ok_or(Unavailable::NotReported)
 }
 
 /// The same validated grant representation for reset-only and combined bearer reads.

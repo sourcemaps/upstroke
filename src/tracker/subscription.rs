@@ -124,11 +124,17 @@ pub(super) fn read_cli(
     control_payload(&output.stdout)
 }
 
-// Typed envelopes reject duplicate routing/status fields as ambiguous.
+// Typed envelopes reject duplicate routing/status fields as ambiguous. The
+// type is read alone first: only a control response's `response` is
+// interpreted, so another event's same-named field of any shape is ignored.
 #[derive(Deserialize)]
 struct StreamEvent {
     #[serde(rename = "type")]
     kind: String,
+}
+
+#[derive(Deserialize)]
+struct ControlEvent {
     response: Option<ControlResponse>,
 }
 
@@ -141,44 +147,61 @@ struct ControlResponse {
 
 // Value's default map reader keeps the last duplicate key. A usage payload
 // with two competing readings is ambiguous, including inside a window/grant.
-// The CLI payload and the bearer body (`reset::response_value`) both use it.
-pub(super) struct UniqueValue(pub(super) Value);
+// This reader records where a key repeats instead: `repeated` names each
+// member of an object whose own key or contents repeat one. The CLI payload
+// (`UniqueValue`) refuses any repetition; the bearer body (`bearer_groups`)
+// voids only the response group that holds it.
+struct Scanned {
+    value: Value,
+    ambiguous: bool,
+    repeated: Vec<String>,
+}
 
-impl<'de> Deserialize<'de> for UniqueValue {
+impl Scanned {
+    fn plain(value: Value) -> Self {
+        Self {
+            value,
+            ambiguous: false,
+            repeated: Vec::new(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Scanned {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Visitor;
 
         impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = UniqueValue;
+            type Value = Scanned;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("JSON with unique object keys")
+                formatter.write_str("JSON")
             }
 
             fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-                Ok(UniqueValue(Value::Null))
+                Ok(Scanned::plain(Value::Null))
             }
 
             fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
-                Ok(UniqueValue(Value::Bool(value)))
+                Ok(Scanned::plain(Value::Bool(value)))
             }
 
             fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
-                Ok(UniqueValue(Value::from(value)))
+                Ok(Scanned::plain(Value::from(value)))
             }
 
             fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
-                Ok(UniqueValue(Value::from(value)))
+                Ok(Scanned::plain(Value::from(value)))
             }
 
             fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
                 serde_json::Number::from_f64(value)
-                    .map(|number| UniqueValue(Value::Number(number)))
+                    .map(|number| Scanned::plain(Value::Number(number)))
                     .ok_or_else(|| E::custom("non-finite number"))
             }
 
             fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-                Ok(UniqueValue(Value::String(value.to_owned())))
+                Ok(Scanned::plain(Value::String(value.to_owned())))
             }
 
             fn visit_seq<A: serde::de::SeqAccess<'de>>(
@@ -186,10 +209,16 @@ impl<'de> Deserialize<'de> for UniqueValue {
                 mut sequence: A,
             ) -> Result<Self::Value, A::Error> {
                 let mut values = Vec::new();
-                while let Some(UniqueValue(value)) = sequence.next_element()? {
-                    values.push(value);
+                let mut ambiguous = false;
+                while let Some(element) = sequence.next_element::<Scanned>()? {
+                    ambiguous |= element.ambiguous;
+                    values.push(element.value);
                 }
-                Ok(UniqueValue(Value::Array(values)))
+                Ok(Scanned {
+                    value: Value::Array(values),
+                    ambiguous,
+                    repeated: Vec::new(),
+                })
             }
 
             fn visit_map<A: serde::de::MapAccess<'de>>(
@@ -197,19 +226,62 @@ impl<'de> Deserialize<'de> for UniqueValue {
                 mut map: A,
             ) -> Result<Self::Value, A::Error> {
                 let mut values = serde_json::Map::new();
+                let mut repeated = Vec::new();
                 while let Some(key) = map.next_key::<String>()? {
-                    if values.contains_key(&key) {
-                        return Err(serde::de::Error::custom("duplicate object key"));
+                    let member: Scanned = map.next_value()?;
+                    if member.ambiguous || values.contains_key(&key) {
+                        repeated.push(key.clone());
                     }
-                    let UniqueValue(value) = map.next_value()?;
-                    values.insert(key, value);
+                    values.insert(key, member.value);
                 }
-                Ok(UniqueValue(Value::Object(values)))
+                Ok(Scanned {
+                    value: Value::Object(values),
+                    ambiguous: !repeated.is_empty(),
+                    repeated,
+                })
             }
         }
 
         deserializer.deserialize_any(Visitor)
     }
+}
+
+struct UniqueValue(Value);
+
+impl<'de> Deserialize<'de> for UniqueValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let scanned = Scanned::deserialize(deserializer)?;
+        if scanned.ambiguous {
+            return Err(serde::de::Error::custom("duplicate object key"));
+        }
+        Ok(Self(scanned.value))
+    }
+}
+
+/// The bearer body, read group by group: each top-level member is one
+/// response group. A key repeated inside a member, or the member's own repeated
+/// name, leaves that member null, so it reads as present but malformed and no
+/// other group is suppressed. `None` for invalid JSON, or when no group
+/// survives a repeated key, including a non-object body that repeats one.
+pub(super) fn bearer_groups(body: &str) -> Option<Value> {
+    let Scanned {
+        mut value,
+        ambiguous,
+        mut repeated,
+    } = serde_json::from_str(body).ok()?;
+    if !ambiguous {
+        return Some(value);
+    }
+    let members = value.as_object_mut()?;
+    repeated.sort_unstable();
+    repeated.dedup();
+    if repeated.len() == members.len() {
+        return None;
+    }
+    for name in repeated {
+        members.insert(name, Value::Null);
+    }
+    Some(value)
 }
 
 fn control_payload(stdout: &str) -> Result<Value, Unavailable> {
@@ -228,6 +300,8 @@ fn control_payload(stdout: &str) -> Result<Value, Unavailable> {
             }
             continue;
         }
+        let event: ControlEvent =
+            serde_json::from_str(line).map_err(|_| Unavailable::CliResponse)?;
         let response = event.response.ok_or(Unavailable::CliResponse)?;
         if response.request_id != "usage-only" {
             continue;
@@ -562,6 +636,11 @@ mod tests {
                 "\"request_id\":\"other\",\"request_id\":",
             ),
             "{\"type\":\"control_response\"}\n".to_owned(),
+            good.replace(
+                "\"type\":\"control_response\"",
+                "\"type\":\"tool_progress\",\"type\":\"control_response\"",
+            ),
+            format!("{{\"response\":null,{}", good.trim_start_matches('{')),
             success(Value::Null),
             success(json!([])),
             success(json!({"rate_limits": {"five_hour": {"utilization": 2}}}))
