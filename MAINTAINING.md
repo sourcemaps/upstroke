@@ -34,7 +34,10 @@ source, documentation, workflows, release machinery and this file.
      repaired head gets a fresh pass.
    - A relevant finding that is not serious is fixed at the author's discretion or logged as tech
      debt: a ledger row with a stable id, an honest failure sequence, and disposition `deferred`
-     or `accepted-risk`.
+     or `accepted-risk`. A P3, in every lane, may be recorded as `accepted-risk` with its ledger
+     row alone and no finding file, by the owner's ruling of 2026-11-13, and the audit accepts it.
+     A P2 or higher recorded as `accepted-risk` is still the owner's call. The two rules that
+     outrank the label (below) are unchanged, so a witnessed or `MUST` P3 is still fixed.
    - A finding that is **not relevant to the change** — pre-existing, out of scope, or against an
      unswept file under a transitional standard (`standards/SWEEP.md`) — is logged the same way or
      `rejected` with the reason, and blocks nothing.

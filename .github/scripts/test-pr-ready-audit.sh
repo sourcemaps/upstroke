@@ -46,7 +46,15 @@
 #                                not counted against three, or a witnessed one was counted as
 #                                unwitnessed
 #   MUT-P3-LANE-DEFERS           the P3 lane let a P3 be deferred
-#   MUT-JSON-SPLIT-BY-REGEX      findings read by splitting text on "},{" instead of a parser
+#   MUT-P3-ACCEPT-MANUAL         an unwitnessed P3 recorded `accepted-risk` on its ledger row was
+#                                still sent to a manual read, or `may_accept_for` failed to answer
+#                                P3 for a lane `lane_for` returns -- the owner's ruling of
+#                                2026-11-13 not applied
+#   MUT-P3-ACCEPT-WIDENED        the acceptance reached past what was ruled: a P2 `accepted-risk`
+#                                row, a `rejected` row, a witnessed P3 or a `MUST` P3 stopped
+#                                blocking, or a lane `may_accept_for` cannot answer for was read
+#                                as one that accepts
+#   MUT-JSON-SPLIT-BY-REGEX     findings read by splitting text on "},{" instead of a parser
 #   MUT-NULL-WITNESS             a null witness field counted as a witness
 #   MUT-MUST-UNSEEN              a MUST deviation was not flagged
 #   MUT-BAD-SEVERITY-PASSES      a P9 finding passed as deferrable
@@ -345,6 +353,9 @@ for row in "${lane_rows[@]}"; do
   expect "MUT-LANE-TABLE-DRIFT lane [$branch]" "$got_lane" "$want_lane"
   expect "MUT-LANE-TABLE-DRIFT effort [$branch]" "$(effort_for "$got_lane" "$branch")" "$want_effort"
   expect "MUT-LANE-TABLE-DRIFT must-fix [$branch]" "$(must_fix_for "$got_lane")" "$want_fix"
+  # P3 IN EVERY LANE, and nothing else in any (owner, 2026-11-13): the severities a ledger row may
+  # accept alone. The two hard rules are the audit's to apply before it asks, and are cased below.
+  expect "MUT-P3-ACCEPT-MANUAL may-accept [$branch]" "$(may_accept_for "$got_lane")" P3
 done
 # Eleven lanes, and `lane_list` is what the label list and both reconciliation loops are driven
 # from: a lane in the table and not in the list is a lane whose label is never created.
@@ -425,6 +436,10 @@ for unknown in "" lane:feature findings-p3 findings-p1p2 feature-ish FEATURE fix
   fi
   if effort_for "$unknown" > "$tmp/lane.out" 2>&1; then
     error "MUT-P3-LANE-DEFERS: lane [$unknown] was given the effort [$(cat "$tmp/lane.out")]"
+  fi
+  # and an acceptance invented for a lane nobody ruled on is the permissive answer fallen into.
+  if may_accept_for "$unknown" > "$tmp/lane.out" 2>&1; then
+    error "MUT-P3-ACCEPT-WIDENED: lane [$unknown] was allowed to accept [$(cat "$tmp/lane.out")]"
   fi
 done
 
@@ -7895,6 +7910,124 @@ contains MUT-LEDGER-LOOKUP-SUPPRESSED "$got" "NOT-READY"
 got="$(STUB_REVIEW_BODY="$tmp/truncating-review.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
 [[ "$got" == *ledger-lookup-failed* ]] \
   && error "MUT-LEDGER-LOOKUP-SUPPRESSED: a readable body was reported unreadable"
+
+# --- a P3 accepted on its ledger row alone, through main ----------------------------------------
+# THE OWNER'S RULING OF 2026-11-13: a P3, in every lane, may be recorded `accepted-risk` with its
+# ledger row and nothing else -- no file under findings/, no manual read -- and the audit accepts
+# it. A P2 or higher recorded so is still the owner's call, a `rejected` row always is, and the two
+# hard rules outrank the label: a witnessed P3 and a `MUST` P3 are fixed, whatever their row says.
+#
+# Run through main against the enqueue harness's own repository, because READY is the assertion and
+# only that harness can reach it -- its reviewed and base commits are real -- and because the row is
+# read inside `audit_one`, where no call on a helper reaches. Its stub is the enqueue stub with the
+# two things these cases vary made inputs: the BRANCH, which decides the lane, and the BODY, which
+# carries the ledger. Each review's only finding is the one under test, so a READY here is that
+# row's doing and no other finding's, and each MANUAL or NOT-READY names the blocker that made it.
+accept_gh="$tmp/accept-gh"
+mkdir -p "$accept_gh"
+printf '#!/usr/bin/env bash\nhead=%s\n' "$enqueue_head" > "$accept_gh/gh"
+cat >> "$accept_gh/gh" <<'GH'
+case "$*" in
+  "repo view"*)               echo eventloops/upstroke ;;
+  *"--jq .owner.login")       echo eventloops ;;
+  *"--jq .owner.type")        echo User ;;
+  *rulesets*)                 ;;
+  *check-runs*)               printf 'upstroke-ci\t10\tsuccess\nupstroke-pr-policy\t11\tsuccess\n' ;;
+  *timeline*)                 ;;
+  *"/comments?per_page=100"*) echo "2026-09-01T00:00:00Z 5001" ;;
+  *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
+  *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
+  *"--json body"*)            cat "$STUB_LEDGER_BODY" ;;
+  "pr view"*)                 printf '%s\n%s\nfalse\nCLEAN\nmaster\n%s\n0\n' \
+                                "$STUB_BRANCH" "$head" "$head" ;;
+  *) echo "GH-UNSTUBBED $*" >&2; exit 97 ;;
+esac
+GH
+chmod +x "$accept_gh/gh"
+accept_review() {  # accept_review FILE FINDING-JSON: a review of the harness head with that one finding
+  { printf 'Reviewed head: %s\n\n```json\n' "$enqueue_head"
+    printf '{"reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[%s]}' \
+      "$enqueue_head" "$enqueue_base" "$2"
+    printf '\n```\n'; } > "$1"
+}
+accept_ledger() {  # accept_ledger FILE ID SEVERITY DISPOSITION: a body whose ledger is that one row
+  { printf '## Summary\n\nOne finding, recorded.\n\n## Review finding ledger\n\n'
+    printf '%s\n' '| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |'
+    printf '%s\n' '|---|---|---|---|---|---|---|---|---|'
+    printf '| %s | %s | %s / src/x.rs:1 | a -> b | pre_existing | correctness | — | `guard` | %s |\n' \
+      "$2" "$3" "${enqueue_head:0:7}" "$4"; } > "$1"
+}
+accept_run() {  # accept_run BRANCH REVIEW BODY: "<status>|<the audit's output, on one line>"
+  local out status=0
+  out="$(cd "$enqueue_repo" && STUB_BRANCH="$1" STUB_REVIEW_BODY="$2" STUB_LEDGER_BODY="$3" \
+    PATH="$accept_gh:$PATH" bash "$root/scripts/pr-ready-audit.sh" 999 2>&1)" || status=$?
+  printf '%s|%s' "$status" "$(tr '\n' ' ' <<< "$out")"
+}
+accept_review "$tmp/accept-p3.md" '{"id":"ACCEPT-P3","severity":"P3"}'
+accept_review "$tmp/accept-p2.md" '{"id":"ACCEPT-P2","severity":"P2"}'
+accept_review "$tmp/accept-p3-witnessed.md" '{"id":"ACCEPT-P3","severity":"P3","witness":"a failing test"}'
+accept_review "$tmp/accept-p3-must.md" \
+  '{"id":"ACCEPT-P3","severity":"P3","correction":"This is a MUST deviation of standards section 7"}'
+accept_ledger "$tmp/accept-p3-row.md" ACCEPT-P3 P3 accepted-risk
+accept_ledger "$tmp/accept-p2-row.md" ACCEPT-P2 P2 accepted-risk
+accept_ledger "$tmp/reject-p3-row.md" ACCEPT-P3 P3 rejected
+
+# The ruling: an unwitnessed P3 on an `accepted-risk` row is READY, with no file and no manual read,
+# in a lane that fixes P0-P1 under the fix-P0/fix-P1 prefixes and in the feature lane alike.
+for accept_branch in fix-P0/correctness_a-slug fix-P1/correctness_a-slug feature/a-slug; do
+  got="$(accept_run "$accept_branch" "$tmp/accept-p3.md" "$tmp/accept-p3-row.md")"
+  contains "MUT-P3-ACCEPT-MANUAL [$accept_branch]" "$got" " READY "
+  expect "MUT-P3-ACCEPT-MANUAL status [$accept_branch]" "${got%%|*}" 0
+  [[ "$got" == *disposition-accepted-risk* || "$got" == *no-file:* || "$got" == *NOT-READY* ]] \
+    && error "MUT-P3-ACCEPT-MANUAL: an accepted P3 still blocked on [$accept_branch]: [$got]"
+  [[ "$got" == *GH-UNSTUBBED* ]] \
+    && error "MUT-P3-ACCEPT-MANUAL: the audit made a call this case does not model: [$got]"
+done
+contains MUT-P3-ACCEPT-MANUAL "$(accept_run fix-P0/correctness_a-slug "$tmp/accept-p3.md" "$tmp/accept-p3-row.md")" \
+  "fix-p0p1"
+
+# A P2 recorded `accepted-risk` is still the owner's call: MANUAL, as before, in a lane where a P2
+# is not must-fix and so reaches its row at all.
+for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
+  got="$(accept_run "$accept_branch" "$tmp/accept-p2.md" "$tmp/accept-p2-row.md")"
+  contains "MUT-P3-ACCEPT-WIDENED P2 [$accept_branch]" "$got" " MANUAL "
+  contains "MUT-P3-ACCEPT-WIDENED P2 [$accept_branch]" "$got" "manual:disposition-accepted-risk:ACCEPT-P2"
+done
+
+# A `rejected` row is the owner's call whatever the severity, a P3's included.
+for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
+  got="$(accept_run "$accept_branch" "$tmp/accept-p3.md" "$tmp/reject-p3-row.md")"
+  contains "MUT-P3-ACCEPT-WIDENED rejected [$accept_branch]" "$got" " MANUAL "
+  contains "MUT-P3-ACCEPT-WIDENED rejected [$accept_branch]" "$got" "manual:disposition-rejected:ACCEPT-P3"
+done
+
+# THE TWO HARD RULES OUTRANK THE ROW. A P3 carrying a witness, and a P3 whose fields name a `MUST`
+# deviation, are blocked before the ledger is consulted -- with the same `accepted-risk` row that
+# makes the unwitnessed P3 above READY -- so these two are what prove the order is kept.
+for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
+  got="$(accept_run "$accept_branch" "$tmp/accept-p3-witnessed.md" "$tmp/accept-p3-row.md")"
+  contains "MUT-P3-ACCEPT-WIDENED witnessed [$accept_branch]" "$got" "NOT-READY"
+  contains "MUT-P3-ACCEPT-WIDENED witnessed [$accept_branch]" "$got" "witnessed:ACCEPT-P3"
+  got="$(accept_run "$accept_branch" "$tmp/accept-p3-must.md" "$tmp/accept-p3-row.md")"
+  contains "MUT-P3-ACCEPT-WIDENED MUST [$accept_branch]" "$got" "NOT-READY"
+  contains "MUT-P3-ACCEPT-WIDENED MUST [$accept_branch]" "$got" "must-deviation:ACCEPT-P3"
+done
+
+# A LANE `may_accept_for` CANNOT ANSWER FOR FAILS CLOSED. Every lane `lane_for` returns is answered
+# today, so this drives `main` with the helper replaced -- which is what a table that gained a lane
+# without a row here would leave it holding -- and the accepted P3 that is READY above must come back
+# NOT-READY, saying why, with its row read as the owner's call rather than as accepted.
+got="$(
+  cd "$enqueue_repo" || exit 99
+  export STUB_BRANCH=feature/a-slug STUB_REVIEW_BODY="$tmp/accept-p3.md" \
+    STUB_LEDGER_BODY="$tmp/accept-p3-row.md"
+  may_accept_for() { return 1; }
+  PATH="$accept_gh:$PATH" main 999 2>&1
+)" || got="exit $?: $got"
+got="$(printf '%s' "$got" | tr '\n' ' ')"
+contains MUT-P3-ACCEPT-WIDENED "$got" "NOT-READY"
+contains MUT-P3-ACCEPT-WIDENED "$got" "may-accept-unanswered:feature"
+contains MUT-P3-ACCEPT-WIDENED "$got" "manual:disposition-accepted-risk:ACCEPT-P3"
 
 if ((failed)); then
   echo "test-pr-ready-audit: FAILED" >&2

@@ -565,7 +565,10 @@ is the open question in §9. On top of whatever that lane requires:
 
 - **P1** → repair round on the same head, by a fresh `claude-opus-5` `max` session, then re-review.
 - **Anything the lane is not required to fix** → filed as a new finding with a `deferred` ledger
-  row, one file per finding, and the batch proceeds.
+  row, one file per finding, and the batch proceeds. A P3 may instead be recorded as
+  `accepted-risk` (owner's ruling, 2026-11-13, in every lane): an accepted P3 needs no file — its
+  ledger row is its record — and the audit accepts it. A P2 or higher recorded as `accepted-risk`
+  is still the owner's call. The next bullet outranks both: a witnessed or `MUST` P3 is fixed.
 - **Fixed whatever its label, in every lane:** a finding carrying a failing test, a reproduction or
   a mutation witness, **and a deviation from a mandatory standard in code this change touches.**
   That second exception is `MAINTAINING.md`'s and an earlier draft of this section dropped it.

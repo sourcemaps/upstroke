@@ -90,8 +90,12 @@
 #   - no finding in that review has a severity the lane must fix
 #   - every allowed finding has a ledger row in the body whose disposition is deferred, with
 #     exactly one file under findings/ on the branch whose YAML frontmatter (the block
-#     between the opening --- and the next) carries `id: <the finding id>`; a rejected or
-#     accepted-risk row is the owner's call and sends the pull request to MANUAL
+#     between the opening --- and the next) carries `id: <the finding id>` -- or, when the
+#     finding's severity is one `may_accept_for` answers for the lane (P3, in every lane, by the
+#     owner's ruling of 2026-11-13), whose disposition is accepted-risk, which needs no file: the
+#     row is its record. Every other accepted-risk row, and every rejected row, is the owner's
+#     call and sends the pull request to MANUAL. A witnessed or MUST P3 never reaches its row:
+#     both are blocked first, whatever the row says (the two hard rules, below)
 #
 # This script decides whether to merge, so every uncertainty resolves to NOT-READY. A read that
 # failed, a read that may be short, and a field the review did not record are each an uncertainty,
@@ -115,8 +119,9 @@
 # retargeted since its review enqueued. Every one of these channels now names its permissive
 # answer explicitly and blocks on everything else -- `timeline-answer-unreadable` for a retarget
 # answer that is neither `yes` nor `no`, `review-id-unreadable` for a comment id that is not a
-# number, a refusal for a ruleset state that is not two flags, and a refusal from `must_fix_for`
-# for a lane it does not know (an empty must-fix set makes every severity deferrable). The
+# number, a refusal for a ruleset state that is not two flags, a refusal from `must_fix_for`
+# for a lane it does not know (an empty must-fix set makes every severity deferrable), and
+# `may-accept-unanswered` when `may_accept_for` cannot answer for the lane. The
 # permissive answer has to be SAID; it is never the one everything else falls into.
 #
 # Reading "I could not look" as "there is nothing there" is precisely how a blocked pull request
@@ -196,11 +201,11 @@ set -euo pipefail
 # a run from any directory finds them beside the audit rather than beside the caller.
 audit_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-# `lane_for`, `lane_list`, `must_fix_for` and `effort_for`, from the one table. Sourced rather than
-# copied: the copy in this file, the copy in review-poller.sh and the copy in make-fix-brief.sh all
-# read `codex/` prefixes that the branch vocabulary does not contain, and all three disagreed. A
-# table that cannot be read is not a table with no lanes in it, so a failure here refuses the whole
-# run -- an audit with no severity to fix defers everything.
+# `lane_for`, `lane_list`, `must_fix_for`, `may_accept_for` and `effort_for`, from the one table.
+# Sourced rather than copied: the copy in this file, the copy in review-poller.sh and the copy in
+# make-fix-brief.sh all read `codex/` prefixes that the branch vocabulary does not contain, and all
+# three disagreed. A table that cannot be read is not a table with no lanes in it, so a failure here
+# refuses the whole run -- an audit with no severity to fix defers everything.
 if ! source "$audit_dir/lane.sh"; then
   echo "refusing: $audit_dir/lane.sh could not be sourced, so no pull request has a lane." >&2
   exit 2
@@ -880,7 +885,7 @@ audit_one() {
     printf '%-5s %-14s %-8s %-13s %s\n' "#$pr" "-" "-" NOT-READY "blockers=pr-lookup-failed"
     return 0
   fi
-  local lane must_fix state
+  local lane must_fix may_accept may_accept_status=0 state
   # A BRANCH OUTSIDE THE VOCABULARY HAS NO LANE, AND IS NOT GIVEN ONE. The catch-all this replaces
   # is the defect: it handed a prefix nobody had thought about the loosest fix set in silence.
   # `lane_for` refuses it and prints the table; this pull request is reported unaudited, and the
@@ -891,8 +896,17 @@ audit_one() {
     return 0
   fi
   must_fix="$(must_fix_for "$lane")"
+  may_accept="$(may_accept_for "$lane")" || may_accept_status=$?
   blockers=()
   state=READY
+  # THE SEVERITIES THIS LANE MAY ACCEPT ON A LEDGER ROW ALONE (owner, 2026-11-13), and a lane it
+  # cannot answer for is not a lane that accepts nothing quietly: it is a blocker, so the pull
+  # request is NOT-READY and says why. The set is emptied as well, so no `accepted-risk` row below
+  # is read as accepted on an answer that never came.
+  if ((may_accept_status != 0)); then
+    blockers+=("may-accept-unanswered:$lane")
+    may_accept=""
+  fi
 
   [[ "$draft" == "true" ]] && blockers+=("draft")
   case "$merge_state" in
@@ -1144,6 +1158,12 @@ audit_one() {
       continue
     fi
     # wit is a bit field from the parser: 1 = a witness field is present, 2 = a MUST deviation.
+    #
+    # THESE TWO RUN BEFORE THE LEDGER IS CONSULTED, AND `continue`, AND THAT ORDER IS WHAT KEEPS
+    # STEP 5'S TWO HARD RULES. A witnessed finding and a MUST deviation are fixed whatever their
+    # severity, so a witnessed or MUST P3 is blocked here and never reaches the `accepted-risk` arm
+    # below, where a P3 is otherwise accepted on its row alone. Moving the ledger lookup above
+    # these, or dropping a `continue`, lets that row accept what step 5 says is fixed.
     if (( wit & 2 )); then
       blockers+=("must-deviation:${id:-unnamed}")
       continue
@@ -1178,7 +1198,16 @@ audit_one() {
           0) blockers+=("no-file:$id") ;;
           *) blockers+=("duplicate-file:$id") ;;
         esac ;;
-      rejected|accepted-risk) blockers+=("manual:disposition-$disposition:$id") ;;   # the owner's call, not the audit's
+      accepted-risk)
+        # A P3 ACCEPTED ON ITS ROW ALONE (owner, 2026-11-13): a severity `may_accept_for` answers
+        # for this lane blocks nothing and needs no file under findings/ -- the row is its record.
+        # Only an unwitnessed, non-MUST finding gets here at all: the two hard rules are applied
+        # above and `continue`, and that order is what keeps them. Any other severity recorded
+        # as accepted-risk is still the owner's call, not the audit's.
+        if [[ " $may_accept " != *" $sev "* ]]; then
+          blockers+=("manual:disposition-$disposition:$id")
+        fi ;;
+      rejected) blockers+=("manual:disposition-$disposition:$id") ;;   # the owner's call, not the audit's
       fixed)
         [[ "$moved" == repairs || "$moved" == merge-edits:* ]] || blockers+=("fixed-but-head-unmoved:$id") ;;
       "") blockers+=("no-row:$id") ;;
