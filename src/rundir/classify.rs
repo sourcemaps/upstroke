@@ -275,8 +275,11 @@ impl Allowance {
 /// (`SWEEP-CLASSIFY-001`). A source that answers `Interrupted` past
 /// [`INTERRUPTED_ALLOWANCE`] classifies [`RunDirClass::Indeterminate`], which
 /// no reader treats as a husk. The other folds are unchanged and still answer
-/// `Husk`; making *them* say so is `SWEEP-CLASSIFY-009` and the P3 row against
-/// this file, and neither is taken here.
+/// `Husk`, and making *them* say so is the P3 row against this file, not taken
+/// here; what changed is downstream, where a `Husk` is reclaimed only through
+/// the ownership proof, whose listing now fails closed and retains the
+/// directory where it used to read a failed listing as empty
+/// (`SWEEP-CLASSIFY-009`'s repair).
 #[must_use]
 pub fn classify_run_dir(public: &Path) -> RunDirClass {
     class_of(first_committed_line(public))
@@ -749,9 +752,10 @@ fn read_up_to<R: Read>(
 /// [`RunDirClass::Indeterminate`]'s sentence. That is a *narrower* answer than
 /// `read_to_end`'s was here (it folded into `Husk` with every other I/O
 /// failure) and it is deliberately not a re-decision of the other folds, which
-/// stay `Husk` as `SWEEP-CLASSIFY-009` records: this is a site this repair
-/// created, and the rule it is written under is the one the repair
-/// implements.
+/// stay `Husk` (since `SWEEP-CLASSIFY-009`'s repair the ownership proof's
+/// listing fails closed, so they no longer authorise a deletion on a failed
+/// listing): this is a site this repair created, and the rule it is written
+/// under is the one the repair implements.
 ///
 /// [`reserve`] then `extend_from_slice`: past a successful reservation the
 /// append cannot allocate again, because the capacity for exactly those bytes

@@ -2722,8 +2722,9 @@ fn the_budget_is_the_files_length_and_a_line_past_the_window_is_still_read() {
 /// the public half with no commit-record check at all. What retains this
 /// directory is that `unbound_shape` reclaims only a bare directory or one
 /// holding the staging file alone, and this one holds an `events.jsonl`.
-/// `first_committed_line` carries the whole argument and the residual
-/// (`SWEEP-CLASSIFY-009`).
+/// `first_committed_line` carries the whole argument, including why a
+/// directory whose listing fails is retained rather than read as bare
+/// (`SWEEP-CLASSIFY-009`'s repair).
 #[test]
 fn a_log_with_no_newline_at_all_is_a_husk_however_long_it_is() {
     let tree = scratch("no-newline");
