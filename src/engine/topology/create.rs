@@ -129,6 +129,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::agent::{AdapterSource, Caps};
+use crate::capacity::Pool;
 use crate::error::UpstrokeError;
 use crate::events::log::{
     BarrierStep, EventLog, TopologyLine, establish_stable_prefix, first_line_digest,
@@ -558,8 +559,8 @@ pub trait Probes: sealed::Sealed {
     ///
     /// # Errors
     ///
-    /// [`UpstrokeError`] when the adapter is not registered or its CLI does not
-    /// answer.
+    /// [`UpstrokeError`] when the adapter is not registered, its CLI does not
+    /// answer, or an account the run would use for it is not signed in.
     fn agent(&self, agent: &str, through: &AgentProbe<'_>) -> Result<(), UpstrokeError>;
 }
 
@@ -570,6 +571,13 @@ pub trait Probes: sealed::Sealed {
 /// nothing from which a second boundary — or a second pair — could be
 /// assembled. That is the whole of the structural claim, and it is a property
 /// of *this type's fields* rather than of the trait's signature.
+///
+/// An agent's probe is followed by its sign-in check
+/// (`preflight::refuse_signed_out`, the function a resume's
+/// `RunPreflight::certify` calls), through the same [`AgentProbe`], under each
+/// of the agent's profiled pools in [`Self::with_pools`]'s pools, or under its
+/// default account when it has none. A signed-out account refuses P4 in the
+/// same words a resume refuses it in.
 pub struct RunnerProbes<'a> {
     /// The recorded shell.
     pub shell: ShellKind,
@@ -590,6 +598,12 @@ pub struct RunnerProbes<'a> {
     /// here, beside the probe, so the loop's attempt plans read what P4
     /// certified. A value, not a boundary: nothing here can run anything.
     probed: Mutex<Vec<(String, Caps)>>,
+    /// The run's pools, in file order: whose accounts each agent's sign-in
+    /// discovery runs under (`preflight::refuse_signed_out`). Empty unless the
+    /// caller supplied them with [`Self::with_pools`]; with none, an agent's
+    /// discovery runs once, under its default account. A value, like `probed`:
+    /// nothing here can run anything.
+    pools: Vec<Pool>,
 }
 
 impl<'a> RunnerProbes<'a> {
@@ -607,7 +621,19 @@ impl<'a> RunnerProbes<'a> {
             adapters,
             policy_digest,
             probed: Mutex::new(Vec::new()),
+            pools: Vec::new(),
         }
+    }
+
+    /// The run's pools, so each agent's sign-in is checked under every
+    /// account the run would use for it. `entry` passes the configured pools,
+    /// the slice `prepare_fresh` checked with `refuse_unusable_profiles` and
+    /// `FreshLeased::run` handed `profiled`, as `RunPreflight::with_pools` is
+    /// given on a resume.
+    #[must_use]
+    pub fn with_pools(mut self, pools: &[Pool]) -> Self {
+        self.pools = pools.to_vec();
+        self
     }
 
     /// Each probed agent's capabilities, in the order P4 probed them.
@@ -654,6 +680,17 @@ impl Probes for RunnerProbes<'_> {
         // logical probe instead of the processes it ran — and there is no raw
         // runner here to hand.
         let caps = adapter.probe(through)?;
+        // **Then its sign-in, under each account the run would use for it,**
+        // through the same boundary: the check a resume makes in
+        // `RunPreflight::certify`, the same function and the same refusal.
+        super::preflight::refuse_signed_out(
+            agent,
+            adapter,
+            &caps,
+            through,
+            &super::preflight::ProfiledPool::of_agent(&self.pools, agent),
+        )
+        .map_err(super::preflight::SignIn::into_error)?;
         self.probed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

@@ -53,8 +53,10 @@ where a refusal can be reported before any agent CLI is started: a fresh run
 refuses in `prepare_fresh`, before its lease, and a resume in its pre-flight,
 under its locks. The profile must be an absolute path and an existing
 directory. The agent's capability probe then runs under the profile, through
-this wrapper. Nothing checks sign-in, so a profile that is not signed in
-passes pre-flight and fails at its first attempt
+this wrapper, and its sign-in discovery runs once under each of its profiled
+pools, so a profile that is not signed in is refused there
+(`preflight.md`, `refuse_signed_out`). Until then nothing checked sign-in, and
+such a profile passed pre-flight and failed at its first attempt
 (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`). It does not expand `~/`: the
 configuration has no helper for that (the only home lookup is
 `util::user_upstroke_dir`, which finds the home but does not rewrite paths),
@@ -91,16 +93,23 @@ The wrapper: the inner runner and the map. It holds nothing per request.
 
 ## `impl Profiled` › `fn stamped(&self, request: &RunnerRequest) -> Option<RunnerRequest> {`
 
-`Some` only when the request is not a worker's, has an agent, and that agent
-has a profile; the stamped request is the original with `credential_profile`
-replaced and every other field unchanged. A worker's request
-(`ExecutionRole::Implement`) is never stamped, whatever it carries: its
+`Some` only when the request is not a worker's, carries no profile yet, has
+an agent, and that agent has a profile; the stamped request is the original
+with `credential_profile` set and every other field unchanged. A worker's
+request (`ExecutionRole::Implement`) is never stamped, whatever it carries: its
 attempt's plan decided its profile, and `None` there means the plan's pool
 names none (see the module section). A request with no agent (a gate, the
-shell probe) is never stamped. A review or agent-probe request whose
-`credential_profile` was already set is overwritten by the agent's bound
-profile — nothing sets one for those roles today, and for them the pool
-binding is the authority.
+shell probe) is never stamped.
+
+**A request that already carries a profile keeps it** (`None`, so it goes
+through unchanged), whatever its role. Pre-flight sets one: it runs an agent's
+sign-in discovery under each of the agent's profiled pools
+(`preflight.md`, `refuse_signed_out`), and the discovery for a pool other than
+the agent's first carries that pool's profile, which the agent's bound profile
+must not replace. A request that carries none — every review and every
+capability probe — is stamped exactly as before. Until pre-flight set one,
+nothing did for these roles, and an already-set profile was overwritten by the
+bound one (`tests::a_probe_that_already_carries_a_profile_keeps_it`).
 
 ## `impl Runner for Profiled {` › `fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {`
 
@@ -164,6 +173,14 @@ it leaves both workers alone.
 
 Both arrivals are compared in one assertion, so a failure shows what each
 worker was given. When workers were stamped, both arrived with `max`'s.
+
+## `mod tests {` › `fn a_probe_that_already_carries_a_profile_keeps_it() {`
+
+Two profiled pools for Claude Code, `max` first, then `spare`. Claude Code's
+`auth status --json` probe request with no profile arrives with `max`'s, the
+agent's bound profile. The same request carrying `spare`'s, as pre-flight
+builds it for its discovery under `spare`, arrives with `spare`'s and
+otherwise unchanged.
 
 ## `mod tests {` › `fn a_request_with_no_agent_goes_through_untouched() {`
 

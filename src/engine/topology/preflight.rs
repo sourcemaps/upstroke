@@ -6,13 +6,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, PoisonError};
 
-use crate::agent::{AdapterSource, Caps, ProcessOutput};
+use crate::agent::{AdapterSource, AgentAdapter, AuthState, Caps, ProcessOutput};
 use crate::capacity::Pool;
 use crate::error::UpstrokeError;
 use crate::gates::ShellKind;
 use crate::runner::container::resolve::RunnerPreflight;
 use crate::runner::{
-    Cancellation, InvocationId, RunFuture, Runner, RunnerCall, RunnerError, RunnerRequest,
+    CallParts, Cancellation, InvocationId, ProbeTarget, RunFuture, Runner, RunnerCall, RunnerError,
+    RunnerRequest,
 };
 use crate::topology::events::{RunnerKind, RunnerPolicy};
 use crate::workspace_manager::ComposedCommonDir;
@@ -36,7 +37,7 @@ impl Probed {
 const CLAUDE_CODE_OAUTH_TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ProfiledPool {
+pub(super) struct ProfiledPool {
     pool: String,
     agent: String,
     profile: PathBuf,
@@ -50,6 +51,14 @@ impl ProfiledPool {
             agent: pool.agent.clone(),
             profile: PathBuf::from(profile),
         })
+    }
+
+    pub(super) fn of_agent(pools: &[Pool], agent: &str) -> Vec<Self> {
+        pools
+            .iter()
+            .filter(|pool| pool.agent == agent)
+            .filter_map(Self::of)
+            .collect()
     }
 }
 
@@ -173,6 +182,20 @@ impl RunnerPreflight for RunPreflight<'_> {
             let probed = adapter
                 .probe(&registering)
                 .map_err(|error| refused(policy, &format!("the `{agent}` CLI: {error}")))?;
+            refuse_signed_out(
+                agent,
+                adapter,
+                &probed,
+                &registering,
+                &ProfiledPool::of_agent(&self.pools, agent),
+            )
+            .map_err(|failure| match failure {
+                SignIn::SignedOut(refusal) => refusal,
+                SignIn::Undiscovered(error) => refused(
+                    policy,
+                    &format!("the `{agent}` CLI's sign-in discovery: {error}"),
+                ),
+            })?;
             caps.push((agent.clone(), probed));
         }
 
@@ -272,6 +295,164 @@ fn refused(policy: &RunnerPolicy, what: &str) -> UpstrokeError {
              of shell and CLI availability inside this run's boundary; nothing was spawned for \
              the run and no recovery event was appended, so the run is resumable"
         ),
+    }
+}
+
+#[derive(Debug)]
+pub(super) enum SignIn {
+    SignedOut(UpstrokeError),
+    Undiscovered(UpstrokeError),
+}
+
+impl SignIn {
+    pub(super) fn into_error(self) -> UpstrokeError {
+        match self {
+            Self::SignedOut(error) | Self::Undiscovered(error) => error,
+        }
+    }
+}
+
+pub(super) fn refuse_signed_out(
+    agent: &str,
+    adapter: &dyn AgentAdapter,
+    caps: &Caps,
+    through: &dyn Runner,
+    pools: &[ProfiledPool],
+) -> Result<(), SignIn> {
+    if pools.is_empty() {
+        let discovery = adapter
+            .discover(through, caps)
+            .map_err(SignIn::Undiscovered)?;
+        return signed_in(agent, None, discovery.auth);
+    }
+    for (further, pool) in (0..).zip(pools) {
+        let under = UnderPool {
+            boundary: through,
+            profile: &pool.profile,
+            further,
+        };
+        let discovery = adapter
+            .discover(&under, caps)
+            .map_err(SignIn::Undiscovered)?;
+        signed_in(agent, Some(pool), discovery.auth)?;
+    }
+    Ok(())
+}
+
+fn signed_in(agent: &str, pool: Option<&ProfiledPool>, auth: AuthState) -> Result<(), SignIn> {
+    match auth {
+        AuthState::NotAuthenticated => Err(SignIn::SignedOut(signed_out(agent, pool))),
+        AuthState::Authenticated | AuthState::Unknown => Ok(()),
+    }
+}
+
+fn signed_out(agent: &str, pool: Option<&ProfiledPool>) -> UpstrokeError {
+    let claude_code = agent == crate::agent::claude::ADAPTER_ID;
+    let (account, login) = match pool {
+        Some(pool) => (
+            format!(
+                "pool `{}`'s account, the credential profile directory `{}`",
+                pool.pool,
+                pool.profile.display()
+            ),
+            if claude_code {
+                format!(
+                    "`claude auth login` with `CLAUDE_CONFIG_DIR` set to `{}`",
+                    pool.profile.display()
+                )
+            } else {
+                format!(
+                    "with the agent's own CLI, under `{}`",
+                    pool.profile.display()
+                )
+            },
+        ),
+        None => (
+            "its default account, as no pool of this run names a credential profile for it"
+                .to_owned(),
+            if claude_code {
+                "`claude auth login`".to_owned()
+            } else {
+                "with the agent's own CLI".to_owned()
+            },
+        ),
+    };
+    UpstrokeError::Refused {
+        message: format!(
+            "pre-flight: agent `{agent}` is not signed in under {account}; its sign-in discovery \
+             reported no signed-in account. Nothing was spawned for the run and no event was \
+             appended; run the same command again once that account is signed in ({login})"
+        ),
+    }
+}
+
+struct UnderPool<'a> {
+    boundary: &'a dyn Runner,
+    profile: &'a Path,
+    further: u32,
+}
+
+impl UnderPool<'_> {
+    fn under(&self, request: &RunnerRequest) -> Result<RunnerRequest, UpstrokeError> {
+        let mut under = request
+            .clone()
+            .with_credential_profile(self.profile.to_path_buf());
+        if self.further == 0 {
+            return Ok(under);
+        }
+        let InvocationId::Probe {
+            target: ProbeTarget::Agent(agent),
+            ordinal,
+        } = &request.invocation
+        else {
+            return Err(UpstrokeError::Refused {
+                message: format!(
+                    "`{}` is not an agent probe; a pool's sign-in discovery runs agent probes \
+                     only, and only an agent probe has a further pool's identity to take",
+                    request.invocation
+                ),
+            });
+        };
+        under.invocation =
+            PreflightIdentities::further_pool(agent.as_str(), self.further, *ordinal)?;
+        Ok(under)
+    }
+}
+
+impl Runner for UnderPool<'_> {
+    fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {
+        let under = match self.under(request) {
+            Ok(under) => under,
+            Err(error) => {
+                return Box::pin(std::future::ready(Err(RunnerError::never_started(
+                    &request.invocation,
+                    error,
+                ))));
+            }
+        };
+        Box::pin(async move {
+            let CallParts {
+                cancellation,
+                leases,
+                spawn,
+                container,
+            } = call.into_parts();
+            let mut relent = RunnerCall::new(cancellation).holding_cleanup_leases(leases);
+            if let Some(spawn) = spawn {
+                relent = relent.observed_by(spawn);
+            }
+            if let Some(container) = container {
+                relent = relent.observed_in_container_by(container);
+            }
+            self.boundary.run(&under, relent).await
+        })
+    }
+
+    fn composed_common_dir(&self, request: &RunnerRequest) -> ComposedCommonDir {
+        match self.under(request) {
+            Ok(under) => self.boundary.composed_common_dir(&under),
+            Err(_) => self.boundary.composed_common_dir(request),
+        }
     }
 }
 

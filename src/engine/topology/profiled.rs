@@ -34,7 +34,7 @@ struct Profiled {
 
 impl Profiled {
     fn stamped(&self, request: &RunnerRequest) -> Option<RunnerRequest> {
-        if request.role == ExecutionRole::Implement {
+        if request.role == ExecutionRole::Implement || request.credential_profile.is_some() {
             return None;
         }
         let agent = request.agent.as_ref()?;
@@ -262,6 +262,47 @@ mod tests {
             same(&seen_unprofiled, &unprofiled) && same(&seen_on_spare, &on_spare),
             "a worker request was changed on its way through: {seen_unprofiled:?}, \
              {seen_on_spare:?}"
+        );
+    }
+
+    #[test]
+    fn a_probe_that_already_carries_a_profile_keeps_it() {
+        let pools = [
+            pool("max", "claude-code", Some("/profiles/personal")),
+            pool("spare", "claude-code", Some("/profiles/spare")),
+        ];
+        let unprofiled = crate::agent::probe_request(
+            "claude-code",
+            CommandSpec::new("claude")
+                .arg("auth")
+                .arg("status")
+                .arg("--json"),
+            2,
+            Duration::from_secs(30),
+        )
+        .expect("a probe request");
+        let on_spare = unprofiled
+            .clone()
+            .with_credential_profile(PathBuf::from("/profiles/spare"));
+
+        let seen_unprofiled = through(&pools, &unprofiled);
+        let seen_on_spare = through(&pools, &on_spare);
+
+        assert_eq!(
+            (
+                seen_unprofiled.credential_profile.clone(),
+                seen_on_spare.credential_profile.clone(),
+            ),
+            (
+                Some(PathBuf::from("/profiles/personal")),
+                Some(PathBuf::from("/profiles/spare")),
+            ),
+            "a probe with no profile takes its agent's first pool's, and one that already \
+             names `spare`'s keeps it, as pre-flight's discovery under a further pool needs"
+        );
+        assert!(
+            same(&seen_on_spare, &on_spare),
+            "a probe that carried a profile was changed on its way through: {seen_on_spare:?}"
         );
     }
 

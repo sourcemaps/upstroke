@@ -300,6 +300,155 @@ none of the five checks applies: not on the container runner, not for an
 agent other than Claude Code, and not with a token set. The probes are the
 ones the run always made.
 
+## `const SECOND_DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/agent");`
+
+---------------------------------------------------------------------------
+Sign-in, under each account
+---------------------------------------------------------------------------
+
+## `const SECOND_DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/agent");`
+
+A second profile directory that exists in every checkout, for a second
+profiled pool, as [`EXISTING_DIRECTORY`] is for the first. Nothing is read
+from it: the profile only has to pass `refuse_unusable_profiles` and be a
+path the CLI double can tell apart.
+
+## `const THIRD_DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/engine");`
+
+A third, so a run has two further pools and the identities of two further
+pools' discoveries have something to collide with.
+
+## `const CLAUDE_HELP: &str = concat!(`
+
+The `claude --help` text the double answers: every flag and effort level the
+Claude Code adapter's probe requires, as `agent::claude`'s own help tests
+spell them, so the real adapter's probe passes and reaches its discovery.
+
+## `const LOGGED_IN: &str = concat!(`
+
+What `claude auth status --json` prints for a signed-in account.
+
+## `const LOGGED_OUT: &str = concat!(`
+
+What it prints for a signed-out one, which it answers with exit 1.
+
+## `fn answered(code: i32, stdout: &str) -> ProcessOutput {`
+
+A process that exited `code` and printed `stdout`.
+
+## `fn answers_signed_in(_profile: Option<&Path>) -> ProcessOutput {`
+
+The double's `auth status --json` answers, by the profile the request
+carries: signed in under any profile, or none.
+
+## `fn answers_signed_out(_profile: Option<&Path>) -> ProcessOutput {`
+
+Signed out under any profile, or none.
+
+## `fn answers_signed_in_under_the_first_profile_only(profile: Option<&Path>) -> ProcessOutput {`
+
+Signed in under [`EXISTING_DIRECTORY`], the first pool's profile, and signed
+out under every other, the second pool's included.
+
+## `struct ClaudeCli {`
+
+A runner that plays the Claude Code CLI to the real adapter
+(`crate::agent::BuiltinAdapters`): `--version` and `--help` as above,
+`auth status --json` by the request's profile through `auth_status`, and
+exit 0 for anything that is not `claude` (the shell probe). It records every
+request, so a test reads which identities ran under which profiles.
+
+## `impl ClaudeCli` › `fn discoveries(&self) -> Vec<(String, Option<PathBuf>)> {`
+
+The `auth status --json` requests, in the order they ran: each one's rendered
+identity and the profile it reached the CLI with.
+
+## `fn claude_code_preflight<'a>(runner: &'a dyn Runner, pools: &[Pool]) -> RunPreflight<'a> {`
+
+A resume's pre-flight of one recorded agent, Claude Code, with the real
+adapter, the run's pools, and no token in the environment.
+
+## `fn profiled_over(cli: &Arc<ClaudeCli>, pools: &[Pool]) -> Arc<dyn Runner> {`
+
+The double with `profiled` over it, as `entry` assembles the run's runner, so
+a discovery that carries no profile is stamped as a run's would be.
+
+## `fn two_profiled_pools() -> [Pool; 2] {`
+
+Two profiled Claude Code pools, `max` on [`EXISTING_DIRECTORY`] and then
+`spare` on [`SECOND_DIRECTORY`]: both absolute, existing directories, so
+`refuse_unusable_profiles` passes them on the host runner.
+
+## `const SIGN_IN_REFUSAL_CLOSING: &str = concat!(`
+
+The closing sentence of the sign-in refusal, up to the parenthesis that says
+how to sign in: nothing was spawned for the run, no event was appended, and the
+same command runs again once that account is signed in. Spelled out here, as
+[`PROFILE_REFUSAL_CLOSING`] is, so a change of wording is a change to this test.
+It is the sentence `signed_out` writes once for both paths, and it differs from
+both neighbours on purpose: `refused`'s says the run is resumable, false on a
+fresh run, and `profile_refused`'s says no agent CLI was started, false once
+the probe and the discovery ran.
+
+## `fn a_sign_in_refusal(error: &UpstrokeError) -> String {`
+
+What every sign-in refusal shares, asserted once: a `Refused` that opens
+with `pre-flight: agent`, the agent's name and `is not signed in under`, carries
+[`SIGN_IN_REFUSAL_CLOSING`] once, ends with how to sign in and no full stop,
+and carries nothing of `refused`'s probe closing. Returns the message for the
+test's own pins.
+
+## `fn a_second_profiled_pool_that_is_signed_out_refuses_naming_that_pool_and_its_profile() {`
+
+The witness. Two profiled Claude Code pools, whose `auth status --json`
+answers `loggedIn: true` under the first profile and `loggedIn: false`, exit
+1, under the second; the runner is `profiled` over the double, as `entry`
+builds it. `certify` refuses, naming the second pool, its profile and how to
+sign it in, and not the first. The first pool's discovery ran at the adapter's
+own identity (`o2`) and the second's at its own (`o18`), each under its own
+profile. Nothing was certified and the ledger balances.
+
+On the code before the sign-in check (`a6412450`), `certify` ran no discovery
+and certified this run: a profile that was not signed in failed at its first
+attempt instead (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`).
+
+## `fn every_profiled_pool_signed_in_certifies_and_every_discovery_is_registered_and_settled() {`
+
+Three profiled pools, all signed in: `certify` passes. The requests are the
+shell probe, Claude Code's two capability probes, then one discovery per pool
+in file order, at `o2`, `o18` and `o34`, so two further pools' discoveries
+registered distinct identities. Each ran under its own pool's profile. Six
+processes were registered and each completed once; nothing is running and
+the ledger balances.
+
+## `fn an_unprofiled_agent_whose_default_account_is_signed_out_refuses_naming_that_account() {`
+
+An agent whose only pool names no profile, signed out: `certify` refuses,
+naming the agent's default account and `claude auth login` with no
+`CLAUDE_CONFIG_DIR`. One discovery ran, under no profile.
+
+## `fn a_discovery_that_cannot_say_whether_the_account_is_signed_in_certifies() {`
+
+`auth status --json` that prints no JSON (a CLI that predates the subcommand),
+or that times out, is an unknown sign-in, and an unknown one passes. Both,
+under the default account and under two profiled pools: `certify` passes, one
+discovery ran per profiled pool (or one with none), and the ledger balances.
+
+## `fn a_fresh_runs_probes_refuse_a_signed_out_pool_in_the_resumes_words() {`
+
+The fresh path. `RunnerProbes`, given the run's pools with `with_pools`,
+probes Claude Code through a `ProbePair`'s agent probe over `profiled` and the
+double, as `create_run`'s P4 does. With the second pool signed out it refuses,
+records no capabilities, ran the two discoveries at their two identities, and
+settled every process in the pair. Its refusal is the same text a resume's
+`certify` returns for the same pools: one refusal, worded once, on both paths.
+
+## `fn a_profiled_pool_on_the_container_runner_is_refused_before_any_discovery() {`
+
+On the container runner, a profiled pool is refused by
+`refuse_unusable_profiles`, as before, in its own closing. No discovery ran,
+nor any other process, and nothing was registered.
+
 ## `fn the_refusal_notes_keep_a_probe_whose_process_is_unresolved() {`
 
 Review round 2's `R2-REG-2` (the PR11 record, §13, round R2). The `certify` section of

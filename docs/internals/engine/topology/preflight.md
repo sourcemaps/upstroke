@@ -91,12 +91,16 @@ passes the coordinator's environment to the child (it reserves `PATH`,
 `HOME`, `USERPROFILE` and the credential-location keys, not this one), so a
 token in the coordinator's environment reaches every profiled process.
 
-## `struct ProfiledPool {`
+## `pub(super) struct ProfiledPool {`
 
 A pool that names a `profile`: its name and agent, which the refusals cite,
 and the profile as a path. As in `profiled.rs`, the configured string is
 used as written, with no `~/` expansion, and a relative one is refused rather
 than resolved ([`refuse_unusable_profiles`], check 3).
+
+`pub(super)`, with private fields, because the fresh run's `RunnerProbes`
+(`create.rs`) hands an agent's profiled pools to [`refuse_signed_out`] too,
+and reads nothing of them itself.
 
 ## `impl ProfiledPool` › `fn of(pool: &Pool) -> Option<Self> {`
 
@@ -105,6 +109,14 @@ not only an agent's bound pool (`capacity::pool_for`): a profile in the
 pools file that this run could not honour is refused wherever it is
 written, rather than passed over because a pool earlier in the file binds
 the agent.
+
+## `impl ProfiledPool` › `pub(super) fn of_agent(pools: &[Pool], agent: &str) -> Vec<Self> {`
+
+The pools of `agent` that name a profile, in file order: the accounts
+[`refuse_signed_out`] checks the agent's sign-in under. Both paths build the
+list here, from the run's pools — `RunPreflight::certify` from the pools
+`with_pools` gave it, `RunnerProbes::agent` from the pools
+`RunnerProbes::with_pools` gave it — so the list cannot differ between them.
 
 ## `pub(in crate::engine) fn coordinator_environment(key: &str) -> Option<OsString> {`
 
@@ -133,6 +145,9 @@ it calls it.
 The run's pools, in file order. Empty unless the caller supplied pools with
 [`RunPreflight::with_pools`]. [`refuse_unusable_profiles`] picks out the ones
 that name a profile, and when there are none, every profile check is skipped.
+Each agent's sign-in discovery runs once under each of that agent's profiled
+pools, or once under its default account when it has none
+([`refuse_signed_out`]).
 
 ## `pub struct RunPreflight<'a>` › `environment: fn(&str) -> Option<OsString>,`
 
@@ -166,16 +181,20 @@ has no workspace of its own" — and that decision is the adapter
 module's, not this one's.
 
 A pre-flight built with `new` alone carries no pools, so it makes no
-profile check and is the pre-flight it was before profiles existed.
+profile check, and each agent's sign-in discovery runs once, under its
+default account.
 
 ## `impl<'a> RunPreflight<'a>` › `pub fn with_pools(mut self, pools: &[Pool]) -> Self {`
 
-The run's pools, so `certify` can refuse a profile the run cannot honour.
+The run's pools, so `certify` can refuse a profile the run cannot honour, and
+check that each profiled pool's account is signed in.
 `entry` passes today's configured pools on the resume path, the same slice
 it hands `profiled`, so the pools the probes are stamped from are the pools
 checked here. A fresh run builds no `RunPreflight`. Its `prepare_fresh`
 calls [`refuse_unusable_profiles`] itself, before the lease, over the same
-slice `FreshLeased::run` later hands `profiled`. A builder rather than a fifth argument to `new`: a caller with
+slice `FreshLeased::run` later hands `profiled`, and gives the same slice to
+its `RunnerProbes` (`RunnerProbes::with_pools`), whose agent probe makes the
+sign-in check. A builder rather than a fifth argument to `new`: a caller with
 no pools, which includes every test fixture that predates profiles, keeps
 the unprofiled pre-flight without having to say so.
 
@@ -262,10 +281,21 @@ The agent probes run through the runner `entry` built, which `profiled`
 wraps, so a profiled pool's Claude Code CLI is probed under that pool's
 profile (`tests::the_claude_code_probe_of_a_profiled_pool_runs_under_that_profile`).
 
+After each agent's probe, and before its capabilities are kept, that agent's
+sign-in is checked under every account the run would use for it
+([`refuse_signed_out`], through the same `registering` boundary, over
+`ProfiledPool::of_agent` of the pools `with_pools` gave it). A fresh run makes
+the same call in `RunnerProbes::agent`, so a signed-out account is refused in
+the same words on both paths
+(`tests::a_fresh_runs_probes_refuse_a_signed_out_pool_in_the_resumes_words`).
+
 ### Errors
 
 [`UpstrokeError::Refused`] naming the pool whose profile cannot be
-honoured, the shell, or the agent whose CLI did not answer. A profile
+honoured, the shell, the agent whose CLI did not answer, or the agent and the
+account it is not signed in under ([`signed_out`]'s refusal, as it stands; a
+discovery that did not run to an answer takes [`refused`]'s shape, like a
+failed probe). A profile
 refusal precedes every registration. Every invocation registered before
 any other refusal is settled —
 completed, or cancelled with its slot pair released — so the ledger
@@ -283,6 +313,15 @@ rather than an argument here.
 ## `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `let mut caps = Vec::with_capacity(self.agents.len());`
 
 (2) One probe per recorded agent, sequentially, in recorded order.
+
+## `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `refuse_signed_out(`
+
+(3) Each agent's sign-in, after its probe: [`refuse_signed_out`] with the caps
+the probe just returned. A [`SignIn::SignedOut`] refusal is returned as it
+stands, because its wording is shared with the fresh path and its closing is
+already true here. A [`SignIn::Undiscovered`] error is a discovery process that
+did not run to an answer, the same kind of failure as a probe's, so it takes
+[`refused`]'s shape, naming the agent's sign-in discovery.
 
 ## `pub(super) fn refuse_unusable_profiles(`
 
@@ -407,6 +446,140 @@ Names the image the probe ran inside, because "a recorded shell or agent CLI
 that fails **inside the recorded image**" is a different fact from the same
 CLI failing on the host, and an operator who cannot tell which one has
 nothing to fix.
+
+## `pub(super) enum SignIn {`
+
+Why [`refuse_signed_out`] stopped, in the two kinds its two callers word
+differently.
+
+## `pub(super) enum SignIn` › `SignedOut(UpstrokeError),`
+
+An account the run would use reports itself signed out: [`signed_out`]'s
+refusal, which both paths return as it stands.
+
+## `pub(super) enum SignIn` › `Undiscovered(UpstrokeError),`
+
+A discovery that did not run to an answer: the adapter's `discover` returned
+an error, which for Claude Code is a process the boundary could not execute.
+It is not a sign-in answer, so it is not passed as `Unknown`; each path words
+it as it words a failed probe — a resume through [`refused`], a fresh run as
+the adapter's error, as `RunnerProbes::agent` returns a probe's.
+
+## `impl SignIn` › `pub(super) fn into_error(self) -> UpstrokeError {`
+
+The error either kind carries, unworded: the fresh path's reading, where a
+probe's error is returned as the adapter gave it.
+
+## `pub(super) fn refuse_signed_out(`
+
+The sign-in check, the one function both paths call: after `agent`'s probe,
+its adapter's sign-in discovery (`AgentAdapter::discover`, with the caps that
+probe returned), run through `through`, the agent probe's own registering
+boundary, once for each account the run would use for the agent.
+
+- **No profiled pool** (`pools` empty): one discovery, through the boundary as
+  it is, under the agent's default account.
+- **Profiled pools**: one discovery per pool, in file order, each through an
+  [`UnderPool`] that stamps that pool's profile. The first pool's keeps the
+  adapter's own identities; the `k`-th further pool's (`k` = 1, 2, …) are moved
+  to identities of their own (`PreflightIdentities::further_pool`), because an
+  adapter mints its discovery's identities with fixed ordinals and the ledger
+  refuses a second registration of one identity (`InvocationLedger::open`).
+
+It stops at the first discovery whose answer is `AuthState::NotAuthenticated`
+and returns [`signed_out`]'s refusal for that account. `Authenticated` passes,
+and so does `Unknown`: a CLI whose `auth status` returns no JSON, or times out,
+has said nothing about the account, and this check refuses only an account
+that reports itself signed out
+(`tests::a_discovery_that_cannot_say_whether_the_account_is_signed_in_certifies`).
+An adapter that does not override `discover` answers `Unknown` and runs
+nothing, so for it this check adds no process.
+
+**Why the first pool's discovery carries its profile too.** On both paths the
+boundary is over `profiled`'s runner, which stamps a probe of the agent with
+the profile of its first pool (`capacity::pool_for`), so for an agent whose
+first pool is profiled the stamp here is the same profile. It is set here
+anyway, because the agent's first profiled pool is not always its first pool:
+with an unprofiled pool before it, `profiled` stamps nothing, and the discovery
+would run under the default account while the refusal named the profile.
+`profiled` passes a request that already carries a profile through unchanged
+(`profiled.md`), so the stamp reaches the CLI.
+
+**What it does not check.** The default account of an agent that has a
+profiled pool, even when another of its pools names no profile. When that
+agent's first pool is profiled, no probe request could reach the default
+account: `profiled` stamps the first pool's profile on any request that
+carries none.
+
+Until this check existed, nothing checked sign-in, so a profile that was not
+signed in passed pre-flight and failed at its first attempt
+(`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`;
+`tests::a_second_profiled_pool_that_is_signed_out_refuses_naming_that_pool_and_its_profile`
+is the witness, which certified on the code before it).
+
+### Errors
+
+[`SignIn::SignedOut`] for the first account that reports itself signed out;
+[`SignIn::Undiscovered`] for a discovery that returned an error, which stops
+the check there too. Every process a discovery ran was registered through
+`through` and is settled by it, on both outcomes.
+
+## `fn signed_in(agent: &str, pool: Option<&ProfiledPool>, auth: AuthState) -> Result<(), SignIn> {`
+
+One discovery's answer read as the check reads it: only `NotAuthenticated`
+refuses.
+
+## `fn signed_out(agent: &str, pool: Option<&ProfiledPool>) -> UpstrokeError {`
+
+The sign-in refusal, worded once for both paths: `pre-flight: `, the agent,
+and the account — the pool and its profile directory, or the agent's default
+account when no pool of the run names a profile for it — then one closing
+sentence: "Nothing was spawned for the run and no event was appended; run the
+same command again once that account is signed in", with how to sign it in in
+parentheses (for Claude Code, `claude auth login`, with `CLAUDE_CONFIG_DIR` set
+to the profile when there is one). Like [`refused`]'s and
+[`profile_refused`]'s, it ends without a full stop.
+
+Neither of their closings is reused, because each is true of one path only.
+[`refused`] says the run is resumable, which is false on a fresh run, where
+the refusal aborts creation at P4 and there is no run to resume.
+[`profile_refused`] says no agent CLI was started, which is false here: the
+probe and the discovery ran. What this one says holds on both: the processes
+that ran were pre-flight's, not the run's; a fresh run refuses at P4, before P5
+opens the event log; a resume refuses at recovery step (c), before any recovery
+event; and on either the same command runs again once the account is signed
+in.
+
+## `struct UnderPool<'a> {`
+
+One pool's sign-in discovery's boundary: `boundary` (the agent probe's
+registering one) with the pool's `profile` stamped on every request, and,
+for the `further`-th further pool, each request's identity moved to that
+pool's block. `further` is 0 for the agent's first profiled pool, whose
+identities are the adapter's own. Everything else of each request, and the
+whole of each call, passes through unchanged.
+
+## `impl UnderPool<'_>` › `fn under(&self, request: &RunnerRequest) -> Result<RunnerRequest, UpstrokeError> {`
+
+The request as the pool's discovery sends it: the profile set, and for a
+further pool the invocation replaced by
+`PreflightIdentities::further_pool` of the same agent, at the adapter's
+ordinal. A request whose invocation is not an agent probe is refused rather
+than given some other identity; `discover` builds agent probes only.
+
+## `impl Runner for UnderPool<'_>` › `fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {`
+
+Hands the rewritten request to the boundary, which registers it under its new
+identity. The call is re-lent at the future's local lifetime from its own
+parts — the same cancellation, leases and hooks — as `Profiled::run` does, and
+for the same reason (`profiled.md`). A request [`UnderPool::under`] refuses is
+never handed on: the error is `NeverStarted`, under the request's original
+identity, and nothing is registered.
+
+## `impl Runner for UnderPool<'_>` › `fn composed_common_dir(&self, request: &RunnerRequest) -> ComposedCommonDir {`
+
+Delegated over the request `run` would hand the boundary, so the trait's
+default (`Unknown`) never replaces the boundary's answer.
 
 ## `pub(super) enum Slots {`
 
