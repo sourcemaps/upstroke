@@ -3586,6 +3586,33 @@ fn end_and_collect(child: &mut Child) -> Result<std::process::ExitStatus, String
 }
 
 #[cfg(unix)]
+fn end_and_poll(child: &mut Child) -> Result<std::process::ExitStatus, String> {
+    let pid = child.id();
+    child
+        .kill()
+        .map_err(|error| format!("SIGKILL to pid {pid}, a child of this test's own: {error}"))?;
+    let began = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {}
+            Err(error) => {
+                return Err(format!(
+                    "collecting pid {pid}, a child of this test's own, after its SIGKILL: {error}"
+                ));
+            }
+        }
+        if began.elapsed() >= MEMBER_END_BOUND {
+            return Err(format!(
+                "pid {pid} had not exited within {MEMBER_END_BOUND:?} of its SIGKILL, so it is \
+                 left this test's unreaped child"
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
 fn close_and_collect(child: &mut Child) -> Result<std::process::ExitStatus, String> {
     drop(child.stdin.take());
     let pid = child.id();
@@ -3648,7 +3675,7 @@ impl Drop for ChildGuard {
         let pid = child.id();
         let failure = match child.try_wait() {
             Ok(Some(_)) => return,
-            Ok(None) => match end_and_collect(&mut child) {
+            Ok(None) => match end_and_poll(&mut child) {
                 Ok(_) => return,
                 Err(reason) => reason,
             },
@@ -3659,7 +3686,7 @@ impl Drop for ChildGuard {
         };
         let failure = format!("the guard of a child spawned by this test: {failure}");
         if thread::panicking() {
-            eprintln!("{failure}");
+            let _ = writeln!(std::io::stderr(), "{failure}");
         } else {
             panic!("{failure}");
         }
@@ -4359,6 +4386,114 @@ fn children_spawned_before_a_failing_spawn_are_ended_and_collected() {
             .stdout
             .contains("ended and collected 3 children spawned before a refused spawn"),
         "the isolated helper ran both setups to their end: {ended}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn a_guard_unwinding_with_no_process_to_spare_helper() {
+    if std::env::var_os("UPSTROKE_NO_PROCESS_TO_SPARE").is_none() {
+        return;
+    }
+    let mut ceiling = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `getrlimit` writes one `rlimit` through a pointer that outlives
+    // the call.
+    let read = unsafe { libc::getrlimit(libc::RLIMIT_NPROC, &mut ceiling) };
+    assert_eq!(
+        read,
+        0,
+        "reading RLIMIT_NPROC: {}",
+        std::io::Error::last_os_error()
+    );
+    let none_to_spare = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: ceiling.rlim_max,
+    };
+    let mut earlier = None;
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let first = group_member(0);
+        earlier = Some(first.id());
+        let group = i32::try_from(first.id()).expect("a pid fits an i32");
+        // SAFETY: `setrlimit` reads one `rlimit` through a pointer that
+        // outlives the call. A soft limit of zero refuses every new process
+        // and thread of this user with `EAGAIN`; it stays in force while the
+        // refused spawn's panic unwinds through `first`'s guard.
+        let lowered = unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &none_to_spare) };
+        assert_eq!(
+            lowered,
+            0,
+            "lowering RLIMIT_NPROC to zero: {}",
+            std::io::Error::last_os_error()
+        );
+        let _second = group_member(group);
+    }));
+    // SAFETY: as above; the hard limit was never changed, so the soft limit
+    // it allowed before is allowed again. This runs only once the unwind,
+    // and every guard it dropped, has been caught.
+    let restored = unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &ceiling) };
+    assert_eq!(
+        restored,
+        0,
+        "restoring RLIMIT_NPROC: {}",
+        std::io::Error::last_os_error()
+    );
+    let Err(payload) = unwound else {
+        panic!(
+            "the spawn given no process to spare succeeded, so nothing failed (RLIMIT_NPROC does \
+             not bind a process with CAP_SYS_RESOURCE or CAP_SYS_ADMIN)"
+        );
+    };
+    let Some(pid) = earlier else {
+        panic!("nothing was spawned before the spawn that failed");
+    };
+    let refusal = format!(
+        "spawn a member into process group {pid}: {}",
+        std::io::Error::from_raw_os_error(libc::EAGAIN)
+    );
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&'static str>().copied());
+    assert_eq!(
+        message,
+        Some(refusal.as_str()),
+        "the setup left through some other panic, so what it left behind is not the refused \
+         spawn's"
+    );
+    let after = observe_child_group(pid);
+    assert_eq!(
+        after.exited_before,
+        Err(libc::ECHILD),
+        "pid {pid}, spawned before the spawn refused for want of a process, is still this \
+         process's child, running or exited and unreaped, after the failure unwound with the \
+         limit still at zero: {after}"
+    );
+    println!(
+        "ended and collected the child spawned before a spawn refused with no process to spare"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_guard_unwinding_with_no_process_to_spare_ends_and_collects_its_child() {
+    let ended = super::test_support::run_test_isolated(
+        "agent::proc::tests::a_guard_unwinding_with_no_process_to_spare_helper",
+        &[("UPSTROKE_NO_PROCESS_TO_SPARE", std::ffi::OsStr::new("1"))],
+        Duration::from_secs(60),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()),
+        "the isolated setup ended: {ended}"
+    );
+    assert!(
+        ended.stdout.contains(
+            "ended and collected the child spawned before a spawn refused with no process to spare"
+        ),
+        "the isolated helper ran its setup to its end: {ended}"
     );
 }
 

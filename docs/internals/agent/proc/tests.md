@@ -1300,8 +1300,8 @@ pid and collects it.
 
 ## `const MEMBER_END_BOUND: Duration = Duration::from_secs(10);`
 
-How long `end_and_collect` and `close_and_collect` wait for a child of
-the test's own to exit (`PR340-R3-1`). After SIGKILL the child's end is
+How long `end_and_collect`, `end_and_poll` and `close_and_collect` wait
+for a child of the test's own to exit (`PR340-R3-1`). After SIGKILL the child's end is
 the kernel's alone, since no stop, handler or mask can delay that
 signal, so the bound bounds a wedged kernel, not a slow shell; after an
 end of file it bounds a shell that should exit at once. It bounds a
@@ -1317,9 +1317,25 @@ when the signal is sent; SIGKILL ends it even while a group stop has
 suspended it, where an end of file would wait for it to run. Past the
 bound the answer is an error naming the pid, and the child stays the
 test's unreaped child, so its number is not issued again while the test
-process lives. It is how a `GroupHold` ends its member, how the
-controls end and collect a process they end themselves, and how a
-`ChildGuard` ends a child it still owns.
+process lives. It is how a `GroupHold` ends its member and how the
+controls end and collect a process they end themselves. It is not how a
+`ChildGuard` ends its child: `await_exit_without_reaping` waits on a
+thread it starts, and a guard dropped because no thread or process
+could be created cannot start one (`end_and_poll`).
+
+## `fn end_and_poll(child: &mut Child) -> Result<std::process::ExitStatus, String> {`
+
+How a `ChildGuard` ends the child it still owns, with no new thread and
+no new process. It sends SIGKILL to the child's own pid (`Child::kill`),
+then polls `try_wait` every ten milliseconds until the child is
+collected, or until `MEMBER_END_BOUND` has passed since the signal. The
+child is unreaped until that `try_wait` collects it, so its pid is its
+and no other's when the signal is sent, and SIGKILL ends it even while a
+group stop has suspended it. Past the bound the answer is an error
+naming the pid, and the child stays the test's unreaped child, as with
+`end_and_collect`. Nothing in it needs a thread, a process or a new
+descriptor, so it works when the failure that dropped the guard was a
+spawn refused for want of one (`EAGAIN` under `RLIMIT_NPROC`).
 
 ## `fn close_and_collect(child: &mut Child) -> Result<std::process::ExitStatus, String> {`
 
@@ -1365,15 +1381,25 @@ group, as before.
 ## `impl Drop for ChildGuard` › `fn drop(&mut self) {`
 
 A child the guard still owns is ended and collected here, by
-`end_and_collect`: SIGKILL to the child's own pid, then collected within
-`MEMBER_END_BOUND`. Nothing is sent to a group's number. `try_wait`
-first says whether anything is left to do: a child the test has already
+`end_and_poll`: SIGKILL to the child's own pid, then `try_wait` polled
+until it is collected or `MEMBER_END_BOUND` has passed. Nothing is sent
+to a group's number, and nothing here starts a thread or a process.
+`end_and_collect` did, through `await_exit_without_reaping`: with
+`RLIMIT_NPROC` at zero the spawn after a guarded shell failed with
+`EAGAIN`, and while that failure unwound the guard sent its SIGKILL and
+then could not start its waiting thread either. That second panic, in a
+destructor during an unwind, aborted the whole test process before the
+child was collected and before any later guard ran. `try_wait` first
+says whether anything is left to do: a child the test has already
 collected answers with its saved status, so the guard neither signals
 nor waits on a pid it no longer owns, and a child that has exited
 unreaped is collected by that same call. A state that cannot be read
 sends nothing. A child not collected within the bound fails the test
 here, or, while another failure is already unwinding, is written to
-stderr instead, as a hold's drop does.
+stderr instead, as a hold's drop does. That write ignores its own
+failure (`writeln!`, not `eprintln!`, which panics when stderr cannot be
+written), so the drop never panics while the thread is already
+panicking.
 
 The order the existing code gives a group signal and a reap is kept. In
 every body the guards are declared before any hold on a group their
@@ -1785,14 +1811,16 @@ Runs `step` with `RLIMIT_NOFILE`'s soft limit at zero, so every
 descriptor `step` asks for is refused with `EMFILE` while the ones
 already open stay usable, and restores the limit before a panic from
 `step` unwinds any further: the cleanup that unwind runs, the guards'
-included, runs under the limit the process had. The hard limit is never
-touched, so the restore asks for nothing the process did not already
-have. The limit is the whole process's, so only an isolated child calls
-this.
+included, runs under the limit the process had. So it never puts a
+guard's own cleanup under the limit it lowers;
+`a_guard_unwinding_with_no_process_to_spare_helper` does that with
+`RLIMIT_NPROC`. The hard limit is never touched, so the restore asks for
+nothing the process did not already have. The limit is the whole
+process's, so only an isolated child calls this.
 
 ## `fn children_spawned_before_a_failing_spawn_helper() {`
 
-The isolated half of the regression test for `ChildGuard`. It runs two
+The isolated half of a regression test for `ChildGuard`. It runs two
 of the controls' setups under `catch_unwind`, each with one spawn made
 to fail part-way through by a real `EMFILE`
 (`with_no_descriptor_to_spare`): the second shell, after the agent,
@@ -1816,7 +1844,7 @@ process's limit.
 
 ## `fn children_spawned_before_a_failing_spawn_are_ended_and_collected() {`
 
-The regression test for `ChildGuard`. It runs the helper above in a
+A regression test for `ChildGuard`. It runs the helper above in a
 process of its own (`run_test_isolated`), because the limit the helper
 lowers is the whole process's, and requires the helper to have passed
 and to report all three children ended and collected, so a helper that
@@ -1829,6 +1857,51 @@ real `EMFILE` ("spawn a member into process group …: Too many open
 files (os error 24)"), and the shell it had spawned before that was
 still running after the unwind, `exited_before` answering `Ok(false)`
 where `Err(ECHILD)` is required. With the body restored, it passes.
+
+## `fn a_guard_unwinding_with_no_process_to_spare_helper() {`
+
+The isolated half of the regression test for a guard whose own cleanup
+runs while no thread or process can be created. Under `catch_unwind` it
+spawns a first shell (`group_member`), lowers `RLIMIT_NPROC`'s soft
+limit to zero, and spawns a second into the first one's group, which
+the kernel refuses with `EAGAIN`. The limit stays at zero while that
+panic unwinds through the first shell's guard, and is restored only
+once `catch_unwind` has returned; the hard limit is never touched, so
+the restore asks for nothing the process did not already have. The
+panic it catches is identified: its message must be `group_member`'s own
+refusal for the first shell's group, with `EAGAIN`'s text, so a setup
+that failed for another reason, or did not fail, fails here instead.
+`RLIMIT_NPROC` does not bind a process with `CAP_SYS_RESOURCE` or
+`CAP_SYS_ADMIN`, so under root the second spawn succeeds and the helper
+fails saying so rather than passing without a refusal. Then the first
+shell must no longer be this process's child:
+`observe_child_group(pid).exited_before` must be `Err(ECHILD)`, as in
+`children_spawned_before_a_failing_spawn_helper`. It prints that it
+found the child ended and collected.
+
+Without `UPSTROKE_NO_PROCESS_TO_SPARE` it returns at once, so a run of
+the ignored tests inside a shared test process never lowers that
+process's limit.
+
+## `fn a_guard_unwinding_with_no_process_to_spare_ends_and_collects_its_child() {`
+
+The regression test for `ChildGuard`'s cleanup with no process to
+spare. It runs the helper above in a process of its own
+(`run_test_isolated`), because `RLIMIT_NPROC` is the whole process's,
+and requires the helper to have exited successfully and to report the
+child ended and collected. An abort of the helper, or a child left
+uncollected, fails it.
+
+MEASURED, because a test that passes is not evidence that it detects.
+With `ChildGuard`'s `Drop` calling `end_and_collect` again, its
+thread-based collection, this test failed and every other test of this
+module passed, `children_spawned_before_a_failing_spawn_are_ended_and_collected`
+included: the helper's second spawn met a real `EAGAIN` ("spawn a
+member into process group …: Resource temporarily unavailable (os error
+11)"), the guard's `thread::spawn` then failed with the same error
+("failed to spawn thread"), and the panic in a destructor during
+cleanup aborted the helper, wait status 134 (SIGABRT). With
+`end_and_poll` restored, it passes.
 
 ## `const READINESS_ROLE: &str = "UPSTROKE_READINESS_ROLE";`
 
