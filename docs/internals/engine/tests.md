@@ -3007,9 +3007,30 @@ Docker-stub test in `src/runner/container/tests.rs`, and one Docker-stub test in
 `src/runner/container/exec/tests.rs`, recorded as finding
 `PR368-WRITER-HELPER-UNBOUNDED-CALLERS`.
 
-If the stand-in is written by `fs::write` again, the race this repair removes
-is possible again and the test can fail intermittently with "Text file busy",
-as it did twice in CI; no test in this tree fails deterministically, because
+The two CI failures this repair answers each recorded "Text file busy". CI run
+41984755598, job 127102847397, `test (ubuntu-latest)`, 2026-11-05: the test
+panicked at `src/engine/tests.rs:11125:9` in the case `own-registration`, where
+the probe's record held
+`gate worktree-true FAIL Err("Text file busy (os error 26)")`
+and the case expected
+`FAIL Err("fatal: failed to read /r/.git/worktrees/upstroke-gates-1/commondir: Success")`;
+3676 passed, 1 failed. CI run 42976030457, job 130375210467, `test (ubuntu-latest)`,
+2026-11-11: the test panicked at `src/engine/tests.rs:11155:9` in the case
+`signal`, with three probes failing `Err("Text file busy (os error 26)")`; 3736
+passed, 1 failed. The race those runs met needs a fork made by another thread
+of the same test process while the stand-in is open for writing. This repair
+has two halves, and either one closes that window: the isolated child, which
+`run_test_isolated` runs with `--test-threads=1` (`src/agent/proc.rs`), so that
+no sibling test thread exists in it to fork while the write is open; and the
+writer helper, which never opens the stand-in in the test's process. Putting
+`fs::write` back while the cases stay in the isolated child would not bring that
+race back; putting the cases back into the shared test process with `fs::write`
+would. The second half has a cost: the helper runs through the process funnel
+once for each stand-in the child writes, and each such run ends by waiting for
+its reaper; if one stalls, the child is ended at its 300-second deadline and the
+test fails. A plain `fs::write` inside the isolated child has no such path. The
+helper is kept as a defence that does not depend on the test staying isolated.
+When the repair is undone, no test in this tree fails deterministically, because
 the window can only be reached by racing. The
 inherited-writer technique of `runner::host::tests` needs a fork taken while the
 writer's descriptor is open. `fs::write` opens, writes and closes a regular file
