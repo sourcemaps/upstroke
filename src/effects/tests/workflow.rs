@@ -4157,10 +4157,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-TIMEOUT-RAISED",
         escape: "a shard's ceiling raised from its 40 minutes, which is 1.75 times the slowest \
-                 measured leg and inside the merge queue's 60, to two hours. A leg whose \
-                 leftover test process holds its step's output after every result line has \
-                 printed, as one did in run 43719719561, then holds the required check and the \
-                 queue entry behind it until that ceiling",
+                 measured leg and inside the merge queue's 60, to two hours. A leg that prints \
+                 every result line and does not end, as one did in run 43719719561, where a \
+                 leftover test process is inferred to have held the step's output, then holds \
+                 the required check and the queue entry behind it until that ceiling",
         job: Some("test-windows-hosted"),
         anchor: "    timeout-minutes: 40\n",
         replacement: "    timeout-minutes: 120\n",
@@ -4523,12 +4523,12 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-SURVIVOR-ALLOWED",
         escape: "line 8 of the guest's suite step, the throw for a test process left running, \
-                 is gone. Line 6 still lists each `upstroke*` process and stops it, and the \
-                 step goes on to its count: a suite that passed and left a process is green. \
-                 The listing is then a line in the log of a job nobody has a reason to open, \
-                 the process is stopped and forgotten, and which test leaves it -- the one \
-                 thing the two runs that did not end left unestablished -- is looked for by \
-                 no one",
+                 is gone. Line 5 still lists each `upstroke*` process and asks Windows to stop \
+                 it, and the step goes on to its count: a suite that passed and left a process \
+                 is green. The listing is then a line in the log of a job nobody has a reason \
+                 to open, the process is forgotten whether or not it stopped, and which test \
+                 leaves it -- the one thing the two runs that did not end left unestablished \
+                 -- is looked for by no one",
         job: Some("test-windows"),
         anchor: "          if ($left.Count -gt 0) { throw \"$($left.Count) test process(es) outlived the suite, listed above: a test leaves a process running, which would hold this step open\" }\n",
         replacement: "",
@@ -4553,10 +4553,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-WINDOWS-HOSTED-SURVIVOR-ALLOWED",
         escape: "line 8 of the shards' suite step, the throw for a test process left running, \
                  is gone, on all five legs at once. Each leg still lists the `upstroke*` \
-                 processes left and stops them, then counts and clears its floor: the leg \
-                 whose tests leave a process is green beside the other four, the process is \
-                 stopped and forgotten, and which test leaves it, the question both runs that \
-                 did not end left open, is asked by nothing",
+                 processes left and asks Windows to stop them, then counts and clears its \
+                 floor: the leg whose tests leave a process is green beside the other four, \
+                 the process is forgotten whether or not it stopped, and which test leaves it, \
+                 the question both runs that did not end left open, is asked by nothing",
         job: Some("test-windows-hosted"),
         anchor: "          if ($left.Count -gt 0) { throw \"$($left.Count) test process(es) outlived the suite, listed above: a test leaves a process running, which would hold this step open\" }\n",
         replacement: "",

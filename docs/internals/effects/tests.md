@@ -2239,7 +2239,7 @@ nothing can be added to its arguments, with each script's pin holding.
 ## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {`
 
 What a Windows suite script must do about the process it starts, read from
-its text, as the ones it does not do. Four:
+its text, as the ones it does not do. Six:
 
 - It waits on that process with `WaitForExit()`, after `Start-Process`, and
   `Start-Process` is given no `-Wait`, which waits for the process's
@@ -2248,10 +2248,16 @@ its text, as the ones it does not do. Four:
 - It exits with the code it kept from that process before it counts.
 - It lists the `upstroke*` processes still running before that exit, and
   throws for them after it and before the count. So a failed suite's
-  processes are listed and stopped too, and a suite that passed and left
-  one fails.
+  processes are listed too, and Windows is asked to stop them, and a suite
+  that passed and left one fails.
+- It runs Cargo, and starts a process, on no line but the one that starts
+  the suite, line 1's two compiler questions aside.
+- It reads the suite's output and lists those processes inside a `try`
+  whose `catch` keeps Cargo's exit code.
 
-The order is read from where each fragment first occurs in the script.
+The order in the first four is read from where each fragment first occurs
+in the script. The last two are read line by line, and each has a heading
+below.
 [`the_windows_leg_counts_the_tests_it_ran`] asks it of the guest's script
 and
 [`the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler`] of
@@ -2262,7 +2268,84 @@ its constant edited to match, passes the pin and fails here.
 Measured once, unplanned: with the space after `$passed =` lost from both
 constants and not from the workflow, the guest's script failed the third and
 fourth of these, and the oracle's clean-workflow check failed beside them as
-an unpinned script.
+an unpinned script. The fifth and sixth are measured by
+[`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`].
+
+## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {` › `let runs_cargo = |line: &str| {`
+
+How many times a line names Cargo as a program: every `cargo` in it, in any
+letter case, that is not one of four spellings which run nothing. `$cargo`
+is the variable line 1 fills with Cargo's version and line 2 reads, and
+`^cargo` opens the pattern line 2 holds it to. `(Cargo's compiler)` and
+`Cargo compiled the harnesses` are where the two refusals' messages name the
+tool, and they are exempt as those exact words.
+
+Any letter case, because PowerShell does not distinguish case in a command's
+name, so `Cargo test` is the suite again. That is PowerShell's documented
+rule; it was not executed here, where no PowerShell runs.
+
+The spellings are left out, not the lines that hold them. Line 2 contains
+`cargo` three times, in the variable and the pattern, and runs nothing. A
+rule that every line containing `cargo` is line 1 or the line that starts
+the suite would refuse the script as it stands, and one that excused line 2
+whole would pass a second run joined to it.
+
+## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {` › `let cargo_elsewhere = lines.iter().enumerate().any(|(index, line)| {`
+
+The fifth complaint: Cargo once. Each line names Cargo as often as its
+place allows. Line 1, where it opens with the first compiler question,
+names it twice, once for each question asked of Cargo. The line that holds
+`Start-Process` names it once, as the program to start. Every other line
+names it never. And `Start-Process`, in any letter case, occurs once in the
+script.
+
+This is a refusal the script lost when the suite became a process that is
+waited on. While the suite was a pipeline, the script could run `cargo test`
+on one line only. After the change,
+[`the_windows_leg_counts_the_tests_it_ran`] required exactly one line equal
+to [`windows_suite_start`]'s, which says nothing of a different line that
+runs the suite again. The review of that change showed it: with
+`cargo test --all-targets --all-features` appended after the floor's
+refusal, in `ci.yml` and in `WINDOWS_TEST_WITNESS` together, every oracle
+test passed over a script that runs the whole suite twice.
+
+Line 1 is held to two, not excused whole, so the same command joined to the
+compiler questions is refused as it is on a line of its own. Line 4 needs no
+such count from this function: both tests that call it compare the whole
+line.
+
+The rule reads letters. A name put together as the script runs, two strings
+joined or the first word of `$cargo`, starts Cargo with no `cargo` here to
+count, and nothing in this function refuses it.
+
+## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {` › `let kept = lines`
+
+The sixth complaint: exit unmasked. Three lines in a row, counted from the
+line that ends by keeping Cargo's exit as `$code`:
+
+- the next line opens `try { Get-Content $err; ` and holds the listing of
+  the `upstroke*` processes, so the reading and the listing are both inside
+  the `try`;
+- the line after it is the `catch`, character for character: where `$code`
+  is not zero it prints the failure, and where it is zero it throws the
+  failure again;
+- the line after that is `if ($code -ne 0) { exit $code }`.
+
+GitHub runs a `pwsh` step with `$ErrorActionPreference = 'stop'`, so a file
+`Get-Content` cannot read, or a `Get-CimInstance` that fails, ends the
+script where it fails. Before the `try`, the reading and the listing were
+lines 5 and 6 and Cargo's exit was line 7. A listing that failed after
+Cargo exited 101 would then have ended the step with PowerShell's error in
+place of 101. A frontier review read that from the text; no run showed it.
+With the two inside the `try` and the exit on the line after the `catch`, a
+failed suite exits with Cargo's code whatever the reading and the listing
+did. A suite that passed is not excused: the `catch` throws again, because
+nothing was read or listed, so nothing can be counted.
+
+The closing brace of the `try` is not read. PowerShell accepts a `catch`
+only straight after a `try` block, so a line 5 that closed its `try` early
+and went on would not parse with line 6 as it must be. That too is
+PowerShell's documented rule and was not executed here.
 
 ## `fn the_windows_leg_counts_the_tests_it_ran() {`
 
@@ -2286,13 +2369,21 @@ already spent the run on the wrong compiler.
 The suite is one line of that text, the one [`windows_suite_start`] makes of
 no selection: `cargo` started as a process with `TEST_COMMAND`'s arguments
 and nothing else, waited on, its exit kept. The test requires that line
-exactly once, and the compiler check before it. It also requires the four
+exactly once, and the compiler check before it. It also requires the six
 things [`windows_suite_wait_complaints`] reads of the script: that it waits
 on the process it starts, pipes nothing into `Tee-Object`, exits with
-Cargo's code before it counts, and throws when a test process is left
-running. The reason for the four is under `WINDOWS_TEST_WITNESS` in the CI
-model notes: two hosted runs, 43719719561 and 44277078005, in which a shard
-reported its tests and did not end.
+Cargo's code before it counts, throws when a test process is left running,
+runs Cargo and starts a process on no other line, and reads and lists
+inside the `try` whose `catch` keeps Cargo's code. The reason for the first
+four is under `WINDOWS_TEST_WITNESS` in the CI model notes: two hosted runs,
+43719719561 and 44277078005, in which a shard reported its tests and did
+not end. The last two came from the review of that change, and
+[`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`] measures
+them.
+
+One exact line is not one run of the suite. The count of lines equal to
+[`windows_suite_start`]'s sees copies of that line and no other line that
+runs Cargo, which is what the fifth of the six refuses.
 
 Every other assertion here reads `ci.yml` and concludes what CI was *asked*
 to do. Cargo can be asked for this suite and execute none of it: a
@@ -2314,6 +2405,50 @@ record says where the boundary actually is. It is a defence against the
 machine, which is the input this change added. The guest is provisioned
 outside the repository, so its Cargo home and its environment are not in any
 diff, and this is the leg saying it ran what it says it ran.
+
+## `fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {`
+
+The fifth and sixth complaints of [`windows_suite_wait_complaints`],
+executed on both scripts, the guest's and the shards'. Each script as the
+workflow runs it draws no complaint, and each of five edits to it draws
+exactly one, the one the edit is made for.
+
+Four edits run the suite a second time and draw the fifth complaint:
+
+- `cargo test --all-targets --all-features` on a line of its own after the
+  count, which is the edit the review made to `ci.yml` and the constant
+  together;
+- the same command joined to line 1 with `; `;
+- the same command on a line of its own, with `Cargo` capitalised;
+- a second copy of the script's own `Start-Process` line.
+
+The fifth edit takes the `try` and its `catch` away and draws the sixth
+complaint.
+
+Exactly one complaint, not at least one. So the test also shows that none
+of the first four complaints refuses any of these edits, which is why the
+last two were added.
+
+The edits are made to the constants' text and nothing is written. An edit
+to `ci.yml` alone is the pin's to refuse
+([`the_workflow_shape_oracle_refuses_every_escape_the_ledger_names`]); these
+are edits that move the workflow and its constant together, which the pin
+passes. The test runs no PowerShell: it shows what the function says of a
+text, not what the script does on a runner.
+
+## `fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {` › `let unwrapped: String = script`
+
+The script without its `try`: the `catch` line is dropped, and `try { ` and
+the block's closing ` }` are taken off the line before it. Line 5 then
+reads `Get-Content $err; $log = Get-Content $out; $log; $left = ...` to the
+end of the listing, and Cargo's exit is line 6: the reading and the listing
+are outside any `try` again, ahead of the exit.
+
+The assertion after it is on the edit, not on the function: the result is
+one line shorter and its line 5 opens that way. Without it, a script whose
+line 5 no longer ended as the stripping expects would lose its `catch` line
+alone, and the complaint would be drawn by an edit other than the one the
+row names.
 
 ## `fn the_windows_home_is_picked_by_the_one_job_the_contract_pins() {`
 
@@ -2687,8 +2822,9 @@ two whole texts can drift apart with both pins holding. So, by line:
 
 - lines 1 to 3 and 5 to 9 of the shards' script are the guest's lines 1 to
   3 and 5 to 9: the compiler questions, their refusal, the two files the
-  suite writes to, what is read from them, the processes left running, the
-  suite's exit, the refusal of a process left running and the count;
+  suite writes to, the `try` that reads them and lists the processes left
+  running, the `catch` that keeps Cargo's exit code, the suite's exit, the
+  refusal of a process left running and the count;
 - the guest's line 4 is [`windows_suite_start`] of no selection, `cargo`
   started as a process with `TEST_COMMAND`'s arguments and nothing else,
   and the shards' line 4 is the same with ` -- ${{ matrix.tests }}` after
@@ -2703,10 +2839,13 @@ pin alone.
 
 The shards' script is also asked what the guest's is about the process it
 starts ([`windows_suite_wait_complaints`]): that it waits on it, pipes
-nothing into `Tee-Object`, exits with Cargo's code before it counts, and
-throws when a test process is left running. Lines 5 to 8 being the guest's
-already says most of that; the question is asked of this text as well so
-that it does not rest on the other test's.
+nothing into `Tee-Object`, exits with Cargo's code before it counts,
+throws when a test process is left running, runs Cargo and starts a process
+on no other line, and reads and lists inside the `try` whose `catch` keeps
+Cargo's code. Lines 5 to 8 being the guest's already says most of that; the
+question is asked of this text as well so that it does not rest on the
+other test's. A line added to the shards' script alone is no line of the
+guest's, so the fifth of those is asked here and not inherited.
 
 Measured by setting the twin's install back to `stable` in the workflow and
 restoring it: this test and the oracle's clean-workflow check both failed,

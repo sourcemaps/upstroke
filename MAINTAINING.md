@@ -57,7 +57,7 @@ source, documentation, workflows, release machinery and this file.
    have not run as separate jobs),
    against the guest's 13 for the whole. Each shard runs under a 40-minute limit. In that run
    one whole-suite job failed a kill-timing test, and one shard did not end after its tests had
-   passed, a leftover test process holding its output; neither followed a change.
+   passed; a leftover test process is inferred to have held its output. Neither followed a change.
 
    The two homes share the compiler and the suite, and the floor in sum. What still differs is the runner:
    GitHub's image against the curated guest's, their filesystems and temporary directories,

@@ -249,21 +249,32 @@ started as a process and waited on:
    ended. `WaitForExit()` returns when Cargo's own process ends, and `$code`
    keeps its exit. There is no `-Wait`, which waits for the process's
    descendants as well.
-5. The two files, printed, and standard output kept as `$log` for the
-   count. The job log carries the suite's output once Cargo has ended, not
-   as it runs.
-6. Every process named `upstroke*` that is still running, listed with its
-   command line and stopped; the test harnesses are `upstroke-<hash>.exe`.
-   A process left running under another name is neither listed nor stopped.
+5. One `try` block, which reads and then lists. It prints the two files
+   and keeps standard output as `$log` for the count; the job log carries
+   the suite's output once Cargo has ended, not as it runs. It then lists
+   every process named `upstroke*` that is still running, with its command
+   line, and asks Windows to stop each one; the test harnesses are
+   `upstroke-<hash>.exe`. `Stop-Process` is given
+   `-ErrorAction SilentlyContinue` and nothing checks that the process
+   stopped, so the stop is attempted, not ensured. The listing names a
+   process, not the test that started it. A process left running under
+   another name is neither listed nor asked to stop.
+6. The `catch` for line 5. GitHub runs a `pwsh` step with
+   `$ErrorActionPreference = 'stop'`, so a failed read or a failed listing
+   ends line 5 where it fails. Where Cargo's exit was not zero, the `catch`
+   prints that failure and the script goes on to line 7, so the failure
+   cannot replace Cargo's exit code. Where Cargo exited zero, it throws the
+   failure again and the step fails: nothing was read or listed, so nothing
+   can be counted.
 7. Cargo's exit, where it is not zero. The line rests on line 4 having kept
-   one: PowerShell compares an empty value as not equal to zero, and `exit`
-   given nothing exits zero, before the count.
-8. A throw where line 6 listed anything.
+   one, as line 6's test does: PowerShell compares an empty value as not
+   equal to zero, and `exit` given nothing exits zero, before the count.
+8. A throw where line 5 listed anything.
 
-What is said here of `Handle`, `ExitCode`, `-Wait` and `exit` was not
-executed where it was written: no PowerShell runs on the build box
-([`HOST_ACCEPTANCE_WINDOWS_CAPTURE`]). The step's first run on each home is
-the evidence for it.
+What is said here of `Handle`, `ExitCode`, `-Wait`, `exit`, `try` and
+`catch` was not executed where it was written: no PowerShell runs on the
+build box ([`HOST_ACCEPTANCE_WINDOWS_CAPTURE`]). The step's first run on
+each home is the evidence for it.
 
 Before this the suite was a pipeline: line 3 was [`TEST_COMMAND`] piped into
 `Tee-Object -Variable log`, and line 4 read `$LASTEXITCODE`. Twice a hosted
@@ -289,18 +300,29 @@ pipe a survivor can hold open; whether a leg that leaves a process now ends
 is the evidence of the next run in which one does.
 
 What is left running is the step's to report, where it was the runner's to
-kill at clean-up. Line 6 runs after a failed suite as after a passed one, so
-the processes are listed and stopped either way. Line 7 then gives Cargo's
-failure Cargo's exit code, and line 8 fails a suite that passed and left a
-process: the job that ran the test names the process's command line.
+kill at clean-up. Line 5 runs after a failed suite as after a passed one, so
+the processes are listed, and Windows is asked to stop them, either way.
+Line 6 keeps a failure in line 5 from replacing Cargo's exit code, line 7
+gives Cargo's failure that code, and line 8 fails a suite that passed and
+left a process: the job that ran the test names the process's command line,
+not the test. If the inference is wrong and Cargo itself does not end, line
+5 is never reached, and the job's limit still ends the leg.
 `the_windows_leg_counts_the_tests_it_ran` holds the script to line 4 as
-[`TEST_COMMAND`]'s arguments make it, and to four things about the process
+[`TEST_COMMAND`]'s arguments make it, and to six things about the process
 it starts: that it waits with `WaitForExit()` and not `-Wait`, pipes nothing
-into `Tee-Object`, exits with Cargo's code before it counts, and lists the
-processes before that exit and throws for them after it.
+into `Tee-Object`, exits with Cargo's code before it counts, lists the
+processes before that exit and throws for them after it, runs Cargo and
+starts a process nowhere else, and reads and lists inside the `try` whose
+`catch` keeps Cargo's code. The six are `windows_suite_wait_complaints` in
+the test notes.
 Measured in the oracle, each an edit to the workflow that leaves this text
 alone: `MUT-TEST-WINDOWS-SUITE-PIPED-AGAIN`, line 4 a pipeline into
 `Tee-Object` again, and `MUT-TEST-WINDOWS-SURVIVOR-ALLOWED`, line 8 removed.
+Measured against this text itself, each an edit a pin cannot refuse because
+the workflow and the constant move together: the suite run a second time,
+and the `try` and its `catch` removed
+(`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit` in the
+test notes).
 
 The hosted twin ran this step too, character for character, until it ran
 the suite in shards. Its legs now run [`WINDOWS_SHARD_WITNESS`], which keeps
@@ -332,10 +354,11 @@ Line by line, against the guest's:
    every harness `--all-targets` builds: the leg's filter, if it has one,
    and a `--skip` for each filter of the legs before it. Without the
    selection every leg runs the whole suite.
-5. The two files, printed, and standard output kept for the count. The
-   guest's line.
-6. The `upstroke*` processes still running, listed and stopped. The guest's
-   line.
+5. The `try` block: the two files, printed, with standard output kept for
+   the count, and the `upstroke*` processes still running, listed, with
+   Windows asked to stop each. The guest's line.
+6. The `catch` that keeps a failure in line 5 from replacing Cargo's exit
+   code. The guest's line.
 7. Cargo's exit, where it is not zero. The guest's line.
 8. The throw where a process was left running. The guest's line.
 9. The sum of every `test result: ok.` line's passed count. The guest's
@@ -364,7 +387,7 @@ leg's is ([`WINDOWS_SHARD_FILTERS`]).
 `the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler`
 holds lines 1 to 3 and 5 to 9 to the guest's lines, line 4 to the guest's
 with only the selection added, and line 10 to the matrix's floor; and it
-holds this text to the four things the guest's is held to about the process
+holds this text to the six things the guest's is held to about the process
 it starts. The count
 carries over for the reason it exists on the guest: the twin's machines are
 GitHub's, not the build box, but a Cargo target runner or a `[workspace]`
@@ -771,9 +794,10 @@ skipped, now means the guest's job or all five shards. `fail-fast` is
 
 40 minutes a leg: 1.75 times the slowest measured leg, and inside the merge
 queue's 60. In that run the 1,669 s shard printed every `test result: ok`
-line 31.6 minutes into its job and did not end: a leftover test process held
-the step's output until the job's limit, and the runner's clean-up killed
-it. The limit bounds that and does not repair it. It happened again on
+line 31.6 minutes into its job and did not end. It ran to the job's limit,
+where the runner's clean-up killed a test process left over; that the
+process held the step's output until then is inferred, not seen. The limit
+bounds the hang and does not repair it. It happened again on
 2026-11-18, in run 44277078005, and the suite step now waits on Cargo's
 process where it piped Cargo; what the two runs showed, and what is inferred
 from it, is under [`WINDOWS_TEST_WITNESS`]. The September and October

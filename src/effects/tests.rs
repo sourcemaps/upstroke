@@ -5586,6 +5586,9 @@ fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {
     let exits = "if ($code -ne 0) { exit $code }\n";
     let throws = "if ($left.Count -gt 0) { throw ";
     let counts = "$passed = ";
+    let questions = "$rustc = ((cargo rustc -q --lib -- --version)";
+    let catches = "catch { if ($code -ne 0) { \"reading the suite's output or listing the processes it left failed: $_\" } else { throw } }";
+    let lines: Vec<&str> = script.lines().collect();
     let mut out = Vec::new();
     if !follows("Start-Process ", "; $suite.WaitForExit(); ") || script.contains(" -Wait ") {
         out.push(
@@ -5612,6 +5615,44 @@ fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {
             "does not list the `upstroke*` processes left running before it exits with \
              Cargo's code and throw for them after, so a test that leaves a process running \
              passes unreported",
+        );
+    }
+    let runs_cargo = |line: &str| {
+        let line = line
+            .replace("(Cargo's compiler)", "")
+            .replace("Cargo compiled the harnesses", "")
+            .to_ascii_lowercase();
+        line.match_indices("cargo")
+            .filter(|(at, _)| !line[..*at].ends_with(['$', '^']))
+            .count()
+    };
+    let cargo_elsewhere = lines.iter().enumerate().any(|(index, line)| {
+        let expected = if index == 0 && line.starts_with(questions) {
+            2
+        } else {
+            usize::from(line.contains("Start-Process"))
+        };
+        runs_cargo(line) != expected
+    });
+    let starts = script.to_ascii_lowercase().matches("start-process").count();
+    if cargo_elsewhere || starts != 1 {
+        out.push(
+            "runs Cargo, or starts a process, on more than the one line that starts the suite, \
+             line 1's two compiler questions aside, so the suite can run twice and be counted \
+             from either run",
+        );
+    }
+    let kept = lines
+        .iter()
+        .position(|line| line.ends_with("$code = $suite.ExitCode"));
+    let after = |offset: usize| kept.and_then(|kept| lines.get(kept + offset).copied());
+    let reads_and_lists = after(1)
+        .is_some_and(|line| line.starts_with("try { Get-Content $err; ") && line.contains(lists));
+    if !reads_and_lists || after(2) != Some(catches) || after(3) != Some(exits.trim_end()) {
+        out.push(
+            "does not read the suite's output and list the processes it left inside the `try` \
+             whose `catch` keeps Cargo's code, with Cargo's exit on the next line, so a failure \
+             while reading the output or listing processes can replace Cargo's exit code",
         );
     }
     out
@@ -5659,6 +5700,79 @@ fn the_windows_leg_counts_the_tests_it_ran() {
         "the Windows leg's step does not test the count against \
          {WINDOWS_TEST_FLOOR}, so the floor this contract documents is not the floor it runs"
     );
+}
+
+#[test]
+fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {
+    let twice = "so the suite can run twice and be counted from either run";
+    let masked = "can replace Cargo's exit code";
+    for (home, script) in [
+        ("the guest's", WINDOWS_TEST_WITNESS),
+        ("the shards'", WINDOWS_SHARD_WITNESS),
+    ] {
+        let clean = windows_suite_wait_complaints(script);
+        assert!(
+            clean.is_empty(),
+            "{home} suite step, as the workflow runs it:\n{}",
+            clean.join("\n")
+        );
+        let start = script
+            .lines()
+            .find(|line| line.contains("Start-Process"))
+            .unwrap_or_else(|| panic!("{home} suite step starts no process"));
+        let unwrapped: String = script
+            .lines()
+            .filter(|line| !line.starts_with("catch { "))
+            .map(|line| {
+                let body = line
+                    .strip_prefix("try { ")
+                    .and_then(|body| body.strip_suffix(" }"));
+                format!("{}\n", body.unwrap_or(line))
+            })
+            .collect();
+        assert!(
+            unwrapped.lines().count() + 1 == script.lines().count()
+                && unwrapped.lines().nth(4).is_some_and(|line| {
+                    line.starts_with("Get-Content $err; $log = Get-Content $out; $log; $left = ")
+                }),
+            "{home} suite step has no `try` on line 5 and `catch` on line 6 to remove, so the \
+             last mutation below is not the one it is named for:\n{unwrapped}"
+        );
+        for (mutation, mutated, complaint) in [
+            (
+                "the suite run again on a line after the count",
+                format!("{script}{TEST_COMMAND}\n"),
+                twice,
+            ),
+            (
+                "the suite run again on the compiler questions' line",
+                script.replacen('\n', &format!("; {TEST_COMMAND}\n"), 1),
+                twice,
+            ),
+            (
+                "the suite run again by a `Cargo` spelled with a capital",
+                format!("{script}{}\n", TEST_COMMAND.replacen("cargo", "Cargo", 1)),
+                twice,
+            ),
+            (
+                "a second copy of the line that starts the suite",
+                format!("{script}{start}\n"),
+                twice,
+            ),
+            (
+                "the `try` and its `catch` removed from around the reading and the listing",
+                unwrapped,
+                masked,
+            ),
+        ] {
+            let complaints = windows_suite_wait_complaints(&mutated);
+            assert!(
+                matches!(complaints.as_slice(), [only] if only.contains(complaint)),
+                "{home} suite step with {mutation} did not draw the one complaint that says \
+                 `{complaint}`: {complaints:#?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -6931,8 +7045,8 @@ fn the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler() {
             guests.is_some() && shard.get(line - 1) == guests,
             "line {line} of the shards' suite step is {:?} and the guest's is {guests:?}: the \
              compiler questions, the files the suite writes to and is read from, the processes \
-             left running, the suite's exit, the refusal of a process left running and the \
-             count are not one text on the two homes",
+             left running, the `catch` that keeps Cargo's exit code, the suite's exit, the \
+             refusal of a process left running and the count are not one text on the two homes",
             shard.get(line - 1)
         );
     }

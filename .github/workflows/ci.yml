@@ -469,10 +469,18 @@ jobs:
       #
       # What is left running is then the step's to report. After Cargo ends
       # the script lists every process named `upstroke*` that is still
-      # running, with its command line, and stops it. Cargo's own failure
-      # comes first, with Cargo's exit code. Where Cargo exited zero and a
+      # running, with its command line, and asks Windows to stop it. It
+      # does not check that the process stopped. The listing names a
+      # process, not the test that started it. Cargo's own failure comes
+      # first, with Cargo's exit code, and a failure while reading the
+      # output or listing the processes cannot replace that code: the
+      # script prints the failure and still exits with Cargo's code. Where
+      # Cargo exited zero the same failure fails the step, because nothing
+      # was read or listed to count from. Where Cargo exited zero and a
       # process was left, the step throws: the suite passed, and a test
-      # leaves a process running.
+      # leaves a process running. If the inference is wrong and Cargo
+      # itself does not end, the listing is never reached, and the job's
+      # limit still ends the leg.
       - name: Test, and witness that the suite ran
         env:
           UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
@@ -481,8 +489,8 @@ jobs:
           if ($rustc -notmatch '^rustc 1\.97\.1 ' -or $path_rustc -notmatch '^rustc 1\.97\.1 ' -or $cargo -notmatch '^cargo 1\.97\.1 ') { throw "the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow" }
           $out = Join-Path $env:RUNNER_TEMP 'suite-stdout.log'; $err = Join-Path $env:RUNNER_TEMP 'suite-stderr.log'
           $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode
-          Get-Content $err; $log = Get-Content $out; $log
-          $left = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'upstroke%'"); foreach ($p in $left) { "left running after the suite: pid $($p.ProcessId): $($p.CommandLine)"; Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
+          try { Get-Content $err; $log = Get-Content $out; $log; $left = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'upstroke%'"); foreach ($p in $left) { "left running after the suite: pid $($p.ProcessId): $($p.CommandLine)"; Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } }
+          catch { if ($code -ne 0) { "reading the suite's output or listing the processes it left failed: $_" } else { throw } }
           if ($code -ne 0) { exit $code }
           if ($left.Count -gt 0) { throw "$($left.Count) test process(es) outlived the suite, listed above: a test leaves a process running, which would hold this step open" }
           $passed = [int](($log | Select-String -Pattern '^test result: ok\. (\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)
@@ -490,13 +498,15 @@ jobs:
 
       # The native HOST acceptance record on the guest: the `test` job's
       # selection under PowerShell, on the compiler the step above has just
-      # asserted, and the harness that step built. `$LASTEXITCODE` carries
-      # Cargo's exit through `Tee-Object`, as it does in the suite step. The
-      # step refuses unless exactly the record's test ran and passed, and
-      # refuses a missing or incomplete frame: BEGIN first, END last with the
-      # same summary, and chunk k at position k with the tag and its exact
-      # length. The workflow oracle pins the script and its case-fold map
-      # whole, immediately after the suite-and-witness step.
+      # asserted, and the harness that step built. This step pipes Cargo
+      # into `Tee-Object` and reads Cargo's exit from `$LASTEXITCODE`; the
+      # suite step, which no longer pipes, reads its exit code from the
+      # process it waited on. The step refuses unless exactly the record's
+      # test ran and passed, and refuses a missing or incomplete frame:
+      # BEGIN first, END last with the same summary, and chunk k at
+      # position k with the tag and its exact length. The workflow oracle
+      # pins the script and its case-fold map whole, immediately after the
+      # suite-and-witness step.
       - name: Capture the native host acceptance record
         env:
           UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
@@ -604,10 +614,11 @@ jobs:
   #
   # 40 minutes a leg: 1.75 times the slowest measured leg, and inside the
   # merge queue's 60. In that run the 1,669 s shard printed every
-  # `test result: ok` line 31.6 minutes into its job and did not end: a
-  # leftover test process held the step's output until the job's limit, and
-  # the runner's clean-up killed it. The limit bounds that; it does not
-  # repair it.
+  # `test result: ok` line 31.6 minutes into its job and did not end. It
+  # ran to the job's limit, where the runner's clean-up killed a test
+  # process left over. That the process held the step's output until then
+  # is inferred, not seen. The limit bounds the hang; it does not repair
+  # it.
   #
   # It happened again on 2026-11-18, in run 44277078005: `test
   # (windows-latest, 3 of 5)` printed `test result: ok. 700 passed; 0
@@ -616,11 +627,11 @@ jobs:
   # `upstroke-8ddcc7d640fdf222`. The suite step no longer pipes Cargo into
   # `Tee-Object`, the pipe a surviving test process is inferred to have
   # held in both runs. It waits on Cargo's process and reads the suite's
-  # output from files; it lists and stops any `upstroke*` process still
-  # running, and fails for it where Cargo's own exit has not already
-  # failed the step. The comment above the guest's suite step says what
-  # was observed, what is inferred, and that the test which leaves the
-  # process is not established.
+  # output from files; it lists, and asks Windows to stop, any `upstroke*`
+  # process still running, and fails for it where Cargo's own exit has not
+  # already failed the step. The comment above the guest's suite step says
+  # what was observed, what is inferred, and that the test which leaves
+  # the process is not established.
   test-windows-hosted:
     name: test (windows-latest, ${{ matrix.shard }})
     runs-on: windows-latest
@@ -668,8 +679,8 @@ jobs:
           if ($rustc -notmatch '^rustc 1\.97\.1 ' -or $path_rustc -notmatch '^rustc 1\.97\.1 ' -or $cargo -notmatch '^cargo 1\.97\.1 ') { throw "the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow" }
           $out = Join-Path $env:RUNNER_TEMP 'suite-stdout.log'; $err = Join-Path $env:RUNNER_TEMP 'suite-stderr.log'
           $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- ${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode
-          Get-Content $err; $log = Get-Content $out; $log
-          $left = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'upstroke%'"); foreach ($p in $left) { "left running after the suite: pid $($p.ProcessId): $($p.CommandLine)"; Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
+          try { Get-Content $err; $log = Get-Content $out; $log; $left = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'upstroke%'"); foreach ($p in $left) { "left running after the suite: pid $($p.ProcessId): $($p.CommandLine)"; Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } }
+          catch { if ($code -ne 0) { "reading the suite's output or listing the processes it left failed: $_" } else { throw } }
           if ($code -ne 0) { exit $code }
           if ($left.Count -gt 0) { throw "$($left.Count) test process(es) outlived the suite, listed above: a test leaves a process running, which would hold this step open" }
           $passed = [int](($log | Select-String -Pattern '^test result: ok\. (\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)
