@@ -11,11 +11,12 @@ a `Claude-Session:` line:
 | `8f7a91ae` | `ab822fb8` | Merge master into machine-level capacity, reconciling it with #403 |
 
 Each now names the `eventloops` account as author and committer, keeps its original dates, and has
-the `Co-Authored-By:` and `Claude-Session:` lines removed; nothing else in either message changed.
+the `Co-Authored-By:` and `Claude-Session:` lines and their preceding blank separator removed.
+The rest of each message is byte-identical.
 The owner chose to change these two commits only: older commits that carry a `Claude-Session:` line
 and no Claude author or co-author are unchanged.
 
-Every later commit was re-created with its parent lines changed and nothing else: its tree,
+Every other descendant of those two commits was re-created with updated parent lines. Its tree,
 author, committer, dates and message are byte-identical, and every tree on the rewritten `master`
 equals the tree it replaced. `master` moved from `0d45280c` to `50c11ded`. A signature on a
 re-created commit could not be kept, since it covered the old parents. Open pull requests were moved
