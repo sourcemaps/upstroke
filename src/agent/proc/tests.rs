@@ -3300,8 +3300,17 @@ fn unix_reaper_kills_labeled_containers() {
          esac\n\
          exit 0\n",
         &[],
-        || {},
+        |_| {},
+        |_, _| {},
+        |_, join| join(),
     );
+}
+
+#[cfg(unix)]
+struct CellStarted<'a> {
+    tree: &'a Path,
+    agent: i32,
+    reaper: i32,
 }
 
 #[cfg(unix)]
@@ -3309,7 +3318,9 @@ fn reaper_container_cells(
     cells: &[(bool, bool)],
     stub_script: &str,
     stub_env: &[(&str, &std::ffi::OsStr)],
-    mut on_drain_wait: impl FnMut(),
+    mut on_drain_wait: impl FnMut(i32),
+    mut before_arming: impl FnMut(&Path, &Path),
+    mut join_agents: impl FnMut(&CellStarted<'_>, &mut dyn FnMut() -> GroupHold) -> GroupHold,
 ) -> Vec<i32> {
     const CONTAINER_ID: &str = "c0ffee0000000000000000000000000000000000000000000000000000000001";
     const PRIVATE_ROOT: &str = "/srv/upstroke-reaper-fixture/private";
@@ -3414,14 +3425,29 @@ fn reaper_container_cells(
         if !coordinator_dies {
             coordinator.env("UPSTROKE_REAPER_CONTAINERS_CLEAN_EXIT", "1");
         }
-        let mut coordinator = coordinator
-            .spawn()
-            .map(ChildGuard::new)
-            .expect("spawn a disposable coordinator");
+        let mut drain = ReaperDrain {
+            cell,
+            tree: dir,
+            published: &reaper_path,
+            coordinator: Some(
+                coordinator
+                    .spawn()
+                    .map(ChildGuard::new)
+                    .expect("spawn a disposable coordinator"),
+            ),
+            reaper: None,
+            on_wait: &mut on_drain_wait,
+        };
 
-        let agent_pid = read_pid(&agent_path, Duration::from_secs(30));
+        before_arming(dir, &reaper_path);
         let reaper_pid = read_pid(&reaper_path, Duration::from_secs(30));
+        drain.reaper = Some(reaper_pid);
         reapers.push(reaper_pid);
+        let agent_pid = read_pid(&agent_path, Duration::from_secs(30));
+        let coordinator = drain
+            .coordinator
+            .as_mut()
+            .expect("the cell's drain holds its coordinator until it drops");
 
         if !coordinator_dies {
             coordinator.wait().expect("reap the coordinator");
@@ -3435,7 +3461,14 @@ fn reaper_container_cells(
             continue;
         }
 
-        let hold = GroupHold::join(agent_pid, || matches!(coordinator.try_wait(), Ok(None)));
+        let started = CellStarted {
+            tree: dir,
+            agent: agent_pid,
+            reaper: reaper_pid,
+        };
+        let hold = join_agents(&started, &mut || {
+            GroupHold::join(agent_pid, || matches!(coordinator.try_wait(), Ok(None)))
+        });
         assert!(alive(agent_pid), "the agent never started");
         coordinator.kill().expect("hard-kill the coordinator");
         coordinator.wait().expect("reap the coordinator");
@@ -3512,17 +3545,6 @@ fn reaper_container_cells(
             settled,
             "the container half replaced the process half: the agent group survived"
         );
-
-        let drain_bound = Duration::from_secs(30);
-        if let Err(waited) = drain_reaper_group(reaper_pid, drain_bound, &mut on_drain_wait) {
-            panic!(
-                "[{cell}] process group {reaper_pid} still answered with a member {waited:?} after \
-                 the cell's last assertion (bound {drain_bound:?}), so a stub the reaper started \
-                 may still write into {}; nothing was signalled: the test holds the group's number, \
-                 not the group",
-                dir.display()
-            );
-        }
     }
     reapers
 }
@@ -3553,6 +3575,77 @@ fn drain_reaper_group(
         thread::sleep(Duration::from_millis(10));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+struct ReaperDrain<'a> {
+    cell: &'a str,
+    tree: &'a Path,
+    published: &'a Path,
+    coordinator: Option<ChildGuard>,
+    reaper: Option<i32>,
+    on_wait: &'a mut dyn FnMut(i32),
+}
+
+#[cfg(unix)]
+impl ReaperDrain<'_> {
+    const BOUND: Duration = Duration::from_secs(30);
+
+    fn published_pid(path: &Path) -> Option<i32> {
+        std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ReaperDrain<'_> {
+    fn drop(&mut self) {
+        let Some(mut coordinator) = self.coordinator.take() else {
+            return;
+        };
+        if self.reaper.is_none() {
+            let settled_by = Instant::now() + Self::BOUND;
+            loop {
+                self.reaper = Self::published_pid(self.published);
+                if self.reaper.is_some()
+                    || !matches!(coordinator.try_wait(), Ok(None))
+                    || Instant::now() >= settled_by
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        drop(coordinator);
+        if self.reaper.is_none() {
+            self.reaper = Self::published_pid(self.published);
+        }
+        let failure = match self.reaper {
+            None => format!(
+                "[{}] the coordinator was ended and collected without publishing a reaper's pid at \
+                 {}, so no reaper's group could be drained: a reaper it had started may still \
+                 write into {}",
+                self.cell,
+                self.published.display(),
+                self.tree.display()
+            ),
+            Some(pgid) => match drain_reaper_group(pgid, Self::BOUND, || (self.on_wait)(pgid)) {
+                Ok(()) => return,
+                Err(waited) => format!(
+                    "[{}] process group {pgid} still answered with a member {waited:?} after the \
+                     cell ended (bound {:?}), so a stub the reaper started may still write into \
+                     {}; nothing was signalled: the test holds the group's number, not the group",
+                    self.cell,
+                    Self::BOUND,
+                    self.tree.display()
+                ),
+            },
+        };
+        if thread::panicking() {
+            let _ = writeln!(std::io::stderr(), "{failure}");
+        } else {
+            panic!("{failure}");
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -3772,6 +3865,26 @@ fn settle_agent_group(mut hold: GroupHold, bound: Duration) -> bool {
 }
 
 #[cfg(unix)]
+const LATE_WRITES_STUB: &str = "#!/bin/sh\n\
+     printf '%s\\n' \"$*\" >> \"$UPSTROKE_STUB_DIR/argv.log\"\n\
+     logged=$?\n\
+     case \"$1\" in\n\
+     ps) if [ -f \"$UPSTROKE_STUB_DIR/removed\" ]; \
+     then printf 'ps %s\\n' \"$logged\" >> \"$UPSTROKE_WITNESS_JOURNAL\"; \
+     else printf '%s\\n' '{CONTAINER_ID}'; fi ;;\n\
+     kill) : > \"$UPSTROKE_STUB_DIR/killing\"; sleep 1 ;;\n\
+     rm) held=0; \
+     until [ -e \"$UPSTROKE_WITNESS_GATE\" ] || [ ! -d \"$UPSTROKE_STUB_DIR\" ]; do \
+     held=$((held + 1)); \
+     if [ \"$held\" -gt 1000 ]; then \
+     printf 'rm hold expired\\n' >> \"$UPSTROKE_WITNESS_JOURNAL\"; exit 0; fi; \
+     sleep 0.01; done; \
+     printf '' > \"$UPSTROKE_STUB_DIR/removed\"; \
+     printf 'rm %s\\n' \"$?\" >> \"$UPSTROKE_WITNESS_JOURNAL\" ;;\n\
+     esac\n\
+     exit 0\n";
+
+#[cfg(unix)]
 #[test]
 fn the_container_cell_reclaims_its_tree_only_after_the_reapers_last_write() {
     let journal_tree =
@@ -3785,31 +3898,16 @@ fn the_container_cell_reclaims_its_tree_only_after_the_reapers_last_write() {
     let gate = control.join("gate");
     let reaper = reaper_container_cells(
         &[(false, true)],
-        "#!/bin/sh\n\
-         printf '%s\\n' \"$*\" >> \"$UPSTROKE_STUB_DIR/argv.log\"\n\
-         logged=$?\n\
-         case \"$1\" in\n\
-         ps) if [ -f \"$UPSTROKE_STUB_DIR/removed\" ]; \
-         then printf 'ps %s\\n' \"$logged\" >> \"$UPSTROKE_WITNESS_JOURNAL\"; \
-         else printf '%s\\n' '{CONTAINER_ID}'; fi ;;\n\
-         kill) : > \"$UPSTROKE_STUB_DIR/killing\"; sleep 1 ;;\n\
-         rm) held=0; \
-         until [ -e \"$UPSTROKE_WITNESS_GATE\" ] || [ ! -d \"$UPSTROKE_STUB_DIR\" ]; do \
-         held=$((held + 1)); \
-         if [ \"$held\" -gt 1000 ]; then \
-         printf 'rm hold expired\\n' >> \"$UPSTROKE_WITNESS_JOURNAL\"; exit 0; fi; \
-         sleep 0.01; done; \
-         printf '' > \"$UPSTROKE_STUB_DIR/removed\"; \
-         printf 'rm %s\\n' \"$?\" >> \"$UPSTROKE_WITNESS_JOURNAL\" ;;\n\
-         esac\n\
-         exit 0\n",
+        LATE_WRITES_STUB,
         &[
             ("UPSTROKE_WITNESS_JOURNAL", journal.as_os_str()),
             ("UPSTROKE_WITNESS_GATE", gate.as_os_str()),
         ],
-        || {
+        |_| {
             std::fs::File::create(gate.as_path()).expect("publish the drain's gate");
         },
+        |_, _| {},
+        |_, join| join(),
     )
     .first()
     .copied()
@@ -3843,6 +3941,266 @@ fn the_container_cell_reclaims_its_tree_only_after_the_reapers_last_write() {
          the cell waits for the reaper's group before its reclaim; a non-zero status, a missing \
          line or `rm hold expired` is a cell that reclaimed first"
     );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn a_dying_cell_refused_after_its_reaper_started_helper() {
+    fn group_ended(pgid: i32) -> bool {
+        // SAFETY: signal 0 performs no delivery; a negative pid only asks
+        // whether a process of that group exists.
+        let answered = unsafe { libc::kill(-pgid, 0) };
+        answered == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+
+    if std::env::var_os("UPSTROKE_CELL_REFUSED_AFTER_ITS_REAPER").is_none() {
+        return;
+    }
+    let journal_tree =
+        crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "reaper-unwind-writes")
+            .expect("a journal tree");
+    let journal = journal_tree.path().join("late-writes");
+    let gate = journal_tree.path().join("gate");
+    let mut started = None;
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        reaper_container_cells(
+            &[(false, true)],
+            LATE_WRITES_STUB,
+            &[
+                ("UPSTROKE_WITNESS_JOURNAL", journal.as_os_str()),
+                ("UPSTROKE_WITNESS_GATE", gate.as_os_str()),
+            ],
+            |_| {
+                if let Err(error) = std::fs::File::create(&gate) {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "publishing the drain's gate {}: {error}",
+                        gate.display()
+                    );
+                }
+            },
+            |_, _| {},
+            |cell, join| {
+                started = Some((cell.tree.to_path_buf(), cell.agent, cell.reaper));
+                with_no_descriptor_to_spare(join)
+            },
+        )
+    }));
+    let message = unwound.as_ref().err().map(|payload| {
+        payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&'static str>().copied())
+            .unwrap_or("a payload that is not text")
+    });
+    let Some((tree, agent, reaper)) = started else {
+        panic!("the cell ended before it joined its agent's group: {message:?}");
+    };
+    let ended_before_the_reclaim = group_ended(reaper);
+
+    let decided_by = Instant::now() + Duration::from_secs(30);
+    while !group_ended(reaper) {
+        assert!(
+            Instant::now() < decided_by,
+            "process group {reaper} still answered with a member 30 s after the refused cell \
+             unwound; nothing was signalled: the helper holds the group's number, not the group"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let late: Vec<String> = match std::fs::read_to_string(&journal) {
+        Ok(text) => text.lines().map(str::to_owned).collect(),
+        Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("reading the journal {}: {error}", journal.display()),
+    };
+
+    let Some(message) = message else {
+        panic!("the dying cell's join, given no descriptor to spare, succeeded, so nothing failed");
+    };
+    let refusal = format!(
+        "spawn a member into process group {agent}: {}",
+        std::io::Error::from_raw_os_error(libc::EMFILE)
+    );
+    assert_eq!(
+        message, refusal,
+        "the cell left through some other panic, so what it left behind is not the refused \
+         join's"
+    );
+    assert!(
+        ended_before_the_reclaim,
+        "process group {reaper}, the refused cell's reaper's, still answered with a member once \
+         the cell's tree {} had been reclaimed, so the reclaim ran while a stub the reaper started \
+         could still write into it",
+        tree.display()
+    );
+    match std::fs::symlink_metadata(&tree) {
+        Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => panic!(
+            "the refused cell's tree {} is still there after the unwind: its reclaim failed",
+            tree.display()
+        ),
+        Err(error) => panic!("observing the cell's tree {}: {error}", tree.display()),
+    }
+    assert_eq!(
+        late,
+        ["rm 0", "ps 0"],
+        "the `rm` stub holds its write until the drain's gate exists or the cell's tree is gone, \
+         so both late writes land only when the refused cell's unwind waits for the reaper's \
+         group before its reclaim"
+    );
+    println!("a refused cell drained its reaper's group before its tree was reclaimed");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dying_cell_refused_after_its_reaper_started_drains_it_before_its_reclaim() {
+    let ended = super::test_support::run_test_isolated(
+        "agent::proc::tests::a_dying_cell_refused_after_its_reaper_started_helper",
+        &[(
+            "UPSTROKE_CELL_REFUSED_AFTER_ITS_REAPER",
+            std::ffi::OsStr::new("1"),
+        )],
+        Duration::from_secs(120),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()),
+        "the isolated cell ended: {ended}"
+    );
+    assert!(
+        ended
+            .stdout
+            .contains("a refused cell drained its reaper's group before its tree was reclaimed"),
+        "the isolated helper ran its cell to its end: {ended}"
+    );
+    assert!(
+        !ended.stderr.contains("was not reclaimed"),
+        "a scratch tree was not reclaimed while the refused cell unwound: {ended}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_cell_failing_before_it_arms_its_drain_drains_its_reaper_before_its_reclaim() {
+    fn group_ended(pgid: i32) -> bool {
+        // SAFETY: signal 0 performs no delivery; a negative pid only asks
+        // whether a process of that group exists.
+        let answered = unsafe { libc::kill(-pgid, 0) };
+        answered == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+
+    fn fail_before_arming(case: &str, after_publication: bool) {
+        let journal_tree =
+            crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "reaper-unarmed-writes")
+                .expect("a journal tree");
+        let journal = journal_tree.path().join("late-writes");
+        let gate = journal_tree.path().join("gate");
+        let failure = format!("{case}: the cell failed before it armed its drain");
+        let mut drained = None;
+        let mut tree = None;
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reaper_container_cells(
+                &[(false, true)],
+                LATE_WRITES_STUB,
+                &[
+                    ("UPSTROKE_WITNESS_JOURNAL", journal.as_os_str()),
+                    ("UPSTROKE_WITNESS_GATE", gate.as_os_str()),
+                ],
+                |reaper| {
+                    drained = Some(reaper);
+                    if let Err(error) = std::fs::File::create(&gate) {
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "{case}: publishing the drain's gate {}: {error}",
+                            gate.display()
+                        );
+                    }
+                },
+                |cell_tree, published| {
+                    tree = Some(cell_tree.to_path_buf());
+                    let published_by = Instant::now() + Duration::from_secs(30);
+                    while after_publication && ReaperDrain::published_pid(published).is_none() {
+                        assert!(
+                            Instant::now() < published_by,
+                            "{case}: the coordinator never published its reaper's pid at {}",
+                            published.display()
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    panic!("{failure}");
+                },
+                |_, join| join(),
+            )
+        }));
+        let ended_before_the_reclaim = drained.map(group_ended);
+
+        if let Some(reaper) = drained {
+            let decided_by = Instant::now() + Duration::from_secs(30);
+            while !group_ended(reaper) {
+                assert!(
+                    Instant::now() < decided_by,
+                    "{case}: process group {reaper} still answered with a member 30 s after the \
+                     cell unwound; nothing was signalled: the test holds the group's number, not \
+                     the group"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let late: Vec<String> = match std::fs::read_to_string(&journal) {
+            Ok(text) => text.lines().map(str::to_owned).collect(),
+            Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("{case}: reading the journal {}: {error}", journal.display()),
+        };
+
+        let message = unwound.as_ref().err().map(|payload| {
+            payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&'static str>().copied())
+                .unwrap_or("a payload that is not text")
+        });
+        assert_eq!(
+            message,
+            Some(failure.as_str()),
+            "{case}: the cell left through some other panic, or through none"
+        );
+        let Some(reaper) = drained else {
+            panic!(
+                "{case}: the cell's drain never waited for a reaper's group, so the reaper its \
+                 coordinator started was left running against the cell's tree"
+            );
+        };
+        let Some(tree) = tree else {
+            panic!("{case}: the cell failed before it reached the point the test fails it at");
+        };
+        assert_eq!(
+            ended_before_the_reclaim,
+            Some(true),
+            "{case}: process group {reaper}, the cell's reaper's, still answered with a member \
+             once the cell's tree {} had been reclaimed",
+            tree.display()
+        );
+        match std::fs::symlink_metadata(&tree) {
+            Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => panic!(
+                "{case}: the cell's tree {} is still there after the unwind: its reclaim failed",
+                tree.display()
+            ),
+            Err(error) => panic!(
+                "{case}: observing the cell's tree {}: {error}",
+                tree.display()
+            ),
+        }
+        assert_eq!(
+            late,
+            ["rm 0", "ps 0"],
+            "{case}: the `rm` stub holds its write until the drain's gate exists or the cell's \
+             tree is gone, so both late writes land only when the unwinding cell waits for the \
+             reaper's group before its reclaim"
+        );
+    }
+
+    fail_before_arming("before its reaper's pid was published", false);
+    fail_before_arming("after its reaper's pid was published", true);
 }
 
 #[cfg(unix)]
