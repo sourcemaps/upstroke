@@ -409,6 +409,10 @@ An answer that lands during the wait is picked up.
 ## `mod tests` › `struct ArrivingSleeper {`
 
 Stands in for an operator running `upstroke answer` mid-wait.
+Its countdown `after` is a `Cell`: the test's stack is its one owner and `resolve` calls `sleep`
+synchronously, so no lock guards it. `sleep` publishes when the count reaches zero (zero on entry
+means it already has) and `expect`s `write_answer`'s result, so a failed publication fails the
+test as that error rather than later as an `Unanswered` answer.
 
 ## `impl ArrivingSleeper` › `fn record() -> AnswerRecord {`
 

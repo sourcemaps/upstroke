@@ -768,7 +768,7 @@ mod tests {
         let arriving = ArrivingSleeper {
             dir: dir.clone(),
             id: question().id,
-            after: Mutex::new(2),
+            after: std::cell::Cell::new(2),
         };
         let answers = EventLogAnswers::with_poll(
             dir,
@@ -804,7 +804,7 @@ mod tests {
     struct ArrivingSleeper {
         dir: std::path::PathBuf,
         id: QuestionId,
-        after: Mutex<usize>,
+        after: std::cell::Cell<usize>,
     }
 
     impl ArrivingSleeper {
@@ -817,17 +817,30 @@ mod tests {
 
     impl Sleeper for ArrivingSleeper {
         fn sleep(&self, _duration: Duration) {
-            let Ok(mut remaining) = self.after.lock() else {
-                return;
-            };
-            if *remaining == 0 {
+            let remaining = self.after.get();
+            if remaining == 0 {
                 return;
             }
-            *remaining -= 1;
-            if *remaining == 0 {
-                let _ = write_answer(&self.dir, &self.id, &Self::record());
+            self.after.set(remaining - 1);
+            if remaining == 1 {
+                write_answer(&self.dir, &self.id, &Self::record())
+                    .expect("publish the arriving answer");
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "publish the arriving answer")]
+    fn the_arriving_sleeper_fails_on_a_publication_error_rather_than_erasing_it() {
+        let tree = scratch("arriving-unpublishable");
+        let blocker = tree.path().join("not-a-directory");
+        std::fs::write(&blocker, b"").expect("the file the answer directory would sit under");
+        let arriving = ArrivingSleeper {
+            dir: blocker.join("answers"),
+            id: question().id,
+            after: std::cell::Cell::new(1),
+        };
+        arriving.sleep(Duration::from_secs(1));
     }
 
     fn assert_read_never_took(path: &Path, published: &[u8], read: &str) {
@@ -900,7 +913,7 @@ mod tests {
         let arriving = ArrivingSleeper {
             dir: dir.clone(),
             id: question().id,
-            after: Mutex::new(1),
+            after: std::cell::Cell::new(1),
         };
         let answers = EventLogAnswers::with_poll(
             dir,
