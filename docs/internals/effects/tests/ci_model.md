@@ -139,7 +139,7 @@ Measured, `MUT-TEST-WINDOWS-HOSTED-RUN-RETARGETED` and
 
 ## `pub(super) const TEST_SCRIPTS: [&str; 4] = [`
 
-Every script the hosted test job may run: the identity script, the suite
+Every script `test-linux` and `test-macos` may run: the identity script, the suite
 over the leg's selection ([`TEST_SHARD_COMMAND`]),
 [`HOST_ACCEPTANCE_CAPTURE`] and [`CAPABILITY_OBSERVATION`]. Each is one exact
 string; the list grows by one pinned script at a time, and nothing in it is a
@@ -658,8 +658,8 @@ those edits are measured on the capture of `test-linux` and `test-macos`
 
 The hosted `test-linux` and `test-macos` jobs' container capability observation (G7, root direction
 `ecf15a9c`, contract version 2 under its root audit 2), character for
-character. It runs on every leg in GitHub's default `bash -e`, the three
-macOS legs each, and must stand immediately after
+character. It runs on every leg in GitHub's default `bash -e`, the five
+macOS legs and the two Linux legs each, and must stand immediately after
 [`HOST_ACCEPTANCE_CAPTURE`]. Line by line:
 
 1. `set -eo pipefail`. Under `bash -e` a pipeline takes its status from `tee`;

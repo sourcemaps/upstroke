@@ -2993,8 +2993,8 @@ measured again since the test became these two assertions.
 The three shard tables of the CI model, `WINDOWS_SHARD_FILTERS`,
 `MACOS_SHARD_FILTERS` and `LINUX_SHARD_FILTERS`, each divide the suite:
 every test runs in exactly one shard. The test reads no workflow. It was the
-proof that came before any line of `ci.yml` was derived from a table. Both
-matrices now are: `windows_shard_matrix_complaints` in the workflow notes is
+proof that came before any line of `ci.yml` was derived from a table. All
+three matrices now are: `windows_shard_matrix_complaints` in the workflow notes is
 what holds the Windows shards' to the Windows table, and
 `test_leg_matrix_complaints` what holds `test-macos`'s five legs to the
 macOS table and `test-linux`'s two legs to the Linux table.
