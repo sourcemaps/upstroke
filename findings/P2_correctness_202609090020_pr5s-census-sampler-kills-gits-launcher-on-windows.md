@@ -99,7 +99,7 @@ same test file, below):
 - CI run 43221659775, job 131194404548, pull request #366 at `583e7e6b`: 3369 passed, 1 failed.
 - CI run 43234617706, job 131238552041, pull request #373 at `72ebee2f`: 3388 passed, 1 failed.
 - CI run 43289831147, job 131432857144, pull request #375 at `274431d0`, the run checking out
-  GitHub's merge of that head into `master`: the same panic.
+  `35d068bc`, GitHub's merge of that head into `master`: the same panic.
 
 In the first, the log's per-site summary showed:
 
@@ -119,9 +119,11 @@ hold the test (near line 13196), `sample_site` (near line 13933) and `SAMPLED_SI
 14125), are byte-identical at `583e7e6b`, `72ebee2f`, `274431d0` and `9992447b`. The file as a
 whole differs at `274431d0`, where #375 changes only comments, in another test
 (`the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does` and the constants and
-helpers above it, from near line 15199 down). The merge commit the third run checked out can no
-longer be fetched, but `master` at the time (`2b16cec2`) had not changed the file since #375's
-merge base, so the merged file was #375's own at `274431d0`. No rate is given: the number of guest jobs that ran this test that day
+helpers above it, from near line 15199 down). The third run checked out
+`35d068bc086afc6fd93de07b441991f4e4c845c0`, GitHub's merge of `274431d0` into `master` at
+`2b16cec2` (its two parents); in that merge `src/workspace_manager/tests.rs` is blob `7a732f18`,
+the same blob as at `274431d0`, so the sampler's lines 13100-14200 are byte-identical in the tree
+the run tested too. No rate is given: the number of guest jobs that ran this test that day
 was not counted for this record.
 
 This is a third fingerprint of this row, not a new row: a recovery that fails is consistent with
