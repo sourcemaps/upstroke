@@ -5251,6 +5251,79 @@ The refusal check the absent-alternative tests lean on does not certify a privat
 list: here a file stands where the directory would, so listing it fails with an error other than
 its absence, and the check fails rather than reading it as holding no commit record.
 
+## `fn profiled_pool_file(tree: &ScratchTree, profile: &Path) -> PathBuf {`
+
+[`stub_pool_file`]'s pool, `claude-max` for the topology stub's agent (`claude-code`), naming
+`profile` as its credential profile. The file sits in the scratch tree, outside the checkout, under
+a name of its own, so the run's tree stays clean and a test can switch between this file and
+[`stub_pool_file`]'s. The path is written as a TOML literal string, so a Windows path's
+backslashes are taken as written.
+
+## `const FIXTURE_OAUTH_TOKEN: &str = "sk-ant-oat01-engine-fixture-token-value";`
+
+A recognisable token value, so a refusal can be asserted not to carry it.
+
+## `fn an_oauth_token_is_set(key: &str) -> Option<std::ffi::OsString> {`
+
+The coordinator environments a fresh run's profile check reads, through `RunOptions`'s
+test-only `coordinator_environment`, in place of the process environment, which every test in this
+binary shares. This one has `CLAUDE_CODE_OAUTH_TOKEN` and nothing else. `no_oauth_token` below has
+nothing at all.
+
+## `struct CountedStub {`
+
+The topology stub, counting the probes and builds a run asks of it. It is its own adapter source,
+which cannot be shared, so the run steps at width 1. A probe is the first process a fresh run spawns
+for an agent (P4), so `(0, 0)` means the run spawned nothing for its agents and built no worker or
+reviewer.
+
+## `fn assert_a_profile_refusal_created_nothing(`
+
+What every fresh-run profile refusal shares, asserted once:
+- it is a `Refused` in the pre-flight's own shape (`pre-flight: `);
+- it is not a creation's refusal (`stopped at`), so `create_run` never began;
+- the stub was neither probed nor built;
+- [`assert_a_refused_creation_left_nothing`] holds;
+- the private `runs` directory holds no entry at all, so there is no private half, committed or not.
+
+Returns the message for the test's own pins.
+
+## `fn host_policy() -> crate::topology::events::RunnerPolicy {`
+
+The host runner's policy, which is the one a fresh run with no `[runner]` section records. The
+pre-flight's refusal names only its boundary (`this host`), so it stands in for the policy a
+resume's pre-flight would be handed for such a run.
+
+## `fn a_fresh_schema_4_run_whose_pool_names_a_missing_profile_is_refused_before_anything_is_created() {`
+
+A fresh schema-4 run whose one pool names a profile directory that does not exist is refused
+through `run_with` before anything of the run is created
+([`assert_a_profile_refusal_created_nothing`]). The refusal names the pool and the path. The run's
+environment has no token, so the directory is the only thing wrong. Then a resume's pre-flight, a
+`RunPreflight` over the same pool certifying the host policy, refuses the same profile, and the two
+messages are equal: one refusal, worded once, on both paths. The resume's refusal comes before its
+token check, so the process environment it reads by default is never consulted.
+
+Measured before the repair, on the source with only this test, its partner and their test-only
+`coordinator_environment` field added: the `expect_err` panicked. The run had been created and had
+completed, `t1` and `t2` committed with four attempts on `claude-max`, all under a profile directory
+that did not exist.
+
+## `fn a_fresh_schema_4_run_whose_profile_an_oauth_token_would_override_is_refused_before_anything_is_created()`
+
+A fresh schema-4 run whose pool names an existing profile directory, with
+`CLAUDE_CODE_OAUTH_TOKEN` set in the environment the check reads ([`an_oauth_token_is_set`]), is
+refused before anything of the run is created. The refusal names the variable, the pool and the
+profile, and never the token's value. Two controls follow in the same checkout:
+- the same configuration with no token creates the run and completes it, so the token was the only
+  thing wrong;
+- a pool that names no profile ([`stub_pool_file`]), with the token set again, is never checked,
+  and that run completes too. This is an unprofiled fresh run's behaviour, unchanged.
+
+Measured before the repair, as its partner was: the `expect_err` panicked. The run had been created
+and had completed although the environment it was given held the token: the fresh path read no
+environment and made none of the profile checks.
+
 ## `const ABSENT_ALTERNATIVE_CLI: &str = "upstroke-absent-codex-alternative-cli";`
 
 The program the alternative reviewer's adapter, `codex`, asks the runner for. Nothing installs it.

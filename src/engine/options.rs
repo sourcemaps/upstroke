@@ -44,6 +44,8 @@ pub struct RunOptions {
     pub(super) log_hooks: Option<fn() -> Box<dyn crate::events::log::EventHooks>>,
     #[cfg(test)]
     pub(crate) legacy_writer: bool,
+    #[cfg(test)]
+    pub(super) coordinator_environment: Option<fn(&str) -> Option<std::ffi::OsString>>,
 }
 
 impl RunOptions {
@@ -66,6 +68,8 @@ impl RunOptions {
             log_hooks: None,
             #[cfg(test)]
             legacy_writer: false,
+            #[cfg(test)]
+            coordinator_environment: None,
         }
     }
 
@@ -77,6 +81,14 @@ impl RunOptions {
         crate::topology::schema::fresh_writer_schema(
             crate::topology::schema::WriterSelector::Production,
         ) == crate::topology::schema::TOPOLOGY_SCHEMA
+    }
+
+    pub(super) fn profile_environment(&self) -> fn(&str) -> Option<std::ffi::OsString> {
+        #[cfg(test)]
+        if let Some(environment) = self.coordinator_environment {
+            return environment;
+        }
+        super::topology::preflight::coordinator_environment
     }
 
     pub(super) fn paths(&self, run_id: &str) -> RunPaths {

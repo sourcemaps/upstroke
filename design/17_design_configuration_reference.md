@@ -57,14 +57,13 @@ in there, and the engine handles no token. The host runner sets it from the pool
 is bound to, which is the first pool in the file naming the attempt's agent. It applies to that
 agent's work, review and probe processes, and a gate gets no credential location. The value is
 used as written, with no `~` expansion. Pre-flight probes the agent's CLI under the profile. A
-profile is supported for Claude Code on the host runner only. A resume's pre-flight refuses,
-before anything runs, a profile on the container runner, a profile for another agent, or one
-whose directory is missing or not a directory, checking every pool that names one. It also
-refuses any profile while `CLAUDE_CODE_OAUTH_TOKEN` is set, because that token overrides a
-profile's credentials. A fresh run's pre-flight (P4) does not yet make those checks. The
-container runner refuses a profiled probe, so a profile there still stops the run's creation,
-but the other three cases are not caught. The legacy (schema 1–3) coordinator refuses any pool
-that names a profile.
+profile is supported for Claude Code on the host runner only. Before anything runs, the engine
+refuses a profile on the container runner, a profile for another agent, or one whose directory is
+missing or not a directory, checking every pool that names one. It also refuses any profile while
+`CLAUDE_CODE_OAUTH_TOKEN` is set, because that token overrides a profile's credentials. A fresh
+run makes these checks before its creation begins, so a refused run leaves no run directory and
+no private half. A resume makes them first in its pre-flight. The refusals are the same, word for
+word, on both. The legacy (schema 1–3) coordinator refuses any pool that names a profile.
 
 **When it is rewritten.** Two comparisons against the file already there, because two questions
 are asked. *May* it be replaced: only if both complete TOML documents parse to equal tables, or

@@ -105,14 +105,19 @@ pools file that this run could not honour is refused wherever it is
 written, rather than passed over because a pool earlier in the file binds
 the agent.
 
-## `fn coordinator_environment(key: &str) -> Option<OsString> {`
+## `pub(in crate::engine) fn coordinator_environment(key: &str) -> Option<OsString> {`
 
-The coordinator's own environment, read when `certify` runs: the one the
-host runner composes each child's environment from
+The coordinator's own environment, read when the profile checks run: the one
+the host runner composes each child's environment from
 (`HostEnvironment::from_process`). A function rather than a snapshot so that
-a pre-flight with no profiled pool reads nothing, and so that tests can stand
-in for it without changing the process environment, which every test in the
-binary shares.
+a run with no profiled pool reads nothing, and so that tests can stand in for
+it without changing the process environment, which every test in the binary
+shares.
+
+Two readers hand it to [`refuse_unusable_profiles`]: a `RunPreflight`, as its
+default `environment`, on a resume; and `RunOptions::profile_environment` on a
+fresh run. That is why it is visible to `engine` and not only here: the fresh
+path's reader is `RunOptions`', in `engine::options`.
 
 ## `pub struct RunPreflight<'a> {`
 
@@ -122,11 +127,11 @@ Holds no `&mut` anything: the [`RunnerPreflight`] trait's `certify` takes
 `&self` because `rebuild_from_record` holds the runner and the record while
 it calls it.
 
-## `pub struct RunPreflight<'a>` › `profiled: Vec<ProfiledPool>,`
+## `pub struct RunPreflight<'a>` › `pools: Vec<Pool>,`
 
-The run's pools that name a profile, in file order. Empty unless the caller
-supplied pools with [`RunPreflight::with_pools`], and empty when none of
-them names a profile. In both cases every profile check is skipped.
+The run's pools, in file order. Empty unless the caller supplied pools with
+[`RunPreflight::with_pools`]. [`refuse_unusable_profiles`] picks out the ones
+that name a profile, and when there are none, every profile check is skipped.
 
 ## `pub struct RunPreflight<'a>` › `environment: fn(&str) -> Option<OsString>,`
 
@@ -167,7 +172,9 @@ profile check and is the pre-flight it was before profiles existed.
 The run's pools, so `certify` can refuse a profile the run cannot honour.
 `entry` passes today's configured pools on the resume path, the same slice
 it hands `profiled`, so the pools the probes are stamped from are the pools
-checked here. A builder rather than a fifth argument to `new`: a caller with
+checked here. A fresh run builds no `RunPreflight`. Its `FreshLeased::run`
+calls [`refuse_unusable_profiles`] itself, over the same slice it hands
+`profiled`. A builder rather than a fifth argument to `new`: a caller with
 no pools, which includes every test fixture that predates profiles, keeps
 the unprofiled pre-flight without having to say so.
 
@@ -180,35 +187,6 @@ it. It is not `#[cfg(test)]`, because a `#[cfg(test)]` item inside the impl
 would end the file's production region there
 (`effects::tests::every_production_region_that_stops_early_stops_at_a_module`)
 and hide the rest of the file from every census that reads that region.
-
-## `impl<'a> RunPreflight<'a>` › `fn refuse_unusable_profiles(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {`
-
-What a profiled run must hold before anything is spawned for it. Each check
-refuses in `refused`'s shape, naming the pool:
-
-1. **The host runner.** A profile is a host directory handed to the child as
-   `CLAUDE_CONFIG_DIR`. The container runner has no way to supply one: it
-   refuses a request carrying a profile before starting it (`runner/
-   container/exec.md`). Refusing here, from the policy's `kind`, keeps that
-   from surfacing as a failed agent probe.
-2. **Claude Code.** This stage supports Claude Code's profile only
-   (`crate::agent::claude::ADAPTER_ID`). The host runner would place a
-   profile under any agent's credential-location key (`CODEX_HOME`,
-   `COPILOT_HOME`), so the limit is held here rather than by the runner.
-   For any other agent the refusal names the pool and that agent.
-3. **An existing directory.** `fs::metadata` follows a symlink, so a link
-   to a directory passes. A missing path, or a dangling link, is refused as
-   not existing. A path that exists and is not a directory is refused as
-   such. Any other error, permission denied included, is refused with the
-   error. A relative profile is resolved against the coordinator's working
-   directory.
-4. **No `CLAUDE_CODE_OAUTH_TOKEN`.** A token overrides the profile's
-   credentials, so the run would not use the profile it names. A variable
-   that is present counts as set, even with an empty value, and the refusal
-   names the variable, never its value.
-
-The checks are made in that order. The run-wide ones (1 and 4) name the
-first profiled pool. 2 and 3 are made pool by pool, in file order.
 
 ## `impl<'a> RunPreflight<'a>` › `pub fn probed(&self) -> Option<Probed> {`
 
@@ -260,10 +238,12 @@ and the one that explains every agent failure that would follow it, so
 it goes first and the agent probes are never reached when it fails.
 
 Before either probe come the profile checks
-(`refuse_unusable_profiles`), which spawn nothing. A profile the run cannot
-honour is refused before the shell probe registers or runs anything, so that
-refusal leaves an empty ledger behind it. With no profiled pool they are
-skipped.
+([`refuse_unusable_profiles`], over the pools `with_pools` gave it and its
+`environment`), which spawn nothing. A profile the run cannot honour is
+refused before the shell probe registers or runs anything, so that refusal
+leaves an empty ledger behind it. With no profiled pool they are skipped. A
+fresh run makes the same call before its creation begins, so a profile is
+refused in the same words on both paths.
 
 `policy` decides one thing here: whether a profiled pool can run at all,
 which turns on its `kind`. Nothing else in it is consulted, and that is
@@ -299,6 +279,65 @@ rather than an argument here.
 ## `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `let mut caps = Vec::with_capacity(self.agents.len());`
 
 (2) One probe per recorded agent, sequentially, in recorded order.
+
+## `pub(super) fn refuse_unusable_profiles(`
+
+What a profiled run must hold before anything is spawned for it. This is the
+one place the profile refusals are made, and both paths call it:
+
+- **A resume:** `RunPreflight::certify`, first, at recovery step (c). It
+  passes the pools `with_pools` gave it and its `environment`.
+- **A fresh run:** `entry`'s `FreshLeased::run`, right after the runner is
+  profiled and before the startup census, `create_run` or anything else the
+  run creates. It passes today's configured pools, the policy the run was
+  authorized under, and `RunOptions::profile_environment`, which is
+  [`coordinator_environment`] in production.
+
+So both paths refuse the same profiles in the same words. Only the pools that
+name a profile count (`ProfiledPool::of`). With none, it returns at once,
+reads no environment and leaves the run as it was before profiles existed.
+
+Each check refuses in `refused`'s shape, naming the pool:
+
+1. **The host runner.** A profile is a host directory handed to the child as
+   `CLAUDE_CONFIG_DIR`. The container runner has no way to supply one: it
+   refuses a request carrying a profile before starting it (`runner/
+   container/exec.md`). Refusing here, from the policy's `kind`, keeps that
+   from surfacing as a failed agent probe.
+2. **Claude Code.** This stage supports Claude Code's profile only
+   (`crate::agent::claude::ADAPTER_ID`). The host runner would place a
+   profile under any agent's credential-location key (`CODEX_HOME`,
+   `COPILOT_HOME`), so the limit is held here rather than by the runner.
+   For any other agent the refusal names the pool and that agent.
+3. **An existing directory.** `fs::metadata` follows a symlink, so a link
+   to a directory passes. A missing path, or a dangling link, is refused as
+   not existing. A path that exists and is not a directory is refused as
+   such. Any other error, permission denied included, is refused with the
+   error. A relative profile is resolved against the coordinator's working
+   directory.
+4. **No `CLAUDE_CODE_OAUTH_TOKEN`.** A token overrides the profile's
+   credentials, so the run would not use the profile it names. A variable
+   that is present counts as set, even with an empty value, and the refusal
+   names the variable, never its value.
+
+The checks are made in that order. The run-wide ones (1 and 4) name the
+first profiled pool. 2 and 3 are made pool by pool, in file order.
+
+The refusal's closing sentence, that nothing was spawned, no recovery event
+was appended and the run is resumable, is the same on a fresh run. There it
+holds trivially: the refusal comes before the run's creation begins, so no
+run directory or private half exists to resume, and the same command can be
+run again once the profile is fixed
+(`engine::tests::a_fresh_schema_4_run_whose_pool_names_a_missing_profile_is_refused_before_anything_is_created`
+holds the two paths' texts equal).
+
+Until this function was shared, these were a method of `RunPreflight` and only
+a resume made them. A fresh run whose pool named a missing directory, or whose
+coordinator had `CLAUDE_CODE_OAUTH_TOKEN` set, was created and ran its
+attempts to completion. Its Claude Code processes were handed a profile
+directory that did not exist, or ran while the token overrode the profile's
+credentials. `engine::tests`' two fresh-run profile tests measured exactly
+that before the repair: each run completed.
 
 ## `fn refused(policy: &RunnerPolicy, what: &str) -> UpstrokeError {`
 

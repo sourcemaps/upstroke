@@ -112,6 +112,25 @@ this (`engine::tests::options`, and the legacy cell of
 `#[cfg(test)]`, like the two hooks above it: no production caller can name it,
 so a released binary has exactly one fresh writer.
 
+## `pub struct RunOptions` › `pub(super) coordinator_environment: Option<fn(&str) -> Option<std::ffi::OsString>>,`
+
+The test configuration's stand-in for the coordinator's environment, as the
+fresh run's profile check reads it ([`RunOptions::profile_environment`]).
+`None` is production's reader. A fixture sets a function, as `RunPreflight`'s
+own tests do with `reading_environment`, so an end-to-end run can find
+`CLAUDE_CODE_OAUTH_TOKEN` set, or unset, without anyone changing the process
+environment, which every test in the binary shares. `#[cfg(test)]`, like the
+hooks above it: no production caller can name it.
+
+## `impl RunOptions` › `pub(super) fn profile_environment(&self) -> fn(&str) -> Option<std::ffi::OsString> {`
+
+Where `entry`'s `FreshLeased::run` reads the coordinator's environment for
+`preflight::refuse_unusable_profiles`: `preflight::coordinator_environment`,
+which is what a resume's `RunPreflight` reads by default, unless the test
+configuration set [`RunOptions`]'s `coordinator_environment`. The test half is
+a `#[cfg(test)]` statement in the body, as in [`RunOptions::writes_topology`],
+so the topology module that calls it carries no `#[cfg(test)]` of its own.
+
 ## `impl RunOptions` › `pub(super) fn writes_topology(&self) -> bool {`
 
 Whether `run_harness` creates this run with the schema-4 topology. True

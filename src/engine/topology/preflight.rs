@@ -53,7 +53,7 @@ impl ProfiledPool {
     }
 }
 
-fn coordinator_environment(key: &str) -> Option<OsString> {
+pub(in crate::engine) fn coordinator_environment(key: &str) -> Option<OsString> {
     std::env::var_os(key)
 }
 
@@ -63,7 +63,7 @@ pub struct RunPreflight<'a> {
     shell: ShellKind,
     workspace: PathBuf,
     agents: Vec<String>,
-    profiled: Vec<ProfiledPool>,
+    pools: Vec<Pool>,
     environment: fn(&str) -> Option<OsString>,
     ledger: Mutex<InvocationLedger>,
     probed: Mutex<Option<Probed>>,
@@ -95,7 +95,7 @@ impl<'a> RunPreflight<'a> {
             shell,
             workspace: workspace.to_path_buf(),
             agents,
-            profiled: Vec::new(),
+            pools: Vec::new(),
             environment: coordinator_environment,
             ledger: Mutex::new(InvocationLedger::new()),
             probed: Mutex::new(None),
@@ -104,7 +104,7 @@ impl<'a> RunPreflight<'a> {
 
     #[must_use]
     pub fn with_pools(mut self, pools: &[Pool]) -> Self {
-        self.profiled = pools.iter().filter_map(ProfiledPool::of).collect();
+        self.pools = pools.to_vec();
         self
     }
 
@@ -112,67 +112,6 @@ impl<'a> RunPreflight<'a> {
     fn reading_environment(mut self, environment: fn(&str) -> Option<OsString>) -> Self {
         self.environment = environment;
         self
-    }
-
-    fn refuse_unusable_profiles(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {
-        let Some(first) = self.profiled.first() else {
-            return Ok(());
-        };
-        if policy.kind == RunnerKind::Container {
-            return Err(refused(
-                policy,
-                &format!(
-                    "pool `{}` names the credential profile `{}`, and a profile is supported on \
-                     the host runner only; this run's runner is the container runner",
-                    first.pool,
-                    first.profile.display()
-                ),
-            ));
-        }
-        for profiled in &self.profiled {
-            if profiled.agent != crate::agent::claude::ADAPTER_ID {
-                return Err(refused(
-                    policy,
-                    &format!(
-                        "pool `{}` names the credential profile `{}` for agent `{}`, and this \
-                         stage supports Claude Code's profile only (agent `{}`)",
-                        profiled.pool,
-                        profiled.profile.display(),
-                        profiled.agent,
-                        crate::agent::claude::ADAPTER_ID
-                    ),
-                ));
-            }
-            let problem = match std::fs::metadata(&profiled.profile) {
-                Ok(metadata) if metadata.is_dir() => continue,
-                Ok(_) => "which is not a directory".to_owned(),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    "which does not exist".to_owned()
-                }
-                Err(error) => format!("which cannot be inspected: {error}"),
-            };
-            return Err(refused(
-                policy,
-                &format!(
-                    "pool `{}` names the credential profile directory `{}`, {problem}",
-                    profiled.pool,
-                    profiled.profile.display()
-                ),
-            ));
-        }
-        if (self.environment)(CLAUDE_CODE_OAUTH_TOKEN).is_some() {
-            return Err(refused(
-                policy,
-                &format!(
-                    "`{CLAUDE_CODE_OAUTH_TOKEN}` is set in this coordinator's environment, and a \
-                     token overrides a profile's credentials, so the run would not use the \
-                     profile pool `{}` names (`{}`); unset it to run under the profile",
-                    first.pool,
-                    first.profile.display()
-                ),
-            ));
-        }
-        Ok(())
     }
 
     #[must_use]
@@ -215,7 +154,7 @@ impl<'a> RunPreflight<'a> {
 
 impl RunnerPreflight for RunPreflight<'_> {
     fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {
-        self.refuse_unusable_profiles(policy)?;
+        refuse_unusable_profiles(&self.pools, policy, self.environment)?;
         let registering = self.registering();
         let shell_id = PreflightIdentities::shell(0)?;
         crate::runner::host::run_shell_probe(
@@ -244,6 +183,72 @@ impl RunnerPreflight for RunPreflight<'_> {
         *self.probed.lock().unwrap_or_else(PoisonError::into_inner) = Some(probed);
         Ok(())
     }
+}
+
+pub(super) fn refuse_unusable_profiles(
+    pools: &[Pool],
+    policy: &RunnerPolicy,
+    environment: fn(&str) -> Option<OsString>,
+) -> Result<(), UpstrokeError> {
+    let profiled: Vec<ProfiledPool> = pools.iter().filter_map(ProfiledPool::of).collect();
+    let Some(first) = profiled.first() else {
+        return Ok(());
+    };
+    if policy.kind == RunnerKind::Container {
+        return Err(refused(
+            policy,
+            &format!(
+                "pool `{}` names the credential profile `{}`, and a profile is supported on \
+                 the host runner only; this run's runner is the container runner",
+                first.pool,
+                first.profile.display()
+            ),
+        ));
+    }
+    for pool in &profiled {
+        if pool.agent != crate::agent::claude::ADAPTER_ID {
+            return Err(refused(
+                policy,
+                &format!(
+                    "pool `{}` names the credential profile `{}` for agent `{}`, and this \
+                     stage supports Claude Code's profile only (agent `{}`)",
+                    pool.pool,
+                    pool.profile.display(),
+                    pool.agent,
+                    crate::agent::claude::ADAPTER_ID
+                ),
+            ));
+        }
+        let problem = match std::fs::metadata(&pool.profile) {
+            Ok(metadata) if metadata.is_dir() => continue,
+            Ok(_) => "which is not a directory".to_owned(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                "which does not exist".to_owned()
+            }
+            Err(error) => format!("which cannot be inspected: {error}"),
+        };
+        return Err(refused(
+            policy,
+            &format!(
+                "pool `{}` names the credential profile directory `{}`, {problem}",
+                pool.pool,
+                pool.profile.display()
+            ),
+        ));
+    }
+    if environment(CLAUDE_CODE_OAUTH_TOKEN).is_some() {
+        return Err(refused(
+            policy,
+            &format!(
+                "`{CLAUDE_CODE_OAUTH_TOKEN}` is set in this coordinator's environment, and a \
+                 token overrides a profile's credentials, so the run would not use the \
+                 profile pool `{}` names (`{}`); unset it to run under the profile",
+                first.pool,
+                first.profile.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn refused(policy: &RunnerPolicy, what: &str) -> UpstrokeError {

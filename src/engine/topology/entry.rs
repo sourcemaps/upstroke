@@ -49,7 +49,7 @@ use crate::workspace_manager::{EffectHooks, WorkspaceManager};
 use super::coordinator::PipelineSeams;
 use super::create::{ProbePair, Request, RunnerProbes, create_run};
 use super::identity::{InvocationLedger, SlotLimits};
-use super::preflight::RunPreflight;
+use super::preflight::{RunPreflight, refuse_unusable_profiles};
 use super::prelock::{self, PreLock, PreLockChecked, RunnerResolved};
 use super::profiled::profiled;
 use super::recover::{
@@ -334,6 +334,11 @@ impl FreshLeased {
             )?),
         };
         let runner = profiled(runner, &analysis.config.pools);
+        refuse_unusable_profiles(
+            &analysis.config.pools,
+            checked.runner_policy(),
+            opts.profile_environment(),
+        )?;
         let census = startup_census(
             WorktreeLocked::from(worktree),
             &mut hooks,

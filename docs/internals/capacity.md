@@ -61,10 +61,11 @@ host runner (§17). On a schema-4 run, each agent's bound pool, which
 `profile`. The host runner then sets it as `CLAUDE_CONFIG_DIR` on that agent's
 work, review and probe processes (`src/engine/topology/profiled.rs` stamps the
 request, and `src/runner/host/environment.rs` composes it). The value is the
-configured string used as a path, with no `~/` expansion. A resume's
-pre-flight refuses a profile the run cannot honour
-(`src/engine/topology/preflight.rs`). A fresh run's pre-flight does not yet
-make those checks, and the legacy coordinator refuses any profiled pool.
+configured string used as a path, with no `~/` expansion. A profile the run
+cannot honour is refused before anything runs for it, by one function
+(`src/engine/topology/preflight.rs`) that both paths call: a fresh run before
+its creation begins, so nothing of the run exists, and a resume at its
+pre-flight. The legacy coordinator refuses any profiled pool.
 Nothing routes on a profile: the binder still binds each agent to one pool,
 because everything multi-profile actually buys (per-profile attribution,
 asymmetric reserve, rebind-instead-of-wait) is capacity-*driven* behaviour,

@@ -94,8 +94,10 @@ activation base's, older than all three, and unchanged here.
 6. [`FreshLeased::run`]: the default root is authorized — canonicalized now
    that it exists, and refused unless it is a real directory, with the ids
    drawn in step 2; the inputs re-captured and compared with the checked
-   capture (a difference refuses); the startup census, under the lease step 3
-   took; the workspace manager; the execution root
+   capture (a difference refuses); the run's runner, built and profiled; the
+   profile refusals (`preflight::refuse_unusable_profiles`, the ones a
+   resume's pre-flight makes), under the policy just authorized; the startup
+   census, under the lease step 3 took; the workspace manager; the execution root
    (`Worktree.CreateExecutionRoot`, which the inventory places before
    `run_started`, and removed again when creation ends with nothing retained);
    the case observation; `run_started(4)`; P0–P8; the handover to the loop;
@@ -337,6 +339,25 @@ so the creation-time probes, the workers and the reviewers each carry their
 agent's bound credential profile. With no profiled pool that returns the
 runner unchanged (see `engine::topology::profiled`'s notes).
 
+**A profile the run cannot honour is refused next, before anything of the
+run exists.** The statement after the profiling is
+`preflight::refuse_unusable_profiles`, over the same pools, the policy
+`checked` authorized and `RunOptions::profile_environment` (the coordinator's
+environment in production). It is the function a resume's
+`RunPreflight::certify` calls first, so a fresh run refuses the same cases
+in the same words: a profile on the container runner, a profile for an agent
+other than Claude Code, a profile directory that is missing or not a
+directory, and any profile while `CLAUDE_CODE_OAUTH_TOKEN` is set. It comes
+before the startup census and before `create_run`, so a refused run has
+spawned nothing and created no run directory, no private half, no execution
+root and no integration ref. The include `run_harness` published before this
+body, and the default root that publication made, stay, as they do for any
+refusal here. With no profiled pool it returns at once and reads nothing.
+`engine::tests`' two
+`a_fresh_schema_4_run_whose_…_is_refused_before_anything_is_created` tests
+hold both halves end to end. Before this call existed, both of those runs were
+created and completed.
+
 ## `pub fn route_resume(opts: &ResumeOptions) -> Result<Option<RootDerived>, UpstrokeError> {`
 
 Which engine resumes this run: `None` for a legacy log (or one whose header
@@ -507,7 +528,9 @@ go to the pre-flight (`RunPreflight::with_pools`), whose `certify` refuses a
 profile the run cannot honour before anything is spawned for it: one on the
 container runner, one for an agent other than Claude Code, one whose
 directory is missing, or any profile while `CLAUDE_CODE_OAUTH_TOKEN` is set
-(`engine::topology::preflight`'s notes).
+(`engine::topology::preflight`'s notes). Its refusals are
+`preflight::refuse_unusable_profiles`, the function [`FreshLeased::run`]
+calls before a fresh run's creation, so the two paths refuse alike.
 
 ## `fn fresh_record(fresh: &FreshRecord<'_>) -> Result<RunStarted4, UpstrokeError> {`
 

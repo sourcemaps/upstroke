@@ -26407,6 +26407,227 @@ fn an_absent_alternative_reviewer_cli_refusal_check_fails_on_a_runs_it_cannot_li
     assert_a_refused_creation_left_nothing(&repo, "a fixture, not a refusal");
 }
 
+fn profiled_pool_file(tree: &ScratchTree, profile: &Path) -> PathBuf {
+    let path = tree.path().join("profiled-pools.toml");
+    fs::write(
+        &path,
+        format!(
+            "[pools.claude-max]\nkind = \"subscription-window\"\nagent = \"claude-code\"\n\
+             profile = '{}'\n",
+            profile.display()
+        ),
+    )
+    .expect("the profiled pools file");
+    path
+}
+
+const FIXTURE_OAUTH_TOKEN: &str = "sk-ant-oat01-engine-fixture-token-value";
+
+fn an_oauth_token_is_set(key: &str) -> Option<std::ffi::OsString> {
+    (key == "CLAUDE_CODE_OAUTH_TOKEN").then(|| std::ffi::OsString::from(FIXTURE_OAUTH_TOKEN))
+}
+
+fn no_oauth_token(_key: &str) -> Option<std::ffi::OsString> {
+    None
+}
+
+struct CountedStub {
+    stub: TopologyStub,
+    probes: std::sync::atomic::AtomicUsize,
+    builds: std::sync::atomic::AtomicUsize,
+}
+
+impl CountedStub {
+    fn new() -> Self {
+        Self {
+            stub: TopologyStub::new(TOPOLOGY_STUB_EDIT, 0),
+            probes: std::sync::atomic::AtomicUsize::new(0),
+            builds: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn asked(&self) -> (usize, usize) {
+        (
+            self.probes.load(std::sync::atomic::Ordering::SeqCst),
+            self.builds.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+}
+
+impl AgentAdapter for CountedStub {
+    fn id(&self) -> &'static str {
+        self.stub.id()
+    }
+
+    fn probe(&self, runner: &dyn crate::runner::Runner) -> Result<Caps, UpstrokeError> {
+        self.probes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.stub.probe(runner)
+    }
+
+    fn build(&self, run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        self.builds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.stub.build(run)
+    }
+
+    fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        self.stub.parse(out)
+    }
+}
+
+impl AdapterSource for CountedStub {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        (id == TOPOLOGY_STUB).then_some(self as &dyn AgentAdapter)
+    }
+}
+
+fn assert_a_profile_refusal_created_nothing(
+    refused: &UpstrokeError,
+    repo: &Path,
+    stub: &CountedStub,
+) -> String {
+    let said = refused.to_string();
+    assert!(
+        matches!(refused, UpstrokeError::Refused { .. }),
+        "a refusal, not some other failure: {said}"
+    );
+    assert!(
+        said.starts_with("pre-flight: "),
+        "the pre-flight's refusal, in the shape a resume's takes: {said}"
+    );
+    assert!(
+        !said.contains("stopped at"),
+        "refused before the run's creation began, not by a creation that then reclaimed what \
+         it made: {said}"
+    );
+    assert_eq!(
+        stub.asked(),
+        (0, 0),
+        "nothing was probed or built for the run: {said}"
+    );
+    assert_a_refused_creation_left_nothing(repo, &said);
+    let private_runs = private_root_for(repo).join("runs");
+    let private_halves: Vec<PathBuf> = match fs::read_dir(&private_runs) {
+        Ok(entries) => entries
+            .map(|entry| {
+                entry
+                    .unwrap_or_else(|error| {
+                        panic!("read an entry of {}: {error}", private_runs.display())
+                    })
+                    .path()
+            })
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("list {}: {error}", private_runs.display()),
+    };
+    assert_eq!(
+        private_halves,
+        Vec::<PathBuf>::new(),
+        "no private half, committed or not: {said}"
+    );
+    said
+}
+
+fn host_policy() -> crate::topology::events::RunnerPolicy {
+    crate::topology::events::RunnerPolicy {
+        kind: crate::topology::events::RunnerKind::Host,
+        policy: crate::topology::events::RunnerContract::HostV1,
+        image: None,
+        credential_volumes: None,
+        mounts: Vec::new(),
+    }
+}
+
+#[test]
+fn a_fresh_schema_4_run_whose_pool_names_a_missing_profile_is_refused_before_anything_is_created() {
+    let (tree, repo) = temp_engine_repo("topology-profile-missing");
+    let missing = tree.path().join("no-such-profile");
+    let mut opts = topology_options(&repo);
+    opts.pools_path = Some(profiled_pool_file(&tree, &missing));
+    opts.coordinator_environment = Some(no_oauth_token);
+    let stub = CountedStub::new();
+
+    let refused = run_with(&opts, &stub)
+        .expect_err("a profile whose directory does not exist refuses the fresh run");
+    let said = assert_a_profile_refusal_created_nothing(&refused, &repo, &stub);
+    assert!(
+        said.contains(&format!(
+            "pool `claude-max` names the credential profile directory `{}`, which does not exist",
+            missing.display()
+        )),
+        "the refusal names the pool and the path: {said}"
+    );
+
+    let mut pool = capacity::Pool::discovered(
+        "claude-max",
+        capacity::PoolKind::SubscriptionWindow,
+        TOPOLOGY_STUB,
+        Vec::new(),
+    );
+    pool.profile = Some(missing.display().to_string());
+    let runner = crate::runner::host::HostRunner::new();
+    let resumed = super::topology::preflight::RunPreflight::new(
+        &runner,
+        &stub,
+        crate::gates::ShellKind::native(),
+        &repo,
+        vec![TOPOLOGY_STUB.to_owned()],
+    )
+    .with_pools(&[pool]);
+    let on_resume =
+        crate::runner::container::resolve::RunnerPreflight::certify(&resumed, &host_policy())
+            .expect_err("a resume's pre-flight refuses the same profile");
+    assert_eq!(
+        said,
+        on_resume.to_string(),
+        "one refusal, worded once, on both paths"
+    );
+}
+
+#[test]
+fn a_fresh_schema_4_run_whose_profile_an_oauth_token_would_override_is_refused_before_anything_is_created()
+ {
+    let (tree, repo) = temp_engine_repo("topology-profile-token");
+    let profile = tree.path().join("profile");
+    fs::create_dir(&profile).expect("the profile directory, outside the checkout");
+    let mut opts = topology_options(&repo);
+    opts.pools_path = Some(profiled_pool_file(&tree, &profile));
+    opts.coordinator_environment = Some(an_oauth_token_is_set);
+    let stub = CountedStub::new();
+
+    let refused = run_with(&opts, &stub)
+        .expect_err("a token that would override the profile refuses the fresh run");
+    let said = assert_a_profile_refusal_created_nothing(&refused, &repo, &stub);
+    assert!(
+        said.starts_with(
+            "pre-flight: `CLAUDE_CODE_OAUTH_TOKEN` is set in this coordinator's environment"
+        ),
+        "the refusal names the variable: {said}"
+    );
+    assert!(
+        said.contains("`claude-max`") && said.contains(&profile.display().to_string()),
+        "and the pool and profile the run would not use: {said}"
+    );
+    assert!(
+        !said.contains(FIXTURE_OAUTH_TOKEN),
+        "a refusal never carries the credential itself: {said}"
+    );
+
+    opts.coordinator_environment = Some(no_oauth_token);
+    let report = run_with(&opts, &stub)
+        .expect("with no token set, the same profiled configuration creates the run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    until_released(&repo, &report.run_id);
+
+    opts.pools_path = Some(stub_pool_file(&tree));
+    opts.coordinator_environment = Some(an_oauth_token_is_set);
+    let report = run_with(&opts, &stub)
+        .expect("a pool that names no profile is not checked, so the token refuses nothing");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    until_released(&repo, &report.run_id);
+}
+
 const ABSENT_ALTERNATIVE_CLI: &str = "upstroke-absent-codex-alternative-cli";
 
 #[derive(Default)]
