@@ -412,7 +412,7 @@ status 2 is `SRUN`. On that same job
 `a_reaped_childs_pid_never_answers_for_its_own_group` passed.
 `test (ubuntu-latest)` compiles and ran that control, which is
 `#[cfg(unix)]`, and passed; this test is `#[cfg(target_os = "macos")]`
-and no leg but macOS compiles it. `test (winguest)` compiles neither.
+and no leg but macOS compiles it. `test (winguest)` compiled neither.
 
 The seven rejected records exercise each condition on its own. Six fail
 on `exited_before`, on having no record to read, or on the group the
