@@ -6343,7 +6343,7 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
         (
             "engine::topology::attempt::tests::kill_after_the_snapshot_intent_before_its_worktree_is_reclaimed",
             13,
-            2,
+            4,
             1,
         ),
         ("engine::tests::host_acceptance_record", 14, 5, 1),
@@ -6368,13 +6368,13 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
         (
             "workspace_manager::tests::a_reservation_is_released",
             3,
-            1,
+            3,
             2,
         ),
         (
             "effects::tests::the_workflow_shape_oracle_refuses_every_escape_the_ledger_names",
             14,
-            5,
+            2,
             2,
         ),
         ("tests::a_test_of_the_binary_harness", 14, 5, 2),

@@ -3392,8 +3392,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  as the table's does and every word of the table's is in its place, so a \
                  reading that stopped at the table's last word would pass it",
         job: Some("test-windows-hosted"),
-        anchor: "--skip engine::tests::a_f\"\n            floor: 980\n",
-        replacement: "--skip engine::tests::a_f --skip effects::\"\n            floor: 980\n",
+        anchor: "--skip engine::tests::f\"\n            floor: 985\n",
+        replacement: "--skip engine::tests::f --skip effects::\"\n            floor: 985\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
@@ -3406,8 +3406,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  passed",
         job: Some("test-windows-hosted"),
         anchor: "          - shard: \"2 of 14\"\n\
-                 \x20           tests: \"effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner engine::topology::recover::tests::a_k engine::topology::recover::tests::an engine::tests::a_p runner::contract:: --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::o --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t\"\n\
-                 \x20           floor: 43\n",
+                 \x20           tests: \"effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner engine::topology::recover::tests::a_k engine::topology::recover::tests::an engine::tests::a_p runner::contract:: engine::topology::coordinator::tests::o --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t\"\n\
+                 \x20           floor: 44\n",
         replacement: "",
         refused_as: "test-windows-hosted-matrix",
     },
@@ -3446,8 +3446,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  selects it, so the engine's own tests whose names open `a_s` run on no hosted \
                  leg. The two legs' floors count tests, not which ones",
         job: Some("test-windows-hosted"),
-        anchor: " engine::tests::a_s --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::o --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::recover::tests::a_k --skip engine::topology::recover::tests::an --skip engine::tests::a_p --skip runner::contract::\"\n            floor: 225\n          - shard: \"4 of 14\"\n            tests: \"",
-        replacement: " --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::o --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::recover::tests::a_k --skip engine::topology::recover::tests::an --skip engine::tests::a_p --skip runner::contract::\"\n            floor: 225\n          - shard: \"4 of 14\"\n            tests: \"engine::tests::a_s ",
+        anchor: " engine::tests::a_s --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::recover::tests::a_k --skip engine::topology::recover::tests::an --skip engine::tests::a_p --skip runner::contract:: --skip engine::topology::coordinator::tests::o\"\n            floor: 224\n          - shard: \"4 of 14\"\n            tests: \"",
+        replacement: " --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::recover::tests::a_k --skip engine::topology::recover::tests::an --skip engine::tests::a_p --skip runner::contract:: --skip engine::topology::coordinator::tests::o\"\n            floor: 224\n          - shard: \"4 of 14\"\n            tests: \"engine::tests::a_s ",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
@@ -3467,14 +3467,14 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-FILTERS-COMMA-JOINED",
         escape: "the first shard's first two filters joined by a comma, \
-                 `engine::topology::coordinator::tests::a_h,engine::topology::coordinator::tests::o`. \
+                 `engine::topology::coordinator::tests::a_h,engine::topology::coordinator::tests::t`. \
                  libtest takes no list: the word is one filter, a substring no test's name \
                  contains, so the first leg runs neither the coordinator's tests whose names \
-                 open `a_h` nor those that open `o`, and every later leg still skips both: they \
+                 open `a_h` nor those that open `t`, and every later leg still skips both: they \
                  run on no hosted leg. The first leg's floor counts tests, not which ones",
         job: Some("test-windows-hosted"),
-        anchor: "            tests: \"engine::topology::coordinator::tests::a_h engine::topology::coordinator::tests::o ",
-        replacement: "            tests: \"engine::topology::coordinator::tests::a_h,engine::topology::coordinator::tests::o ",
+        anchor: "            tests: \"engine::topology::coordinator::tests::a_h engine::topology::coordinator::tests::t ",
+        replacement: "            tests: \"engine::topology::coordinator::tests::a_h,engine::topology::coordinator::tests::t ",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
@@ -3483,20 +3483,20 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  step still tests the count against `matrix.floor`, so its pin holds, and a leg \
                  that executed one test clears the floor the matrix now hands it",
         job: Some("test-windows-hosted"),
-        anchor: "            floor: 980\n",
+        anchor: "            floor: 985\n",
         replacement: "            floor: 1\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-ZEROED",
         escape: "the last shard's floor set to zero in the table, the script untouched. It is \
-                 the largest of the fourteen, 980 of 1700, the floor the whole suite was held \
+                 the largest of the fourteen, 985 of 1700, the floor the whole suite was held \
                  to as one job, and with it gone the leg is green having executed nothing: the \
                  count the step sums is never below zero. \
                  `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED`'s floor of 1 still asks for one \
                  test; this asks for none, which is the arrival the count exists to refuse",
         job: Some("test-windows-hosted"),
-        anchor: "            floor: 980\n",
+        anchor: "            floor: 985\n",
         replacement: "            floor: 0\n",
         refused_as: "test-windows-hosted-matrix",
     },
@@ -3562,7 +3562,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  27 + 99 + 76 + 235 + 195 + 120 = 802 passing tests, and the rest of \
                  `engine::topology::`, which none of them named, was 484 tests by the counts \
                  the floors of 2026-11-19 were set from. 802 + 484 = 1,286 is above every one \
-                 of the fourteen floors, the last leg's 980 among them: fourteen green legs \
+                 of the fourteen floors, the last leg's 985 among them: fourteen green legs \
                  over a suite that lost every test whose name does not contain `engine::`",
         job: Some("test-windows-hosted"),
         anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
@@ -3573,9 +3573,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-MACOS-SHARD-NARROWED",
         escape: "the last macOS shard, the one with no filter, gains a `--skip effects::`. Every \
                  test of that shard whose name contains `effects::` then runs on no macOS leg, \
-                 this oracle's among them. These legs hold no count to a floor, so all five \
-                 are green over a macOS suite that lost those tests, beside a Linux leg that \
-                 still runs them",
+                 `topology::effects::registry::`'s among them. These legs hold no count to a \
+                 floor, so all five are green over a macOS suite that lost those tests, beside \
+                 a Linux leg that still runs them",
         job: Some("test"),
         anchor: "            leg: \"macos-latest, 5 of 5\"\n\
                  \x20           tests: \"",
@@ -3586,13 +3586,13 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-MACOS-LAST-SHARD-SKIPS-MORE",
         escape: "the same skip put last in the last macOS leg's arguments, after the \
-                 twenty-four the table derives. Every test of that leg whose name contains \
+                 twenty-eight the table derives. Every test of that leg whose name contains \
                  `effects::` runs on no macOS leg, as under `MUT-TEST-MACOS-SHARD-NARROWED`, and \
                  no floor is there to say so; here the string opens as the table's does, so a \
                  reading that stopped at the table's last word would pass it",
         job: Some("test"),
-        anchor: "--skip engine::tests::an\"\n    steps:\n",
-        replacement: "--skip engine::tests::an --skip effects::\"\n    steps:\n",
+        anchor: "--skip engine::topology::attempt::\"\n    steps:\n",
+        replacement: "--skip engine::topology::attempt:: --skip effects::\"\n    steps:\n",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
@@ -3624,15 +3624,14 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-MACOS-FILTER-MOVED-BETWEEN-LEGS",
-        escape: "the third macOS leg's last filter, `engine::tests::t`, moved to the front of \
-                 the fourth leg's filters: one word moved and none lost. The fourth leg still \
-                 skips it, as every macOS leg after the third does, and libtest runs no test a \
-                 `--skip` names whatever filter selects it, so the engine's own tests whose \
-                 names open `t` run on no macOS leg. These legs hold no count to a floor, so \
-                 all five are green",
+        escape: "the third macOS leg's last filter, `events::log::`, moved to the front of the \
+                 fourth leg's filters: one word moved and none lost. The fourth leg still skips \
+                 it, as every macOS leg after the third does, and libtest runs no test a \
+                 `--skip` names whatever filter selects it, so the event log's own tests run on \
+                 no macOS leg. These legs hold no count to a floor, so all five are green",
         job: Some("test"),
-        anchor: " engine::tests::t --skip engine::topology::coordinator::tests::a_p --skip workspace_manager::tests::a --skip workspace_manager::tests::t --skip engine::tests::a_k --skip engine::tests::a_r --skip engine::tests::a_s --skip runner::host:: --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::a_s --skip engine::topology::attempt:: --skip workspace_manager::tests::e --skip workspace_manager::tests::n --skip topology::census::\"\n          - os: macos-latest\n            leg: \"macos-latest, 4 of 5\"\n            tests: \"",
-        replacement: " --skip engine::topology::coordinator::tests::a_p --skip workspace_manager::tests::a --skip workspace_manager::tests::t --skip engine::tests::a_k --skip engine::tests::a_r --skip engine::tests::a_s --skip runner::host:: --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::a_s --skip engine::topology::attempt:: --skip workspace_manager::tests::e --skip workspace_manager::tests::n --skip topology::census::\"\n          - os: macos-latest\n            leg: \"macos-latest, 4 of 5\"\n            tests: \"engine::tests::t ",
+        anchor: " events::log:: --skip engine::topology::coordinator::tests::a_p --skip workspace_manager::tests::t --skip engine::tests::a_k --skip engine::tests::a_r --skip engine::tests::a_s --skip runner::host:: --skip workspace::tests:: --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::a_s --skip workspace_manager::tests::e --skip workspace_manager::tests::n --skip topology::census:: --skip effects::tests::\"\n          - os: macos-latest\n            leg: \"macos-latest, 4 of 5\"\n            tests: \"",
+        replacement: " --skip engine::topology::coordinator::tests::a_p --skip workspace_manager::tests::t --skip engine::tests::a_k --skip engine::tests::a_r --skip engine::tests::a_s --skip runner::host:: --skip workspace::tests:: --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::a_s --skip workspace_manager::tests::e --skip workspace_manager::tests::n --skip topology::census:: --skip effects::tests::\"\n          - os: macos-latest\n            leg: \"macos-latest, 4 of 5\"\n            tests: \"events::log:: ",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {

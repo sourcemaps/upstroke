@@ -3020,14 +3020,14 @@ Five claims.
      before `tests::`, which is how a harness lists a test at its crate's
      root, the bin harness's among them (14).
 
-   On macOS the same fourteen fall in shards 1, 3, 5, 5, 2, 3, 2, 5, 1, 4,
-   2, 1, 5 and 5: there the first list takes the coordinator's `a_p...`
-   tests, the workspace manager's named `a...` and the engine's own
-   `a_k...`; the second takes the `interleaving` module, the attempt tests
-   and the workspace manager's `e...` tests; the third takes the
-   coordinator's `a_r...` tests and the recovery tests named `a_...` or
-   `k...`; the fourth takes `runner::container::`; and no macOS filter names
-   the coordinator's `a_b...` or `halt...`. In the Linux column
+   On macOS the same fourteen fall in shards 1, 3, 5, 5, 2, 3, 4, 5, 1, 4,
+   2, 3, 2 and 5: there the first list takes the coordinator's `a_p...`
+   tests and the engine's own `a_k...`; the second takes the `interleaving`
+   module, the workspace manager's `e...` tests and `effects::tests::`; the
+   third takes the coordinator's `a_r...` tests, the recovery tests named
+   `a_...` or `k...` and the workspace manager's named `a...`; the fourth
+   takes `runner::container::` and the attempt tests; and no macOS filter
+   names the coordinator's `a_b...` or `halt...`. In the Linux column
    every name that contains `engine::` falls in shard 1, the first nine and
    the eleventh, and the runner's test and the last three in shard 2.
 4. In all three tables no list is empty, no filter is empty, contains

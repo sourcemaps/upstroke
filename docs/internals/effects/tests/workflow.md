@@ -448,7 +448,7 @@ interleaving tests run on no macOS leg. `MUT-TEST-MACOS-SKIP-DROPPED`
 deletes the last leg's first skip, so the tests the first leg runs under
 `...coordinator::tests::a_p` run in the last leg too. And
 `MUT-TEST-MACOS-FILTER-MOVED-BETWEEN-LEGS` moves the third leg's last
-filter, `engine::tests::t`, to the front of the fourth leg's, which still
+filter, `events::log::`, to the front of the fourth leg's, which still
 skips it: libtest's skip wins over any filter, and those tests run on no
 macOS leg. These legs hold no count to a floor, so under each of the three
 every leg is green. The moved filter's anchor spells the third leg's skips
@@ -618,7 +618,7 @@ counts the ten-shard floors of 2026-11-20 were set from that subset clears
 all fourteen floors. The first six of those ten shards and the
 ninth, whose filters each contained `engine::`, were 802 tests, and the rest
 of `engine::topology::`, which none of them named, was 484 tests by the
-counts of 2026-11-19: 1,286, above the last leg's 980 and every other floor.
+counts of 2026-11-19: 1,286, above the last leg's 985 and every other floor.
 Before the re-split of 2026-11-20 the subset was the first seven shards'
 tests, 1,295 by those counts, against a last floor of 734.
 
@@ -915,6 +915,24 @@ re-pack added spell short pieces of the first four legs' `tests:` values;
 the moved filter's spells the third leg's skips whole, from its last filter
 to the opening of the fourth leg's value, so a change to the table re-spells
 it too.
+
+The rebalance from the five runs' medians, which moved whole filters
+between legs, re-spelled them once more. The second leg's entry now ends
+its own filters with the coordinator's `...tests::o`, moved there from the
+first leg, with floor 44; the moved filter's row spells the third leg's
+skips, which now end with that `o`, and floor 224; the first leg's first two
+filters, which the comma-joined row joins, are now `...tests::a_h` and
+`...tests::t`; and the last leg's last skip is `engine::tests::f` and its
+floor 985. On the macOS side the last leg's last skip is
+`engine::topology::attempt::`, and the third leg's last filter, which
+`MUT-TEST-MACOS-FILTER-MOVED-BETWEEN-LEGS` moves, is `events::log::`. The
+second macOS leg now names `effects::tests::`, so this oracle's own tests no
+longer run in the last macOS leg; the `--skip effects::` of the two macOS
+skip rows now takes the tests under `topology::effects::` outside its
+`tests` module, such as `topology::effects::registry::`'s, which still run
+there.
+`MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED` kept its anchor and had the last
+floor restated.
 
 Before that row a deleted leg was measured by hand, on 2026-11-17, while
 the legs were five, in `ci.yml` itself and then restored: with the fifth

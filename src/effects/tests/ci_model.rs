@@ -162,7 +162,6 @@ pub(super) const CACHE_ACTION: &str = "Swatinem/rust-cache@";
 pub(super) const WINDOWS_SHARD_FILTERS: [&[&str]; 13] = [
     &[
         "engine::topology::coordinator::tests::a_h",
-        "engine::topology::coordinator::tests::o",
         "engine::topology::coordinator::tests::t",
         "engine::topology::recover::tests::k",
         "workspace_manager::tests::c",
@@ -174,6 +173,7 @@ pub(super) const WINDOWS_SHARD_FILTERS: [&[&str]; 13] = [
         "engine::topology::recover::tests::an",
         "engine::tests::a_p",
         "runner::contract::",
+        "engine::topology::coordinator::tests::o",
     ],
     &[
         "engine::topology::coordinator::tests::interleaving::s",
@@ -188,7 +188,6 @@ pub(super) const WINDOWS_SHARD_FILTERS: [&[&str]; 13] = [
         "engine::topology::recover::tests::a_f",
         "engine::topology::candidate::",
         "workspace_manager::tests::r",
-        "engine::tests::f",
     ],
     &[
         "engine::topology::coordinator::tests::independent_tasks_dispatch_together_and_keep_per_key_projections_under_every_seed",
@@ -196,6 +195,7 @@ pub(super) const WINDOWS_SHARD_FILTERS: [&[&str]; 13] = [
         "engine::topology::coordinator::tests::a_d",
         "engine::topology::coordinator::tests::a_g",
         "engine::tests::t",
+        "engine::topology::coordinator::tests::a_v",
     ],
     &[
         "engine::topology::coordinator::tests::interleaving::r",
@@ -204,10 +204,10 @@ pub(super) const WINDOWS_SHARD_FILTERS: [&[&str]; 13] = [
         "engine::tests::e",
         "engine::tests::r",
         "engine::tests::s",
+        "engine::topology::recover::tests::s",
     ],
     &[
         "engine::topology::coordinator::tests::a_f",
-        "engine::topology::coordinator::tests::c",
         "engine::topology::coordinator::tests::d",
         "workspace_manager::tests::e",
         "workspace_manager::tests::t",
@@ -220,11 +220,11 @@ pub(super) const WINDOWS_SHARD_FILTERS: [&[&str]; 13] = [
         "engine::topology::coordinator::tests::s",
         "engine::topology::integrate::",
         "engine::tests::l",
+        "engine::topology::coordinator::tests::c",
     ],
     &[
         "engine::topology::coordinator::tests::an",
         "engine::topology::recover::tests::a_r",
-        "engine::topology::recover::tests::s",
         "engine::topology::coverage::",
         "engine::tests::a_r",
     ],
@@ -240,43 +240,43 @@ pub(super) const WINDOWS_SHARD_FILTERS: [&[&str]; 13] = [
         "engine::topology::run::",
         "topology::census::",
         "engine::tests::an",
+        "engine::topology::recover::tests::t",
     ],
     &[
         "engine::topology::coordinator::tests::interleaving::a",
         "engine::topology::recover::tests::r",
-        "engine::topology::recover::tests::t",
         "workspace_manager::tests::n",
         "workspace::",
     ],
     &[
-        "engine::topology::coordinator::tests::a_v",
         "engine::topology::attempt::",
         "workspace_manager::tests::s",
         "engine::tests::a_c",
         "engine::tests::a_f",
+        "engine::tests::f",
     ],
 ];
 
 pub(super) const WINDOWS_SHARD_FLOORS: [u32; 14] =
-    [23, 43, 225, 48, 23, 32, 37, 34, 56, 26, 66, 63, 44, 980];
+    [22, 44, 224, 43, 27, 33, 36, 35, 54, 26, 83, 45, 43, 985];
 
 pub(super) const MACOS_SHARD_FILTERS: [&[&str]; 4] = [
     &[
         "engine::topology::coordinator::tests::a_p",
-        "workspace_manager::tests::a",
         "workspace_manager::tests::t",
         "engine::tests::a_k",
         "engine::tests::a_r",
         "engine::tests::a_s",
         "runner::host::",
+        "workspace::tests::",
     ],
     &[
         "engine::topology::coordinator::tests::interleaving::",
         "engine::topology::coordinator::tests::a_s",
-        "engine::topology::attempt::",
         "workspace_manager::tests::e",
         "workspace_manager::tests::n",
         "topology::census::",
+        "effects::tests::",
     ],
     &[
         "engine::topology::coordinator::tests::a_r",
@@ -285,6 +285,9 @@ pub(super) const MACOS_SHARD_FILTERS: [&[&str]; 4] = [
         "workspace_manager::tests::s",
         "engine::tests::a_b",
         "engine::tests::t",
+        "engine::topology::recover::",
+        "workspace_manager::tests::a",
+        "events::log::",
     ],
     &[
         "engine::topology::coordinator::tests::a_g",
@@ -292,6 +295,7 @@ pub(super) const MACOS_SHARD_FILTERS: [&[&str]; 4] = [
         "runner::container::",
         "runner::contract::",
         "engine::tests::an",
+        "engine::topology::attempt::",
     ],
 ];
 

@@ -394,6 +394,8 @@ captures its output. The tests were packed into legs
 ([`WINDOWS_SHARD_FILTERS`]) by those times: on 2026-11-22 by CI run
 45045067738's, and again on 2026-11-23 by the mean of each test's times over
 CI runs 45045067738, 45161322179 and 45233912312 (`MAINTAINING.md` step 3).
+The filters were then rebalanced by the median of each test's times over CI
+runs 45259861458, 45265008874, 45269007219, 45273775506 and 45337940696.
 The `test result:` lines the count reads are the same with the times as
 without them.
 
@@ -930,12 +932,17 @@ re-split for the first time: its slowest leg, the fifth, took 18.1 minutes.
 Fourteen legs since 2026-11-22, each but the last named by a list of
 filters ([`WINDOWS_SHARD_FILTERS`]). They were first packed from the
 per-test Windows times of CI run 45045067738 alone, and run 45233912312
-measured them. The filters now come from the mean of each test's measured
-times over CI runs 45045067738, 45161322179 and 45233912312, packed into
-legs whole module by whole module, and a module is split by the opening of
-its tests' names only where it alone exceeds a leg's budget. The re-pack was
-not timed before it landed: the CI run of the pull request that landed it is
-its first measurement.
+measured them. They were re-packed from the mean of each test's measured
+times over CI runs 45045067738, 45161322179 and 45233912312, into legs whole
+module by whole module, and a module is split by the opening of its tests'
+names only where it alone exceeds a leg's budget.
+
+The filters were then rebalanced from the median of each test's time over
+CI runs 45259861458, 45265008874, 45269007219, 45273775506 and
+45337940696, moving whole filters between legs so that each leg's median job
+time is about ten minutes or less. The rebalance was not timed before it
+landed: the CI run of the pull request that landed it is its first
+measurement.
 
 Single tests set a floor under every leg. A leg takes no less than its
 longest test plus the job's fixed minutes, and in run 45045067738 the two
@@ -944,8 +951,8 @@ longest single tests were:
 - `engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect`, 249.8 s;
 - `engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect`, 244.5 s.
 
-Under the packing, every leg's prediction, about 9 minutes a job, is above
-that floor.
+Under the re-pack from the three runs, every leg's prediction, about 9
+minutes a job, was above that floor.
 
 The aggregate reads the fourteen legs through one result,
 `needs.test-windows-hosted.result`, as it reads the `test` and `msrv`
@@ -1076,11 +1083,14 @@ none of them. Thirteen lists, 69 filters in all, make fourteen shards; the
 fourteenth runs everything no filter names, the bin harness's tests among
 them.
 
-The lists come from the mean of each test's measured Windows times over CI
-runs 45045067738, 45161322179 and 45233912312; the first lists of
-2026-11-22 came from run 45045067738's alone. Tests were packed into shards
-whole module by whole module, and a module was split by the opening of its
-tests' names only where it alone exceeded a shard's budget: so 12 of the 69
+The lists come from the median of each test's measured Windows times over CI
+runs 45259861458, 45265008874, 45269007219, 45273775506 and 45337940696,
+which rebalanced lists packed from the mean of each test's times over CI
+runs 45045067738, 45161322179 and 45233912312 by moving whole filters
+between shards; the first lists of 2026-11-22 came from run 45045067738's
+alone. Tests were packed into shards whole module by whole module, and a
+module was split by the opening of its tests' names only where it alone
+exceeded a shard's budget: so 12 of the 69
 filters are a whole module path ending `::`, such as `runner::container::`
 or `engine::topology::ledger::`, and the rest open a test's name in one
 large module, such as `engine::topology::coordinator::tests::a_h` or
@@ -1129,8 +1139,8 @@ filter, none of them twice in the table.
 ## `pub(super) const WINDOWS_SHARD_FLOORS: [u32; 14] =`
 
 The count each Windows shard must report before it may succeed, in shard
-order: [`WINDOWS_TEST_FLOOR`] divided among the fourteen, 23, 43, 225, 48,
-23, 32, 37, 34, 56, 26, 66, 63, 44 and 980. Each is its leg's
+order: [`WINDOWS_TEST_FLOOR`] divided among the fourteen, 22, 44, 224, 43,
+27, 33, 36, 35, 54, 26, 83, 45, 43 and 985. Each is its leg's
 `floor:` in the job's matrix, an integer the oracle holds to this list, and
 the number line 13 of [`WINDOWS_SHARD_WITNESS`] tests the leg's count against.
 
@@ -1165,11 +1175,13 @@ every run counts them again.
 ## `pub(super) const MACOS_SHARD_FILTERS: [&[&str]; 4] = [`
 
 The same kind of table for the macOS suite, under the same rule: four
-filter lists, 24 filters, five shards. 6 of the 24 are whole module paths
-ending `::` -- `runner::host::`, the coordinator's `interleaving::`,
-`engine::topology::attempt::`, `topology::census::`, `runner::container::`
-and `runner::contract::` -- and the rest open a test's name in one large
-module, such as `engine::topology::coordinator::tests::a_p` or
+filter lists, 28 filters, five shards. 10 of the 28 are whole module paths
+ending `::` -- `runner::host::`, `workspace::tests::`, the coordinator's
+`interleaving::`, `topology::census::`, `effects::tests::`,
+`engine::topology::recover::`, `events::log::`, `runner::container::`,
+`runner::contract::` and `engine::topology::attempt::` -- and the rest open
+a test's name in one large module, such as
+`engine::topology::coordinator::tests::a_p` or
 `workspace_manager::tests::a`; the fifth shard is everything else. The `test` job's five
 macOS legs are derived from it, through [`TEST_LEGS`]; until the macOS
 suite was divided nothing in `ci.yml` read it, and the suite was one leg of
@@ -1177,14 +1189,17 @@ the `test` matrix. `the_shard_tables_run_every_test_in_exactly_one_shard`
 holds its count of derived argument strings and the first of them, places
 the same fourteen names, and holds its filters to the same shape.
 
-The lists are packed as the Windows table's are, whole module by whole
+The lists were packed as the Windows table's were, whole module by whole
 module, from the same mean of each test's Windows times over CI runs
 45045067738, 45161322179 and 45233912312, each test's time scaled by a
 ratio of macOS to Windows time fitted for each group of tests on the macOS
 legs measured with the lists before 2026-11-22 and with the first lists
 packed that day. Those first lists took run 45045067738's times alone, each
 scaled by the ratio measured for the macOS leg the test ran in under the
-lists before.
+lists before. They were then rebalanced, as the Windows table was, from the
+median of each test's time over CI runs 45259861458, 45265008874,
+45269007219, 45273775506 and 45337940696, moving whole filters between legs
+so that each leg's median job time is about ten minutes or less.
 
 It was two filters and three shards until 2026-11-19: `engine::topology::`,
 the rest of `engine::`, and everything else. In run 44614925593 those three
@@ -1282,9 +1297,10 @@ had its slowest leg predicted at about 14 to 15 minutes on macOS and about
 minutes for the slowest macOS leg and 8.2 for the slower Linux one. The
 macOS table was divided again on 2026-11-20, from that run, with its slowest
 leg predicted at about 11.8 minutes and measured at 16.0 in run 44736631711.
-30 minutes is about two and a half times the slowest shard expected and a
-little under twice the one measured, and the limit the Linux leg already
-had. Code `test-job-timeout`.
+Its lists have since been re-packed, and then rebalanced from five runs'
+medians so that each leg's median job time is about ten minutes or less. 30 minutes is about
+three times the slowest leg expected and a little under twice the 16.0
+measured, and the limit the Linux leg already had. Code `test-job-timeout`.
 Measured, `MUT-TEST-TIMEOUT-RAISED-FOR-MACOS` and `MUT-TEST-TIMEOUT-RAISED`.
 
 ## `pub(super) const TEST_LEGS: [(&str, &[&[&str]]); 2] = [`
