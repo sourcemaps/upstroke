@@ -1,10 +1,11 @@
 //! Extended notes: `docs/internals/engine/topology/preflight/tests.md`
 
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use super::*;
 use crate::agent::AgentAdapter;
+use crate::capacity::PoolKind;
 use crate::gates::ShellKind;
 use crate::ir::Outcome;
 use crate::runner::invocation::AttemptRole;
@@ -503,6 +504,235 @@ fn the_debug_rendering_names_the_boundary_and_not_the_ledgers() {
     assert!(
         !rendered.contains("Mutex"),
         "the ledgers are not part of the rendering: {rendered}"
+    );
+}
+
+const EXISTING_DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+const A_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+const MISSING: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/no-such-credential-profile");
+const TOKEN: &str = "sk-ant-oat01-fixture-token-value";
+
+fn no_token(_key: &str) -> Option<OsString> {
+    None
+}
+
+fn token_set(key: &str) -> Option<OsString> {
+    (key == CLAUDE_CODE_OAUTH_TOKEN).then(|| OsString::from(TOKEN))
+}
+
+fn pool(name: &str, agent: &str, profile: Option<&str>) -> Pool {
+    let mut pool = Pool::discovered(name, PoolKind::SubscriptionWindow, agent, Vec::new());
+    pool.profile = profile.map(str::to_owned);
+    pool
+}
+
+fn profiled_preflight<'a>(
+    runner: &'a dyn Runner,
+    adapters: &'a Registry,
+    pools: &[Pool],
+    environment: fn(&str) -> Option<OsString>,
+) -> RunPreflight<'a> {
+    preflight(runner, adapters, &[AGENT])
+        .with_pools(pools)
+        .reading_environment(environment)
+}
+
+fn refused_before_anything_ran(
+    runner: &Recording,
+    preflight: &RunPreflight<'_>,
+    policy: &RunnerPolicy,
+) -> String {
+    let error = preflight
+        .certify(policy)
+        .expect_err("the profile cannot be honoured, so the pre-flight refuses");
+    let text = error.to_string();
+    assert!(
+        matches!(error, UpstrokeError::Refused { .. }),
+        "a refusal, not some other failure: {text}"
+    );
+    assert!(
+        text.starts_with("pre-flight: "),
+        "the refusal shape: {text}"
+    );
+    assert!(
+        runner.programs().is_empty(),
+        "nothing is spawned before a profile refusal, not even the shell probe: {:?}",
+        runner.programs()
+    );
+    assert_eq!(preflight.settlements(), (0, 0), "nothing was registered");
+    assert!(preflight.ledgers_balance());
+    assert!(preflight.probed().is_none(), "nothing was certified");
+    text
+}
+
+#[test]
+fn a_profiled_pool_on_the_container_runner_refuses_before_anything_runs() {
+    let runner = Recording::default();
+    let adapters = Registry;
+    let pools = [pool("max", AGENT, Some(EXISTING_DIRECTORY))];
+    let preflight = profiled_preflight(&runner, &adapters, &pools, no_token);
+
+    let text = refused_before_anything_ran(&runner, &preflight, &container_policy());
+
+    assert!(text.contains("`max`"), "the refusal names the pool: {text}");
+    assert!(
+        text.contains("host runner only") && text.contains("container runner"),
+        "the refusal says a profile needs the host runner: {text}"
+    );
+}
+
+#[test]
+fn a_profiled_pool_whose_agent_is_not_claude_code_refuses_naming_the_pool_and_agent() {
+    let runner = Recording::default();
+    let adapters = Registry;
+    let pools = [
+        pool("max", AGENT, Some(EXISTING_DIRECTORY)),
+        pool("work", OTHER, Some(EXISTING_DIRECTORY)),
+    ];
+    let preflight = profiled_preflight(&runner, &adapters, &pools, no_token);
+
+    let text = refused_before_anything_ran(&runner, &preflight, &host_policy());
+
+    assert!(
+        text.contains("`work`"),
+        "the refusal names the pool: {text}"
+    );
+    assert!(
+        text.contains(&format!("`{OTHER}`")),
+        "and its agent: {text}"
+    );
+    assert!(
+        text.contains("Claude Code's profile only"),
+        "and says which agent's profile this stage supports: {text}"
+    );
+}
+
+#[test]
+fn a_profile_that_does_not_exist_refuses_naming_the_pool_and_the_path() {
+    let runner = Recording::default();
+    let adapters = Registry;
+    let pools = [pool("max", AGENT, Some(MISSING))];
+    let preflight = profiled_preflight(&runner, &adapters, &pools, no_token);
+
+    let text = refused_before_anything_ran(&runner, &preflight, &host_policy());
+
+    assert!(text.contains("`max`"), "the refusal names the pool: {text}");
+    assert!(text.contains(MISSING), "and the path: {text}");
+    assert!(text.contains("does not exist"), "{text}");
+}
+
+#[test]
+fn a_profile_that_is_not_a_directory_refuses_naming_the_pool_and_the_path() {
+    let runner = Recording::default();
+    let adapters = Registry;
+    let pools = [pool("max", AGENT, Some(A_FILE))];
+    let preflight = profiled_preflight(&runner, &adapters, &pools, no_token);
+
+    let text = refused_before_anything_ran(&runner, &preflight, &host_policy());
+
+    assert!(text.contains("`max`"), "the refusal names the pool: {text}");
+    assert!(text.contains(A_FILE), "and the path: {text}");
+    assert!(text.contains("is not a directory"), "{text}");
+}
+
+#[test]
+fn an_oauth_token_in_the_coordinators_environment_refuses_without_printing_it() {
+    let runner = Recording::default();
+    let adapters = Registry;
+    let pools = [pool("max", AGENT, Some(EXISTING_DIRECTORY))];
+    let preflight = profiled_preflight(&runner, &adapters, &pools, token_set);
+
+    let text = refused_before_anything_ran(&runner, &preflight, &host_policy());
+
+    assert!(
+        text.contains(CLAUDE_CODE_OAUTH_TOKEN),
+        "the refusal names the variable: {text}"
+    );
+    assert!(
+        text.contains("`max`") && text.contains(EXISTING_DIRECTORY),
+        "and the profile the run would not use: {text}"
+    );
+    assert!(
+        !text.contains(TOKEN),
+        "a refusal must never carry the credential itself: {text}"
+    );
+}
+
+#[test]
+fn a_profiled_claude_code_pool_on_the_host_with_its_directory_and_no_token_certifies() {
+    let runner = Recording::default();
+    let adapters = Registry;
+    let pools = [pool("max", AGENT, Some(EXISTING_DIRECTORY))];
+    let preflight = profiled_preflight(&runner, &adapters, &pools, no_token);
+
+    preflight
+        .certify(&host_policy())
+        .expect("every profile check holds and every probe answers");
+
+    assert_eq!(
+        runner.programs(),
+        vec!["bash".to_owned(), AGENT.to_owned()],
+        "the checks spawn nothing of their own; the probes are the ones an unprofiled run makes"
+    );
+    assert_eq!(
+        preflight.probed().map(|probed| probed.agents),
+        Some(vec![AGENT.to_owned()])
+    );
+    assert!(preflight.ledgers_balance());
+}
+
+#[test]
+fn the_claude_code_probe_of_a_profiled_pool_runs_under_that_profile() {
+    let recording = Arc::new(Recording::default());
+    let pools = [pool("max", AGENT, Some(EXISTING_DIRECTORY))];
+    let runner = crate::engine::topology::profiled::profiled(
+        Arc::clone(&recording) as Arc<dyn Runner>,
+        &pools,
+    );
+    let adapters = Registry;
+    let preflight = profiled_preflight(&*runner, &adapters, &pools, no_token);
+
+    preflight
+        .certify(&host_policy())
+        .expect("the profiled pre-flight certifies");
+
+    let requests = recording.requests();
+    let profiles: Vec<(String, Option<PathBuf>)> = requests
+        .iter()
+        .map(|request| {
+            (
+                request.command.program.clone(),
+                request.credential_profile.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        profiles,
+        vec![
+            ("bash".to_owned(), None),
+            (AGENT.to_owned(), Some(PathBuf::from(EXISTING_DIRECTORY))),
+        ],
+        "the agent probe goes through the run's profiled runner, as `entry` builds it, so the \
+         Claude Code CLI is probed under the profile its pool names; the shell probe has no \
+         agent and takes none"
+    );
+}
+
+#[test]
+fn pools_that_name_no_profile_leave_the_preflight_as_it_was() {
+    let runner = Recording::default();
+    let adapters = Registry;
+    let pools = [pool("max", AGENT, None), pool("work", OTHER, None)];
+    let preflight = profiled_preflight(&runner, &adapters, &pools, token_set);
+
+    preflight
+        .certify(&container_policy())
+        .expect("with no profile named, none of the profile checks applies");
+
+    assert_eq!(
+        runner.programs(),
+        vec!["bash".to_owned(), AGENT.to_owned()],
+        "the same probes, on the container runner and with a token set"
     );
 }
 

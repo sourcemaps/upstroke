@@ -7960,6 +7960,45 @@ fn attempts_are_attributed_to_the_pool_that_paid_them() {
 }
 
 #[test]
+fn a_legacy_run_refuses_a_profiled_pool_at_preflight_rather_than_ignore_it() {
+    let (_tree, repo) = temp_engine_repo("legacyprofile");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        None,
+    );
+    let mut opts = options(&repo);
+    opts.pools_path = Some(pools_file(
+        &repo,
+        "[pools.claude-max]\nkind = \"subscription-window\"\nagent = \"claude-code\"\n\
+         profile = \"/profiles/personal\"\n",
+    ));
+    let source = fake(Effect::EditFile);
+
+    let err = run_with(&opts, &source).expect_err("a legacy run cannot carry the profile");
+
+    let text = err.to_string();
+    assert!(
+        matches!(err, UpstrokeError::Refused { .. }),
+        "a refusal, not some other failure: {text}"
+    );
+    assert!(
+        text.contains("`claude-max`") && text.contains("/profiles/personal"),
+        "the refusal names the pool and the profile it would have ignored: {text}"
+    );
+    assert!(
+        text.contains("execution topology (schema 4)"),
+        "and where profiles do apply: {text}"
+    );
+    let branch = git_in(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    assert_eq!(branch.trim(), "main", "refused before branching");
+    assert!(
+        !crate::rundir::runs_root(&repo).exists(),
+        "and before any run directory was created"
+    );
+}
+
+#[test]
 fn a_pinned_live_attempt_records_its_selection_origin() {
     let (_tree, repo) = temp_engine_repo("pinorigin");
     seed(

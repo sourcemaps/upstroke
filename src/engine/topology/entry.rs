@@ -673,7 +673,8 @@ impl ResumeVerified {
             shell,
             &crate::agent::probe_workspace(),
             started.probed_agents,
-        );
+        )
+        .with_pools(&config.pools);
         let (_recovered, handle) = recover_verified(
             records,
             &ResumeSeams {

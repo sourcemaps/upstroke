@@ -82,6 +82,38 @@ What each agent's CLI reported about itself.
 
 The agent names, which is what the durable record carries.
 
+## `const CLAUDE_CODE_OAUTH_TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";`
+
+The variable through which Claude Code takes a long-lived OAuth token. When
+it is set, Claude Code authenticates with it instead of the credentials in
+its configuration directory, which is what a profile is. The host runner
+passes the coordinator's environment to the child (it reserves `PATH`,
+`HOME`, `USERPROFILE` and the credential-location keys, not this one), so a
+token in the coordinator's environment reaches every profiled process.
+
+## `struct ProfiledPool {`
+
+A pool that names a `profile`: its name and agent, which the refusals cite,
+and the profile as a path. As in `profiled.rs`, the configured string is
+used as written, with no `~/` expansion.
+
+## `impl ProfiledPool` › `fn of(pool: &Pool) -> Option<Self> {`
+
+`None` for a pool that names no profile. Every pool that names one counts,
+not only an agent's bound pool (`capacity::pool_for`): a profile in the
+pools file that this run could not honour is refused wherever it is
+written, rather than passed over because a pool earlier in the file binds
+the agent.
+
+## `fn coordinator_environment(key: &str) -> Option<OsString> {`
+
+The coordinator's own environment, read when `certify` runs: the one the
+host runner composes each child's environment from
+(`HostEnvironment::from_process`). A function rather than a snapshot so that
+a pre-flight with no profiled pool reads nothing, and so that tests can stand
+in for it without changing the process environment, which every test in the
+binary shares.
+
 ## `pub struct RunPreflight<'a> {`
 
 The run's `RunnerPreflight`: a shell probe and one probe per recorded agent.
@@ -89,6 +121,17 @@ The run's `RunnerPreflight`: a shell probe and one probe per recorded agent.
 Holds no `&mut` anything: the [`RunnerPreflight`] trait's `certify` takes
 `&self` because `rebuild_from_record` holds the runner and the record while
 it calls it.
+
+## `pub struct RunPreflight<'a>` › `profiled: Vec<ProfiledPool>,`
+
+The run's pools that name a profile, in file order. Empty unless the caller
+supplied pools with [`RunPreflight::with_pools`], and empty when none of
+them names a profile. In both cases every profile check is skipped.
+
+## `pub struct RunPreflight<'a>` › `environment: fn(&str) -> Option<OsString>,`
+
+Where the token check looks: [`coordinator_environment`] in production,
+and a fixture in tests (`reading_environment`).
 
 ## `pub struct RunPreflight<'a>` › `ledger: Mutex<InvocationLedger>,`
 
@@ -115,6 +158,57 @@ recorded agents are `agents`.
 [`crate::agent::probe_request`] — "a probe asks a CLI about itself and
 has no workspace of its own" — and that decision is the adapter
 module's, not this one's.
+
+A pre-flight built with `new` alone carries no pools, so it makes no
+profile check and is the pre-flight it was before profiles existed.
+
+## `impl<'a> RunPreflight<'a>` › `pub fn with_pools(mut self, pools: &[Pool]) -> Self {`
+
+The run's pools, so `certify` can refuse a profile the run cannot honour.
+`entry` passes today's configured pools on the resume path, the same slice
+it hands `profiled`, so the pools the probes are stamped from are the pools
+checked here. A builder rather than a fifth argument to `new`: a caller with
+no pools, which includes every test fixture that predates profiles, keeps
+the unprofiled pre-flight without having to say so.
+
+## `impl<'a> RunPreflight<'a>` › `fn reading_environment(mut self, environment: fn(&str) -> Option<OsString>) -> Self {`
+
+For the tests: the token check reads `environment` instead of the process
+environment. A test that changed the real variable would race every other
+test in the binary that reads it. It is private and no production path calls
+it. It is not `#[cfg(test)]`, because a `#[cfg(test)]` item inside the impl
+would end the file's production region there
+(`effects::tests::every_production_region_that_stops_early_stops_at_a_module`)
+and hide the rest of the file from every census that reads that region.
+
+## `impl<'a> RunPreflight<'a>` › `fn refuse_unusable_profiles(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {`
+
+What a profiled run must hold before anything is spawned for it. Each check
+refuses in `refused`'s shape, naming the pool:
+
+1. **The host runner.** A profile is a host directory handed to the child as
+   `CLAUDE_CONFIG_DIR`. The container runner has no way to supply one: it
+   refuses a request carrying a profile before starting it (`runner/
+   container/exec.md`). Refusing here, from the policy's `kind`, keeps that
+   from surfacing as a failed agent probe.
+2. **Claude Code.** This stage supports Claude Code's profile only
+   (`crate::agent::claude::ADAPTER_ID`). The host runner would place a
+   profile under any agent's credential-location key (`CODEX_HOME`,
+   `COPILOT_HOME`), so the limit is held here rather than by the runner.
+   For any other agent the refusal names the pool and that agent.
+3. **An existing directory.** `fs::metadata` follows a symlink, so a link
+   to a directory passes. A missing path, or a dangling link, is refused as
+   not existing. A path that exists and is not a directory is refused as
+   such. Any other error, permission denied included, is refused with the
+   error. A relative profile is resolved against the coordinator's working
+   directory.
+4. **No `CLAUDE_CODE_OAUTH_TOKEN`.** A token overrides the profile's
+   credentials, so the run would not use the profile it names. A variable
+   that is present counts as set, even with an empty value, and the refusal
+   names the variable, never its value.
+
+The checks are made in that order. The run-wide ones (1 and 4) name the
+first profiled pool. 2 and 3 are made pool by pool, in file order.
 
 ## `impl<'a> RunPreflight<'a>` › `pub fn probed(&self) -> Option<Probed> {`
 
@@ -165,17 +259,31 @@ pre-flight". A shell that cannot run a command is the cheaper refusal
 and the one that explains every agent failure that would follow it, so
 it goes first and the agent probes are never reached when it fails.
 
-`policy` is not consulted here and that is deliberate: the runner this
-executes through was *built* from the record — `rebuild_from_record`
-verified the runtime, the recorded image id and the volumes before
-calling this — so re-reading the record to decide anything would be
-this module deciding a question the rebuild already answered. It is
-named in the refusal, which is what a caller needs it for.
+Before either probe come the profile checks
+(`refuse_unusable_profiles`), which spawn nothing. A profile the run cannot
+honour is refused before the shell probe registers or runs anything, so that
+refusal leaves an empty ledger behind it. With no profiled pool they are
+skipped.
+
+`policy` decides one thing here: whether a profiled pool can run at all,
+which turns on its `kind`. Nothing else in it is consulted, and that is
+deliberate: the runner this executes through was *built* from the record
+— `rebuild_from_record` verified the runtime, the recorded image id and
+the volumes before calling this — so re-reading the record to decide
+anything else would be this module deciding a question the rebuild
+already answered. It is named in every refusal, which is what a caller
+needs it for.
+
+The agent probes run through the runner `entry` built, which `profiled`
+wraps, so a profiled pool's Claude Code CLI is probed under that pool's
+profile (`tests::the_claude_code_probe_of_a_profiled_pool_runs_under_that_profile`).
 
 ### Errors
 
-[`UpstrokeError::Refused`] naming the shell or the agent whose CLI did
-not answer. Every invocation registered before the refusal is settled —
+[`UpstrokeError::Refused`] naming the pool whose profile cannot be
+honoured, the shell, or the agent whose CLI did not answer. A profile
+refusal precedes every registration. Every invocation registered before
+any other refusal is settled —
 completed, or cancelled with its slot pair released — so the ledger
 balances on both paths, with one exception: a probe whose process the
 Runner could not establish as ended (`ProcessFate::Unresolved`) is not

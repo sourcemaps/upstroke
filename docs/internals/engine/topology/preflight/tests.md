@@ -147,6 +147,89 @@ Asserted because the impl is hand-written: a derived one would print the
 `Mutex`es, and a `RunPreflight` in a refusal message would then carry every
 invocation identity the run has issued.
 
+## `const EXISTING_DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");`
+
+---------------------------------------------------------------------------
+Profiled pools
+---------------------------------------------------------------------------
+
+## `const EXISTING_DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");`
+
+Profile paths that already exist (or, for `MISSING`, do not) in every
+checkout of this crate. This module is a topology module, where creating a
+directory is a build error, and the profile check only reads metadata, so a
+fixture that made a directory would add an effect without strengthening
+anything.
+
+## `const TOKEN: &str = "sk-ant-oat01-fixture-token-value";`
+
+A recognisable token value, so the refusal can be asserted not to carry
+it.
+
+## `fn no_token(_key: &str) -> Option<OsString> {`
+
+The coordinator environments the token check reads, standing in for the
+process environment (`RunPreflight::reading_environment`). `token_set` has
+`CLAUDE_CODE_OAUTH_TOKEN` and nothing else.
+
+## `fn refused_before_anything_ran(`
+
+What every profile refusal shares, asserted once: it is a `Refused` in
+`refused`'s `pre-flight: ` shape, nothing reached the runner (not even the
+shell probe), nothing was registered or certified, and the ledger
+balances. Returns the message for the test's own pins.
+
+## `fn a_profiled_pool_on_the_container_runner_refuses_before_anything_runs() {`
+
+Check 1: a profiled pool on the container runner is refused from the
+policy's `kind`, naming the pool, before the container runner's own refusal
+of the stamped probe request could be reached. The directory exists, so the
+runner kind is the only thing wrong.
+
+## `fn a_profiled_pool_whose_agent_is_not_claude_code_refuses_naming_the_pool_and_agent() {`
+
+Check 2: a profile on a pool whose agent is not Claude Code is refused,
+naming that pool and its agent, even while a valid Claude Code profile
+stands beside it. Both directories exist, so the agent is the only thing
+wrong.
+
+## `fn a_profile_that_does_not_exist_refuses_naming_the_pool_and_the_path() {`
+
+Check 3, a missing path: the refusal names the pool and the path as
+configured.
+
+## `fn a_profile_that_is_not_a_directory_refuses_naming_the_pool_and_the_path() {`
+
+Check 3, a path that exists and is a file: refused as not a directory, so
+the operator is told something other than that it is missing.
+
+## `fn an_oauth_token_in_the_coordinators_environment_refuses_without_printing_it() {`
+
+Check 4: `CLAUDE_CODE_OAUTH_TOKEN` in the coordinator's environment would
+override the profile's credentials, so the run would not use the profile it
+names. The refusal names the variable, the pool and the profile, and never
+the token's value.
+
+## `fn a_profiled_claude_code_pool_on_the_host_with_its_directory_and_no_token_certifies() {`
+
+The pass case: a Claude Code pool whose profile directory exists, on the host
+runner, with no token set, certifies. The checks add no process of their
+own: the probes are the shell and the one agent, as for an unprofiled run.
+
+## `fn the_claude_code_probe_of_a_profiled_pool_runs_under_that_profile() {`
+
+The pre-flight's agent probe runs under the profile. The runner is assembled
+as `entry` assembles it, with `profiled` over the run's runner, and the
+pre-flight probes through it. The Claude Code probe arrives with its pool's
+profile. The shell probe, which has no agent, arrives with none.
+
+## `fn pools_that_name_no_profile_leave_the_preflight_as_it_was() {`
+
+An unprofiled run's pre-flight is unchanged. With pools that name no profile,
+none of the four checks applies: not on the container runner, not for an
+agent other than Claude Code, and not with a token set. The probes are the
+ones the run always made.
+
 ## `fn the_refusal_notes_keep_a_probe_whose_process_is_unresolved() {`
 
 Review round 2's `R2-REG-2` (the PR11 record, §13, round R2). The `certify` section of

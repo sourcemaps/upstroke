@@ -198,6 +198,12 @@ The caller warns; only it knows which absence it is looking at.
 the worktree lease and confirmed under it — see [`Validated`]. Everything
 from here on may inspect the machine.
 
+## `refuse_profiled_pools(&analysis.config.pools)?;`
+
+First, before any probe, a run whose pools name a `profile` is refused (see
+[`refuse_profiled_pools`]). Both the legacy run and the legacy resume come
+through here, so neither can run without a profile its pools name.
+
 ## `if let Some(routing) = recorded.routing.as_ref() {`
 
 Bindings are execution identity just like reviewers and gates. Restore
@@ -275,6 +281,17 @@ Here, with the other pre-flight refusals, rather than where the ceiling
 is first read: `--budget 0` must not create a branch and a run directory
 before discovering it cannot spend anything (§14 — pre-flight refuses
 before any agent token is spent, and before the workspace is touched).
+
+## `fn refuse_profiled_pools(pools: &[Pool]) -> Result<(), UpstrokeError> {`
+
+The legacy coordinator (schema 1–3 runs) does not carry credential
+profiles. Its runner is never wrapped by `engine::topology::profiled`, and
+its pre-flight makes none of the profile checks that
+`engine::topology::preflight` makes. Only runs created on the execution
+topology (schema 4) stamp a pool's `profile` onto its agent's requests. A
+legacy run that started anyway would run every attempt under the
+operator's default credentials while the pools file names others, so it is
+refused instead, naming the first pool that names a profile.
 
 ## `fn effective_budgets(`
 

@@ -1942,6 +1942,18 @@ dollar column comes from.
 And §14's pre-flight snapshot is on the record — folding to nothing,
 which `assert_live_equals_replay` elsewhere is what proves.
 
+## `fn a_legacy_run_refuses_a_profiled_pool_at_preflight_rather_than_ignore_it() {`
+
+The legacy coordinator does not carry a pool's `profile`: only runs created on
+the execution topology (schema 4) stamp it onto their agents' requests. So a
+legacy run whose pools name one is refused at pre-flight
+(`preflight::refuse_profiled_pools`), naming the pool, the profile and where
+profiles apply, before the run branch or a run directory exists. Without the
+refusal it would run every attempt under the operator's default credentials
+while the pools file says otherwise. A fresh run is the case driven here; a
+legacy resume reaches the same check, because both go through
+`preflight_with_recorded`.
+
 ## `let (_tree, repo) = temp_engine_repo("poolexhausted");`
 
 §13 source 1 made real: the signal is ground truth, and the estimator

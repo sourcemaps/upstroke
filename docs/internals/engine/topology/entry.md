@@ -502,7 +502,12 @@ is `RunnerPreflight::certify`, which records what it probed before it returns
 
 The runner is profiled with the configuration's pools as on the fresh path,
 before `RunPreflight` is built over it, so the resume's probes, workers and
-reviewers carry their agent's bound credential profile too.
+reviewers carry their agent's bound credential profile too. The same pools
+go to the pre-flight (`RunPreflight::with_pools`), whose `certify` refuses a
+profile the run cannot honour before anything is spawned for it: one on the
+container runner, one for an agent other than Claude Code, one whose
+directory is missing, or any profile while `CLAUDE_CODE_OAUTH_TOKEN` is set
+(`engine::topology::preflight`'s notes).
 
 ## `fn fresh_record(fresh: &FreshRecord<'_>) -> Result<RunStarted4, UpstrokeError> {`
 
