@@ -577,9 +577,9 @@ is what says so, and it is what fails if one comes back.
 
 Two independently varying fields, and their intersection is the test:
 **which boundary** (two, reporting different versions) x **in which
-order** (both). Three distinct versions are asserted as distinct-value
-counts rather than described, so a fixture that lost a version reports
-it instead of agreeing with itself.
+order** (both). Two distinct versions (1.1.1 and 2.2.2), probed in both
+orders, are asserted as a distinct-value count rather than described, so
+a fixture that lost a version reports it instead of agreeing with itself.
 
 ## `mod built_program_tests` › `fn the_adapters_hold_no_process_wide_resolution_state() {`
 
