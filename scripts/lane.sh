@@ -111,13 +111,15 @@ must_fix_for() {
   esac
 }
 
-# may_accept_for <lane>: the severities that may be recorded as `accepted-risk` with a ledger row
-# alone -- no finding file under findings/, no manual read -- as a space-separated list, tested by
-# the caller the way `must_fix_for`'s is: `[[ " $may_accept " == *" $sev "* ]]`.
+# may_accept_for <lane>: the severities that may be recorded as `accepted-risk` and accepted with
+# no manual read -- each still filed under findings/ like every open finding, and accepted only
+# when its ledger row records the review's severity -- as a space-separated list, tested by the
+# caller the way `must_fix_for`'s is: `[[ " $may_accept " == *" $sev "* ]]`.
 #
-# THE OWNER'S RULING OF 2026-11-13: a P3, in every lane, may be accepted on its row; its row is its
-# record. A P2 or higher recorded as `accepted-risk` is still the owner's call and is not in this
-# answer, and a `rejected` row is never answered here at all.
+# THE OWNER'S RULING OF 2026-11-13: a P3, in every lane, filed with `disposition: accepted-risk`,
+# is accepted without the owner's read when its row records the review's severity. A P2 or higher
+# recorded as `accepted-risk` is still the owner's call and is not in this answer, and a `rejected`
+# row is never answered here at all.
 #
 # THE TWO HARD RULES ARE APPLIED BEFORE THIS, and this answer does not reach past them: a finding
 # carrying a failing test, reproduction or mutation witness, and a `MUST` deviation, are fixed
