@@ -61,8 +61,9 @@ source, documentation, workflows, release machinery and this file.
    `engine::`, `runner::`, and everything else. The slowest shard was predicted at about 14.4
    minutes and the slowest macOS leg at about 11.8. Run 44736631711 measured both re-splits for
    the first time: the slowest Windows leg took 18.1 minutes and the slowest macOS leg 16.0.
-   Each test's result line in a Windows leg's log now ends with its time on the hosted runner
-   (`test <name> ... ok <0.123s>`, libtest's `--report-time`). libtest writes the time apart
+   In a Windows leg's log, the result line of each test the leg runs now ends with its time on
+   the hosted runner (`test <name> ... ok <0.123s>`, libtest's `--report-time`); an ignored test
+   is not run, and its line carries no time. libtest writes the time apart
    from the result, so a child a test starts on the harness's console can write between them
    and move the time to the next line; the `mklink` that `link_dir` in `src/rundir/tests.rs`
    starts was one, and `link_dir` now captures its output. The packing of tests into legs is to

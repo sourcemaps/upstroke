@@ -362,8 +362,9 @@ Lines 4 to 7 were one line until the legs reported each test's time:
 running each in turn. libtest reports a test's time only under
 `--report-time`, which it takes only after `-Z unstable-options`, and on a
 stable compiler it takes that only where `RUSTC_BOOTSTRAP` is set in the
-harness's own environment. Each test's result line then ends with its
-time, as `test <name> ... ok <0.123s>`. libtest writes the time apart from
+harness's own environment. The result line of each test the leg runs then
+ends with its time, as `test <name> ... ok <0.123s>`; an ignored test is not
+run, and its line carries no time. libtest writes the time apart from
 the result, so a child a test starts on the harness's console can write
 between them and move the time to the next line; the `mklink` that
 `link_dir` in `src/rundir/tests.rs` starts was one, and `link_dir` now

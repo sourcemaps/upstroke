@@ -2215,8 +2215,9 @@ this check read and how each was shown a spelling it missed.
 ## `const WINDOWS_SUITE_TIMES: &str = "-Z unstable-options --report-time";`
 
 What the Windows shards hand each test harness after the leg's selection,
-so that libtest ends each test's result line with the time it took, as
-`test <name> ... ok <0.123s>`. libtest writes the time apart from the
+so that libtest ends the result line of each test the leg runs with the
+time it took, as `test <name> ... ok <0.123s>`; an ignored test is not run,
+and its line carries no time. libtest writes the time apart from the
 result, so a child a test starts on the harness's console can write between
 them and move the time to the next line; the `mklink` that `link_dir` in
 `src/rundir/tests.rs` starts was one, and `link_dir` now captures its
