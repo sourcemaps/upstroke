@@ -195,3 +195,61 @@ The raw job log's SHA256 is `37dbcaa1801c8b1ac9ba7727f822116ac1c2df7ef3419c8a33a
 
 **The cause is still not established.** The guard in this finding's frontmatter still applies: the
 next step is to establish the cause, not to repair.
+
+## Recurrence, 2026-11-27
+
+This section records another recurrence on native macOS CI, in the shape `findings/PROCESS.md` §10
+sets. It establishes no cause and repairs nothing, and the frontmatter and the sections above are
+unchanged.
+
+| run | job | platform | date | pull request | checkout |
+|---|---|---|---|---|---|
+| `45925135358` (`pull_request`), attempt 1 | `140264577840`, `test (macos-latest, 12 of 12)` | a GitHub-hosted `macos-latest` runner, image `macos-26-arm64` version `20261117.0516.1` (log lines 17-18) | 2026-11-27, 01:53:33Z to 02:02:13Z (8 min 40 s) | #437 at `bc645322` | `a8b816f`, GitHub's merge of `bc645322` into `master` at `552c0395` (log line 107) |
+
+Read from the job's log as GitHub's API serves it, with ANSI escape sequences removed
+(`~/selfhost-findings-20261128/evidence/job-45925135358-140264577840.log`, SHA256
+`768e14668fc70abdacdd709a5e36fc0d6209d6087c95fdea51e0cd62ab08aee3`):
+
+- Line 995:
+  `test agent::proc::tests::terminal_input_and_output_stops_cover_the_isolated_tree ... FAILED`.
+- Line 2968: the panic at `src/agent/proc/tests.rs:3027:28`. Line 2969:
+  `signal 22 left the supervised tree stranded`. Signal 22 on macOS is `SIGTTOU`.
+- Line 2975:
+  `test result: FAILED. 2426 passed; 1 failed; 107 ignored; 0 measured; 1727 filtered out; finished in 312.08s`.
+  This test was the only failure.
+- In the same run 44 of the 46 jobs passed; the other failure was the aggregate `upstroke-ci` (job
+  `140267605699`).
+
+**What the test asserts, by line at `bc645322`.** `bc645322`'s `src/agent/proc.rs` and
+`src/agent/proc` directory are `552c0395`'s byte for byte, and `a8b816f` is their merge. Line 3027
+is the `unwrap_or_else` on `wait_for_exit(&mut helper.child, Duration::from_secs(10))` (line 3026),
+after `finish` is written (line 3024) and `SIGCONT` is sent to the group (line 3025), in
+`assert_stop_covers_the_isolated_tree` (line 3005): the step the failure sequence above numbers 5,
+in the `SIGTTOU` pass. #437's diff, from its merge base `d5aff4f5` to `bc645322`, changes
+`src/agent/codex.rs` and nothing in `src/agent/proc.rs` or under the `src/agent/proc` directory.
+
+**The same checkout passed twice before.** Runs `45902908779` (job `140192818663`, 2026-11-26,
+22:09:33Z to 22:13:51Z) and `45905435081` (job `140200917974`, 22:32:27Z to 22:41:10Z), both
+`pull_request` runs on #437 at `bc645322`, checked out the same merge commit, `a8b816f` (line 107 of
+each log), on image version `20261117.0516.1` (line 18). Each logged the test `... ok` (lines 672
+and 674) and the library's `test result: ok. 2427 passed; 0 failed; 107 ignored` (lines 2962 and
+2963). Their logs: `~/selfhost-findings-20261128/evidence/job-45902908779-140192818663.log`, SHA256
+`55fd89db5182f8061e732a729ef8c42219d04f2d975efd350d301f2114d07211`, and
+`~/selfhost-findings-20261128/evidence/job-45905435081-140200917974.log`, SHA256
+`d283762bd1ce005a9b086ddb1138a180ee676c6c3bd7e25cf3f4d1241977b1f5`.
+
+**What is and is not established.**
+
+- **Established:** in one hosted macOS job, the test's ten-second wait for the helper to exit after
+  `SIGCONT`, in the `SIGTTOU` pass, ran out; the same merge commit passed the test in two earlier
+  runs on the same image version.
+- **Not established:** whether the tree never resumed or resumed too slowly. The log records only
+  the timeout.
+- **Inferred, not established:** a timing failure of the test on a loaded macOS runner.
+- **Inferred, not established:** a race in how `agent::proc` handles `SIGTTOU` followed by `SIGCONT`
+  on macOS.
+- These readings are not exhaustive.
+- **Not established: the rate.**
+
+**What was done.** No re-run of this job was made: #437 was parked at the time. It merged later, as
+`ca058512`. The guard in this finding's frontmatter still applies.
