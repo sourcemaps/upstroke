@@ -435,8 +435,19 @@ impl AgentAdapter for FakeAdapter {
             scripted(&self.effects, index, Effect::EditFile),
             self.worker_limit_on_stderr,
         ) {
+            // The JSON result on stdout, the limit on stderr, then a failing
+            // exit, spelled with what both shells `shell_spec` picks share:
+            // `echo`, `>&2` and `&&`. The `printf '…'; …` spelling this
+            // replaces was `sh`'s alone, and under `cmd /C` the missing
+            // `printf` made the attempt an agent error that parked the task.
+            // There is no blank before `>&2` or `&&`, so `cmd` writes no
+            // trailing one; its CRLF line ends change neither the JSON nor
+            // the reset the parser reads. `echo_operand` says why each text
+            // is still quoted per shell.
             return Ok(shell_spec(&format!(
-                "printf '%s' '{CLAUDE_REQUEST_FAILED}'; printf '%s\\n' \"{limit}\" >&2; exit 1"
+                "echo {}&& echo {}>&2&& exit 1",
+                echo_operand(CLAUDE_REQUEST_FAILED),
+                echo_operand(limit)
             )));
         }
         Ok(shell_spec("exit 0"))
@@ -646,6 +657,32 @@ impl RecordingSleeper {
 
 fn shell_spec(script: &str) -> CommandSpec {
     crate::gates::ShellKind::native().spec(script)
+}
+
+/// `text` as one operand of `echo` in the shell `shell_spec` picks, so that
+/// `cmd /C` and `sh -c` print the same line. `cmd`'s `echo` prints every
+/// character it is given, quotes included, and reads none of `sh`'s escapes,
+/// so `cmd` gets the text bare. `sh` reads a bare `"` as quoting, `(` and `)`
+/// as syntax and `{a,b}` as a brace expansion, so it gets the text in double
+/// quotes with each `"` escaped. A JSON result needs its quotes and a limit
+/// message its ` (UTC)`, so no one spelling serves both. The refused
+/// characters are the ones that would still differ: `cmd` reads `^ & | < > %`
+/// even in a bare `echo`, `sh` expands `$` and `` ` `` inside double quotes,
+/// its `echo` may read `\` as an escape, and `cmd` writes in the console's
+/// code page rather than UTF-8.
+fn echo_operand(text: &str) -> String {
+    assert!(
+        text.is_ascii() && !text.contains(['^', '&', '|', '<', '>', '%', '$', '`', '\\']),
+        "{text:?} holds a character `cmd` and `sh` would not echo alike"
+    );
+    if matches!(
+        crate::gates::ShellKind::native(),
+        crate::gates::ShellKind::Cmd
+    ) {
+        text.to_owned()
+    } else {
+        format!("\"{}\"", text.replace('"', "\\\""))
+    }
 }
 
 fn git_in(repo: &Path, args: &[&str]) -> String {
@@ -8187,8 +8224,13 @@ fn a_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_pool_exhaus
         vec![Effect::RateLimited, Effect::EditFile],
         vec![ReviewBehavior::Pass],
     );
+    // The fake worker echoes this through the native shell (see
+    // `echo_operand`), so `-` stands in for the real message's `·`, which
+    // `cmd` would write in the console's code page. The parser reads any
+    // non-alphanumeric run between the limit and `resets`, and needs the
+    // ` (UTC)` that `echo_operand` keeps.
     source.adapter.worker_limit_on_stderr =
-        Some("You've hit your 5-hour limit · resets 5:30am (UTC)");
+        Some("You've hit your 5-hour limit - resets 5:30am (UTC)");
     let report = run_with(&opts, &source).expect("run");
     assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
 
