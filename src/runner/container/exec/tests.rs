@@ -6472,10 +6472,9 @@ fn slow_docker_start_child() {
             "#!/bin/sh\n\
              fail() {{ echo \"stand-in docker: $1\" >&2; exit 1; }}\n\
              if [ \"$1\" = start ]; then\n\
-             \x20 began=$(PATH=/bin:/usr/bin date +%s) || fail 'no start time'\n\
-             \x20 PATH=/bin:/usr/bin sleep {SLOW_START_HOLD_SECONDS} || fail 'the delay failed'\n\
-             \x20 ended=$(PATH=/bin:/usr/bin date +%s) || fail 'no end time'\n\
-             \x20 printf '%s %s\\n' \"$began\" \"$ended\" >>\"${SLOW_START_MARK}\" || fail 'no mark'\n\
+             \x20 PATH=\"${SLOW_START_ORIGINAL_PATH}\" sleep {SLOW_START_HOLD_SECONDS} \
+             || fail 'the delay failed'\n\
+             \x20 echo 'delayed {SLOW_START_HOLD_SECONDS}' >>\"${SLOW_START_MARK}\" || fail 'no mark'\n\
              fi\n\
              PATH=\"${SLOW_START_ORIGINAL_PATH}\" exec docker \"$@\"\n"
         ),
@@ -6485,7 +6484,7 @@ fn slow_docker_start_child() {
         .expect("the stand-in is executable");
     assert_eq!(
         crate::util::find_program(crate::runner::container::DOCKER_PROGRAM),
-        Some(stand_in.clone()),
+        Some(stand_in),
         "the stand-in is not the `docker` this process runs, so nothing below is slowed"
     );
 
@@ -6540,18 +6539,13 @@ fn slow_docker_start_child() {
          was reached without the slow start this test exists to hold",
         mark.display()
     );
+    let held = format!("delayed {SLOW_START_HOLD_SECONDS}");
     for line in delayed.lines() {
-        let (began, ended) = line
-            .split_once(' ')
-            .and_then(|(began, ended)| {
-                Some((began.parse::<u64>().ok()?, ended.parse::<u64>().ok()?))
-            })
-            .unwrap_or_else(|| panic!("a mark line that is not two times in seconds: {line:?}"));
-        assert!(
-            ended.saturating_sub(began) >= SLOW_START_HOLD_SECONDS,
-            "a `docker start` was delayed {} seconds, not the {SLOW_START_HOLD_SECONDS} asked for: \
-             {line:?}",
-            ended.saturating_sub(began)
+        assert_eq!(
+            line,
+            held.as_str(),
+            "a mark line that is not the {held:?} the stand-in writes only after its `sleep \
+             {SLOW_START_HOLD_SECONDS}` succeeded: {line:?}"
         );
     }
 }
