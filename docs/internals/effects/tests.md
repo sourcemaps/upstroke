@@ -2450,7 +2450,8 @@ against it.
 
 Both are found from `current_exe` rather than from a guessed target
 directory: `CARGO_TARGET_DIR` here is the build wrapper's slot, not `target/`.
-The idiom is lane C's, from `src/events/log/tests.rs`.
+The idiom began as lane C's copy in `src/events/log/tests.rs`, which now
+calls this helper.
 
 There are two layouts, told apart by what is on disk and never by the
 toolchain's version:
@@ -2504,7 +2505,7 @@ Every `<package>/<unit>/out` directory under `<profile>/build`. They are
 sorted, so the `-L` order does not depend on the order the directory is
 listed in. An entry that cannot be listed as a directory is skipped.
 
-## `fn newest_upstroke_rlib(dirs: &[PathBuf]) -> Option<PathBuf> {`
+## `fn newest_upstroke_rlib(dirs: &[&Path]) -> Option<PathBuf> {`
 
 The most recently modified `libupstroke-*.rlib` in any of `dirs`, or `None`.
 A file whose modification time cannot be read sorts as the epoch, as it did

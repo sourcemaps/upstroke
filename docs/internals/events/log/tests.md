@@ -1383,8 +1383,13 @@ directly. Three things are asserted that a bare "it did not build" cannot:
 
 ### The one boundary, stated rather than hidden
 
-The fixtures are compiled against the rlib cargo built beside this test
-binary, so they see the crate as an external consumer does. Under the gate
+The fixtures are compiled against the rlib the shared lookup,
+`crate::effects::tests::crate_under_test`, finds: the one beside this test
+binary under Cargo's old layout, or, under Cargo 1.100.0's per-unit layout,
+the newest `libupstroke-*.rlib` in the package's unit directories
+(`build/upstroke/<hash>/out/`). The lookup is described under `typecheck`'s
+`let built = crate::effects::tests::crate_under_test();` above. Either way
+they see the crate as an external consumer does. Under the gate
 command that rlib is always current — `--all-targets` builds the `upstroke`
 binary, which links it. Under a bare `cargo test --lib` after a visibility
 change, cargo has no reason to rebuild the rlib, and a fixture could then

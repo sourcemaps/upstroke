@@ -3450,11 +3450,9 @@ fn extern_dependencies(dirs: &[PathBuf]) -> Vec<(String, PathBuf)> {
             .metadata()
             .and_then(|meta| meta.modified())
             .unwrap_or(std::time::UNIX_EPOCH);
-        let slot = best
-            .entry(crate_name.replace('-', "_"))
-            .or_insert((stamp, path.clone()));
-        if stamp >= slot.0 {
-            *slot = (stamp, path);
+        let key = crate_name.replace('-', "_");
+        if best.get(&key).is_none_or(|(seen, _)| stamp >= *seen) {
+            best.insert(key, (stamp, path));
         }
     }
     best.into_iter()
@@ -6111,7 +6109,7 @@ pub(crate) fn crate_under_test() -> CrateUnderTest {
         .parent()
         .expect("the test executable is in a directory")
         .to_path_buf();
-    if let Some(rlib) = newest_upstroke_rlib(std::slice::from_ref(&beside)) {
+    if let Some(rlib) = newest_upstroke_rlib(&[beside.as_path()]) {
         return CrateUnderTest {
             rlib,
             dependency_dirs: vec![beside],
@@ -6130,10 +6128,10 @@ pub(crate) fn crate_under_test() -> CrateUnderTest {
         .parent()
         .expect("a per-unit package directory is in the build directory");
     let dependency_dirs = unit_out_dirs(build);
-    let own: Vec<PathBuf> = dependency_dirs
+    let own: Vec<&Path> = dependency_dirs
         .iter()
         .filter(|out| out.parent().and_then(Path::parent) == Some(package))
-        .cloned()
+        .map(PathBuf::as_path)
         .collect();
     let Some(rlib) = newest_upstroke_rlib(&own) else {
         panic!(
@@ -6181,7 +6179,7 @@ fn unit_out_dirs(build: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-fn newest_upstroke_rlib(dirs: &[PathBuf]) -> Option<PathBuf> {
+fn newest_upstroke_rlib(dirs: &[&Path]) -> Option<PathBuf> {
     let mut rlibs: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
     for dir in dirs {
         let entries = fs::read_dir(dir)
