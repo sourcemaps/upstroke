@@ -278,6 +278,17 @@ about the result text, and this test holds that route open for the new
 wording. The run's evidence is the result form. Nobody has seen the stderr
 form from the CLI.
 
+## `mod tests` › `fn a_failed_attempt_whose_result_says_you_hit_your_context_window_limit_is_an_agent_error() {`
+
+A failed attempt in the same shape as the five-hour one, exit code 1 and
+`"is_error":true`, whose result is
+`You've hit your context-window limit; shorten the prompt`. A context window
+is not a quota window, so it must parse to `AgentError`, which the ladder
+retries or escalates, and not to `RateLimited`, which would defer a real
+failure and tell the capacity engine the pool is exhausted. The message
+still comes through as the detail. Under the earlier rule, which took any
+"limit" after "hit your", this attempt was `RateLimited`.
+
 ## `mod tests` › `fn a_successful_task_about_hitting_a_limit_is_not_rate_limited() {`
 
 A successful attempt whose summary says "you've hit your 5-hour limit"

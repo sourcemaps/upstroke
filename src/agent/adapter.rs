@@ -218,9 +218,21 @@ pub fn looks_rate_limited(text: &str) -> bool {
     ]
     .iter()
     .any(|needle| lower.contains(needle))
-        || lower
-            .split_once("hit your")
-            .is_some_and(|(_, after)| after.contains("limit"))
+        || hits_a_quota_window(&lower)
+}
+
+fn hits_a_quota_window(lower: &str) -> bool {
+    lower.split("hit your ").skip(1).any(|after| {
+        let hours = after.trim_start_matches(|character: char| character.is_ascii_digit());
+        let window_end = if hours.len() < after.len() {
+            hours.strip_prefix("-hour")
+        } else {
+            after
+                .strip_prefix("session")
+                .or_else(|| after.strip_prefix("weekly"))
+        };
+        window_end.is_some_and(|rest| rest.starts_with(" limit"))
+    })
 }
 
 #[cfg(test)]
@@ -471,6 +483,35 @@ mod tests {
     #[test]
     fn a_hit_your_weekly_limit_message_signals() {
         assert!(looks_rate_limited("You've hit your weekly limit"));
+    }
+
+    #[test]
+    fn the_recorded_hit_your_session_limit_message_signals() {
+        assert!(looks_rate_limited("You've hit your session limit"));
+    }
+
+    #[test]
+    fn a_hit_your_context_window_limit_message_does_not_signal() {
+        let text = "You've hit your context-window limit; shorten the prompt";
+        assert!(!looks_rate_limited(text), "should not signal: {text}");
+    }
+
+    #[test]
+    fn hit_your_limit_with_no_window_does_not_signal() {
+        let text = "you hit your limit";
+        assert!(!looks_rate_limited(text), "should not signal: {text}");
+    }
+
+    #[test]
+    fn an_hours_window_is_spelt_hour_then_limit() {
+        let text = "hit your 5-hours limit";
+        assert!(!looks_rate_limited(text), "should not signal: {text}");
+    }
+
+    #[test]
+    fn a_window_after_a_later_hit_your_signals() {
+        let text = "the patch hit your branch, then you've hit your weekly limit";
+        assert!(looks_rate_limited(text), "should signal: {text}");
     }
 
     #[test]

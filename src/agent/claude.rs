@@ -774,6 +774,18 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_attempt_whose_result_says_you_hit_your_context_window_limit_is_an_agent_error() {
+        let stdout = r#"{"type":"result","is_error":true,
+            "result":"You've hit your context-window limit; shorten the prompt","session_id":"s1"}"#;
+        let outcome = parse_output(&output(Some(1), stdout, ""));
+        assert_eq!(outcome.status, OutcomeStatus::AgentError);
+        assert_eq!(
+            outcome.detail.as_deref(),
+            Some("You've hit your context-window limit; shorten the prompt")
+        );
+    }
+
+    #[test]
     fn a_successful_task_about_hitting_a_limit_is_not_rate_limited() {
         let stdout = r#"{"type":"result","subtype":"success","is_error":false,
             "result":"Handled the case where you've hit your 5-hour limit.",

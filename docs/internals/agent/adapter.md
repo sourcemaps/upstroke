@@ -308,19 +308,35 @@ twenty-one attempts in that run were read as `AgentError` and spent an
 attempt each, when they should have been read as `RateLimited` and deferred.
 Twelve tasks parked without a commit.
 
-So one rule sits beside the phrases: the text, in lower case, contains
-"hit your" and then contains "limit" somewhere after it. The order matters.
-"limit" only before "hit your" does not signal, and neither does "hit your"
-with no "limit". The rule takes the text after the first "hit your". If any
-later "hit your" is followed by "limit", the first one is too, so checking
-the first is enough. The rule uses `split_once` and `contains` on the string
-that is already lower-cased, so it allocates nothing more and cannot panic.
+So one rule sits beside the phrases, in `hits_a_quota_window`: the text, in
+lower case, contains "hit your " followed immediately by a quota window and
+then " limit". There are exactly three windows: a number of hours, written as
+one or more ASCII digits and then "-hour" ("5-hour"); "session"; and
+"weekly". Every occurrence of "hit your " is checked, not only the first, so
+an ordinary "the patch hit your branch" earlier in the text does not hide a
+limit message after it. "hit your usage limit" needs no window: "usage limit"
+is one of the twelve phrases.
 
-Only the five-hour form has been observed. The rule is written to also cover
-the likely siblings, "You've hit your weekly limit" and "You've hit your
-session limit", without one phrase per window. Neither sibling has been seen
-from the CLI. If Claude Code prints them some other way, this rule will not
-match them.
+The rule is narrow on purpose. A rate-limit signal is ground truth about
+capacity (§13): the ladder does not count the attempt, defers it, and after
+three deferrals asks a human. So "You've hit your context-window limit",
+"hit your rate of change limit" and a bare "hit your limit" do not signal.
+They are task failures, to be retried or escalated like any other.
+
+The rule splits the already lower-cased text on "hit your " and reads each
+piece with `trim_start_matches`, `strip_prefix` and `starts_with`. Those
+return slices of the same string, so it allocates nothing more, and nothing
+in it indexes or unwraps, so it cannot panic.
+
+Two forms have been observed. The five-hour form is the one from run
+`01M740JX5N8HB94RNC7W2MM777` above (2026-11-11, exit code 1). The session
+form, `You've hit your session limit`, is in `reviews/FINDINGS.md`, in the
+record of a worker that returned rc=1 with that message while its wrapper
+reported success. The weekly form is covered on the expectation that it is
+worded alike. It has not been observed. A limit message in any other wording
+is not recognised and is read as `AgentError`. That spends an attempt, which
+is the safer mistake: a false rate-limit signal would tell the capacity
+engine an untouched pool is exhausted.
 
 Only ever consulted for a FAILED attempt: a successful task *about* rate
 limiting ("added backoff for 429 responses") must never be read as the pool
@@ -421,32 +437,70 @@ separator.
 This is the message Claude Code printed when an account reached its limit,
 copied verbatim from the event log of run `01M740JX5N8HB94RNC7W2MM777`
 (2026-11-11, exit code 1), middle dot included. None of the twelve phrases
-matches it, so only the "hit your … limit" rule can make it signal. Remove
-the rule and this test fails.
+matches it, so only the quota-window rule can make it signal, through its
+hours window. Remove the rule and this test fails.
 
 ## `mod tests` › `fn a_hit_your_weekly_limit_message_signals() {`
 
-The weekly window in the same wording. Nobody has seen this text from the
-CLI. Only the five-hour form has been observed. The test pins what the rule
-claims to cover: the wording, not one particular window.
+The weekly window in the same wording. This text has not been observed from
+the CLI. The test pins what the rule claims to cover on the expectation that
+the weekly message is worded like the five-hour and session ones.
+
+## `mod tests` › `fn the_recorded_hit_your_session_limit_message_signals() {`
+
+The session window, in the words `reviews/FINDINGS.md` records from a worker
+that returned rc=1 with `You've hit your session limit`. None of the twelve
+phrases matches it. Remove "session" from the windows and this test fails.
+
+## `mod tests` › `fn a_hit_your_context_window_limit_message_does_not_signal() {`
+
+A context-window limit is a fault in the task, not a quota window: a shorter
+prompt fixes it and waiting does not. "hit your " is followed by
+"context-window", which is none of the three windows, so the text does not
+signal. Under the earlier rule, which took any "limit" after "hit your", it
+did, and the ladder would have deferred a real failure three times and asked
+a human.
+
+## `mod tests` › `fn hit_your_limit_with_no_window_does_not_signal() {`
+
+"you hit your limit" names no window. The rule needs one of the three
+between "hit your " and " limit", so this does not signal. A rule that made
+the window optional would fail this test.
+
+## `mod tests` › `fn an_hours_window_is_spelt_hour_then_limit() {`
+
+"hit your 5-hours limit" has digits and "-hour", but then "s limit", not
+" limit". The window must be followed immediately by " limit", so this does
+not signal. A rule that looked for " limit" anywhere after the window, or
+accepted "-hours", would fail this test.
+
+## `mod tests` › `fn a_window_after_a_later_hit_your_signals() {`
+
+The first "hit your " is followed by "branch", the second by "weekly limit".
+The text signals because every occurrence of "hit your " is checked. A rule
+that read only the first occurrence, as `split_once` does, would miss it and
+fail this test.
 
 ## `mod tests` › `fn limit_before_hit_your_and_none_after_does_not_signal() {`
 
-"limit" before "hit your", with no "limit" after it, does not signal. The
-order is the rule.
+"limit" before "hit your", with no window after it, does not signal. The
+rule reads only what follows "hit your ", so a "limit" earlier in the text
+plays no part.
 
 The first text, "no limit was hit; your change is in", is the example from
-the task that added the rule. Its semicolon means it never contains "hit
-your" as a substring. That makes it a fair negative, but it cannot catch a
-rule that ignores order. The second text has a real "hit your" with "limit"
-only before it, and that one does catch it. If the rule were changed to
-match "limit" anywhere in a text that contains "hit your", the second text
-would signal and this test would fail.
+the task that added the first form of the rule. Its semicolon means it never
+contains "hit your " as a substring, so it is a fair negative but cannot
+tell one rule from another. The second text has a real "hit your " followed
+by "branch", with "limit" only before it. It witnesses that a rule matching
+"limit" anywhere in a text that contains "hit your" would be wrong: that
+rule would signal on it and this test would fail.
 
 ## `mod tests` › `fn hit_your_without_limit_does_not_signal() {`
 
 "hit your" alone is ordinary English, as in a patch that hit your branch. It
-is not a limit message, so the rule also needs "limit".
+is not a limit message. It witnesses that the rule needs more than the
+words "hit your": a rule that signalled on them alone would fail this test.
+The tests above pin what more it needs, a window and then " limit".
 
 ## `mod built_program_tests` › `struct Boundary {`
 
