@@ -5,7 +5,7 @@ disposition: deferred
 category: correctness
 pr: 376
 reviewed_sha: e62b49cce5d09020fd0019b7b8ef471546d0a8a4
-location: src/effects/tests.rs:6090
+location: src/effects/tests.rs:6184
 provenance: pre_existing
 first_bad:
 guard: the change that makes `crate_under_test` choose the library unit built for the running test executable rather than the newest one, for instance by reading the unit's fingerprint or the dependency file beside the executable, with a witness of a build slot holding two builds of the library
@@ -15,9 +15,9 @@ guard: the change that makes `crate_under_test` choose the library unit built fo
 
 ## Failure sequence
 
-`crate_under_test` in `src/effects/tests.rs` (line 6090 at the reviewed commit) finds this crate's library for the
-fixture-compiling tests. Under Cargo 1.100.0's per-unit layout it takes the newest `libupstroke-*.rlib` among the
-package's unit directories, `debug/build/upstroke/<hash>/out/`.
+`crate_under_test` in `src/effects/tests.rs` (line 6108 at the reviewed commit) finds this crate's library for the
+fixture-compiling tests. Under Cargo 1.100.0's per-unit layout it takes, through `newest_upstroke_rlib` (line 6184), the
+newest `libupstroke-*.rlib` among the package's unit directories, `debug/build/upstroke/<hash>/out/`.
 
 A build directory can hold two builds of the library. On the operator's build machine, build slot 1 held two 1.100.0
 units, `build/upstroke/73049cf421cb3c54/` and `build/upstroke/3d5016eed0999272/`, whose fingerprints differ in
