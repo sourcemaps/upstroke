@@ -32,7 +32,9 @@ tests in `super::tests` fail and this file is the thing that must be argued with
 
 LEGACY-EFFECT: this module is in the **frozen legacy section** of `effects/allowlist.toml`, which
 carries its justification and the condition under which the section shrinks.
-`decisions.effect_site_inventory.mechanism` (2).
+The design packet's `decisions.effect_site_inventory.mechanism` (2), which is not in this
+repository, is the source the allowlist entry's `packet` field cites for this placement; the
+entry's `legacy_effect` text is the justification that applies.
 
 ## `pub struct PremoveEventLog {`
 
