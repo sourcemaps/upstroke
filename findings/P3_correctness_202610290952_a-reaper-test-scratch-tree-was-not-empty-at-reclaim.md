@@ -54,26 +54,16 @@ Observed once, and not reproduced. PR #345's CI run 40847264881, job 12335837658
   `PR172-REAPER-ROUNDS-STUB-NEVER-RAN`.
 - **Keep the scratch guard's panic on a failed reclaim:** a leaked tree must still fail the test.
 
-## The same reclaim failure in another test, 2026-11-11
+## A Linux sighting of the same test, 2026-11-10
 
-Both observations below are from full local runs of the test suite on the operator's build machine, not from CI.
-
-1. **A second test failed at the same reclaim.** In a local run on 2026-11-11 at about 15:40 UTC, at commit `6db8d300`
-   (a notes-only change on pull request #368's branch),
-   `agent::proc::termination::tests::a_stopped_container_reaper_ends_its_caller_rather_than_releasing_it` failed. It
+1. **The test failed in a local run, not in CI.** In a full local run of the test suite on the operator's build machine,
+   on Linux, on 2026-11-10 at about 22:00 UTC at commit `62ecddd`, `unix_reaper_kills_labeled_containers` failed. It
    panicked at `src/rundir/scratch_tree.rs:761:21`, the scratch guard's reclaim, with "scratch tree
-   /tmp/upstroke-stopped-container-reaper-ZVP3QJC3ET was not reclaimed: Directory not empty (os error 39)": the same
-   location and the same error this finding records for `unix_reaper_kills_labeled_containers`.
-2. **The first test failed the same way the day before.** In a local run on 2026-11-10 at about 22:00 UTC, at commit
-   `62ecddd`, `unix_reaper_kills_labeled_containers` itself failed at `src/rundir/scratch_tree.rs:761:21` with "scratch
-   tree /tmp/upstroke-bare-dies-AS947RAKZF was not reclaimed: Directory not empty (os error 39)".
-3. **No rate is given.** Both runs were on a heavily used machine, and each failure is one among the operator's local
-   suite runs of those days. The number of local runs that passed was not counted.
+   /tmp/upstroke-bare-dies-AS947RAKZF was not reclaimed: Directory not empty (os error 39)".
+2. **The platform and the error number differ from this finding's sighting; the step and the meaning do not.** That
+   sighting was on macOS, with `os error 66`. Both are the platform's "directory not empty", raised at the same reclaim
+   of the test's bare-dies scratch tree.
+3. **No rate is given.** The number of local runs that passed was not counted.
 
-**What this adds:** the failure is not particular to one test. A second test that starts a container reaper and
-reclaims a scratch tree met it. Whoever takes this finding up should look at what the two tests share, with a reaper
-still writing into the tree when it is reclaimed being the candidate this finding already names, and should check the
-other tests of that shape. No cause is established here.
-
-**Kept separate:** pull request #340 repairs `unix_reaper_kills_labeled_containers` by waiting for the reaper's group
-before the reclaim. It does not touch `a_stopped_container_reaper_ends_its_caller_rather_than_releasing_it`.
+The same reclaim failure in `a_stopped_container_reaper_ends_its_caller_rather_than_releasing_it` is filed as
+`LOCAL-RUN-STOPPED-REAPER-SCRATCH-NOT-EMPTY-AT-RECLAIM`.
