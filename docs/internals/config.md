@@ -46,7 +46,7 @@ message quotes that is longer than 16 characters withheld (a key or schema
 name is kept up to 64). Only a key is refused: an unrecognised `mode` value
 still warns and the load succeeds.
 No forward-compatibility key is lost at the top level: nothing in the tree's
-fixtures, docs or examples writes a top-level key outside the seven.
+fixtures, docs or examples writes a top-level key outside the eight.
 
 ## `fn a_misspelled_top_level_section_is_refused_not_dropped() {`
 
