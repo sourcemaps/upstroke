@@ -141,7 +141,10 @@ type ParkedSlot = Arc<Mutex<Parked>>;
 enum Reclaimed {
     /// The tree is gone and the token is spent.
     Done,
-    /// The tree is still there. **Slice 1's own refusal**, carrying the token
+    /// The reclaim was refused and the token came back. That says nothing about
+    /// whether the tree is still there: on [`spend`]'s path the refusal follows
+    /// something the funnel checked or observed, and on [`refuses`]'s nothing
+    /// was observed at all. **Slice 1's own refusal**, carrying the token
     /// it handed back and the error slice 1 recorded: on [`spend`]'s path, what
     /// the identity check, the remover or the root-absence observation
     /// answered; on [`refuses`]'s, the synthetic `PermissionDenied` that
