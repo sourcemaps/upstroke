@@ -8,15 +8,7 @@ if [[ $# -ne 1 || ! "$1" =~ ^[0-9a-f]{40}$ ]]; then
 fi
 
 head_sha="$1"
-# Bash drops NUL in command substitutions. Make it detectable before reading,
-# and retain the final newline so only actual CRLF pairs are normalized.
-body="$(tr '\000' '\001' && printf '.')"
-if [[ "$body" == *$'\001'* ]]; then
-  echo 'pull-request body contains a control byte' >&2
-  exit 1
-fi
-body="${body%.}"
-body="${body//$'\r\n'/$'\n'}"
+body="$(tr -d '\r')"
 failed=0
 
 error() {
@@ -109,30 +101,21 @@ for ((index = header_index + 2; index < ${#lines[@]}; index++)); do
       ;;
     integrated) ;;
   esac
-  # A path of exactly `pr.md` is the pull request's body, which the review
-  # driver hands the reviewer as `pr.md` and which the audit reads, on a `fixed`
-  # row, as `body-fixed:<id>`. The body is in no tree and has changed since the
-  # review, so its lines are not the reviewed ones: no tree lookup and no
-  # line-count check. The reviewed SHA above still had to resolve and be
-  # integrated, and the guard below is checked as for any row.
-  # `[` compares literally even when the caller enables bash's nocasematch.
-  if [ "$path" != 'pr.md' ]; then
-    location_key="$reviewed_sha:$path"
-    if [[ -z "${location_lines[$location_key]:-}" ]]; then
-      if ! git cat-file -e "$location_key" 2>/dev/null; then
-        location_lines[$location_key]=missing
-      else
-        location_lines[$location_key]="$(git show "$location_key" | awk 'END { print NR + 0 }')"
-      fi
+  location_key="$reviewed_sha:$path"
+  if [[ -z "${location_lines[$location_key]:-}" ]]; then
+    if ! git cat-file -e "$location_key" 2>/dev/null; then
+      location_lines[$location_key]=missing
+    else
+      location_lines[$location_key]="$(git show "$location_key" | awk 'END { print NR + 0 }')"
     fi
-    if [[ "${location_lines[$location_key]}" == missing ]]; then
-      error "$id location does not exist at its reviewed SHA: $reviewed_sha / $path"
-      continue
-    fi
-    line_count="${location_lines[$location_key]}"
-    if (( line_number > line_count )); then
-      error "$id location line $line_number exceeds $path at $reviewed_sha ($line_count lines)"
-    fi
+  fi
+  if [[ "${location_lines[$location_key]}" == missing ]]; then
+    error "$id location does not exist at its reviewed SHA: $reviewed_sha / $path"
+    continue
+  fi
+  line_count="${location_lines[$location_key]}"
+  if (( line_number > line_count )); then
+    error "$id location line $line_number exceeds $path at $reviewed_sha ($line_count lines)"
   fi
 
   # Backticks identify concrete tracked tests/scripts/guards. Prose is allowed

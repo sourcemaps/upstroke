@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Offline movement contracts: ordinary temporary history, no remote or enqueue calls."""
 
+import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -15,6 +17,32 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("review_parser", ROOT / "scripts/pr-review-parse.py")
 parser = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(parser)
+
+
+class BaseContract(unittest.TestCase):
+    def test_restored_files_match_reference_blobs(self):
+        # Blob identities from 3b04c1d7. Compare bytes, without requiring history in CI's
+        # shallow checkout or fetching anything from a remote.
+        references = {
+            ".github/scripts/validate-pr-body.sh": "b34ee6f5a09b8e7954b6df68c23250a6651676fd",
+            ".github/scripts/validate-pr-ledger-evidence.sh": "c0a9827d11dd45c27fdc9c8ba4f9bacb83af1612",
+            ".github/scripts/test-pr-policy.sh": "fb88e42d3de910e3ede74d7efa2fef6d689dd889",
+            ".github/scripts/test-pr-ledger-evidence.sh": "831ee6335bbb4f6d60c49760d9e0d4d89bc5d6cc",
+            "scripts/lane.sh": "4c516af4309565f30350b636f1b5e37066bafd03",
+        }
+        for path, reference in references.items():
+            with self.subTest(path=path):
+                data = (ROOT / path).read_bytes()
+                if path == "scripts/lane.sh":
+                    comment = (
+                        b"# The exception is a `findings/` pull request that records a red: each pass also checks every fact\n"
+                        b"# the record gives against the logs and the source (MAINTAINING.md; `findings/PROCESS.md`\n"
+                        b"# section 10).\n"
+                    )
+                    self.assertEqual(data.count(comment), 1)
+                    data = data.replace(comment, b"")
+                header = ("blob %d\0" % len(data)).encode("ascii")
+                self.assertEqual(hashlib.sha1(header + data).hexdigest(), reference)
 
 
 class MovementContracts(unittest.TestCase):
@@ -54,7 +82,11 @@ class MovementContracts(unittest.TestCase):
 
     def movement(self, head, reader=None):
         if reader is None:
-            return parser.movement_result([self.reviewed, head, self.base])["moved"]
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "scripts/pr-review-parse.py"), "movement",
+                 self.reviewed, head, self.base],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            return json.loads(result.stdout)["moved"]
         with mock.patch.object(parser, "GitEvidence", return_value=reader):
             return parser.movement_result([self.reviewed, head, self.base])["moved"]
 
@@ -71,10 +103,10 @@ class MovementContracts(unittest.TestCase):
         edit = self.commit("edit")
         self.assertEqual([(one.commit, one.status, one.path) for one in self.changes(edit)], [
             (edit, "M", b"findings/one.md"), (addition, "A", b"findings/one.md")])
-        self.assertEqual(self.movement(edit), "repairs")
+        self.assertEqual(self.movement(edit), "ledger-rewrite")
         self.write("findings/one.md", "first\n")
         reverted = self.commit("restore addition's contents")
-        self.assertEqual(self.movement(reverted), "repairs")
+        self.assertEqual(self.movement(reverted), "ledger-rewrite")
         self.assertEqual(len(self.changes(reverted)), 3)
 
     def test_move_keeps_the_source_and_destination(self):
@@ -84,11 +116,11 @@ class MovementContracts(unittest.TestCase):
         head = self.commit("move")
         self.assertEqual({(one.status, one.path) for one in self.changes(head)}, {
             ("D", b"findings/old.md"), ("A", b"findings/new.md")})
-        self.assertEqual(self.movement(head), "repairs")
+        self.assertEqual(self.movement(head), "ledger-rewrite")
         (self.repo / "findings/new.md").rename(self.repo / "findings/old.md")
         back = self.commit("move back")
         self.assertEqual(len(self.changes(back)), 4)
-        self.assertEqual(self.movement(back), "repairs")
+        self.assertEqual(self.movement(back), "ledger-rewrite")
 
     def test_mixed_push_and_neighboring_additions(self):
         self.write("findings/one.md", "one\n")
@@ -115,9 +147,9 @@ class MovementContracts(unittest.TestCase):
         self.write("reviews/FINDINGS.md", "closed and edited\n")
         self.write("reviews/findings/new.md", "new\n")
         head = self.commit("historical edits")
-        self.assertEqual(self.movement(head), "ledger-only")
+        self.assertEqual(self.movement(head), "ledger-rewrite")
         self.reviewed = self.base
-        self.assertEqual(self.movement(head), "repairs")
+        self.assertEqual(self.movement(head), "ledger-rewrite")
 
     def test_archive_symlink_is_not_an_existing_file(self):
         (self.repo / "reviews").mkdir()
@@ -128,7 +160,7 @@ class MovementContracts(unittest.TestCase):
         self.assertEqual(reader.archive(tree, b"reviews/FINDINGS.md", parser.REGULAR_MODES), "wrong-type")
         (self.repo / "reviews/FINDINGS.md").unlink()
         (self.repo / "reviews/FINDINGS.md").symlink_to("../elsewhere")
-        self.assertEqual(self.movement(self.commit("edit link")), "repairs")
+        self.assertEqual(self.movement(self.commit("edit link")), "ledger-rewrite")
 
     def test_archive_read_errors_are_not_absence(self):
         self.write("reviews/FINDINGS.md", "archive\n")
@@ -194,7 +226,7 @@ class MovementContracts(unittest.TestCase):
                                missing_parent if args == ("cat-file", "commit", head) else original(*args)):
             with self.assertRaises(parser.Unparsed):
                 self.movement(head, reader)
-        self.assertEqual(self.movement(head), "repairs")
+        self.assertEqual(self.movement(head), "ledger-rewrite")
 
     def test_every_record_and_type_is_validated(self):
         oid = b"\x01" * 20
@@ -221,7 +253,7 @@ class MovementContracts(unittest.TestCase):
         self.write("findings/tab\tname.md", "one\n")
         head = self.commit("quoted path")
         self.assertEqual(self.changes(head)[0].path, b"findings/tab\tname.md")
-        self.assertEqual(self.movement(head), "repairs")
+        self.assertEqual(self.movement(head), "ledger-rewrite")
 
     def test_resolution_commit_framing_and_process_failure(self):
         oid = self.base.encode("ascii")

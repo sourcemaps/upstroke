@@ -416,14 +416,6 @@
 #                                `set -e` can see it, and `read` or `mapfile` leaves what it was
 #                                to fill holding whatever it held before. The guard is the class:
 #                                the script carries no here-string and no here-document at all
-#   MUT-BODY-LOCATION-FLAG       bit 4 of a finding's flags, "located in the pull request's body",
-#                                was set by a `location` other than exactly `pr.md:<line>`, or
-#                                moved the witness and MUST bits beside it
-#   MUT-BODY-FIXED-UNREAD        a `fixed` row on a finding the review located in the body, with
-#                                no push outside the ledger, read READY or was enqueued, though no
-#                                commit shows the repair; it is `body-fixed:<id>`, NEEDS-ATTEST,
-#                                and a witness, a MUST, a code location or another row keeps its
-#                                answer of before
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
 # NOTHING HERE WRITES INTO THE TREE IT JUDGES. This gate runs `scripts/pr-review-parse.py`
@@ -486,9 +478,6 @@ for row in "${lane_rows[@]}"; do
   # P3 IN EVERY LANE, and nothing else in any (owner, 2026-11-13): the severities a ledger row may
   # accept alone. The two hard rules are the audit's to apply before it asks, and are cased below.
   expect "MUT-P3-ACCEPT-MANUAL may-accept [$branch]" "$(may_accept_for "$got_lane")" P3
-  want_body=P3
-  [[ "$got_lane" != findings ]] || want_body='P2 P3'
-  expect "BODY-FIX-LANE [$branch]" "$(may_fix_body_for "$got_lane")" "$want_body"
 done
 # Eleven lanes, and `lane_list` is what the label list and both reconciliation loops are driven
 # from: a lane in the table and not in the list is a lane whose label is never created.
@@ -573,9 +562,6 @@ for unknown in "" lane:feature findings-p3 findings-p1p2 feature-ish FEATURE fix
   # and an acceptance invented for a lane nobody ruled on is the permissive answer fallen into.
   if may_accept_for "$unknown" > "$tmp/lane.out" 2>&1; then
     error "MUT-P3-ACCEPT-WIDENED: lane [$unknown] was allowed to accept [$(cat "$tmp/lane.out")]"
-  fi
-  if may_fix_body_for "$unknown" > "$tmp/lane.out" 2>&1; then
-    error "BODY-FIX-LANE: unknown lane [$unknown] allows a body repair"
   fi
 done
 
@@ -982,10 +968,10 @@ ledger_policy_body() {  # ledger_policy_body FILE LEDGER-TEXT: the required sect
     printf '%s\n' "$2"; } > "$1"
   policy_bodies+=("$1")
 }
-ledger_row() {  # ledger_row ID:SEVERITY:DISPOSITION [LOCATION]: one canonical row
+ledger_row() {  # ledger_row ID:SEVERITY:DISPOSITION: one row the body validator accepts
   local id="${1%%:*}" rest="${1#*:}"
-  printf '| %s | %s | %s / %s | a reviewed failure -> a wrong answer | pre_existing | correctness | — | `guard` | %s |\n' \
-    "$id" "${rest%%:*}" "$enqueue_head" "${2:-src/x.rs:1}" "${rest#*:}"
+  printf '| %s | %s | %s / src/x.rs:1 | a reviewed failure -> a wrong answer | pre_existing | correctness | — | `guard` | %s |\n' \
+    "$id" "${rest%%:*}" "$enqueue_head" "${rest#*:}"
 }
 ledger_table() {  # ledger_table ID:SEVERITY:DISPOSITION...: the canonical header, separator and rows
   local row
@@ -6714,14 +6700,13 @@ def main(argv):
 PYSHAPE
 probe_expect elsewhere \
   'decoded=no unrefusing=- unproven=- skipped=- | refusing=- drive=returned:0 swept=- forced=0'
-# AND THEN THE PARSER THE AUDIT ACTUALLY RUNS, DRIVEN OVER ITS OWN WORK. Nine real parses: the
+# AND THEN THE PARSER THE AUDIT ACTUALLY RUNS, DRIVEN OVER ITS OWN WORK. Eight real parses: the
 # workflow form in both renderings, the repeated name it must refuse, the same at three objects
-# down, the older bare object, the frontier form, the frontier form quoting a fenced example, a
-# workflow review whose findings carry a location, and the ledger subcommand. They are drives
-# rather than assertions -- what the first eight return is asserted by the families above, on these
-# same shapes -- and their job here is that the parser's own code runs, and every scan it makes is
-# answered for. What they leave, the probe takes: a handler the nine never enter is entered, and a
-# branch they take one way only is turned --
+# down, the older bare object, the frontier form, the frontier form quoting a fenced example, and
+# the ledger subcommand. They are drives rather than assertions -- what the first seven return is
+# asserted by the families above, on these same shapes -- and their job here is that the parser's
+# own code runs, and every scan it makes is answered for. What they leave, the probe takes: a
+# handler the eight never enter is entered, and a branch they take one way only is turned --
 # measured when this was written, all 118 conditional branches in the 41 code objects of
 # `scripts/pr-review-parse.py` went both ways, over 109 altered runs -- and the verdict line below
 # asserts that every instruction in the file ran. A loop no document enters is the one thing
@@ -6730,8 +6715,8 @@ probe_expect elsewhere \
 #
 # THE QUOTED DRIVE IS THAT RULE, APPLIED. The parser reads a fence run inside a block's content only
 # inside a loop over that content, and resolves a reference in an info string only inside the
-# callback `rendered_language` hands `re.sub`. None of the other documents reaches either, and
-# without it this line read
+# callback `rendered_language` hands `re.sub`. None of the other seven documents reaches either,
+# and with only those seven this line read
 # `unproven=referable,rendered_language.<locals>.resolved,unresolved_material`. The example's nested
 # fence enters the loop, and without it `unresolved_material` stays unproven. Its info string holds
 # one of each path the callback takes: a backslash escape, a named reference, a name no table holds,
@@ -6741,29 +6726,13 @@ probe_expect elsewhere \
 printf '<!-- upstroke-frontier-review pr=1 -->\nReviewed head: %s\n\n%s\n\n' \
   "$revived_head" '1. **P2 -- a finding.** Detail.' > "$tmp/probe-drive-prose.md"
 printf 'VERDICT: CHANGES_REQUIRED\n' >> "$tmp/probe-drive-prose.md"
-# Canonical synthetic records enter the location classifier with each outcome.
-# A two-column historical sketch only exercised the parser's header refusal.
-{ printf '## Review finding ledger\n\n'; ledger_table
-  for probe_row in 'PR1-BODY|pr.md:12' 'PR1-CODE|src/x.rs:1' 'PR1-INVALID|../pr.md:12'; do
-    printf '| %s | P3 | %s / %s | a failure -> a wrong answer | pre_existing | correctness | — | `guard` | fixed |\n' \
-      "${probe_row%%|*}" "$revived_head" "${probe_row#*|}"
-  done; } > "$tmp/probe-drive-ledger.md"
-expect BODY-LOCATION-PROBE "$(parse_nul ledger "$tmp/probe-drive-ledger.md")" \
-  '0|ledger|3|PR1-BODY|P3|fixed|body|PR1-CODE|P3|fixed|repository|PR1-INVALID|P3|fixed|unknown|'
+printf '%s\n\n| ID | Disposition |\n| --- | --- |\n| PR1-A | fixed |\n' \
+  '## Review finding ledger' > "$tmp/probe-drive-ledger.md"
 { printf '<!-- upstroke-frontier-review pr=1 -->\nReviewed head: %s\n\n' "$revived_head"
   printf '````text\n```%s\nan example quoted inside an example\n```\n````\n\n' \
     '\*&amp;&notareal;&#110;&#x6a;&#11;'
   printf '1. **P2 -- a finding.** Detail.\n\nVERDICT: CHANGES_REQUIRED\n'
 } > "$tmp/probe-drive-quoted.md"
-# AND THE LOCATED DRIVE IS THE SAME RULE AGAIN. No other document's finding carries a `location`, so
-# `finding` never read one and this line read `unproven=finding`. One finding located in the body and
-# one in code take both ways of the match; what each returns is asserted by MUT-BODY-LOCATION-FLAG.
-printf 'Reviewed head: %s\n\n```json\n{"reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[%s,%s]}\n```\n' \
-  "$revived_head" "$revived_head" "$revived_base" \
-  '{"id":"IN-BODY","severity":"P3","location":"pr.md:12"}' \
-  '{"id":"IN-CODE","severity":"P3","location":"src/x.rs:12"}' > "$tmp/probe-drive-located.md"
-expect MUT-BODY-LOCATION-FLAG "$(review_rows "$tmp/probe-drive-located.md")" \
-  "0|json/$revived_head/CHANGES_REQUIRED/$revived_base/-;P3:IN-BODY:4;P3:IN-CODE:0"
 # Movement reads repository objects, so its drive needs ordinary history as well as arguments.
 # GIT_DIR pins that scratch repository while the probe runs from its own scratch directory.
 # No code is excluded from the probe: these drives enter the tree/commit loops just as the
@@ -6808,7 +6777,7 @@ got="$(GIT_DIR="$probe_git/.git" decode_probe scripts/pr-review-parse.py \
   "review|$tmp/one-findings.md" "review --nul|$tmp/one-findings.md" \
   "review|$tmp/dup-findings.md" "review|$tmp/dup-deep.md" "review|$tmp/one-bare.md" \
   "review|$tmp/probe-drive-prose.md" "review|$tmp/probe-drive-quoted.md" \
-  "review|$tmp/probe-drive-located.md" "ledger --nul|$tmp/probe-drive-ledger.md" \
+  "ledger --nul|$tmp/probe-drive-ledger.md" \
   "movement --nul $probe_git_base $probe_git_add $probe_git_base|" \
   "movement --nul $probe_git_reviewed $probe_git_ledger $probe_git_base|" \
   "movement --nul $probe_git_reviewed $probe_git_repairs $probe_git_base|" \
@@ -8249,20 +8218,6 @@ expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of ledger-only)" R
 expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of "" "open-P1:a-manual:thing")" NOT-READY
 expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of "" "verdict:x
 manual:y")" NOT-READY
-# MUT-BODY-FIXED-UNREAD. `body-fixed:<id>` is a repair no commit shows, so it is read like a repair
-# push: neither hard nor manual, NEEDS-ATTEST over a manual blocker and under a hard one, on any
-# head, and never READY. The prefix is tested on the whole element, as the manual one is.
-expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of "" body-fixed:X)" NEEDS-ATTEST
-expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of ledger-only body-fixed:X manual:y)" NEEDS-ATTEST
-expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of merges-only manual:y body-fixed:X)" NEEDS-ATTEST
-expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of "" body-fixed:X draft)" NOT-READY
-expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of repairs body-fixed:X)" NEEDS-ATTEST
-expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of "" "open-P1:a-body-fixed:thing")" NOT-READY
-expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of "" "verdict:x
-body-fixed:y")" NOT-READY
-# and without it, the same heads and the same manual blocker are what they were.
-expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of ledger-only manual:y)" MANUAL
-expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of merges-only)" READY
 
 # --- the newest check run per name -------------------------------------------------------------
 got="$(printf 'upstroke-ci\t100\tsuccess\nupstroke-ci\t250\tfailure\nupstroke-pr-policy\t120\tsuccess\nupstroke-ci\t90\tsuccess\n' | newest_per_name | tr ' ' '\n' | grep . | sort | tr '\n' ' ')"
@@ -8299,43 +8254,23 @@ ledger_rows() {  # ledger_rows FILE: "<status>|<id>:<severity>:<disposition>;...
 expect MUT-LEDGER-HEADER-AS-ROW "$(ledger_rows "$tmp/body.md")" \
   '0|A-DEFERRABLE:P3:deferred;B-FIXED:P2:fixed'
 # The payload the audit reads, whose second field is the row count: the same rule as the review's,
-# so a ledger that stopped arriving is not a pull request with fewer rows in it. FOUR FIELDS PER
-# ROW -- id, severity, disposition, location kind. Older short-SHA rows remain readable but their
-# locations are unknown: they cannot establish a body repair.
+# so a ledger that stopped arriving is not a pull request with fewer rows in it. THREE FIELDS PER
+# ROW -- id, severity, disposition -- because the audit holds an `accepted-risk` row's own severity
+# against the review's, and a payload without it leaves the audit nothing to hold.
 expect MUT-PARSE-PAYLOAD-COUNT "$(parse_nul ledger "$tmp/body.md")" \
-  '0|ledger|2|A-DEFERRABLE|P3|deferred|unknown|B-FIXED|P2|fixed|unknown|'
+  '0|ledger|2|A-DEFERRABLE|P3|deferred|B-FIXED|P2|fixed|'
 expect MUT-LEDGER-SEVERITY-DROPPED "$(parse_nul ledger "$tmp/body.md")" \
-  '0|ledger|2|A-DEFERRABLE|P3|deferred|unknown|B-FIXED|P2|fixed|unknown|'
-# A reader and writer that disagree about the shape fail closed.
+  '0|ledger|2|A-DEFERRABLE|P3|deferred|B-FIXED|P2|fixed|'
+# and the audit's own read of it takes three per row: two would read this payload's five records'
+# worth of fields as the wrong length and refuse it, which is the point -- a reader and a writer
+# that disagree about the shape fail closed rather than pairing an id with a severity.
 "$parser_python" scripts/pr-review-parse.py ledger --nul --out "$tmp/ledger.payload" "$tmp/body.md"
 expect MUT-LEDGER-SEVERITY-DROPPED "$(
-  fields=(); read_ledger_fields "$tmp/ledger.payload" && echo "${#fields[@]}"
-)" 10
+  fields=(); read_parser_fields "$tmp/ledger.payload" ledger 2 3 && echo "${#fields[@]}"
+)" 8
 ledger_two_status=0
 ( fields=(); read_parser_fields "$tmp/ledger.payload" ledger 2 2 ) || ledger_two_status=$?
 expect "MUT-LEDGER-SEVERITY-DROPPED two per row refused" "$ledger_two_status" 1
-# Synthetic records test the consumer, independently of what today's parser emits.
-for payload_case in \
-  '0|ledger|1|F|P3|fixed|body|' \
-  '0|ledger|1|F|P3|fixed|repository|' \
-  '0|ledger|1|F|P3|fixed|unknown|' \
-  '0|ledger|0|' \
-  '1|ledger|1|F|P3|fixed|' \
-  '1|ledger|1|F|P3|fixed|BODY|' \
-  '1|ledger|1|F|P3|fixed||' \
-  '1|ledger|1|F|P3|fixed|pr.md|' \
-  '1|ledger|2|F|P3|fixed|body|' \
-  '1|ledger|0|F|P3|fixed|body|' \
-  '1|review|1|F|P3|fixed|body|'; do
-  printf '%s' "${payload_case#*|}" | tr '|' '\000' > "$tmp/location.payload"
-  payload_status=0
-  read_ledger_fields "$tmp/location.payload" || payload_status=$?
-  expect "BODY-LOCATION-PROTOCOL [$payload_case]" "$payload_status" "${payload_case%%|*}"
-done
-printf 'ledger\0001\000F\000P3\000fixed\000body' > "$tmp/location.payload"
-payload_status=0
-read_ledger_fields "$tmp/location.payload" || payload_status=$?
-expect 'BODY-LOCATION-PROTOCOL unterminated category' "$payload_status" 1
 # A row too short to reach the severity column reports it empty, which equals no severity a review
 # gives, rather than shifting the disposition or another cell into its place.
 cat > "$tmp/short-row-body.md" <<'EOF'
@@ -8389,12 +8324,15 @@ ledger_policy_body "$tmp/two-headings-trailing.md" "$(
 expect "MUT-LEDGER-SECOND-HEADING trailing policy" \
   "$(body_policy "$tmp/two-headings-trailing.md")" pass
 expect "MUT-LEDGER-SECOND-HEADING trailing" "$(ledger_rows "$tmp/two-headings-trailing.md")" '1|'
-# Neither reader deletes interior carriage returns to manufacture a heading.
+# The lines the parser compares are the validator's lines: it deletes every carriage return before
+# comparing, so a heading spelled with one inside it IS the heading to the validator, and has to be
+# one here. Kept, the trailing-space heading below was the only heading the parser saw, and it read
+# a section the validator never checked.
 ledger_policy_body "$tmp/two-headings-cr.md" "$(
   printf '## Review fi\rnding ledger\n\n'; ledger_table ACCEPT-P3:P2:accepted-risk
   printf '\n## Review finding ledger \n\n'; ledger_table ACCEPT-P3:P3:accepted-risk)"
 expect "MUT-LEDGER-SECOND-HEADING carriage-return policy" \
-  "$(body_policy "$tmp/two-headings-cr.md")" fail
+  "$(body_policy "$tmp/two-headings-cr.md")" pass
 expect "MUT-LEDGER-SECOND-HEADING carriage-return" "$(ledger_rows "$tmp/two-headings-cr.md")" '1|'
 # and a body with CRLF line ends throughout, as GitHub may store one, is the same ledger.
 while IFS= read -r crlf_line; do printf '%s\r\n' "$crlf_line"; done < "$tmp/body.md" > "$tmp/crlf-body.md"
@@ -8423,7 +8361,7 @@ expect "MUT-LEDGER-NONCANONICAL-HEADING canonical policy" \
 expect "MUT-LEDGER-NONCANONICAL-HEADING canonical" "$(ledger_rows "$tmp/heading-canonical.md")" \
   '0|ACCEPT-P3:P3:accepted-risk'
 expect "MUT-LEDGER-NONCANONICAL-HEADING canonical payload" \
-  "$(parse_nul ledger "$tmp/heading-canonical.md")" '0|ledger|1|ACCEPT-P3|P3|accepted-risk|repository|'
+  "$(parse_nul ledger "$tmp/heading-canonical.md")" '0|ledger|1|ACCEPT-P3|P3|accepted-risk|'
 # A trailing space, a trailing tab -- the two the witness named -- and the other ways a line can be
 # the heading but for whitespace: a leading space, a doubled or tabbed gap, and a no-break space,
 # vertical tab or form feed at the end, written as bytes so what is tested does not depend on the
@@ -8455,7 +8393,8 @@ contains "MUT-LEDGER-NONCANONICAL-HEADING trailing-space why" \
   "$(ledger_why "$tmp/heading-trailing-space.md")" "heading '## Review finding ledger '"
 contains "MUT-LEDGER-NONCANONICAL-HEADING trailing-tab why" \
   "$(ledger_why "$tmp/heading-trailing-tab.md")" "heading '## Review finding ledger\\t'"
-# CRLF line ends become LF in both readers: the canonical one passes the validator and
+# CRLF line ends. The validator deletes every carriage return before it compares a line, and so does
+# the parser, so a CRLF body is its LF spelling to both: the canonical one passes the validator and
 # reads as it does in LF, and a space or tab before the CR is still there once the CR is gone, so the
 # CRLF spelling of each near miss fails the validator and is a refusal here.
 for crlf_name in canonical trailing-space trailing-tab; do
@@ -8510,12 +8449,12 @@ ledger_policy_body "$tmp/tabbed-row.md" "$(
 expect "MUT-LEDGER-TABBED-CELL policy" "$(body_policy "$tmp/tabbed-row.md")" pass
 expect MUT-LEDGER-TABBED-CELL "$(ledger_rows "$tmp/tabbed-row.md")" '0|ACCEPT-P3:P3:accepted-risk'
 expect MUT-LEDGER-TABBED-CELL "$(parse_nul ledger "$tmp/tabbed-row.md")" \
-  '0|ledger|1|ACCEPT-P3|P3|accepted-risk|repository|'
+  '0|ledger|1|ACCEPT-P3|P3|accepted-risk|'
 
 # EXACTLY THE SIX CHARACTERS THE VALIDATOR TRIMS, AND NO OTHERS. The audit runs validate-pr-body.sh
 # under `LC_ALL=C`, where its `trim`'s `[[:space:]]` is space, tab, newline, vertical tab, form feed
 # and carriage return; `str.strip()` takes off U+00A0 and U+001C as well. Each character below is
-# put either side of the id, severity or disposition, in the READY case's row, and written
+# put either side of one of the three cells the parser returns, in the READY case's row, and written
 # as bytes, so what is tested does not depend on the locale this runs under. A tab, a vertical tab
 # and a form feed are trimmed: the validator passes the row, and the parser returns it as the
 # validator read it. U+00A0 and U+001C are kept: the validator refuses the row, and the parser
@@ -8541,7 +8480,7 @@ trim_case() {  # trim_case pass|fail CELL NAME|CHAR: the body as $tmp/trim-CELL-
   fi
   expect "$label policy" "$(body_policy "$file")" "$1"
   expect "$label" "$(ledger_rows "$file")" "0|$row"
-  expect "$label payload" "$(parse_nul ledger "$file")" "0|ledger|1|${row//:/|}|repository|"
+  expect "$label payload" "$(parse_nul ledger "$file")" "0|ledger|1|${row//:/|}|"
 }
 trim_cells=(id severity disposition)
 trimmed_chars=($'tab|\t' $'vtab|\v' $'formfeed|\f')
@@ -8598,7 +8537,7 @@ ledger_policy_body "$tmp/id-row.md" "$(
 expect "MUT-LEDGER-HEADER-BY-CONTENT policy" "$(body_policy "$tmp/id-row.md")" pass
 expect MUT-LEDGER-HEADER-BY-CONTENT "$(ledger_rows "$tmp/id-row.md")" '0|ID:P3:accepted-risk'
 expect MUT-LEDGER-HEADER-BY-CONTENT "$(parse_nul ledger "$tmp/id-row.md")" \
-  '0|ledger|1|ID|P3|accepted-risk|repository|'
+  '0|ledger|1|ID|P3|accepted-risk|'
 # THE FIRST TWO `|` LINES ARE THE HEADER AND THE SEPARATOR, or the section is refused. A `|` line
 # above the canonical header -- which the body validator steps over, finding its header by content
 # -- and a header whose next line is not the separator, and a heading with no table under it.
@@ -8741,9 +8680,8 @@ accept_review() {  # accept_review FILE FINDING-JSON [HEAD]: a review of HEAD wi
 # four missing sections, the short commit and the short sequence -- harmless while nothing but the
 # parser read it, and `body-policy-failed:1` on every case below once the audit runs the validator,
 # READY ones included.
-accept_ledger() {  # accept_ledger FILE ID SEVERITY DISPOSITION [LOCATION]
-  ledger_policy_body "$1" "$(printf '## Review finding ledger\n\n'; ledger_table
-    ledger_row "$2:$3:$4" "${5:-src/x.rs:1}")"
+accept_ledger() {  # accept_ledger FILE ID SEVERITY DISPOSITION: a body whose ledger is that one row
+  ledger_policy_body "$1" "$(printf '## Review finding ledger\n\n'; ledger_table "$2:$3:$4")"
 }
 accept_run() {  # accept_run BRANCH REVIEW BODY [HEAD]: "<status>|<the audit's output, on one line>"
   local out status=0
@@ -9541,10 +9479,10 @@ expect "MUT-LEDGER-PUSH-REWRITES-FINDING bare closed-ledger add read" \
 expect "MUT-LEDGER-PUSH-REWRITES-FINDING bare old-prefix add read" \
   "$(ledger_push_status "$lp_bare_add_legacy" "$lp_bare_reviewed")" 'A>reviews/findings/legacy-new.md '
 # The merge is a merge of the reviewed head and that other commit, and it carries the edit.
-expect "MUT-BODY-FIXED-UNREAD merge-edit head parents" \
+expect "review retention merge-edit head parents" \
   "$(git -C "$enqueue_repo" rev-list --parents -n 1 "$lp_head_merge_edit")" \
   "$lp_head_merge_edit $ledger_push_reviewed $lp_merge_side"
-expect "MUT-BODY-FIXED-UNREAD merge-edit head carries the edit" \
+expect "review retention merge-edit head carries the edit" \
   "$(git -C "$enqueue_repo" ls-tree --name-only "$lp_head_merge_edit" -- repair.txt)" repair.txt
 # The review of the reviewed head that raises NEW-P3, its two rows, and a clean PASS of the same head.
 accept_review "$tmp/ledger-push-new-p3.md" '{"id":"NEW-P3","severity":"P3"}' "$ledger_push_reviewed"
@@ -9585,41 +9523,40 @@ lp_case "add, accepted" ledger-push-new-p3 ledger-push-accepted "$lp_head_add" l
 lp_case "add, clean" ledger-push-pass no-findings-body "$lp_head_add" ledger-only READY 1
 # The finding's witness, three shapes: the retag under each row, and the deletion under the clean
 # review, where nothing but the push stands between it and READY. And the rename, which is both.
-lp_case "(i) retag, deferred" ledger-push-new-p3 ledger-push-deferred "$lp_head_retag" repairs NEEDS-ATTEST 0
-lp_case "(ii) retag, accepted" ledger-push-new-p3 ledger-push-accepted "$lp_head_retag" repairs NEEDS-ATTEST 0
-lp_case "(iii) delete, clean" ledger-push-pass no-findings-body "$lp_head_delete" repairs NEEDS-ATTEST 0
-lp_case "rename, deferred" ledger-push-new-p3 ledger-push-deferred "$lp_head_rename" repairs NEEDS-ATTEST 0
-# A modification is a repair, the `id:` untouched; so is a file added and then edited in the range.
-lp_case "edit, clean" ledger-push-pass no-findings-body "$lp_head_edit" repairs NEEDS-ATTEST 0
+lp_case "(i) retag, deferred" ledger-push-new-p3 ledger-push-deferred "$lp_head_retag" ledger-rewrite NEEDS-ATTEST 0
+lp_case "(ii) retag, accepted" ledger-push-new-p3 ledger-push-accepted "$lp_head_retag" ledger-rewrite NEEDS-ATTEST 0
+lp_case "(iii) delete, clean" ledger-push-pass no-findings-body "$lp_head_delete" ledger-rewrite NEEDS-ATTEST 0
+lp_case "rename, deferred" ledger-push-new-p3 ledger-push-deferred "$lp_head_rename" ledger-rewrite NEEDS-ATTEST 0
+# A modification is a ledger rewrite even with its `id:` untouched, including add-then-edit.
+lp_case "edit, clean" ledger-push-pass no-findings-body "$lp_head_edit" ledger-rewrite NEEDS-ATTEST 0
 lp_case "add then edit, deferred" ledger-push-new-p3 ledger-push-deferred "$lp_head_add_edit" \
-  repairs NEEDS-ATTEST 0
-# The closed ledger FILE keeps the review as an edit of the file the reviewed head carries, and the
-# old prefix is held to the new one's rule: an addition keeps it, a modification does not.
-lp_case "closed ledger edited" ledger-push-pass no-findings-body "$lp_head_closed" ledger-only READY 1
+  ledger-rewrite NEEDS-ATTEST 0
+# Editing the closed ledger is a rewrite too. Verified additions under an existing legacy
+# directory retain the review; modifying its entries does not.
+lp_case "closed ledger edited" ledger-push-pass no-findings-body "$lp_head_closed" ledger-rewrite NEEDS-ATTEST 0
 lp_case "old prefix, add" ledger-push-pass no-findings-body "$lp_head_legacy_add" ledger-only READY 1
-lp_case "old prefix, edit" ledger-push-pass no-findings-body "$lp_head_legacy_edit" repairs NEEDS-ATTEST 0
+lp_case "old prefix, edit" ledger-push-pass no-findings-body "$lp_head_legacy_edit" ledger-rewrite NEEDS-ATTEST 0
 # THE ARCHIVED LEDGER KEEPS THE REVIEW ONLY ON A BRANCH THAT CARRIES IT
 # (PR433-ARCHIVED-LEDGER-KEEPS-REVIEW). On a reviewed head cut after the move, a push adding
-# reviews/FINDINGS.md read `ledger-only`, READY, and called merge; it is a repair now, and so is a
-# file added under reviews/findings/ there. The neighbours that must not move: the same head's push
-# filing under findings/ is `ledger-only` and READY, and on the head that carries the archived ledger
-# its edit and its addition above still are. Deleting the closed ledger is no edit of it.
+# reviews/FINDINGS.md read `ledger-only`, READY, and called merge. It is a ledger rewrite now,
+# as is a file added under reviews/findings/ there. Additions under findings/ still retain the
+# review, as do additions under a legacy directory verified at review time.
 lp_case "bare head, add" ledger-push-bare-pass no-findings-body "$lp_bare_add" ledger-only READY 1
 lp_case "bare head, closed ledger added" ledger-push-bare-pass no-findings-body \
-  "$lp_bare_add_closed" repairs NEEDS-ATTEST 0
+  "$lp_bare_add_closed" ledger-rewrite NEEDS-ATTEST 0
 [[ "$lp_got" == *blockers=* ]] \
   && error "MUT-LEDGER-PUSH-REWRITES-FINDING: [bare head, closed ledger added] blocked: [$lp_got]"
 lp_case "bare head, old prefix added" ledger-push-bare-pass no-findings-body \
-  "$lp_bare_add_legacy" repairs NEEDS-ATTEST 0
+  "$lp_bare_add_legacy" ledger-rewrite NEEDS-ATTEST 0
 [[ "$lp_got" == *blockers=* ]] \
   && error "MUT-LEDGER-PUSH-REWRITES-FINDING: [bare head, old prefix added] blocked: [$lp_got]"
 lp_case "closed ledger deleted" ledger-push-pass no-findings-body "$lp_head_closed_delete" \
-  repairs NEEDS-ATTEST 0
+  ledger-rewrite NEEDS-ATTEST 0
 [[ "$lp_got" == *blockers=* ]] \
   && error "MUT-LEDGER-PUSH-REWRITES-FINDING: [closed ledger deleted] blocked: [$lp_got]"
-# A path git quoted, and a path outside the ledger, are repairs, as before, and neither blocks: the
-# quoted path is a record of a path, and `touched` names it the same way.
-lp_case "quoted path" ledger-push-new-p3 ledger-push-deferred "$lp_head_quoted" repairs NEEDS-ATTEST 0
+# A quoted ledger path remains outside the exemption, but cannot grant repair credit.
+# An outside change still classifies as repairs.
+lp_case "quoted path" ledger-push-new-p3 ledger-push-deferred "$lp_head_quoted" ledger-rewrite NEEDS-ATTEST 0
 [[ "$lp_got" == *blockers=* ]] && error "MUT-LEDGER-PUSH-REWRITES-FINDING: [quoted path] blocked: [$lp_got]"
 lp_case "outside the ledger" ledger-push-pass no-findings-body "$lp_head_outside" repairs NEEDS-ATTEST 0
 [[ "$lp_got" == *blockers=* ]] \
@@ -9645,329 +9582,72 @@ lp_case "mixed push, full read" ledger-push-new-p3 ledger-push-deferred "$lp_hea
 [[ "$lp_got" == *blockers=* ]] \
   && error "MUT-LEDGER-PUSH-REWRITES-FINDING: [mixed push, full read] blocked: [$lp_got]"
 
-# --- a finding located in the body -------------------------------------------------------------------
-# MUT-BODY-LOCATION-FLAG. The review driver hands the reviewer the body as `pr.md`, so a finding whose
-# `location` is exactly `pr.md:<line>` is located in the body, and the parser says so in bit 4 of its
-# flags. A column, a range, line 0, another file, a padded or longer string, a number, a null or no
-# key at all is not that, and shows the flags it showed before; the witness and MUST bits beside
-# bit 4 read as they did.
-for bf_flag_row in \
-  '{"id":"F","severity":"P3","location":"pr.md:12"}|4' \
-  '{"id":"F","severity":"P3","location":"pr.md:12","witness":"a failing test"}|5' \
-  '{"id":"F","severity":"P3","location":"pr.md:12","correction":"a MUST deviation"}|6' \
-  '{"id":"F","severity":"P3","location":"pr.md:12:3"}|0' \
-  '{"id":"F","severity":"P3","location":"pr.md:0"}|0' \
-  '{"id":"F","severity":"P3","location":"pr.md:012"}|0' \
-  '{"id":"F","severity":"P3","location":"PR.md:12"}|0' \
-  '{"id":"F","severity":"P3","location":"pr.MD:12"}|0' \
-  '{"id":"F","severity":"P3","location":"p\rr.md:12"}|0' \
-  '{"id":"F","severity":"P3","location":"pr.\u0000md:12"}|0' \
-  '{"id":"F","severity":"P3","location":"src/x.rs:12"}|0' \
-  '{"id":"F","severity":"P3","location":"src/x.rs:12","witness":"a failing test"}|1' \
-  '{"id":"F","severity":"P3","location":" pr.md:12"}|0' \
-  '{"id":"F","severity":"P3","location":"pr.md:12\n"}|0' \
-  '{"id":"F","severity":"P3","location":"docs/pr.md:12"}|0' \
-  '{"id":"F","severity":"P3","location":"pr.md:12-14"}|0' \
-  '{"id":"F","severity":"P3","location":12}|0' \
-  '{"id":"F","severity":"P3","location":null}|0' \
-  '{"id":"F","severity":"P3"}|0' \
-  '{"id":"F","severity":"P3","witness":"a failing test"}|1'; do
-  accept_review "$tmp/bf-flag.md" "${bf_flag_row%|*}"
-  got="$(review_rows "$tmp/bf-flag.md")"
-  expect "MUT-BODY-LOCATION-FLAG [${bf_flag_row%|*}]" "${got%%|*}|${got##*;}" "0|P3:F:${bf_flag_row##*|}"
-done
-
-# The ledger's category uses the same literal virtual filename and positive
-# line syntax as the review. Classifying is separate from validating Git evidence.
-for location_case in \
-  'body|pr.md:1' 'body|pr.md:123456' \
-  'repository|src/x.rs:12' 'repository|PR.md:12' 'repository|pr.MD:12' \
-  'repository|docs/pr.md:12' 'repository|pr.mdx:12' \
-  'unknown|./pr.md:12' 'unknown|../pr.md:12' 'unknown|docs/../pr.md:12' \
-  'unknown|docs//pr.md:12' 'unknown|pr.md:0' 'unknown|pr.md:012' \
-  'unknown|pr.md:12:3' 'unknown|pr.md:12-14' \
-  $'unknown|p\rr.md:12' $'unknown|pr.\tmd:12' $'unknown|pr.\vmd:12'; do
-  accept_ledger "$tmp/location-kind.md" F P3 fixed "${location_case#*|}"
-  for ending in lf crlf; do
-    location_input="$tmp/location-kind.md"
-    if [[ "$ending" == crlf ]]; then
-      crlf_copy < "$location_input" > "$tmp/location-kind-crlf.md"
-      location_input="$tmp/location-kind-crlf.md"
-    fi
-    expect "BODY-LOCATION-PARSER [$location_case/$ending]" "$(parse_nul ledger "$location_input")" \
-      "0|ledger|1|F|P3|fixed|${location_case%%|*}|"
-  done
-done
-# The NUL is a real input byte here, not the characters of a JSON escape.
-{ printf '## Review finding ledger\n\n'; ledger_table
-  ledger_row F:P3:fixed $'pr.\001md:12' | tr '\001' '\000'; } > "$tmp/location-nul.md"
-expect 'BODY-LOCATION-PARSER interior NUL' "$(parse_nul ledger "$tmp/location-nul.md")" '1|'
-
-# MUT-BODY-FIXED-UNREAD (AUDIT-FIXED-ROW-NEEDS-A-PUSH-OUTSIDE-THE-LEDGER, its body shape). A `fixed`
-# row on a finding the review located in the body, with nothing pushed outside the ledger, read
-# `fixed-but-head-unmoved` -- or `witnessed`, given a witness -- and only a new frontier verdict
-# cleared it, though the repair was real. It is `body-fixed:<id>` now: NEEDS-ATTEST, never READY,
-# because no commit shows the repair and a person must read it. Run through the ledger-push harness
-# with --enqueue, so "never READY" is a count of `pr merge` calls as well. Each review is of the
-# reviewed head above and raises NEW-P3 (or NEW-P1): `$ledger_push_reviewed` is that head unmoved,
-# `$lp_head_add` is it moved by a push filing NEW-P3 (`ledger-only`), `$lp_head_outside` is it
-# moved by a repair (`repairs`), and `$lp_head_merge_edit` is it moved by a merge that is not git's
-# own (`merge-edits:*`).
-bf_review() {  # bf_review NAME FINDING-JSON...: a review of the reviewed head, as $tmp/bf-NAME.md
-  local name="$1"
-  shift
-  accept_review "$tmp/bf-$name.md" "$(IFS=,; printf '%s' "$*")" "$ledger_push_reviewed"
-}
-bf_body_p3='"id":"NEW-P3","severity":"P3","location":"pr.md:12"'
-bf_code_p3='"id":"NEW-P3","severity":"P3","location":"src/x.rs:12"'
-bf_witness='"witness":"git rev-list --count prints 5"'
-bf_review body "{$bf_body_p3}"
-bf_review body-witnessed "{$bf_body_p3,$bf_witness}"
-bf_review body-must "{$bf_body_p3,\"correction\":\"a MUST deviation of standards section 7\"}"
-bf_review body-repeated "{$bf_body_p3}" "{$bf_body_p3}"
-bf_review body-witnessed-repeated "{$bf_body_p3,$bf_witness}" "{$bf_body_p3,$bf_witness}"
-bf_review body-witnessed-no-id "{\"severity\":\"P3\",\"location\":\"pr.md:12\",$bf_witness}"
-bf_review code "{$bf_code_p3}"
-bf_review code-witnessed "{$bf_code_p3,$bf_witness}"
-bf_review p1-witnessed "{\"id\":\"NEW-P1\",\"severity\":\"P1\",\"location\":\"pr.md:12\",$bf_witness}"
-accept_ledger "$tmp/bf-fixed.md" NEW-P3 P3 fixed
-accept_ledger "$tmp/bf-body-fixed.md" NEW-P3 P3 fixed pr.md:12
-accept_ledger "$tmp/bf-p1-fixed.md" NEW-P1 P1 fixed pr.md:12
-accept_ledger "$tmp/bf-body-deferred.md" NEW-P3 P3 deferred pr.md:12
-accept_ledger "$tmp/bf-body-accepted.md" NEW-P3 P3 accepted-risk pr.md:12
-# PR433-ARCHIVE-LOOKUP-ERROR / INVALID-LEDGER-STATUS-TOKEN: indeterminate evidence must not
-# clear either a code witness or a body witness on a fixed row. These audits are read-only;
-# all GitHub reads use the existing offline stub, and no enqueue is requested.
-for evidence_review in bf-code-witnessed bf-body-witnessed; do
-  evidence_body=bf-fixed
-  [[ "$evidence_review" != bf-body-witnessed ]] || evidence_body=bf-body-fixed
-  for evidence_mode in fail empty archive; do
-    evidence_out="$(cd "$enqueue_repo" && STUB_BRANCH=feature/a-slug \
-      STUB_REVIEW_BODY="$tmp/$evidence_review.md" STUB_LEDGER_BODY="$tmp/$evidence_body.md" \
-      STUB_HEAD="$lp_head_outside" LEDGER_STATUS_MODE="$evidence_mode" \
-      PATH="$ledger_push_git:$ledger_push_gh:$PATH" \
-      bash "$root/scripts/pr-ready-audit.sh" 999 2>&1)"
-    contains "indeterminate [$evidence_review/$evidence_mode] state" "$evidence_out" " NOT-READY "
-    contains "indeterminate [$evidence_review/$evidence_mode] movement" "$evidence_out" "moved=indeterminate"
-    contains "indeterminate [$evidence_review/$evidence_mode] read" "$evidence_out" "ledger-status-read-failed"
-    contains "indeterminate [$evidence_review/$evidence_mode] witness" "$evidence_out" "witnessed:NEW-P3"
-    [[ "$evidence_out" == *GH-UNSTUBBED* ]] && error "indeterminate evidence made an unmodelled call"
-  done
-done
-for bf_body in bf-fixed bf-body-fixed bf-p1-fixed; do
-  expect "MUT-BODY-FIXED-UNREAD [$bf_body] policy" "$(body_policy "$tmp/$bf_body.md")" pass
-done
-# The reviews are what they say, by the parser's own flags.
-expect "MUT-BODY-FIXED-UNREAD body review" "$(review_rows "$tmp/bf-body.md")" \
-  "0|json/$ledger_push_reviewed/CHANGES_REQUIRED/$enqueue_base/-;P3:NEW-P3:4"
-expect "MUT-BODY-FIXED-UNREAD witnessed body review" "$(review_rows "$tmp/bf-body-witnessed.md")" \
-  "0|json/$ledger_push_reviewed/CHANGES_REQUIRED/$enqueue_base/-;P3:NEW-P3:5"
-expect "MUT-BODY-FIXED-UNREAD code review" "$(review_rows "$tmp/bf-code.md")" \
-  "0|json/$ledger_push_reviewed/CHANGES_REQUIRED/$enqueue_base/-;P3:NEW-P3:0"
-# bf_case NAME REVIEW BODY HEAD STATE MERGES [WANT...]: one audit, its state, its `pr merge` calls,
-# each WANT in its line, and no unmodelled call
-bf_case() {
-  local name="$1" got want
-  got="$(ledger_push_run "$tmp/$2.md" "$tmp/$3.md" "$4")"
-  contains "MUT-BODY-FIXED-UNREAD $name" "$got" " $5 "
-  expect "MUT-BODY-FIXED-UNREAD $name status" "${got%%|*}" 0
-  expect "MUT-BODY-FIXED-UNREAD $name merge calls" "${got##*|}" "$6"
-  [[ "$5" != READY && "$got" == *" READY "* ]] \
-    && error "MUT-BODY-FIXED-UNREAD: [$name] read READY: [$got]"
-  [[ "$got" == *GH-UNSTUBBED* ]] \
-    && error "MUT-BODY-FIXED-UNREAD: [$name] made a call this case does not model: [$got]"
-  shift 6
-  for want in "$@"; do contains "MUT-BODY-FIXED-UNREAD $name" "$got" "$want"; done
-  bf_got="$got"
-}
-# The neighbours that must not move: a body P3 deferred and filed is READY and enqueued once, so the
-# location changes nothing but a `fixed` row's reading; and a code P3's `fixed` row with nothing
-# pushed outside the ledger is `fixed-but-head-unmoved`, NOT-READY, as before.
-bf_case "body, deferred, ledger-only" bf-body bf-body-deferred "$lp_head_add" READY 1 \
-  "moved=ledger-only "
-[[ "$bf_got" == *blockers=* ]] \
-  && error "MUT-BODY-FIXED-UNREAD: [body, deferred, ledger-only] blocked: [$bf_got]"
-bf_case "code, fixed, unmoved" bf-code bf-fixed "$ledger_push_reviewed" NOT-READY 0 \
-  "blockers=fixed-but-head-unmoved:NEW-P3 "
-bf_case "code, fixed, ledger-only" bf-code bf-fixed "$lp_head_add" NOT-READY 0 \
-  "moved=ledger-only " "blockers=fixed-but-head-unmoved:NEW-P3 "
-# The body P3's `fixed` row, on the head unmoved and on the head a ledger push moved, with and without
-# a witness: `body-fixed` and nothing else, NEEDS-ATTEST, never enqueued, and no `witnessed`.
-bf_case "body, fixed, unmoved" bf-body bf-body-fixed "$ledger_push_reviewed" NEEDS-ATTEST 0 \
-  "blockers=body-fixed:NEW-P3 "
-[[ "$bf_got" == *moved=* ]] && error "MUT-BODY-FIXED-UNREAD: [body, fixed, unmoved] moved: [$bf_got]"
-bf_case "body, witnessed, fixed, unmoved" bf-body-witnessed bf-body-fixed "$ledger_push_reviewed" \
-  NEEDS-ATTEST 0 "blockers=body-fixed:NEW-P3 "
-bf_case "body, fixed, ledger-only" bf-body bf-body-fixed "$lp_head_add" NEEDS-ATTEST 0 \
-  "moved=ledger-only " "blockers=body-fixed:NEW-P3 "
-bf_case "body, witnessed, fixed, ledger-only" bf-body-witnessed bf-body-fixed "$lp_head_add" \
-  NEEDS-ATTEST 0 "moved=ledger-only " "blockers=body-fixed:NEW-P3 "
-# A repair push is read already, so there the location adds nothing, witnessed or not.
-bf_case "body, fixed, repairs" bf-body bf-body-fixed "$lp_head_outside" NEEDS-ATTEST 0 "moved=repairs "
-[[ "$bf_got" == *blockers=* ]] && error "MUT-BODY-FIXED-UNREAD: [body, fixed, repairs] blocked: [$bf_got]"
-bf_case "body, witnessed, fixed, repairs" bf-body-witnessed bf-body-fixed "$lp_head_outside" \
-  NEEDS-ATTEST 0 "moved=repairs "
-[[ "$bf_got" == *blockers=* ]] \
-  && error "MUT-BODY-FIXED-UNREAD: [body, witnessed, fixed, repairs] blocked: [$bf_got]"
-# A witnessed code finding whose row is `fixed` is let past the witness rule by a repair push, and by
-# nothing less: on the head unmoved, or moved by the ledger alone, it is `witnessed` as before.
-bf_case "code, witnessed, fixed, repairs" bf-code-witnessed bf-fixed "$lp_head_outside" \
-  NEEDS-ATTEST 0 "moved=repairs "
-[[ "$bf_got" == *blockers=* ]] \
-  && error "MUT-BODY-FIXED-UNREAD: [code, witnessed, fixed, repairs] blocked: [$bf_got]"
-# A MERGE THAT EDITS CLEARS NO WITNESS. On a head moved `merge-edits:*` -- the reviewed head merged
-# with another commit, with an edit made in the merge -- the same witnessed code finding's `fixed`
-# row was let through as a read repair, NEEDS-ATTEST; it is `witnessed`, NOT-READY, now, and so is the
-# witnessed body finding's. The neighbours that must not move: the repair push above still clears
-# it, and an unwitnessed `fixed` row, code or body, on the merge-edited head is NEEDS-ATTEST with no
-# blocker, as before.
-bf_merge_moved="moved=merge-edits:${lp_head_merge_edit:0:7} "
-bf_case "code, witnessed, fixed, merge-edits" bf-code-witnessed bf-fixed "$lp_head_merge_edit" \
-  NOT-READY 0 "$bf_merge_moved" "blockers=witnessed:NEW-P3 "
-bf_case "body, witnessed, fixed, merge-edits" bf-body-witnessed bf-body-fixed "$lp_head_merge_edit" \
-  NOT-READY 0 "$bf_merge_moved" "blockers=witnessed:NEW-P3 "
-bf_case "code, fixed, merge-edits" bf-code bf-fixed "$lp_head_merge_edit" NEEDS-ATTEST 0 \
-  "$bf_merge_moved"
-[[ "$bf_got" == *blockers=* ]] \
-  && error "MUT-BODY-FIXED-UNREAD: [code, fixed, merge-edits] blocked: [$bf_got]"
-bf_case "body, fixed, merge-edits" bf-body bf-body-fixed "$lp_head_merge_edit" NEEDS-ATTEST 0 \
-  "$bf_merge_moved"
-[[ "$bf_got" == *blockers=* ]] \
-  && error "MUT-BODY-FIXED-UNREAD: [body, fixed, merge-edits] blocked: [$bf_got]"
-bf_case "code, witnessed, fixed, unmoved" bf-code-witnessed bf-fixed "$ledger_push_reviewed" \
-  NOT-READY 0 "blockers=witnessed:NEW-P3 "
-bf_case "code, witnessed, fixed, ledger-only" bf-code-witnessed bf-fixed "$lp_head_add" \
-  NOT-READY 0 "blockers=witnessed:NEW-P3 "
-# Only a `fixed` row lets a witnessed body finding past: `deferred`, `accepted-risk` and no row at
-# all are `witnessed`, as before, on either head.
-for bf_body in bf-body-deferred bf-body-accepted no-findings-body; do
-  bf_case "body, witnessed, $bf_body, unmoved" bf-body-witnessed "$bf_body" "$ledger_push_reviewed" \
-    NOT-READY 0 "blockers=witnessed:NEW-P3 "
-  bf_case "body, witnessed, $bf_body, ledger-only" bf-body-witnessed "$bf_body" "$lp_head_add" \
-    NOT-READY 0 "blockers=witnessed:NEW-P3 "
-done
-# A finding with no id, and an id the review repeats, have no row, so they keep today's answers.
-bf_case "body, witnessed, no id" bf-body-witnessed-no-id bf-body-fixed "$ledger_push_reviewed" \
-  NOT-READY 0 "blockers=witnessed:unnamed "
-bf_case "body, repeated, fixed" bf-body-repeated bf-body-fixed "$ledger_push_reviewed" NOT-READY 0 \
-  "blockers=duplicate-review-id:NEW-P3 "
-bf_case "body, witnessed, repeated, fixed" bf-body-witnessed-repeated bf-body-fixed \
-  "$ledger_push_reviewed" NOT-READY 0 \
-  "blockers=duplicate-review-id:NEW-P3,witnessed:NEW-P3,witnessed:NEW-P3 "
-# A MUST deviation is blocked whatever its row and its location, on any head.
-bf_case "body, MUST, fixed, unmoved" bf-body-must bf-body-fixed "$ledger_push_reviewed" NOT-READY 0 \
-  "blockers=must-deviation:NEW-P3 "
-bf_case "body, MUST, fixed, repairs" bf-body-must bf-body-fixed "$lp_head_outside" NOT-READY 0 \
-  "moved=repairs " "blockers=must-deviation:NEW-P3 "
-# A witnessed P1 repaired in a push still needs a fresh pass. An unmoved P1 is
-# ineligible for a body repair and therefore still blocked by its witness.
-bf_case "P1, witnessed, fixed, repairs" bf-p1-witnessed bf-p1-fixed "$lp_head_outside" NOT-READY 0 \
-  "moved=repairs " "blockers=open-P1:NEW-P1 "
-bf_case "P1, witnessed, fixed, unmoved" bf-p1-witnessed bf-p1-fixed "$ledger_push_reviewed" \
-  NOT-READY 0 "blockers=witnessed:NEW-P1 "
-
-# Review/row agreement is checked only for current IDs, in both directions.
-bf_case "code review, body row" bf-code bf-body-fixed "$ledger_push_reviewed" NOT-READY 0 \
-  "blockers=location-mismatch:NEW-P3 "
-bf_case "body review, code row" bf-body bf-fixed "$ledger_push_reviewed" NOT-READY 0 \
-  "blockers=location-mismatch:NEW-P3 "
-bf_case "code witness, body row, repair push" bf-code-witnessed bf-body-fixed "$lp_head_outside" \
-  NOT-READY 0 "blockers=location-mismatch:NEW-P3 "
-accept_ledger "$tmp/bf-body-wrong-severity.md" NEW-P3 P2 fixed pr.md:12
-bf_case "body row severity differs" bf-body bf-body-wrong-severity "$ledger_push_reviewed" \
-  NOT-READY 0 "blockers=severity-mismatch:NEW-P3 "
-accept_ledger "$tmp/bf-body-other-id.md" OTHER-P3 P3 fixed pr.md:12
-bf_case "body row names another finding" bf-body bf-body-other-id "$ledger_push_reviewed" \
-  NOT-READY 0 "blockers=no-row:NEW-P3 "
-ledger_policy_body "$tmp/bf-historical.md" "$(printf '## Review finding ledger\n\n'; ledger_table
-  ledger_row NEW-P3:P3:fixed pr.md:12
-  ledger_row OLD-P1:P1:fixed pr.md:99
-  ledger_row OLD-P2:P2:fixed src/ordinary.rs:1)"
-bf_case "historical rows remain readable" bf-body bf-historical "$ledger_push_reviewed" \
-  NEEDS-ATTEST 0 "blockers=body-fixed:NEW-P3 "
-crlf_copy < "$tmp/bf-body-fixed.md" > "$tmp/bf-body-fixed-crlf.md"
-bf_case "canonical body in CRLF" bf-body bf-body-fixed-crlf "$ledger_push_reviewed" \
-  NEEDS-ATTEST 0 "blockers=body-fixed:NEW-P3 "
-accept_ledger "$tmp/bf-body-case-id.md" new-p3 P3 fixed pr.md:12
-for bf_shell_body in bf-body-fixed bf-body-fixed-crlf bf-body-case-id; do
-  bf_result="$(
-    shopt -s nocasematch
-    export BASHOPTS
-    ledger_push_run "$tmp/bf-body.md" "$tmp/$bf_shell_body.md" "$ledger_push_reviewed"
-  )"
-  if [[ "$bf_shell_body" == bf-body-case-id ]]; then
-    contains 'BODY-LOCATION-SHELL exact ID' "$bf_result" ' NOT-READY '
-    contains 'BODY-LOCATION-SHELL exact ID reason' "$bf_result" 'no-row:NEW-P3'
-  else
-    contains "BODY-LOCATION-SHELL [$bf_shell_body]" "$bf_result" ' NEEDS-ATTEST '
-    contains "BODY-LOCATION-SHELL attestation [$bf_shell_body]" "$bf_result" 'body-fixed:NEW-P3'
-  fi
-  expect "BODY-LOCATION-SHELL merge calls [$bf_shell_body]" "${bf_result##*|}" 0
-done
-
-# MAINTAINING step 5: every lane's P3, only findings/'s P2, and never P0/P1.
-# Run the real decision with and without a witness; no eligible body repair enqueues.
-for lane_row in "${lane_rows[@]}"; do
-  bf_branch="${lane_row%%|*}"
-  for bf_severity in P0 P1 P2 P3; do
-    for bf_has_witness in no yes; do
-      bf_extra=""
-      [[ "$bf_has_witness" == no ]] || bf_extra=",$bf_witness"
-      bf_review lane "{\"id\":\"BODY-FIX\",\"severity\":\"$bf_severity\",\"location\":\"pr.md:12\"$bf_extra}"
-      accept_ledger "$tmp/bf-lane-row.md" BODY-FIX "$bf_severity" fixed pr.md:12
-      bf_result="$(ledger_push_run "$tmp/bf-lane.md" "$tmp/bf-lane-row.md" \
-        "$ledger_push_reviewed" '' "$bf_branch")"
-      bf_expected=NOT-READY
-      if [[ "$bf_severity" == P3 || ( "$bf_severity" == P2 && "$bf_branch" == findings/* ) ]]; then
-        bf_expected=NEEDS-ATTEST
-        contains 'BODY-FIX-LANE eligible attestation' "$bf_result" 'blockers=body-fixed:BODY-FIX '
-      elif [[ "$bf_result" == *body-fixed:* ]]; then
-        error "BODY-FIX-LANE ineligible exemption: $bf_result"
-      fi
-      contains "BODY-FIX-LANE [$bf_branch/$bf_severity/$bf_has_witness]" "$bf_result" " $bf_expected "
-      expect 'BODY-FIX-LANE exit status' "${bf_result%%|*}" 0
-      expect 'BODY-FIX-LANE merge calls' "${bf_result##*|}" 0
-      [[ "$bf_result" != *GH-UNSTUBBED* ]] || error "BODY-FIX-LANE unmodelled call: $bf_result"
+# --- restored review retention, using synthetic public records -----------------------------------
+# Location adds no flag or special disposition route. Witnesses and MUST deviations block before
+# any ledger row is consulted, including on repair pushes.
+for retention_location in pr.md:12 src/x.rs:12; do
+  for retention_flags in 0 1 2 3; do
+    retention_extra=""
+    ((retention_flags & 1)) && retention_extra+=',"witness":"synthetic failing test"'
+    ((retention_flags & 2)) && retention_extra+=',"mandatory":true'
+    accept_review "$tmp/retention-review.md" \
+      "{\"id\":\"NEW-P3\",\"severity\":\"P3\",\"location\":\"$retention_location\"$retention_extra}" \
+      "$ledger_push_reviewed"
+    expect "base review flags [$retention_location/$retention_flags]" \
+      "$(review_rows "$tmp/retention-review.md")" \
+      "0|json/$ledger_push_reviewed/CHANGES_REQUIRED/$enqueue_base/-;P3:NEW-P3:$retention_flags"
+    for retention_row_location in pr.md:12 src/x.rs:12; do
+      # The restored parser returns only id, severity and disposition, for either location.
+      ledger_policy_body "$tmp/retention-row.md" "$(printf '## Review finding ledger\n\n'; ledger_table
+        ledger_row NEW-P3:P3:fixed | sed "s@src/x.rs:1@$retention_row_location@")"
+      expect "base ledger record [$retention_row_location]" \
+        "$(parse_nul ledger "$tmp/retention-row.md")" '0|ledger|1|NEW-P3|P3|fixed|'
+      for retention_head in "$ledger_push_reviewed" "$lp_head_add" "$lp_head_edit" \
+          "$lp_head_retag" "$lp_head_delete" "$lp_head_rename" "$lp_head_add_edit" \
+          "$lp_head_closed" "$lp_head_legacy_edit" "$lp_head_closed_delete" \
+          "$lp_head_outside" "$lp_head_merge_edit"; do
+        retention_state=NOT-READY
+        if ((retention_flags & 2)); then
+          retention_blocker=must-deviation:NEW-P3
+        elif ((retention_flags & 1)); then
+          retention_blocker=witnessed:NEW-P3
+        elif [[ "$retention_head" == "$lp_head_outside" || "$retention_head" == "$lp_head_merge_edit" ]]; then
+          retention_state=NEEDS-ATTEST
+          retention_blocker=""
+        else
+          retention_blocker=fixed-but-head-unmoved:NEW-P3
+        fi
+        retention_got="$(ledger_push_run "$tmp/retention-review.md" "$tmp/retention-row.md" "$retention_head")"
+        contains "review retention state" "$retention_got" " $retention_state "
+        expect "review retention status" "${retention_got%%|*}" 0
+        expect "review retention enqueue calls" "${retention_got##*|}" 0
+        if [[ -n "$retention_blocker" ]]; then
+          contains "review retention blocker" "$retention_got" "blockers=$retention_blocker "
+        elif [[ "$retention_got" == *blockers=* ]]; then
+          error "review retention unexpected blocker: $retention_got"
+        fi
+        [[ "$retention_got" != *GH-UNSTUBBED* ]] || error "review retention unmodelled call: $retention_got"
+      done
     done
   done
 done
-
-# A failed helper or a synthetic parser success with a missing/invalid category
-# must block at the consumer, even though the fetched body itself is valid.
-for bf_protocol in old invalid unknown failed lane; do
-  bf_result="$(
-    cd "$enqueue_repo" || exit 99
-    export STUB_BRANCH=feature/a-slug STUB_REVIEW_BODY="$tmp/bf-body.md" \
-      STUB_LEDGER_BODY="$tmp/bf-body-fixed.md" STUB_HEAD="$ledger_push_reviewed"
-    if [[ "$bf_protocol" == lane ]]; then
-      may_fix_body_for() { printf 'P3'; return 1; }
-    else
-      run_review_parser() {
-        if [[ "$1" != ledger ]]; then
-          "$review_python" "$review_parser" "$1" --nul --out "$3" "$2"
-          return
-        fi
-        printf '%s\0' ledger 1 NEW-P3 P3 fixed > "$3"
-        case "$bf_protocol" in
-          old) ;;
-          invalid) printf '%s\0' BODY >> "$3" ;;
-          unknown) printf '%s\0' unknown >> "$3" ;;
-          failed) printf '%s\0' body >> "$3"; return 1 ;;
-        esac
-      }
-    fi
-    PATH="$ledger_push_git:$ledger_push_gh:$PATH" main 999 2>&1
-  )"
-  contains "BODY-FIX-PROTOCOL [$bf_protocol]" "$bf_result" ' NOT-READY '
-  case "$bf_protocol" in
-    old|invalid) bf_blocker=ledger-parse-incomplete ;;
-    unknown) bf_blocker=location-mismatch:NEW-P3 ;;
-    failed) bf_blocker=ledger-parse-failed:1 ;;
-    lane) bf_blocker=may-fix-body-unanswered:feature ;;
-  esac
-  contains "BODY-FIX-PROTOCOL reason [$bf_protocol]" "$bf_result" "$bf_blocker"
-  [[ "$bf_result" != *body-fixed:* ]] || error "BODY-FIX-PROTOCOL granted an exemption: $bf_result"
+# Indeterminate movement remains a hard blocker and cannot clear a witness.
+accept_review "$tmp/retention-witness.md" \
+  '{"id":"NEW-P3","severity":"P3","location":"pr.md:12","witness":"synthetic failing test"}' \
+  "$ledger_push_reviewed"
+for retention_mode in fail empty archive; do
+  retention_got="$(ledger_push_run "$tmp/retention-witness.md" "$tmp/retention-row.md" \
+    "$lp_head_outside" "$retention_mode")"
+  contains "indeterminate retention state" "$retention_got" " NOT-READY "
+  contains "indeterminate retention movement" "$retention_got" "moved=indeterminate "
+  contains "indeterminate retention read" "$retention_got" "ledger-status-read-failed"
+  contains "indeterminate retention witness" "$retention_got" "witnessed:NEW-P3"
+  expect "indeterminate retention enqueue calls" "${retention_got##*|}" 0
 done
+# A rewrite needs attestation even with no findings; hard blockers keep it NOT-READY.
+expect "ledger rewrite state" "$(state_of ledger-rewrite)" NEEDS-ATTEST
+expect "ledger rewrite manual state" "$(state_of ledger-rewrite manual:x)" NEEDS-ATTEST
+expect "ledger rewrite hard state" "$(state_of ledger-rewrite witnessed:x)" NOT-READY
 
 # --- every body `ledger_policy_body` built, through main ---------------------------------------------
 # THE BLOCKER APPEARS EXACTLY WHEN `body_policy` SAYS `fail`, over every body this file built with

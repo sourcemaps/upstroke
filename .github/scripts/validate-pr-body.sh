@@ -3,15 +3,7 @@ set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
 
 title="${1:-}"
-# Keep the evidence validator's byte handling: NUL must not disappear, and a
-# carriage return is a line ending only when immediately followed by LF.
-body="$(tr '\000' '\001' && printf '.')"
-if [[ "$body" == *$'\001'* ]]; then
-  echo 'pull-request body contains a control byte' >&2
-  exit 1
-fi
-body="${body%.}"
-body="${body//$'\r\n'/$'\n'}"
+body="$(tr -d '\r')"
 failed=0
 
 error() {
