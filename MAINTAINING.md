@@ -61,6 +61,9 @@ source, documentation, workflows, release machinery and this file.
    `engine::`, `runner::`, and everything else. The slowest shard was predicted at about 14.4
    minutes and the slowest macOS leg at about 11.8. Run 44736631711 measured both re-splits for
    the first time: the slowest Windows leg took 18.1 minutes and the slowest macOS leg 16.0.
+   Each Windows leg's log now gives every test's own duration on the hosted runner
+   (`test <name> ... ok <0.123s>`, libtest's `--report-time`), and the packing of tests into
+   legs is weighed by those times.
    Single tests set the floor under the Windows prediction: a leg takes no less than its longest test
    and the fixed minutes, and two tests are each estimated at about 9 minutes of their leg's
    harness, neither changed by the re-split:
