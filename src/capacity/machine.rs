@@ -33,7 +33,7 @@ use serde::Deserialize;
 
 use super::evidence::{self, Evidence};
 use super::usage::{self, UsageReport};
-use super::{Allowance, Basis, Observations, Pool, Reported};
+use super::{Allowance, Basis, Observations, Pool, Reported, UsageSource};
 
 /// Which runs feed the capacity views: `[capacity] scope` (§17).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -489,9 +489,10 @@ fn read_reports(
 /// is the whole validity rule. A window whose reset has passed says nothing (its usage
 /// started over); a window that names no reset is believed for
 /// [`UNDATED_WINDOW_MAX_AGE`] and then dropped; a report dated ahead of this
-/// machine's clock, or from a provider the pool no longer names, says nothing
-/// at all. Where several windows still stand, the tightest binds, since a pool
-/// is spent when any one of its windows is.
+/// machine's clock, from a provider the pool no longer names, or about an
+/// account other than the one the pool now names (`other_account`), says
+/// nothing at all. Where several windows still stand, the tightest binds,
+/// since a pool is spent when any one of its windows is.
 ///
 /// The fraction returned is raw: the caller applies the pool's margin and
 /// reserve.
@@ -512,6 +513,10 @@ pub fn reading(
              bounds nothing; `upstroke capacity --refresh` replaces it",
             report.provider, source.provider
         ));
+        return (None, notes);
+    }
+    if let Some(why) = other_account(report, source) {
+        notes.push(why);
         return (None, notes);
     }
     if report.fetched_at > now_unix.saturating_add(CLOCK_SKEW_ALLOWANCE.as_secs()) {
@@ -582,10 +587,51 @@ pub fn reading(
     (reported, notes)
 }
 
+/// Why `report` is not about the account `source` now names, or `None` when
+/// it is.
+///
+/// "Usage inside one window only grows" is true of one account. A provider
+/// that reports per account answers for the account in its address, so a
+/// reading of `account-a` says nothing about `account-b`, however recent,
+/// and a pool's `usage_account` can be changed after its report was taken.
+/// So a report binds only while the account it records is the one
+/// [`usage::account_for`] answers for the pool as configured now, which is
+/// the account a refresh would ask about. One that records none, for a
+/// provider that reads one, was stored before accounts were recorded and
+/// cannot be told apart from another account's. A provider that reports per
+/// key reads no account, so a report that records one for it is not one the
+/// tracker wrote.
+fn other_account(report: &UsageReport, source: &UsageSource) -> Option<String> {
+    let found = report.account.as_deref();
+    if found == usage::account_for(source) {
+        return None;
+    }
+    let provider = source.provider;
+    let refresh = "`upstroke capacity --refresh` replaces it";
+    Some(match (found, source.account.as_deref()) {
+        (Some(found), _) if !provider.needs_account() => format!(
+            "the stored provider report names account `{found}`, and `{provider}` reports per key \
+             and not per account, so it bounds nothing; {refresh}"
+        ),
+        (Some(found), Some(named)) => format!(
+            "the stored provider report came from account `{found}` and the pool now names \
+             `{named}`, so it bounds nothing; {refresh}"
+        ),
+        (Some(found), None) => format!(
+            "the stored provider report came from account `{found}` and the pool now names no \
+             `usage_account`, so it bounds nothing"
+        ),
+        (None, _) => format!(
+            "the stored provider report predates account recording, so which account it \
+             measured is not known and it bounds nothing; {refresh}"
+        ),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::usage::UsageWindow;
-    use super::super::{PoolKind, Source, UsageProvider, UsageSource};
+    use super::super::{PoolKind, Source, UsageProvider};
     use super::*;
 
     const NOON: u64 = 1_795_435_200;
@@ -619,8 +665,33 @@ mod tests {
         UsageReport {
             pool: "anthropic-api".to_owned(),
             provider: "anthropic-cost".to_owned(),
+            account: None,
             fetched_at,
             windows,
+        }
+    }
+
+    /// A pool whose provider reports per account, naming `account`.
+    fn per_account(account: Option<&str>) -> Pool {
+        Pool {
+            name: "copilot".to_owned(),
+            usage: Some(UsageSource {
+                provider: UsageProvider::GithubAiCredits,
+                token_env: Some("TOKEN".to_owned()),
+                account: account.map(str::to_owned),
+            }),
+            ..pool()
+        }
+    }
+
+    /// That provider's report of 90 of the pool's 100 drawn this month, taken
+    /// at noon for `account`.
+    fn per_account_report(account: Option<&str>) -> UsageReport {
+        UsageReport {
+            pool: "copilot".to_owned(),
+            provider: "github-ai-credits".to_owned(),
+            account: account.map(str::to_owned),
+            ..stored(NOON, vec![window("month", 90.0, Some(NOON + 200 * HOUR))])
         }
     }
 
@@ -754,6 +825,120 @@ mod tests {
             reading(&within, &unasked, NOON),
             (None, Vec::new()),
             "a pool that names no provider reads no report"
+        );
+    }
+
+    #[test]
+    fn a_report_binds_only_while_the_pool_names_the_account_it_was_fetched_for() {
+        let report = per_account_report(Some("account-a"));
+        let (bound, notes) = reading(&report, &per_account(Some("account-a")), NOON + HOUR);
+        assert!(
+            bound.is_some_and(|bound| (bound.remaining - 0.1).abs() < 1e-9),
+            "the pool still names the account the report was fetched for, so its reading stands"
+        );
+        assert!(notes.is_empty(), "{notes:?}");
+
+        let (bound, notes) = reading(&report, &per_account(Some("account-b")), NOON + HOUR);
+        assert_eq!(
+            bound, None,
+            "account-a's reading says nothing about account-b"
+        );
+        assert_eq!(
+            notes,
+            vec![
+                "the stored provider report came from account `account-a` and the pool now names \
+                 `account-b`, so it bounds nothing; `upstroke capacity --refresh` replaces it"
+                    .to_owned()
+            ]
+        );
+
+        let (bound, notes) = reading(&report, &per_account(None), NOON + HOUR);
+        assert_eq!(
+            bound, None,
+            "a pool that names no account names none of the report's"
+        );
+        assert!(
+            notes.iter().any(|note| {
+                note.contains("came from account `account-a`")
+                    && note.contains("the pool now names no `usage_account`")
+            }),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn an_old_report_with_no_account_bounds_nothing_where_the_provider_reads_one() {
+        let stored_before = serde_json::json!({
+            "schema": 1,
+            "pool": "copilot",
+            "provider": "github-ai-credits",
+            "fetched_at": crate::util::rfc3339_utc(NOON),
+            "windows": [{
+                "label": "month",
+                "used_amount": 90.0,
+                "resets_at": crate::util::rfc3339_utc(NOON + 200 * HOUR),
+            }],
+        })
+        .to_string();
+        let report = UsageReport::decode(stored_before.as_bytes())
+            .expect("a report stored before accounts were recorded still decodes");
+        assert_eq!(report, per_account_report(None), "and records no account");
+
+        let (bound, notes) = reading(&report, &per_account(Some("account-a")), NOON + HOUR);
+        assert_eq!(bound, None, "there is no telling which account it measured");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].contains("predates account recording")
+                && notes[0].ends_with("`upstroke capacity --refresh` replaces it"),
+            "{notes:?}"
+        );
+
+        let per_key = UsageReport::decode(
+            stored_before
+                .replacen("github-ai-credits", "anthropic-cost", 1)
+                .as_bytes(),
+        )
+        .expect("a per-key provider's report from before decodes too");
+        let (bound, notes) = reading(&per_key, &pool(), NOON + HOUR);
+        assert!(
+            bound.is_some_and(|bound| (bound.remaining - 0.1).abs() < 1e-9),
+            "a provider that reports per key has no account to record, so its earlier reports \
+             still bind: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn a_provider_that_reports_per_key_is_held_to_no_account() {
+        let ignored = Pool {
+            usage: Some(UsageSource {
+                provider: UsageProvider::AnthropicCost,
+                token_env: Some("TOKEN".to_owned()),
+                account: Some("octo-cat".to_owned()),
+            }),
+            ..pool()
+        };
+        let open = vec![window("month", 50.0, Some(NOON + 3 * HOUR))];
+        let (bound, notes) = reading(&stored(NOON, open.clone()), &ignored, NOON);
+        assert!(
+            bound.is_some(),
+            "a `usage_account` the provider does not read changes nothing about its report: \
+             {notes:?}"
+        );
+
+        let recorded = UsageReport {
+            account: Some("octo-cat".to_owned()),
+            ..stored(NOON, open)
+        };
+        let (bound, notes) = reading(&recorded, &ignored, NOON);
+        assert_eq!(
+            bound, None,
+            "the tracker records no account for this provider"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("`anthropic-cost` reports per key")),
+            "{notes:?}"
         );
     }
 

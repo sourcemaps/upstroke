@@ -213,7 +213,9 @@ run, for a difference the operator cannot see.
 
 Whether the endpoint reports per account, and so needs `usage_account` in its
 address. GitHub's billing usage does; the two organization cost endpoints
-answer for the organization the key belongs to.
+answer for the organization the key belongs to. It also decides whether a
+stored report records an account, and so whether changing `usage_account`
+retires the report (see [`Reported`]).
 
 ## `pub const MAX_TOKEN_ENV_CHARS: usize = 64;`
 
@@ -770,6 +772,34 @@ reduced to a fraction: `remaining` is raw, before the pool's margin and
 reserve. `src/capacity/machine.rs` builds it (`reading`), since what a report
 is worth depends on the clock and on the pool's allowance, and the estimator
 is given neither.
+
+It depends on the account as well. A provider that reports per account
+([`UsageProvider::needs_account`]) answers for the account in the request's
+address, and "usage inside one window only grows" is true of one account.
+Until 2026-11-23 a stored report did not record which account it was, and
+`reading` checked only its provider: a pool refreshed for `account-a` at 90
+of 100 drawn and then switched to `account-b` showed `account-a`'s "≤10%
+[provider-reported]" for `account-b`, with no note, until the window reset
+(`PR409-USAGE-CACHE-ACCOUNT-IDENTITY`). A report now records the account it
+was fetched for: the pool's `usage_account` at the refresh, and none for a
+provider that reports per key, whatever the pool sets. One function decides
+that, `capacity::usage::account_for`; the tracker writes with it and
+`reading` checks with it, so the two cannot disagree. `reading` builds no
+`Reported` from a report whose account is not the one the pool names now.
+Its note says which account the report came from and which the pool now
+names, as the note for a changed `usage_provider` does, and that
+`upstroke capacity --refresh` replaces it. A report that records no account,
+for a provider that needs one, was stored before accounts were recorded. It
+cannot be told apart from another account's, so it bounds nothing either,
+with a note saying it predates account recording.
+
+The field is optional, so a report stored before it still decodes, and a
+per-key provider's report is written as it was before the field existed, so
+those reports bind as they did. A build from before the field refuses a
+report that has it, as an unknown field, and that report then bounds nothing
+there. The report stores the account's name, never a credential, and refuses
+one that is not an account name (`names_an_account`) on the way in and on
+the way out.
 
 ## `pub enum Basis {`
 

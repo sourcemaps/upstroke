@@ -27,7 +27,10 @@
 //! of either. The write is atomic and not durable: a crash can lose the newest
 //! report, and the next refresh writes it again. A failed refresh leaves the
 //! stored report alone, since an older reading is still a valid ceiling until
-//! its window resets (`capacity::machine::reading`).
+//! its window resets (`capacity::machine::reading`). That holds of one account:
+//! each report records the account it was asked about, where the provider
+//! reports per account (`capacity::usage::account_for`), and once the pool
+//! names another, the old report bounds nothing.
 
 // Allowlist placement: the funnel section of `effects/allowlist.toml`, which
 // carries this module's review clause.
@@ -184,6 +187,7 @@ fn refresh_pool(
     let report = UsageReport {
         pool: pool.name.clone(),
         provider: source.provider.to_string(),
+        account: usage::account_for(source).map(str::to_owned),
         fetched_at: now_unix,
         windows,
     };
@@ -366,6 +370,39 @@ agent = \"claude-code\"
         fn stored(&self, pool: &str) -> Option<UsageReport> {
             usage::read(&self.store(), pool).expect("a stored report reads back")
         }
+
+        /// What the capacity views gather at `now_unix` from the reports
+        /// stored so far, with no refresh first, and their estimate of `pool`.
+        fn gathered(
+            &self,
+            pool: &str,
+            now_unix: u64,
+        ) -> (crate::capacity::Gathered, crate::capacity::PoolEstimate) {
+            let options = self.options();
+            let mut warnings = Vec::new();
+            let config = crate::config::load(
+                None,
+                &options.repo_root,
+                options.pools_path.as_deref(),
+                &mut warnings,
+            )
+            .expect("the pools load");
+            let gathered = crate::capacity::machine::gather(
+                &crate::capacity::machine::GatherOptions {
+                    scope: crate::capacity::Scope::Machine,
+                    repo_root: &options.repo_root,
+                    machine_dir: config.machine_dir.as_deref(),
+                    pools: &config.pools,
+                    now_unix,
+                },
+                &mut warnings,
+            );
+            let estimate = crate::capacity::estimate_gathered(&config.pools, &gathered)
+                .into_iter()
+                .find(|estimate| estimate.pool == pool)
+                .unwrap_or_else(|| panic!("`{pool}` is estimated"));
+            (gathered, estimate)
+        }
     }
 
     /// A transport that answers by host and records every request it saw.
@@ -528,6 +565,121 @@ agent = \"claude-code\"
         assert_eq!(anthropic.reset_at.as_deref(), Some("2026-12-01T00:00:00Z"));
     }
 
+    /// A pools file whose one pool, `copilot`, reads GitHub's billing for
+    /// `account` against an allowance of 100, with no margin and no reserve,
+    /// so that the ceiling shown is the provider's reading as it stands.
+    fn copilot_for(account: &str) -> String {
+        format!(
+            "[pools.copilot]\nkind = \"credits\"\nagent = \"copilot\"\nmonthly_allowance = 100\n\
+             safety_margin = 0.0\nreserve = 0.0\nusage_provider = \"github-ai-credits\"\n\
+             usage_token_env = \"GH_PLAN_TOKEN\"\nusage_account = \"{account}\"\n"
+        )
+    }
+
+    /// GitHub's answer for an account that has drawn `credits` this month.
+    fn github_drew(credits: u32) -> String {
+        format!(r#"{{"usageItems":[{{"unitType":"ai-credits","grossQuantity":{credits}}}]}}"#)
+    }
+
+    /// Finding PR409-USAGE-CACHE-ACCOUNT-IDENTITY's witness, ported into the
+    /// crate. A per-account provider's report is one account's reading: with
+    /// `account-a` at 90 of 100 drawn and the pool then switched to
+    /// `account-b`, the views showed `account-a`'s "≤10% [provider-reported]"
+    /// for `account-b`, with no note, until the window reset.
+    #[test]
+    fn changing_the_account_must_invalidate_its_previous_report() {
+        let machine = Machine::new("tracker-account-switch", &copilot_for("account-a"));
+        let ninety = github_drew(90);
+        let table = Table::new(&[("api.github.com", Ok((200, ninety.as_str())))]);
+        refresh(&machine.options(), &table, &environment).expect("a refresh for account-a");
+        assert!(
+            table.asked.borrow()[0].url.contains("/users/account-a/"),
+            "{}",
+            table.asked.borrow()[0].url
+        );
+        let stored = machine.stored("copilot").expect("a report was stored");
+        assert_eq!(
+            stored.account.as_deref(),
+            Some("account-a"),
+            "the report records the account it was fetched for"
+        );
+        let written = std::fs::read_to_string(usage::report_path(&machine.store(), "copilot"))
+            .expect("the stored report reads");
+        assert!(
+            !written.contains("github_pat_test"),
+            "the account's name is stored, never the credential: {written}"
+        );
+
+        let later = NOON + 3_600;
+        let (gathered, copilot) = machine.gathered("copilot", later);
+        assert!(
+            gathered.reported.contains_key("copilot"),
+            "the pool still names account-a, so its reading binds: {:?}",
+            gathered.report_notes
+        );
+        assert!(
+            copilot
+                .describe()
+                .starts_with("copilot: ≤10% [provider-reported]"),
+            "{}",
+            copilot.describe()
+        );
+
+        std::fs::write(
+            machine.tree.path().join("pools.toml"),
+            copilot_for("account-b"),
+        )
+        .expect("the pools file now names account-b");
+        let (gathered, copilot) = machine.gathered("copilot", later);
+        assert!(
+            !gathered.reported.contains_key("copilot"),
+            "account-a's reading is not account-b's: {:?}",
+            gathered.reported
+        );
+        assert_eq!(copilot.remaining, crate::capacity::Remaining::Unknown);
+        assert!(
+            copilot.notes.iter().any(|note| {
+                note.contains(
+                    "the stored provider report came from account `account-a` and the pool now \
+                     names `account-b`, so it bounds nothing",
+                ) && note.ends_with("`upstroke capacity --refresh` replaces it")
+            }),
+            "account-a's reading is not shown for account-b without saying why: {:?}",
+            copilot.notes
+        );
+        assert_eq!(
+            table.asked.borrow().len(),
+            1,
+            "nothing was refreshed in between"
+        );
+
+        let thirty = github_drew(30);
+        let again = Table::new(&[("api.github.com", Ok((200, thirty.as_str())))]);
+        refresh(&machine.options(), &again, &environment).expect("a refresh for account-b");
+        assert!(
+            again.asked.borrow()[0].url.contains("/users/account-b/"),
+            "{}",
+            again.asked.borrow()[0].url
+        );
+        let (gathered, copilot) = machine.gathered("copilot", later);
+        assert!(gathered.reported.contains_key("copilot"));
+        assert!(
+            copilot
+                .describe()
+                .starts_with("copilot: ≤70% [provider-reported]"),
+            "the refresh replaced the report with account-b's own: {}",
+            copilot.describe()
+        );
+        assert!(
+            !copilot
+                .notes
+                .iter()
+                .any(|note| note.contains("came from account")),
+            "{:?}",
+            copilot.notes
+        );
+    }
+
     #[test]
     fn a_pool_with_no_credential_or_no_account_is_skipped_and_nothing_is_asked() {
         let machine = Machine::new(
@@ -625,6 +777,7 @@ agent = \"claude-code\"
         let mut report = UsageReport {
             pool: "team/claude".to_owned(),
             provider: "anthropic-cost".to_owned(),
+            account: None,
             fetched_at: NOON,
             windows: vec![UsageWindow {
                 label: "month".to_owned(),
@@ -662,6 +815,7 @@ agent = \"claude-code\"
         let report = UsageReport {
             pool: "p".to_owned(),
             provider: "anthropic-cost".to_owned(),
+            account: None,
             fetched_at: NOON,
             windows: vec![UsageWindow {
                 label: "month".to_owned(),
@@ -681,6 +835,7 @@ agent = \"claude-code\"
         let report = UsageReport {
             pool: "p".to_owned(),
             provider: "anthropic-cost".to_owned(),
+            account: None,
             fetched_at: NOON,
             windows: Vec::new(),
         };
