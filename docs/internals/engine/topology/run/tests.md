@@ -188,9 +188,9 @@ foreign operator beside a correct one passed it, and the whole suite with it
 (the delta review's R9). Its domain is the drivers' production code, which
 the census checks reaches the functions it must (`step`, `idle`, `finish`,
 `registry_pause`).
-`coordinator::tests::every_append_of_the_width_one_step_a_retrys_settlement_included_folds_through_the_callers_hooks`
+`coordinator::tests::registry_waits::every_append_of_the_width_one_step_a_retrys_settlement_included_folds_through_the_callers_hooks`
 is the behavioural witness, and
-`coordinator::tests::the_width_one_step_runs_the_same_transitions_and_its_access_waits_by_sleeping`
+`coordinator::tests::registry_waits::the_width_one_step_runs_the_same_transitions_and_its_access_waits_by_sleeping`
 the control.
 
 ## `fn the_r_t_census_reports_one_call_that_bypasses_its_driver() {`
