@@ -7,7 +7,7 @@ pr: 362
 reviewed_sha: 4b0a628e19f19ebf94a5d3aea945885f96cb15bf
 location: docs/internals/events/log/tests.md:1351
 provenance: pre_existing
-first_bad:
+first_bad: f45e76a3037657b28686e462106f7d12e670dcfa
 guard: the next change to the build-refusal notes in `docs/internals/events/log/tests.md`
 ---
 
@@ -24,7 +24,9 @@ fixture wrapped in a `fn main`, line 1351 still reads:
 > written that way and this wraps them the same.
 
 The wrapping is real and the reason is stale. The fixtures are no longer doctests, so the note
-explains today's code by a mechanism that is gone.
+explains today's code by a mechanism that is gone. Commit `f45e76a3` moved the comment into the
+notes while it switched the extractor from Rustdoc comments to Markdown fixtures, which is when
+the note's doctest wording stopped being true.
 
 ## What the change that takes this up should do
 
