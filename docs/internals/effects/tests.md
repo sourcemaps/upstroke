@@ -76,7 +76,8 @@ start a subprocess while `RUSTC_BOOTSTRAP` is present.
 After changing a manifest or adding/removing an automatically discovered target,
 run `python3 .github/scripts/test-categories.py refresh-targets`, then the
 standalone category check. Review the two updated metadata constants with the
-manifest change. `generate`, `contract` and `prove --harness` remain Cargo-free.
+manifest change. The refresh rewrites only a stale constant's interior, in the
+line ending that follows it; every other byte, including CRLF endings, stays. `generate`, `contract` and `prove --harness` remain Cargo-free.
 The snapshot is checked in so ordinary local tests need no preparatory command
 or environment variable. Its manifest fingerprint is checked on every acquisition;
 the standalone inventory supplies the independent Cargo comparison.
@@ -3211,6 +3212,44 @@ Compile a libtest fixture twice. Both builds contain ordinary and ignored
 the second must fail with that name and `TEST_CATEGORIES` in its diagnostic.
 Every fixture body panics if executed, making this a listing-only refusal
 witness and a positive control for the CLI requirement.
+
+## `fn inert_category_harness(directory: &Path, name: &str, body: &str, flags: &[&str]) -> PathBuf {`
+
+Compile `body` plus one `cli_tests::registers` registration into a libtest
+harness with `rustc --test` and the given flags, never Cargo. The compiler runs
+in `directory`, so a later `rustc` query from the same fixture root resolves the
+same toolchain. Every fixture body panics if executed.
+
+## `fn the_category_check_holds_its_build_slot_until_the_last_listing() {`
+
+`PR439-INVENTORY-OUTLIVES-BUILD-SLOT`. A one-slot `upstroke-build` model runs
+its child inside the slot; when the slot is released, a second worktree relinks
+the same executable path with its own, fully categorised harness. The candidate
+harness adds the uncategorised `not_assigned::new_registration`. Standalone
+`check` must fail with that name and the slot's path, list nothing after the
+release, build once, and never acquire the slot twice: inside the slot the check
+runs Cargo bare. Before the repair the wrapper covered only the build, so the
+listing certified the second worktree's harness and the check passed. Only the
+wrapper, Cargo's build response and the metadata sync are substituted; the
+listings run the real harnesses.
+
+## `fn the_category_check_lists_a_prefer_dynamic_harness_with_cargos_library_path() {`
+
+`PR439-INVENTORY-DIRECT-LISTING-LIBRARY-PATH`, Linux only. Compile the harness
+with `-C prefer-dynamic` into a fixture `target/debug/deps`, then run standalone
+`check` over it with `LD_LIBRARY_PATH` and `RUSTC` removed, as a shell outside
+Cargo would. The direct listing must load libstd from rustc's target libdir and
+report one categorised registration. Before the repair it exited 127. Only
+Cargo's build response and the metadata sync are substituted.
+
+## `fn the_target_refresh_preserves_crlf_and_every_byte_outside_stale_constants() {`
+
+`PR439-TARGET-REFRESH-REWRITES-LINE-ENDINGS`. Convert the fixture's target
+source to CRLF and append an LF line and an unterminated one. Answering offline
+metadata from the recorded constants, `refresh-targets` must leave every byte
+alone. After one repository target is added, it must change only that constant's
+interior, in CRLF, and a following check must accept it. Python's subprocess
+constructor is refused throughout.
 
 ## `mod merge_gate_answers {`
 

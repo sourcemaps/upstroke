@@ -1217,7 +1217,11 @@ one named selection per registration, then lists every harness with all category
 filters skipped. Any remaining registration fails with its harness and the table
 location. An empty example harness is permitted; an empty aggregate or failed
 listing fails.
-On a build box it uses `upstroke-build`; on CI it uses Cargo directly. Windows uses
+On a build box `upstroke-build` runs the whole check, so one slot covers the
+build and every listing of its executables; inside it Cargo runs bare. On CI it
+uses Cargo directly. Each listing runs with the library path `cargo test` would
+give it: build-script link paths inside the output directory, the deps and base
+output directories, then rustc's target libdir. Windows uses
 the same Python implementation. Listing occurs before every Linux and Windows suite;
 on macOS the pinned condition runs it before the generated owner's suite. C3's existing equality
 between shell gate files and Linux lint invocations is retained: lint also runs the

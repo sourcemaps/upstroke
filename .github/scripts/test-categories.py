@@ -4,7 +4,10 @@
 The Rust table is the only registry. Planning inventories and timings are not
 inputs to this program. No check ever executes an unmatched test.
 The standalone check also verifies the crate-root metadata consumed by tests;
-refresh-targets updates those snapshots after a manifest or target change.
+refresh-targets updates those snapshots after a manifest or target change,
+leaving every other byte of their file alone. Under upstroke-build one slot holds
+the whole check, so it lists only the executables it built, with the library
+path Cargo gives a test it runs.
 """
 import argparse
 import ast
@@ -24,7 +27,10 @@ MODEL = ROOT / "src/effects/tests/ci_model.rs"
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
 TARGET_SOURCE = ROOT / "src/effects/tests.rs"
 PLATFORMS = ("ubuntu", "macos", "windows")
+# Set for the check that upstroke-build runs inside the slot it holds.
+SLOT_HELD = "TEST_CATEGORIES_BUILD_SLOT"
 Registration = namedtuple("Registration", "harness name")
+Build = namedtuple("Build", "harnesses linked_paths")
 
 
 def registry():
@@ -200,7 +206,9 @@ def checked(command):
 
 def cargo():
     # A build box owns target isolation. CI and workstations use ordinary Cargo.
-    wrapper = shutil.which("upstroke-build")
+    # Inside the slot a whole check holds (see main), Cargo runs bare: the
+    # wrapper has already bound that slot's target directory.
+    wrapper = None if os.environ.get(SLOT_HELD) == "1" else shutil.which("upstroke-build")
     return [wrapper, "cargo"] if wrapper else ["cargo"]
 
 
@@ -233,31 +241,45 @@ def target_metadata(manifest):
 
 
 def sync_target_metadata(refresh=False):
-    source = TARGET_SOURCE.read_text(encoding="utf-8")
+    # Decode explicitly without universal-newline translation: only a stale
+    # constant's interior may change, taking the line ending after that constant.
+    before = TARGET_SOURCE.read_bytes()
+    source = before.decode("utf-8")
     with tempfile.TemporaryDirectory(prefix="upstroke-targets-") as directory:
         fixture = Path(directory) / "Cargo.toml"
-        fixture.write_text(target_constant(source, "CUSTOM_TARGET_MANIFEST").group(1),
-                           encoding="utf-8")
+        # Rust reads a raw string's CRLF as LF, so the manifest's text is LF's.
+        fixture.write_text(target_constant(source, "CUSTOM_TARGET_MANIFEST").group(1)
+                           .replace("\r\n", "\n"), encoding="utf-8")
         for name, manifest in (("REPOSITORY_TARGET_METADATA", ROOT / "Cargo.toml"),
                                ("CUSTOM_TARGET_METADATA", fixture)):
             match = target_constant(source, name)
             actual = target_metadata(manifest)
-            if not refresh and json.loads(match.group(1)) != actual:
+            if json.loads(match.group(1)) == actual:
+                continue
+            if not refresh:
                 raise ValueError(f"stale {name}; run python3 .github/scripts/test-categories.py "
                                  "refresh-targets before testing")
-            if refresh:
-                source = source[:match.start(1)] + json.dumps(actual, indent=2) + source[match.end(1):]
-    if refresh:
-        TARGET_SOURCE.write_text(source, encoding="utf-8")
+            newline = "\r\n" if source.startswith("\r\n", match.end()) else "\n"
+            source = (source[:match.start(1)] + json.dumps(actual, indent=2).replace("\n", newline)
+                      + source[match.end(1):])
+    after = source.encode("utf-8")
+    if after != before:
+        TARGET_SOURCE.write_bytes(after)
 
 
 def built_harnesses():
+    return build().harnesses
+
+
+def build():
     output = checked(cargo() + ["test", "--all-targets", "--all-features", "--no-run",
                                 "--message-format=json"])
-    harnesses = []
+    harnesses, linked = [], []
     for line in output.splitlines():
         artifact = json.loads(line)
-        if (artifact.get("reason") == "compiler-artifact"
+        if artifact.get("reason") == "build-script-executed":
+            linked.extend(artifact.get("linked_paths", []))
+        elif (artifact.get("reason") == "compiler-artifact"
                 and artifact.get("profile", {}).get("test")
                 and artifact.get("executable")):
             harness = artifact["executable"]
@@ -266,7 +288,43 @@ def built_harnesses():
             harnesses.append(harness)
     if not harnesses:
         raise ValueError("Cargo listed no test harnesses; refusing an empty inventory")
-    return harnesses
+    return Build(harnesses, linked)
+
+
+def dylib_variable():
+    # The variable Cargo extends for each program it runs, per host platform.
+    if sys.platform == "win32":
+        return "PATH"
+    if sys.platform == "darwin":
+        return "DYLD_FALLBACK_LIBRARY_PATH"
+    return "LIBPATH" if sys.platform.startswith("aix") else "LD_LIBRARY_PATH"
+
+
+def runtime_library_path(built):
+    """Return the loader variable and value `cargo test` gives these harnesses.
+
+    Cargo prepends build-script link paths inside the base output directory,
+    the deps and base output directories, and rustc's target libdir, where a
+    `-C prefer-dynamic` harness finds libstd. Existing entries follow.
+    """
+    deps = list(dict.fromkeys(Path(harness).parent for harness in built.harnesses))
+    roots = list(dict.fromkeys(directory.parent for directory in deps))
+    native = []
+    for entry in built.linked_paths:
+        kind, separator, path = entry.partition("=")
+        path = Path(path if separator and kind in ("native", "crate", "dependency", "all") else entry)
+        if any(path == root or root in path.parents for root in roots):
+            native.append(path)
+    rustc = [os.environ.get("RUSTC") or "rustc", "--print", "target-libdir"]
+    process = subprocess.run(rustc, cwd=ROOT, encoding="utf-8", stdout=subprocess.PIPE)
+    if process.returncode or not process.stdout.strip():
+        raise ValueError(f"command failed ({process.returncode}): {rustc}")
+    variable = dylib_variable()
+    existing = [entry for entry in os.environ.get(variable, "").split(os.pathsep) if entry]
+    if sys.platform == "darwin" and not existing:
+        existing = [str(Path.home() / "lib"), "/usr/local/lib", "/usr/lib"]
+    search = [*map(str, dict.fromkeys(native + deps + roots)), process.stdout.strip()]
+    return variable, os.pathsep.join(search + existing)
 
 
 def inventory(harnesses, selection=()):
@@ -362,21 +420,37 @@ def main():
         prove(rows, args.platform, args.harness, require_cli=args.require_cli)
     else:
         sync_workflow(rows, check=True)
-        sync_target_metadata()
-        harnesses = built_harnesses()
-        registrations = inventory(harnesses)
-        counts = validate(rows, args.platform, registrations, require_cli=True)
-        skips = [word for row in rows for f in row["filters"] for word in ("--skip", f)]
-        unmatched = inventory(harnesses, skips)
-        if unmatched:
-            raise ValueError("\n".join(f"uncategorised: {name} (harness {harness}) — "
-                                       f"update TEST_CATEGORIES in {MODEL}"
-                                       for harness, name in unmatched))
-        print(f"{args.platform}: {len(registrations)} registrations including ignored; uncategorised: 0")
-        for (category, number), count in sorted(counts.items()):
-            print(f"  {category}/{number}: {count}")
-        if args.explain:
-            explain(rows, registrations)
+        wrapper = cargo()[:-1]
+        if wrapper:
+            # One slot must cover the build and every listing of what it built:
+            # once released, another tree may relink the same executable paths.
+            # So the wrapper runs this whole check, which then runs Cargo bare.
+            process = subprocess.run([*wrapper, sys.executable, str(Path(__file__).resolve()),
+                                      *sys.argv[1:]], env={**os.environ, SLOT_HELD: "1"})
+            sys.exit(process.returncode)
+        standalone(rows, args.platform, args.explain)
+
+
+def standalone(rows, platform, explain_rows=False):
+    sync_target_metadata()
+    built = build()
+    harnesses = built.harnesses
+    # From here this process only lists harnesses, each as `cargo test` runs it.
+    variable, value = runtime_library_path(built)
+    os.environ[variable] = value
+    registrations = inventory(harnesses)
+    counts = validate(rows, platform, registrations, require_cli=True)
+    skips = [word for row in rows for f in row["filters"] for word in ("--skip", f)]
+    unmatched = inventory(harnesses, skips)
+    if unmatched:
+        raise ValueError("\n".join(f"uncategorised: {name} (harness {harness}) — "
+                                   f"update TEST_CATEGORIES in {MODEL}"
+                                   for harness, name in unmatched))
+    print(f"{platform}: {len(registrations)} registrations including ignored; uncategorised: 0")
+    for (category, number), count in sorted(counts.items()):
+        print(f"  {category}/{number}: {count}")
+    if explain_rows:
+        explain(rows, registrations)
 
 
 if __name__ == "__main__":

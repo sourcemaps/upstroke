@@ -7305,6 +7305,299 @@ fn newly_registered_unclassified() { panic!("the catch-all must not execute"); }
     }
 }
 
+fn inert_category_harness(directory: &Path, name: &str, body: &str, flags: &[&str]) -> PathBuf {
+    const INERT_CLI: &str =
+        "mod cli_tests {\n#[test]\nfn registers() { panic!(\"listing only\"); }\n}\n";
+    let source = directory.join(format!("{name}.rs"));
+    let harness = directory
+        .join(name)
+        .with_extension(std::env::consts::EXE_EXTENSION);
+    fs::write(&source, format!("{body}\n{INERT_CLI}")).expect("write inert harness source");
+    let output = std::process::Command::new("rustc")
+        .arg("--test")
+        .args(flags)
+        .arg(&source)
+        .arg("-o")
+        .arg(&harness)
+        .current_dir(directory)
+        .output()
+        .expect("compile inert harness without Cargo");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    harness
+}
+
+#[test]
+fn the_category_check_holds_its_build_slot_until_the_last_listing() {
+    let directory = category_fixture();
+    let candidate = inert_category_harness(
+        directory.path(),
+        "candidate",
+        "mod not_assigned {\n#[test]\nfn new_registration() { panic!(\"listing only\"); }\n}",
+        &[],
+    );
+    let second = inert_category_harness(
+        directory.path(),
+        "second_worktree",
+        "mod util {\n#[test]\nfn belongs_to_second_worktree() { panic!(\"listing only\"); }\n}",
+        &[],
+    );
+    let slot = directory
+        .path()
+        .join("slot1/debug/deps/fixture_harness")
+        .with_extension(std::env::consts::EXE_EXTENSION);
+    let output = std::process::Command::new(if cfg!(windows) { "python" } else { "python3" })
+        .args([
+            "-c",
+            r#"
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+script, candidate, second, slot = sys.argv[1:5]
+spec = importlib.util.spec_from_file_location("categories", script)
+tool = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tool)
+real_run, real_which = subprocess.run, shutil.which
+held, events, errors = [], [], []
+
+def build(command):
+    assert command == ["cargo", "test", "--all-targets", "--all-features", "--no-run",
+                       "--message-format=json"], command
+    assert held, "Cargo built outside the slot"
+    Path(slot).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(candidate, slot)
+    events.append("candidate built")
+    artifact = dict(reason="compiler-artifact", profile=dict(test=True), executable=slot)
+    return subprocess.CompletedProcess(command, 0, json.dumps(artifact))
+
+def check_in_slot(command, env):
+    assert command[0] == sys.executable and Path(command[1]) == Path(script).resolve(), command
+    saved_env, saved_argv = dict(os.environ), sys.argv
+    os.environ.clear()
+    os.environ.update(env)
+    sys.argv = command[1:]
+    try:
+        tool.main()
+        return 0
+    except ValueError as error:
+        errors.append(str(error))
+        return 1
+    finally:
+        os.environ.clear()
+        os.environ.update(saved_env)
+        sys.argv = saved_argv
+
+def wrapper(command, kwargs):
+    # A one-slot pool: acquiring it again while held would wait for ever.
+    assert not held, f"nested slot acquisition: {command}"
+    held.append(command)
+    try:
+        if command[0] == "cargo":
+            return build(command)
+        return subprocess.CompletedProcess(command, check_in_slot(command, kwargs["env"]))
+    finally:
+        held.pop()
+        # The released slot goes to the second worktree, which relinks the same path.
+        shutil.copy(second, slot)
+        events.append("slot released")
+
+def run(command, **kwargs):
+    command = [str(word) for word in command]
+    if command[0] == "fixture-upstroke-build":
+        return wrapper(command[1:], kwargs)
+    if Path(command[0]).stem == "cargo":
+        return build(command)
+    if command[0] == slot and not held:
+        events.append("listed after release")
+    return real_run(command, **kwargs)
+
+subprocess.run = run
+shutil.which = lambda name, *rest, **options: (
+    "fixture-upstroke-build" if name == "upstroke-build" else real_which(name, *rest, **options))
+tool.sync_target_metadata = lambda refresh=False: events.append("metadata")
+sys.argv = [script, "check"]
+try:
+    tool.main()
+    code = 0
+except SystemExit as exit:
+    code = exit.code
+except ValueError as error:
+    errors.append(str(error))
+    code = 1
+assert code == 1, ("the candidate was accepted", code, events, errors)
+assert any("uncategorised: not_assigned::new_registration" in error and slot in error
+           for error in errors), errors
+assert "listed after release" not in events, events
+assert events.count("candidate built") == 1 and events.count("slot released") == 1, events
+"#,
+        ])
+        .arg(directory.path().join(".github/scripts/test-categories.py"))
+        .args([&candidate, &second, &slot])
+        .env_remove("RUSTC_BOOTSTRAP")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .expect("model a one-slot pool shared with a second worktree, without Cargo");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_category_check_lists_a_prefer_dynamic_harness_with_cargos_library_path() {
+    let directory = category_fixture();
+    let deps = directory.path().join("target/debug/deps");
+    fs::create_dir_all(&deps).expect("create the fixture's deps directory");
+    let harness = inert_category_harness(&deps, "prefer_dynamic", "", &["-C", "prefer-dynamic"]);
+    let output = std::process::Command::new("python3")
+        .args([
+            "-c",
+            r#"
+import importlib.util
+import json
+import subprocess
+import sys
+
+script, harness = sys.argv[1:3]
+spec = importlib.util.spec_from_file_location("categories", script)
+tool = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tool)
+native_checked = tool.checked
+builds = []
+
+def checked(command):
+    if command[0] == "fixture-cargo":
+        assert command == ["fixture-cargo", "test", "--all-targets", "--all-features", "--no-run",
+                           "--message-format=json"], command
+        builds.append(command)
+        return json.dumps(dict(reason="compiler-artifact", profile=dict(test=True),
+                               executable=harness))
+    assert command[0] == harness and command[1:4] == ["--list", "--format", "terse"], command
+    return native_checked(command)
+
+tool.cargo = lambda: ["fixture-cargo"]
+tool.checked = checked
+tool.sync_target_metadata = lambda refresh=False: None
+sys.argv = [script, "check"]
+tool.main()
+assert len(builds) == 1, builds
+"#,
+        ])
+        .arg(directory.path().join(".github/scripts/test-categories.py"))
+        .arg(&harness)
+        .env_remove("RUSTC_BOOTSTRAP")
+        .env_remove("RUSTC")
+        .env_remove("LD_LIBRARY_PATH")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .expect("list a prefer-dynamic harness without Cargo's environment");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        report.contains("1 registrations including ignored; uncategorised: 0"),
+        "{report}"
+    );
+}
+
+#[test]
+fn the_target_refresh_preserves_crlf_and_every_byte_outside_stale_constants() {
+    let directory = category_fixture();
+    let target_source = directory.path().join("src/effects/tests.rs");
+    let source = fs::read_to_string(&target_source)
+        .expect("read the fixture target source")
+        .replace("\r\n", "\n")
+        .replace('\n', "\r\n");
+    fs::write(
+        &target_source,
+        format!("{source}// an LF line outside both constants\n// no final newline"),
+    )
+    .expect("write a CRLF target source with mixed outside endings");
+    let output = std::process::Command::new(if cfg!(windows) { "python" } else { "python3" })
+        .args([
+            "-c",
+            r#"
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+script = sys.argv[1]
+spec = importlib.util.spec_from_file_location("categories", script)
+tool = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tool)
+
+def refuse_subprocess(*args, **kwargs):
+    raise AssertionError("the fixture must not start Cargo")
+
+def constant(source, name):
+    return tool.target_constant(source.decode("utf-8"), name)
+
+def recorded(name):
+    snapshot = json.loads(constant(tool.TARGET_SOURCE.read_bytes(), name).group(1))
+    return [target["src_path"] for target in snapshot["packages"][0]["targets"]]
+
+repository = recorded("REPOSITORY_TARGET_METADATA")
+custom = recorded("CUSTOM_TARGET_METADATA")
+
+def checked(command):
+    assert command[:7] == ["fixture-cargo", "metadata", "--format-version", "1", "--no-deps",
+                           "--offline", "--manifest-path"], command
+    manifest = Path(command[7])
+    paths = repository if manifest == tool.ROOT / "Cargo.toml" else custom
+    return json.dumps(dict(packages=[dict(manifest_path=str(manifest), targets=[
+        dict(src_path=str(manifest.parent / path)) for path in paths])]))
+
+subprocess.Popen = refuse_subprocess
+tool.cargo = lambda: ["fixture-cargo"]
+tool.checked = checked
+before = tool.TARGET_SOURCE.read_bytes()
+assert before.count(b"\r\n") > 1000, "the fixture is CRLF"
+sys.argv = [script, "refresh-targets"]
+tool.main()
+assert tool.TARGET_SOURCE.read_bytes() == before, "a current refresh rewrote the source"
+repository.append("src/tools/added-by-refresh.rs")
+tool.main()
+after = tool.TARGET_SOURCE.read_bytes()
+old = constant(before, "REPOSITORY_TARGET_METADATA")
+new = constant(after, "REPOSITORY_TARGET_METADATA")
+assert old.group(1) != new.group(1), "the stale constant was not refreshed"
+assert before.decode("utf-8")[:old.start(1)] == after.decode("utf-8")[:new.start(1)]
+assert before.decode("utf-8")[old.end(1):] == after.decode("utf-8")[new.end(1):]
+assert "\n" not in new.group(1).replace("\r\n", ""), "the refreshed constant mixed endings"
+assert "src/tools/added-by-refresh.rs" in recorded("REPOSITORY_TARGET_METADATA")
+tool.sync_target_metadata()
+"#,
+        ])
+        .arg(directory.path().join(".github/scripts/test-categories.py"))
+        .env_remove("RUSTC_BOOTSTRAP")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .expect("refresh CRLF target metadata without starting Cargo");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[cfg(target_os = "linux")]
 mod merge_gate_answers {
     use std::fs;
