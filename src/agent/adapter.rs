@@ -241,6 +241,113 @@ fn hits_a_quota_window(lower: &str) -> bool {
     })
 }
 
+pub fn reset_at_from_limit_message(text: &str, now_unix: u64) -> Option<String> {
+    let reset = first_reset(text)?;
+    let (date, time) = match leading_month(reset) {
+        Some((month, rest)) => {
+            let (day, rest) = leading_digits(rest)?;
+            let rest = rest.strip_prefix(", ")?;
+            (Some((month, day)), rest)
+        }
+        None => (None, reset),
+    };
+    let (second_of_day, zone) = time_of_day(time)?;
+    if !zone.starts_with(" (UTC)") {
+        return None;
+    }
+
+    let now = i64::try_from(now_unix).ok()?;
+    let at = match date {
+        None => {
+            let today = now.checked_sub(now.rem_euclid(86_400))?;
+            let at = today.checked_add(second_of_day)?;
+            if at >= now {
+                at
+            } else {
+                at.checked_add(86_400)?
+            }
+        }
+        Some((month, day)) => {
+            let (year, _, _) = crate::util::civil_from_days(now.div_euclid(86_400));
+            let this_year = unix_seconds_at(year, month, day, second_of_day)?;
+            if this_year.checked_add(86_400)? >= now {
+                this_year
+            } else {
+                unix_seconds_at(year.checked_add(1)?, month, day, second_of_day)?
+            }
+        }
+    };
+    Some(crate::util::rfc3339_utc(u64::try_from(at).ok()?))
+}
+
+fn first_reset(text: &str) -> Option<&str> {
+    text.match_indices("resets ").find_map(|(at, needle)| {
+        let starts_a_word = !text
+            .get(..at)?
+            .ends_with(|character: char| character.is_ascii_alphanumeric() || character == '_');
+        if starts_a_word {
+            text.get(at + needle.len()..)
+        } else {
+            None
+        }
+    })
+}
+
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+fn leading_month(text: &str) -> Option<(i64, &str)> {
+    MONTHS.iter().zip(1..).find_map(|(name, number)| {
+        text.strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix(' '))
+            .map(|rest| (number, rest))
+    })
+}
+
+fn leading_digits(text: &str) -> Option<(i64, &str)> {
+    let length = text
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(text.len());
+    if !(1..=2).contains(&length) {
+        return None;
+    }
+    let (digits, rest) = text.split_at_checked(length)?;
+    Some((digits.parse().ok()?, rest))
+}
+
+fn time_of_day(text: &str) -> Option<(i64, &str)> {
+    let (hour, rest) = leading_digits(text)?;
+    let (minute, rest) = match rest.strip_prefix(':') {
+        Some(after) => {
+            let (minute, rest) = leading_digits(after)?;
+            if after.len() - rest.len() != 2 {
+                return None;
+            }
+            (minute, rest)
+        }
+        None => (0, rest),
+    };
+    let (afternoon, rest) = match (rest.strip_prefix("am"), rest.strip_prefix("pm")) {
+        (Some(rest), _) => (false, rest),
+        (None, Some(rest)) => (true, rest),
+        (None, None) => return None,
+    };
+    if !(1..=12).contains(&hour) || !(0..=59).contains(&minute) {
+        return None;
+    }
+    let hour = hour % 12 + if afternoon { 12 } else { 0 };
+    Some((hour * 3600 + minute * 60, rest))
+}
+
+fn unix_seconds_at(year: i64, month: i64, day: i64, second_of_day: i64) -> Option<i64> {
+    let days = crate::util::days_from_civil(year, month, day);
+    if crate::util::civil_from_days(days) != (year, month, day) {
+        return None;
+    }
+    days.checked_mul(86_400)?.checked_add(second_of_day)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,6 +670,251 @@ mod tests {
     fn limit_at_the_very_end_of_the_text_signals() {
         let text = "You've hit your weekly limit";
         assert!(looks_rate_limited(text), "should signal: {text}");
+    }
+
+    const FIVE_HOUR: &str = "You've hit your 5-hour limit · resets 5:30am (UTC)";
+    const FABLE: &str = "You've hit your Fable limit · resets Nov 14, 9am (UTC)";
+    const HOUR: u64 = 3_600;
+    const DAY: u64 = 86_400;
+    const NOV_11_2026: u64 = 1_794_355_200;
+    const DEC_31_2026: u64 = 1_798_675_200;
+    const FEB_27_2027: u64 = 1_803_686_400;
+    const FEB_27_2028: u64 = 1_835_222_400;
+
+    fn reset(text: &str, now: u64) -> Option<String> {
+        reset_at_from_limit_message(text, now)
+    }
+
+    #[test]
+    fn the_reset_fixtures_are_the_midnights_they_are_named_for() {
+        for (now, midnight) in [
+            (NOV_11_2026, "2026-11-11T00:00:00Z"),
+            (DEC_31_2026, "2026-12-31T00:00:00Z"),
+            (FEB_27_2027, "2027-02-27T00:00:00Z"),
+            (FEB_27_2028, "2028-02-27T00:00:00Z"),
+        ] {
+            assert_eq!(crate::util::rfc3339_utc(now), midnight);
+        }
+    }
+
+    #[test]
+    fn the_observed_five_hour_message_resets_later_the_same_day() {
+        assert_eq!(
+            reset(FIVE_HOUR, NOV_11_2026 + 3 * HOUR).as_deref(),
+            Some("2026-11-11T05:30:00Z")
+        );
+    }
+
+    #[test]
+    fn the_observed_fable_message_resets_on_its_date() {
+        assert_eq!(
+            reset(FABLE, NOV_11_2026 + DAY + 10 * HOUR).as_deref(),
+            Some("2026-11-14T09:00:00Z")
+        );
+    }
+
+    #[test]
+    fn a_time_only_reset_already_passed_today_is_tomorrows() {
+        assert_eq!(
+            reset(FIVE_HOUR, NOV_11_2026 + 6 * HOUR).as_deref(),
+            Some("2026-11-12T05:30:00Z")
+        );
+        let at_the_reset = NOV_11_2026 + 5 * HOUR + 30 * 60;
+        assert_eq!(
+            reset(FIVE_HOUR, at_the_reset).as_deref(),
+            Some("2026-11-11T05:30:00Z"),
+            "a reset at the very second it is read is still today's"
+        );
+        assert_eq!(
+            reset(FIVE_HOUR, at_the_reset + 1).as_deref(),
+            Some("2026-11-12T05:30:00Z")
+        );
+    }
+
+    #[test]
+    fn twelve_am_is_midnight_and_twelve_pm_is_noon() {
+        let now = NOV_11_2026 + HOUR;
+        for (text, expected) in [
+            ("resets 12am (UTC)", "2026-11-12T00:00:00Z"),
+            ("resets 12:45am (UTC)", "2026-11-12T00:45:00Z"),
+            ("resets 12pm (UTC)", "2026-11-11T12:00:00Z"),
+            ("resets 12:45pm (UTC)", "2026-11-11T12:45:00Z"),
+            ("resets 1am (UTC)", "2026-11-11T01:00:00Z"),
+            ("resets 1pm (UTC)", "2026-11-11T13:00:00Z"),
+            ("resets 11:59pm (UTC)", "2026-11-11T23:59:00Z"),
+        ] {
+            assert_eq!(reset(text, now).as_deref(), Some(expected), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_dated_reset_read_just_after_itself_stays_in_its_year() {
+        assert_eq!(
+            reset(FABLE, NOV_11_2026 + 3 * DAY + 20 * HOUR).as_deref(),
+            Some("2026-11-14T09:00:00Z")
+        );
+        let a_day_after = NOV_11_2026 + 4 * DAY + 9 * HOUR;
+        assert_eq!(
+            reset(FABLE, a_day_after).as_deref(),
+            Some("2026-11-14T09:00:00Z")
+        );
+        assert_eq!(
+            reset(FABLE, a_day_after + 1).as_deref(),
+            Some("2027-11-14T09:00:00Z")
+        );
+    }
+
+    #[test]
+    fn a_dated_reset_across_a_year_end_is_next_years() {
+        let now = DEC_31_2026 + 12 * HOUR;
+        assert_eq!(
+            reset("resets Jan 2, 9am (UTC)", now).as_deref(),
+            Some("2027-01-02T09:00:00Z")
+        );
+        assert_eq!(
+            reset("resets 5am (UTC)", now).as_deref(),
+            Some("2027-01-01T05:00:00Z")
+        );
+        assert_eq!(
+            reset("resets Dec 31, 11pm (UTC)", now).as_deref(),
+            Some("2026-12-31T23:00:00Z")
+        );
+    }
+
+    #[test]
+    fn feb_29_resets_in_a_leap_year_and_is_refused_in_another() {
+        let text = "resets Feb 29, 3pm (UTC)";
+        assert_eq!(
+            reset(text, FEB_27_2028).as_deref(),
+            Some("2028-02-29T15:00:00Z")
+        );
+        assert_eq!(reset(text, FEB_27_2027), None);
+    }
+
+    #[test]
+    fn a_zone_other_than_utc_gives_none() {
+        let now = NOV_11_2026;
+        for text in [
+            "You've hit your 5-hour limit · resets 5:30am (Europe/London)",
+            "resets 5:30am (GMT)",
+            "resets 5:30am (utc)",
+            "resets 5:30am UTC",
+            "resets 5:30am(UTC)",
+            "resets 5:30am",
+            "resets Nov 14, 9am (America/New_York)",
+        ] {
+            assert_eq!(reset(text, now), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn text_without_a_reset_gives_none() {
+        for text in [
+            "",
+            "You've hit your session limit",
+            "5-hour limit reached",
+            "pool rate-limited: 5:30am (UTC)",
+            "loaded presets 5:30am (UTC)",
+            "reset 5:30am (UTC)",
+            "resets",
+        ] {
+            assert_eq!(reset(text, NOV_11_2026), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn malformed_hours_minutes_months_and_days_give_none() {
+        for text in [
+            "resets 0am (UTC)",
+            "resets 13am (UTC)",
+            "resets 13pm (UTC)",
+            "resets 123am (UTC)",
+            "resets -5am (UTC)",
+            "resets +5am (UTC)",
+            "resets 5 am (UTC)",
+            "resets 5AM (UTC)",
+            "resets 5 (UTC)",
+            "resets :30am (UTC)",
+            "resets 5:60am (UTC)",
+            "resets 5:99am (UTC)",
+            "resets 5:3am (UTC)",
+            "resets 5:300am (UTC)",
+            "resets 5:am (UTC)",
+            "resets 5.30am (UTC)",
+            "resets Noc 14, 9am (UTC)",
+            "resets nov 14, 9am (UTC)",
+            "resets November 14, 9am (UTC)",
+            "resets Sept 14, 9am (UTC)",
+            "resets Nov 31, 9am (UTC)",
+            "resets Apr 31, 9am (UTC)",
+            "resets Feb 30, 9am (UTC)",
+            "resets Nov 0, 9am (UTC)",
+            "resets Nov 100, 9am (UTC)",
+            "resets Nov , 9am (UTC)",
+            "resets Nov 14 9am (UTC)",
+            "resets Nov 14,9am (UTC)",
+            "resets Nov 14, 13pm (UTC)",
+            "resets Nov 14, (UTC)",
+        ] {
+            assert_eq!(reset(text, NOV_11_2026), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn the_first_of_several_resets_is_read() {
+        let now = NOV_11_2026;
+        assert_eq!(
+            reset("resets 5am (UTC), then resets 7am (UTC)", now).as_deref(),
+            Some("2026-11-11T05:00:00Z")
+        );
+        assert_eq!(
+            reset("resets Nov 14, 9am (UTC); resets 5am (UTC)", now).as_deref(),
+            Some("2026-11-14T09:00:00Z")
+        );
+        assert_eq!(
+            reset("resets 13am (UTC), then resets 7am (UTC)", now),
+            None,
+            "a malformed first reset is not passed over for a later one"
+        );
+    }
+
+    #[test]
+    fn arbitrary_non_ascii_text_never_panics() {
+        let texts = [
+            "resets ５am (UTC)",
+            "resets 5:3０am (UTC)",
+            "resets Növ 14, 9am (UTC)",
+            "resets Nov 1４, 9am (UTC)",
+            "resets 9ám (UTC)",
+            "resets 9am (ＵＴＣ)",
+            "resets 9am\u{a0}(UTC)",
+            "resets ·",
+            "resets é",
+            "·resets·5am·(UTC)",
+            "制限に達しました · resets 5:30am (UTC)",
+            "🙂resets 5am (UTC)",
+            "\u{0}resets \u{0}",
+        ];
+        for now in [0, NOV_11_2026, DEC_31_2026, u64::MAX / 2, u64::MAX] {
+            for text in texts.iter().chain([FIVE_HOUR, FABLE].iter()) {
+                let _ = reset(text, now);
+            }
+            for message in [FIVE_HOUR, FABLE] {
+                for (index, _) in message.char_indices() {
+                    let prefix = message.get(..index).unwrap_or_default();
+                    assert_eq!(reset(prefix, now), None, "{prefix:?}");
+                    let suffix = message.get(index..).unwrap_or_default();
+                    let _ = reset(suffix, now);
+                }
+            }
+        }
+        assert_eq!(reset("resets 5:3０am (UTC)", NOV_11_2026), None);
+        assert_eq!(
+            reset("制限に達しました · resets 5:30am (UTC)", NOV_11_2026).as_deref(),
+            Some("2026-11-11T05:30:00Z")
+        );
+        assert_eq!(reset(FIVE_HOUR, u64::MAX), None);
+        assert_eq!(reset(FABLE, u64::MAX), None);
     }
 
     #[test]

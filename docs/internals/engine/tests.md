@@ -121,6 +121,19 @@ cross-family one only warns.
 
 Whether this route reports spend. Copilot's does not.
 
+## `worker_rate_limit: &'static str,`
+
+The detail a worker's `Effect::RateLimited` reports, which the engine
+carries into the failure's reason (`pool rate-limited: …`) and so into the
+text `pool_exhausted` reads its reset from. Both constructors set it to
+[`FIVE_HOUR_LIMIT_REACHED`], the text every test saw before the field
+existed, so only a test that assigns it sees anything else. The reviewer's
+rate limit keeps its own literal.
+
+## `const FIVE_HOUR_LIMIT_REACHED: &str = "5-hour limit reached";`
+
+The older Claude Code wording, which names no reset.
+
 ## `const REVIEW_MARKER: &str = "UPSTROKE-FAKE-REVIEW";`
 
 Marker the fake's review command prints so `parse` can tell a review
@@ -5116,3 +5129,22 @@ present, creates the run, records both agents as probed, and completes it.
 
 This prose sat above the test in the source until the execution root moved into the create protocol
 at P3c; the refusal used to be reported after P3b, and the root was made before creation began.
+
+## `fn a_rate_limit_marks_its_pool_exhausted_and_a_recovery_retires_the_signal() {` › `assert_eq!(signals[0].reset_at, None, "{signals:?}");`
+
+The worker's rate-limit text here is the default "5-hour limit reached", which names no reset, so
+the recorded `pool_exhausted` carries none. Reading a reset out of text that has none would put an
+invented time into the log as the subscription's own.
+
+## `fn a_rate_limit_that_names_its_reset_records_it_on_pool_exhausted() {`
+
+The same run as the test above, with one difference: the worker's rate-limit text is the message
+Claude Code printed on 2026-11-11, `You've hit your 5-hour limit · resets 5:30am (UTC)`, set through
+`worker_rate_limit`. The one `pool_exhausted` event carries that text in its detail and a `reset_at`
+in the fixed-width RFC 3339 form ending `T05:30:00Z`. The test reads the clock before and after the
+run, and the reset falls in that window extended by a day: the first 05:30 UTC at or after the
+moment the signal was recorded, by string comparison, which the fixed width makes legitimate. The
+estimate folded from the log up to the signal reports the pool exhausted with that same reset time:
+`attempt_finished` comes first and marks the pool with no reset, and `pool_exhausted` after it
+supplies the time. The run still completes, as the test above does, so the reset changes what is
+recorded and nothing about how the attempt is deferred or retried.

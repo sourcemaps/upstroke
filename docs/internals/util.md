@@ -558,21 +558,58 @@ Now, as an RFC 3339 UTC timestamp — the `ts` on every event (§15).
 
 Std-only rather than a date dependency: this is one field on one line of
 JSON, and the conversion below is a closed-form algorithm with no table and
-no locale. A clock that cannot read (`SystemTime` before the epoch) yields
-the epoch rather than failing — a timestamp is metadata on the event, and
-losing the event to a clock problem would be the worse trade.
+no locale. The clock is read by [`unix_seconds_now`], below.
 
-## `fn civil_from_days(days: i64) -> (i64, i64, i64) {`
+## `pub(crate) fn unix_seconds_now() -> u64 {`
+
+Now, as whole seconds since 1970-01-01 UTC. The one place this module reads
+the clock: [`rfc3339_utc_now`] formats what it returns, and the coordinator
+passes it to `agent::reset_at_from_limit_message` when it records a
+`pool_exhausted` event, so the reset time is placed against the same clock,
+read the same way, as the event's `ts`.
+
+A clock that cannot read (`SystemTime` before the epoch) yields the epoch
+rather than failing — a timestamp is metadata on the event, and losing the
+event to a clock problem would be the worse trade. Read against the epoch, a
+reset is still a reset at or after the time given, so the worst a broken
+clock does to `reset_at` is put it in 1970.
+
+## `pub(crate) fn rfc3339_utc(unix_seconds: u64) -> String {`
+
+A unix time as `YYYY-MM-DDTHH:MM:SSZ`. Crate-visible so the reset time read
+from a rate-limit message is formatted by the same code as every event's
+`ts`, rather than by a second formatter that could drift from it: the log
+compares these strings as strings.
+
+## `pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {`
 
 Civil date from a day count since 1970-01-01 (Howard Hinnant's
 `civil_from_days`). The era starts on 0000-03-01 so that a leap day always
 lands at the end of a cycle, which is what lets the month and day fall out
 of integer arithmetic instead of a lookup table.
 
+Crate-visible for the reset parser in `agent::adapter`, which needs the year
+of "now" and checks that a date it was given exists (see
+[`days_from_civil`]).
+
 ## `let month = if shifted_month < 10 {`
 
 March is month 0 in the shifted era; roll January and February into the
 following calendar year.
+
+## `pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {`
+
+The inverse: the day count since 1970-01-01 of a civil date (Hinnant's
+`days_from_civil`), on the same March-first era, so the two agree on every
+day either can name.
+
+It does not validate. A day the month does not have counts on into the
+next month (`1900-02-29` is the day count of `1900-03-01`; day 0 is the
+last day of the month before), so a caller that must refuse such a date
+converts back with [`civil_from_days`] and compares; the reset parser does
+exactly that. The arithmetic is plain `i64`, exact for any year whose day
+count fits with room to spare: a year derived from a clock in seconds that
+fits in a `u64` is below 6 × 10¹¹, far inside it.
 
 ## `#[cfg(test)]`
 
@@ -627,6 +664,31 @@ A day boundary and the last second before one.
 
 The log is read back with a plain string compare in places; the
 zero-padded fixed-width form is what makes that legitimate.
+
+## `fn days_from_civil_gives_known_day_counts() {`
+
+Day counts written here, not derived: the epoch and the day either side of
+it, 2000-01-01 (`946_684_800 / 86_400`), both leap rules on 2000-02-29 and
+2024-02-29 (the day counts of the two leap-day timestamps above), the start
+of 2026 and the day the five-hour message was seen, and both century years
+that are not leap years, 1900 and 2100, on either side of where their
+29 February would be.
+
+## `fn days_from_civil_inverts_civil_from_days_across_leap_years_and_centuries() {`
+
+Every day count from -100 000 to 100 000, roughly 1696 to 2243, survives
+`civil_from_days` then `days_from_civil`. That range holds 1700, 1800, 1900,
+2100 and 2200, none of them leap years, and 2000, which is. The listed dates
+go the other way, a date to a count and back, on the leap days and century
+boundaries from 1600 to 2400.
+
+## `fn a_day_the_month_does_not_have_fails_the_round_trip() {`
+
+What the round trip is for. A day the month does not have (29 February
+outside a leap year, 31 November, 31 April, day 0) comes back as a different
+date, so comparing the round trip with the input refuses it. This is the
+check the reset parser relies on, and it is why `days_from_civil` itself can
+stay a plain formula.
 
 ## `let tree = scratch("util-path");`
 

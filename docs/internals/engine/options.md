@@ -48,10 +48,11 @@ pool counts as down and a human is asked instead.
 Step 10 gave the capacity engine reset times — [`crate::capacity`] carries
 them on an estimate, and `pool_exhausted` records one whenever a signal
 includes it — so the obvious question is why this bound still exists. Two
-reasons, both current: neither CLI actually reports a machine-readable reset
-time today, so the field is almost always `None`; and §13 ships the capacity
-engine read-only in v0.1, so nothing routes on a reset even when there is
-one. Waiting for a reset instead of counting deferrals is capacity-*driven*
+reasons, both current: neither CLI reports a machine-readable reset time, and
+the one read out of prose (`agent::reset_at_from_limit_message`, for Claude
+Code's `· resets 5:30am (UTC)` and its dated form) covers one vendor's
+wording, so the field is often `None`; and §13 ships the capacity engine
+read-only in v0.1, so nothing routes on a reset even when there is one. Waiting for a reset instead of counting deferrals is capacity-*driven*
 behaviour, and it arrives with the rest of it in v0.2. Until then this is
 what keeps an exhausted pool from deferring forever.
 

@@ -364,6 +364,101 @@ the next character is a word character. Both work on slices of the same
 string, so the rule still allocates nothing more and cannot panic. The
 character test is ASCII only, like the lower-casing before it.
 
+## `pub fn reset_at_from_limit_message(text: &str, now_unix: u64) -> Option<String> {`
+
+When a usage limit says it lifts, read from the limit message itself, as an
+RFC 3339 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`). The coordinator records it as
+`reset_at` on the `pool_exhausted` event.
+
+Two messages carry one. Both were printed by Claude Code on the build machine:
+
+- `You've hit your 5-hour limit · resets 5:30am (UTC)` (2026-11-11);
+- `You've hit your Fable limit · resets Nov 14, 9am (UTC)` (2026-11-12).
+
+So a reset is the word `resets` and a space, then an optional date, then a
+time of day, then a space and `(UTC)`. The date is a three-letter month
+(`Jan` to `Dec`), a space, a day of the month in one or two digits, a comma
+and a space. The time of day is an hour from 1 to 12 in one or two digits,
+optionally `:` and exactly two minute digits, then `am` or `pm`. `12am` is
+midnight and `12pm` noon. The spelling is matched exactly, case included, as
+it was printed.
+
+Neither message gives a year, and the time-only one gives no date. Both are
+completed against `now_unix`, the moment the message is read:
+
+- A time only is the first such time at or after `now_unix`: today if it is
+  still to come, else tomorrow. A message that gives no date names the next
+  time that clock time comes round; the five-hour window it was printed for
+  reopens well inside a day.
+- A month and day is that date at that time in `now_unix`'s year. If that is
+  more than one day before `now_unix`, it is the same date in the next year,
+  so a `Jan 2` reset read on 31 December is next year's. A reset is never in
+  the past, but the day of tolerance keeps a message read shortly after its
+  own reset in its own year. Without it, a message read at 09:01 on 14
+  November for a 09:00 reset would be read as a reset a year away.
+
+`None` means the text gave no reset this can stand behind: no `resets` at
+all, a zone other than `(UTC)`, or any part that does not parse (an hour
+outside 1 to 12, minutes outside 0 to 59 or not two digits, a month not in
+the list, a day the month does not have, a missing comma or space). A
+reset in another zone is refused rather than converted: converting
+`(Europe/London)` needs a time-zone database, which is a dependency, and a
+guess at the offset would be a wrong timestamp recorded as fact. `None` is
+what `reset_at` held before this existed, and the estimate already says
+what it means: the reset is unknown.
+
+If several resets appear, the first is read, and only the first. A text
+whose first reset is malformed gives `None` even when a later one parses:
+the first is the one the message gave, and a later one may be about
+something else.
+
+It never panics, on any text and any `now_unix`. The text is read with
+`match_indices`, `strip_prefix`, `starts_with`, `get` and
+`split_at_checked`, each of which returns a slice of the same string or
+`None`; the only indices come from `find` and `match_indices`, so they
+fall on character boundaries. The clock arithmetic is checked: a
+`now_unix` past `i64::MAX`, or a reset whose seconds would overflow, gives
+`None`.
+
+## `fn first_reset(text: &str) -> Option<&str> {`
+
+What follows the first `resets ` that begins a word: at the start of the
+text, or after a character that is not an ASCII letter, ASCII digit or
+underscore, the boundary `hits_a_quota_window` uses. Without it,
+`loaded presets 5:30am (UTC)` would read as a reset.
+
+## `const MONTHS: [&str; 12] = [`
+
+The twelve abbreviations, in order, so the position gives the month's
+number. `Sept` and `November` are not in it, and are refused rather than
+guessed at: neither has been printed.
+
+## `fn leading_month(text: &str) -> Option<(i64, &str)> {`
+
+A month abbreviation and the space after it. `None` here is not yet a
+refusal: the reset may be a time only. A text that starts with neither a
+month nor an hour is refused by `time_of_day`.
+
+## `fn leading_digits(text: &str) -> Option<(i64, &str)> {`
+
+One or two ASCII digits at the start of the text, as a number. Three digits
+or none are refused, and so is a sign, which `str::parse` would otherwise
+accept.
+
+## `fn time_of_day(text: &str) -> Option<(i64, &str)> {`
+
+The time of day as seconds after midnight, and what follows it. `hour % 12`
+is what makes `12am` midnight and `12pm` noon: the twelve wraps to zero and
+`pm` adds twelve hours.
+
+## `fn unix_seconds_at(year: i64, month: i64, day: i64, second_of_day: i64) -> Option<i64> {`
+
+The unix time of a date and time, or `None` when the month does not have
+that day. `util::days_from_civil` counts a missing day on into the next
+month, so the date is converted back with `util::civil_from_days` and must
+come back unchanged. That is how `Feb 29` is accepted in 2028 and refused
+in 2027, and how `Nov 31` is refused in any year.
+
 ## `mod tests` › `fn a_successful_answer_from(id: &str) -> String {`
 
 A stdout every adapter would call a **success**, written in that
@@ -557,6 +652,96 @@ text is the one `a_hit_your_weekly_limit_message_signals` uses; it is here
 again to pin the end-of-text half of the boundary beside the full stop
 above. A boundary that demanded a following character, as a check reading
 the next character without allowing for none would, fails this test.
+
+## `mod tests` › `const NOV_11_2026: u64 = 1_794_355_200;`
+
+The reset tests read their messages at fixed instants, never at the
+clock's. Each constant is a UTC midnight written as a literal, and
+`the_reset_fixtures_are_the_midnights_they_are_named_for` checks each
+against the date it is named for, so a miscounted constant fails there,
+by name, rather than as a wrong reset further down.
+
+## `mod tests` › `fn the_observed_five_hour_message_resets_later_the_same_day() {`
+
+The five-hour message as Claude Code printed it, read at 03:00 on the day
+it was seen: the reset is 05:30 that day.
+
+## `mod tests` › `fn the_observed_fable_message_resets_on_its_date() {`
+
+The dated message as Claude Code printed it, read on 12 November 2026: the
+reset is 14 November 2026 at 09:00.
+
+## `mod tests` › `fn a_time_only_reset_already_passed_today_is_tomorrows() {`
+
+Read at 06:00, a 05:30 reset is tomorrow's. Read at 05:30 exactly, it is
+today's ("at or after"), and a second later it is tomorrow's, so both
+sides of the boundary are pinned.
+
+## `mod tests` › `fn twelve_am_is_midnight_and_twelve_pm_is_noon() {`
+
+Read at 01:00: `12am` and `12:45am` have passed and are tomorrow's 00:00 and
+00:45; `12pm` and `12:45pm` are today's 12:00 and 12:45. `1am`, `1pm` and
+`11:59pm` pin the hours either side of the wrap. Reading `12am` as 12:00, as
+a parser that only adds twelve for `pm` would, fails here.
+
+## `mod tests` › `fn a_dated_reset_read_just_after_itself_stays_in_its_year() {`
+
+The day of tolerance. The `Nov 14, 9am` message read on 14 November at
+20:00, and again at 09:00 on 15 November, exactly one day after its reset,
+still gives 14 November 2026. One second later it gives 14 November 2027.
+
+## `mod tests` › `fn a_dated_reset_across_a_year_end_is_next_years() {`
+
+Read at noon on 31 December 2026, `Jan 2` is 2 January 2027 and a time-only
+`5am` is 1 January 2027. `Dec 31, 11pm` is later that same day, so the
+year-end rule does not move a reset that is still to come.
+
+## `mod tests` › `fn feb_29_resets_in_a_leap_year_and_is_refused_in_another() {`
+
+`Feb 29` read on 27 February 2028 is 29 February 2028. Read on 27 February
+2027, a year without that day, it is refused rather than moved to
+1 March.
+
+## `mod tests` › `fn a_zone_other_than_utc_gives_none() {`
+
+The five-hour message with `(Europe/London)` in place of `(UTC)` gives
+`None`, and so do `(GMT)`, a lower-case `(utc)`, `UTC` without parentheses
+or without the space before them, and no zone at all.
+
+## `mod tests` › `fn text_without_a_reset_gives_none() {`
+
+Texts with no reset in them: the empty text, the session-limit message, the
+older "5-hour limit reached", a time and zone with no `resets` before them,
+`reset` without the `s`, `resets` with nothing after it, and `presets`,
+which contains `resets ` but not as a word.
+
+## `mod tests` › `fn malformed_hours_minutes_months_and_days_give_none() {`
+
+One malformation per text, each otherwise in the observed shape: hours 0,
+13 and 123, a signed hour, a space before `am`, upper-case `AM`, no `am` or
+`pm`, minutes 60 and 99, one or three minute digits, a `.` for the `:`, a
+misspelt, lower-case, unabbreviated or four-letter month, 31 November,
+31 April, 30 February, day 0, a three-digit day, no day, no comma, no space
+after the comma, and a dated reset with an hour of 13 or no time.
+
+## `mod tests` › `fn the_first_of_several_resets_is_read() {`
+
+Two well-formed resets give the first, for a time-only and a dated first.
+A malformed first reset gives `None`; it is not passed over for a later
+one.
+
+## `mod tests` › `fn arbitrary_non_ascii_text_never_panics() {`
+
+Texts with non-ASCII characters where the reset's parts would be (a
+full-width digit, an accented month or `am`, full-width `UTC`, a
+no-break space, a middle dot in place of each space, Japanese before the
+message, an emoji or a NUL against `resets`), each read at five instants
+from 0 to `u64::MAX`. With them, every prefix and every suffix of both
+observed messages, cut at each character boundary, so a cut lands inside
+every part of the grammar, including just after the multibyte middle dot.
+Each prefix stops before the closing `)` and must give `None`. None of
+these may panic, and at `u64::MAX`, past what an `i64` second count holds,
+both messages give `None`.
 
 ## `mod built_program_tests` › `struct Boundary {`
 

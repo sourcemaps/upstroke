@@ -10,7 +10,7 @@ use std::fs;
 use std::time::Duration;
 
 use crate::agent::proc::NoHooks;
-use crate::agent::{AdapterSource, BuiltinAdapters, Caps};
+use crate::agent::{AdapterSource, BuiltinAdapters, Caps, reset_at_from_limit_message};
 use crate::capacity;
 use crate::config::{self, OnTaskFailure};
 use crate::error::UpstrokeError;
@@ -1063,7 +1063,7 @@ impl Run<'_> {
             data: events::PoolExhausted {
                 pool,
                 agent,
-                reset_at: None,
+                reset_at: reset_at_from_limit_message(&failure.reason, util::unix_seconds_now()),
                 detail: util::head(&failure.reason, 400),
             },
         })

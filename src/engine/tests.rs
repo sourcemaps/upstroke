@@ -91,9 +91,13 @@ struct FakeAdapter {
     probe_error: Option<&'static str>,
 
     reports_cost: bool,
+
+    worker_rate_limit: &'static str,
     calls: Mutex<Calls>,
     role_probe: Option<RoleProbe>,
 }
+
+const FIVE_HOUR_LIMIT_REACHED: &str = "5-hour limit reached";
 
 #[derive(Default)]
 struct Calls {
@@ -121,6 +125,7 @@ impl FakeAdapter {
             reviews,
             probe_error: None,
             reports_cost: true,
+            worker_rate_limit: FIVE_HOUR_LIMIT_REACHED,
             calls: Mutex::new(Calls::default()),
             role_probe: None,
         }
@@ -133,6 +138,7 @@ impl FakeAdapter {
             reviews,
             probe_error: None,
             reports_cost: true,
+            worker_rate_limit: FIVE_HOUR_LIMIT_REACHED,
             calls: Mutex::new(Calls::default()),
             role_probe: None,
         }
@@ -500,7 +506,7 @@ impl AgentAdapter for FakeAdapter {
         };
         let detail = match effect {
             Effect::Error => Some("fake adapter error detail".to_owned()),
-            Effect::RateLimited => Some("5-hour limit reached".to_owned()),
+            Effect::RateLimited => Some(self.worker_rate_limit.to_owned()),
             Effect::AskQuestion => Some(
                 "I made a start but stopped.\nUPSTROKE-QUESTION: should cursors be opaque or \
                      signed?"
@@ -8016,6 +8022,7 @@ fn a_rate_limit_marks_its_pool_exhausted_and_a_recovery_retires_the_signal() {
     assert_eq!(signals.len(), 1, "{signals:?}");
     assert_eq!(signals[0].pool, "claude-max");
     assert_eq!(signals[0].agent, "claude-code");
+    assert_eq!(signals[0].reset_at, None, "{signals:?}");
 
     let signal_at = events
         .iter()
@@ -8034,6 +8041,71 @@ fn a_rate_limit_marks_its_pool_exhausted_and_a_recovery_retires_the_signal() {
         capacity::Remaining::Exhausted,
         "{}",
         settled[0].describe()
+    );
+}
+
+#[test]
+fn a_rate_limit_that_names_its_reset_records_it_on_pool_exhausted() {
+    let (_tree, repo) = temp_engine_repo("poolexhaustedreset");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let pools = pools_file(&repo, CLAUDE_POOL);
+    opts.pools_path = Some(pools.clone());
+    let mut source = source(
+        vec![Effect::RateLimited, Effect::EditFile],
+        vec![ReviewBehavior::Pass],
+    );
+    source.adapter.worker_rate_limit = "You've hit your 5-hour limit · resets 5:30am (UTC)";
+    let before = crate::util::unix_seconds_now();
+    let report = run_with(&opts, &source).expect("run");
+    let after = crate::util::unix_seconds_now();
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let events = events_of(&repo, &report.run_id);
+    let signals: Vec<&events::PoolExhausted> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signals.len(), 1, "{signals:?}");
+    assert_eq!(signals[0].pool, "claude-max");
+    assert!(
+        signals[0].detail.contains("resets 5:30am (UTC)"),
+        "{signals:?}"
+    );
+    let reset_at = signals[0]
+        .reset_at
+        .as_deref()
+        .expect("the failure text named its reset");
+    assert!(reset_at.ends_with("T05:30:00Z"), "{reset_at}");
+    assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
+    assert!(
+        crate::util::rfc3339_utc(before).as_str() <= reset_at
+            && reset_at < crate::util::rfc3339_utc(after + 86_400).as_str(),
+        "{reset_at} is the first 05:30 UTC at or after the signal, which fell between \
+         {before} and {after}"
+    );
+
+    let signal_at = events
+        .iter()
+        .position(|e| matches!(e.body, EventBody::PoolExhausted { .. }))
+        .expect("the signal is in the log");
+    let mut warnings = Vec::new();
+    let cfg = config::load(None, &repo, Some(&pools), &mut warnings).expect("pools");
+    let at_the_signal = capacity::estimate(&cfg.pools, &capacity::observe(&events[..=signal_at]));
+    assert_eq!(at_the_signal[0].remaining, capacity::Remaining::Exhausted);
+    assert_eq!(
+        at_the_signal[0].reset_at.as_deref(),
+        Some(reset_at),
+        "{}",
+        at_the_signal[0].describe()
     );
 }
 

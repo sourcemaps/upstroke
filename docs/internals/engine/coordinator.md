@@ -820,13 +820,23 @@ to hang it on would put a fact about nothing into the estimator.
 
 Only the transition (see `exhausted_pools`).
 
-## `impl Run<'_>` › `reset_at: None,`
+## `impl Run<'_>` › `reset_at: reset_at_from_limit_message(&failure.reason, util::unix_seconds_now()),`
 
-§13 wants a retry-at-reset timer here. Neither CLI reports a
-machine-readable reset time today, and parsing one out of
-prose would be a guess dressed as a timestamp — so it stays
-`None`, `DEFAULT_MAX_DEFERS` stays the bound, and the estimate
-says the reset is unknown.
+The reset time the limit message gave, where it gave one.
+`agent::reset_at_from_limit_message` reads the failure's text for Claude
+Code's `· resets 5:30am (UTC)` or `· resets Nov 14, 9am (UTC)`, completes
+the missing date or year against now, and returns the time as RFC 3339 UTC;
+it returns `None` for any text without a reset in exactly that form,
+including one in a zone other than UTC. Now is `util::unix_seconds_now`,
+the same clock read the same way as the event's own `ts`.
+
+It is recorded, not acted on. §13 wants a retry-at-reset timer here, and
+there is none: the ladder still defers a rate-limited attempt and
+`DEFAULT_MAX_DEFERS` is still the bound, whatever the reset says. What the
+time changes is what the estimate reports, a reset time instead of
+"unknown". A reset in any other shape, from Codex or Copilot or from a
+wording Claude Code has not been seen to print, stays `None`, as every reset
+was before.
 
 ## `impl Run<'_>` › `let halts_run = self.on_task_failure == OnTaskFailure::Halt;`
 
