@@ -228,7 +228,7 @@ passes on the other compiler, but only in a run the other four have already
 failed. So no green run of the leg that runs those four has spawned a
 fixture compiler other than the one Cargo built with. By
 [`WINDOWS_SHARD_FILTERS`] that is the last leg, the one with no filter: the
-five fixtures' paths contain none of the table's 73 filters. That bound is the fixtures',
+five fixtures' paths contain none of the table's 69 filters. That bound is the fixtures',
 not the questions', and it rests on those four tests running on a Windows
 leg, which nothing here pins by name: the floors count tests, not which
 ones.
@@ -888,16 +888,18 @@ the ten was predicted at about 14.4 minutes. Run 44736631711 measured the
 re-split for the first time: its slowest leg, the fifth, took 18.1 minutes.
 
 Fourteen legs since 2026-11-22, each but the last named by a list of
-filters ([`WINDOWS_SHARD_FILTERS`]). The filters come from the per-test
-Windows times of CI run 45045067738, packed into legs whole module by whole
-module, and a module is split by the opening of its tests' names only where
-it alone exceeds a leg's budget. The fourteen were not timed before they
-landed: the CI run of the pull request that landed them is their first
-measurement.
+filters ([`WINDOWS_SHARD_FILTERS`]). They were first packed from the
+per-test Windows times of CI run 45045067738 alone, and run 45233912312
+measured them. The filters now come from the mean of each test's measured
+times over CI runs 45045067738, 45161322179 and 45233912312, packed into
+legs whole module by whole module, and a module is split by the opening of
+its tests' names only where it alone exceeds a leg's budget. The re-pack was
+not timed before it landed: the CI run of the pull request that landed it is
+its first measurement.
 
 Single tests set a floor under every leg. A leg takes no less than its
-longest test plus the job's fixed minutes, and in that run the two longest
-single tests were:
+longest test plus the job's fixed minutes, and in run 45045067738 the two
+longest single tests were:
 
 - `engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect`, 249.8 s;
 - `engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect`, 244.5 s.
@@ -1023,23 +1025,26 @@ the matrix is derived from it rather than written beside it:
 `tests:` in `ci.yml` to be the string `shard_selections` makes of this table
 for that shard, in order. The second shard's string is written out once more,
 in the anchor of the ledger row that deletes that leg,
-`MUT-TEST-WINDOWS-HOSTED-SHARD-DROPPED`; the other rows are under
-`windows_shard_matrix_complaints` in the workflow notes.
+`MUT-TEST-WINDOWS-HOSTED-SHARD-DROPPED`, and the third shard's skips in the
+anchor of `MUT-TEST-WINDOWS-HOSTED-FILTER-MOVED-BETWEEN-LEGS`; the other rows
+are under `windows_shard_matrix_complaints` in the workflow notes.
 
 The rule is `shard_selections`' in `super::workflow`. Shard `k` runs the tests
 whose names contain any filter of list `k` and no filter of any list before
 it, and one more shard, after the last list's, runs the tests that contain
-none of them. Thirteen lists, 73 filters in all, make fourteen shards; the
+none of them. Thirteen lists, 69 filters in all, make fourteen shards; the
 fourteenth runs everything no filter names, the bin harness's tests among
 them.
 
-The lists come from the per-test Windows times of CI run 45045067738. Tests
-were packed into shards whole module by whole module, and a module was split
-by the opening of its tests' names only where it alone exceeded a shard's
-budget: so most filters are a module path, such as `runner::container::` or
-`engine::topology::ledger::`, and the rest name the opening of a test's name
-in one large module, such as `engine::topology::coordinator::tests::a_c` or
-`engine::tests::l`. Three filters are a single test's whole path.
+The lists come from the mean of each test's measured Windows times over CI
+runs 45045067738, 45161322179 and 45233912312; the first lists of
+2026-11-22 came from run 45045067738's alone. Tests were packed into shards
+whole module by whole module, and a module was split by the opening of its
+tests' names only where it alone exceeded a shard's budget: so 12 of the 69
+filters are a whole module path ending `::`, such as `runner::container::`
+or `engine::topology::ledger::`, and the rest open a test's name in one
+large module, such as `engine::topology::coordinator::tests::a_h` or
+`engine::tests::l`. Three of those are a single test's whole path.
 
 The list was four filters and five shards until 2026-11-19:
 `engine::topology::coordinator::tests::a`, the rest of
@@ -1084,8 +1089,8 @@ filter, none of them twice in the table.
 ## `pub(super) const WINDOWS_SHARD_FLOORS: [u32; 14] =`
 
 The count each Windows shard must report before it may succeed, in shard
-order: [`WINDOWS_TEST_FLOOR`] divided among the fourteen, 40, 36, 148, 34,
-43, 30, 15, 76, 73, 80, 32, 32, 92 and 969. Each is its leg's
+order: [`WINDOWS_TEST_FLOOR`] divided among the fourteen, 23, 43, 225, 48,
+23, 32, 37, 34, 56, 26, 66, 63, 44 and 980. Each is its leg's
 `floor:` in the job's matrix, an integer the oracle holds to this list, and
 the number line 13 of [`WINDOWS_SHARD_WITNESS`] tests the leg's count against.
 
@@ -1120,22 +1125,26 @@ every run counts them again.
 ## `pub(super) const MACOS_SHARD_FILTERS: [&[&str]; 4] = [`
 
 The same kind of table for the macOS suite, under the same rule: four
-filter lists, eleven filters, five shards -- `runner::container::` and
-`workspace_manager::`; the coordinator's `interleaving` tests and
-`engine::topology::recover::`; the coordinator's tests whose names begin
-with `a`, `engine::topology::attempt::`, `runner::contract::` and
-`runner::host::`; `topology::census::` and the engine's own tests whose
-names begin with `a` or `t`; and everything else. The `test` job's five
+filter lists, 24 filters, five shards. 6 of the 24 are whole module paths
+ending `::` -- `runner::host::`, the coordinator's `interleaving::`,
+`engine::topology::attempt::`, `topology::census::`, `runner::container::`
+and `runner::contract::` -- and the rest open a test's name in one large
+module, such as `engine::topology::coordinator::tests::a_p` or
+`workspace_manager::tests::a`; the fifth shard is everything else. The `test` job's five
 macOS legs are derived from it, through [`TEST_LEGS`]; until the macOS
 suite was divided nothing in `ci.yml` read it, and the suite was one leg of
 the `test` matrix. `the_shard_tables_run_every_test_in_exactly_one_shard`
 holds its count of derived argument strings and the first of them, places
 the same fourteen names, and holds its filters to the same shape.
 
-The lists of 2026-11-22 are packed as the Windows table's are, whole module
-by whole module, from the same per-test Windows times of CI run
-45045067738, each test's time scaled by the ratio of macOS to Windows time
-measured for the macOS leg it ran in under the lists before.
+The lists are packed as the Windows table's are, whole module by whole
+module, from the same mean of each test's Windows times over CI runs
+45045067738, 45161322179 and 45233912312, each test's time scaled by a
+ratio of macOS to Windows time fitted for each group of tests on the macOS
+legs measured with the lists before 2026-11-22 and with the first lists
+packed that day. Those first lists took run 45045067738's times alone, each
+scaled by the ratio measured for the macOS leg the test ran in under the
+lists before.
 
 It was two filters and three shards until 2026-11-19: `engine::topology::`,
 the rest of `engine::`, and everything else. In run 44614925593 those three

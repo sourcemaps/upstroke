@@ -2108,7 +2108,7 @@ on conforming input is one nobody has seen refuse anything -- the rule this
 file states in its own header and the reason `PR5-C-DOCTEST-FIXTURES-NEVER-RAN`
 exists.
 
-The ledger is 153 rows. It was 195 until 2026-11-20, when the guest's
+The ledger is 161 rows. It was 195 until 2026-11-20, when the guest's
 Windows job and the job that picked the suite's home were removed from the
 workflow. The rows written for either, and for the rule that ran exactly
 one of two Windows suite jobs, went with them, and ten were written for what
@@ -2128,8 +2128,15 @@ when the loop came to keep each harness's code before it copies the
 harness's outputs: `MUT-TEST-WINDOWS-HOSTED-CODE-KEPT-AFTER-THE-COPIES` and
 `MUT-TEST-WINDOWS-HOSTED-OUTPUT-COPY-UNGUARDED`. One more came when the
 step read the build's errors in a `try`:
-`MUT-TEST-WINDOWS-HOSTED-BUILD-ERRORS-READ-UNGUARDED`. The test asserts no
-count. It requires every row to change the document and to be refused under
+`MUT-TEST-WINDOWS-HOSTED-BUILD-ERRORS-READ-UNGUARDED`. That made 153, and
+eight came when the shard tables were re-packed from three timed runs, for
+filters and skips moved within the matrix rather than whole legs: five on
+the Windows legs, `MUT-TEST-WINDOWS-HOSTED-FILTER-DROPPED-FROM-ITS-LEG`,
+`-SKIP-DROPPED`, `-FILTER-MOVED-BETWEEN-LEGS`, `-FILTER-WIDENED` and
+`-FILTERS-COMMA-JOINED`, and three on the macOS legs,
+`MUT-TEST-MACOS-FILTER-DROPPED-FROM-ITS-LEG`, `-SKIP-DROPPED` and
+`-FILTER-MOVED-BETWEEN-LEGS` (each under its matrix check in the workflow
+notes). The test asserts no count. It requires every row to change the document and to be refused under
 the code the row names, and no two rows to share a name; a row taken out of
 the ledger is a claim nothing measures, and that is the diff's to show.
 
@@ -2941,7 +2948,7 @@ Five claims.
    Linux ones, as [`shard_selections`] derives them. Each table's first
    selection is its first filter list joined by spaces, with no skip, and
    the last Windows selection is exactly a `--skip` for each of the table's
-   73 filters, in table order: the two ends of the rule, stated a second
+   69 filters, in table order: the two ends of the rule, stated a second
    way.
 2. The Linux table's two are written out as literals, and a table with no
    list gives one empty string -- one shard, no arguments, the whole suite.
@@ -2952,35 +2959,38 @@ Five claims.
    each of the three tables; under the empty table's one selection every
    name runs. The names are the boundaries of the rule, with the Windows
    shard of each and the filter that puts it there:
-   - coordinator tests named `a_p...` (shard 2, `...tests::a_p`) and
-     `a_r...` (12, `...tests::a_r`), and two that no coordinator filter
+   - coordinator tests named `a_p...` (shard 4, `...tests::a_p`) and
+     `a_r...` (10, `...tests::a_r`), and two that no coordinator filter
      names, `a_b...` and `halt...` (14);
-   - a test named `a_...` in the coordinator's `interleaving` module (4,
+   - a test named `a_...` in the coordinator's `interleaving` module (12,
      `...interleaving::a`), which the coordinator's `...tests::a_` filters
      do not reach because each is a substring that runs through `tests::a_`;
-   - a recovery test (5, `...recover::tests::k`) and an attempt test (10,
+   - a recovery test (1, `...recover::tests::k`) and an attempt test (13,
      `engine::topology::attempt::`);
    - `engine::tests::host_acceptance_record` (14), which no
      `engine::tests::` filter names, and `engine::tests::a_kept_pin...` (10,
      `engine::tests::a_k`);
    - a runner test (3, `runner::container::`);
-   - `workspace_manager::tests::engine::a_name_with_a_filter_inside_it` (2,
+   - `workspace_manager::tests::engine::a_name_with_a_filter_inside_it` (7,
      `workspace_manager::tests::e`), a name outside the engine that contains
      `engine::`. The Windows table has no `engine::` filter, and the name
      contains no `engine::tests::` one, so the workspace manager's filter
      decides. The Linux table does have that filter. libtest's filter is a
      substring, so there the `engine::` shard runs the name and every later
      shard skips it: once, as for any other name;
-   - a workspace manager test named `a_...` (13, `workspace_manager::tests::a`);
+   - a workspace manager test named `a_...` (3, `workspace_manager::tests::a`);
    - a library test that contains no filter (14), and a name with no module
      before `tests::`, which is how a harness lists a test at its crate's
      root, the bin harness's among them (14).
 
-   On macOS the same fourteen fall in shards 3, 3, 3, 5, 2, 2, 3, 5, 4, 1,
-   1, 1, 5 and 5: there the third list's `...coordinator::tests::a` takes
-   every coordinator test named `a...`, the second list takes the
-   `interleaving` module and recovery, and the first takes the runner's
-   container tests and the whole workspace manager. In the Linux column
+   On macOS the same fourteen fall in shards 1, 3, 5, 5, 2, 3, 2, 5, 1, 4,
+   2, 1, 5 and 5: there the first list takes the coordinator's `a_p...`
+   tests, the workspace manager's named `a...` and the engine's own
+   `a_k...`; the second takes the `interleaving` module, the attempt tests
+   and the workspace manager's `e...` tests; the third takes the
+   coordinator's `a_r...` tests and the recovery tests named `a_...` or
+   `k...`; the fourth takes `runner::container::`; and no macOS filter names
+   the coordinator's `a_b...` or `halt...`. In the Linux column
    every name that contains `engine::` falls in shard 1, the first nine and
    the eleventh, and the runner's test and the last three in shard 2.
 4. In all three tables no list is empty, no filter is empty, contains

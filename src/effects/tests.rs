@@ -6112,8 +6112,8 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
         .collect();
     assert_eq!(
         windows_filters.len(),
-        73,
-        "the Windows table holds {} filters, not 73",
+        69,
+        "the Windows table holds {} filters, not 69",
         windows_filters.len()
     );
     assert_eq!(
@@ -6145,20 +6145,20 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
     for (name, windows_shard, macos_shard, linux_shard) in [
         (
             "engine::topology::coordinator::tests::a_pipeline_is_served_while_an_intent_removals_repair_plan_waits_on_a_torn_registration",
-            2,
-            3,
+            4,
+            1,
             1,
         ),
         (
             "engine::topology::coordinator::tests::a_registry_refusal_after_two_paid_passes_is_recorded_with_both_at_width_one",
-            12,
+            10,
             3,
             1,
         ),
         (
             "engine::topology::coordinator::tests::a_budget_stop_drains",
             14,
-            3,
+            5,
             1,
         ),
         (
@@ -6169,44 +6169,44 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
         ),
         (
             "engine::topology::coordinator::tests::interleaving::a_budget_stop_under_every_seed",
-            4,
+            12,
             2,
             1,
         ),
         (
             "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect",
-            5,
-            2,
+            1,
+            3,
             1,
         ),
         (
             "engine::topology::attempt::tests::kill_after_the_snapshot_intent_before_its_worktree_is_reclaimed",
-            10,
-            3,
+            13,
+            2,
             1,
         ),
         ("engine::tests::host_acceptance_record", 14, 5, 1),
         (
             "engine::tests::a_kept_pin_is_written_whatever_head_is_when_the_snapshot_is_refused",
             10,
-            4,
+            1,
             1,
         ),
         (
             "runner::container::tests::container_capability_record",
             3,
-            1,
+            4,
             2,
         ),
         (
             "workspace_manager::tests::engine::a_name_with_a_filter_inside_it",
+            7,
             2,
-            1,
             1,
         ),
         (
             "workspace_manager::tests::a_reservation_is_released",
-            13,
+            3,
             1,
             2,
         ),

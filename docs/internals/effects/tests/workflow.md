@@ -409,6 +409,22 @@ the first leg's arguments, `engine::` where it read `--skip engine::`: both
 Linux legs run the one subset, and the tests that run on Linux alone run
 nowhere.
 
+Three more rows make three of the Windows shards' mutations on the macOS
+legs, and the fifth check refuses each. `MUT-TEST-MACOS-FILTER-DROPPED-FROM-ITS-LEG`
+deletes the second leg's first filter,
+`engine::topology::coordinator::tests::interleaving::`, from that leg's own
+`tests:` alone; every later leg still skips it, so the coordinator's
+interleaving tests run on no macOS leg. `MUT-TEST-MACOS-SKIP-DROPPED`
+deletes the last leg's first skip, so the tests the first leg runs under
+`...coordinator::tests::a_p` run in the last leg too. And
+`MUT-TEST-MACOS-FILTER-MOVED-BETWEEN-LEGS` moves the third leg's last
+filter, `engine::tests::t`, to the front of the fourth leg's, which still
+skips it: libtest's skip wins over any filter, and those tests run on no
+macOS leg. These legs hold no count to a floor, so under each of the three
+every leg is green. The moved filter's anchor spells the third leg's skips
+whole and the opening of the fourth leg's value, so a change to the table
+re-spells it; the other two spell a leg's opening words.
+
 A deleted macOS leg and the first check were measured by hand instead, on
 2026-11-17, while the macOS legs were three, each in the tree and then
 restored. With the third macOS entry's three lines removed from `ci.yml`,
@@ -569,10 +585,10 @@ measure the same thing. Measured,
 `MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`. The second is the one no floor
 refuses: every leg runs the tests whose names contain `engine::`, and by the
 counts the ten-shard floors of 2026-11-20 were set from that subset clears
-all fourteen floors of 2026-11-22. The first six of those ten shards and the
+all fourteen floors. The first six of those ten shards and the
 ninth, whose filters each contained `engine::`, were 802 tests, and the rest
 of `engine::topology::`, which none of them named, was 484 tests by the
-counts of 2026-11-19: 1,286, above the last leg's 969 and every other floor.
+counts of 2026-11-19: 1,286, above the last leg's 980 and every other floor.
 Before the re-split of 2026-11-20 the subset was the first seven shards'
 tests, 1,295 by those counts, against a last floor of 734.
 
@@ -805,7 +821,27 @@ Measured, for the fourth:
 - `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED` and
   `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-ZEROED`, the last leg's floor at 1
   and at 0. At 1 the leg must still execute a test; at 0 it is green having
-  executed none.
+  executed none;
+- `MUT-TEST-WINDOWS-HOSTED-FILTER-DROPPED-FROM-ITS-LEG`, the second leg's
+  first filter deleted from its own `tests:` and kept in every later leg's
+  skips, so the one test it names runs on no leg;
+- `MUT-TEST-WINDOWS-HOSTED-SKIP-DROPPED`, the last leg's first skip deleted,
+  so the tests it excluded run in the first leg and again in the last;
+- `MUT-TEST-WINDOWS-HOSTED-FILTER-MOVED-BETWEEN-LEGS`, the third leg's last
+  filter moved to the front of the fourth leg's, which still skips it:
+  libtest's skip wins, and its tests run on no leg;
+- `MUT-TEST-WINDOWS-HOSTED-FILTER-WIDENED`, the first leg's
+  `...coordinator::tests::a_h` cut to `...tests::a_` on its own line, so
+  that leg also runs tests later legs run;
+- `MUT-TEST-WINDOWS-HOSTED-FILTERS-COMMA-JOINED`, the first leg's first two
+  filters joined by a comma: libtest reads the word as one filter, which no
+  test's name contains.
+
+Two of the last five only raise a leg's count, which no floor refuses. The
+other three lower one leg's count by the tests they lose, which its floor
+refuses only where they take the leg below it: a floor counts tests, not
+which ones. What refuses all five is the equality of each leg's `tests:`
+with the string `shard_selections` derives, word for word.
 
 The deleted leg's anchor is that entry's three lines, so the second leg's
 arguments are written out there, the only place they are. A change to the
@@ -837,6 +873,18 @@ name `14 of 14` and `2 of 14`. On the macOS side
 `MUT-TEST-MACOS-LAST-SHARD-SKIPS-MORE` now anchors on the last macOS leg's
 last skip, `engine::tests::t`. `MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`
 kept its anchor and had its count restated against the fourteen floors.
+
+The re-pack from three timed runs re-spelled them once more. The second
+leg's entry still opens with `effects::tests::every_pr6_...` and goes on with
+`engine::topology::recover::tests::a_k`, `...recover::tests::an`,
+`engine::tests::a_p` and `runner::contract::`, with floor 43; the last leg's
+last skip is `engine::tests::a_f` and its floor 980; and the last macOS
+leg's last skip is `engine::tests::an`. `MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`
+kept its anchor and had the last floor restated. The five Windows rows the
+re-pack added spell short pieces of the first four legs' `tests:` values;
+the moved filter's spells the third leg's skips whole, from its last filter
+to the opening of the fourth leg's value, so a change to the table re-spells
+it too.
 
 Before that row a deleted leg was measured by hand, on 2026-11-17, while
 the legs were five, in `ci.yml` itself and then restored: with the fifth
