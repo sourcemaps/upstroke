@@ -1788,12 +1788,15 @@ fn read_dir_names(dir: &Path) -> Result<Vec<OsString>, UpstrokeError> {
         path: dir.to_path_buf(),
         source,
     };
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
+    let read = match fs::read_dir(dir) {
+        Ok(read) => read,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(io_error(error)),
     };
-    collect_entry_names(listing_fault::entry_names(dir, entries)).map_err(io_error)
+    collect_entry_names(
+        listing_fault::entries(dir, read).map(|entry| entry.map(|entry| entry.file_name())),
+    )
+    .map_err(io_error)
 }
 
 /// The names `entries` yields, sorted, or the first error it yields.
@@ -1809,25 +1812,28 @@ fn collect_entry_names(
     Ok(names)
 }
 
-/// The name of each entry an opened listing yields, or the error reading it,
-/// in the directory's order: [`read_dir_names`]'s one observation of a
-/// listing after it opened.
+/// Each entry an opened listing yields, or the error reading it, in the
+/// directory's order: [`read_dir_names`]'s one observation of a listing after
+/// it opened. Production hands the listing back unchanged.
 ///
 /// A module of its own, twinned by configuration exactly as the ownership
 /// proof's `locator_fault` is, so that a test can fail a real directory's
 /// listing after it opened, for one path (`SWEEP-CLASSIFY-009`): the test
 /// build's twin is this file's last item, so no production item stands below
-/// the census boundary.
+/// the census boundary. The seam carries the raw entries, not their names, so
+/// that [`read_dir_names`] maps entries to names itself and that mapping -- the
+/// line a dropping `.flatten()` once stood on -- is compiled, and witnessed,
+/// in both builds.
 #[cfg(not(test))]
 mod listing_fault {
-    use super::{OsString, Path, fs, io};
+    use super::{Path, fs, io};
 
     #[inline]
-    pub(super) fn entry_names(
+    pub(super) fn entries(
         _dir: &Path,
-        entries: fs::ReadDir,
-    ) -> impl Iterator<Item = io::Result<OsString>> {
-        entries.map(|entry| entry.map(|entry| entry.file_name()))
+        read: fs::ReadDir,
+    ) -> impl Iterator<Item = io::Result<fs::DirEntry>> {
+        read
     }
 }
 
@@ -2883,13 +2889,13 @@ mod tests;
 // ===========================================================================
 
 /// The test build's twin of the production `listing_fault` above: the same
-/// names, except for exactly the directory an armed [`ListingFault`] names,
+/// entries, except for exactly the directory an armed [`ListingFault`] names,
 /// where the read after the first entry fails with the armed kind in place of
 /// whatever the directory holds next, as a `readdir` that fails mid-listing
 /// does, and the listing ends there. The last item of this file.
 #[cfg(test)]
 mod listing_fault {
-    use super::{OsString, Path, PathBuf, fs, io};
+    use super::{Path, PathBuf, fs, io};
 
     /// The armed failure's text: what a retained answer's `detail` carries
     /// when it is the filesystem's own error and nothing added to it.
@@ -2898,20 +2904,18 @@ mod listing_fault {
 
     /// An armed [`ListingFault`] for exactly `dir` yields its error kind after
     /// the first entry; every other directory lists as production lists it.
-    pub(super) fn entry_names(
+    pub(super) fn entries(
         dir: &Path,
-        entries: fs::ReadDir,
-    ) -> impl Iterator<Item = io::Result<OsString>> {
+        read: fs::ReadDir,
+    ) -> impl Iterator<Item = io::Result<fs::DirEntry>> {
         let armed = FAULTS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .find(|(path, _)| path == dir)
             .map(|(_, kind)| *kind);
-        let read = if armed.is_some() { 1 } else { usize::MAX };
-        entries
-            .map(|entry| entry.map(|entry| entry.file_name()))
-            .take(read)
+        let before = if armed.is_some() { 1 } else { usize::MAX };
+        read.take(before)
             .chain(armed.map(|kind| Err(io::Error::new(kind, FAILURE))))
     }
 
