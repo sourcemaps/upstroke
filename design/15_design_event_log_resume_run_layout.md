@@ -24,6 +24,14 @@ The durable run artifacts are **split in two**, by who is allowed to read each h
 upstroke.toml                       # repo-root config, checked in
 ```
 
+**An answer file is read, never taken.** Ingesting `answers/<question-id>.json`
+reads it, and nothing in the engine removes or rewrites it afterwards, so it
+stays present and byte-identical for as long as the run directory does. This is
+part of the run-scoped run-directory contents that the effects vocabulary's
+resource row R21 accounts for. This paragraph was added on 2026-11-13 to record
+what the answer readers already do, so that their tests have a design sentence
+to be held to.
+
 A fresh sequential run reserves the global private root and its repository's
 public root with exclusive directory creation before creating skeleton files,
 opening the event log or entering early-error cleanup. An occupied root refuses

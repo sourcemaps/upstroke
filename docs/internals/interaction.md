@@ -421,15 +421,22 @@ and take the bytes `write_answer` writes for it rather than spelling them by han
 
 ## `mod tests` › `fn assert_read_never_took(path: &Path, published: &[u8], read: &str) {`
 
-R21: ingestion is a read, never a take. After a read of a published answer, the file is still
-present and `fs::read` of it equals the bytes taken before the read; each assertion message names
-R21's read-never-take rule and the read under test.
+The rule is the run layout's design: `design/15`, "An answer file is read, never taken". Ingestion
+reads a published answer and never takes it, and the answer file belongs to the run-scoped
+run-directory contents that the effects vocabulary's row R21 accounts for. After a read of a
+published answer, the file is still present and `fs::read` of it equals the bytes taken before the
+read; each assertion message names R21's read-never-take rule and the read under test.
 
 `EventLogAnswers` reads a published answer in exactly three places, and all three go through
 `read_answer`: `poll`; `resolve`'s immediate read, before it waits; and `resolve`'s read inside its
-waiting loop, after each sleep. The three tests below witness one read each. Before them no
-committed test read the file after any of these reads, so a reader that removed or rewrote it
-passed every test.
+waiting loop, after each sleep. The three tests below witness one read each. `poll` already had a
+witness: since `af6cb53a`,
+`an_answer_left_on_disk_under_a_budget_stop_is_ingested_once_by_the_resume_in_its_epoch_and_never_again`
+in `src/engine/topology/recover/tests.rs` ingests through `poll` and then asserts the file is
+retained byte for byte. The finding these tests close measured at `7e0110a1`, before that test
+existed, that a reader removing or rewriting the file passed every test. `resolve`'s two reads had
+no witness at all; the tests below add the first for each of them, plus one for `poll` at this
+layer.
 
 Measured on this head: removing the file after each of the three reads (in `poll`, in `resolve`'s
 immediate branch, in its waiting branch) fails each read's own test on the presence assertion,
