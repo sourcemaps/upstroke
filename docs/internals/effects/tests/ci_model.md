@@ -520,17 +520,21 @@ other build, not the retired second one -- as a scheduling repair that
 names no cause for the hosted runs and repairs no test. One guest serves
 every lane, so a queue entry waits for it behind whatever build holds it --
 unless the operator has set `WINGUEST_BUSY`, or has set a
-`WINGUEST_QUEUE_LIMIT` the guest's queue has reached, when the run goes to
-[`TEST_WINDOWS_HOSTED_JOB`] instead. Neither is set by default. A run
+`WINGUEST_QUEUE_LIMIT` the guest's queue has reached, or the run is a pull
+request's and the owner has set `WINGUEST_PR_HOSTED`, when the run goes to
+[`TEST_WINDOWS_HOSTED_JOB`] instead. None of the three is set by default. A run
 the guest takes runs its commit on the guest, and says no more than that:
 the picker answers for each run on its own, so taking the guest for one run
 says nothing about where the earlier runs of the same change ran. With
-neither variable set every run of a change is on the guest, and a test whose
+none of the three set every run of a change is on the guest, and a test whose
 outcome depends on the machine is not seen first by the push to master. With
-either set, a pull request and its queue entry can both pass on the twin and
+`WINGUEST_BUSY` or a limit set, a pull request and its queue entry can both
+pass on the twin and
 the push to master be the change's first run on the guest, where such a test
 is then first seen; `WINGUEST_BUSY` cleared between the queue entry and the
-push is enough. That is why `MAINTAINING.md` step 3 asks for a Windows-only
+push is enough. With `WINGUEST_PR_HOSTED` alone set, a change's pull-request
+runs are on the twin and its queue entry is its first run on the guest.
+That is why `MAINTAINING.md` step 3 asks for a Windows-only
 failure to be run on the other home before it is believed. The second review
 of #375 found this paragraph, and the workflow's comment above
 `test-windows`, still naming the guest as the machine "every pull request
@@ -801,27 +805,54 @@ checkout beside a token that reads other runs. Measured,
 The shell the script is written for, declared on the step and checked as
 resolved, the way the aggregate's is.
 
-## `pub(super) const PICK_WINDOWS_HOME_STEP_ENV: [(&str, &str); 3] = [`
+## `pub(super) const PICK_WINDOWS_HOME_STEP_ENV: [(&str, &str); 4] = [`
 
-The step's environment, whole: the job's token for `gh`, and the two
+The step's environment, whole: the job's token for `gh`, and the three
 repository variables. They reach the script as environment, never spliced
 into its text, and each name reads its own variable. Measured,
 `MUT-PICK-WINDOWS-HOME-ENV-CROSSED`.
 
+The event the script tests is not here. `GITHUB_EVENT_NAME` is set by the
+runner for every step, like `GITHUB_RUN_ID` and `GITHUB_REPOSITORY`, which
+the script also reads, and needs no `env:` entry.
+
 ## `pub(super) const PICK_WINDOWS_HOME_SCRIPT: &str = r#"winguest_queue() {`
 
 The picker's script, character for character. It answers `hosted` when
-`WINGUEST_BUSY` is exactly `1`; otherwise, when `WINGUEST_QUEUE_LIMIT` is a
+`WINGUEST_BUSY` is exactly `1`; otherwise, when the run is a pull request's
+and `WINGUEST_PR_HOSTED` is exactly `1`; otherwise, when
+`WINGUEST_QUEUE_LIMIT` is a
 whole number from 1 to 999999, when the guest's queue, as the script reads it in the
 other runs of this workflow, has reached that limit; otherwise `guest`.
 It answers `guest` whenever the API cannot be read, because a failed question
 must not move a run off the machine every lane has run on, and it prints what
 it found: the variables, the limit, the two counts, the answer.
 
+Routing pull requests is opt-in, and only a pull request's run takes it. One
+`elif`, after the `WINGUEST_BUSY` test and before the limit check, tests that
+`GITHUB_EVENT_NAME` is `pull_request` and that `WINGUEST_PR_HOSTED` is `1`.
+This workflow's events are `push`, `pull_request` and `merge_group`, so a
+merge-queue entry and a push are never moved by the variable, and with it
+unset, empty or anything but `1` every run is answered as before the rule. A
+run the rule sends to the hosted shards counts nothing and calls no API,
+whatever the limit and whether or not the API can be read.
+
+The rule is for the guest's time: 26 of the last 30 CI runs on 2026-11-15
+were pull-request runs, and all of them wait for the one guest. Sent to the
+hosted shards they use no guest time, and queue entries and pushes keep the
+guest. It is off by default because of what the sharding measurement showed
+([`TEST_WINDOWS_HOSTED_JOB`]): one of three whole hosted runs failed a
+kill-timing test that an open finding already lists, and one shard did not
+end after its tests passed. The owner sets the variable when hosted runs are
+trusted and clears it again without a workflow change.
+`the_windows_home_is_picked_by_the_one_job_the_contract_pins` holds the one
+`elif` and its place, and `the_windows_home_picker_answers_from_canned_api_pages`
+executes it for all three events.
+
 Routing on the queue is opt-in. With `WINGUEST_QUEUE_LIMIT` unset, empty or
 anything but a whole number from 1 to 999999 the script counts nothing, calls no API
-and answers `guest`, so with neither variable set every run goes to the guest
-as it did before the twin. The first review of this job (#375, head
+and answers `guest`, so with none of the three variables set every run goes to
+the guest as it did before the twin. The first review of this job (#375, head
 `873ff8c7`) found the default limit of 2 it then had would be reached by one
 build and one queue entry, sending runs -- merge-queue entries among them --
 to a hosted suite whose October 2026 queue runs were cancelled at their

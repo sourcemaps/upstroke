@@ -194,9 +194,10 @@ pub(super) const PICK_WINDOWS_HOME_STEP_FIELDS: [&str; 5] = ["env", "id", "name"
 
 pub(super) const PICK_WINDOWS_HOME_SHELL: &str = "bash";
 
-pub(super) const PICK_WINDOWS_HOME_STEP_ENV: [(&str, &str); 3] = [
+pub(super) const PICK_WINDOWS_HOME_STEP_ENV: [(&str, &str); 4] = [
     ("GH_TOKEN", "${{ github.token }}"),
     ("WINGUEST_BUSY", "${{ vars.WINGUEST_BUSY }}"),
+    ("WINGUEST_PR_HOSTED", "${{ vars.WINGUEST_PR_HOSTED }}"),
     ("WINGUEST_QUEUE_LIMIT", "${{ vars.WINGUEST_QUEUE_LIMIT }}"),
 ];
 
@@ -232,6 +233,9 @@ home=guest
 if [[ "${WINGUEST_BUSY:-}" == "1" ]]; then
   home=hosted
   echo "WINGUEST_BUSY is 1, so the queue for the guest was not counted."
+elif [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" && "${WINGUEST_PR_HOSTED:-}" == "1" ]]; then
+  home=hosted
+  echo "This run is a pull request's and WINGUEST_PR_HOSTED is 1, so its Windows suite runs on the hosted shards and the queue for the guest was not counted."
 elif [[ ! "${WINGUEST_QUEUE_LIMIT:-}" =~ ^0*[1-9][0-9]{0,5}$ ]]; then
   echo "WINGUEST_BUSY is not 1, and WINGUEST_QUEUE_LIMIT is unset or not a whole number from 1 to 999999, so routing on the queue is off and the queue for the guest was not counted."
 else

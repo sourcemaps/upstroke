@@ -1588,7 +1588,7 @@ pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {
     if env.as_ref() != Some(&expected_env) {
         out.push(format!(
             "[pick-windows-home-env] `{PICK_WINDOWS_HOME_JOB}`'s step binds {env:#?}, not \
-             exactly {expected_env:#?}. The two repository variables reach the script as \
+             exactly {expected_env:#?}. The three repository variables reach the script as \
              environment, never as text spliced into it, and each name reads its own variable; \
              any other key is something the script was never written to be handed."
         ));
@@ -1600,7 +1600,8 @@ pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {
             "[pick-windows-home-script] `{PICK_WINDOWS_HOME_JOB}`'s script is not the pinned \
              one. `the_windows_home_picker_answers_from_canned_api_pages` executes the \
              workflow's script against canned API pages, and the pin is what makes those \
-             answers this text's: the queue is counted only under a limit the operator set, \
+             answers this text's: only a pull request's run is moved by \
+             `WINGUEST_PR_HOSTED`, the queue is counted only under a limit the operator set, \
              an unreadable API answers `guest`, a run both status queries list is counted \
              once, every page is read, and runs that start together are told apart by run \
              id, so a burst neither overfills the guest nor leaves it empty. \
@@ -3771,7 +3772,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  unset or empty `WINGUEST_QUEUE_LIMIT`, the limit check then passes, and every \
                  run counts the guest's queue unasked. One build and one queue entry reach it, \
                  so ordinary concurrency sends runs, merge-queue entries among them, to the \
-                 hosted twin with neither variable set -- the routing the operator made opt-in",
+                 hosted twin with no variable set -- the routing the operator made opt-in",
         job: Some("pick-windows-home"),
         anchor: "          elif [[ ! \"${WINGUEST_QUEUE_LIMIT:-}\" =~ ^0*[1-9][0-9]{0,5}$ ]]; then\n",
         replacement: "          elif [[ ! \"${WINGUEST_QUEUE_LIMIT:=2}\" =~ ^0*[1-9][0-9]{0,5}$ ]]; then\n",
@@ -3832,7 +3833,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-PICK-WINDOWS-HOME-ENV-CROSSED",
-        escape: "`WINGUEST_BUSY` bound to the other variable. With the limit set to `1` every \
+        escape: "`WINGUEST_BUSY` bound to the limit's variable. With the limit set to `1` every \
                  run reads as busy, and with it unset none does, whatever the operator set",
         job: Some("pick-windows-home"),
         anchor: "          WINGUEST_BUSY: ${{ vars.WINGUEST_BUSY }}\n",

@@ -2253,11 +2253,16 @@ diff, and this is the leg saying it ran what it says it ran.
 ## `fn the_windows_home_is_picked_by_the_one_job_the_contract_pins() {`
 
 The job that decides where the Windows suite runs matches the contract, and
-three facts inside its pinned script agree with the model. It reads the
+four facts inside its pinned script agree with the model. It reads the
 guest's queue in exactly one place -- the function is defined once and called
 once -- after the check that `WINGUEST_QUEUE_LIMIT` is a whole number
 from 1 to 999999, so routing on the queue is opt-in on every platform this test runs
-on, not only where the script is executed. And it reads other runs' jobs by
+on, not only where the script is executed. It tests the event and
+`WINGUEST_PR_HOSTED` in one `elif`, which stands after the `WINGUEST_BUSY`
+test and before the limit check, and it expands `GITHUB_EVENT_NAME` and
+`WINGUEST_PR_HOSTED` once each, there: so routing pull requests to the hosted
+shards is opt-in, no other line of the script can send another event there,
+and a busy guest is said first. And it reads other runs' jobs by
 the two names the oracle holds their `name:` to: `TEST_WINDOWS_NAME`, the
 guest's job, and `PICK_WINDOWS_HOME_NAME`, another run's picker, whose state
 is what tells a run still choosing its home from one that has chosen. The
@@ -2324,6 +2329,22 @@ each with the home it must answer; `limit` is `WINGUEST_QUEUE_LIMIT`; and
 not picking here -- a guest job held, or an earlier run still choosing. It is
 stated by the fixture, not derived from the script's output, so the two
 checks in [`together`] do not copy the rule they test.
+
+## `struct Lane {`
+
+What a run is, to the pull-request rule: the event the runner reports as
+`GITHUB_EVENT_NAME`, and what `WINGUEST_PR_HOSTED` holds. `name` says both,
+in the failure a picker run as this lane prints and in the names of the
+files that run writes.
+
+## `const UNMOVED: [Lane; 2] = [`
+
+The two lanes every case of [`cases`] and every burst of [`bursts`] is
+answered as: a pull request with the variable empty, and a merge-queue entry
+with the variable `1`. Neither is moved by the rule, so both must give the
+answer, the printed lines and the requests the fixture gave before the rule
+existed. The first is every pull request while the owner has not opted in;
+the second is the event the rule must never move, with the variable set.
 
 ## `fn twin_legs() -> Vec<String> {`
 
@@ -2442,6 +2463,27 @@ run already queued for the guest counts for both; an earlier third run still
 picking takes a place before either; and of three runs at a limit of 2 the
 first two take the guest.
 
+## `fn pull_request_routing() -> Vec<(Lane, Case)> {`
+
+The pull-request rule's own cases, each with the one lane it is answered as.
+
+A pull request with `WINGUEST_PR_HOSTED` at `1` goes to the hosted shards,
+prints the rule's line and asks the API nothing: with no limit set, over the
+deep queue below; under a limit of 2 and an empty queue, which without the
+variable answers `guest` after two requests; and under a limit with no page
+canned, where the fake `gh` fails every request and the script would
+otherwise say the API could not be read. With `WINGUEST_BUSY` at `1` as well
+the answer is `hosted` and the line printed is the busy one alone, since
+that test comes first.
+
+Then five lanes the rule must leave alone: a push with the variable `1`, and
+a pull request with the variable `true`, `0`, `01` and ` 1`. The variable
+routes only as the exact string `1`, as `WINGUEST_BUSY` does. Each lane is
+answered twice as it would be without the variable: `guest` with routing on
+the queue off and nothing asked, over the deep queue; and `guest` under a
+limit of 2 with one job waiting, the two listings and that run's jobs asked
+for once each.
+
 ## `fn deep_queue() -> Vec<(String, Vec<Page>)> {`
 
 Three waiting guest jobs in two other runs. Every limit a literal reading of
@@ -2454,21 +2496,28 @@ One snapshot in a directory of its own: the fake `gh`, its canned pages, the
 script, and a PATH with the fake first. Every picker run against it reads
 the same files, which is what makes several pickers' snapshot one.
 
-## `fn pick(snapshot: &Snapshot, run: u64, busy: &str, limit: &str) -> Picked {`
+## `fn pick(snapshot: &Snapshot, run: u64, lane: &Lane, busy: &str, limit: &str) -> Picked {`
 
-The script run once, as `run`: a cleared environment holding only what the
-job's step would hold, a `GITHUB_OUTPUT` and a request log of its own, and
-what it exited with, printed, wrote and asked for.
+The script run once, as `run` in `lane`: a cleared environment holding only
+what the job's step would hold, the lane's `GITHUB_EVENT_NAME` and
+`WINGUEST_PR_HOSTED` among it, a `GITHUB_OUTPUT` and a request log of its
+own, and what it exited with, printed, wrote and asked for. The two files
+are named by the run and the lane, so one snapshot is read by a run in
+several lanes and each keeps its own.
 
-## `fn answer(case: &Case, script: &str, root: &Path) -> Result<(), String> {`
+## `fn answer(case: &Case, lanes: &[Lane], script: &str, root: &Path) -> Vec<String> {`
 
-One case: staged, picked as run 900, and every way its answer, its output,
-its printed lines or its requests differ from the case. The script must exit
-0 on every answer, since the aggregate requires the picker to succeed.
+One case: staged once, picked as run 900 in each lane, and for each lane
+every way its answer, its output, its printed lines or its requests differ
+from the case. The printed lines are the case's and the answer's, and no
+other: a line the case does not name is a fault too, so a lane that printed
+the pull-request rule's line beside today's would not pass. The script must
+exit 0 on every answer, since the aggregate requires the picker to succeed.
 
-## `fn together(burst: &Burst, script: &str, root: &Path) -> Result<(), String> {`
+## `fn together(burst: &Burst, lanes: &[Lane], script: &str, root: &Path) -> Vec<String> {`
 
-One burst: the snapshot staged once and each picker run against it in turn,
+One burst: the snapshot staged once and, in each lane, each picker run
+against it in turn,
 which against pages that do not change is the same as at once. Each picker
 must answer its stated home, and ask for both listings and every other
 listed run's jobs once, never its own. Then two checks that read only the
@@ -2487,8 +2536,9 @@ answer is the same on a runner and off one.
 
 ## `fn picker_fixtures(jq: &str) {`
 
-Every case and every burst, reported together, so a broken script names
-every answer it gets wrong. It asks PATH for `jq` first, under the name it
+Every case and every burst, each answered in both lanes of [`UNMOVED`], and
+then the cases of [`pull_request_routing`], reported together, so a broken
+script names every answer it gets wrong. It asks PATH for `jq` first, under the name it
 is handed, and fails with the guard's reason when that does not answer: a
 machine without `jq` is then never read as the script's own `guest` fallback
 passing, and never as a pass at all. The parameter is the name the guard
@@ -2529,6 +2579,13 @@ guest jobs are reported `queued`, both pickers answering `hosted`, and the
 two rows for that reading. The two bursts that fail under neither of the
 first two are the one with room for both runs and the one with room for
 none, where every rule agrees.
+
+Measured on 2026-11-17 for the pull-request rule, each a mutation of the
+workflow's script, then restored. With the event test dropped, so that the
+variable alone routes, this test failed in the merge-queue lane of
+[`UNMOVED`], a case that answers `guest` there answering `hosted` and asking
+nothing. With the rule tested before `WINGUEST_BUSY`, this test failed. Both
+also failed the picker's pin.
 
 ## `fn the_windows_home_picker_answers_from_canned_api_pages() {`
 

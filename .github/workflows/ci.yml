@@ -171,15 +171,34 @@ jobs:
   # answer is the job output `home`: `test-windows` runs when it is `guest`
   # and `test-windows-hosted` when it is `hosted`.
   #
-  # The answer is `hosted` when the repository variable WINGUEST_BUSY is `1`
-  # (the build machine's operator sets it while the machine is held), or when
-  # the repository variable WINGUEST_QUEUE_LIMIT is a whole number from 1 to
-  # 999999 and the guest's queue, as this run reads it in the other runs of this
-  # workflow, has reached that limit. Routing on the queue is opt-in:
-  # with WINGUEST_QUEUE_LIMIT unset, empty or anything else the queue is not
-  # counted, no API call is made, and the answer is `guest`, so with neither
-  # variable set every run goes to the guest as it did before the twin
-  # existed. A limit that applied by default would be reached by ordinary
+  # The answer is `hosted` in three cases, tested in this order: the
+  # repository variable WINGUEST_BUSY is `1` (the build machine's operator
+  # sets it while the machine is held); the run is a pull request's and the
+  # repository variable WINGUEST_PR_HOSTED is `1`; or the repository variable
+  # WINGUEST_QUEUE_LIMIT is a whole number from 1 to 999999 and the guest's
+  # queue, as this run reads it in the other runs of this workflow, has
+  # reached that limit.
+  #
+  # Routing pull requests saves the guest's time. 26 of the last 30 CI runs
+  # on 2026-11-15 were pull-request runs, and all of them wait for the one
+  # guest. Sent to the hosted shards they use no guest time. Merge-queue
+  # entries and pushes keep the guest: the rule reads GITHUB_EVENT_NAME,
+  # which the runner sets for every step, and only `pull_request` takes it,
+  # whatever the variable holds. The rule is opt-in, like the two it joins:
+  # with WINGUEST_PR_HOSTED unset, empty or anything but `1` every run is
+  # answered as if the rule were not there. In the measurement behind the
+  # shards (`test-windows-hosted`, below) one of three whole hosted runs
+  # failed a kill-timing test that an open finding already lists, and one
+  # shard did not end after its tests passed; the owner sets the variable
+  # when hosted runs are trusted and clears it again without a workflow
+  # change. A run the rule sends to the hosted shards counts nothing and
+  # calls no API.
+  #
+  # Routing on the queue is opt-in too: with WINGUEST_QUEUE_LIMIT unset,
+  # empty or anything else the queue is not counted, no API call is made,
+  # and the answer is `guest`, so with none of the three variables set every
+  # run goes to the guest as it did before the twin existed. A limit that
+  # applied by default would be reached by ordinary
   # concurrency -- one build and one queue entry -- and send runs, merge-queue
   # entries among them, to a hosted suite whose October 2026 queue runs were
   # cancelled at their timeouts (operator decision, 2026-11-12, on the first
@@ -233,6 +252,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           WINGUEST_BUSY: ${{ vars.WINGUEST_BUSY }}
+          WINGUEST_PR_HOSTED: ${{ vars.WINGUEST_PR_HOSTED }}
           WINGUEST_QUEUE_LIMIT: ${{ vars.WINGUEST_QUEUE_LIMIT }}
         run: |
           winguest_queue() {
@@ -267,6 +287,9 @@ jobs:
           if [[ "${WINGUEST_BUSY:-}" == "1" ]]; then
             home=hosted
             echo "WINGUEST_BUSY is 1, so the queue for the guest was not counted."
+          elif [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" && "${WINGUEST_PR_HOSTED:-}" == "1" ]]; then
+            home=hosted
+            echo "This run is a pull request's and WINGUEST_PR_HOSTED is 1, so its Windows suite runs on the hosted shards and the queue for the guest was not counted."
           elif [[ ! "${WINGUEST_QUEUE_LIMIT:-}" =~ ^0*[1-9][0-9]{0,5}$ ]]; then
             echo "WINGUEST_BUSY is not 1, and WINGUEST_QUEUE_LIMIT is unset or not a whole number from 1 to 999999, so routing on the queue is off and the queue for the guest was not counted."
           else
@@ -290,8 +313,9 @@ jobs:
   # (MAINTAINING.md step 3). A pull request, a push to master and a
   # merge-queue entry all run it there, on the same three labels, unless the
   # run's `pick-windows-home` answers `hosted` -- WINGUEST_BUSY is `1`, or
-  # WINGUEST_QUEUE_LIMIT is set and the guest's queue has reached it, both
-  # opt-in and neither set by default. Then this job is skipped
+  # the run is a pull request's and WINGUEST_PR_HOSTED is `1`, or
+  # WINGUEST_QUEUE_LIMIT is set and the guest's queue has reached it, all
+  # three opt-in and none set by default. Then this job is skipped
   # and `test-windows-hosted` below runs the same suite on windows-latest,
   # in five shards, each on a runner of its own; the aggregate requires
   # exactly one of the two jobs to succeed, and the hosted job succeeds only
@@ -310,13 +334,15 @@ jobs:
   # That is a scheduling repair: it names no cause for the hosted runs, and
   # it repairs no test. One guest serves every lane, so a queue entry's leg
   # waits for it behind any build that holds it, up to the queue limit where
-  # the operator has set one. With neither variable set every run of a
+  # the operator has set one. With none of the three set every run of a
   # change is on the guest, where the hosted queue left a test whose outcome
   # depends on the machine to be seen first by the push to master. That is
   # as far as it goes: the picker answers for each run on its own, so taking
   # the guest for one run says nothing about where the earlier runs of the
   # same change ran. A pull request and its queue entry sent to the hosted
   # twin can both pass there, and the push to master is then the change's
+  # first run on the guest. With WINGUEST_PR_HOSTED alone set, a change's
+  # pull-request runs are on the hosted shards and its queue entry is its
   # first run on the guest. `lint (windows)` and the Windows
   # MSRV leg stay on windows-latest, and `lint (windows)` also links every
   # binary and test harness with `cargo build --all-targets`, so GitHub's
