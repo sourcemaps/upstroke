@@ -25893,26 +25893,250 @@ git cat-file -e 'HEAD^{tree}'
             .expect("a case that ended within its bound sent its outcome")
     }
 
+    /// Each `bounded(` call in `source` whose first argument is an `f-` name, a literal one or
+    /// an `&format!` one: the name, and the text of the call's own arguments, from just after
+    /// `bounded(` to its matching `)`. Nothing after that parenthesis is part of the call. The
+    /// contents of string and char literals, and comments, are blanked to spaces first, so a
+    /// message's words or parentheses are never read as code and a call written inside a
+    /// string is not a call.
+    fn f_bounded_calls(source: &str) -> Vec<(String, String)> {
+        let text = source.as_bytes();
+        let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+        let mut code = text.to_vec();
+        let mut at = 0;
+        while at < text.len() {
+            let rest = &text[at..];
+            let prefix = if rest.starts_with(b"br") {
+                2
+            } else {
+                usize::from(rest[0] == b'r')
+            };
+            let hashes = rest[prefix..]
+                .iter()
+                .take_while(|&&byte| byte == b'#')
+                .count();
+            let raw = prefix > 0
+                && (at == 0 || !word(text[at - 1]))
+                && rest.get(prefix + hashes) == Some(&b'"');
+            let (from, to, next) = if rest.starts_with(b"//") {
+                let end = rest
+                    .iter()
+                    .position(|&byte| byte == b'\n')
+                    .map_or(text.len(), |n| at + n);
+                (at, end, end)
+            } else if rest.starts_with(b"/*") {
+                let (mut depth, mut end) = (0, at);
+                while end < text.len() {
+                    if text[end..].starts_with(b"/*") {
+                        depth += 1;
+                        end += 2;
+                    } else if text[end..].starts_with(b"*/") {
+                        depth -= 1;
+                        end += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else {
+                        end += 1;
+                    }
+                }
+                (at, end.min(text.len()), end)
+            } else if raw {
+                let open = at + prefix + hashes + 1;
+                let closing = format!("\"{}", "#".repeat(hashes));
+                let end = text[open..]
+                    .windows(closing.len())
+                    .position(|window| window == closing.as_bytes())
+                    .map_or(text.len(), |n| open + n);
+                (open, end, end + closing.len())
+            } else if rest[0] == b'"' {
+                let mut end = at + 1;
+                while end < text.len() && text[end] != b'"' {
+                    end += if text[end] == b'\\' { 2 } else { 1 };
+                }
+                (at + 1, end.min(text.len()), end + 1)
+            } else if rest[0] == b'\'' && rest.get(1) == Some(&b'\\') {
+                let end = (at + 3..text.len())
+                    .find(|&n| text[n] == b'\'')
+                    .unwrap_or(text.len());
+                (at + 1, end, end + 1)
+            } else if rest[0] == b'\'' {
+                let width = source[at + 1..].chars().next().map_or(0, char::len_utf8);
+                if width > 0 && rest.get(1 + width) == Some(&b'\'') {
+                    (at + 1, at + 1 + width, at + 2 + width)
+                } else {
+                    (at, at, at + 1)
+                }
+            } else {
+                (at, at, at + 1)
+            };
+            code[from..to].fill(b' ');
+            at = next;
+        }
+        let code = String::from_utf8(code).expect("blanking whole literals keeps the text UTF-8");
+        let mut calls = Vec::new();
+        for (at, opening) in code.match_indices("bounded(") {
+            if at > 0 && word(text[at - 1]) {
+                continue;
+            }
+            let open = at + opening.len();
+            let first = source[open..].trim_start();
+            let named = first
+                .strip_prefix("&format!(")
+                .map_or(first, str::trim_start);
+            let Some(name) = named
+                .strip_prefix('"')
+                .filter(|name| name.starts_with("f-"))
+            else {
+                continue;
+            };
+            let mut depth = 1_usize;
+            let close = code[open..]
+                .bytes()
+                .position(|byte| {
+                    match byte {
+                        b'(' => depth += 1,
+                        b')' => depth -= 1,
+                        _ => {}
+                    }
+                    depth == 0
+                })
+                .map_or(code.len(), |n| open + n);
+            let name = name.split('"').next().unwrap_or(name);
+            calls.push((name.to_owned(), code[open..close].to_owned()));
+        }
+        calls
+    }
+
     #[test]
     fn no_f_test_runs_a_loop_of_cases_under_one_bound() {
-        const SOURCE: &str = include_str!("coordinator.rs");
-        let opening = "bounded(\"f-";
-        let mut scanned = 0;
-        let mut shared = Vec::new();
-        for (at, _) in SOURCE.match_indices(opening) {
-            let call = &SOURCE[at + "bounded(\"".len()..];
-            let name = call.split('"').next().unwrap_or(call);
-            let body = call.split("\n    }").next().unwrap_or(call);
-            scanned += 1;
-            for marker in ["in F_MATRIX", "for width in", "f_report("] {
-                if body.contains(marker) {
-                    shared.push(format!("{name}: {marker}"));
+        let markers = |arguments: &str| {
+            let in_word = |c: char| c.is_alphanumeric() || c == '_';
+            let starts_word = |at: usize| !arguments[..at].ends_with(in_word);
+            let mut found = Vec::new();
+            if arguments.match_indices("for").any(|(at, keyword)| {
+                let after = &arguments[at + keyword.len()..];
+                starts_word(at) && !after.starts_with(in_word) && after.contains(" in ")
+            }) {
+                found.push("for ... in");
+            }
+            for marker in ["while ", "loop {"] {
+                if arguments
+                    .match_indices(marker)
+                    .any(|(at, _)| starts_word(at))
+                {
+                    found.push(marker);
                 }
             }
+            for marker in [".for_each(", "F_MATRIX", "f_report("] {
+                if arguments.contains(marker) {
+                    found.push(marker);
+                }
+            }
+            found
+        };
+        let literal =
+            |name: &'static str, body: &str| (name, format!("bounded(\"{name}\", {body});\n"));
+        let formatted = |name: &'static str, body: &str| {
+            (name, format!("bounded(&format!(\"{name}\"), {body});\n"))
+        };
+        let flagged = [
+            (
+                literal(
+                    "f-control-matrix",
+                    "move || { for (subject, width) in F_MATRIX { f_case(subject, width); } }",
+                ),
+                "for ... in",
+            ),
+            (
+                literal(
+                    "f-control-borrowed-matrix",
+                    "move || { for &(subject, width) in &F_MATRIX { f_case(subject, width); } }",
+                ),
+                "for ... in",
+            ),
+            (
+                literal(
+                    "f-control-renamed-matrix",
+                    "move || { let scenarios = F_MATRIX; for one in scenarios { f_case(one); } }",
+                ),
+                "for ... in",
+            ),
+            (
+                formatted(
+                    "f-control-each width {width}",
+                    "move || { [1, 3].iter().for_each(|w| { f_case(FSubject::Attempt, *w); }); }",
+                ),
+                ".for_each(",
+            ),
+            (
+                literal("f-control-report", "|| f_report(&f_policy_cases(3))"),
+                "f_report(",
+            ),
+            (
+                literal(
+                    "f-control-while",
+                    "move || { let mut widths = vec![1, 3]; \
+                     while let Some(width) = widths.pop() { f_case(FSubject::Attempt, width); } }",
+                ),
+                "while ",
+            ),
+            (
+                literal(
+                    "f-control-loop",
+                    "move || { let mut widths = vec![1, 3]; \
+                     loop { let Some(width) = widths.pop() else { break }; f_case(width); } }",
+                ),
+                "loop {",
+            ),
+        ];
+        let mut misjudged = Vec::new();
+        for ((name, text), marker) in flagged {
+            let calls = f_bounded_calls(&text);
+            let names: Vec<&str> = calls.iter().map(|(found, _)| found.as_str()).collect();
+            let found: Vec<&str> = calls.iter().flat_map(|(_, call)| markers(call)).collect();
+            if names != [name] || !found.contains(&marker) {
+                misjudged.push(format!(
+                    "{name} is not flagged {marker}: {calls:?} {found:?}"
+                ));
+            }
+        }
+        let (alone, mut one_case) = literal(
+            "f-control-one-case",
+            "move || { let outcome = f_case(FSubject::Attempt, 1); \
+             assert!(outcome.is_ok(), \"(waiting for the case in turn\"); }",
+        );
+        one_case.push_str(
+            "f_report(&cases);\n\
+             for (subject, width) in F_MATRIX { cases.push(f_case(subject, width)); }\n",
+        );
+        let calls = f_bounded_calls(&one_case);
+        let names: Vec<&str> = calls.iter().map(|(found, _)| found.as_str()).collect();
+        let found: Vec<&str> = calls.iter().flat_map(|(_, call)| markers(call)).collect();
+        if names != [alone] || !found.is_empty() {
+            misjudged.push(format!(
+                "{alone} runs one case and reports after its bound, yet: {calls:?} {found:?}"
+            ));
         }
         assert!(
-            scanned > 0,
-            "no bounded F scenario with a literal name was found"
+            misjudged.is_empty(),
+            "the scan misjudges its controls: {misjudged:?}"
+        );
+        let calls = f_bounded_calls(include_str!("coordinator.rs"));
+        let shared: Vec<String> = calls
+            .iter()
+            .flat_map(|(name, call)| {
+                markers(call)
+                    .into_iter()
+                    .map(move |marker| format!("{name}: {marker}"))
+            })
+            .collect();
+        assert!(
+            calls.len() >= 12,
+            "only {} bounded F scenarios named `f-` were found, so the scan no longer sees them: \
+             {:?}",
+            calls.len(),
+            calls.iter().map(|(name, _)| name).collect::<Vec<_>>()
         );
         assert!(
             shared.is_empty(),
@@ -26803,9 +27027,7 @@ git cat-file -e 'HEAD^{tree}'
                         })
                         .collect();
                     assert!(!shared.is_empty(), "the split index wrote its shared file");
-                    for path in shared {
-                        crate::workspace_manager::fixture::remove_file(&path);
-                    }
+                    f_remove_all(&shared);
                 }),
             );
             let (wide, result) = f_verify_width_three("f-residual-i", &tasks, false, policy);
@@ -27838,13 +28060,7 @@ git cat-file -e 'HEAD^{tree}'
                 .expect("the kept slot")
                 .map(|entry| entry.expect("an entry").path())
                 .collect();
-            for path in held {
-                if path.is_dir() {
-                    f_remove_tree_by_hand(&path);
-                } else {
-                    crate::workspace_manager::fixture::remove_file(&path);
-                }
-            }
+            f_remove_all(&held);
             crate::workspace_manager::fixture::remove_dir(&kept);
             let (_, mut resumed) = env
                 .resume(
@@ -27862,6 +28078,18 @@ git cat-file -e 'HEAD^{tree}'
                 "{progress:?}"
             );
         });
+    }
+
+    /// Removes each of `paths` in order, a directory with everything under it, outside the
+    /// bound of the scenario that calls it.
+    fn f_remove_all(paths: &[PathBuf]) {
+        for path in paths {
+            if path.is_dir() {
+                f_remove_tree_by_hand(path);
+            } else {
+                crate::workspace_manager::fixture::remove_file(path);
+            }
+        }
     }
 
     fn f_remove_tree_by_hand(root: &std::path::Path) {
