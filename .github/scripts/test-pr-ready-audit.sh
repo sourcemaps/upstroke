@@ -253,6 +253,13 @@
 #   MUT-FRONTMATTER-UPSTREAM-ERROR-AS-MISS  the frontmatter read was a pipeline, so under
 #                                `pipefail` the reader's failure (2) stood behind the matcher's
 #                                ordinary "no match" (1) and the caller was handed an answer
+#   MUT-FRONTMATTER-CRLF-AS-MISS  the frontmatter read kept a CRLF line's carriage return, so a
+#                                finding file authored on Windows opened `---\r`, had no
+#                                frontmatter and filed no id: an accepted P3 whose one file is
+#                                CRLF read NOT-READY, `no-file:<id>`, and an LF and a CRLF file
+#                                filing one id counted one and read READY instead of
+#                                `duplicate-file:<id>` -- or a carriage return inside the id line,
+#                                not at its end, was taken off with the line ending
 #   MUT-PROSE-VERDICT-SUFFIX     the verdict check was anchored at one end, so it validated the
 #                                TAIL of the token and read `VERDICT: FAIL<U+00C9>PASS` as PASS --
 #                                and read it differently under `C`, in a file whose header
@@ -7752,6 +7759,25 @@ expect MUT-MULTI-ID-FILE-OVERREACH "$(has_id OTHER-ID "$tmp/prose-id.md")" "0|1"
 printf -- '---\nid: ONE-ID\nids_cited: OTHER\nidentity: x\n---\n\nBody.\n' > "$tmp/id-like-keys.md"
 expect MUT-MULTI-ID-FILE-OVERREACH "$(has_id ONE-ID "$tmp/id-like-keys.md")" "0|1"
 expect MUT-MULTI-ID-FILE-OVERREACH "$(has_id TARGET-ID "$tmp/front-id.md")" "0|1"
+# A LINE ENDS LF OR CRLF. A finding authored on Windows opens `---\r`, which is not `---`, and its
+# id line ends in a carriage return the id does not carry: read with it still on, every CRLF file
+# had no frontmatter and filed nothing. The CRLF copies of three files above answer as those files
+# do -- the id alone, the id among others, the id in prose only -- and the copies are checked to
+# be CRLF, so a copy that lost its carriage returns cannot pass these for it. A carriage return
+# anywhere but the end of the line is part of the line, so an id line carrying one inside it is
+# not the id, CRLF file or not.
+crlf_copy() { awk '{ printf "%s\r\n", $0 }'; }   # crlf_copy < FILE: the same lines, each ending CRLF
+for crlf_name in front-id two-ids prose-id; do
+  crlf_copy < "$tmp/$crlf_name.md" > "$tmp/$crlf_name-crlf.md"
+done
+expect MUT-FRONTMATTER-CRLF-AS-MISS "$(tr -cd '\r' < "$tmp/front-id-crlf.md" | wc -c)" 6
+expect MUT-FRONTMATTER-CRLF-AS-MISS "$(tr -cd '\r' < "$tmp/two-ids-crlf.md" | wc -c)" 7
+expect MUT-FRONTMATTER-CRLF-AS-MISS "$(tr -cd '\r' < "$tmp/prose-id-crlf.md" | wc -c)" 7
+expect MUT-FRONTMATTER-CRLF-AS-MISS "$(has_id TARGET-ID "$tmp/front-id-crlf.md")" "0|1"
+expect MUT-FRONTMATTER-CRLF-AS-MISS "$(has_id SHARED-A "$tmp/two-ids-crlf.md")" "0|2"
+expect MUT-FRONTMATTER-CRLF-AS-MISS "$(has_id TARGET-ID "$tmp/prose-id-crlf.md")" "0|0"
+printf -- '---\r\nid: TARGET\r-ID\r\nseverity: P2\r\n---\r\n\r\nBody.\r\n' > "$tmp/cr-inside-id.md"
+expect MUT-FRONTMATTER-CRLF-AS-MISS "$(has_id TARGET-ID "$tmp/cr-inside-id.md")" "0|0"
 
 # --- counting the files that file a finding ------------------------------------------------------
 # The one place git is exercised here, in a repository built for it. This count decides whether a
@@ -7791,6 +7817,37 @@ expect MUT-FINDING-FILE-COUNT "$(count_in_fixture NOT-FILED-ANYWHERE)" 0
 expect MUT-MULTI-ID-FILE-ACCEPTED "$(count_in_fixture M-SHARED-A)" multi    # one file, two findings
 expect MUT-MULTI-ID-FILE-ACCEPTED "$(count_in_fixture M-SHARED-B)" multi
 expect MUT-MULTI-ID-FILE-ACCEPTED "$(count_in_fixture M-ALSO-ALONE)" multi  # its own file does not clear it
+
+# A LINE ENDS LF OR CRLF, and the count is where that decides a verdict: a CRLF file read as no
+# file is `no-file` for a finding filed once, and beside an LF copy it hid the second file, so one
+# id filed twice counted one and `duplicate-file` never fired. In a repository of its own, its
+# blobs written by `git hash-object` from bytes that carry the carriage returns -- `git add` is
+# what a line-ending config converts on the way in, and the blob is the bytes the count reads.
+crlf_repo="$tmp/crlf-repo"
+git init -q "$crlf_repo"
+crlf_blob() {  # crlf_blob ID...: a blob of a CRLF finding file whose frontmatter names each ID
+  { printf -- '---\r\n'; printf -- 'id: %s\r\n' "$@"; printf -- 'severity: P3\r\n---\r\n\r\nBody.\r\n'; } \
+    | git -C "$crlf_repo" hash-object -w --stdin
+}
+crlf_one_blob="$(crlf_blob CRLF-ONE)"
+crlf_twice_blob="$(crlf_blob CRLF-TWICE)"
+lf_twice_blob="$(printf -- '---\nid: CRLF-TWICE\nseverity: P3\n---\n\nBody.\n' \
+  | git -C "$crlf_repo" hash-object -w --stdin)"
+crlf_shared_blob="$(crlf_blob CRLF-SHARED-A CRLF-SHARED-B)"
+crlf_findings_tree="$(printf '100644 blob %s\t%s\n' \
+    "$crlf_one_blob" one.md "$crlf_twice_blob" twice-crlf.md "$lf_twice_blob" twice-lf.md \
+    "$crlf_shared_blob" shared.md \
+  | git -C "$crlf_repo" mktree)"
+crlf_root_tree="$(printf '040000 tree %s\tfindings\n' "$crlf_findings_tree" | git -C "$crlf_repo" mktree)"
+crlf_commit="$(git -C "$crlf_repo" -c user.email=t@example -c user.name=t \
+  commit-tree "$crlf_root_tree" -m "file findings in CRLF")"
+# The file the tree names holds the carriage returns, one a line, so the count below reads CRLF.
+expect MUT-FRONTMATTER-CRLF-AS-MISS \
+  "$(git -C "$crlf_repo" cat-file blob "$crlf_commit:findings/one.md" | tr -cd '\r' | wc -c)" 6
+count_in_crlf() { (cd "$crlf_repo" && finding_file_count "$1" "$crlf_commit"); }
+expect MUT-FRONTMATTER-CRLF-AS-MISS "$(count_in_crlf CRLF-ONE)" 1         # one CRLF file is one file
+expect MUT-FRONTMATTER-CRLF-AS-MISS "$(count_in_crlf CRLF-TWICE)" 2       # LF and CRLF, one id: two
+expect MUT-FRONTMATTER-CRLF-AS-MISS "$(count_in_crlf CRLF-SHARED-A)" multi   # two ids, one CRLF file
 
 # THE LEDGER'S OLD PREFIX IS STILL COUNTED, BECAUSE THE TREEISH IS THE CALLER'S REVISION. The
 # ledger moved from reviews/findings/ to findings/ on 2026-09-12 (pull request #276) and
@@ -8499,6 +8556,24 @@ accept_head_with() {  # accept_head_with ID NAME...: a commit on the harness hea
   git -C "$enqueue_repo" -c user.email=t@example -c user.name=t \
     commit-tree "$root_tree" -p "$enqueue_head" -m "file a finding under findings/"
 }
+# The same commit with the file under CRLF-NAME written CRLF, from bytes that carry the carriage
+# returns, and -- given LF-NAME -- a second file filing the same id in LF, the blob accept_head_with
+# writes. A finding authored on Windows is these bytes, and they are the bytes the count reads.
+accept_head_crlf() {  # accept_head_crlf ID CRLF-NAME [LF-NAME]: a commit on the harness head
+  local crlf_object lf_object listing findings_tree root_tree
+  crlf_object="$(printf -- '---\r\nid: %s\r\nseverity: P3\r\n---\r\n\r\nAccepted, and still open.\r\n' "$1" \
+    | git -C "$enqueue_repo" hash-object -w --stdin)"
+  listing="100644 blob $crlf_object"$'\t'"$2"$'\n'
+  if (($# > 2)); then
+    lf_object="$(printf -- '---\nid: %s\nseverity: P3\n---\n\nAccepted, and still open.\n' "$1" \
+      | git -C "$enqueue_repo" hash-object -w --stdin)"
+    listing+="100644 blob $lf_object"$'\t'"$3"$'\n'
+  fi
+  findings_tree="$(printf '%s' "$listing" | git -C "$enqueue_repo" mktree)"
+  root_tree="$(printf '040000 tree %s\tfindings\n' "$findings_tree" | git -C "$enqueue_repo" mktree)"
+  git -C "$enqueue_repo" -c user.email=t@example -c user.name=t \
+    commit-tree "$root_tree" -p "$enqueue_head" -m "file a finding under findings/, in CRLF"
+}
 accept_head_one="$(accept_head_with ACCEPT-P3 accept-p3.md)"
 accept_head_two="$(accept_head_with ACCEPT-P3 accept-p3.md accept-p3-again.md)"
 accept_head_none="$enqueue_head"
@@ -8513,6 +8588,14 @@ expect "MUT-P3-ACCEPT-UNFILED no-file head" \
   "$(cd "$enqueue_repo" && finding_file_count ACCEPT-P3 "$accept_head_none")" 0
 expect "MUT-LEDGER-HEADER-BY-CONTENT one-file head" \
   "$(cd "$enqueue_repo" && finding_file_count ID "$id_head_one")" 1
+accept_head_crlf_one="$(accept_head_crlf ACCEPT-P3 accept-p3.md)"
+accept_head_crlf_mixed="$(accept_head_crlf ACCEPT-P3 accept-p3-crlf.md accept-p3.md)"
+expect "MUT-FRONTMATTER-CRLF-AS-MISS CRLF head is CRLF" "$(git -C "$enqueue_repo" \
+  cat-file blob "$accept_head_crlf_one:findings/accept-p3.md" | tr -cd '\r' | wc -c)" 6
+expect "MUT-FRONTMATTER-CRLF-AS-MISS CRLF head" \
+  "$(cd "$enqueue_repo" && finding_file_count ACCEPT-P3 "$accept_head_crlf_one")" 1
+expect "MUT-FRONTMATTER-CRLF-AS-MISS LF and CRLF head" \
+  "$(cd "$enqueue_repo" && finding_file_count ACCEPT-P3 "$accept_head_crlf_mixed")" 2
 accept_gh="$tmp/accept-gh"
 mkdir -p "$accept_gh"
 printf '#!/usr/bin/env bash\nhead=${STUB_HEAD:-%s}\n' "$enqueue_head" > "$accept_gh/gh"
@@ -8637,6 +8720,26 @@ for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
     "$accept_head_two")"
   contains "MUT-P3-ACCEPT-UNFILED two files [$accept_branch]" "$got" " NOT-READY "
   contains "MUT-P3-ACCEPT-UNFILED two files [$accept_branch]" "$got" "duplicate-file:ACCEPT-P3"
+done
+
+# A LINE ENDS LF OR CRLF, through main. The READY case above with its one finding file written
+# CRLF: read with the carriage returns on, the file opened `---\r`, had no frontmatter, and an
+# accepted, filed P3 read NOT-READY, `no-file:ACCEPT-P3`. Filed once in LF and once in CRLF, the
+# CRLF copy counted for nothing and the one id filed twice read READY; it is `duplicate-file`.
+accept_review "$tmp/accept-p3-crlf.md" '{"id":"ACCEPT-P3","severity":"P3"}' "$accept_head_crlf_one"
+accept_review "$tmp/accept-p3-crlf-mixed.md" '{"id":"ACCEPT-P3","severity":"P3"}' \
+  "$accept_head_crlf_mixed"
+for accept_branch in feature/a-slug fix-P1/correctness_a-slug; do
+  got="$(accept_run "$accept_branch" "$tmp/accept-p3-crlf.md" "$tmp/accept-p3-row.md" \
+    "$accept_head_crlf_one")"
+  contains "MUT-FRONTMATTER-CRLF-AS-MISS [$accept_branch]" "$got" " READY "
+  expect "MUT-FRONTMATTER-CRLF-AS-MISS status [$accept_branch]" "${got%%|*}" 0
+  [[ "$got" == *no-file:* || "$got" == *NOT-READY* ]] \
+    && error "MUT-FRONTMATTER-CRLF-AS-MISS: an accepted P3 filed once in CRLF blocked on [$accept_branch]: [$got]"
+  got="$(accept_run "$accept_branch" "$tmp/accept-p3-crlf-mixed.md" "$tmp/accept-p3-row.md" \
+    "$accept_head_crlf_mixed")"
+  contains "MUT-FRONTMATTER-CRLF-AS-MISS LF and CRLF [$accept_branch]" "$got" " NOT-READY "
+  contains "MUT-FRONTMATTER-CRLF-AS-MISS LF and CRLF [$accept_branch]" "$got" "duplicate-file:ACCEPT-P3"
 done
 
 # A P2 recorded `accepted-risk` is still the owner's call: MANUAL, as before, in a lane where a P2

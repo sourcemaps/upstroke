@@ -330,6 +330,13 @@ run_body_validator() {
 # line in prose or a code block further down is not a frontmatter id. The id is a fixed string,
 # whole line.
 #
+# A LINE ENDS LF OR CRLF. One carriage return before the newline -- or at the very end of a last
+# line with no newline -- is the line ending and comes off before anything is compared, as
+# .github/scripts/changed-in-range.sh has it: a file authored on Windows opens `---\r`, which is not
+# `---`, and every such finding read as having no frontmatter at all, so as filing no id. A
+# carriage return anywhere else is part of the line, so `id: A\rB` is not the line `id: AB` and not
+# the line `id: A`.
+#
 # `2` IS NOT A KIND OF YES. One file per finding is the rule (findings/README.md), and a file
 # whose frontmatter names two ids is two findings in one file: counted as a file for each, two
 # accepted or deferred P3s read READY on one file between them, and the queue findings/ is held
@@ -363,6 +370,7 @@ frontmatter_has_id() {
   # matching one included, so the answer is `2` exactly when this id is one of several. The class
   # `[ \t]` is two named characters and not a range, so no locale decides what it holds.
   FRONTMATTER_ID="id: $1" awk '
+    { sub(/\r$/, "") }
     NR == 1     { if ($0 != "---") { print 0; answered = 1; exit 0 }   # no opening fence, no frontmatter
                   next }
     $0 == "---" { print (found ? (ids > 1 ? 2 : 1) : 0); answered = 1; exit 0 }   # the block ends here
@@ -378,6 +386,14 @@ frontmatter_has_id() {
 # the files it named, could not be read -- which is not a count of zero. This rule wants exactly
 # one file, so a read that quietly does not count can turn two files into one as easily as one
 # into none.
+#
+# WHAT ELSE A COUNTED FILE IS, all of it at once: a regular file -- mode `100644` or `100755` in
+# the tree, below -- under either ledger prefix, NAMED `*.md`, not one of the ledger's own two
+# documents, whose frontmatter carries the line `id: <ID>` WHOLE, a fixed string and nothing either
+# side of it but the line's LF or CRLF ending (`frontmatter_has_id` says how a line ends). This is
+# its own rule and not the branch policy's: a file .github/scripts/validate-pr-branch.sh accepts
+# and this does not count is no file for its id here, so a finding filed only in such a file
+# reads `no-file`.
 #
 # A FILE IS ONE FINDING, so a file naming two ids is not a file for either of them, and it is a
 # blocker for every id it names whichever ledger arm asks. Counted per id as it used to be, two
