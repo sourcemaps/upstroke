@@ -414,6 +414,56 @@ worker's stderr rides on, so the coordinator can read the reviewer's reset
 from it through `AttemptFailure::limit_message()`
 (`PR380-REVIEWER-STDERR-RESET-DROPPED`). Nothing stores it.
 
+### What this does to `ReviewResult`'s public surface
+
+`review` is a `pub mod` of the published library (`src/lib.rs`), so
+`ReviewResult` is public API. Callers get it in the `result` field of the
+`ReviewOutcome` that `run_review` returns. v0.1.0 shipped the variant as
+`Unavailable { status, detail }`, and this change adds `limit_message`.
+`standards/05_standards_types_modules_apis.md` ("API shape") asks for a
+SemVer assessment of a public API change in review. No release leg runs
+`cargo semver-checks` yet, so this section is that assessment, done the way
+`ladder`'s notes do it for `AttemptFailure`
+(`PR380-REVIEW-RESULT-PUBLIC-FIELD-BREAK`). The rule names below are those of
+the Cargo book's SemVer compatibility chapter.
+
+* **What breaks: building the variant, and a pattern that names every field
+  without `..`.** An enum variant's fields are as public as the enum, so
+  adding one is a major change (`enum-fields-new`). A downstream struct
+  literal `ReviewResult::Unavailable { status, detail }` no longer compiles,
+  because it does not name `limit_message`. A pattern
+  `ReviewResult::Unavailable { status, detail }` with no `..` fails the same
+  way, because it no longer covers the variant. Each compiles again once it
+  names the new field (`limit_message: None` in a literal).
+* **What does not break.** A pattern with `..`, such as
+  `ReviewResult::Unavailable { status, .. }`, compiles and binds what it did
+  before. `Judged(Verdict)` is untouched, so building it and matching it work
+  as before. No variant is added, so a `match` that covers both variants is
+  still exhaustive. `ReviewResult` derives only `Debug`, not serde, so no
+  wire format changes. Derived `Debug` output now includes `limit_message`,
+  and that output is not a stable contract.
+* **Why the field is on the variant.** The limit text belongs to the
+  unavailable outcome alone. A `Judged` result comes from a reviewer that
+  answered, so it has no limit to report. On the variant the text sits beside
+  the `status` it is evidence for, and it is `Some` only when that status is
+  `RateLimited`. Putting it on `ReviewOutcome` would let a judged result carry
+  limit text that means nothing, and it would not avoid the break: every field
+  of `ReviewOutcome` is public, so a new one there is
+  `struct-add-public-field-when-no-private`. The field cannot be made private
+  as `AttemptFailure`'s was, because an enum variant has no private fields.
+* **Later additions stay breaking.** The variant is not `#[non_exhaustive]`,
+  so adding another field to it later is also a major change. Adding the
+  attribute would be a major change of its own (`attr-adding-non-exhaustive`),
+  and it would stop code outside the crate from building the variant at all.
+  This change does neither.
+
+So the first release that ships this breaks any downstream code that builds
+`ReviewResult::Unavailable`, or matches it by every field without `..`.
+`Cargo.toml` still says 0.1.0. Under Cargo's convention for `0.y.z`, a
+breaking change bumps `y`, so this is a minor-version break past 0.1. That is
+the same bump `ladder`'s notes record for `AttemptFailure`. The version bump
+and its release note belong to the release, not to this change.
+
 ## `pub struct ReviewOutcome` › `pub invocations: u32,`
 
 How many agent invocations it took (2 means the re-ask was needed).
