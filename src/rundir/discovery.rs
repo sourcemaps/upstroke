@@ -753,6 +753,18 @@ pub struct FoundQuestion {
 /// directory that did not classify cannot be walked past here and dropped from
 /// the sentence there. A full question id still answers: it names one file, and
 /// no unread directory makes an exact name mean something else.
+///
+/// # Errors
+///
+/// A refusal when no question answers to `wanted`, or a prefix does not name
+/// exactly one. An [`UpstrokeError::Io`] naming the path when a committed run's
+/// `questions` directory, or an entry in it, cannot be read for any reason
+/// other than the directory being absent. Absent means the run raised no
+/// question. Any other failure means the run's questions were not read, and
+/// skipping them would report a question absent, or a prefix unambiguous, from
+/// a set this command did not see (`CODING_STANDARDS.md` §7: only an actual
+/// not-found becomes absence). Unlike a run that did not classify, this error
+/// is returned for a full question id too.
 pub fn find_question(repo_root: &Path, wanted: &str) -> Result<FoundQuestion, UpstrokeError> {
     find_question_observed(repo_root, wanted, &mut classify_run_dir)
 }
@@ -778,10 +790,24 @@ fn find_question_observed(
     let mut matches: Vec<FoundQuestion> = Vec::new();
     for run_id in names_classified(&census, listed_as_run) {
         let public = public_dir(repo_root, &run_id);
-        let Ok(entries) = fs::read_dir(public.join(QUESTIONS_DIR)) else {
-            continue;
+        let questions = public.join(QUESTIONS_DIR);
+        // Only a missing directory is a run with no questions; see `# Errors`
+        // on `find_question` for why every other failure is returned.
+        let entries = match fs::read_dir(&questions) {
+            Ok(entries) => entries,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(UpstrokeError::Io {
+                    path: questions,
+                    source,
+                });
+            }
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = entry.map_err(|source| UpstrokeError::Io {
+                path: questions.clone(),
+                source,
+            })?;
             let name = entry.file_name().to_string_lossy().into_owned();
             let Some(question_id) = name.strip_suffix(".json") else {
                 continue;
@@ -848,7 +874,7 @@ mod tests {
         listed_as_husk, listed_as_run, public_dir, resolve_in_census, resolve_observed,
         resolve_run_id, unclassified,
     };
-    use crate::rundir::tests::{commit_run, husk_run, question_in, scratch};
+    use crate::rundir::tests::{commit_run, husk_run, question_in, questions_not_a_dir, scratch};
 
     /// The three classifications, crossed with the three readers that filter on
     /// them.
@@ -1477,5 +1503,50 @@ mod tests {
             absent.contains("no question with that id") && absent.contains(UNREAD),
             "an absence is not a fact about a census that could not read every run: {absent}"
         );
+    }
+
+    /// A run whose `questions` directory cannot be listed is an error naming
+    /// that path, and not a run with no questions.
+    ///
+    /// The run beside it holds `q-ONLY`, so a search that skipped the unreadable
+    /// run would answer `q-ONL` with it as unambiguous and report `q-GONE`
+    /// absent. Both are claims about a set this command did not read. A full
+    /// id is refused the same way: the error is returned, not set aside. The
+    /// control is a run with no `questions` directory at all, which is still a
+    /// run that raised none.
+    #[test]
+    fn a_question_search_reports_an_unreadable_questions_directory() {
+        const READ: &str = "01Q00000000000000000000000";
+        const BARE: &str = "01Q00000000000000000000001";
+        const BROKEN: &str = "01Q00000000000000000000002";
+
+        let tree = scratch("questionsunreadable");
+        let repo = tree.path().join("repo");
+        question_in(&repo, READ, "q-ONLY");
+        commit_run(&repo, BARE);
+
+        // The control: a missing directory is absence, and the search answers.
+        assert_eq!(
+            find_question(&repo, "q-ONL")
+                .expect("a run without a questions directory raised none")
+                .question_id,
+            "q-ONLY"
+        );
+
+        let unreadable = questions_not_a_dir(&repo, BROKEN);
+        for wanted in ["q-ONL", "q-GONE", "q-ONLY"] {
+            let error = find_question_observed(&repo, wanted, &mut classify_run_dir)
+                .expect_err("a run whose questions could not be listed was not read");
+            assert!(
+                matches!(&error, UpstrokeError::Io { path, .. } if path == &unreadable),
+                "`{wanted}` reports the questions path it could not list: {error:?}"
+            );
+            let said = error.to_string();
+            assert!(
+                said.contains(&unreadable.display().to_string())
+                    && !said.contains("no question with that id"),
+                "`{wanted}` names the path, and does not report an absence: {said}"
+            );
+        }
     }
 }

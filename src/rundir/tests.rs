@@ -511,6 +511,17 @@ pub(crate) fn question_in(repo: &Path, run_id: &str, question_id: &str) {
     fs::write(dir.join(format!("{question_id}.json")), "{}").expect("question");
 }
 
+/// Make a committed run's `questions` path unreadable as a directory, and
+/// return it. A regular file stands where the directory belongs, so listing it
+/// fails with an error other than not-found on Linux, macOS and Windows alike,
+/// and no permission bit has to be set. Permission bits are not honoured for a
+/// root test process. `pub(crate)` for the reason [`scratch`] is.
+pub(crate) fn questions_not_a_dir(repo: &Path, run_id: &str) -> PathBuf {
+    let questions = commit_run(repo, run_id).join(QUESTIONS_DIR);
+    fs::write(&questions, "not a directory").expect("a file where the questions dir belongs");
+    questions
+}
+
 fn paths_in(root: &Path, run_id: &str) -> RunPaths {
     RunPaths::with_private_root(&root.join("repo"), run_id, &root.join("home"))
 }
