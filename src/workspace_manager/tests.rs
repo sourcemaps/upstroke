@@ -62,7 +62,7 @@ use crate::rundir::scratch_tree::acquire;
 // `use std::ffi::{OsStr, OsString};` to `OsString`. It carried a `#[cfg(unix)]`
 // while its only call site was inside a `#[cfg(unix)]` test: on Windows the
 // item was compiled out and an ungated import is an `unused_imports` error
-// under the guest's `-D warnings`. `hostile_replacement_environments` names it
+// under the Windows legs' `-D warnings`. `hostile_replacement_environments` names it
 // on both platforms, so the gate is gone -- and it was the gate that broke the
 // three Windows legs of CI while ubuntu and macos were green, which is the one
 // thing this box cannot measure for itself.
@@ -2398,7 +2398,7 @@ fn a_run_id_is_the_canonical_ulid_and_a_case_variant_is_refused() {
 
 /// The Windows half of the test above: Win32 resolves `..` lexically before
 /// the filesystem sees it, so `missing\..` canonicalizes to the scratch
-/// directory and the peel rejoins `x` onto it. Evaluated on `test (winguest)`.
+/// directory and the peel rejoins `x` onto it. Evaluated on the Windows legs.
 #[cfg(windows)]
 #[test]
 fn windows_resolves_a_dot_dot_below_an_absent_component_before_the_filesystem_sees_it() {
@@ -13726,7 +13726,7 @@ fn no_sampled_funnel_builds_its_argv_from_a_literal() {
              the pick to read the proposal commit",
         ),
     ];
-    // CRLF normalized first: the Windows guest checks this tree out with it,
+    // CRLF normalized first: the Windows legs check this tree out with it,
     // and `find("\n    }\n")` does not match `\r\n    }\r\n`. Measured — this
     // census passed on Linux and panicked "the function ends" on the guest.
     let source =

@@ -2804,8 +2804,8 @@ fn endless_log_classification_helper() {
 ///
 /// Unix-gated because both callers are: `/dev/zero` and `mkfifo` are the two
 /// ways to get hold of a non-terminating source without privilege and
-/// neither exists on Windows, so on the guest this would be dead code — and
-/// the guest's `-D warnings` says so, which is how this gate was found.
+/// neither exists on Windows, so on the Windows legs this would be dead
+/// code — and their `-D warnings` says so, which is how this gate was found.
 #[cfg(unix)]
 fn classification_must_answer(public: &Path, probe: bool, never_returned: &str) {
     let helper = format!(
@@ -2929,7 +2929,7 @@ fn a_run_directory_whose_log_blocks_on_open_is_still_classified() {
 /// hold of without privilege. The platform-free half of the same claim —
 /// that the probe spends a finite budget and stops — is
 /// `the_first_line_probe_spends_its_budget_and_stops`, which runs on the
-/// Windows guest too.
+/// Windows legs too.
 ///
 /// **The child probes the device as well as the directory**, and that is not
 /// decoration (`PR5-CONF-001`). Once `first_committed_line` refuses to open
