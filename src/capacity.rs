@@ -222,6 +222,27 @@ pub fn observe(events: &[Event]) -> Observations {
 }
 
 fn retire_signals(exhausted: &mut BTreeMap<String, Option<String>>, record: &AttemptRecord) {
+    retire_served_pools(exhausted, record);
+    if let Some(failure) = &record.failure {
+        if failure.kind == FailureKind::RateLimited {
+            let pool = match failure.origin {
+                crate::ladder::FailureOrigin::Worker => record.pool.as_ref(),
+                crate::ladder::FailureOrigin::Reviewer => record
+                    .reviews
+                    .last()
+                    .and_then(|review| review.pool.as_ref()),
+            };
+            if let Some(pool) = pool {
+                exhausted.entry(pool.clone()).or_insert(None);
+            }
+        }
+    }
+}
+
+pub(crate) fn retire_served_pools(
+    exhausted: &mut BTreeMap<String, Option<String>>,
+    record: &AttemptRecord,
+) {
     let worker_served = record.failure.as_ref().is_none_or(|failure| {
         failure.kind != FailureKind::Interrupted
             && !(failure.kind == FailureKind::RateLimited
@@ -236,20 +257,6 @@ fn retire_signals(exhausted: &mut BTreeMap<String, Option<String>>, record: &Att
         if review.outcome != ReviewPassOutcome::Unavailable {
             if let Some(pool) = &review.pool {
                 exhausted.remove(pool);
-            }
-        }
-    }
-    if let Some(failure) = &record.failure {
-        if failure.kind == FailureKind::RateLimited {
-            let pool = match failure.origin {
-                crate::ladder::FailureOrigin::Worker => record.pool.as_ref(),
-                crate::ladder::FailureOrigin::Reviewer => record
-                    .reviews
-                    .last()
-                    .and_then(|review| review.pool.as_ref()),
-            };
-            if let Some(pool) = pool {
-                exhausted.entry(pool.clone()).or_insert(None);
             }
         }
     }

@@ -403,9 +403,11 @@ Only the *transition* is worth an event. One outage produces a failed
 attempt per deferral (up to `max_defers`), and emitting on each wrote N
 identical records of a single fact — inflating any later count of
 outages by the deferral factor and repeating the same line N times in
-`status --follow`. Retired when an attempt proves the pool is serving
-again, mirroring [`capacity::observe`]'s rule so the log the engine
-writes and the fold a reader performs agree about when a pool came back.
+`status --follow`. Retired, with its reset, when an attempt proves the
+pool is serving again, successes included, by
+`capacity::retire_served_pools`, the function [`capacity::observe`]
+folds with. One function means the log the engine writes and the fold
+a reader performs agree about when a pool came back.
 
 The reset is kept because a pool can be refused for a second reason
 before the first clears. A Claude subscription has several caps: at
@@ -690,6 +692,24 @@ or publishes it if the complete settlement is readable.
 Deleting it here would turn an ambiguous sync error into a
 schema-3 settlement whose exact object is no longer durable.
 
+## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `capacity::retire_served_pools(&mut self.exhausted_pools, &record);`
+
+An attempt that reached a model and got an answer, whatever the
+verdict on its code, proves every pool it drew on is serving
+again, so they leave `exhausted_pools` with their remembered
+resets. This is the function `capacity::observe` folds with,
+applied to the record just made durable. It sits before the
+success/failure split because a success retires a pool too.
+
+It used to be a copy of the rule on the failure branch alone, and
+a success left its pool in the map. A later task refused on that
+pool, naming the same reset, then looked already recorded and
+wrote nothing. Replay, which had retired the pool on the success,
+re-marked it from the refusal with no reset, so the estimate said
+"unknown" where the log had named the time.
+`a_rate_limit_after_a_success_retired_its_pool_writes_pool_exhausted_again`
+in `engine::tests` holds it.
+
 ## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `if let Err(cleanup) = self.workspace.discard_uncommitted() {`
 
 The durable settlement is authoritative and already carries
@@ -703,7 +723,7 @@ Scrub gate side-effects (build artifacts, lockfile churn) so
 they cannot leak into the next task's captured diff; the
 commit recorded exactly the verified staged set.
 
-## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `if failure.kind != FailureKind::Interrupted`
+## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `if failure.kind == FailureKind::RateLimited {`
 
 §13 source 1: a rate-limit signal is ground truth about a pool,
 and the only thing in v0.1 that can call one empty rather than
@@ -711,15 +731,6 @@ unmeasured. Recorded separately from the deferral that follows
 because they are facts with different lifetimes — the deferral is
 about this task's next move, this is about a subscription, and a
 later run's estimator reads it back out of the log.
-
-## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `self.exhausted_pools.remove(&profile.pool);`
-
-This attempt reached a model and got an answer, whatever the
-verdict on its code, so any pool it drew on is serving again.
-Same rule as `capacity::observe`'s, applied to the engine's
-own view so the two cannot disagree about when a pool
-recovered — without it, the *next* outage on the same pool
-would go unrecorded because the map still held it.
 
 ## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `if !matches!(next, Next::RetrySameRung { resume: true }) {`
 
@@ -859,7 +870,10 @@ was before.
 ## `impl Run<'_>` › `.is_some_and(|recorded| reset_at.is_none() || *recorded == reset_at);`
 
 Only the transition (see `exhausted_pools`), and a changed reset counts as
-one. A pool not yet exhausted always gets its `pool_exhausted`. A pool
+one. A pool not yet exhausted always gets its `pool_exhausted`, and
+that includes one an attempt has since retired: a success forgets the
+pool's reset along with the pool, so the next refusal writes one again
+even if it names the same reset. A pool
 already exhausted gets one more only when this refusal names a reset and
 it differs from the one recorded: the five-hour limit at 05:29:30, then
 the weekly limit on the deferral after 05:30, writes two, the second

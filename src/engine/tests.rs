@@ -8285,6 +8285,109 @@ fn a_different_later_reset_writes_one_more_pool_exhausted() {
 }
 
 #[test]
+fn a_rate_limit_after_a_success_retired_its_pool_writes_pool_exhausted_again() {
+    let (_tree, repo) = temp_engine_repo("poolexhaustedafterretire");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
+             ## Two\n<!-- upstroke: id=t2 kind=implement depends=t1 -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let pools = pools_file(&repo, CLAUDE_POOL);
+    opts.pools_path = Some(pools.clone());
+    let mut source = source(
+        vec![
+            Effect::RateLimited,
+            Effect::EditFile,
+            Effect::RateLimited,
+            Effect::EditFile,
+        ],
+        vec![ReviewBehavior::Pass],
+    );
+    source.adapter.worker_rate_limit = "You've hit your weekly limit · resets Nov 14, 5pm (UTC)";
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let events = events_of(&repo, &report.run_id);
+    let signals: Vec<(usize, &events::PoolExhausted)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(at, e)| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some((at, data)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        signals.len(),
+        2,
+        "the success between the outages retired the first, so the second is news: {signals:?}"
+    );
+    let first = signals[0]
+        .1
+        .reset_at
+        .clone()
+        .expect("the weekly text named its reset");
+    assert!(first.ends_with("-11-14T17:00:00Z"), "{first}");
+    assert_eq!(
+        signals[1].1.reset_at.as_deref(),
+        Some(first.as_str()),
+        "the same reset as before, which the remembered one used to swallow: {signals:?}"
+    );
+    assert_eq!(signals[0].1.pool, "claude-max");
+    assert_eq!(signals[1].1.pool, "claude-max");
+
+    let finished: Vec<(usize, &str, bool)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(at, e)| match &e.body {
+            EventBody::AttemptFinished { task, data, .. } => Some((
+                at,
+                task.as_str(),
+                data.failure
+                    .as_ref()
+                    .is_some_and(|f| f.kind == FailureKind::RateLimited),
+            )),
+            _ => None,
+        })
+        .collect();
+    let shape: Vec<(&str, bool)> = finished
+        .iter()
+        .map(|(_, task, limited)| (*task, *limited))
+        .collect();
+    assert_eq!(
+        shape,
+        [("t1", true), ("t1", false), ("t2", true), ("t2", false)],
+        "t1 is refused then served, and t2 is refused on the same pool after"
+    );
+    let retired_at = finished[1].0;
+    assert!(
+        signals[0].0 < retired_at && retired_at < finished[2].0 && finished[2].0 < signals[1].0,
+        "the second signal follows t2's refusal, after t1's success retired the first"
+    );
+
+    let mut warnings = Vec::new();
+    let cfg = config::load(None, &repo, Some(&pools), &mut warnings).expect("pools");
+    let after_success = capacity::estimate(&cfg.pools, &capacity::observe(&events[..=retired_at]));
+    assert_ne!(
+        after_success[0].remaining,
+        capacity::Remaining::Exhausted,
+        "{}",
+        after_success[0].describe()
+    );
+    let through_second =
+        capacity::estimate(&cfg.pools, &capacity::observe(&events[..=signals[1].0]));
+    assert_eq!(through_second[0].remaining, capacity::Remaining::Exhausted);
+    assert_eq!(
+        through_second[0].reset_at.as_deref(),
+        Some(first.as_str()),
+        "the fold reports the reset again, not \"unknown\": {}",
+        through_second[0].describe()
+    );
+}
+
+#[test]
 fn another_agents_rate_limit_naming_a_reset_records_none_on_pool_exhausted() {
     const COPILOT_RESET: &str = "premium request allowance exhausted; resets Dec 1, 12am (UTC)";
     assert!(

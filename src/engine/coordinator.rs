@@ -800,6 +800,19 @@ impl Run<'_> {
                 None
             };
 
+            let record = super::classify::attempt_record(
+                attempt,
+                super::classify::AttemptFacts {
+                    tier: rung.tier,
+                    model: &profile.model,
+                    pool: pool_option(&profile.pool),
+                    resumed: resume.is_some(),
+                    outcome: &result.outcome,
+                    reviews: &result.reviews,
+                    failure: result.failure.as_ref(),
+                    feedback: super::classify::FeedbackCarrier::LadderEvent,
+                },
+            );
             let settlement = self.emit(EventBody::AttemptFinished {
                 task: task_id.clone(),
                 attempt,
@@ -808,19 +821,7 @@ impl Run<'_> {
                 parking,
                 transition,
                 prepared_commit: prepared_commit.clone().map(Box::new),
-                data: Box::new(super::classify::attempt_record(
-                    attempt,
-                    super::classify::AttemptFacts {
-                        tier: rung.tier,
-                        model: &profile.model,
-                        pool: pool_option(&profile.pool),
-                        resumed: resume.is_some(),
-                        outcome: &result.outcome,
-                        reviews: &result.reviews,
-                        failure: result.failure.as_ref(),
-                        feedback: super::classify::FeedbackCarrier::LadderEvent,
-                    },
-                )),
+                data: Box::new(record.clone()),
             });
             if let Err(error) = settlement {
                 if prepared_commit.is_some() {
@@ -841,6 +842,7 @@ impl Run<'_> {
                 }
                 return Err(error);
             }
+            capacity::retire_served_pools(&mut self.exhausted_pools, &record);
             if let Some(question) = parking_question.as_ref() {
                 if let Err(error) = self.materialize_question(question) {
                     if let Err(cleanup) = self.workspace.discard_uncommitted() {
@@ -874,19 +876,6 @@ impl Run<'_> {
                 return Ok(false);
             };
 
-            if failure.kind != FailureKind::Interrupted
-                && !(failure.kind == FailureKind::RateLimited
-                    && failure.origin == FailureOrigin::Worker)
-            {
-                self.exhausted_pools.remove(&profile.pool);
-            }
-            for review in &result.reviews {
-                if review.outcome != events::ReviewPassOutcome::Unavailable {
-                    if let Some(pool) = &review.pool {
-                        self.exhausted_pools.remove(pool);
-                    }
-                }
-            }
             if failure.kind == FailureKind::RateLimited {
                 self.record_pool_exhausted(&task_id, &profile, &result.reviews, &failure)?;
             }

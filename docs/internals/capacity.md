@@ -249,18 +249,8 @@ read `exhausted [signal]` at midnight, on the same line that reported the
 successful attempts it had served since.
 
 Events arrive in order, so a later signal re-marks a pool this retired —
-which is right: the pool went down again.
-
-What counts as proof is deliberately narrow. A *completed* attempt reached
-the model and got an answer, whatever the verdict on its code — a gate
-failure says nothing about the subscription. A rate-limited one proves the
-opposite. An interrupted one proves nothing at all: the engine died without
-ever learning whether a reply was coming.
-
-## `fn retire_signals` › `for review in &record.reviews {`
-
-A review pass that reached a verdict proves its own pool served, which on
-a cross-vendor second opinion is a different subscription entirely.
+which is right: the pool went down again. The retiring half is
+`retire_served_pools`, which the live engine calls too.
 
 ## `fn retire_signals` › `if let Some(failure) = &record.failure {`
 
@@ -280,7 +270,34 @@ back-off — erase that reset, so `validate` said the signal carried none
 and a resume's `capacity_snapshot` wrote `reset_at: null` beside an open
 signal that named one. A rate limit with no earlier signal still marks
 the pool, with no reset; a success or an available review still retires
-it above.
+it first, in `retire_served_pools`.
+
+## `pub(crate) fn retire_served_pools(`
+
+Remove every pool this attempt proves is serving again, reset and all.
+
+What counts as proof is deliberately narrow. A *completed* attempt reached
+the model and got an answer, whatever the verdict on its code — a gate
+failure says nothing about the subscription. A rate-limited one proves the
+opposite. An interrupted one proves nothing at all: the engine died without
+ever learning whether a reply was coming.
+
+The engine's coordinator calls this on the record it has just settled, so
+its own `exhausted_pools` and this fold retire a pool on the same attempt.
+It used to carry a copy of the rule instead, and the copy sat on the failure
+branch only. A success forgot nothing, so the coordinator went on
+remembering the pool and its reset while this fold had retired it. A later
+task refused on the same pool, naming the same reset, then looked
+already recorded and wrote no `pool_exhausted`. The fold, which had
+retired the pool, re-marked it from that refusal with no reset, and the
+estimate said "unknown" where the log had once named the time.
+`a_rate_limit_after_a_success_retired_its_pool_writes_pool_exhausted_again`
+in `engine::tests` holds the two together.
+
+## `fn retire_served_pools` › `for review in &record.reviews {`
+
+A review pass that reached a verdict proves its own pool served, which on
+a cross-vendor second opinion is a different subscription entirely.
 
 ## `pub fn drain_of<'a>(`
 
