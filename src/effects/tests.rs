@@ -5387,9 +5387,9 @@ use ci_model::{
 use workflow::{
     WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_test_job_complaints,
     ci_test_windows_hosted_job_complaints, ci_windows_build_witness_complaints, ci_workflow_text,
-    complaint_codes, declared_msrv_toolchain, declared_rust_version, field, field_names,
-    libtest_runs, mutate_workflow, parse_workflow, rustflags_complaints, scalar, shard_selections,
-    steps_of, three_component, workflow_complaints,
+    complaint_codes, cross_target, declared_msrv_toolchain, declared_rust_version, field,
+    field_names, libtest_runs, mutate_workflow, parse_workflow, rustflags_complaints, scalar,
+    shard_selections, steps_of, three_component, workflow_complaints,
 };
 
 #[test]
@@ -6826,6 +6826,17 @@ fn every_platform_this_crate_configures_for_has_a_clippy_gate_the_aggregate_requ
             "no body in this tree is compiled by `{}` alone, so nothing here establishes \
              that its Clippy leg is needed",
             target.runner
+        );
+        let compiles_the_tuple = match cross_target(target.clippy_gate) {
+            Some(triple) => triple == target.triple,
+            None => target.check_runner == target.runner,
+        };
+        assert!(
+            compiles_the_tuple,
+            "the `{}` gate, `{}` on `{}`, does not compile `{}`. The census credits it with \
+             every region that tuple compiles, so it has to compile them: natively on `{}`, or \
+             by naming the tuple with `--target`.",
+            target.triple, target.clippy_gate, target.check_runner, target.triple, target.runner
         );
     }
 

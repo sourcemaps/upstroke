@@ -3057,7 +3057,12 @@ The MSRV leg checks the floor the manifest publishes, on every platform.
 
 Four claims. Three were held by nothing at all before this test: that the leg
 is enabled and unabsolved, that its command is the documented one *including*
-`--locked`, and that its matrix is every supported runner. The fourth, the
+`--locked`, and that its matrix is every supported target. The matrix is one
+`include:` entry per target of [`CI_TARGETS`], each on that target's
+`check_runner` and compiling its tuple with `--target ${{ matrix.target }}`:
+Linux and Windows on their own runners, macOS from `ubuntu-latest` by triple,
+because GitHub runs at most five macOS jobs at once for the account and each
+run asked for seven (run 45175187088). The fourth, the
 toolchain, was held loosely -- `.github/scripts/test-docs-consistency.sh`'s C2
 accepts `rust-version` "or a patch release of it" -- and is held exactly here.
 It is derived from the manifest and quoted from it on failure, because a
@@ -3208,8 +3213,15 @@ aggregate makes that gate required.
 The domain is derived from the tree rather than listed here: a written-down
 platform list is one nothing forces an author to extend, which is what the
 previous repair of this test shipped. The two halves join at the target
-tuple -- [`cfg_regions`] decides which runners compile each body, and the
-workflow contract requires a gate job whose `runs-on:` is that runner.
+tuple -- [`cfg_regions`] decides which runners compile each body, naming a
+target by the runner its test legs use, and the workflow contract requires,
+for each target, a gate job whose `runs-on:` is the target's `check_runner`
+and which runs its `clippy_gate`. Linux and Windows are linted natively.
+`lint (macos)` runs on `ubuntu-latest` with `--target aarch64-apple-darwin`:
+`cfg` follows the target, not the host, so it evaluates every
+`#[cfg(target_os = "macos")]` region as a Mac would, and it left
+`macos-latest` because GitHub runs at most five macOS jobs at once for the
+account and each run asked for seven (run 45175187088).
 
 **Why this is one test and not three.** `PR5D-MSVC-CLIPPY-NEVER-RUN` and
 `PR5-MACOS-CLIPPY-NEVER-RUN` are the same defect on two platforms, found
@@ -3233,6 +3245,12 @@ read them all as unconditional.
 Each leg is load-bearing, with a witness. A runner no body needs is a job
 this contract would keep demanding for no reason; a body only one runner
 compiles is why that runner's leg cannot be dropped.
+
+And each gate compiles the tuple the census credits it with: a gate that
+names no `--target` runs on the target's own runner, and one that does names
+the target's `triple`. Without it a `clippy_gate` naming another tuple would
+satisfy the workflow contract while the census still counted the macOS
+regions as linted.
 
 ## `pub(crate) struct CrateUnderTest {`
 
