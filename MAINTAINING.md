@@ -164,12 +164,11 @@ source, documentation, workflows, release machinery and this file.
    under `findings/`, or under `reviews/findings/` where the reviewed tree carries that directory,
    or a conflict-free merge of `master` that leaves `git diff master...HEAD` byte-identical with CI
    green on the merged head and no gate edited by the pull request, keeps the review as well.
-   Movement is checked per commit against complete, hash-verified Git objects; a later edit or
-   reversal cannot disappear into an endpoint diff. Archive lookups must also succeed completely.
    A push confined to ledger paths that modifies, deletes or renames existing entries, including
    `reviews/FINDINGS.md`, is `ledger-rewrite`, NEEDS-ATTEST at best. Adding that closed archive,
    adding under a legacy directory absent at review, or a ledger path outside the addition
-   exemption has the same classification. None satisfies a `fixed` row or clears a witness.
+   exemption has the same classification. A ledger rewrite satisfies no `fixed` row and lifts no
+   witness.
    Record both SHAs, and for the merge-in both base SHAs and the diff hash
    before and after. Anything wider is a new change and is reviewed again. A panel-reviewed
    checkpoint candidate is the exception: any head movement re-runs every seat.

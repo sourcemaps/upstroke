@@ -114,6 +114,10 @@ looks likely to return, say so in the body's row rather than relying on the file
   did move is its open rows: every one is a file here now, under the same `id`, so this directory
   is the whole queue and that file is the history behind it. It is closed to new sections; new
   findings come here.
-- **The review-preservation rule still applies.** `MAINTAINING.md` lets a push confined to the
-  ledger keep its frontier review; that exemption names this directory, so recording a
-  finding, or deleting a resolved one, does not cost a pass.
+- **Review retention is additions-only.** `MAINTAINING.md` step 5 lets a push confined to
+  additions under `findings/`, or under `reviews/findings/` where the reviewed tree carries that
+  directory, keep its frontier review. A ledger-only modification, deletion or rename of an
+  existing entry, any change to `reviews/FINDINGS.md`, or another ledger path outside that
+  exemption is `ledger-rewrite`, NEEDS-ATTEST at best; it satisfies no `fixed` row and lifts no
+  witness. A correction to the pull request's own text uses step 5's interim clause and its
+  personal read. A panel-reviewed candidate still re-runs every seat on any head movement.
