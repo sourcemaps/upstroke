@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod answer;
 pub mod capacity;
+pub mod capacity_planner;
 pub mod catalog;
 pub mod config;
 pub mod connect;

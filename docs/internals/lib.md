@@ -29,6 +29,12 @@ CLIs and writes the pools file, `capacity` and the dry-run preview estimate
 what is left and what each strategy *would* do, and budgets stop a run at a
 ceiling — but nothing routes on any of it. Capacity-driven binding is v0.2.
 
+`capacity_planner` is the first, offline stage of §13's banked-grant
+planning. From readings, grant inventory, runnable demand and priorities
+that its caller supplies, it recommends redeeming, deferring or letting a
+reset grant expire. It reads, redeems and grants nothing, and nothing calls
+it yet.
+
 ## `#![forbid(non_local_definitions)]`
 
 The one lint level this file states, added on 2026-09-26 (PR #325). A macro
