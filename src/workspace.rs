@@ -6110,6 +6110,110 @@ mod tests {
 
     #[test]
     fn write_copy_syncs_the_written_file_then_renames_it_then_syncs_its_parent() {
+        const OPEN: &str = "let written = OpenOptions::new().write(true).open(partial)
+            .map_err(|source| UpstrokeError::Io { path: partial.to_path_buf(), source })?;";
+        const SYNC: &str = "written.sync_all()
+            .map_err(|source| UpstrokeError::Io { path: partial.to_path_buf(), source })?;";
+        const RENAME: &str = "fs::rename(partial, copy)
+            .map_err(|source| UpstrokeError::Io { path: copy.to_path_buf(), source })?;";
+        const SYNC_PARENT: &str = "sync_parent(copy)";
+        let [open_call, sync_call, rename_call, parent_call] = COPY_BARRIER;
+        let braced = |statements: &[&str]| format!("{{\n{}\n}}", statements.join("\n"));
+        for (fixture, body, verdict) in [
+            (
+                "the intact barrier",
+                braced(&[OPEN, SYNC, RENAME, SYNC_PARENT]),
+                Ok(()),
+            ),
+            (
+                "the file's sync missing",
+                braced(&[OPEN, RENAME, SYNC_PARENT]),
+                Err(CopyBarrierBreach::NotOnce {
+                    call: sync_call,
+                    times: 0,
+                }),
+            ),
+            (
+                "the rename before the file's sync",
+                braced(&[OPEN, RENAME, SYNC, SYNC_PARENT]),
+                Err(CopyBarrierBreach::OutOfOrder {
+                    call: rename_call,
+                    after: sync_call,
+                }),
+            ),
+            (
+                "the parent's sync missing",
+                braced(&[OPEN, SYNC, RENAME, "Ok(())"]),
+                Err(CopyBarrierBreach::NotOnce {
+                    call: parent_call,
+                    times: 0,
+                }),
+            ),
+            (
+                "the file's sync bound to `_`",
+                braced(&[OPEN, "let _ = written.sync_all();", RENAME, SYNC_PARENT]),
+                Err(CopyBarrierBreach::ErrorNotPropagated { call: sync_call }),
+            ),
+            (
+                "the file's sync with its result unused",
+                braced(&[OPEN, "written.sync_all();", RENAME, SYNC_PARENT]),
+                Err(CopyBarrierBreach::ErrorNotPropagated { call: sync_call }),
+            ),
+            (
+                "the file's sync with its error mapped and then discarded",
+                braced(&[
+                    OPEN,
+                    "written.sync_all().map_err(drop).ok();",
+                    RENAME,
+                    SYNC_PARENT,
+                ]),
+                Err(CopyBarrierBreach::ErrorNotPropagated { call: sync_call }),
+            ),
+            (
+                "the file's sync under a condition",
+                braced(&[OPEN, "if !cfg!(windows) {", SYNC, "}", RENAME, SYNC_PARENT]),
+                Err(CopyBarrierBreach::Nested { call: sync_call }),
+            ),
+            (
+                "the parent's sync bound to `_`",
+                braced(&[OPEN, SYNC, RENAME, "let _ = sync_parent(copy);", "Ok(())"]),
+                Err(CopyBarrierBreach::ErrorNotPropagated { call: parent_call }),
+            ),
+            (
+                "the parent's sync with its result unused",
+                braced(&[OPEN, SYNC, RENAME, "sync_parent(copy);", "Ok(())"]),
+                Err(CopyBarrierBreach::ErrorNotPropagated { call: parent_call }),
+            ),
+            (
+                "the rename bound to `_`",
+                braced(&[
+                    OPEN,
+                    SYNC,
+                    "let _ = fs::rename(partial, copy);",
+                    SYNC_PARENT,
+                ]),
+                Err(CopyBarrierBreach::ErrorNotPropagated { call: rename_call }),
+            ),
+            (
+                "the open unchecked, and the file synced only if it opened",
+                braced(&[
+                    "let written = OpenOptions::new().write(true).open(partial);",
+                    "if let Ok(written) = written {",
+                    SYNC,
+                    "}",
+                    RENAME,
+                    SYNC_PARENT,
+                ]),
+                Err(CopyBarrierBreach::ErrorNotPropagated { call: open_call }),
+            ),
+        ] {
+            assert_eq!(
+                check_copy_barrier(&body),
+                verdict,
+                "the check over {fixture}, a positive control of this pin:\n{body}"
+            );
+        }
+
         let source = include_str!("workspace.rs");
         let mut code = crate::effects::blank_comments_and_strings(source);
         assert_eq!(
@@ -6150,35 +6254,98 @@ mod tests {
             }
         }
         let close = close.expect("its body closes");
-        let body: String = code
-            .get(open..=close)
-            .expect("its body's span")
+        let body = code.get(open..=close).expect("its body's span");
+        assert_eq!(
+            check_copy_barrier(body),
+            Ok(()),
+            "`write_copy`'s durability barrier, in its body:\n{body}"
+        );
+    }
+
+    const COPY_BARRIER: [&str; 4] = [
+        "letwritten=OpenOptions::new().write(true).open(partial)",
+        "written.sync_all()",
+        "fs::rename(partial,copy)",
+        "sync_parent(copy)",
+    ];
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum CopyBarrierBreach {
+        NotOnce {
+            call: &'static str,
+            times: usize,
+        },
+        OutOfOrder {
+            call: &'static str,
+            after: &'static str,
+        },
+        Nested {
+            call: &'static str,
+        },
+        ErrorNotPropagated {
+            call: &'static str,
+        },
+    }
+
+    fn check_copy_barrier(body: &str) -> Result<(), CopyBarrierBreach> {
+        let body: String = body
             .chars()
             .filter(|character| !character.is_whitespace())
             .collect();
-
+        let tried = |rest: &str| {
+            let Some(inside) = rest.strip_prefix(".map_err(") else {
+                return false;
+            };
+            let mut depth = 1_usize;
+            for (at, character) in inside.char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return inside
+                                .get(at + 1..)
+                                .is_some_and(|after| after.starts_with("?;"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            false
+        };
         let mut reached = 0_usize;
-        for (step, call) in [
-            (
-                "open the written file with write access",
-                "letwritten=OpenOptions::new().write(true).open(partial)",
-            ),
-            ("sync that file", "written.sync_all()"),
-            ("rename it to the copy's name", "fs::rename(partial,copy)"),
-            ("sync the copy's directory", "sync_parent(copy)"),
-        ] {
+        let mut before = "";
+        for (step, call) in COPY_BARRIER.into_iter().enumerate() {
             let found: Vec<usize> = body.match_indices(call).map(|(at, _)| at).collect();
             let [at] = found.as_slice() else {
-                panic!(
-                    "`write_copy` must {step} (`{call}`) once, and it is at {found:?} in: {body}"
-                );
+                return Err(CopyBarrierBreach::NotOnce {
+                    call,
+                    times: found.len(),
+                });
             };
-            assert!(
-                *at >= reached,
-                "`write_copy` must {step} (`{call}`) only after the step before it: {body}"
-            );
+            if *at < reached {
+                return Err(CopyBarrierBreach::OutOfOrder {
+                    call,
+                    after: before,
+                });
+            }
+            let ahead = body.get(..*at).expect("on a character boundary");
+            let rest = body.get(at + call.len()..).expect("and ends on one");
+            if ahead.matches('{').count() != ahead.matches('}').count() + 1 {
+                return Err(CopyBarrierBreach::Nested { call });
+            }
+            let propagated = if step + 1 == COPY_BARRIER.len() {
+                rest == "}"
+            } else {
+                tried(rest)
+            };
+            if !ahead.ends_with([';', '{', '}']) || !propagated {
+                return Err(CopyBarrierBreach::ErrorNotPropagated { call });
+            }
             reached = at + call.len();
+            before = call;
         }
+        Ok(())
     }
 
     #[cfg(unix)]

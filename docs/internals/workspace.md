@@ -763,7 +763,8 @@ durability idiom: `File::sync_all` with write access (`fsync`, `F_FULLFSYNC` on 
 Whether the calls are those system calls, and what a successful fsync means on a disk, is
 reasoned; the order was traced on Linux (record §5.17).
 `write_copy_syncs_the_written_file_then_renames_it_then_syncs_its_parent` holds that order in the
-source; see its section.
+source, and that each step hands its error back, so a failed one stops the steps after it; see its
+section.
 
 ## `impl Workspace` › `fn relative_to_root(`
 
@@ -1580,23 +1581,70 @@ so no behaviour test can guard the sentence; the reviewer's sequence, executed a
 
 The guard `FUD-FULL-COPYBARRIER` asked for (F4 of the owner's full review of #331): nothing held
 the order of `write_copy`'s durability barrier, and with the file's `sync_all` removed and
-`sync_parent` made a no-op every engine and workspace test stayed green. A source-order pin,
-reading this file as the census does: comments and string literals blanked by
-`crate::effects::blank_comments_and_strings`, the test module taken out by `test_module_span`,
-`fn write_copy(` found exactly once in what is left, its body taken through the brace that
-balances it, and its whitespace removed. In that body the written file is opened with write
-access and bound to `written` (`OpenOptions::new().write(true).open(partial)`), `written` is
-synced (`sync_all`), the `.partial` is renamed to the copy's name (`fs::rename(partial, copy)`),
-and the copy's directory is synced (`sync_parent(copy)`): each exactly once, and each only after
-the one before it ends. Red with the file's sync deleted from `write_copy`, which the pin reports
-as `written.sync_all()` found nowhere; green with it restored.
+`sync_parent` made a no-op every engine and workspace test stayed green. A source pin whose check
+is `check_copy_barrier` (its section below), run first over fixtures and then over the live body.
 
-What it cannot see, because it reads the order in the source and not the calls made:
-`sync_parent` becoming a no-op on Unix (on Windows it is one by design, and the directory entry's
-durability there is reasoned); a step whose error is dropped rather than returned; and the whole
-`copy_pin` call moving after the revert in `discard_held`, where a crash after the revert could
-find the only copy of what the discard removed not yet durable. A step moved into a helper fails
-it, and whoever moves one changes the pin with it.
+Its positive controls come first: bodies built from the four steps as `write_copy` writes them,
+each with one step broken, and the four intact. The check must accept the intact body and reject
+each other one for the breach it injects, a `CopyBarrierBreach` compared whole: the file's sync
+missing, and the parent's (`NotOnce`); the rename before the file's sync (`OutOfOrder`); the
+file's sync under a condition (`Nested`); and, as `ErrorNotPropagated`, the file's sync and the
+parent's each bound to `_` and each with its result unused, the file's sync with its error mapped
+and then discarded (`.map_err(drop).ok();`), the rename bound to `_`, and the open left unchecked
+with the file synced only if it opened. A control that fails names its fixture.
+
+Then the live body, read as the census reads this file: comments and string literals blanked by
+`crate::effects::blank_comments_and_strings`, which must keep the file's length, the test module
+taken out by `test_module_span`, `fn write_copy(` found exactly once in what is left, and its body
+taken through the brace that balances it. The check must accept it: each of the four steps once,
+in order, a statement of the body's own, its error handed back the way `write_copy` hands it back
+today.
+
+Red with `let _ = written.sync_all();` in `write_copy`, as `ErrorNotPropagated` for
+`written.sync_all()`: the review found that the order-only pin this replaces passed it, the text
+it required still there once and in order. Red with the parent's sync deleted (`sync_parent(copy)`
+replaced by `Ok(())`), as `NotOnce` for `sync_parent(copy)`, found 0 times. Green with each
+restored.
+
+What it cannot see. It reads source: it does not run the calls, replay a crash, or know what a
+successful fsync means on a disk. A parent sync that does nothing inside its own function is
+invisible to it: `sync_parent` made a no-op on Unix passes, and on Windows it is one by design,
+where the directory entry's durability is reasoned. Nor does it see the whole `copy_pin` call
+moving after the revert in `discard_held`, where a crash after the revert could find the only copy
+of what the discard removed not yet durable. A step moved into a helper, or handing its error back
+in another shape than today's (a bare `?;` with no `map_err`, or `sync_parent(copy)?;` before an
+`Ok(())`), fails it, and whoever moves one changes the pin with it.
+
+## `const COPY_BARRIER: [&str; 4] = [`
+
+The four steps of `write_copy`'s barrier, in order, as `check_copy_barrier` finds them in a body
+with its whitespace removed: the written file opened with write access and bound to `written`,
+`written` synced, the `.partial` renamed to the copy's name, and the copy's directory synced. The
+pin's controls name the steps from it, so their expected breaches move with it.
+
+## `enum CopyBarrierBreach {`
+
+Why `check_copy_barrier` finds a body's barrier broken, at the first step that breaks it, named by
+its call as `COPY_BARRIER` spells it: `NotOnce`, the call is not in the body exactly once, and
+`times` is how often it is; `OutOfOrder`, it begins before the end of the call ahead of it,
+`after`; `Nested`, it is inside a block of the body, so it runs only when that block does; and
+`ErrorNotPropagated`, it is not a statement of the body that hands its error back the way
+`write_copy` does today, so its failure need not stop what follows it.
+
+## `fn check_copy_barrier(body: &str) -> Result<(), CopyBarrierBreach> {`
+
+The pin's check, apart from the file it reads, so the same code runs over the live body and over
+the fixtures. `body` is a block, its braces included, whose comments and strings are already
+blanked, as the live body's are; the fixtures carry none. With its whitespace removed, each step of
+`COPY_BARRIER` in turn must be in it exactly once; begin no earlier than the end of the call before
+it; have only the body's own brace open ahead of it, the `{` ahead of it outnumbering the `}` by
+one; and begin a statement, the code ahead of it ending in `;`, `{` or `}`, so that no `let _ =`
+or `drop(` takes its result. Then it must hand its error back in the shape `write_copy` uses
+today. The first three end their statement with `.map_err(…)?;`: the call, `.map_err(`, the
+parentheses balanced to its close, then `?;`. The last, the parent's sync, is the body's tail:
+nothing follows it but the closing brace, so its `Result` is `write_copy`'s own. That rule bounds
+the domain too: a body taken past its closing brace fails there, and one cut short fails on the
+step it lacks. `Ok(())` when every step holds; otherwise the first breach.
 
 ## `struct InheritedSelection {`
 
