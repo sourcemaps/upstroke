@@ -2720,19 +2720,29 @@ Windows shards 4 and 5.
 The aggregate's script, executed. Linux only, for the reason
 `pick_windows_home_answers` is: the script runs on `ubuntu-latest`.
 
+The test tries five results for each gate: `success`, `failure`, `cancelled`,
+`skipped` and `abandoned`. The fifth is the result GitHub gave a job it
+cancelled with no runner, before any step: in runs 44114671287 (`msrv`, a
+matrix), 44149091955 (`test`, a matrix), 44145399741 and 44154430793 such a
+job reached `upstroke-ci` as `abandoned`, and `upstroke-ci` failed. The
+aggregate accepts `success` alone, so it failed on `abandoned` before the
+test tried it; the test tries it because a script that refused `failure`,
+`cancelled` and `skipped` by name would pass the other four and accept this
+one.
+
 ## `fn the_aggregate_requires_exactly_one_windows_suite_job_and_every_other_gate() {`
 
 The workflow's own aggregate script, run under `bash --noprofile --norc -eo
 pipefail` with the results it would read. The gates are the `_RESULT` names
 of the step's own `env:`, so a gate added to the workflow is exercised
 without an edit here. Every pair of Windows results among `success`,
-`failure`, `cancelled` and `skipped`, every other gate succeeding: exactly
-`success` beside `skipped`, either way round, passes. Then each other gate
-failed, cancelled or skipped, beside either passing Windows pair: the
-aggregate fails. Measured by mutating the workflow's script, each mutation
-then restored: accepting both Windows jobs skipped failed this test on that
-pair, and requiring both to succeed, as the script did before the twin,
-failed it on both passing pairs.
+`failure`, `cancelled`, `skipped` and `abandoned`, every other gate
+succeeding: exactly `success` beside `skipped`, either way round, passes.
+Then each other gate failed, cancelled, skipped or abandoned, beside either
+passing Windows pair: the aggregate fails. Measured by mutating the
+workflow's script, each mutation then restored: accepting both Windows jobs
+skipped failed this test on that pair, and requiring both to succeed, as the
+script did before the twin, failed it on both passing pairs.
 
 ## `fn the_msrv_leg_checks_the_floor_the_manifest_publishes_on_every_platform() {`
 

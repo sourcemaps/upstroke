@@ -558,11 +558,16 @@ jobs:
   # colon and a space, which YAML reads as a mapping in a plain scalar.
   #
   # `fail-fast: false`, so one leg's failure does not cancel the others
-  # before they report. `needs.test-windows-hosted.result` is `success` only
-  # when every leg succeeded, and the aggregate already reads the `test` and
-  # `msrv` matrices through one result each. So its rule stands as written:
-  # exactly one of the two Windows suite jobs succeeded and the other was
-  # skipped, which now means the guest's job, or all five shards.
+  # before they report. The aggregate reads the five legs through one
+  # result, `needs.test-windows-hosted.result`, as it already reads the
+  # `test` and `msrv` matrices through one result each. So its rule stands
+  # as written: exactly one of the two Windows suite jobs succeeded and the
+  # other was skipped, and it accepts `success` alone. What GitHub gives a
+  # matrix whose leg did not finish is observed, not a rule stated here: a
+  # leg GitHub cancelled without a runner made its matrix `abandoned` and
+  # the aggregate red, in runs 44114671287 (`msrv`) and 44149091955
+  # (`test`). No hosted shard has been lost that way yet. A `success`
+  # reported over an unfinished leg is what the rule cannot refuse.
   #
   # 40 minutes a leg: 1.75 times the slowest measured leg, and inside the
   # merge queue's 60. In that run the 1,669 s shard printed every
@@ -763,10 +768,14 @@ jobs:
   # gate must succeed except the two Windows suite jobs, of which
   # `pick-windows-home` sends a run to one: exactly one of those must succeed
   # and the other be skipped, so both skipped, both run, or either failed or
-  # cancelled is red. `test-windows-hosted` is a matrix, and its result is
-  # `success` only when every shard succeeded, as `test`'s and `msrv`'s are
-  # only when every leg did; so the hosted half of the rule is all five
-  # shards, and one that failed or was cancelled is red.
+  # cancelled is red. `test-windows-hosted` is a matrix, read through one
+  # result as `test` and `msrv` are, and the rule accepts `success` alone
+  # from it. What GitHub gives a matrix whose leg did not finish is
+  # observed: a leg GitHub cancelled without a runner made its matrix
+  # `abandoned` and the aggregate red, in runs 44114671287 (`msrv`) and
+  # 44149091955 (`test`). No hosted shard has been lost that way yet. A
+  # `success` reported over an unfinished leg is what the rule cannot
+  # refuse.
   merge-gate:
     name: upstroke-ci
     if: always()

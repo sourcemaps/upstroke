@@ -7043,7 +7043,7 @@ mod merge_gate_answers {
 
     const GUEST: &str = "TEST_WINDOWS_RESULT";
     const HOSTED: &str = "TEST_WINDOWS_HOSTED_RESULT";
-    const RESULTS: [&str; 4] = ["success", "failure", "cancelled", "skipped"];
+    const RESULTS: [&str; 5] = ["success", "failure", "cancelled", "skipped", "abandoned"];
 
     #[test]
     fn the_aggregate_requires_exactly_one_windows_suite_job_and_every_other_gate() {
@@ -7105,7 +7105,7 @@ mod merge_gate_answers {
             }
         }
         for gate in &others {
-            for result in ["failure", "cancelled", "skipped"] {
+            for result in ["failure", "cancelled", "skipped", "abandoned"] {
                 for (guest, hosted) in [("success", "skipped"), ("skipped", "success")] {
                     let mut results: Vec<(&str, &str)> = others
                         .iter()
