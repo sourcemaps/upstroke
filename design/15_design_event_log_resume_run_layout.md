@@ -34,6 +34,15 @@ Skeleton creation failures retain partial directories for inspection. Resume
 keeps its idempotent skeleton creation; schema-4 creation keeps its separate
 marker and reciprocal-owner protocol.
 
+**A marker-less run directory is reclaimed only on a complete listing.** At
+startup the census may reclaim a public run directory that has no marker only
+when listing it completed and showed it bare or holding only the staged
+`.creating.tmp`. A listing that fails retains the directory and reports it
+unreadable, with the error, because a failed listing is no evidence that
+nothing is there. Reclamation removes the directory by the shape that listing
+showed, never by a fresh one, so a directory that gained contents since is
+kept. This paragraph was added on 2026-11-14 to record what the census does.
+
 New ULIDs retain the 48-bit timestamp and 80-bit suffix layout. The suffix is
 the first ten SHA-256 bytes over `upstroke.ulid.v2` followed by a zero byte and
 the big-endian timestamp, process id and nonce, with widths 64, 32 and 64 bits.
