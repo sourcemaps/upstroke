@@ -793,13 +793,60 @@ for a provider that needs one, was stored before accounts were recorded. It
 cannot be told apart from another account's, so it bounds nothing either,
 with a note saying it predates account recording.
 
-The field is optional, so a report stored before it still decodes, and a
-per-key provider's report is written as it was before the field existed, so
-those reports bind as they did. A build from before the field refuses a
-report that has it, as an unknown field, and that report then bounds nothing
-there. The report stores the account's name, never a credential, and refuses
-one that is not an account name (`names_an_account`) on the way in and on
-the way out.
+Until 2026-11-24 that last rule had a hole. `reading` took a report's
+account to match when it equalled what `account_for` answered for the pool,
+so a report that records no account and a pool that names no
+`usage_account` matched, `None` to `None`: a GitHub report stored before
+accounts were recorded still bound such a pool, although the refresh skips
+that pool and so would never replace the report
+(`PR409-USAGE-CACHE-MISSING-ACCOUNT`). Where the provider reads an account,
+the account must now be known on both sides and equal, and `None` matches
+nothing. The note for a pool that names no `usage_account` says the refresh
+will not run for it until it names one.
+
+It depends on the credential too. A provider that reports per key
+(`anthropic-cost`, `openai-cost`) answers for the organization its key
+belongs to, and its report records no account. Until 2026-11-24 nothing
+recorded which key it was, so a report fetched with the key in
+`ORG_A_ADMIN_KEY`, at 90 of 100 spent, still supplied the ceiling after the
+pool's `usage_token_env` was changed to `ORG_B_ADMIN_KEY`, another
+organization's, with no note (`PR409-USAGE-CACHE-CREDENTIAL-IDENTITY`). A
+report now records the name of the environment variable the tracker read
+its credential from, for every provider, and `reading` binds it only while
+that name is the pool's `usage_token_env`. As with the account, a report
+that records none, or a pool that names none, matches nothing. The name is
+what is recorded and compared, so a variable that comes to hold another
+organization's key under the same name is not seen. The binding is to the
+configuration, not to the credential, which a report never holds.
+
+One function decides whether a report is about the source the pool names
+now: `other_source` in `src/capacity/machine.rs`. It checks the provider,
+then the account where the provider reads one, then the variable, and the
+first that differs gives the note. It compares with
+`capacity::usage::account_for` and `capacity::usage::token_env_for`, the
+helpers the tracker records the two fields with, and the tracker also reads
+the credential from the variable `token_env_for` names, so the writer and
+the reader cannot disagree. Every refusal is a note in the style of the
+provider's: what the report came from and what the pool names now, or that
+the report predates recording it, and that `upstroke capacity --refresh`
+replaces it. Where the pool names no `usage_account` its provider needs, or
+no `usage_token_env`, the note says instead that the refresh will not run
+for the pool until it names one. A note names variables and accounts, never
+a credential.
+
+Both fields are optional, so a report stored before either still decodes.
+The tracker leaves the account out of a per-key provider's report and
+writes the variable in every report. A report stored before the variable
+was recorded therefore bounds nothing, with its note, until a refresh
+replaces it. A build from before a field refuses a report that has it, as
+an unknown field, and that report then bounds nothing there. Every report
+now carries `token_env`, so a build from before 2026-11-24 can read none of
+the reports a later build writes. The report stores names, never a
+credential. It refuses an account that is not an account name
+(`names_an_account`), and a variable that is not a variable's name or is
+longer than `MAX_TOKEN_ENV_CHARS`, on the way in and on the way out. That
+bound is the one within which `src/tracker.rs` prints a name whole, so a
+note never prints whole a recorded name the tracker would have cut short.
 
 ## `pub enum Basis {`
 

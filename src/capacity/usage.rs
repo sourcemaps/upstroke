@@ -3,9 +3,12 @@
 //!
 //! A report is what one provider usage endpoint said about one pool at one
 //! moment: per quota window, how much was drawn and when the window resets.
-//! Where the provider reports per account, it also records which account it
-//! was asked about, since that is what the reading measures and the pool's
-//! `usage_account` can change after it was taken ([`account_for`]).
+//! It also records the source it was fetched with, since that is what the
+//! reading measures and the pool's usage keys can change after it was taken:
+//! the name of the environment variable the credential was read from
+//! ([`token_env_for`]), and, where the provider reports per account, the
+//! account it was asked about ([`account_for`]). Both are names; a report
+//! never holds a credential.
 //! The tracker (`src/tracker.rs`) is the only writer; it asks the endpoint
 //! over HTTPS, which the engine never does (§4.2). Everything here is the
 //! other side of that line: a persisted schema, its codec, and the read. No
@@ -81,6 +84,14 @@ pub struct UsageReport {
     /// name and never a credential. A report stored before accounts were
     /// recorded reads back as `None` as well.
     pub account: Option<String>,
+    /// The name of the environment variable the tracker read the credential
+    /// from, which is the pool's `usage_token_env` at the refresh
+    /// ([`token_env_for`]). A provider that reports per key answers for the
+    /// organization its key belongs to, so for one this name is the only
+    /// record of whose usage the report measured. It is the variable's name
+    /// and never its value. A report stored before variables were recorded
+    /// reads back as `None`.
+    pub token_env: Option<String>,
     /// When the tracker received the answer, in Unix seconds.
     pub fetched_at: u64,
     pub windows: Vec<UsageWindow>,
@@ -100,6 +111,20 @@ pub fn account_for(source: &UsageSource) -> Option<&str> {
         .account
         .as_deref()
         .filter(|_| source.provider.needs_account())
+}
+
+/// The name of the environment variable a report fetched for `source` reads
+/// its credential from: the pool's `usage_token_env`, for every provider, or
+/// `None` where the pool names none and so is never refreshed.
+///
+/// The tracker reads the credential from the variable this answers and
+/// records the name in the report it writes, and `capacity::machine::reading`
+/// holds a stored report to what it answers for the pool as configured now,
+/// as with [`account_for`]. It answers a name and never the value the
+/// variable holds, so recording it records no credential.
+#[must_use]
+pub fn token_env_for(source: &UsageSource) -> Option<&str> {
+    source.token_env.as_deref()
 }
 
 /// Why a report file is not a report.
@@ -129,10 +154,15 @@ struct RawReport {
     pool: String,
     provider: String,
     /// Optional, so that a report stored before accounts were recorded still
-    /// decodes, and left out of a per-key provider's report, which is then
-    /// the same bytes it was before the field existed.
+    /// decodes, and left out of a per-key provider's report, which reads no
+    /// account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     account: Option<String>,
+    /// Optional, so that a report stored before variables were recorded
+    /// still decodes. The tracker writes it in every report, for every
+    /// provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token_env: Option<String>,
     fetched_at: String,
     windows: Vec<RawWindow>,
 }
@@ -171,6 +201,7 @@ impl UsageReport {
             pool: self.pool.clone(),
             provider: self.provider.clone(),
             account: self.account.clone(),
+            token_env: self.token_env.clone(),
             fetched_at: crate::util::rfc3339_utc(self.fetched_at),
             windows: self
                 .windows
@@ -194,9 +225,10 @@ impl UsageReport {
     ///
     /// [`ReportDefect`] for anything that is not exactly a schema-1 report
     /// within the bounds above: an unknown field, a missing one, a number out
-    /// of range, a timestamp this build cannot read. `account` is the one
-    /// field that may be absent, as it is from a per-key provider's report
-    /// and from any report stored before accounts were recorded.
+    /// of range, a timestamp this build cannot read. `account` and
+    /// `token_env` are the two fields that may be absent: `account` from a
+    /// per-key provider's report, and either from a report stored before it
+    /// was recorded.
     pub fn decode(bytes: &[u8]) -> Result<Self, ReportDefect> {
         let probe: SchemaProbe = serde_json::from_slice(bytes)
             .map_err(|error| ReportDefect::Malformed(error.to_string()))?;
@@ -236,6 +268,7 @@ impl UsageReport {
             pool: raw.pool,
             provider: raw.provider,
             account: raw.account,
+            token_env: raw.token_env,
             fetched_at,
             windows,
         };
@@ -265,6 +298,19 @@ impl UsageReport {
                     "not an account name: letters, digits, `.`, `_` and `-`, not starting with \
                      `.` or `-`, at most {} characters",
                     super::MAX_USAGE_KEY_CHARS
+                ),
+            });
+        }
+        if self.token_env.as_deref().is_some_and(|name| {
+            !super::names_an_environment_variable(name)
+                || name.chars().count() > super::MAX_TOKEN_ENV_CHARS
+        }) {
+            return Err(ReportDefect::Field {
+                field: "token_env",
+                problem: format!(
+                    "not an environment variable's name: letters, digits and underscores, not \
+                     starting with a digit, at most {} characters",
+                    super::MAX_TOKEN_ENV_CHARS
                 ),
             });
         }
@@ -472,6 +518,7 @@ mod tests {
             pool: "anthropic-api".to_owned(),
             provider: "anthropic-cost".to_owned(),
             account: None,
+            token_env: None,
             fetched_at: 1_795_435_380,
             windows: vec![UsageWindow {
                 label: "month".to_owned(),
@@ -560,6 +607,143 @@ mod tests {
             stored_before,
             "and a report with no account is written as one was before the field existed"
         );
+    }
+
+    /// A report as the tracker writes one for a per-key provider: with the
+    /// name of the variable its credential was read from, and no account.
+    fn keyed() -> UsageReport {
+        UsageReport {
+            token_env: Some("ANTHROPIC_ADMIN_KEY".to_owned()),
+            ..report()
+        }
+    }
+
+    #[test]
+    fn a_report_records_the_variable_its_credential_was_read_from() {
+        let written = encoded(&keyed());
+        let value: serde_json::Value =
+            serde_json::from_str(&written).expect("the encoding is JSON");
+        assert_eq!(value["token_env"], "ANTHROPIC_ADMIN_KEY", "{written}");
+        assert_eq!(value.get("account"), None, "{written}");
+        assert_eq!(UsageReport::decode(written.as_bytes()), Ok(keyed()));
+
+        let both = UsageReport {
+            token_env: Some("GH_PLAN_TOKEN".to_owned()),
+            ..per_account()
+        };
+        let written = encoded(&both);
+        let value: serde_json::Value =
+            serde_json::from_str(&written).expect("the encoding is JSON");
+        assert_eq!(
+            (&value["account"], &value["token_env"]),
+            (
+                &serde_json::json!("octo-cat"),
+                &serde_json::json!("GH_PLAN_TOKEN")
+            ),
+            "{written}"
+        );
+        assert_eq!(UsageReport::decode(written.as_bytes()), Ok(both));
+    }
+
+    #[test]
+    fn a_report_stored_before_variables_were_recorded_still_decodes() {
+        let stored_before = serde_json::json!({
+            "schema": 1,
+            "pool": "copilot",
+            "provider": "github-ai-credits",
+            "account": "octo-cat",
+            "fetched_at": "2026-11-23T12:03:00Z",
+            "windows": [
+                {"label": "month", "used_amount": 12.5, "resets_at": "2026-12-01T00:00:00Z"},
+            ],
+        });
+        let decoded = UsageReport::decode(stored_before.to_string().as_bytes());
+        assert_eq!(
+            decoded,
+            Ok(per_account()),
+            "a report written before the variable was recorded is still a report, of no known \
+             variable"
+        );
+        assert_eq!(decoded.map(|report| report.token_env), Ok(None));
+    }
+
+    #[test]
+    fn a_variable_that_is_not_a_name_is_refused_on_the_way_in_and_on_the_way_out() {
+        let too_long = "K".repeat(crate::capacity::MAX_TOKEN_ENV_CHARS + 1);
+        for variable in [
+            "",
+            "ADMIN KEY",
+            "1ADMIN_KEY",
+            "sk-ant-admin01-example",
+            "KEY\u{1b}[2J",
+            too_long.as_str(),
+        ] {
+            let bad = UsageReport {
+                token_env: Some(variable.to_owned()),
+                ..keyed()
+            };
+            let refused = bad.validate();
+            assert!(
+                matches!(
+                    refused,
+                    Err(ReportDefect::Field {
+                        field: "token_env",
+                        ..
+                    })
+                ),
+                "{variable:?} validated"
+            );
+            assert_eq!(
+                bad.encode(),
+                refused.clone().map(|()| String::new()),
+                "{variable:?}: what does not validate does not encode"
+            );
+            if let Err(defect) = refused {
+                assert!(
+                    variable.is_empty() || !defect.to_string().contains(variable),
+                    "the refusal repeats what was written: {defect}"
+                );
+            }
+        }
+        let longest = UsageReport {
+            token_env: Some("K".repeat(crate::capacity::MAX_TOKEN_ENV_CHARS)),
+            ..keyed()
+        };
+        assert_eq!(
+            longest.validate(),
+            Ok(()),
+            "a name as long as the pools reader takes is a name here too"
+        );
+        let written =
+            encoded(&keyed()).replacen("\"ANTHROPIC_ADMIN_KEY\"", "\"ANTHROPIC ADMIN KEY\"", 1);
+        assert!(matches!(
+            UsageReport::decode(written.as_bytes()),
+            Err(ReportDefect::Field {
+                field: "token_env",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn the_variable_a_report_is_for_is_the_pools_whatever_the_provider() {
+        for provider in crate::capacity::UsageProvider::ALL {
+            let source = UsageSource {
+                provider,
+                token_env: Some("ORG_A_ADMIN_KEY".to_owned()),
+                account: Some("octo-cat".to_owned()),
+            };
+            assert_eq!(
+                token_env_for(&source),
+                Some("ORG_A_ADMIN_KEY"),
+                "`{provider}` reads its credential from the variable the pool names"
+            );
+            let unnamed = UsageSource {
+                token_env: None,
+                ..source
+            };
+            assert_eq!(token_env_for(&unnamed), None, "`{provider}`");
+        }
     }
 
     #[test]
