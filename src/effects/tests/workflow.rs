@@ -571,7 +571,7 @@ pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
     if scalar(job, "name") != Some(TEST_JOB_NAME) {
         out.push(format!(
             "[test-job-name] the `test` job is named {:?}, not `{TEST_JOB_NAME}`. The name is \
-             how a run's list tells the legs apart: under `matrix.os` the three macOS shards \
+             how a run's list tells the legs apart: under `matrix.os` the shards of one runner \
              publish one name, and under a literal every leg does, so a red leg does not say \
              which shard's tests failed.",
             scalar(job, "name")
@@ -2251,7 +2251,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-MATRIX-EXCLUDED",
         escape: "an `exclude:` naming the macOS runner, beside the `include:` list that still \
-                 names its three legs. Over an axis, `exclude:` removes combinations the axis \
+                 names its five legs. Over an axis, `exclude:` removes combinations the axis \
                  still lists, and every check that reads the list passes while the fixtures \
                  never run on that platform -- the matrix half of \
                  `PR5-MACOS-CLIPPY-NEVER-RUN`, and what this row measured while the legs were \
@@ -2388,19 +2388,22 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-CI-TEST-MATRIX-NARROWED",
         escape: "the hosted fixtures run on one platform and the other goes unexercised, \
-                 while every check that names the command still passes. The leg removed from \
-                 the `include:` list is the Linux one, whose three lines spell no shard's \
-                 arguments: the three macOS legs stay, each green.",
+                 while every check that names the command still passes. The legs removed from \
+                 the `include:` list are the two Linux ones, their six lines, which are that \
+                 platform's whole suite: the five macOS legs stay, each green.",
         job: Some("test"),
         anchor: "          - os: ubuntu-latest\n\
-                 \x20           leg: \"ubuntu-latest\"\n\
-                 \x20           tests: \"\"\n",
+                 \x20           leg: \"ubuntu-latest, 1 of 2\"\n\
+                 \x20           tests: \"engine::\"\n\
+                 \x20         - os: ubuntu-latest\n\
+                 \x20           leg: \"ubuntu-latest, 2 of 2\"\n\
+                 \x20           tests: \"--skip engine::\"\n",
         replacement: "",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-MATRIX-KEEPS-WINDOWS",
-        escape: "the hosted matrix quietly re-admits Windows, as a fifth `include:` entry that \
+        escape: "the hosted matrix quietly re-admits Windows, as an eighth `include:` entry that \
                  runs the suite whole on `windows-latest`. Two jobs then run the Windows \
                  suite, and the one whose duration this contract retired is back on the \
                  critical path with every other check passing.",
@@ -2654,7 +2657,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-CASEFOLD-DECLARED-ON-THE-WRONG-LEG",
         escape: "the declaration moves to the ubuntu runner, whose temporary directory does not \
-                 fold case: the macOS legs observe instead of requiring, and the ubuntu leg \
+                 fold case: the macOS legs observe instead of requiring, and an ubuntu leg \
                  fails its declaration loudly -- a red that reads as a flake rather than as \
                  the guard having moved",
         job: Some("test"),
@@ -4075,7 +4078,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the hosted twin keeps the suite command and loses the count: the line that \
                  sums it, the line that holds it to the shard's floor and the line that prints \
                  it. A Cargo target runner in the image's environment or Cargo home then hands \
-                 every harness to a wrapper that exits zero, and each of the five legs of the \
+                 every harness to a wrapper that exits zero, and each of the ten legs of the \
                  run the picker sent off the guest is green having executed nothing",
         job: Some("test-windows-hosted"),
         anchor: "          $passed = [int](($log | Select-String -Pattern '^test result: ok\\. (\\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)\n          if ($passed -lt ${{ matrix.floor }}) { throw \"shard ${{ matrix.shard }} reported $passed passing tests, below its floor of ${{ matrix.floor }}: Cargo compiled the harnesses and executed almost none of this shard's tests\" }\n          \"shard ${{ matrix.shard }} reported $passed passing tests; its floor is ${{ matrix.floor }}\"\n",
@@ -4110,7 +4113,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-RUNS-BESIDE-THE-GUEST",
         escape: "a twin condition that holds whatever the picker answered, so both Windows jobs \
-                 run on every run the guest takes: five hosted shards spent for nothing, and \
+                 run on every run the guest takes: ten hosted shards spent for nothing, and \
                  the aggregate red over two green jobs",
         job: Some("test-windows-hosted"),
         anchor: "    if: needs.pick-windows-home.outputs.home == 'hosted'\n",
@@ -4157,10 +4160,11 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-TIMEOUT-RAISED",
         escape: "a shard's ceiling raised from its 40 minutes, which is 1.75 times the slowest \
-                 measured leg and inside the merge queue's 60, to two hours. A leg that prints \
-                 every result line and does not end, as one did in run 43719719561, where a \
-                 leftover test process is inferred to have held the step's output, then holds \
-                 the required check and the queue entry behind it until that ceiling",
+                 leg that ended in run 43719719561 and inside the merge queue's 60, to two \
+                 hours. A leg that prints every result line and does not end, as one did in \
+                 that run, where a leftover test process is inferred to have held the step's \
+                 output, then holds the required check and the queue entry behind it until \
+                 that ceiling",
         job: Some("test-windows-hosted"),
         anchor: "    timeout-minutes: 40\n",
         replacement: "    timeout-minutes: 120\n",
@@ -4264,36 +4268,37 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the last shard, the one with no filter, gains a `--skip effects::`. Every test \
                  of that shard whose name contains `effects::` then runs in no leg, this \
                  oracle's among them. The leg's floor is about half of its count, so where the \
-                 skip takes less than the other half all five legs are green over a suite that \
+                 skip takes less than the other half all ten legs are green over a suite that \
                  lost those tests",
         job: Some("test-windows-hosted"),
-        anchor: "          - shard: \"5 of 5\"\n            tests: \"",
-        replacement: "          - shard: \"5 of 5\"\n            tests: \"--skip effects:: ",
+        anchor: "          - shard: \"10 of 10\"\n            tests: \"",
+        replacement: "          - shard: \"10 of 10\"\n            tests: \"--skip effects:: ",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-LAST-SHARD-SKIPS-MORE",
-        escape: "the same skip put last in the last shard's arguments, after the four the table \
+        escape: "the same skip put last in the last shard's arguments, after the nine the table \
                  derives. Every test of that shard whose name contains `effects::` runs in no \
                  leg, as under `MUT-TEST-WINDOWS-HOSTED-SHARD-NARROWED`; here the string opens \
                  as the table's does and every word of the table's is in its place, so a \
                  reading that stopped at the table's last word would pass it",
         job: Some("test-windows-hosted"),
-        anchor: "--skip engine::\"\n            floor: 1085\n",
-        replacement: "--skip engine:: --skip effects::\"\n            floor: 1085\n",
+        anchor: "--skip workspace_manager::\"\n            floor: 734\n",
+        replacement: "--skip workspace_manager:: --skip effects::\"\n            floor: 734\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-DROPPED",
         escape: "the second shard's entry gone from the `include:` list, its three lines. Its \
-                 tests are the coordinator's that the first shard's filter does not name: every \
-                 later leg skips them and no leg left asks for them, so they run on no hosted \
-                 leg. The four legs left each clear their own floor, the job's result is \
-                 `success`, and the aggregate reads a Windows suite that passed",
+                 tests are the coordinator's whose names open `a_r`, which the first shard's \
+                 filter does not name: every later leg skips them and no leg left asks for \
+                 them, so they run on no hosted leg. The nine legs left each clear their own \
+                 floor, the job's result is `success`, and the aggregate reads a Windows suite \
+                 that passed",
         job: Some("test-windows-hosted"),
-        anchor: "          - shard: \"2 of 5\"\n\
-                 \x20           tests: \"engine::topology::coordinator:: --skip engine::topology::coordinator::tests::a\"\n\
-                 \x20           floor: 30\n",
+        anchor: "          - shard: \"2 of 10\"\n\
+                 \x20           tests: \"engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_p\"\n\
+                 \x20           floor: 13\n",
         replacement: "",
         refused_as: "test-windows-hosted-matrix",
     },
@@ -4303,19 +4308,19 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  step still tests the count against `matrix.floor`, so its pin holds, and a leg \
                  that executed one test clears the floor the matrix now hands it",
         job: Some("test-windows-hosted"),
-        anchor: "            floor: 1085\n",
+        anchor: "            floor: 734\n",
         replacement: "            floor: 1\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-ZEROED",
         escape: "the last shard's floor set to zero in the table, the script untouched. It is \
-                 the largest of the five, 1085 of the guest's 1700, and with it gone the leg is \
+                 the largest of the ten, 734 of the guest's 1700, and with it gone the leg is \
                  green having executed nothing: the count the step sums is never below zero. \
                  `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED`'s floor of 1 still asks for one \
                  test; this asks for none, which is the arrival the count exists to refuse",
         job: Some("test-windows-hosted"),
-        anchor: "            floor: 1085\n",
+        anchor: "            floor: 734\n",
         replacement: "            floor: 0\n",
         refused_as: "test-windows-hosted-matrix",
     },
@@ -4331,11 +4336,11 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-MATRIX-AXIS-ADDED",
-        escape: "an axis beside the `include:` list, which still names all five shards. By \
+        escape: "an axis beside the `include:` list, which still names all ten shards. By \
                  GitHub's documented rule for `include:`, each entry is added to the axis's one \
                  combination instead of making a leg of its own, and a later entry overwrites \
                  the `shard`, `tests` and `floor` an earlier one added: one leg runs, the last \
-                 shard's, it clears its own floor, the job's result is `success`, and four \
+                 shard's, it clears its own floor, the job's result is `success`, and nine \
                  shards' tests ran nowhere",
         job: Some("test-windows-hosted"),
         anchor: "      matrix:\n        include:\n",
@@ -4345,7 +4350,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-EXCLUDED",
         escape: "an `exclude:` naming the second shard, beside the `include:` list that still \
-                 names all five. Were it to remove that leg, the shard's tests would run on no \
+                 names all ten. Were it to remove that leg, the shard's tests would run on no \
                  hosted leg while every reading of the list passed. GitHub documents that \
                  `include:` entries are processed after `exclude:`, so by that rule it removes \
                  no leg of a list with no axis; that is the rule as documented, and no workflow \
@@ -4355,16 +4360,16 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         job: Some("test-windows-hosted"),
         anchor: "        include:\n",
         replacement: "        exclude:\n\
-                      \x20         - shard: \"2 of 5\"\n\
+                      \x20         - shard: \"2 of 10\"\n\
                       \x20       include:\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED",
         escape: "the cargo line loses the leg's selection and is the guest's again, the table \
-                 and the floors untouched: each of the five legs runs the whole suite. Measured \
-                 on 2026-11-15 at 59 to 76 minutes a job, that is five legs cancelled at their \
-                 limit; on a faster runner it is five green legs and no shard",
+                 and the floors untouched: each of the ten legs runs the whole suite. Measured \
+                 on 2026-11-15 at 59 to 76 minutes a job, that is ten legs cancelled at their \
+                 limit; on a faster runner it is ten green legs and no shard",
         job: Some("test-windows-hosted"),
         anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- ${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
         replacement: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
@@ -4374,11 +4379,11 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED",
         escape: "the cargo line names one filter, `engine::`, where it read the leg's \
                  `matrix.tests`, the table and the floors untouched. Every leg then runs the one \
-                 subset, the first four shards' tests together, and every test outside it runs \
-                 on no hosted leg. By the counts the floors were set from, that subset is 193 + \
-                 59 + 684 + 304 = 1,240 passing tests, above every floor in the table, the last \
-                 leg's 1085 among them: five green legs over a suite that lost the 2,188 tests \
-                 of its largest shard",
+                 subset, the first seven shards' tests together, and every test outside it runs \
+                 on no hosted leg. By the counts the floors were set from, that subset is 50 + \
+                 27 + 116 + 59 + 235 + 484 + 324 = 1,295 passing tests, above every floor in \
+                 the table, the last leg's 734 among them: ten green legs over a suite that \
+                 lost the 2,267 tests of its last three shards",
         job: Some("test-windows-hosted"),
         anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- ${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
         replacement: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- engine::' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
@@ -4408,48 +4413,49 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-MACOS-SHARD-NARROWED",
         escape: "the last macOS shard, the one with no filter, gains a `--skip effects::`. Every \
                  test of that shard whose name contains `effects::` then runs on no macOS leg, \
-                 this oracle's among them. These legs hold no count to a floor, so all three \
+                 this oracle's among them. These legs hold no count to a floor, so all five \
                  are green over a macOS suite that lost those tests, beside a Linux leg that \
                  still runs them",
         job: Some("test"),
-        anchor: "            leg: \"macos-latest, 3 of 3\"\n\
+        anchor: "            leg: \"macos-latest, 5 of 5\"\n\
                  \x20           tests: \"",
-        replacement: "            leg: \"macos-latest, 3 of 3\"\n\
+        replacement: "            leg: \"macos-latest, 5 of 5\"\n\
                       \x20           tests: \"--skip effects:: ",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-MACOS-LAST-SHARD-SKIPS-MORE",
-        escape: "the same skip put last in the last macOS leg's arguments, after the two the \
+        escape: "the same skip put last in the last macOS leg's arguments, after the four the \
                  table derives. Every test of that leg whose name contains `effects::` runs on \
                  no macOS leg, as under `MUT-TEST-MACOS-SHARD-NARROWED`, and no floor is there \
                  to say so; here the string opens as the table's does, so a reading that stopped \
                  at the table's last word would pass it",
         job: Some("test"),
-        anchor: "--skip engine::\"\n    steps:\n",
-        replacement: "--skip engine:: --skip effects::\"\n    steps:\n",
+        anchor: "--skip runner::\"\n    steps:\n",
+        replacement: "--skip runner:: --skip effects::\"\n    steps:\n",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-UBUNTU-LEG-FILTERED",
-        escape: "the Linux leg, the one leg that runs the suite whole, handed a filter: its \
-                 `tests: \"\"` becomes `tests: \"engine::\"`. The leg runs the tests whose names \
-                 contain `engine::` and no other, holds no count to a floor, and is green. The \
+        escape: "the last Linux leg, the one with no filter, handed one: its \
+                 `tests: \"--skip engine::\"` becomes `tests: \"engine::\"`, the first Linux \
+                 leg's. Both Linux legs then run the tests whose names contain `engine::` and \
+                 neither runs any other; they hold no count to a floor, and both are green. The \
                  macOS shards and the Windows suite still run the rest on their platforms; the \
                  tests that run on Linux alone, the picker's and the aggregate's scripts \
                  executed among them, then run nowhere",
         job: Some("test"),
-        anchor: "            leg: \"ubuntu-latest\"\n            tests: \"\"\n",
-        replacement: "            leg: \"ubuntu-latest\"\n            tests: \"engine::\"\n",
+        anchor: "            leg: \"ubuntu-latest, 2 of 2\"\n            tests: \"--skip engine::\"\n",
+        replacement: "            leg: \"ubuntu-latest, 2 of 2\"\n            tests: \"engine::\"\n",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-SHARD-SELECTION-DROPPED",
         escape: "the cargo line loses the leg's selection and is the whole suite's again, the \
-                 table untouched: each of the three macOS legs runs the whole suite, a leg that \
-                 took 27 to 37 minutes while it was one, under the 30 minutes set for a shard. \
-                 That is three legs cancelled at their limit on a slow day, and three green \
-                 legs and no shard on a fast one",
+                 table untouched: each of the seven legs runs its platform's whole suite, on \
+                 macOS a leg that took 27 to 37 minutes while it was one, under the 30 minutes \
+                 set for a shard. That is five macOS legs cancelled at their limit on a slow \
+                 day, and seven green legs and no shard on a fast one",
         job: Some("test"),
         anchor: "      - run: cargo test --all-targets --all-features -- ${{ matrix.tests }}\n",
         replacement: "      - run: cargo test --all-targets --all-features\n",
@@ -4458,8 +4464,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-FILTER-HARDCODED",
         escape: "the suite step names one filter, `engine::`, where it read the leg's \
-                 `matrix.tests`, the table untouched. All four legs then run the one subset, the \
-                 Linux leg among them, and none holds a count to a floor: every leg is green and \
+                 `matrix.tests`, the table untouched. All seven legs then run the one subset, the \
+                 Linux legs among them, and none holds a count to a floor: every leg is green and \
                  every test whose name does not contain `engine::` runs on no leg of this job. \
                  The line is a quoted scalar because a plain one cannot end in a colon: \
                  unquoted, it is a document the parser refuses before this contract reads it",
@@ -4471,8 +4477,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-LEGS-NAMED-BY-RUNNER",
         escape: "the job named by `matrix.os` again, as it was while each runner had one leg. \
-                 The three macOS shards then publish one name, `test (macos-latest)`, three \
-                 times over, and a red one does not say which shard's tests failed",
+                 The five macOS shards then publish one name, `test (macos-latest)`, five \
+                 times over, and the two Linux shards `test (ubuntu-latest)` twice, and a red \
+                 one does not say which shard's tests failed",
         job: Some("test"),
         anchor: "    name: test (${{ matrix.leg }})\n",
         replacement: "    name: test (${{ matrix.os }})\n",
@@ -4542,7 +4549,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  its tests and did not end before its job's limit. By the inference the step \
                  is written against, a test process that outlives the suite holds that pipe, \
                  so a leg whose tests all passed is cancelled at its 40 minutes with no \
-                 failing test to show for it, on whichever of the five legs runs the test \
+                 failing test to show for it, on whichever of the ten legs runs the test \
                  that leaves the process",
         job: Some("test-windows-hosted"),
         anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- ${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
@@ -4552,9 +4559,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SURVIVOR-ALLOWED",
         escape: "line 8 of the shards' suite step, the throw for a test process left running, \
-                 is gone, on all five legs at once. Each leg still lists the `upstroke*` \
+                 is gone, on all ten legs at once. Each leg still lists the `upstroke*` \
                  processes left and asks Windows to stop them, then counts and clears its \
-                 floor: the leg whose tests leave a process is green beside the other four, \
+                 floor: the leg whose tests leave a process is green beside the other nine, \
                  the process is forgotten whether or not it stopped, and which test leaves it, \
                  the question both runs that did not end left open, is asked by nothing",
         job: Some("test-windows-hosted"),

@@ -45,13 +45,27 @@ jobs:
     # was the slowest job of every run that does not wait for the guest:
     # 32m 23s of run 43705001427's 32m 32s on 2026-11-15, the harness
     # 1,777 s for 3,888 tests on three processors, 72% of that limit. So the
-    # macOS suite runs as the three shards of the matrix below. The same
-    # three ran on macOS in draft pull request #339 on 2026-10-18, run
+    # macOS suite was divided, at first into three shards:
+    # `engine::topology::`, the rest of `engine::`, and everything else. The
+    # same three ran on macOS in draft pull request #339 on 2026-10-18, run
     # 39146387106: 10m 13s, 12m 10s and 12m 17s a leg. The whole leg has
     # taken 27 to 37 minutes since, and no shard was timed at the suite the
     # shards landed on: the CI run of the pull request that landed them is
-    # that measurement. 30 is about twice the slowest shard expected, and
-    # the limit the Linux leg already had.
+    # that measurement.
+    #
+    # A platform's slowest leg sets the run's wall clock. In run 44614925593
+    # on 2026-11-19 the three macOS legs took 22.2, 11.3 and 14.3 minutes,
+    # and 16.6, 11.8 and 14.5 in run 44516609416, about 4 of them fixed. The
+    # one Linux leg took 11.4 minutes, and 13.4 in the other run, about 1.6
+    # of them fixed. So the matrix below divides both suites by measured
+    # time, macOS into five shards and Linux into two: per-test weights from
+    # a sequential Linux run, scaled to each platform's measured wall time
+    # for each shard and blended with a uniform per-test model. The slowest
+    # leg is predicted at about 14 to 15 minutes on macOS and about 8 to 9
+    # on Linux, and neither split was timed before it landed: the CI run of
+    # the pull request that landed them is their first measurement. 30 is
+    # about twice the slowest shard expected, and the limit the Linux leg
+    # already had.
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -63,32 +77,44 @@ jobs:
         # `test-windows` on a self-hosted runner, or in `test-windows-hosted`
         # when the guest is busy; these legs stay on GitHub's runners.
         #
-        # Four legs: the Linux suite whole, with no filter, and the macOS
-        # suite as three shards -- `engine::topology::`, the rest of
-        # `engine::`, and everything else. The shard rule is the one
-        # `test-windows-hosted` states below: a leg runs the tests whose names
+        # Seven legs: the Linux suite as two shards -- `engine::`, and
+        # everything else -- and the macOS suite as five --
+        # `engine::topology::coordinator::`, the rest of `engine::topology::`,
+        # the rest of `engine::`, `runner::`, and everything else. The shard
+        # rule is the one `test-windows-hosted` states below, applied to each
+        # runner's legs on their own: a leg runs the tests whose names
         # contain its filter and none of the filters of the legs before it,
         # each of those a `--skip`; the last leg has no filter and runs the
         # tests that contain none of them. So every test runs in exactly one
-        # macOS leg. These legs carry no floor on the count of passing tests
-        # and the shards add none: a filter that matches no test only moves
-        # tests to a later leg, and none stops running. The workflow oracle
+        # Linux leg and in exactly one macOS leg. These legs carry no floor on
+        # the count of passing tests and the shards add none: a filter that
+        # matches no test only moves tests to a later leg of its runner, and
+        # none stops running. The workflow oracle
         # derives this list from its table of runners and filters and holds
         # the matrix to it entry for entry, in order. Every `leg:` and
         # `tests:` value is double-quoted, as in that job's table.
         include:
           - os: ubuntu-latest
-            leg: "ubuntu-latest"
-            tests: ""
+            leg: "ubuntu-latest, 1 of 2"
+            tests: "engine::"
+          - os: ubuntu-latest
+            leg: "ubuntu-latest, 2 of 2"
+            tests: "--skip engine::"
           - os: macos-latest
-            leg: "macos-latest, 1 of 3"
-            tests: "engine::topology::"
+            leg: "macos-latest, 1 of 5"
+            tests: "engine::topology::coordinator::"
           - os: macos-latest
-            leg: "macos-latest, 2 of 3"
-            tests: "engine:: --skip engine::topology::"
+            leg: "macos-latest, 2 of 5"
+            tests: "engine::topology:: --skip engine::topology::coordinator::"
           - os: macos-latest
-            leg: "macos-latest, 3 of 3"
-            tests: "--skip engine::topology:: --skip engine::"
+            leg: "macos-latest, 3 of 5"
+            tests: "engine:: --skip engine::topology::coordinator:: --skip engine::topology::"
+          - os: macos-latest
+            leg: "macos-latest, 4 of 5"
+            tests: "runner:: --skip engine::topology::coordinator:: --skip engine::topology:: --skip engine::"
+          - os: macos-latest
+            leg: "macos-latest, 5 of 5"
+            tests: "--skip engine::topology::coordinator:: --skip engine::topology:: --skip engine:: --skip runner::"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -120,7 +146,7 @@ jobs:
       # `the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does`
       # requires its native casefold branch only where the leg declares that
       # the temporary directory its suite runs under folds case; anywhere
-      # else -- the ubuntu leg, a developer's TMPDIR on case-sensitive APFS --
+      # else -- the ubuntu legs, a developer's TMPDIR on case-sensitive APFS --
       # it observes the branch instead of failing it. The macOS runner's
       # temporary directory folds case and the ubuntu runner's does not, so
       # the declaration is per leg, and `test-windows` and its hosted twin
@@ -128,8 +154,8 @@ jobs:
       # NTFS. The workflow oracle pins this one
       # step-level `env:` as a whole map (`TEST_STEP_ENV`), the way it pins
       # the aggregate's: any other key here is refused. The cargo line hands
-      # libtest the leg's `matrix.tests`: nothing on the Linux leg, which
-      # runs the suite whole, and the shard's filter and skips on a macOS leg.
+      # libtest the leg's `matrix.tests`, on a Linux leg as on a macOS one:
+      # the shard's filter, where it has one, and its skips.
       - run: cargo test --all-targets --all-features -- ${{ matrix.tests }}
         env:
           UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
@@ -356,9 +382,9 @@ jobs:
   # WINGUEST_QUEUE_LIMIT is set and the guest's queue has reached it, all
   # three opt-in and none set by default. Then this job is skipped
   # and `test-windows-hosted` below runs the same suite on windows-latest,
-  # in five shards, each on a runner of its own; the aggregate requires
+  # in ten shards, each on a runner of its own; the aggregate requires
   # exactly one of the two jobs to succeed, and the hosted job succeeds only
-  # when all five shards do. Measured
+  # when all ten shards do. Measured
   # 2026-09-15/16: five hosted samples of the suite on windows-latest (run
   # 34980597250, at 126b8832) took 1122-1499 s in the harness, 21m 30s to
   # 28m 03s a job; the guest, on three green runs of pull request #299, took
@@ -543,7 +569,7 @@ jobs:
           if (-not $ok) { throw "the container capability record is missing or its framing is incomplete" }
 
   # The Windows suite's hosted twin, for a run `pick-windows-home` sends off
-  # the guest: the one suite in five shards, each a leg of this job's matrix
+  # the guest: the one suite in ten shards, each a leg of this job's matrix
   # on a windows-latest runner of its own. Its suite step is the guest's but
   # for three things: the cargo line hands libtest the shard's filter, the
   # count of passing tests is held to the shard's share of the guest's
@@ -583,25 +609,38 @@ jobs:
   # directory and services are not the guest's, so a test whose outcome
   # depends on the machine can still pass here and fail there.
   #
-  # Five shards, because one job no longer fits. Measured on 2026-11-15, run
+  # Shards, because one job no longer fits. Measured on 2026-11-15, run
   # 43719719561, on windows-latest with four processors: the whole suite
   # took 3,311 to 4,292 s in the harness, 59 to 76 minutes a job. Four
   # shards by test name took 692 to 1,669 s and ran 193 + 776 + 320 + 2,218
   # = 3,507 tests, the whole suite's count. The slowest leg that ended took
-  # 22m 53s. The 1,669 s shard, the rest of `engine::topology::`, is divided
-  # in two here, which makes the five.
+  # 22m 53s. The 1,669 s shard, the rest of `engine::topology::`, was
+  # divided in two, which made five.
+  #
+  # Ten now, divided by measured time, because a run's slowest leg sets its
+  # wall clock. In run 44614925593 on 2026-11-19 the five legs' libtest
+  # harnesses took 1201, 508, 976, 564 and 860 s, and the slowest job took
+  # 24.3 minutes, against about 3.6 minutes fixed per leg: setup, the
+  # compiler questions, a 1m45s to 2m46s compile, and the two record
+  # captures. The nine filters below come from per-test weights of a
+  # sequential Linux run, scaled to those five measured walls and blended
+  # with a uniform per-test model. The first three divide the 1201 s shard
+  # by the opening of a test's name, `a_p`, `a_r` and the rest of `a`; the
+  # other filters are module paths. The slowest leg is predicted at about
+  # 13 to 16 minutes, and the ten were not timed before they landed: the CI
+  # run of the pull request that landed them is their first measurement.
   #
   # The shard rule: a leg runs the tests whose names contain its filter and
   # none of the filters of the legs before it, each of those a `--skip`; the
   # last leg has no filter and runs the tests that contain none of them. So
   # every test runs in exactly one leg. The workflow oracle derives the table
   # below from its filter list and its floors, and holds this matrix to it
-  # entry for entry; the five floors sum to the guest's 1700. Every `shard:`
+  # entry for entry; the ten floors sum to the guest's 1700. Every `shard:`
   # and `tests:` value is double-quoted: a `tests:` value contains `:: `, a
   # colon and a space, which YAML reads as a mapping in a plain scalar.
   #
   # `fail-fast: false`, so one leg's failure does not cancel the others
-  # before they report. The aggregate reads the five legs through one
+  # before they report. The aggregate reads the ten legs through one
   # result, `needs.test-windows-hosted.result`, as it already reads the
   # `test` and `msrv` matrices through one result each. So its rule stands
   # as written: exactly one of the two Windows suite jobs succeeded and the
@@ -612,13 +651,13 @@ jobs:
   # (`test`). No hosted shard has been lost that way yet. A `success`
   # reported over an unfinished leg is what the rule cannot refuse.
   #
-  # 40 minutes a leg: 1.75 times the slowest measured leg, and inside the
-  # merge queue's 60. In that run the 1,669 s shard printed every
-  # `test result: ok` line 31.6 minutes into its job and did not end. It
-  # ran to the job's limit, where the runner's clean-up killed a test
-  # process left over. That the process held the step's output until then
-  # is inferred, not seen. The limit bounds the hang; it does not repair
-  # it.
+  # 40 minutes a leg: 1.75 times the slowest leg that ended in run
+  # 43719719561, and inside the merge queue's 60. In that run the 1,669 s
+  # shard printed every `test result: ok` line 31.6 minutes into its job
+  # and did not end. It ran to the job's limit, where the runner's clean-up
+  # killed a test process left over. That the process held the step's
+  # output until then is inferred, not seen. The limit bounds the hang; it
+  # does not repair it.
   #
   # It happened again on 2026-11-18, in run 44277078005: `test
   # (windows-latest, 3 of 5)` printed `test result: ok. 700 passed; 0
@@ -642,21 +681,36 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - shard: "1 of 5"
-            tests: "engine::topology::coordinator::tests::a"
-            floor: 95
-          - shard: "2 of 5"
-            tests: "engine::topology::coordinator:: --skip engine::topology::coordinator::tests::a"
-            floor: 30
-          - shard: "3 of 5"
-            tests: "engine::topology:: --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator::"
-            floor: 340
-          - shard: "4 of 5"
-            tests: "engine:: --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::"
-            floor: 150
-          - shard: "5 of 5"
-            tests: "--skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology:: --skip engine::"
-            floor: 1085
+          - shard: "1 of 10"
+            tests: "engine::topology::coordinator::tests::a_p"
+            floor: 24
+          - shard: "2 of 10"
+            tests: "engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_p"
+            floor: 13
+          - shard: "3 of 10"
+            tests: "engine::topology::coordinator::tests::a --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r"
+            floor: 55
+          - shard: "4 of 10"
+            tests: "engine::topology::coordinator:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a"
+            floor: 28
+          - shard: "5 of 10"
+            tests: "engine::topology::recover:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator::"
+            floor: 112
+          - shard: "6 of 10"
+            tests: "engine::topology:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover::"
+            floor: 231
+          - shard: "7 of 10"
+            tests: "engine:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::topology::"
+            floor: 155
+          - shard: "8 of 10"
+            tests: "runner:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::topology:: --skip engine::"
+            floor: 196
+          - shard: "9 of 10"
+            tests: "workspace_manager:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::topology:: --skip engine:: --skip runner::"
+            floor: 152
+          - shard: "10 of 10"
+            tests: "--skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::topology:: --skip engine:: --skip runner:: --skip workspace_manager::"
+            floor: 734
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 

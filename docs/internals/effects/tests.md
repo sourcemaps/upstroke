@@ -2124,8 +2124,8 @@ line of the comment-stripped text, and whether the file contained the test
 command anywhere; both survive an `echo`, and the strip existed only because
 the job's own comment spelled the needle.
 
-Every platform, and now every leg: the job's matrix is four legs, the Linux
-suite whole and the macOS suite as three shards, and the oracle holds the
+Every platform, and now every leg: the job's matrix is seven legs, the Linux
+suite as two shards and the macOS suite as five, and the oracle holds the
 matrix to the legs it derives from `TEST_LEGS`
 (`test_leg_matrix_complaints` in the workflow notes).
 
@@ -2602,26 +2602,26 @@ the second is the event the rule must never move, with the variable set.
 
 ## `fn twin_legs() -> Vec<String> {`
 
-The hosted twin's five legs as GitHub lists them in a run's jobs:
-`test (windows-latest, 1 of 5)` to `test (windows-latest, 5 of 5)`. The twin
-is a matrix, its `name:` is an expression, and the API lists each leg under
-the name with its shard in place. The names are made here the same way,
+The hosted twin's ten legs as GitHub lists them in a run's jobs:
+`test (windows-latest, 1 of 10)` to `test (windows-latest, 10 of 10)`. The
+twin is a matrix, its `name:` is an expression, and the API lists each leg
+under the name with its shard in place. The names are made here the same way,
 `TEST_WINDOWS_HOSTED_NAME` with each of `windows_shard_labels`' labels in
-place of `${{ matrix.shard }}`, so a renamed job or a sixth shard moves the
-fixtures with it. Until the twin was a matrix a job list here named one
-hosted job, `test (windows-latest)`, twice from the constant and once as a
-literal.
+place of `${{ matrix.shard }}`, so a renamed job or another shard moves the
+fixtures with it, as the five legs' names moved when the shards became ten.
+Until the twin was a matrix a job list here named one hosted job,
+`test (windows-latest)`, twice from the constant and once as a literal.
 
 ## `fn beside_the_twin<'a>(`
 
 A run's job list with the twin's legs in it: the jobs given, then every leg
-of [`twin_legs`] in one status. A run sent to the twin lists all five, so a
-canned list that names a hosted job names five.
+of [`twin_legs`] in one status. A run sent to the twin lists all ten, so a
+canned list that names a hosted job names ten.
 
 The script reads none of them. It selects jobs by two names, the guest's
 and the picker's, and a leg's is neither; that is what the three lists that
 use this are there to show, and why no answer moved when one hosted job
-became five.
+became five, or when the five became ten.
 
 ## `fn cases() -> Vec<Case> {`
 
@@ -2642,7 +2642,9 @@ one are [`other_runs_still_choosing`].
   1, the answer `guest`, and run 101's jobs are asked for once.
 - `jobs-and-runs-after-the-first-page-are-counted`: a second page of the run
   listing and of one run's jobs each carry a guest job, and the answer is
-  `hosted` only if both pages are read.
+  `hosted` only if both pages are read. The first page of that run's jobs
+  lists a `test (ubuntu-latest, 1 of 2)`, a leg of the `test` job under the
+  name GitHub lists it by, as a job the script passes over.
 - `a-failure-on-a-later-page-of-the-run-listing-answers-guest` and
   `a-failure-on-a-later-page-of-a-runs-jobs-answers-guest`: the pages before
   the failure hold enough guest jobs to reach the limit, so counting them
@@ -2651,7 +2653,7 @@ one are [`other_runs_still_choosing`].
 The rest: `WINGUEST_BUSY` is `1` exactly and then nothing is asked, and
 `true` is not `1`; an unreadable API; one job below a limit of 2 and two at
 it; this run left out; completed guest jobs and other jobs not counted, the
-twin's five legs queued among them ([`beside_the_twin`]);
+twin's ten legs queued among them ([`beside_the_twin`]);
 limits of 3 and 1; and five values that are not whole numbers from 1 to 999999 --
 `0`, `-1`, `2.5`, `two`, ` 3` -- each leaving routing on the queue off, so
 nothing is asked and the answer is `guest`, over the deep queue below.
@@ -2684,7 +2686,7 @@ later.
 - Not counted: an earlier run whose guest job is `completed` beside a
   finished picker, sent to the twin or done; and an earlier run with jobs
   listed and neither a picker nor a guest job among them. Both list the
-  twin's five legs in progress ([`beside_the_twin`]).
+  twin's ten legs in progress ([`beside_the_twin`]).
 - Runs 99 and 1000 against this run's 900: ids are compared as numbers. As
   strings `99` sorts after `900` and `1000` before it, and each row would
   answer the other way.
@@ -2917,60 +2919,74 @@ then, and have not been since the script became eleven lines.
 
 ## `fn the_shard_tables_run_every_test_in_exactly_one_shard() {`
 
-The two shard tables of the CI model, `WINDOWS_SHARD_FILTERS` and
-`MACOS_SHARD_FILTERS`, each divide the suite: every test runs in exactly one
-shard. The test reads no workflow. It was the proof that came before any
-line of `ci.yml` was derived from a table. Both matrices now are:
-`windows_shard_matrix_complaints` in the workflow notes is what holds the
-hosted twin's to the Windows table, and `test_leg_matrix_complaints` what
-holds the `test` job's three macOS legs to the macOS one.
+The three shard tables of the CI model, `WINDOWS_SHARD_FILTERS`,
+`MACOS_SHARD_FILTERS` and `LINUX_SHARD_FILTERS`, each divide the suite:
+every test runs in exactly one shard. The test reads no workflow. It was the
+proof that came before any line of `ci.yml` was derived from a table. Both
+matrices now are: `windows_shard_matrix_complaints` in the workflow notes is
+what holds the hosted twin's to the Windows table, and
+`test_leg_matrix_complaints` what holds the `test` job's five macOS legs to
+the macOS one and its two Linux legs to the Linux one.
 
 Five claims.
 
-1. The Windows table's five selections, as [`shard_selections`] derives
-   them, are the five strings written out here. Literals, not a second
+1. The Windows table's ten selections, as [`shard_selections`] derives
+   them, are the ten strings written out here. Literals, not a second
    derivation: the rule is then stated twice in two forms, and a reader sees
    the arguments a shard is handed.
-2. The macOS table's three are likewise written out, and a table with no
-   filter gives one empty string -- one shard, no arguments, the whole suite.
-3. Each of eight names is run by exactly one selection of each table under
-   [`libtest_runs`], and by the one named beside it; under the empty table's
-   one selection every name runs. The names are the boundaries of the rule,
-   in Windows shard order:
-   - a coordinator test named `a...` (shard 1), one that is not (2), and one
-     named `a...` in a child module of the coordinator's tests (2), which
-     the first filter does not reach because it is a substring that ends at
+2. The macOS table's five and the Linux table's two are likewise written
+   out, and a table with no filter gives one empty string -- one shard, no
+   arguments, the whole suite. No runner's table is empty since the Linux
+   suite was divided; the empty one stays as the rule's base case.
+3. Each of thirteen names is run by exactly one selection of each table
+   under [`libtest_runs`], and by the one named beside it, in a column for
+   each of the three tables; under the empty table's one selection every
+   name runs. The names are the boundaries of the rule, in Windows shard
+   order but for the tenth:
+   - a coordinator test named `a_p...` (shard 1), one named `a_r...` (2),
+     and one named `a...` that is neither (3);
+   - a coordinator test not named `a...` (4), and one named `a...` in a
+     child module of the coordinator's tests (4), which the first three
+     filters do not reach because each is a substring that runs through
      `tests::a`;
-   - a topology test outside the coordinator (3) and an engine test outside
-     topology (4);
-   - `workspace_manager::tests::engine::a_name_with_a_filter_inside_it` (4),
-     a name outside the engine that contains `engine::`. libtest's filter is
-     a substring, so the engine's shard runs it, and the last shard skips it:
-     once, as for any other name;
-   - a library test that contains no filter (5), and a name with no module
+   - a recovery test (5), a topology test outside the coordinator and
+     recovery (6), and an engine test outside topology (7);
+   - a runner test (8);
+   - `workspace_manager::tests::engine::a_name_with_a_filter_inside_it` (7),
+     a name outside the engine that contains `engine::`, and a second filter
+     besides, `workspace_manager::`. libtest's filter is a substring, so the
+     engine's shard runs it, and the workspace manager's shard and the last
+     shard skip it: once, as for any other name;
+   - a workspace manager test that contains no earlier filter (9);
+   - a library test that contains no filter (10), and a name with no module
      before `tests::`, which is how a harness lists a test at its crate's
-     root, the bin harness's among them (5).
+     root, the bin harness's among them (10).
 
-   On macOS the same eight fall in shards 1, 1, 1, 1, 2, 2, 3 and 3.
-4. In both lists no filter is empty, contains whitespace or starts with `-`,
-   and none repeats. Each filter is one word of a command line: an empty one
-   is no word, so its own shard has no filter and a later shard's `--skip`
-   takes the next word as its string; one with whitespace is two words; one
-   that starts with `-` is an option. A repeated filter gives a second shard
-   that skips its own filter and selects nothing.
+   On macOS the same thirteen fall in shards 1, 1, 1, 1, 1, 2, 2, 3, 4, 3,
+   5, 5 and 5. The Linux column is the newest: every name that contains
+   `engine::` falls in shard 1, the first eight and the tenth, and the
+   runner's test and the last three in shard 2.
+4. In all three lists no filter is empty, contains whitespace or starts
+   with `-`, and none repeats. Each filter is one word of a command line: an
+   empty one is no word, so its own shard has no filter and a later shard's
+   `--skip` takes the next word as its string; one with whitespace is two
+   words; one that starts with `-` is an option. A repeated filter gives a
+   second shard that skips its own filter and selects nothing.
 5. `WINDOWS_SHARD_FLOORS` has one entry for each Windows shard, each above
    zero, and they sum to [`WINDOWS_TEST_FLOOR`]: the hosted shards together
    must not accept fewer passing tests than the guest's one job does.
 
-Eight names are examples, not a census of the suite, and the test does not
-ask whether a test of each name exists. That the rule divides every set of
-names is the argument in the workflow notes, under `shard_selections`; these
-are the cases that argument turns on, executed.
+Thirteen names are examples, not a census of the suite, and the test does
+not ask whether a test of each name exists. That the rule divides every set
+of names is the argument in the workflow notes, under `shard_selections`;
+these are the cases that argument turns on, executed.
 
-Measured by making [`libtest_runs`] read a skip string as a prefix of the
+Measured, while the Windows table made five shards and the names were
+eight, by making [`libtest_runs`] read a skip string as a prefix of the
 name rather than a substring, and restoring it: this test failed on
 `workspace_manager::tests::engine::a_name_with_a_filter_inside_it`, run by
-Windows shards 4 and 5.
+Windows shards 4 and 5 of that table. It was not measured again for the
+ten.
 
 ## `mod merge_gate_answers {`
 

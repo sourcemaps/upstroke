@@ -5379,12 +5379,12 @@ mod ci_model;
 mod workflow;
 
 use ci_model::{
-    CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, MACOS_SHARD_FILTERS, MSRV_COMMAND, MSRV_JOB,
-    OVERRIDING_REPO_FILES, PICK_WINDOWS_HOME_NAME, PICK_WINDOWS_HOME_SCRIPT, RUSTFLAGS_KEY,
-    TEST_COMMAND, TEST_SHARD_COMMAND, TEST_WINDOWS_CONDITION, TEST_WINDOWS_HOSTED_CONDITION,
-    TEST_WINDOWS_HOSTED_JOB, TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM,
-    WINDOWS_SHARD_FILTERS, WINDOWS_SHARD_FLOORS, WINDOWS_SHARD_WITNESS, WINDOWS_TEST_FLOOR,
-    WINDOWS_TEST_WITNESS,
+    CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, LINUX_SHARD_FILTERS, MACOS_SHARD_FILTERS,
+    MSRV_COMMAND, MSRV_JOB, OVERRIDING_REPO_FILES, PICK_WINDOWS_HOME_NAME,
+    PICK_WINDOWS_HOME_SCRIPT, RUSTFLAGS_KEY, TEST_COMMAND, TEST_SHARD_COMMAND,
+    TEST_WINDOWS_CONDITION, TEST_WINDOWS_HOSTED_CONDITION, TEST_WINDOWS_HOSTED_JOB,
+    TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM, WINDOWS_SHARD_FILTERS,
+    WINDOWS_SHARD_FLOORS, WINDOWS_SHARD_WITNESS, WINDOWS_TEST_FLOOR, WINDOWS_TEST_WITNESS,
 };
 use workflow::{
     WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_pick_windows_home_complaints,
@@ -6172,7 +6172,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                         vec![
                             job_page(&[
                                 (11, "lint", "in_progress"),
-                                (12, "test (ubuntu-latest)", "in_progress"),
+                                (12, "test (ubuntu-latest, 1 of 2)", "in_progress"),
                             ]),
                             job_page(&[(13, guest, "in_progress")]),
                         ],
@@ -7120,13 +7120,18 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
     assert_eq!(
         windows,
         [
-            "engine::topology::coordinator::tests::a",
-            "engine::topology::coordinator:: --skip engine::topology::coordinator::tests::a",
-            "engine::topology:: --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator::",
-            "engine:: --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::",
-            "--skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology:: --skip engine::",
+            "engine::topology::coordinator::tests::a_p",
+            "engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_p",
+            "engine::topology::coordinator::tests::a --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r",
+            "engine::topology::coordinator:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a",
+            "engine::topology::recover:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator::",
+            "engine::topology:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover::",
+            "engine:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::topology::",
+            "runner:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::topology:: --skip engine::",
+            "workspace_manager:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::topology:: --skip engine:: --skip runner::",
+            "--skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::topology:: --skip engine:: --skip runner:: --skip workspace_manager::",
         ],
-        "the Windows shards' libtest arguments are not the five written out here: each shard's \
+        "the Windows shards' libtest arguments are not the ten written out here: each shard's \
          are its filter and a `--skip` for every filter before it, and the last shard's are \
          only the skips"
     );
@@ -7134,11 +7139,19 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
     assert_eq!(
         macos,
         [
-            "engine::topology::",
-            "engine:: --skip engine::topology::",
-            "--skip engine::topology:: --skip engine::",
+            "engine::topology::coordinator::",
+            "engine::topology:: --skip engine::topology::coordinator::",
+            "engine:: --skip engine::topology::coordinator:: --skip engine::topology::",
+            "runner:: --skip engine::topology::coordinator:: --skip engine::topology:: --skip engine::",
+            "--skip engine::topology::coordinator:: --skip engine::topology:: --skip engine:: --skip runner::",
         ],
-        "the macOS shards' libtest arguments are not the three written out here"
+        "the macOS shards' libtest arguments are not the five written out here"
+    );
+    let linux = shard_selections(&LINUX_SHARD_FILTERS);
+    assert_eq!(
+        linux,
+        ["engine::", "--skip engine::"],
+        "the Linux shards' libtest arguments are not the two written out here"
     );
     let unsharded = shard_selections(&[]);
     assert_eq!(
@@ -7147,43 +7160,80 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
         "a table with no filter is not one shard with no arguments, which is the whole suite"
     );
 
-    for (name, windows_shard, macos_shard) in [
+    for (name, windows_shard, macos_shard, linux_shard) in [
+        (
+            "engine::topology::coordinator::tests::a_pipeline_is_served_while_an_intent_removals_repair_plan_waits_on_a_torn_registration",
+            1,
+            1,
+            1,
+        ),
+        (
+            "engine::topology::coordinator::tests::a_registry_refusal_after_two_paid_passes_is_recorded_with_both_at_width_one",
+            2,
+            1,
+            1,
+        ),
         (
             "engine::topology::coordinator::tests::a_budget_stop_drains",
+            3,
             1,
             1,
         ),
         (
             "engine::topology::coordinator::tests::halt_cancels_in_flight_attempt_at_width_three",
-            2,
+            4,
+            1,
             1,
         ),
         (
             "engine::topology::coordinator::tests::interleaving::a_budget_stop_under_every_seed",
-            2,
+            4,
+            1,
             1,
         ),
         (
             "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
-            3,
+            5,
+            2,
             1,
         ),
-        ("engine::tests::host_acceptance_record", 4, 2),
         (
-            "workspace_manager::tests::engine::a_name_with_a_filter_inside_it",
+            "engine::topology::attempt::tests::kill_after_the_snapshot_intent_before_its_worktree_is_reclaimed",
+            6,
+            2,
+            1,
+        ),
+        ("engine::tests::host_acceptance_record", 7, 3, 1),
+        (
+            "runner::container::tests::container_capability_record",
+            8,
             4,
             2,
         ),
         (
-            "effects::tests::the_workflow_shape_oracle_refuses_every_escape_the_ledger_names",
-            5,
+            "workspace_manager::tests::engine::a_name_with_a_filter_inside_it",
+            7,
             3,
+            1,
         ),
-        ("tests::a_test_of_the_binary_harness", 5, 3),
+        (
+            "workspace_manager::tests::a_reservation_is_released",
+            9,
+            5,
+            2,
+        ),
+        (
+            "effects::tests::the_workflow_shape_oracle_refuses_every_escape_the_ledger_names",
+            10,
+            5,
+            2,
+        ),
+        ("tests::a_test_of_the_binary_harness", 10, 5, 2),
     ] {
         for (table, selections, expected) in [
             ("Windows", &windows, windows_shard),
             ("macOS", &macos, macos_shard),
+            ("Linux", &linux, linux_shard),
             ("empty", &unsharded, 1),
         ] {
             let running: Vec<usize> = selections
@@ -7205,6 +7255,7 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
     for (table, filters) in [
         ("WINDOWS_SHARD_FILTERS", WINDOWS_SHARD_FILTERS.as_slice()),
         ("MACOS_SHARD_FILTERS", MACOS_SHARD_FILTERS.as_slice()),
+        ("LINUX_SHARD_FILTERS", LINUX_SHARD_FILTERS.as_slice()),
     ] {
         let malformed: Vec<&str> = filters
             .iter()
