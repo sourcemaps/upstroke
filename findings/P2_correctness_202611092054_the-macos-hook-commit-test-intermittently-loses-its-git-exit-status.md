@@ -67,18 +67,22 @@ This replaces, for macOS only and until the repair, the instruction above not to
 Everywhere else, and on macOS once the finding is repaired, that instruction stands as written. The
 assertion is not weakened, and nothing retries it.
 
-The reason for the decision: on 2026-11-11 the test failed on macOS in nine of the fifty-six
-completed `test (macos-latest)` jobs that ran it, 9 of 56, sixteen per cent.
+The reason for the decision: on 2026-11-11 the test failed on macOS in nine of the fifty-eight
+completed `test (macos-latest)` jobs that ran it, 9 of 58, between fifteen and sixteen per cent.
 
 How that was counted. The operator measured it from the GitHub API and the failed jobs' logs at
-about 23:45 UTC on 2026-11-11. The population is every run of the `CI` workflow created on
-2026-11-11 UTC up to that time: 84 runs, on every event (77 pull-request, 4 merge-queue, 3 push).
-Each has one `test (macos-latest)` job. Of the 84 jobs, 49 succeeded, 11 failed, 23 were cancelled
-(superseded by a later push or edit) and 1 was still running. Of the 60 completed jobs, 4 ran with
-this test already ignored on macOS (three on the branch of pull request #370 and one on the branch
-that added this section), so 56 completed jobs ran the test, and it failed in 9 of them. The other
-two failed jobs failed on other tests only: `agent::proc::tests::unix_reaper_kills_labeled_containers`
-in run 43028506871, and a test added by pull request #340 in run 43112671690.
+00:55 UTC on 2026-11-12, after every job of every run created on 2026-11-11 UTC had ended. The
+population is every run of the `CI` workflow created on 2026-11-11 UTC: 86 runs, on every event
+(79 pull-request, 4 merge-queue, 3 push). Each has one `test (macos-latest)` job. Of the 86 jobs,
+50 succeeded, 12 failed, 24 were cancelled (superseded by a later push or edit) and none was still
+running. Of the 62 completed jobs, 4 ran with this test already ignored on macOS (three on the
+branch of pull request #370 and one on the branch that added this section), so 58 completed jobs
+ran the test, and it failed in 9 of them. The other three failed jobs failed on other tests only:
+`agent::proc::tests::unix_reaper_kills_labeled_containers` in run 43028506871; a test added by pull
+request #340 in run 43112671690; and
+`engine::topology::recover::tests::sampled_cherry_pick_child_kills_every_residue_classified_and_recovered`
+in run 43118198459. An earlier version of this section gave a count cut off at about 23:45 UTC on
+2026-11-11 (84 runs, 9 of 56) that missed two runs created at 23:39 UTC; this count replaces it.
 
 In all nine the panic is the test's final assertion, reported at `src/runner/host/tests.rs:8600:5`,
 with the message `1 launcher(s) changed the user's commit:` followed by one case's label and
