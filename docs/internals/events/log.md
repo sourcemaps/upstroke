@@ -278,7 +278,10 @@ Do what an observer answered at `point` of `site`.
 [`Injection::Kill`] aborts, and it is `abort` rather than `panic!` or
 `exit` for the reason [`crate::agent::proc`] gives: the claim under test is
 what a process that dies **without running any cleanup** leaves durable, and
-both of the others run destructors.
+both of the others run some. `panic!` unwinds and runs the stack's
+destructors. `std::process::exit` runs no stack destructors, but it is the
+orderly exit and runs the process-exit handlers registered with the platform.
+`std::process::abort` runs neither.
 
 ## `fn injected(site: EventSite, point: SubEffectPoint, path: &Path) -> UpstrokeError {`
 
