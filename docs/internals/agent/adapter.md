@@ -384,18 +384,36 @@ midnight and `12pm` noon. The spelling is matched exactly, case included, as
 it was printed.
 
 Neither message gives a year, and the time-only one gives no date. Both are
-completed against `now_unix`, the moment the message is read:
+completed against `now_unix`, the moment the message is read, by one rule:
+the reset is the occurrence nearest to `now_unix`. There are three
+candidates, in order:
 
-- A time only is the first such time at or after `now_unix`: today if it is
-  still to come, else tomorrow. A message that gives no date names the next
-  time that clock time comes round; the five-hour window it was printed for
-  reopens well inside a day.
-- A month and day is that date at that time in `now_unix`'s year. If that is
-  more than one day before `now_unix`, it is the same date in the next year,
-  so a `Jan 2` reset read on 31 December is next year's. A reset is never in
-  the past, but the day of tolerance keeps a message read shortly after its
-  own reset in its own year. Without it, a message read at 09:01 on 14
-  November for a 09:00 reset would be read as a reset a year away.
+- for a time only, that time yesterday, today and tomorrow;
+- for a month and day, that date at that time in the year before
+  `now_unix`'s, in its year and in the year after. A candidate that is not a
+  real date, such as 29 February in a common year, is not a candidate, and
+  if none is, the answer is `None`.
+
+The candidate with the smallest absolute distance from `now_unix` is the
+reset, and on a tie the later one. So a message read well before its reset
+gets the coming one: `5:30am` read the evening before is the next morning's,
+and `Jan 2` read on 30 December is the coming 2 January. A message read just
+after its reset keeps its own reset, a moment in the past, rather than one a
+day or a year away: `5:30am` read at 05:30:01 is that morning's, and
+`Dec 31, 11pm` read at 00:30 on 1 January is the day before's, in the year
+before. Either way the reset is never more than half a day from `now_unix`
+for a time only, nor more than half a year for a date every year has.
+`Feb 29` is the exception, since at most one of the three years has it: read
+in 2027 it is 29 February 2028, more than a year ahead; read in 2029 it is
+29 February 2028, in the past; read in 2026, with no leap year among 2025,
+2026 and 2027, it is `None`.
+
+This rule replaced two, after the frontier review found a defect in each. A
+time only was the first such time at or after `now_unix`, so a message read
+a second after its reset was recorded a day ahead. A month and day was in
+`now_unix`'s year unless that was more than a day past, so the previous year
+was never a candidate and a `Dec 31` reset read on 1 January was recorded a
+year ahead.
 
 `None` means the text gave no reset this can stand behind: no `resets` at
 all, a zone other than `(UTC)`, or any part that does not parse (an hour
@@ -417,8 +435,9 @@ It never panics, on any text and any `now_unix`. The text is read with
 `split_at_checked`, each of which returns a slice of the same string or
 `None`; the only indices come from `find` and `match_indices`, so they
 fall on character boundaries. The clock arithmetic is checked: a
-`now_unix` past `i64::MAX`, or a reset whose seconds would overflow, gives
-`None`.
+`now_unix` past `i64::MAX`, or a candidate whose seconds would overflow,
+gives `None`. So does a nearest candidate before 1970, which has no unix
+time to format; only a clock read near the epoch can meet one.
 
 ## `fn first_reset(text: &str) -> Option<&str> {`
 
@@ -451,13 +470,16 @@ The time of day as seconds after midnight, and what follows it. `hour % 12`
 is what makes `12am` midnight and `12pm` noon: the twelve wraps to zero and
 `pm` adds twelve hours.
 
-## `fn unix_seconds_at(year: i64, month: i64, day: i64, second_of_day: i64) -> Option<i64> {`
+## `fn epoch_day(year: i64, month: i64, day: i64) -> Option<i64> {`
 
-The unix time of a date and time, or `None` when the month does not have
-that day. `util::days_from_civil` counts a missing day on into the next
-month, so the date is converted back with `util::civil_from_days` and must
-come back unchanged. That is how `Feb 29` is accepted in 2028 and refused
-in 2027, and how `Nov 31` is refused in any year.
+The day number of a date, counted from 1970-01-01, or `None` when the month
+does not have that day. `util::days_from_civil` counts a missing day on into
+the next month, so the date is converted back with `util::civil_from_days`
+and must come back unchanged. That is how `Feb 29` is a candidate in 2028
+and not in 2027, and how `Nov 31` is a candidate in no year, so it gives
+`None`. It returns days rather than seconds so that a date the month lacks
+and a time that overflows stay apart: the first only drops a candidate, the
+second refuses the whole reset.
 
 ## `mod tests` › `fn a_successful_answer_from(id: &str) -> String {`
 
@@ -671,36 +693,80 @@ it was seen: the reset is 05:30 that day.
 The dated message as Claude Code printed it, read on 12 November 2026: the
 reset is 14 November 2026 at 09:00.
 
-## `mod tests` › `fn a_time_only_reset_already_passed_today_is_tomorrows() {`
+## `mod tests` › `fn a_time_only_reset_read_just_after_itself_is_its_own() {`
 
-Read at 06:00, a 05:30 reset is tomorrow's. Read at 05:30 exactly, it is
-today's ("at or after"), and a second later it is tomorrow's, so both
-sides of the boundary are pinned.
+The first defect the frontier review found. The five-hour message read at
+05:30 exactly, at 05:30:01 and at 06:00 gives 05:30 that morning each time.
+Under the rule this replaced, "the first such time at or after", the last
+two gave the next morning's, a day ahead of the reset the message named.
+This test replaced `a_time_only_reset_already_passed_today_is_tomorrows`,
+which pinned that rule.
+
+## `mod tests` › `fn a_time_only_reset_read_the_evening_before_is_the_next_mornings() {`
+
+Read at 20:00, `5:30am` is the next morning's, 9.5 hours ahead rather than
+14.5 hours past. 17:30 is halfway between the two mornings: one second
+before it the morning just gone is the nearer, and at it the two are as
+near as each other and the later is taken, so both sides of the tie are
+pinned.
 
 ## `mod tests` › `fn twelve_am_is_midnight_and_twelve_pm_is_noon() {`
 
-Read at 01:00: `12am` and `12:45am` have passed and are tomorrow's 00:00 and
-00:45; `12pm` and `12:45pm` are today's 12:00 and 12:45. `1am`, `1pm` and
-`11:59pm` pin the hours either side of the wrap. Reading `12am` as 12:00, as
-a parser that only adds twelve for `pm` would, fails here.
+Read at 01:00: `12am` and `12:45am` are an hour and a quarter of an hour
+past, and are today's 00:00 and 00:45; `12pm` and `12:45pm` are today's
+12:00 and 12:45. `1am`, `1pm` and `11:59pm` pin the hours either side of the
+wrap: `1am` is now, `1pm` is twelve hours either way and so the later,
+today's, and `11:59pm` is yesterday's, an hour past. Reading `12am` as
+12:00, as a parser that only adds twelve for `pm` would, fails here.
 
-## `mod tests` › `fn a_dated_reset_read_just_after_itself_stays_in_its_year() {`
+The read time is the one this test had under the rule this replaced, when
+`12am`, `12:45am` and `11:59pm` gave tomorrow's 00:00, tomorrow's 00:45 and
+today's 23:59. The nearest-occurrence rule moved those three expectations,
+and the wrap is pinned just as well by the new ones.
 
-The day of tolerance. The `Nov 14, 9am` message read on 14 November at
-20:00, and again at 09:00 on 15 November, exactly one day after its reset,
-still gives 14 November 2026. One second later it gives 14 November 2027.
+## `mod tests` › `fn a_dated_reset_is_its_own_until_the_next_years_is_nearer() {`
+
+The `Nov 14, 9am` message read on 14 November at 20:00, at 09:00 on 15
+November, and a second after that gives 14 November 2026. Under the rule
+this replaced, that last read was past its day of tolerance and gave 14
+November 2027; this test replaced
+`a_dated_reset_read_just_after_itself_stays_in_its_year`, which pinned it.
+The two resets are 365 days apart, so halfway between them is 21:00 on 15
+May 2027, which the test checks first. One second before it the reset is
+still 2026's, and at it the two are as near as each other and the later,
+2027's, is taken.
 
 ## `mod tests` › `fn a_dated_reset_across_a_year_end_is_next_years() {`
 
-Read at noon on 31 December 2026, `Jan 2` is 2 January 2027 and a time-only
-`5am` is 1 January 2027. `Dec 31, 11pm` is later that same day, so the
-year-end rule does not move a reset that is still to come.
+Read at 20:00 on 31 December 2026, `Jan 2` is 2 January 2027 and a time-only
+`5am` is 1 January 2027, nine hours ahead. `Dec 31, 11pm` is later that same
+day. Read at noon on 30 December, `Jan 2` is still the coming 2 January, not
+the one just under a year past.
 
-## `mod tests` › `fn feb_29_resets_in_a_leap_year_and_is_refused_in_another() {`
+The read time was noon until the nearest-occurrence rule: at noon, `5am` is
+seven hours past and the rule gives that morning's, which is no longer a
+year-end case, so the read moved to 20:00 rather than the expectation.
 
-`Feb 29` read on 27 February 2028 is 29 February 2028. Read on 27 February
-2027, a year without that day, it is refused rather than moved to
-1 March.
+## `mod tests` › `fn a_reset_read_just_after_a_year_end_is_last_years() {`
+
+The second defect the frontier review found. At 00:30 on 1 January 2027,
+`Dec 31, 11pm` is 31 December 2026, an hour and a half past, and not 31
+December 2027, the date in the year read from the clock, which the rule
+this replaced gave. A time-only `11pm` read then is the same instant,
+yesterday's.
+
+## `mod tests` › `fn feb_29_is_a_neighbouring_years_leap_day_or_none() {`
+
+`Feb 29, 3pm` read on 27 February of four years in a row. In 2028 it is
+29 February 2028. In 2027 and in 2029, years without that day, it is 29
+February 2028, the leap day in the next year and in the year before: the
+nearest leap year is a candidate when it is a neighbouring year, whether that
+puts the reset a year ahead or in the past. In 2026 it is `None`, since none
+of 2025, 2026 and 2027 has the day; it is never moved to 1 March. The test
+was `feb_29_resets_in_a_leap_year_and_is_refused_in_another`, which gave
+`None` in 2027 because only the current year and, after it, the next were
+read; with the next year a candidate whatever the date, 2027's expectation
+changed.
 
 ## `mod tests` › `fn a_zone_other_than_utc_gives_none() {`
 

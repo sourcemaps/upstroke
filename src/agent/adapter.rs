@@ -257,27 +257,23 @@ pub fn reset_at_from_limit_message(text: &str, now_unix: u64) -> Option<String> 
     }
 
     let now = i64::try_from(now_unix).ok()?;
-    let at = match date {
-        None => {
-            let today = now.checked_sub(now.rem_euclid(86_400))?;
-            let at = today.checked_add(second_of_day)?;
-            if at >= now {
-                at
-            } else {
-                at.checked_add(86_400)?
-            }
-        }
+    let today = now.div_euclid(86_400);
+    let days = match date {
+        None => [today.checked_sub(1)?, today, today.checked_add(1)?].map(Some),
         Some((month, day)) => {
-            let (year, _, _) = crate::util::civil_from_days(now.div_euclid(86_400));
-            let this_year = unix_seconds_at(year, month, day, second_of_day)?;
-            if this_year.checked_add(86_400)? >= now {
-                this_year
-            } else {
-                unix_seconds_at(year.checked_add(1)?, month, day, second_of_day)?
-            }
+            let (year, _, _) = crate::util::civil_from_days(today);
+            [year.checked_sub(1)?, year, year.checked_add(1)?]
+                .map(|year| epoch_day(year, month, day))
         }
     };
-    Some(crate::util::rfc3339_utc(u64::try_from(at).ok()?))
+    let mut nearest: Option<i64> = None;
+    for day in days.into_iter().flatten() {
+        let at = day.checked_mul(86_400)?.checked_add(second_of_day)?;
+        if nearest.is_none_or(|best| at.abs_diff(now) <= best.abs_diff(now)) {
+            nearest = Some(at);
+        }
+    }
+    Some(crate::util::rfc3339_utc(u64::try_from(nearest?).ok()?))
 }
 
 fn first_reset(text: &str) -> Option<&str> {
@@ -340,12 +336,9 @@ fn time_of_day(text: &str) -> Option<(i64, &str)> {
     Some((hour * 3600 + minute * 60, rest))
 }
 
-fn unix_seconds_at(year: i64, month: i64, day: i64, second_of_day: i64) -> Option<i64> {
+fn epoch_day(year: i64, month: i64, day: i64) -> Option<i64> {
     let days = crate::util::days_from_civil(year, month, day);
-    if crate::util::civil_from_days(days) != (year, month, day) {
-        return None;
-    }
-    days.checked_mul(86_400)?.checked_add(second_of_day)
+    (crate::util::civil_from_days(days) == (year, month, day)).then_some(days)
 }
 
 #[cfg(test)]
@@ -678,8 +671,10 @@ mod tests {
     const DAY: u64 = 86_400;
     const NOV_11_2026: u64 = 1_794_355_200;
     const DEC_31_2026: u64 = 1_798_675_200;
+    const FEB_27_2026: u64 = 1_772_150_400;
     const FEB_27_2027: u64 = 1_803_686_400;
     const FEB_27_2028: u64 = 1_835_222_400;
+    const FEB_27_2029: u64 = 1_866_844_800;
 
     fn reset(text: &str, now: u64) -> Option<String> {
         reset_at_from_limit_message(text, now)
@@ -690,8 +685,10 @@ mod tests {
         for (now, midnight) in [
             (NOV_11_2026, "2026-11-11T00:00:00Z"),
             (DEC_31_2026, "2026-12-31T00:00:00Z"),
+            (FEB_27_2026, "2026-02-27T00:00:00Z"),
             (FEB_27_2027, "2027-02-27T00:00:00Z"),
             (FEB_27_2028, "2028-02-27T00:00:00Z"),
+            (FEB_27_2029, "2029-02-27T00:00:00Z"),
         ] {
             assert_eq!(crate::util::rfc3339_utc(now), midnight);
         }
@@ -714,20 +711,34 @@ mod tests {
     }
 
     #[test]
-    fn a_time_only_reset_already_passed_today_is_tomorrows() {
-        assert_eq!(
-            reset(FIVE_HOUR, NOV_11_2026 + 6 * HOUR).as_deref(),
-            Some("2026-11-12T05:30:00Z")
-        );
+    fn a_time_only_reset_read_just_after_itself_is_its_own() {
         let at_the_reset = NOV_11_2026 + 5 * HOUR + 30 * 60;
+        for now in [at_the_reset, at_the_reset + 1, NOV_11_2026 + 6 * HOUR] {
+            assert_eq!(
+                reset(FIVE_HOUR, now).as_deref(),
+                Some("2026-11-11T05:30:00Z"),
+                "read at {}",
+                crate::util::rfc3339_utc(now)
+            );
+        }
+    }
+
+    #[test]
+    fn a_time_only_reset_read_the_evening_before_is_the_next_mornings() {
         assert_eq!(
-            reset(FIVE_HOUR, at_the_reset).as_deref(),
+            reset(FIVE_HOUR, NOV_11_2026 + 20 * HOUR).as_deref(),
+            Some("2026-11-12T05:30:00Z")
+        );
+        let halfway = NOV_11_2026 + 17 * HOUR + 30 * 60;
+        assert_eq!(
+            reset(FIVE_HOUR, halfway - 1).as_deref(),
             Some("2026-11-11T05:30:00Z"),
-            "a reset at the very second it is read is still today's"
+            "a second short of halfway, the morning just gone is the nearer"
         );
         assert_eq!(
-            reset(FIVE_HOUR, at_the_reset + 1).as_deref(),
-            Some("2026-11-12T05:30:00Z")
+            reset(FIVE_HOUR, halfway).as_deref(),
+            Some("2026-11-12T05:30:00Z"),
+            "halfway between two mornings, the later is taken"
         );
     }
 
@@ -735,38 +746,45 @@ mod tests {
     fn twelve_am_is_midnight_and_twelve_pm_is_noon() {
         let now = NOV_11_2026 + HOUR;
         for (text, expected) in [
-            ("resets 12am (UTC)", "2026-11-12T00:00:00Z"),
-            ("resets 12:45am (UTC)", "2026-11-12T00:45:00Z"),
+            ("resets 12am (UTC)", "2026-11-11T00:00:00Z"),
+            ("resets 12:45am (UTC)", "2026-11-11T00:45:00Z"),
             ("resets 12pm (UTC)", "2026-11-11T12:00:00Z"),
             ("resets 12:45pm (UTC)", "2026-11-11T12:45:00Z"),
             ("resets 1am (UTC)", "2026-11-11T01:00:00Z"),
             ("resets 1pm (UTC)", "2026-11-11T13:00:00Z"),
-            ("resets 11:59pm (UTC)", "2026-11-11T23:59:00Z"),
+            ("resets 11:59pm (UTC)", "2026-11-10T23:59:00Z"),
         ] {
             assert_eq!(reset(text, now).as_deref(), Some(expected), "{text}");
         }
     }
 
     #[test]
-    fn a_dated_reset_read_just_after_itself_stays_in_its_year() {
+    fn a_dated_reset_is_its_own_until_the_next_years_is_nearer() {
+        let the_reset = NOV_11_2026 + 3 * DAY + 9 * HOUR;
+        for now in [the_reset + 11 * HOUR, the_reset + DAY, the_reset + DAY + 1] {
+            assert_eq!(
+                reset(FABLE, now).as_deref(),
+                Some("2026-11-14T09:00:00Z"),
+                "read at {}",
+                crate::util::rfc3339_utc(now)
+            );
+        }
+        let halfway = the_reset + 365 * DAY / 2;
+        assert_eq!(crate::util::rfc3339_utc(halfway), "2027-05-15T21:00:00Z");
         assert_eq!(
-            reset(FABLE, NOV_11_2026 + 3 * DAY + 20 * HOUR).as_deref(),
+            reset(FABLE, halfway - 1).as_deref(),
             Some("2026-11-14T09:00:00Z")
         );
-        let a_day_after = NOV_11_2026 + 4 * DAY + 9 * HOUR;
         assert_eq!(
-            reset(FABLE, a_day_after).as_deref(),
-            Some("2026-11-14T09:00:00Z")
-        );
-        assert_eq!(
-            reset(FABLE, a_day_after + 1).as_deref(),
-            Some("2027-11-14T09:00:00Z")
+            reset(FABLE, halfway).as_deref(),
+            Some("2027-11-14T09:00:00Z"),
+            "halfway between two years' resets, the later is taken"
         );
     }
 
     #[test]
     fn a_dated_reset_across_a_year_end_is_next_years() {
-        let now = DEC_31_2026 + 12 * HOUR;
+        let now = DEC_31_2026 + 20 * HOUR;
         assert_eq!(
             reset("resets Jan 2, 9am (UTC)", now).as_deref(),
             Some("2027-01-02T09:00:00Z")
@@ -779,16 +797,50 @@ mod tests {
             reset("resets Dec 31, 11pm (UTC)", now).as_deref(),
             Some("2026-12-31T23:00:00Z")
         );
+        let dec_30 = DEC_31_2026 - DAY + 12 * HOUR;
+        assert_eq!(
+            reset("resets Jan 2, 9am (UTC)", dec_30).as_deref(),
+            Some("2027-01-02T09:00:00Z")
+        );
     }
 
     #[test]
-    fn feb_29_resets_in_a_leap_year_and_is_refused_in_another() {
-        let text = "resets Feb 29, 3pm (UTC)";
+    fn a_reset_read_just_after_a_year_end_is_last_years() {
+        let now = DEC_31_2026 + DAY + 30 * 60;
+        assert_eq!(crate::util::rfc3339_utc(now), "2027-01-01T00:30:00Z");
         assert_eq!(
-            reset(text, FEB_27_2028).as_deref(),
-            Some("2028-02-29T15:00:00Z")
+            reset("resets Dec 31, 11pm (UTC)", now).as_deref(),
+            Some("2026-12-31T23:00:00Z")
         );
-        assert_eq!(reset(text, FEB_27_2027), None);
+        assert_eq!(
+            reset("resets 11pm (UTC)", now).as_deref(),
+            Some("2026-12-31T23:00:00Z")
+        );
+    }
+
+    #[test]
+    fn feb_29_is_a_neighbouring_years_leap_day_or_none() {
+        let text = "resets Feb 29, 3pm (UTC)";
+        for (now, expected, why) in [
+            (FEB_27_2026, None, "none of 2025, 2026 and 2027 has the day"),
+            (
+                FEB_27_2027,
+                Some("2028-02-29T15:00:00Z"),
+                "2027 has no such day, the next year has",
+            ),
+            (
+                FEB_27_2028,
+                Some("2028-02-29T15:00:00Z"),
+                "a leap year's own",
+            ),
+            (
+                FEB_27_2029,
+                Some("2028-02-29T15:00:00Z"),
+                "2029 has no such day, the previous year has, and it is in the past",
+            ),
+        ] {
+            assert_eq!(reset(text, now).as_deref(), expected, "{why}");
+        }
     }
 
     #[test]

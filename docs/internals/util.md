@@ -571,8 +571,9 @@ read the same way, as the event's `ts`.
 A clock that cannot read (`SystemTime` before the epoch) yields the epoch
 rather than failing — a timestamp is metadata on the event, and losing the
 event to a clock problem would be the worse trade. Read against the epoch, a
-reset is still a reset at or after the time given, so the worst a broken
-clock does to `reset_at` is put it in 1970.
+reset is the occurrence nearest 1970-01-01, so the worst a broken clock does
+to `reset_at` is put it in 1970, or leave it `None` when the nearest falls
+before the epoch.
 
 ## `pub(crate) fn rfc3339_utc(unix_seconds: u64) -> String {`
 

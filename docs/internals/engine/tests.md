@@ -5142,8 +5142,9 @@ The same run as the test above, with one difference: the worker's rate-limit tex
 Claude Code printed on 2026-11-11, `You've hit your 5-hour limit · resets 5:30am (UTC)`, set through
 `worker_rate_limit`. The one `pool_exhausted` event carries that text in its detail and a `reset_at`
 in the fixed-width RFC 3339 form ending `T05:30:00Z`. The test reads the clock before and after the
-run, and the reset falls in that window extended by a day: the first 05:30 UTC at or after the
-moment the signal was recorded, by string comparison, which the fixed width makes legitimate. The
+run, and the reset falls in that window extended by twelve hours either side: the 05:30 UTC nearest
+the moment the signal was recorded, which may be the one just past, by string comparison, which the
+fixed width makes legitimate. The
 estimate folded from the log up to the signal reports the pool exhausted with that same reset time:
 `attempt_finished` comes first and marks the pool with no reset, and `pool_exhausted` after it
 supplies the time. The run still completes, as the test above does, so the reset changes what is

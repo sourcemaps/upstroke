@@ -8087,9 +8087,9 @@ fn a_rate_limit_that_names_its_reset_records_it_on_pool_exhausted() {
     assert!(reset_at.ends_with("T05:30:00Z"), "{reset_at}");
     assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
     assert!(
-        crate::util::rfc3339_utc(before).as_str() <= reset_at
-            && reset_at < crate::util::rfc3339_utc(after + 86_400).as_str(),
-        "{reset_at} is the first 05:30 UTC at or after the signal, which fell between \
+        crate::util::rfc3339_utc(before.saturating_sub(43_200)).as_str() <= reset_at
+            && reset_at <= crate::util::rfc3339_utc(after + 43_200).as_str(),
+        "{reset_at} is the 05:30 UTC nearest the signal, which fell between \
          {before} and {after}"
     );
 
