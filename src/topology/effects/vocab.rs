@@ -1294,181 +1294,116 @@ mod tests {
     // numbers that move together. This census reads the source and compares the
     // enum's variants to its `ALL`.
 
-    /// Replace every comment and every string, byte-string, raw-string and
-    /// character literal with spaces, preserving byte length and newlines.
-    fn blank_comments_and_literals(source: &str) -> String {
-        let bytes = source.as_bytes();
-        let mut out = bytes.to_vec();
-        let at = |i: usize| bytes.get(i).copied();
-        let ident_byte =
-            |b: Option<u8>| matches!(b, Some(c) if c.is_ascii_alphanumeric() || c == b'_');
-        let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
-            for slot in out.iter_mut().take(to).skip(from) {
-                if *slot != b'\n' {
-                    *slot = b' ';
-                }
-            }
-        };
-        let mut i = 0;
-        while i < bytes.len() {
-            match (at(i), at(i + 1)) {
-                (Some(b'/'), Some(b'/')) => {
-                    let end = source
-                        .get(i..)
-                        .and_then(|rest| rest.find('\n'))
-                        .map_or(bytes.len(), |offset| i + offset);
-                    blank(&mut out, i, end);
-                    i = end;
-                }
-                (Some(b'/'), Some(b'*')) => {
-                    let mut depth = 1usize;
-                    let mut j = i + 2;
-                    while j < bytes.len() && depth > 0 {
-                        match (at(j), at(j + 1)) {
-                            (Some(b'/'), Some(b'*')) => {
-                                depth += 1;
-                                j += 2;
-                            }
-                            (Some(b'*'), Some(b'/')) => {
-                                depth -= 1;
-                                j += 2;
-                            }
-                            _ => j += 1,
-                        }
-                    }
-                    blank(&mut out, i, j);
-                    i = j;
-                }
-                (Some(first), _)
-                    if (first == b'r' || first == b'b') && !ident_byte(at(i.wrapping_sub(1))) =>
-                {
-                    // `r"`, `r#"`, `b"`, `br"`, `br#"` -- and anything else
-                    // starting with these letters is an identifier.
-                    let mut j = i + 1;
-                    if first == b'b' && at(j) == Some(b'r') {
-                        j += 1;
-                    }
-                    let raw = first == b'r' || at(i + 1) == Some(b'r');
-                    let mut hashes = 0usize;
-                    if raw {
-                        while at(j) == Some(b'#') {
-                            hashes += 1;
-                            j += 1;
-                        }
-                    }
-                    if at(j) != Some(b'"') || (!raw && hashes > 0) {
-                        i += 1;
-                        continue;
-                    }
-                    j += 1;
-                    let end = if raw {
-                        let mut k = j;
-                        loop {
-                            if k >= bytes.len() {
-                                break bytes.len();
-                            }
-                            if at(k) == Some(b'"')
-                                && (0..hashes).all(|h| at(k + 1 + h) == Some(b'#'))
-                            {
-                                break k + 1 + hashes;
-                            }
-                            k += 1;
-                        }
-                    } else {
-                        end_of_quoted(bytes, j)
-                    };
-                    blank(&mut out, i, end);
-                    i = end;
-                }
-                (Some(b'"'), _) => {
-                    let end = end_of_quoted(bytes, i + 1);
-                    blank(&mut out, i, end);
-                    i = end;
-                }
-                (Some(b'\''), _) => {
-                    // A lifetime, not a literal, unless the quote closes within
-                    // one escape or one character. `&'static [Self]` is the
-                    // shape that a naive scan swallows the rest of the file on.
-                    let end = if at(i + 1) == Some(b'\\') {
-                        let mut k = i + 2;
-                        while k < bytes.len() && at(k) != Some(b'\'') {
-                            k += 1;
-                        }
-                        Some(k + 1)
-                    } else if at(i + 2) == Some(b'\'') {
-                        Some(i + 3)
-                    } else {
-                        None
-                    };
-                    match end {
-                        Some(end) => {
-                            blank(&mut out, i, end);
-                            i = end;
-                        }
-                        None => i += 1,
-                    }
-                }
-                _ => i += 1,
-            }
-        }
-        String::from_utf8(out).unwrap_or_else(|_| source.to_owned())
-    }
-
-    /// The index one past the closing quote of a `"`-delimited literal whose
-    /// body starts at `from`.
-    fn end_of_quoted(bytes: &[u8], from: usize) -> usize {
-        let mut i = from;
-        while i < bytes.len() {
-            match bytes.get(i).copied() {
-                Some(b'\\') => i += 2,
-                Some(b'"') => return i + 1,
-                Some(_) => i += 1,
-                None => break,
-            }
-        }
-        bytes.len()
-    }
-
-    /// `(enum name, variants declared)` for every `pub enum` in `source`.
+    /// Count file-level `pub enum` declarations independently of `ALL` and of
+    /// host cfg evaluation. Only commas outside payloads, attributes and
+    /// discriminant subexpressions separate variants; newlines do not.
     fn declared_variants(source: &str) -> Vec<(String, usize)> {
-        let blanked = blank_comments_and_literals(source);
-        let lines: Vec<&str> = blanked.lines().collect();
+        let blanked = crate::effects::blank_comments_and_strings(source);
+        let tokens = census_tokens(&blanked);
         let mut found = Vec::new();
         let mut index = 0usize;
-        while let Some(line) = lines.get(index) {
-            index += 1;
-            let Some(name) = line
-                .strip_prefix("pub enum ")
-                .and_then(|rest| rest.strip_suffix(" {"))
-            else {
-                continue;
-            };
-            let mut variants = 0usize;
-            while let Some(body) = lines.get(index) {
-                index += 1;
-                if *body == "}" {
-                    break;
+        while index < tokens.len() {
+            match tokens.get(index..) {
+                Some(["pub", "enum", name, "{", ..]) => {
+                    let end = past_census_group(&tokens, index + 3);
+                    let body = &tokens[index + 4..end - 1];
+                    let mut variants = 0;
+                    let mut at = 0;
+                    let mut beginning = true;
+                    while let Some(token) = body.get(at) {
+                        match *token {
+                            "(" | "[" | "{" => at = past_census_group(body, at),
+                            "<" if matches!(
+                                body.get(at.wrapping_sub(1)).copied(),
+                                Some(":" | "=" | "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^")
+                            ) =>
+                            {
+                                at = past_census_generics(body, at);
+                            }
+                            "," => {
+                                beginning = true;
+                                at += 1;
+                            }
+                            "#" if beginning => at += 1,
+                            _ => {
+                                if beginning {
+                                    variants += 1;
+                                    beginning = false;
+                                }
+                                at += 1;
+                            }
+                        }
+                    }
+                    found.push(((*name).to_owned(), variants));
+                    index = end;
                 }
-                if is_variant_line(body.trim()) {
-                    variants += 1;
-                }
+                Some(["(" | "[" | "{", ..]) => index = past_census_group(&tokens, index),
+                _ => index += 1,
             }
-            found.push((name.to_owned(), variants));
         }
         found
     }
 
-    fn is_variant_line(text: &str) -> bool {
-        let Some(body) = text.strip_suffix(',').or_else(|| text.strip_suffix('{')) else {
-            return false;
-        };
-        let identifier = body
-            .split_once(['=', '(', '{'])
-            .map_or(body, |(identifier, _)| identifier)
-            .trim();
-        let mut characters = identifier.chars();
-        matches!(characters.next(), Some(first) if first.is_ascii_uppercase())
-            && characters.all(|c| c.is_ascii_alphanumeric())
+    fn census_tokens(code: &str) -> Vec<&str> {
+        let mut characters = code.char_indices().peekable();
+        let mut tokens = Vec::new();
+        while let Some((start, ch)) = characters.next() {
+            if ch.is_whitespace() {
+                continue;
+            }
+            let mut end = start + ch.len_utf8();
+            if ch.is_alphanumeric() || ch == '_' {
+                while let Some(&(at, next)) = characters.peek() {
+                    if !next.is_alphanumeric() && next != '_' {
+                        break;
+                    }
+                    end = at + next.len_utf8();
+                    characters.next();
+                }
+            }
+            tokens.push(&code[start..end]);
+        }
+        tokens
+    }
+
+    fn past_census_group(tokens: &[&str], open: usize) -> usize {
+        let mut depth = 0usize;
+        for (at, token) in tokens.iter().enumerate().skip(open) {
+            match *token {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return at + 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("an unclosed delimiter in the census source");
+    }
+
+    fn past_census_generics(tokens: &[&str], open: usize) -> usize {
+        let mut depth = 0usize;
+        let mut at = open;
+        while let Some(token) = tokens.get(at) {
+            match *token {
+                "(" | "[" | "{" => {
+                    at = past_census_group(tokens, at);
+                    continue;
+                }
+                "<" => depth += 1,
+                ">" if tokens.get(at.wrapping_sub(1)) != Some(&"-") => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return at + 1;
+                    }
+                }
+                _ => {}
+            }
+            at += 1;
+        }
+        panic!("unclosed generic arguments in the census source");
     }
 
     #[test]
@@ -1479,6 +1414,8 @@ mod tests {
         let fixture = "\
 const NOISE: &'static str = \"pub enum Ghost {\\n    Boo,\\n}\";
 const RAW: &str = r#\"pub enum Phantom {\"#;
+pub struct Payload;
+#[repr(u8)]
 pub enum Real {
     One,
     // Two,
@@ -1491,7 +1428,7 @@ pub enum Real {
 }
 ";
         assert_eq!(
-            blank_comments_and_literals(fixture).len(),
+            crate::effects::blank_comments_and_strings(fixture).len(),
             fixture.len(),
             "the blanker moved a byte"
         );
@@ -1503,13 +1440,139 @@ pub enum Real {
 
         // The injected violation: one variant added to the enum and to nothing
         // else has to move the count.
-        let widened = fixture.replace("    Three(Payload),", "    Three(Payload),\n    Four,");
+        let widened = fixture.replace("    Three(Payload),", "    Three(Payload),\n    Added,");
         assert_eq!(declared_variants(&widened), vec![("Real".to_owned(), 6)]);
+        assert_ne!(declared_variants(&widened), declared_variants(fixture));
+        census_fixture_compiles(fixture);
+        census_fixture_compiles(&widened);
 
         // And the blanker survives the two literal shapes that make a naive
         // scanner lose its place.
-        let tricky = "let comma = ',';\nlet quote = '\\'';\npub enum After {\n    One,\n}\n";
+        let tricky =
+            "const COMMA: char = ',';\nconst QUOTE: char = '\\'';\npub enum After {\n    One,\n}\n";
         assert_eq!(declared_variants(tricky), vec![("After".to_owned(), 1)]);
+        census_fixture_compiles(tricky);
+    }
+
+    fn census_fixture_compiles(source: &str) {
+        use crate::runner::host::HostRunner;
+        use crate::runner::invocation::AttemptRole;
+        use crate::runner::{CommandSpec, InvocationId, Runner, gate_request};
+        use crate::topology::events::{AttemptNumber, GenerationId};
+        use crate::topology::registry::TaskKey;
+
+        let request = gate_request(
+            CommandSpec::new("rustc")
+                .arg("--edition=2024")
+                .arg("--crate-type=lib")
+                .arg("--emit=metadata")
+                .arg("-o")
+                .arg("-")
+                .arg("-")
+                .stdin(source.as_bytes()),
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+            std::time::Duration::from_secs(60),
+            InvocationId::attempt(
+                TaskKey(0),
+                GenerationId(0),
+                AttemptNumber(1),
+                AttemptRole::Gate(0),
+                0,
+            ),
+        );
+        let output = HostRunner::new()
+            .run_blocking(&request)
+            .expect("rustc is available to compile the census fixture");
+        assert!(!output.timed_out && !output.output_limited, "{output:?}");
+        assert_eq!(
+            output.code,
+            Some(0),
+            "the census fixture must be valid Rust: {}",
+            output.stderr
+        );
+    }
+
+    #[test]
+    fn the_census_counts_outer_declarations_across_formatting_and_discriminants() {
+        let fixture = r##"
+const VALUE: u8 = 10;
+pub struct Payload;
+const fn value<A, B>() -> u8 { 50 }
+trait Number<A, B> { const VALUE: u8; }
+impl Number<u16, u32> for u8 { const VALUE: u8 = 60; }
+#[repr(u8)]
+pub
+/* enum Ghost { Boo, } */ enum
+    Formatted
+{
+    #[doc = "Ghost, { Fake, }"]
+    Unit,
+    Tuple
+    (
+        Payload,
+        Result<u8, u16>,
+        &'static str,
+    ),
+    Record
+    {
+        field: u8,
+        other: [u8; { 2 }],
+    },
+    Expression =
+        VALUE,
+    Block =
+    {
+        const INNER: u8 = 20;
+        INNER
+    },
+    Branch = match 0 {
+        0 => {
+            match 1 {
+                1 => 30,
+                _ => 31,
+            }
+        }
+        _ => 32,
+    },
+    Literals = {
+        let _ = ('}', '\'', 'é', b',', "}, Ghost,", b"}, Ghost,",
+                 r#"}, Ghost,"#, br#"}, Ghost,"#);
+        /* Outer, /* Nested, */ StillComment, */
+        40
+    },
+    Generic = value::<fn() -> u8, Result<u16, u32>>(),
+    Qualified = <u8 as Number<u16, u32>>::VALUE,
+    Comparison = (1 < 2) as u8 + 70,
+    Last
+}
+pub enum Inline { First, Second }
+pub enum Hosts {
+    #[cfg(unix)] Unix,
+    #[cfg(windows)] Windows,
+}
+"##;
+        let expected = vec![
+            ("Formatted".to_owned(), 11),
+            ("Inline".to_owned(), 2),
+            ("Hosts".to_owned(), 2),
+        ];
+        assert_eq!(declared_variants(fixture), expected);
+        let ordinary_header = fixture.replace(
+            "pub\n/* enum Ghost { Boo, } */ enum\n    Formatted\n{",
+            "pub enum Formatted {",
+        );
+        assert_eq!(declared_variants(&ordinary_header), expected);
+        census_fixture_compiles(fixture);
+        let widened = fixture.replace("    Last\n", "    Last, Added\n");
+        assert_eq!(
+            declared_variants(&widened),
+            vec![
+                ("Formatted".to_owned(), 12),
+                ("Inline".to_owned(), 2),
+                ("Hosts".to_owned(), 2),
+            ]
+        );
+        census_fixture_compiles(&widened);
     }
 
     #[test]
