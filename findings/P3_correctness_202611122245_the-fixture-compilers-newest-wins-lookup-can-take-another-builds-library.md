@@ -8,7 +8,7 @@ reviewed_sha: e62b49cce5d09020fd0019b7b8ef471546d0a8a4
 location: src/effects/tests.rs:6184
 provenance: pre_existing
 first_bad:
-guard: the change that makes `crate_under_test` choose the library unit built for the running test executable rather than the newest one, for instance by reading the unit's fingerprint or the dependency file beside the executable, with a witness of a build slot holding two builds of the library
+guard: the change that makes `crate_under_test` choose the library unit whose dependency fingerprints match the running test executable's, or fail when more than one library unit is present, with a witness over a synthetic directory holding two library units
 ---
 
 # The fixture compilers' newest-wins lookup can take another build's library
@@ -39,6 +39,7 @@ this repository; this one is the repository's own lookup.
 
 ## What the change that takes this up should do
 
-Choose the library unit built for the running test executable (its fingerprint or `.d` file names the library it
-linked), or fail when more than one candidate exists. Keep the lookup working under both layouts. Add a witness over a
-synthetic directory holding two library units.
+Choose the library unit whose dependency fingerprints match the running test executable's, or fail when more than
+one library unit is present. The test executable is compiled with `--test` from the crate's source and links no
+library rlib, so neither its fingerprint nor its `.d` file names one. Keep the lookup working under both layouts. Add
+a witness over a synthetic directory holding two library units.
