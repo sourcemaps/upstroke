@@ -2589,8 +2589,12 @@ with none.
 
 **And the pool each attempt drained**, which is the field `R3-SEAMS-001`
 was about and the one no test held. The dispatch arm reads `plan.pool`;
-the retry arm appends before its plan exists and takes the same answer
-from `AttemptPlans::pool_for` one step earlier. Both are asserted here, in
+the retry arm appends before its plan exists and names the pool of the
+attempt it resumes, read from that attempt's record
+(`run::TopologyRun::retry_request`). It took the agent's first pool from
+`AttemptPlans::pool_for` until a dispatch could bind any pool of its agent.
+This fixture's agent has one pool, so both answers are that pool. Both
+appends are asserted here, in
 one run, against the pool the assembler actually resolves — which is the
 behavioural witness `79cd9c8` said was unavailable because "no driver
 fixture can reach the arm". This fixture reaches it, and reached it then.
@@ -3030,6 +3034,14 @@ question a reader would otherwise ask.
 This fixture's Mid rung is `High` and its review axis is `Medium`, so the two
 are distinguishable. A fixture where they matched would assert nothing.
 
+## `fn a_reviewer_runs_at_the_review_effort_not_the_implementers() {` › `pool: crate::engine::topology::attempt::AttemptPlans::pool_for(&plans, AGENT),`
+
+The request names the implementer's pool, as the driver now does for every
+attempt: `FrozenPlans::plan` no longer resolves one from the binding's agent.
+It is the agent's first pool, read through the seam, so the assertion below
+still finds the implementer on `the-implementers-pool` and the reviewer's
+pool is still compared with a different value.
+
 ## `fn a_reviewer_runs_at_the_review_effort_not_the_implementers() {` › `assert_eq!(`
 
 The implementer's own pool, so the two values in play are distinguishable
@@ -3076,15 +3088,31 @@ second agent the run actually probed and not one invented here.
 reviewer test above is: a real resumed run's registry entry and frozen rung
 binding, and a production `FrozenPlans` over pools written here.
 
-Two pools for the implementer's agent. The first, the one the plan is on,
-names `/profiles/implementer` in one round and no profile in the other. The
-second always names `/profiles/spare`. The plan answers the first pool's
-profile, then `None`.
+Two pools for the implementer's agent, with the reviewing agent's pool
+written between them. The first names `/profiles/implementer` in one round
+and no profile in the other. The second, the spare, always names
+`/profiles/spare`. `pools_for` lists exactly those two for the agent, in that
+order, which is the production table's answer to which pools an attempt of
+this agent may bind.
 
-The spare is what makes the `None` round say something: a plan that took a
-profile from any pool for its agent would answer `/profiles/spare` there.
-The pool assertion before it says the plan is on the pool whose profile the
-round set.
+Each round builds three plans, and the request names the pool, as the driver
+does (`PlanRequest::pool`):
+
+1. the first pool: the plan is on it and answers its profile, then `None` in
+   the round that sets none;
+2. the spare: the plan is on the spare and answers `/profiles/spare`. This is
+   an attempt bound to its agent's second pool, and its worker's credentials
+   are that pool's, not the first pool's;
+3. no pool: the plan is on none and carries no profile, though both of the
+   agent's pools exist and one names a profile.
+
+The spare is what makes the first case's `None` round say something: a plan
+that took a profile from any pool for its agent would answer
+`/profiles/spare` there. The second and third cases say the plan builder
+resolves no pool of its own. On the code before the request named the pool,
+every plan was on the agent's first pool, so the second case could not be
+asked. The pool assertion before each profile assertion says the plan is on
+the pool the request named.
 
 The profile is compared as `PathBuf::from` of the configured string, which is
 all `FrozenPlans::plan` does to it.

@@ -750,6 +750,15 @@ Which attempt of the generation.
 
 Which rung of the frozen ladder.
 
+## `struct RunAs` › `pool: Option<String>,`
+
+The pool an attempt already announced was announced on: a retry's, as its
+`attempt_started` recorded it. `prepare_attempt` plans an announced attempt
+on this pool and chooses none of its own, so the plan and the event it
+follows name one pool. A dispatch carries `None` here, which says nothing
+about its pool: it is not announced yet, and `prepare_attempt` chooses its
+pool with [`serving_pool`].
+
 ## `struct RunAs` › `resume_session: Option<SessionId>,`
 
 The session this attempt resumes, if any.
@@ -1139,6 +1148,11 @@ it recorded, as the sequential engine's `exhausted_pools` holds them. A
 settled attempt that proves a pool serving again retires it
 (`capacity::retire_served_pools`). What a resume starts it from is the
 `let exhausted_pools` section of `resumed`, below.
+
+A pool in this map is *held exhausted*, and that is all the word means: a
+signal put it here and no attempt it served has taken it out. It is the only
+thing [`serving_pool`] reads to decide which of an agent's pools a new
+attempt binds. No estimate, no spend and no configuration is consulted.
 
 ## `impl TopologyRun` › `pub fn resumed(handle: RunHandle, inputs: FrozenInputs, ceiling: Ceiling) -> Self {`
 
@@ -1581,7 +1595,9 @@ and the announcement ([`TopologyRun::first_attempt`]) take the run.
 ## `impl TopologyRun` › `fn first_attempt(`
 
 The first attempt of a dispatched generation: rung and feedback from the run,
-the plan and `attempt_started` through [`TopologyRun::prepare_attempt`].
+the plan and `attempt_started` through [`TopologyRun::prepare_attempt`]. It
+names no pool (`pool: None`), because nothing has announced the attempt yet:
+`prepare_attempt` chooses the pool it binds.
 
 ## `impl TopologyRun` › `fn judge_inline(`
 
@@ -1822,16 +1838,35 @@ scrubbed as before.
 
 The run's side of a retry, before its worktree is verified: the request, owned.
 
-## `impl TopologyRun` › `let pool = seams.plans.pool_for(&binding.agent);`
+It takes no seams: everything it reads is the run's own fold, log and
+retained tree. It took them for one call, `seams.plans.pool_for`, which the
+`let pool =` section below replaced.
 
-Read before `binding` moves into the request below it.
+## `impl TopologyRun` › `let pool =`
+
+**The retained attempt's own pool**, read from its record: the task's last
+`attempt_finished` ([`last_settled_record`]), which for a retained generation
+is the settlement that retained it. A retry resumes that attempt's session,
+and a session lives under its pool's credential directory, so the retry stays
+on the pool the session ran on. It does not ask [`serving_pool`]. A pool
+earlier in file order may have come back since the attempt started, and
+choosing it would hand a session to credentials that never held it.
+
+This line read `seams.plans.pool_for(&binding.agent)`, the agent's first pool.
+While every attempt bound the first pool, that was the retained attempt's pool
+by construction. Once a dispatch can bind a later pool, it is not:
+`tests::a_retained_retry_resumes_on_the_pool_its_session_ran_on` has the
+retained attempt on `claude-max-2` and `claude-max` no longer held, and the
+retry stays on `claude-max-2`.
 
 ## `impl TopologyRun` › `pool,`
 
-Through the seam that owns the frozen pool table, not a
-second lookup here. The dispatch arm reads `plan.pool`;
-this arm appends before its plan exists, so it asks the
-same authority one step earlier (`R3-SEAMS-001`).
+A pool named by the record, not invented here. The dispatch arm's
+`attempt_started` reads `plan.pool`; this arm appends before its plan
+exists, so it names the pool first and `prepare_attempt` then plans on the
+pool the event recorded ([`RunAs::pool`]). `R3-SEAMS-001` was this field
+passed as `None`, so the ledger recorded no pool for an attempt whose plan
+resolved one.
 
 ## `impl TopologyRun` › `feedback: self.brief.lines(key),`
 
@@ -1843,7 +1878,9 @@ same-rung retry ever produces.
 ## `impl TopologyRun` › `fn retry_started(`
 
 A started retry: `attempt_started`, the reservation converted, and the attempt's
-plan.
+plan. The plan is built on the pool the event recorded, which the retry's
+`RunAs` carries (`pool: started.pool.clone()`), so the two cannot name
+different pools.
 
 ## `impl TopologyRun` › `fn retry_closed(`
 
@@ -1867,7 +1904,8 @@ The attempt number a fresh generation's first attempt carries.
 
 The fourth clause of the ready-dispatch branch, first half: **the attempt's
 plan and its announcement.** The binding from the fold, the frozen registry
-entry, `plans.plan`, and `attempt_started` unless the retry already appended it
+entry, the pool the attempt binds (the `let pool =` section below),
+`plans.plan`, and `attempt_started` unless the retry already appended it
 — on the coordinator's thread, as an [`AttemptJob`] that owns everything the
 body reads. The worker, the exact-tree capture, the gate set on one shared
 snapshot and each reviewer on a fresh one are [`attempt_body`]'s, in that order,
@@ -1905,6 +1943,28 @@ would not survive to the second read. One registry entry is a few
 strings; the alternative is the driver copying the five fields
 `inputs` reads, which is assembly logic in the one place that must
 not hold any.
+
+## `impl TopologyRun` › `let pool = if run_as.announced {`
+
+**Which pool this attempt binds.** An attempt already announced keeps the
+pool its `attempt_started` recorded ([`RunAs::pool`]): that is a retry, whose
+pool `retry_request` took from the retained attempt. Any other attempt is the
+first of its generation, in a fresh session, and binds [`serving_pool`]'s
+choice among the pools the plans list for the binding's agent
+(`AttemptPlans::pools_for`), read against `exhausted_pools` and the run's
+clock. The choice goes to the assembler as `PlanRequest::pool`, and the
+plan's `pool`, the slot the worker takes and its credential profile follow
+from it.
+
+So a task that a usage limit deferred is dispatched again on its agent's
+next pool while a signal still holds the first one exhausted, and returns to
+the first once an attempt it served has retired the signal. The reviewers'
+pools are not chosen here. Each is its agent's first pool, as before.
+
+`tests::a_task_dispatched_again_after_a_rate_limit_binds_the_next_pool_of_its_agent_in_a_fresh_session`
+is the witness. Before this section's line the plan resolved the agent's
+first pool on its own, so the second generation ran on the pool that had just
+refused the first.
 
 ## `impl TopologyRun` › `if !run_as.announced {`
 
@@ -2175,10 +2235,35 @@ the log, and applying the event as it will be read back is what makes
 a live run and a replay of its own log one computation rather than two
 that agree by inspection (§15, "one fold, not two").
 
+## `fn serving_pool<'a>(`
+
+The pool a new attempt binds, among `candidates`: its agent's pools in file
+order (`AttemptPlans::pools_for`). `held` is the run's `exhausted_pools` and
+`now_unix` its clock. Pure, so the rule is tested on its own
+(`tests::the_serving_pool_is_the_first_in_file_order_no_signal_holds_exhausted`).
+
+1. The first candidate `held` does not contain. Whether a held pool earlier
+   in the order has a reset behind the clock does not matter here: a pool no
+   signal holds is taken before any pool one does.
+2. With every candidate held, the first whose recorded reset, plus
+   `interaction::RESET_WAIT_MARGIN`, is at or before `now_unix`. That is the
+   moment a wait toward the reset ends (`interaction::reset_wait_until`), so
+   a pool whose reset the run waited out counts as passed when the task it
+   deferred wakes. The reset is read by [`unix_seconds_of`]. A pool held with
+   no reset, or with one that does not read as a date, has not passed.
+3. With every candidate held and none passed, the first candidate. The
+   attempt runs into the limit again, which is what a single pool always did,
+   and the ladder's deferral bounds how often.
+4. `None` when there are no candidates: an agent no pool names binds none.
+
+A pool that is held but is not a candidate is another agent's and changes
+nothing.
+
 ## `fn unix_seconds(clock: &dyn TimeSource) -> u64 {`
 
 The run's clock in Unix seconds: the "now" a limit message's reset is
-read against (`capacity::pool_exhausted_to_record`). It is read through
+read against (`capacity::pool_exhausted_to_record`), and the "now"
+[`serving_pool`] compares a held pool's reset with. It is read through
 the same seam that stamps every event. A reading that is not RFC 3339 UTC
 falls back to the host clock, which is what the sequential engine reads.
 

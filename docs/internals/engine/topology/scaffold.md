@@ -1184,15 +1184,31 @@ coordinator must classify as it arrives (round R1, the early review's
 `R1-CONC-2`). `pools` names a pool per agent, overriding `pool` for the agents it
 lists — an entry of `None` gives that agent no pool while the others keep theirs —
 which is how phase 6's runtime pool tests give two agents pools of their own, or one
-agent none beside a pooled one. Its pools are names only, so its attempt plans carry no
-credential profile (`credential_profile: None`).
+agent none beside a pooled one. Two entries naming one agent give that agent two pools, in
+the order written, as two pools naming one agent do in a real run's pools file. Its pools are
+names only, so its attempt plans carry no credential profile (`credential_profile: None`).
 
 ## `impl WidePlans` › `fn pool_of(&self, agent: &str) -> Option<String> {`
 
-The pool an agent's pairs name: its `pools` entry when it has one, else `pool`. The
-worker's (`plan`, and `pool_for`, which the retry path asks) and every reviewer's
-(`reviewer_plans`, whose profile carries it) come from here, so one run's attempts,
-retries and verifications agree on each agent's pool.
+The first pool an agent's pairs name: its first `pools` entry when it has one, else `pool`.
+`pool_for` answers it, and every reviewer's pool (`reviewer_plans`, whose profile carries
+it) comes from here, so one run's attempts and verifications agree on each reviewing
+agent's pool. A worker's pool is not read from here any longer: `plan` takes the one its
+request names.
+
+## `impl super::attempt::AttemptPlans for WidePlans` › `fn pools_for(&self, agent: &str) -> Vec<String> {`
+
+Every pool the plans give `agent`, in order: the name of each `pools` entry naming it, or
+`pool` when no entry does. An entry of `None` names the agent and contributes no pool, so an
+agent listed only with `None` has none, as `pool_of` answers for it. Where the agent's first
+entry names a pool, that name is first here and is `pool_of`'s answer. The run chooses a
+worker's pool among these (`run::serving_pool`), which is how `run::tests`' two-pool
+witnesses move a rate-limited task onto `claude-max-2`.
+
+## `impl super::attempt::AttemptPlans for WidePlans` › `pool: request.pool.clone(),`
+
+The pool the run chose for this attempt, as `assembly::FrozenPlans::plan` takes it. It read
+`self.pool_of(&request.binding.agent)`, the agent's first pool, whatever the run asked for.
 
 ## `impl WidePlans` › `fn reviewer_plans(&self, count: usize) -> Vec<ReviewerPlan> {`
 

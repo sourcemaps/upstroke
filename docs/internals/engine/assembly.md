@@ -328,11 +328,14 @@ What pre-flight certified this agent's CLI as, where it certified one.
 
 ## `impl AttemptPlans for FrozenPlans<'_>` › `fn pool_for(&self, agent: &str) -> Option<String> {`
 
-The one production resolution of an agent's pool over the frozen table:
-the plan builder below, the reviewer profile beside it, and the driver
-filling the retry's `RetryRequest` all read **this**.
+The one production resolution of an agent's pool over the frozen table: its
+first pool in file order. The reviewer profile reads **this**. The plan
+builder below and the driver filling the retry's `RetryRequest` read it too,
+until an agent's attempts could bind any of its pools: the plan builder is now
+handed its pool (`PlanRequest::pool`), and the retry takes the retained
+attempt's (`run::TopologyRun::retry_request`).
 
-**It did not, until `21f1de0`'s round.** `79cd9c8` introduced this method
+**It was not the one resolution until `21f1de0`'s round.** `79cd9c8` introduced this method
 and said it gave the rule "one production implementation"; the plan
 builder and the reviewer profile went on calling
 `crate::capacity::pool_for` directly, so the count was three and this
@@ -341,6 +344,27 @@ character-for-character copies of this body, so routing them here is a
 substitution and not a behaviour change.
 `run::tests::the_frozen_pool_table_is_read_through_one_seam` holds the
 count at one. `reviews/FINDINGS.md` §19, claim (4).
+
+## `impl AttemptPlans for FrozenPlans<'_>` › `fn pools_for(&self, agent: &str) -> Vec<String> {`
+
+Every pool the frozen table lists for `agent`, by name, in file order: the
+candidates `run::serving_pool` chooses an implementer's pool from. Its first
+entry is `pool_for`'s answer, because both keep the pools whose `agent` is
+this one and neither reorders them. A pool the table marks unusable is listed
+like any other, as `capacity::pool_for` lists it.
+
+It walks `self.pools` here and calls no function of `capacity`. The census
+`run::tests::the_frozen_pool_table_is_read_through_one_seam` counts free calls
+to `pool_for` and so does not see this walk, which its own notes say a name
+census cannot. The two are kept in step by
+`recover::tests::a_plan_carries_the_credential_profile_of_its_pool`, which
+reads this list over a table that puts another agent's pool between the two.
+
+## `impl AttemptPlans for SharedPlans` › `fn pools_for(&self, agent: &str) -> Vec<String> {`
+
+Delegated to the borrowed view, like every other answer. Without it the
+coordinator's plans would answer the trait's provided body, the first pool
+alone, and its runs would never bind an agent's second pool.
 
 ## `fn inputs(&self, request: &InputsRequest<'_>) -> Result<ReviewInputs, UpstrokeError> {` › `artifacts: super::attempt::load_artifacts(`
 
@@ -353,10 +377,17 @@ artifact lists the worker's prompt wired to real files.
 See `Self::plan`'s stem for why this is a guard and not a
 convenience.
 
-## `fn plan(&self, request: &PlanRequest<'_>) -> Result<AttemptPlan, UpstrokeError> {` › `self.pool_for(&request.binding.agent),`
+## `fn plan(&self, request: &PlanRequest<'_>) -> Result<AttemptPlan, UpstrokeError> {` › `request.pool.clone(),`
 
-Through the seam, which is what makes it *the* production
-resolution rather than one of three. This read
+The pool the driver chose for this attempt, taken as given. The plan builder
+resolves no pool of its own: the implementer's profile, the plan's `pool` and
+the credential profile below all follow the request's one name, and a request
+naming no pool gives a plan on none.
+
+This line read `self.pool_for(&request.binding.agent)`, the agent's first
+pool, for every attempt. That is why a task rate limited on one subscription
+was dispatched again onto the same one while a second pool of the same agent
+sat idle. Before that it read
 `crate::capacity::pool_for(...).map(|pool| pool.name.clone())` --
 `Self::pool_for`'s body, character for character -- while that
 method's own doc said the plan builder read it.
@@ -371,15 +402,18 @@ reviewers and probes. A pool that names no profile gives `None`, and so does
 a plan with no pool.
 
 It is looked up from the plan's own pool, by name, and not from the agent a
-second time. Today the two give the same pool, because `Self::pool_for`
-binds the plan to its agent's first pool. They are kept apart so that the pool a
-plan names and the credentials its worker runs under cannot be two answers.
+second time. The two can differ: the request may name any pool of the agent
+(`run::serving_pool` chooses the first that no signal holds exhausted), and a
+lookup by agent would give the first pool's credentials to a worker bound to
+the second. Keeping them apart is what makes the pool a plan names and the
+credentials its worker runs under one answer.
 It is also not a second resolution of an agent's pool, so
 `run::tests::the_frozen_pool_table_is_read_through_one_seam` still counts
 one.
 
 `recover::tests::a_plan_carries_the_credential_profile_of_its_pool` holds
-both answers.
+these answers: the first pool's profile, a second pool's, and none for a
+request that names no pool.
 
 ## `fn plan(&self, request: &PlanRequest<'_>) -> Result<AttemptPlan, UpstrokeError> {` › `let gate_cmds: Vec<String> = self.gates.iter().map(|gate| gate.cmd.clone()).collect();`
 

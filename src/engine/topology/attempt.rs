@@ -59,6 +59,7 @@ pub struct PlanRequest<'a> {
     pub attempt: AttemptNumber,
     pub rung: u32,
     pub binding: RungBinding,
+    pub pool: Option<String>,
     pub workspace: &'a std::path::Path,
     pub resume_session: Option<SessionId>,
     pub feedback: Vec<crate::events::Feedback>,
@@ -88,6 +89,10 @@ pub trait AttemptPlans {
     fn inputs(&self, request: &InputsRequest<'_>) -> Result<ReviewInputs, UpstrokeError>;
 
     fn pool_for(&self, agent: &str) -> Option<String>;
+
+    fn pools_for(&self, agent: &str) -> Vec<String> {
+        self.pool_for(agent).into_iter().collect()
+    }
 
     fn plan(&self, request: &PlanRequest<'_>) -> Result<AttemptPlan, UpstrokeError>;
 

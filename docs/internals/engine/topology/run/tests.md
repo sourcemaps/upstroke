@@ -222,6 +222,14 @@ called `crate::capacity::pool_for` from three places, two of them
 character-for-character copies of the seam's body, and the seam's only caller
 was `run.rs`. `reviews/FINDINGS.md` §19, claim (4).
 
+**Who asks the seam has changed since, and the count has not.** An agent may
+have several pools now. The plan builder is handed the pool its attempt binds
+(`PlanRequest::pool`), the retry takes the retained attempt's from its record,
+and the reviewer profile is the seam's remaining production caller.
+`assembly.rs` still names `capacity::pool_for` once. Its `pools_for` lists an
+agent's pools by walking the table, which is the kind of unnamed resolution
+this note says, below, that the census cannot see.
+
 **The needle is a free call to `pool_for`**, through the shared
 [`crate::effects::census_domain::production_calls`]. It was the literal
 `capacity::pool_for(`, which reasons about one direction only — a longer
@@ -275,6 +283,15 @@ disagreed about the same attempt.
 The needle is the field's value in each production `AttemptStarted4` literal.
 A hard-coded `None` fails; anything that names something does not, because
 this census's claim is "not invented here", not "non-empty".
+
+The retry arm's authority is the retained attempt's own record. `SITES` said
+the driver filled `request.pool` from `AttemptPlans::pool_for`, the agent's
+first pool, and that was true until a dispatch could bind any of its agent's
+pools. A retry resumes a session, so it is announced on the pool that session
+ran on (`TopologyRun::retry_request`), and the description says so. What the
+census reads is unchanged: `settle.rs`'s literal still reads `request.pool`.
+`a_retained_retry_resumes_on_the_pool_its_session_ran_on` is the behavioural
+witness of the value.
 
 ### Two corrections to what this test was said to be
 
@@ -759,6 +776,96 @@ The same run on the same moving clock, stepped until `Progress::Waited`. Each
 one before it, or since stepping began. A back-off that drops a held wait for the plain one
 records only its own minute: on the code before the repair, the one `defer_wait_elapsed` said
 60 seconds where 9,060 had been slept.
+
+## `fn the_serving_pool_is_the_first_in_file_order_no_signal_holds_exhausted() {`
+
+The rule `serving_pool` applies, case by case, over the candidates `a`, `b` and `c` in that
+order. The clock is `RunClock`'s 03:00 UTC on 11 November 2026.
+
+| Held | Answer |
+|---|---|
+| nothing | `a` |
+| `a` | `b` |
+| `a` and `b` | `c` |
+| `claude-max`, which is not a candidate | `a` |
+| all three, `b`'s reset at 02:58:00 | `b` |
+| all three, `b`'s reset at 02:58:01 | `a` |
+| all three, every reset at 05:30 | `a` |
+| all three, no reset recorded | `a` |
+| all three, `b`'s reset `2026-02-31T01:00:00Z` | `a` |
+
+With no candidates the answer is `None`.
+
+02:58:00 is `interaction::RESET_WAIT_MARGIN`, two minutes, behind the clock to the second, and
+the test asserts that before it uses it. So the fifth row is the boundary of "at or before
+now", and the sixth, one second later, is the first reset that has not passed. The last row is
+a reset on a day its month lacks. `unix_seconds_of` reads it as no date, so it has not passed. A
+parser that counted the day on into March would have put it eight months behind the clock and
+answered `b`.
+
+On the code before `serving_pool` existed the test does not compile: the function it calls is
+not there.
+
+## `fn on_two_claude_max_pools(`
+
+`on_claude_max` with two pools for the scaffold's implementing agent, `claude-max` and then
+`claude-max-2`, as `WidePlans::pools` entries naming `AGENT` twice. The primary reviewer runs on
+the same agent, and a reviewer's pool is its agent's first, so reviews stay on `claude-max`.
+
+## `fn served_steps_until_settled(`
+
+`step_answered_by` with the serving adapters, repeated until a step settles an attempt of
+`key`, keeping each step. It panics after 64 steps. The steps before the settlement are whatever
+the run does first, which today is the sixteen slices of a wait toward the 05:30 reset. A test
+that uses this says nothing about whether that wait happens, so it holds on a run that waits
+and on one that does not.
+
+## `fn attempts_started(`
+
+Every `attempt_started` the log holds for `key`, in order.
+
+## `fn limited_once_on_two_pools(`
+
+`on_two_claude_max_pools` with one task, `alpha`, whose first generation is limited by
+`FIVE_HOUR_LIMIT`, stepped once with the rate-limiting adapters. The attempt settles rate
+limited, and the log holds one `pool_exhausted`, for `claude-max` with the 05:30 reset. Both
+witnesses below start here, with `claude-max` held exhausted and `claude-max-2` not.
+
+## `fn a_task_dispatched_again_after_a_rate_limit_binds_the_next_pool_of_its_agent_in_a_fresh_session()`
+
+The witness for the pool a new attempt binds. `alpha`'s first generation is rate limited on
+`claude-max`. Its next generation is served, and accepted. The log holds exactly two
+`attempt_started` for the task: generation 0 on `claude-max`, then generation 1 on
+`claude-max-2`, each attempt 1 with no session to resume, and both under the same binding. The
+agent, model and effort did not change. Only the pool did.
+
+The steps between the two attempts are not asserted (`served_steps_until_settled`). Today the
+run waits out the 05:30 reset before it wakes the task, though `claude-max-2` could have
+served it at once.
+
+On the code before `prepare_attempt` chose a pool the test fails on the pools: generation 1
+starts on `claude-max` again, the pool that had just refused generation 0, because the plan
+builder resolved the agent's first pool for every attempt.
+
+## `fn a_retained_retry_resumes_on_the_pool_its_session_ran_on() {`
+
+The witness for a retry's pool. The same start, with the gate failing `alpha`'s attempt 1.
+Generation 0 never reaches its gate, because its worker is rate limited. Generation 1's first
+attempt runs on `claude-max-2` and fails the gate. That is an ordinary failure with a session, so
+the generation is retained and its second attempt resumes the session.
+
+Before the retry the test takes `claude-max` out of `exhausted_pools`, as a review that pool
+served for another task would. `claude-max` is then first in file order and held by nothing, so
+`serving_pool` would choose it. The retry still records `claude-max-2`, with a `resume_session`,
+because `retry_request` takes the retained attempt's own pool. A session lives under its pool's
+credential directory, and the first pool's credentials never held this one.
+
+The scaffold reaches the retained retry through `TopologyRun::step`, so `retry_request` is not
+called directly. The retry is the step after the retained settlement, and the test asserts it
+is one step.
+
+On the code before the change the test fails on the retry's pool, `claude-max` where it expects
+`claude-max-2`: every attempt there, the retry included, bound the agent's first pool.
 
 ## `fn escalated_log(interrupted_first: bool) -> (TopologyFold, Vec<TopologyEvent>) {`
 

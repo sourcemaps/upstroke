@@ -207,6 +207,14 @@ impl AttemptPlans for FrozenPlans<'_> {
         crate::capacity::pool_for(agent, self.pools).map(|pool| pool.name.clone())
     }
 
+    fn pools_for(&self, agent: &str) -> Vec<String> {
+        self.pools
+            .iter()
+            .filter(|pool| pool.agent == agent)
+            .map(|pool| pool.name.clone())
+            .collect()
+    }
+
     fn inputs(&self, request: &InputsRequest<'_>) -> Result<ReviewInputs, UpstrokeError> {
         let entry = request.entry;
         Ok(ReviewInputs {
@@ -242,7 +250,7 @@ impl AttemptPlans for FrozenPlans<'_> {
         let entry = request.entry;
         let profile = implementer_profile(
             ImplementerBinding::of_frozen(&request.binding),
-            self.pool_for(&request.binding.agent),
+            request.pool.clone(),
         );
         let pool = pool_option(&profile.pool);
         let credential_profile = pool
@@ -332,6 +340,10 @@ impl SharedPlans {
 impl AttemptPlans for SharedPlans {
     fn pool_for(&self, agent: &str) -> Option<String> {
         self.frozen().pool_for(agent)
+    }
+
+    fn pools_for(&self, agent: &str) -> Vec<String> {
+        self.frozen().pools_for(agent)
     }
 
     fn inputs(&self, request: &InputsRequest<'_>) -> Result<ReviewInputs, UpstrokeError> {

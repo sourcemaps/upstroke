@@ -6744,6 +6744,7 @@ fn a_reviewer_runs_at_the_review_effort_not_the_implementers() {
             attempt: crate::topology::events::AttemptNumber(1),
             rung: 0,
             binding,
+            pool: crate::engine::topology::attempt::AttemptPlans::pool_for(&plans, AGENT),
             workspace: &fixture.repo_root,
             resume_session: None,
             feedback: Vec::new(),
@@ -6826,7 +6827,14 @@ fn a_plan_carries_the_credential_profile_of_its_pool() {
             vec![crate::capacity::Source::Signals],
         );
         spare.profile = Some("/profiles/spare".to_owned());
-        let pools = vec![implementers, spare];
+        let mut reviewers = crate::capacity::Pool::discovered(
+            "the-reviewers-own-pool",
+            crate::capacity::PoolKind::SubscriptionWindow,
+            crate::engine::topology::scaffold::REVIEW_AGENT,
+            vec![crate::capacity::Source::Signals],
+        );
+        reviewers.profile = Some("/profiles/reviewer".to_owned());
+        let pools = vec![implementers, reviewers, spare];
         let plans = crate::engine::assembly::FrozenPlans {
             adapters: &adapters,
             paths: &paths,
@@ -6836,37 +6844,52 @@ fn a_plan_carries_the_credential_profile_of_its_pool() {
             worker_timeout: std::time::Duration::from_secs(300),
             decisions: &[],
         };
-        let binding = handle
-            .fold
-            .frozen_rung_binding(TaskKey(0), 0)
-            .expect("rung 0 is frozen");
-        let plan = crate::engine::topology::attempt::AttemptPlans::plan(
-            &plans,
-            &crate::engine::topology::attempt::PlanRequest {
-                key: TaskKey(0),
-                entry,
-                attempt: crate::topology::events::AttemptNumber(1),
-                rung: 0,
-                binding,
-                workspace: &fixture.repo_root,
-                resume_session: None,
-                feedback: Vec::new(),
-                materialization_observed: None,
-            },
-        )
-        .expect("the plan assembles");
+        assert_eq!(
+            crate::engine::topology::attempt::AttemptPlans::pools_for(&plans, AGENT),
+            ["the-implementers-pool", "the-implementers-spare-pool"],
+            "the implementer's agent has exactly the two pools the requests below name, in the \
+             order the table lists them, and another agent's pool between them is not one"
+        );
 
-        assert_eq!(
-            plan.pool.as_deref(),
-            Some("the-implementers-pool"),
-            "the plan is not on the pool whose profile this test set, so the profile below \
-             would be another pool's"
-        );
-        assert_eq!(
-            plan.credential_profile,
-            profile.map(PathBuf::from),
-            "the plan does not carry its own pool's profile (`{profile:?}`), as written"
-        );
+        for (named, named_profile) in [
+            (Some("the-implementers-pool"), profile),
+            (Some("the-implementers-spare-pool"), Some("/profiles/spare")),
+            (None, None),
+        ] {
+            let binding = handle
+                .fold
+                .frozen_rung_binding(TaskKey(0), 0)
+                .expect("rung 0 is frozen");
+            let plan = crate::engine::topology::attempt::AttemptPlans::plan(
+                &plans,
+                &crate::engine::topology::attempt::PlanRequest {
+                    key: TaskKey(0),
+                    entry,
+                    attempt: crate::topology::events::AttemptNumber(1),
+                    rung: 0,
+                    binding,
+                    pool: named.map(str::to_owned),
+                    workspace: &fixture.repo_root,
+                    resume_session: None,
+                    feedback: Vec::new(),
+                    materialization_observed: None,
+                },
+            )
+            .expect("the plan assembles");
+
+            assert_eq!(
+                plan.pool.as_deref(),
+                named,
+                "the plan is not on the pool its request named, so the profile below would be \
+                 another pool's"
+            );
+            assert_eq!(
+                plan.credential_profile,
+                named_profile.map(PathBuf::from),
+                "the plan on `{named:?}` does not carry that pool's own profile \
+                 (`{named_profile:?}`), as written"
+            );
+        }
     }
 }
 
