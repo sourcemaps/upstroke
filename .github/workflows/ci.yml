@@ -762,6 +762,9 @@ jobs:
       # start and last complete suite summary, without pairing helper runs;
       # only that summary's passes count, and its total must match the start.
       # Both boundaries are required, with no earlier result or later start.
+      # A start is libtest's line, with any shuffle seed it appends, alone
+      # or after an interrupted `test NAME ... ` record; an ignored test's
+      # reason is not one.
       # Mixed stdout cannot prove provenance: a helper with the same total
       # makes completion ambiguous, so fail closed even if summaries match.
       # Individual timed test records do not establish suite completion.
@@ -790,7 +793,7 @@ jobs:
           foreach ($harnessLog in $harnessLogs) {
             $expected = $null; $result = $null; $ambiguous = $false
             foreach ($line in $harnessLog.Lines) {
-              if ($line -cmatch '(?:^|\s)running ([0-9]+) tests?$') {
+              if ($line -cmatch '^(?:test \S+(?: - should panic)? \.\.\. )?running ([0-9]+) tests?(?: \(shuffle seed: [0-9]+\))?$') {
                 if ($null -eq $expected) { $expected = [long]$Matches[1] }
                 elseif ([long]$Matches[1] -eq $expected) { $ambiguous = $true }
                 $result = $null

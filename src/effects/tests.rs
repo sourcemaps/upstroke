@@ -6150,6 +6150,26 @@ $runner = @(
     'test result: ok. 409 passed; 0 failed; 12 ignored; 0 measured; 3503 filtered out; finished in 99.20s'
   ) }
 )
+$shuffled = @{ Harness = 'lib.exe'; Lines = @(
+  '', 'running 2 tests (shuffle seed: 42)',
+  'test second ... ok <0.001s>',
+  'test first ... ok <0.002s>',
+  '', 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s', ''
+) }
+$shuffledHelper = @{ Harness = 'lib.exe'; Lines = @(
+  '', 'running 3 tests',
+  '', 'running 3 tests (shuffle seed: 1764201600000)',
+  'test helper::first ... ok <0.001s>',
+  'test helper::second ... ok <0.001s>',
+  'test helper::third ... ok <0.001s>',
+  '', 'test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s', ''
+) }
+$worker = 'test worker::needs_one ... ignored, requires a worker'
+$workerResult = 'test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 12 filtered out; finished in 0.00s'
+$besideWorker = @(
+  @{ Harness = 'one.exe'; Lines = @('', 'running 1 test', 'test one ... ok <0.001s>', '', 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s', '') },
+  @{ Harness = 'two.exe'; Lines = @('', 'running 2 tests', 'test two::a ... ok <0.001s>', 'test two::b ... ok <0.001s>', '', 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s', '') }
+)
 $cases = @(
   @{ Name = '99 top-level passes and nine helper passes'; Logs = @($nested, $binary, $zero); Harnesses = 3; Passed = 99 },
   @{ Name = 'recorded unit suite'; Logs = $unit; Harnesses = 3; Passed = 1541 },
@@ -6171,7 +6191,13 @@ $cases = @(
   @{ Name = 'timed test record without suite summary'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 1 test', 'test parent ... ok <0.030s>') }); Harnesses = 1; Passed = $null },
   @{ Name = 'failed summary'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 1 test', 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s') }); Harnesses = 1; Passed = $null },
   @{ Name = 'failed test in ok summary'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 1 test', 'test result: ok. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s') }); Harnesses = 1; Passed = $null },
-  @{ Name = 'inconsistent total'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 1 test', 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s') }); Harnesses = 1; Passed = $null }
+  @{ Name = 'inconsistent total'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 1 test', 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s') }); Harnesses = 1; Passed = $null },
+  @{ Name = 'shuffled harness'; Logs = @($shuffled); Harnesses = 1; Passed = 2 },
+  @{ Name = 'shuffled equal-size helper without outer result'; Logs = @($shuffledHelper); Harnesses = 1; Passed = $null },
+  @{ Name = 'shuffled equal-size helper start after an interrupted should-panic record'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 3 tests', 'test parent - should panic ... running 3 tests (shuffle seed: 9)', 'test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s') }); Harnesses = 1; Passed = $null },
+  @{ Name = 'equal-size helper start after an interrupted test record'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 3 tests', 'test parent ... running 3 tests', 'test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s') }); Harnesses = 1; Passed = $null },
+  @{ Name = 'ignored test with a reason'; Logs = @(@{ Harness = 'worker.exe'; Lines = @('running 1 test', $worker, $workerResult) }) + $besideWorker; Harnesses = 3; Passed = 3 },
+  @{ Name = 'ignore reason ending in a harness start'; Logs = @(@{ Harness = 'worker.exe'; Lines = @('running 1 test', "$worker running 1 test", $workerResult) }) + $besideWorker; Harnesses = 3; Passed = 3 }
 )
 foreach ($case in $cases) {
   $failure = $null; $actual = $null

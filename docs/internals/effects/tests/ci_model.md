@@ -563,6 +563,12 @@ After the suite, the count starts on line 12 and has three stages:
    truncated result or an inconsistent total fails. Each start or result
    marker clears the current result; only a complete summary sets it again.
    A nested start announcing the same total as the first start fails closed.
+   A start is libtest's own line, `running N test` or `running N tests`,
+   with the ` (shuffle seed: S)` libtest appends when it shuffles, alone on
+   its line or directly after a `test NAME ... ` or
+   `test NAME - should panic ... ` record that another process's output
+   interrupted. Text anywhere else in a line is not a start, so an ignored
+   test's reason, which libtest writes after `ignored, `, announces none.
 2. Refuse a sum below `${{ matrix.floor }}`. The message names the shard
    and its floor.
 3. Print the sum, shard and floor, so a later floor change has a measurement.
@@ -594,6 +600,21 @@ records (`test <name> ... ok <0.123s>`) are not suite summaries and do not
 supply that corroboration. Unobserved or forged helper output is outside
 what these mixed lines can establish; the executable's actual exit status
 and the operator's archived invocation boundaries remain separate evidence.
+
+Round three of #439 closed two gaps in what the count reads as a start.
+It read one only where the line ended at the noun, so a helper libtest
+shuffled, whose start ends with its seed, was not seen: an outer three-test
+start, a shuffled three-test helper passing all three and a parent that
+exited zero before its summary counted the helper's three against a floor
+of 3 (`PR439-WINDOWS-SHUFFLED-HELPER-COMPLETION`). And it read one after any
+whitespace, so an ignored test whose reason ended in `running 1 test`
+announced a nested start of the outer total, and a harness that had
+completed failed as ambiguous
+(`PR439-WINDOWS-IGNORE-REASON-AS-HARNESS-START`). A reason that holds a line
+break and then a start line is still read as a start, since the lines
+cannot tell it from one. An extra start after the first can only refuse a
+run: it marks the run ambiguous or clears a result a later summary must
+set again. The summary matcher is unchanged.
 
 The floor is not in this text. It reaches the script from the matrix, so
 the equality over the script holds that the floor check reads `matrix.floor` and

@@ -2884,6 +2884,24 @@ refused, even if their summaries appear complete. These fixtures establish
 the boundary counter's behavior, not process provenance or replay of the
 full archived runs. Actual executable exit handling is unchanged.
 
+Six cases came with round three of #439: three for a shuffled start, two
+for an ignored test's reason, and one that keeps a refusal the narrower
+start matcher must not lose. A shuffled harness,
+whose start carries libtest's ` (shuffle seed: S)`, contributes its two
+passes. An outer three-test start followed by a shuffled three-test helper
+that passes all three, with no outer summary, is refused
+(`PR439-WINDOWS-SHUFFLED-HELPER-COMPLETION`), and so is the same shuffled
+start after an interrupted `test NAME - should panic ... ` record. An
+unshuffled equal-size start after an interrupted `test NAME ... ` record
+stays refused. Three executables with three passes between them, one of
+which reports an ignored test, count 3 with the reason `requires a worker`,
+and still count 3 when the reason ends in `running 1 test`
+(`PR439-WINDOWS-IGNORE-REASON-AS-HARNESS-START`). On the count as it stood
+before, the shuffled harness had a result without a start, both shuffled
+helpers' three passes were accepted, and the second reason made the run
+ambiguous. That is read from the two patterns, not run on the build box,
+which has no PowerShell; the Windows `self-checks` leg executes the cases.
+
 An isolated completed zero-test harness returns zero. The fixture executes
 in a private scratch directory under the process runner's 120-second bound
 and process-tree cleanup, without a PowerShell profile or interactive input.

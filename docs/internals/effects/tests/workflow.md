@@ -696,7 +696,9 @@ empty array. The witness-removal fixture removes the complete per-harness
 count block and the floor/report lines, kept in agreement with the workflow
 and `WINDOWS_SHARD_WITNESS`. The native Windows fixture in `super` exercises
 the count with the 99-pass nested case, the recorded unit (1541) and runner
-(409) boundaries, and incomplete inputs. Each executable's first start and
+(409) boundaries, shuffled starts, an ignored test's reason, and incomplete
+inputs. The witness-removal fixture's anchor spells the start matcher as
+the workflow does, and moved with it in round three of #439. Each executable's first start and
 last complete summary determine its contribution without pairing nested
 starts; the final total must balance and only its passes reach the floor.
 Mixed stdout does not identify each line's process. A helper announcing the

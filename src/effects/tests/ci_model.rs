@@ -66,7 +66,7 @@ if ($harnesses.Count -eq 0 -or $harnessLogs.Count -ne $harnesses.Count) { throw 
 foreach ($harnessLog in $harnessLogs) {
   $expected = $null; $result = $null; $ambiguous = $false
   foreach ($line in $harnessLog.Lines) {
-    if ($line -cmatch '(?:^|\s)running ([0-9]+) tests?$') {
+    if ($line -cmatch '^(?:test \S+(?: - should panic)? \.\.\. )?running ([0-9]+) tests?(?: \(shuffle seed: [0-9]+\))?$') {
       if ($null -eq $expected) { $expected = [long]$Matches[1] }
       elseif ([long]$Matches[1] -eq $expected) { $ambiguous = $true }
       $result = $null
