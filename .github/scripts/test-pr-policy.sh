@@ -6894,9 +6894,14 @@ fi
 # .github/scripts/validate-pr-commits.sh refuses a pull request any of whose own commits credits
 # Claude, and it is judged here on real repositories, as the listing builders above are, because
 # what it decides is which COMMITS are the pull request's, and only a real history can be wrong
-# about that.
+# about that. The verdicts are the Contract in the script's header: fixed strings, compared ASCII
+# case-insensitively, in the identities and the message git reports, and nothing parsed. A case
+# that pins a listed limit or a listed false refusal says so in its label.
 #
-# AMBIENT GIT CANNOT CHANGE A VERDICT. Every commit and merge is made with its author and
+# AMBIENT GIT CANNOT CHANGE A VERDICT. Every inherited environment variable whose name begins with
+# GIT_ is set aside for the section and put back after it, so a caller's GIT_GRAFT_FILE, GIT_DIR or
+# identity variables reach neither the fixture nor the script; their values are held in this
+# shell, never printed or written. Every commit and merge is made with its author and
 # committer, names, emails and dates, given explicitly, so neither the fixture's configured
 # identity nor the contributor's can decide a case; commits use `--cleanup=verbatim`, so the
 # message the script reads is the message written here; every git command in the fixture runs
@@ -6909,8 +6914,17 @@ fi
 # carries `Claude-Session:` lines from before the rewrite, so every case here runs against a target
 # shaped that way: a case that refuses must refuse for its own commit, and one that passes must pass
 # with the old history in reach.
-credit_saved_global="${GIT_CONFIG_GLOBAL-}" credit_had_global="${GIT_CONFIG_GLOBAL+set}"
-credit_saved_system="${GIT_CONFIG_SYSTEM-}" credit_had_system="${GIT_CONFIG_SYSTEM+set}"
+credit_set_aside_git() {  # unset every exported GIT_ variable, its name and value kept in credit_git_*
+  local name
+  credit_git_names=() credit_git_values=()
+  while IFS= read -r name; do
+    [[ "$name" == GIT_* ]] || continue
+    credit_git_names+=("$name")
+    credit_git_values+=("${!name}")
+    unset "$name"
+  done < <(compgen -e)
+}
+credit_set_aside_git
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 
 credit_script="$root/.github/scripts/validate-pr-commits.sh"
@@ -6956,11 +6970,12 @@ credit_base="$(plain_commit "$credit_old" 'the merge base: a plain commit on mas
 credit_target="$(credit_commit "$credit_base" Claude noreply@anthropic.com Claude noreply@anthropic.com "$claude_history_message")" \
   || { echo 'could not build the commit-credit target' >&2; exit 1; }
 
-# credit_run <target> <head>: run the script from the fixture repository; credit_rc holds its exit
-# code and $fixture_dir/credit-out and credit-err what it printed.
+# credit_run <target> <head> [<directory>]: run the script from the fixture repository, or from the
+# directory named; credit_rc holds its exit code and $fixture_dir/credit-out and credit-err what it
+# printed.
 credit_run() {
   credit_rc=0
-  ( cd "$credit_repo" && "$BASH" "$credit_script" "$1" "$2" ) \
+  ( cd "${3:-$credit_repo}" && "$BASH" "$credit_script" "$1" "$2" ) \
     > "$fixture_dir/credit-out" 2> "$fixture_dir/credit-err" || credit_rc=$?
 }
 
@@ -7012,10 +7027,10 @@ credit_refuse() {
   fi
 }
 
-# credit_fail_closed <label> <target> <head>: exit 2, no refusal line, and no email address
-# anywhere in what the failure printed.
+# credit_fail_closed <label> <target> <head> [<directory>]: exit 2, no refusal line, and no email
+# address anywhere in what the failure printed.
 credit_fail_closed() {
-  credit_run "$2" "$3"
+  credit_run "$2" "$3" "${4:-}"
   if [[ "$credit_rc" != 2 ]]; then
     echo "commit credit: $1: exit $credit_rc and 2 was expected" >&2
     exit 1
@@ -7039,21 +7054,21 @@ credit_pass 'prose naming Claude Code in the subject and the body' "$c" 1
 c="$(plain_commit "$credit_base" $'feat: pair on the adapter\n\nCo-Authored-By: Jane Doe <jane@example.com>')" || exit 1
 credit_pass 'a Co-Authored-By line naming a person' "$c" 1
 c="$(plain_commit "$credit_base" $'docs: the rewrite record\n\nsee the Claude-Session line in the old history')" || exit 1
-credit_pass 'Claude-Session named anywhere but at the start of a line' "$c" 1
-c="$(plain_commit "$credit_base" $'docs: the rewrite record\n\nthe old history ends every message with a Claude-Session: line, and the rewrite drops it')" || exit 1
-credit_pass 'the literal Claude-Session: mid-sentence' "$c" 1
-# A co-author is matched by identity, not by substring: each of these is a person.
+credit_pass 'Claude-Session named without its colon' "$c" 1
+# A person whose name and address hold no listed string passes.
 c="$(plain_commit "$credit_base" $'feat: pair with Jean-Claude\n\nCo-Authored-By: Jean-Claude Martin <jcm@example.com>')" || exit 1
 credit_pass 'Co-Authored-By Jean-Claude Martin' "$c" 1
-c="$(plain_commit "$credit_base" $'feat: pair with Claudette\n\nCo-Authored-By: Claudette Martin <cm@example.com>')" || exit 1
-credit_pass 'Co-Authored-By Claudette Martin' "$c" 1
 c="$(plain_commit "$credit_base" $'feat: pair with Ava\n\nCo-Authored-By: Ava Martin <ava@philanthropic.example>')" || exit 1
 credit_pass 'Co-Authored-By an address at philanthropic.example' "$c" 1
-# The generated-with rule matches a footer, not prose about one.
-c="$(plain_commit "$credit_base" $'docs: the adapter\'s output\n\nExamples generated with Claude Code include an extra blank line.')" || exit 1
-credit_pass 'a body sentence saying generated with Claude Code part-way through' "$c" 1
-c="$(plain_commit "$credit_base" 'docs: explain why the adapter strips the text "Generated with Claude Code"')" || exit 1
-credit_pass 'a subject quoting "Generated with Claude Code"' "$c" 1
+# An anthropic.com address other than the listed one is not it, whatever the key's case.
+c="$(plain_commit "$credit_base" $'feat: a change\n\nco-authored-by: Someone <someone@anthropic.com>')" || exit 1
+credit_pass 'listed limit: co-authored-by naming an anthropic.com address that is not listed' "$c" 1
+# Other spellings of a listed string pass: a space before the colon, and a co-author whose
+# identity is folded onto an indented next line, each at a neutral address.
+c="$(plain_commit "$credit_base" $'feat: a change with a spaced trailer\n\nCo-Authored-By : Claude <model@example.invalid>')" || exit 1
+credit_pass 'listed limit: Co-Authored-By : Claude, with a space before the colon' "$c" 1
+c="$(plain_commit "$credit_base" $'feat: a change with a folded trailer\n\nCo-Authored-By:\n  Claude <model@example.invalid>')" || exit 1
+credit_pass 'listed limit: a co-author whose identity is folded onto an indented next line' "$c" 1
 # The target alone credits Claude, at the merge base's parent and again after it; the pull request
 # is one plain commit and is judged as one.
 c="$(plain_commit "$credit_base" 'feat: a change cut from a master that credits Claude')" || exit 1
@@ -7069,173 +7084,146 @@ c="$(credit_commit "$credit_base" 'Jane Doe' jane@example.com Claude committer@e
 credit_refuse 'the committer name Claude' "$c" "$c:claude-committer"
 c="$(plain_commit "$credit_base" $'feat: a change\n\nCo-Authored-By: Claude Fable 5.2 <model@example.invalid>')" || exit 1
 credit_refuse 'Co-Authored-By naming Claude Fable 5.2' "$c" "$c:claude-co-author"
-c="$(plain_commit "$credit_base" $'feat: a change\n\nco-authored-by: Someone <someone@anthropic.com>')" || exit 1
-credit_refuse 'co-authored-by naming an anthropic address' "$c" "$c:claude-co-author"
 c="$(plain_commit "$credit_base" $'feat: a change\n\n   Claude-Session: https://claude.ai/code/session_x')" || exit 1
 credit_refuse 'an indented Claude-Session trailer' "$c" "$c:claude-session"
 c="$(plain_commit "$credit_base" $'feat: a change\n\n\xf0\x9f\xa4\x96 Generated with [Claude Code](https://claude.com/claude-code)')" || exit 1
 credit_refuse 'the Generated with [Claude Code] footer' "$c" "$c:claude-generated"
 c="$(plain_commit "$credit_base" $'feat: a change with a bare footer\n\nGenerated with Claude Code.')" || exit 1
 credit_refuse 'a bare Generated with Claude Code. line' "$c" "$c:claude-generated"
-# Each half of a co-author's identity refuses alone: the name with a neutral address, and a
-# neutral name at the Claude Code address.
+# Either co-author string refuses alone: the name with a neutral address, and a neutral name at
+# the listed address. A line holding both is one refusal.
 c="$(plain_commit "$credit_base" $'feat: a change\n\nCo-Authored-By: Claude <bot@example.com>')" || exit 1
 credit_refuse 'Co-Authored-By the name Claude at a neutral address' "$c" "$c:claude-co-author"
 c="$(plain_commit "$credit_base" $'feat: a change\n\nCo-Authored-By: Jane Roe <noreply@anthropic.com>')" || exit 1
 credit_refuse 'Co-Authored-By a neutral name at noreply@anthropic.com' "$c" "$c:claude-co-author"
-# Trailers are read as git reads them: folded, and with whitespace before the colon. Each is one
-# refusal, however many of the script's readings find it.
-c="$(plain_commit "$credit_base" $'feat: a change with a folded trailer\n\nCo-Authored-By:\n  Claude <noreply@anthropic.com>')" || exit 1
-credit_refuse 'a Co-Authored-By whose identity is on an indented continuation line' "$c" "$c:claude-co-author"
-c="$(plain_commit "$credit_base" $'feat: a change with a spaced trailer\n\nCo-Authored-By : Claude <noreply@anthropic.com>')" || exit 1
-credit_refuse 'Co-Authored-By : with a space before the colon' "$c" "$c:claude-co-author"
+c="$(plain_commit "$credit_base" $'feat: a change\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nco-authored-by: claude <NOREPLY@ANTHROPIC.COM>')" || exit 1
+credit_refuse 'both co-author strings, twice: one refusal' "$c" "$c:claude-co-author"
+# A message quoting a listed string is refused, wherever it stands and whoever it names.
+c="$(plain_commit "$credit_base" $'docs: the rewrite record\n\nthe old history ends every message with a Claude-Session: line, and the rewrite drops it')" || exit 1
+credit_refuse 'listed false refusal: the literal Claude-Session: mid-sentence' "$c" "$c:claude-session"
+c="$(plain_commit "$credit_base" 'docs: explain why the adapter strips the text "Generated with Claude Code"')" || exit 1
+credit_refuse 'listed false refusal: a subject quoting "Generated with Claude Code"' "$c" "$c:claude-generated"
+c="$(plain_commit "$credit_base" $'docs: the adapter\'s output\n\nExamples generated with Claude Code include an extra blank line.')" || exit 1
+credit_refuse 'listed false refusal: the sentence Examples generated with Claude Code include an extra blank line.' \
+  "$c" "$c:claude-generated"
+c="$(plain_commit "$credit_base" $'feat: pair with Claudette\n\nCo-Authored-By: Claudette Martin <cm@example.com>')" || exit 1
+credit_refuse 'listed false refusal: the person Co-Authored-By: Claudette Martin at a neutral address' \
+  "$c" "$c:claude-co-author"
 
-# Parsing contracts run in both object formats. Each case changes the message alone; neutral
-# addresses keep a name test independent of the domain test, and all identities are invented.
-credit_message_case() {  # <pass|rule-id> <label> <message>
-  local verdict="$1" label="$2" commit
-  commit="$(plain_commit "$credit_target" "$3")" || exit 1
-  if [[ "$verdict" == pass ]]; then
-    credit_pass "$label" "$commit" 1
+# credit_expect <pass|rule-id> <label> <commit>: one commit on the target, judged alone, and a rule
+# id names the one refusal it must earn. The two cases below keep everything but the value under
+# test neutral.
+credit_expect() {
+  if [[ "$1" == pass ]]; then
+    credit_pass "$2" "$3" 1
   else
-    credit_refuse "$label" "$commit" "$commit:$verdict"
+    credit_refuse "$2" "$3" "$3:$1"
   fi
 }
-
-credit_parsing_contracts() {  # <base>
-  local credit_target="$1" value prefix=$'feat: parsing contract\n\n'
-  # PR431-COAUTHOR-NAME-BOUNDARIES: UTF-8 bytes, apostrophes and compound hyphens belong to
-  # the human name. None of these addresses can independently pass or fail a name comparison.
-  for value in 'Éclaude Exemple' 'Claudeé Exemple' 'Claudé Exemple' 'Jean-Claude Exemple' \
-    'Jean‐Claude Exemple' 'Jean‑Claude Exemple' "D'Claude Exemple" 'D’Claude Exemple' \
-    'Claudette Exemple' '林澄 Exemple'; do
-    credit_message_case pass 'international human display name' \
-      "${prefix}Co-Authored-By: $value <person@example.invalid>"
-  done
-  for value in 'Claude' 'Claude Code' 'Claude Fable 5.2' 'Anthropic Claude'; do
-    credit_message_case claude-co-author 'agent/model display name at an independent address' \
-      "${prefix}Co-Authored-By: $value <model@example.invalid>"
-  done
-  # r72 row 7: this must fail independently of both Claude and the provider domain.
-  credit_message_case claude-co-author 'Anthropic alone at a neutral mailbox' \
-    "${prefix}Co-Authored-By: Anthropic <person@example.invalid>"
-
-  # r72 rows 1-2 are named limits, not promises to recognize more spellings.
-  for value in '1️⃣ Generated with [Claude Code]' \
-    '1️⃣ Generated with [Claude Code](https://example.invalid)' \
-    '✨ Generated with Claude Code'; do
-    credit_message_case pass 'limit: footer prefixes other than the robot emoji' "$prefix$value"
-  done
-  credit_message_case pass 'limit: a hyphen keeps Claude-Opus in one name word' \
-    "${prefix}Co-Authored-By: Claude-Opus <person@example.invalid>"
-  credit_message_case pass 'limit: U+00A0 keeps Claude and Code in one name word' \
-    "${prefix}Co-Authored-By: Claude"$'\xc2\xa0'"Code <person@example.invalid>"
-
-  # The display name, mailbox and trailing comment are distinct fields. Bare mailboxes have
-  # no display name, and a domain is compared only when the mailbox actually has one.
-  for value in 'Mira Example <claude@example.invalid>' \
-    'Mira Example <person@anthropic.com.example.invalid>' \
-    'Mira Example <anthropic.com>' 'Mira Example <research.anthropic.com>' \
-    'claude@example.invalid' 'person@anthropic.example.invalid' \
-    'Mira Example <person@example.invalid> (Claude reviewed the patch)' \
-    'person@example.invalid (Claude reviewed the patch)'; do
-    credit_message_case pass 'only a display name or a mailbox domain supplies identity' \
-      "${prefix}Co-Authored-By: $value"
-  done
-  for value in 'Mira Example <person@anthropic.com>' \
-    'Mira Example <@anthropic.com>' 'Mira Example <person@@anthropic.com>' \
-    'Mira Example <person@research.anthropic.com>' 'person@anthropic.com' \
-    'person@research.anthropic.com (Mira Example)'; do
-    credit_message_case claude-co-author 'a syntactically present provider domain' \
-      "${prefix}Co-Authored-By: $value"
-  done
-
-  # r72 row 3: the local part is opaque, in both directions. Quoting, spaces or another @
-  # cannot hide a provider domain or turn a neutral mailbox's local part into a name.
-  for value in 'Pat Example <"QA Team"@anthropic.com>' \
-    'Mira Example <"Audit Sender"@anthropic.com>' \
-    'Mira Example <"Audit@Sender"@research.anthropic.com>' \
-    '"QA Team"@anthropic.com' '"QA Team"@research.anthropic.com (Mira Example)'; do
-    credit_message_case claude-co-author 'quoted local part retains the last-at provider domain' \
-      "${prefix}Co-Authored-By: $value"
-  done
-  for value in '"Claude Support"@example.invalid' \
-    '"Anthropic Support"@example.invalid (Claude reviewed the patch)' \
-    '"Claude@anthropic.com"@example.invalid' \
-    'Mira Example <"Claude Support"@example.invalid>' \
-    'Mira Example <"person@anthropic.com"@example.invalid>' \
-    'Mira Example <person@example.invalid> <person@anthropic.com>'; do
-    credit_message_case pass 'mailbox local parts and text after the first mailbox are not names' \
-      "${prefix}Co-Authored-By: $value"
-  done
-
-  # r72 row 4: the same mailbox-less sentence is prose outside Git's parsed trailer block,
-  # and a listed false refusal inside it. A mailbox-less credit outside that block is a limit.
-  credit_message_case pass 'mailbox-less explanatory prose before a human sign-off' \
-    "${prefix}Co-Authored-By: is the trailer the Claude Code adapter reads."$'\n\nSigned-off-by: Mira Example <person@example.invalid>'
-  credit_message_case claude-co-author 'listed false refusal: a sentence Git parses as a trailer' \
-    "${prefix}Co-Authored-By: is the trailer the Claude Code adapter reads."
-  credit_message_case pass 'limit: an unparsed mailbox-less mid-body credit' \
-    "${prefix}Co-Authored-By: Claude"$'\n\nLater prose.'
-  credit_message_case claude-co-author 'a Git-parsed mailbox-less name remains a credit' \
-    "${prefix}Co-Authored-By: Claude"
-
-  # Folded and unfolded identities must have identical verdicts. The partial physical line
-  # ending in <Claude is not a complete name; a completed identity's continuation is a comment.
-  for value in $'Mira Example <Claude\n  >' 'Mira Example <Claude >' \
-    $'Mira Example\n  <claude@example.invalid>' 'Mira Example <claude@example.invalid>' \
-    $'Mira Example <person@example.invalid>\n  (Claude reviewed the patch)' \
-    'Mira Example <person@example.invalid> (Claude reviewed the patch)'; do
-    credit_message_case pass 'folded and unfolded human identities agree' \
-      "${prefix}Co-Authored-By: $value"
-  done
-  for value in $'Claude Fable\n\t5.2 <model@example.invalid>' \
-    'Claude Fable 5.2 <model@example.invalid>' \
-    $'Mira Example <\n  person@anthropic.com>' 'Mira Example < person@anthropic.com>'; do
-    credit_message_case claude-co-author 'folded and unfolded agent identities agree' \
-      "${prefix}Co-Authored-By: $value"
-  done
-  # PR431-TRAILER-UNFOLDS-BLANK-SEPARATOR: neither kind of paragraph separator can join a
-  # later indented paragraph to the co-author. Without that separator it IS the trailer value.
-  for value in $'\n' $' \t\n'; do
-    credit_message_case pass 'blank paragraph ends a logical trailer' \
-      "${prefix}Co-Authored-By: Mira Example"$'\n'"${value}  Claude explains folding."
-  done
-  credit_message_case claude-co-author 'a nonblank continuation belongs to the name' \
-    "${prefix}Co-Authored-By: Mira Example"$'\n  Claude'
-  credit_message_case claude-co-author 'standalone credit outside the final trailer block' \
-    "${prefix}  Co-Authored-By : Claude <model@example.invalid>"$'\n\nLater prose.'
-  credit_message_case claude-co-author 'an indented co-author key still starts a standalone credit' \
-    "${prefix}Note: collaborators"$'\n  Co-Authored-By:\n    Claude <model@example.invalid>\n\nLater prose.'
-  credit_message_case pass 'another trailer is not a co-author field' \
-    "${prefix}Reviewed-By: Claude <model@example.invalid>"
-  credit_message_case claude-session 'session keys retain their standalone rule' \
-    "${prefix}  Claude-Session : invented-session"$'\n\nLater prose.'
-
-  # PR431-FOOTER-PREFIX-CLASS: recognize a complete credit, not arbitrary punctuation or
-  # sentences about the label. No growing list of prose exceptions belongs in the validator.
-  for value in '"Generated with Claude Code"' "'Generated with Claude Code'" \
-    '> Generated with Claude Code' '`Generated with Claude Code`' \
-    '“Generated with Claude Code”' 'Generated with Claude Code is the footer label.' \
-    'Generated with [Claude Code](https://example.invalid) is an example.' \
-    'Generated with Claude Codecs'; do
-    credit_message_case pass 'quotation or sentence discussing the footer' "$prefix$value"
-  done
-  for value in 'Generated with Claude Code' 'Generated with Claude Code.' \
-    'Generated with [Claude Code]' 'Generated with [Claude Code](https://example.invalid)' \
-    '🤖 Generated with [Claude Code](https://example.invalid)' \
-    '  🤖 generated with Claude Code.  '; do
-    credit_message_case claude-generated 'recognized standalone generated-with credit' "$prefix$value"
-  done
+credit_message_case() {  # <pass|rule-id> <label> <message>: neutral identities
+  local commit
+  commit="$(plain_commit "$credit_target" "$3")" || exit 1
+  credit_expect "$1" "$2" "$commit"
+}
+credit_identity_case() {  # <pass|rule-id> <label> <author name> <author email> <committer name> <committer email>
+  local commit
+  commit="$(credit_commit "$credit_target" "$3" "$4" "$5" "$6" 'feat: a change')" || exit 1
+  credit_expect "$1" "$2" "$commit"
 }
 
-credit_parsing_contracts "$credit_base"
+# Each listed string and each identity field, one case apiece, in both object formats: the
+# author's and the committer's name and email, and five messages that each hold one listed string
+# and no other.
+credit_listed_strings() {  # <base>
+  local credit_target="$1" n='Jane Doe' e=jane@example.com p=$'feat: a change\n\n'
+  local bot='12345678+claude[bot]@users.noreply.github.com'
+  credit_identity_case claude-author 'the author name Claude' Claude "$e" "$n" "$e"
+  credit_identity_case claude-author 'the author name claude[bot]' 'claude[bot]' "$e" "$n" "$e"
+  credit_identity_case claude-author 'the author email noreply@anthropic.com' \
+    "$n" noreply@anthropic.com "$n" "$e"
+  credit_identity_case claude-author 'an author email ending +claude[bot]@users.noreply.github.com' \
+    "$n" "$bot" "$n" "$e"
+  credit_identity_case claude-committer 'the committer name Claude' "$n" "$e" Claude "$e"
+  credit_identity_case claude-committer 'the committer name claude[bot]' "$n" "$e" 'claude[bot]' "$e"
+  # Round four, case 6: a neutral committer name at noreply@anthropic.com.
+  credit_identity_case claude-committer 'the committer email noreply@anthropic.com' \
+    "$n" "$e" "$n" noreply@anthropic.com
+  credit_identity_case claude-committer 'a committer email ending +claude[bot]@users.noreply.github.com' \
+    "$n" "$e" "$n" "$bot"
+  credit_message_case claude-co-author 'a message holding noreply@anthropic.com' \
+    "${p}Reviewed-by: Jane Roe <noreply@anthropic.com>"
+  credit_message_case claude-co-author 'a message holding Co-Authored-By: Claude' \
+    "${p}Co-Authored-By: Claude <model@example.invalid>"
+  credit_message_case claude-session 'a message holding Claude-Session:' \
+    "${p}Claude-Session: https://claude.ai/code/session_listed"
+  credit_message_case claude-generated 'a message holding Generated with Claude Code' \
+    "${p}Generated with Claude Code"
+  credit_message_case claude-generated 'a message holding Generated with [Claude Code]' \
+    "${p}Generated with [Claude Code]"
+}
+credit_listed_strings "$credit_target"
 
-# The author and committer still use whole-name/exact-email rules, not the broader co-author
-# rules. A provider domain alone or an agent/model suffix is not either header rule.
+# ASCII case: an upper-case identity value and an upper-case message string are refused.
+credit_identity_case claude-committer 'ASCII case: a committer email ending +CLAUDE[BOT]@USERS.NOREPLY.GITHUB.COM' \
+  'Jane Doe' jane@example.com 'Jane Doe' '12345678+CLAUDE[BOT]@USERS.NOREPLY.GITHUB.COM'
+credit_message_case claude-generated 'ASCII case: the message line GENERATED WITH [CLAUDE CODE]' \
+  $'feat: a change\n\nGENERATED WITH [CLAUDE CODE]'
+
+# Fixed strings, not patterns. As a glob or a regular expression, `[bot]` and `[Claude Code]` each
+# match one character, and every one of these would be refused.
+credit_identity_case pass 'fixed strings: the author name claudeb' \
+  claudeb jane@example.com 'Jane Doe' jane@example.com
+credit_identity_case pass 'fixed strings: the committer name claudet' \
+  'Jane Doe' jane@example.com claudet jane@example.com
+credit_identity_case pass 'fixed strings: an author email ending +claudeb@users.noreply.github.com' \
+  'Jane Doe' '12345678+claudeb@users.noreply.github.com' 'Jane Doe' jane@example.com
+credit_message_case pass 'fixed strings: the message line Generated with a plan' \
+  $'feat: a change\n\nGenerated with a plan'
+
+# A .mailmap the pull request adds to its own tree, mapping the listed identity to a neutral one,
+# changes no verdict: the identities are git's raw fields. The case is only about anything if git's
+# mailmap forms really do report the neutral identity for that commit.
+credit_git checkout -q --detach "$credit_target"
+printf 'Jane Doe <jane@example.com> Claude <noreply@anthropic.com>\n' > "$credit_repo/.mailmap"
+credit_git add .mailmap
+c="$(credit_commit HEAD Claude noreply@anthropic.com Claude noreply@anthropic.com 'feat: map the identity away')" || exit 1
+if [[ "$(credit_git log --no-walk --format='%aN <%aE> %cN <%cE>' "$c")" \
+    != 'Jane Doe <jane@example.com> Jane Doe <jane@example.com>' ]]; then
+  echo 'commit credit: the fixture .mailmap does not map the listed identity, so the case proves nothing' >&2
+  exit 1
+fi
+credit_refuse 'a .mailmap mapping the listed identity to a neutral one' "$c" \
+  "$c:claude-author" "$c:claude-committer"
+
+# Only the listed identities are refused: an agent name with a suffix, and anthropic.com addresses
+# other than the listed one, pass.
 c="$(credit_commit "$credit_base" 'Claude Fable 5.2' person@anthropic.com \
   'Jean-Claude Exemple' person@research.anthropic.com 'feat: header identity contract')" || exit 1
-credit_pass 'author and committer rules stay distinct from co-author rules' "$c" 1
+credit_pass 'listed limit: the author Claude Fable 5.2 and the committer Jean-Claude Exemple, at anthropic.com' "$c" 1
+
+# Round four's cases, each with the Contract's verdict. Case 3, GIT_GRAFT_FILE set, and case 5, a
+# caller exporting it, are with the graft cases below; case 6 is in credit_listed_strings.
+# 1. Co-author lines that hold no listed string pass, whatever addresses their nested comments name.
+credit_message_case pass 'listed limit: Co-Authored-By mira@anthropic.com, a nested comment at example.invalid' \
+  $'feat: a change\n\nCo-Authored-By: mira@anthropic.com (old alias team@example.invalid (retired))'
+credit_message_case pass 'listed limit: Co-Authored-By mira@example.invalid, a nested comment at anthropic.com' \
+  $'feat: a change\n\nCo-Authored-By: mira@example.invalid (old alias team@anthropic.com (retired))'
+# 2. A generated-with footer whose link holds parentheses.
+credit_message_case claude-generated 'a Generated with [Claude Code] footer whose link holds parentheses' \
+  $'feat: a change\n\nGenerated with [Claude Code](https://example.invalid/docs_(tool)).'
+# 4. A hand-built object whose author and committer are neutral, carrying an extra header line
+#    `Author Claude <...>`: git reports no such identity.
+credit_handmade_tree="$(credit_git rev-parse "$credit_target^{tree}")" || exit 1
+credit_handmade="$(printf 'tree %s\nparent %s\nauthor Jane Doe <jane@example.com> 1795608000 +0000\ncommitter Jane Doe <jane@example.com> 1795608000 +0000\nAuthor Claude <archivist@example.invalid>\n\nfeat: a hand-built commit with an extra header line\n' \
+  "$credit_handmade_tree" "$credit_target" | credit_git hash-object -t commit -w --stdin)" \
+  || { echo 'could not build the hand-built commit-credit object' >&2; exit 1; }
+credit_pass 'round four, case 4: an extra Author header line names no identity' "$credit_handmade" 1
+# 7. One commit shaped like the old history's first credited commit is refused for that commit
+#    alone, each rule it breaks named once.
+c="$(credit_commit "$credit_base" Claude noreply@anthropic.com Claude noreply@anthropic.com \
+  $'chore: a commit shaped like the first credited one\n\nCo-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_first')" || exit 1
+credit_refuse 'round four, case 7: a commit shaped like the first credited one, each rule named once' "$c" \
+  "$c:claude-author" "$c:claude-committer" "$c:claude-co-author" "$c:claude-session"
 
 # Reached only through a merge: the side branch's commit is on no first-parent path from the head.
 credit_side="$(plain_commit "$credit_base" $'feat: the side branch\n\nCo-Authored-By: Claude <noreply@anthropic.com>')" || exit 1
@@ -7284,6 +7272,28 @@ credit_fail_closed 'an active graft cannot verify an empty range' "$credit_clean
 mv "$credit_repo/.git/info/grafts" "$fixture_dir/credit-grafts"
 GIT_GRAFT_FILE="$fixture_dir/credit-grafts" \
   credit_fail_closed 'an explicit graft file also changes ancestry' "$credit_target" "$credit_shallow_head"
+# Round four, case 3: GIT_GRAFT_FILE set at all is exit 2, whatever it names, even for a range that
+# would pass: a relative name, which git resolves from the top of the work tree and not from the
+# subdirectory the script runs in; `-`; an empty regular file; and an empty value.
+mkdir "$credit_repo/credit-subdirectory"
+cp "$fixture_dir/credit-grafts" "$credit_repo/credit-relative-grafts"
+GIT_GRAFT_FILE=credit-relative-grafts credit_fail_closed 'a relative graft file named from a subdirectory' \
+  "$credit_target" "$credit_shallow_head" "$credit_repo/credit-subdirectory"
+rm "$credit_repo/credit-relative-grafts"
+rmdir "$credit_repo/credit-subdirectory"
+GIT_GRAFT_FILE=- credit_fail_closed 'a graft file named -' "$credit_target" "$credit_clean"
+: > "$fixture_dir/credit-empty-grafts"
+GIT_GRAFT_FILE="$fixture_dir/credit-empty-grafts" \
+  credit_fail_closed 'an empty regular graft file' "$credit_target" "$credit_clean"
+GIT_GRAFT_FILE= credit_fail_closed 'an empty GIT_GRAFT_FILE' "$credit_target" "$credit_clean"
+# Round four, case 5: a caller exporting GIT_GRAFT_FILE naming an empty regular file decides
+# nothing here, because the section sets it aside with every other GIT_ variable. This runs the
+# section's own set-aside under it.
+( export GIT_GRAFT_FILE="$fixture_dir/credit-empty-grafts"
+  credit_set_aside_git
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+  credit_pass 'round four, case 5: a caller exporting GIT_GRAFT_FILE naming an empty regular file' \
+    "$credit_clean" 1 )
 printf '# no active grafts\n \t\n  # only comments\n' > "$credit_repo/.git/info/grafts"
 credit_refuse 'comments alone do not hide the credited ancestor' "$credit_shallow_head" "$credit_hidden:claude-session"
 credit_pass 'comments alone permit a complete clean range' "$credit_clean" 1
@@ -7432,7 +7442,7 @@ credit_sha256_bad="$(plain_commit "$credit_sha256_base" $'SHA-256 credit\n\nClau
 credit_target="$credit_sha256_base" credit_refuse 'SHA-256 rule output' \
   "$credit_sha256_bad" "$credit_sha256_bad:claude-session"
 credit_width_contracts "$credit_sha256_base" "$credit_sha256_clean" "$credit_sha256_bad"
-credit_parsing_contracts "$credit_sha256_base"
+credit_listed_strings "$credit_sha256_base"
 credit_repo="$credit_sha1_repo"
 
 # Criss-crossed histories: two merge bases, and both are the target's. A and C are siblings on
@@ -7473,9 +7483,12 @@ credit_target="$crisscross_target" \
   credit_refuse 'criss-crossed histories: the head commit crediting Claude is named, and neither merge base' \
   "$c" "$c:claude-co-author"
 
-# The section's config isolation, put back as it was found.
-if [[ -n "$credit_had_global" ]]; then export GIT_CONFIG_GLOBAL="$credit_saved_global"; else unset GIT_CONFIG_GLOBAL; fi
-if [[ -n "$credit_had_system" ]]; then export GIT_CONFIG_SYSTEM="$credit_saved_system"; else unset GIT_CONFIG_SYSTEM; fi
+# The section's isolation, put back as it was found: its two config variables unset, and every
+# GIT_ variable it set aside exported again with the value it came with.
+unset GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+for credit_i in ${credit_git_names[@]+"${!credit_git_names[@]}"}; do
+  export "${credit_git_names[credit_i]}=${credit_git_values[credit_i]}"
+done
 
 echo 'commit-credit fixtures passed'
 
