@@ -3464,23 +3464,3 @@ cancellation's answer through unchanged, and the third that the record is of a
 true answer the question was given and not of the invocation's state when the
 outcome is read: a cancellation the process funnel never acted on did not end
 the question.
-
-## `fn an_unanswered_docker_question_asked_through_observe_names_its_cancellation() {`
-
-A question asked through `observe` under an invocation's bound, and ended by
-that invocation's cancellation, names the cancellation as the end it met. This
-parent runs the child below under `run_test_isolated` with `PATH` set to the
-stub's directory alone, and requires the child's pass and the mark, the file
-the stub creates when it is asked its question. The test is Unix only, and it
-fails where the temporary directory's path holds a colon, which a `PATH` entry
-cannot hold.
-
-## `fn unanswered_docker_question_cancellation_child() {`
-
-The child the test above runs; an ordinary run ignores it. It writes the stub
-itself, in a process of its own (`write_program_in_its_own_process`), and the
-stub, asked `ps`, creates the mark and sleeps. The child asks `observe` under
-an invocation's bound, cancels that invocation when the mark appears, and
-requires the detail of `observe`'s failure to name its invocation's
-cancellation as the end it met. The test is Unix only, and it fails where the
-temporary directory's path holds a colon, which a `PATH` entry cannot hold.
