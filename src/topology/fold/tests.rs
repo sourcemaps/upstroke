@@ -7738,6 +7738,39 @@ fn a_budget_stop_records_a_ceiling_its_own_recorded_spend_reached() {
 }
 
 #[test]
+fn a_budget_exceeded_with_a_zero_or_negative_ceiling_is_refused() {
+    let fold = started();
+    let breach = |limit_usd: f64, spent_usd: f64| {
+        ev(TopologyEventBody::BudgetExceeded {
+            data: BudgetExceeded4 {
+                epoch: Epoch(0),
+                budget: BudgetKind::Run,
+                limit_usd,
+                spent_usd,
+                key: Some(ZETA),
+            },
+        })
+    };
+
+    for limit_usd in [0.0, -1.0] {
+        let FoldError::InconsistentRecord { kind, detail } = refuse(&fold, &breach(limit_usd, 0.0))
+        else {
+            panic!("a nonpositive budget ceiling is refused as an inconsistent record");
+        };
+        assert_eq!(kind, "budget_exceeded");
+        assert_eq!(
+            detail,
+            format!(
+                "it records a `run_usd` ceiling of {limit_usd}, and a budget ceiling is a positive \
+                 number of dollars"
+            )
+        );
+    }
+
+    accepts(&fold, &breach(1.0, 1.0));
+}
+
+#[test]
 fn a_wait_never_elapses_under_a_halt_or_a_budget_stop() {
     let base = sha("base");
     let elapsed = ev(TopologyEventBody::DeferWaitElapsed {

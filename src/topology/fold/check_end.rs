@@ -214,6 +214,16 @@ impl RunState {
                 ),
             });
         }
+        if exceeded.limit_usd <= 0.0 {
+            return Err(FoldError::InconsistentRecord {
+                kind: KIND,
+                detail: format!(
+                    "it records a `{}` ceiling of {}, and a budget ceiling is a positive number \
+                     of dollars",
+                    exceeded.budget, exceeded.limit_usd
+                ),
+            });
+        }
         if exceeded.spent_usd < exceeded.limit_usd {
             return Err(FoldError::InconsistentRecord {
                 kind: KIND,
