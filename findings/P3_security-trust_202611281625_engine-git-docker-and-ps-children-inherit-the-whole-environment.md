@@ -11,16 +11,17 @@ first_bad:
 guard: the owner's decision on what the engine's own Git, Docker and process-table children inherit, taken with HOST-ROLES-GET-EVERY-AMBIENT-CREDENTIAL's
 ---
 
-# The engine's own Git, Docker and process-table children inherit the whole environment
+# The engine's own Git, Docker and process-table children inherit every exported credential
 
 ## Failure sequence
 
 1. The engine starts some children itself, as `std::process::Command`s, without clearing their
    environment: Git through `git_command` (`src/workspace.rs:78-103`), which removes and sets Git
-   variables only; the manager's two Git builders (`src/workspace_manager.rs:7284-7287`,
-   `:8140-8141`); the host Docker client through `docker_command`
-   (`src/runner/container.rs:1701-1705`); and, off Linux, the reaper's `/bin/ps` query, which sets
-   only `LC_ALL` (`src/agent/proc.rs:4817-4825`).
+   variables only; the manager's two Git builders, which also remove and set Git variables only
+   (`src/workspace_manager.rs:7284-7313`, `:8140-8157`, `:8188-8195`); the host Docker client
+   through `docker_command` (`src/runner/container.rs:1701-1705`); and, on a Unix other than Linux,
+   the reaper's `/bin/ps` query, which sets only `LC_ALL` (`src/agent/proc.rs:1546-1547`,
+   `:4817-4825`).
 2. A `std::process::Command` hands its child the parent's environment unless told otherwise, so each
    of these children receives every credential the operator exported.
 
