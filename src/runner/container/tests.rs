@@ -1794,6 +1794,56 @@ fn the_availability_toggle_is_per_operation_so_ps_can_answer_while_inspect_canno
 /// operation and the seam's one detail.
 #[test]
 fn an_unarmed_inspection_runtime_answers_as_an_absent_runtime() {
+    #[cfg(unix)]
+    {
+        let tree = scratch("unarmed-inspection-questions");
+        let bin = tree.path().join("bin");
+        fs::create_dir(&bin).expect("the stub runtime's directory");
+        let asked = tree.path().join("runtime-asked");
+        super::write_program_in_its_own_process(
+            &bin.join(super::DOCKER_PROGRAM),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 93\n",
+                asked.display()
+            ),
+        );
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let path =
+            std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+                .expect("a PATH with the stub runtime first");
+        let ended = crate::agent::proc::test_support::run_test_isolated(
+            "runner::container::tests::unarmed_inspection_questions_child",
+            &[("PATH", path.as_os_str())],
+            Duration::from_secs(300),
+        );
+        assert!(
+            ended.status.is_some_and(|status| status.success())
+                && ended.stdout.contains("1 passed"),
+            "an isolated child asked the unarmed inspection runtime every question: {ended}"
+        );
+        assert!(
+            !asked.exists(),
+            "the unarmed inspection runtime asked the container runtime: {}",
+            fs::read_to_string(&asked).unwrap_or_default()
+        );
+    }
+    #[cfg(not(unix))]
+    ask_the_unarmed_inspection_runtime_every_question();
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn unarmed_inspection_questions_child() {
+    ask_the_unarmed_inspection_runtime_every_question();
+    assert_eq!(
+        crate::engine::topology::entry::container_runtime::unarmed_answers(),
+        12,
+        "the unarmed absent-runtime double answered each of the twelve questions"
+    );
+}
+
+fn ask_the_unarmed_inspection_runtime_every_question() {
     use crate::engine::topology::entry::container_runtime;
 
     #[track_caller]
@@ -1823,8 +1873,6 @@ fn an_unarmed_inspection_runtime_answers_as_an_absent_runtime() {
         open_stdin: false,
     };
     let runtime = container_runtime::for_inspection();
-    // Each question is asked only once the one before it was answered as absent,
-    // and the effects come last, so a runtime that answers is never asked to act.
     absent(RuntimeOp::Probe, runtime.probe());
     absent(
         RuntimeOp::InspectImageByReference,
