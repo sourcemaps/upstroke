@@ -32,9 +32,13 @@ At the reviewed commit, in `src/engine/topology/coordinator.rs`:
 - `bounded` (line 11330) runs its body on a thread of its own and panics if it has not ended within `BOUND`, 120 s
   (line 2181). One call is one bound, whatever the body runs.
 - `f_bounded_case` (line 25883) runs one case under `bounded`, named by the case, and returns its outcome for
-  `f_report`. The F tests that collect outcomes call it once per case.
-- The other F tests — the nine `-control` tests, `f-c1-p2-launch-outage`, `f-c2-retained-residue` and `f-o14b` — call
-  `bounded` once per case directly and assert inside it.
+  `f_report`. Of the 21 split tests (the F tests whose cases once shared one `BOUND`), the nine that collect outcomes
+  call it once per case.
+- The other twelve split tests — the nine `-control` tests, `f-c1-p2-launch-outage`, `f-c2-retained-residue` and
+  `f-o14b` — call `bounded` once per case directly and assert inside it. F tests outside the 21 are not in this list;
+  among them, `the_launch_premise_names_the_deleted_head_in_either_separator_spelling_and_nothing_else` (F-R1's path
+  spelling) collects outcomes and calls `f_report` without `f_bounded_case`, and the single-case `f-residual-i` calls
+  `bounded` directly.
 
 One case per bound is a convention those call sites follow, and the notes for `f_bounded_case`
 (`docs/internals/engine/topology/coordinator.md`) say why: one `BOUND` around a 12- or 16-case matrix measured how
@@ -50,8 +54,9 @@ many cases a test chains and how loaded the runner was (`G6-F-MATRIX-AGGREGATE-B
 
 Nothing kills either mutation. The source scanner that read this file's own text for a loop inside an F bound
 (`no_f_test_runs_a_loop_of_cases_under_one_bound`, with `f_bounded_calls`) is removed in the change that files this, and its note with it.
-It never saw the second mutation, and it saw the first only where the loop was written inside the call's own
-arguments.
+It never saw the second mutation, and it saw the first only through markers in the bound's own arguments: it caught
+a loop behind a helper call it recognized, such as `f_report(&f_policy_cases(3))` in its `f-control-report` control,
+and could miss one behind a helper call it did not recognize.
 
 ## Grading
 
