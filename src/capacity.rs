@@ -934,7 +934,7 @@ pub fn report(
     adapters: &dyn crate::agent::AdapterSource,
 ) -> Result<CapacityReport, crate::error::UpstrokeError> {
     let mut warnings = Vec::new();
-    let config = crate::config::load(
+    let config = crate::config::load_for_report(
         opts.config_path.as_deref(),
         &opts.repo_root,
         opts.pools_path.as_deref(),
@@ -2851,6 +2851,157 @@ pub(crate) mod tests {
             "{rendered}"
         );
         assert!(!rendered.contains("could not be read"), "{rendered}");
+    }
+
+    fn report_under(
+        repo: &std::path::Path,
+        settings: &str,
+    ) -> Result<CapacityReport, crate::error::UpstrokeError> {
+        crate::workspace_manager::fixture::write_file(
+            &repo.join("upstroke.toml"),
+            settings.as_bytes(),
+        );
+        report(
+            &CapacityOptions {
+                config_path: None,
+                pools_path: Some(claude_max_pools_file(repo)),
+                repo_root: repo.to_path_buf(),
+                scope: None,
+                now_unix: Some(FIXTURE_NOW),
+            },
+            &NoAdapters,
+        )
+    }
+
+    const WOULD_REFUSE: &str = "a run created now would refuse the file";
+
+    #[test]
+    fn a_capacity_report_reads_past_settings_it_never_uses_and_warns_what_a_run_would_refuse() {
+        for (tag, body, named) in [
+            (
+                "capacity-refused-gate-key",
+                "[[gates]]\nname = \"fmt\"\ncmd = \"true\"\ntimout_secs = 5\n",
+                "timout_secs",
+            ),
+            (
+                "capacity-refused-gate-name",
+                "[[gates]]\nname = \"fmt\"\ncmd = \"true\"\n\
+                 [[gates]]\nname = \"fmt\"\ncmd = \"true\"\n",
+                "fmt",
+            ),
+            (
+                "capacity-refused-engine-key",
+                "[engine]\nmax_paralel = 2\n",
+                "max_paralel",
+            ),
+            (
+                "capacity-refused-interaction-key",
+                "[interaction]\nmod = \"never\"\n",
+                "mod",
+            ),
+        ] {
+            let tree = crate::workspace_manager::fixture::scratch(tag);
+            let repo = tree.path();
+            let settings = format!("[routing.strategy]\nmode = \"value-max\"\n{body}");
+
+            let report = match report_under(repo, &settings) {
+                Ok(report) => report,
+                Err(error) => panic!("{body}: the report refused the file: {error}"),
+            };
+
+            assert_eq!(report.strategy, "value-max", "{body}");
+            let refusals: Vec<&String> = report
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains(WOULD_REFUSE))
+                .collect();
+            assert_eq!(refusals.len(), 1, "{body}: {:?}", report.warnings);
+            assert!(
+                refusals[0].contains(&format!("`{named}`")),
+                "{body}: the warning names `{named}`: {refusals:?}"
+            );
+            assert!(
+                refusals[0].contains("upstroke.toml"),
+                "{body}: the warning names the file: {refusals:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_capacity_report_on_a_refused_file_keeps_its_capacity_scope() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-refused-scope");
+        let repo = tree.path();
+        let settings = "[routing.strategy]\nmode = \"value-max\"\n[capacity]\nscope = \"repo\"\n\
+                        [[gates]]\nname = \"fmt\"\ncmd = \"true\"\ntimout_secs = 5\n";
+
+        let report = match report_under(repo, settings) {
+            Ok(report) => report,
+            Err(error) => panic!("the report refused the file: {error}"),
+        };
+
+        assert_eq!(report.scope, Scope::Repo);
+        assert_eq!(report.strategy, "value-max");
+        assert_eq!(
+            report
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains(WOULD_REFUSE))
+                .count(),
+            1,
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn a_capacity_report_still_refuses_the_settings_it_reads() {
+        for (tag, settings, named) in [
+            (
+                "capacity-refused-strategy-key",
+                "[routing.strategy]\nmode = \"value-max\"\nspend_down_afer = 0.7\n",
+                "spend_down_afer",
+            ),
+            (
+                "capacity-refused-scope-value",
+                "[capacity]\nscope = \"galaxy\"\n",
+                "galaxy",
+            ),
+        ] {
+            let tree = crate::workspace_manager::fixture::scratch(tag);
+            let repo = tree.path();
+
+            match report_under(repo, settings) {
+                Ok(report) => panic!("{settings}: the report read it: {:?}", report.warnings),
+                Err(error) => {
+                    let message = error.to_string();
+                    assert!(message.contains(named), "{settings}: {message}");
+                    assert!(!message.contains(WOULD_REFUSE), "{settings}: {message}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_capacity_report_on_an_accepted_file_warns_of_no_refusal() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-accepted-file");
+        let repo = tree.path();
+        let settings = "[routing.strategy]\nmode = \"value-max\"\n[[gates]]\nname = \"fmt\"\n\
+                        cmd = \"true\"\n";
+
+        let report = match report_under(repo, settings) {
+            Ok(report) => report,
+            Err(error) => panic!("the report refused the file: {error}"),
+        };
+
+        assert_eq!(report.strategy, "value-max");
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("would refuse")),
+            "{:?}",
+            report.warnings
+        );
     }
 
     const REFUSING_RUN: &str = "01CAPACITYREFUSING00000001";
