@@ -32,11 +32,17 @@ source, documentation, workflows, release machinery and this file.
    `WINGUEST_BUSY` is `1`, or when the repository variable `WINGUEST_QUEUE_LIMIT` is a positive
    whole number and the guest's queue reaches it: the guest's jobs queued or running in other
    runs, together with the runs of a lower run id that have not yet shown where their own suite
-   goes. So of runs that start together, a merge queue's entries among them, the earliest take
-   the guest up to the limit and the rest go to the hosted runner; a limit of `1` keeps the
-   guest to one suite at a time. Both are opt-in:
+   goes. The limit is best effort. While every run's picker can read the API and list the other
+   runs, of runs that start together, a merge queue's entries among them, the earliest take the
+   guest up to the limit and no further, and the rest go to the hosted runner. Both are opt-in:
    with neither set every run goes to the guest, and an unset or malformed limit counts nothing.
-   A GitHub API the job cannot read answers `guest`. The build machine's operator sets
+   A GitHub API the job cannot read answers `guest`: a failed question never moves a run off
+   the guest. So the limit can be passed in two ways. A burst of n runs costs about n² requests,
+   each picker asking about each other active run, against the workflow token's rate limits
+   (GitHub documents 1,000 requests an hour for a repository's `GITHUB_TOKEN`), and pickers
+   refused together each answer `guest`; and an earlier run a picker could not list, one still
+   `pending` or a finished run re-run, is not counted. Either can put more suites than the limit
+   on the guest. The build machine's operator sets
    `WINGUEST_BUSY` to `1` while baselines or Upstroke runs hold the machine, and clears it
    afterwards. A hosted run is not free: by the workflow's September 2026 measurements it takes
    three to four times the guest's time, 21 to 28 minutes a job against about 7, and in October
