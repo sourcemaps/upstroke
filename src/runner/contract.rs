@@ -101,6 +101,7 @@ pub enum ExecutionRole {
     Implement,
     Gate,
     Review,
+    Decide,
 }
 
 impl ExecutionRole {
@@ -114,13 +115,16 @@ impl ExecutionRole {
             Self::Implement,
             Self::Gate,
             Self::Review,
+            Self::Decide,
         ]
     }
 
     #[must_use]
     pub fn is_slotted(&self) -> bool {
         match self {
-            Self::Probe(ProbeTarget::Agent(_)) | Self::Implement | Self::Review => true,
+            Self::Probe(ProbeTarget::Agent(_)) | Self::Implement | Self::Review | Self::Decide => {
+                true
+            }
             Self::Probe(ProbeTarget::Shell) | Self::Gate => false,
         }
     }
@@ -133,6 +137,7 @@ impl ExecutionRole {
             Self::Implement => "implement".to_owned(),
             Self::Gate => "gate".to_owned(),
             Self::Review => "review".to_owned(),
+            Self::Decide => "decide".to_owned(),
         }
     }
 }
@@ -195,6 +200,25 @@ pub fn review_request(
         command,
         workspace,
         role: ExecutionRole::Review,
+        timeout,
+        agent: Some(agent),
+        invocation,
+        credential_profile: None,
+    }
+}
+
+#[must_use]
+pub fn decide_request(
+    command: CommandSpec,
+    workspace: PathBuf,
+    agent: AgentId,
+    timeout: Duration,
+    invocation: InvocationId,
+) -> RunnerRequest {
+    RunnerRequest {
+        command,
+        workspace,
+        role: ExecutionRole::Decide,
         timeout,
         agent: Some(agent),
         invocation,
@@ -573,6 +597,7 @@ pub(crate) mod tests {
             (ExecutionRole::Implement, true),
             (ExecutionRole::Gate, false),
             (ExecutionRole::Review, true),
+            (ExecutionRole::Decide, true),
         ];
         assert_eq!(
             expected.len(),
@@ -694,6 +719,107 @@ pub(crate) mod tests {
             .map(ExecutionRole::label)
             .collect();
         assert_eq!(labels.len(), ExecutionRole::all().len());
+    }
+
+    #[test]
+    fn the_decide_role_is_labelled_listed_once_and_slotted_as_review_is() {
+        assert_eq!(ExecutionRole::Decide.label(), "decide");
+        assert_eq!(ExecutionRole::Decide.to_string(), "decide");
+        let all = ExecutionRole::all();
+        let listed: Vec<&ExecutionRole> =
+            all.iter().filter(|role| role.label() == "decide").collect();
+        assert_eq!(
+            listed,
+            vec![&ExecutionRole::Decide],
+            "listed once, and no other role writes itself as `decide`: {all:?}"
+        );
+        assert_eq!(
+            all.last(),
+            Some(&ExecutionRole::Decide),
+            "appended after review, so every earlier role keeps its place: {all:?}"
+        );
+        assert!(ExecutionRole::Decide.is_slotted());
+        assert_eq!(
+            ExecutionRole::Decide.is_slotted(),
+            ExecutionRole::Review.is_slotted()
+        );
+    }
+
+    #[test]
+    fn decide_request_builds_reviews_request_in_the_decide_role_with_the_overlay_as_given() {
+        let overlay = vec![
+            ("UPSTROKE_OVERLAY".to_owned(), "1".to_owned()),
+            (
+                "CLAUDE_CODE_MAX_OUTPUT_TOKENS".to_owned(),
+                "8000".to_owned(),
+            ),
+            ("UPSTROKE_OVERLAY".to_owned(), "2".to_owned()),
+        ];
+        let spec = CommandSpec::new("prog")
+            .arg("--decide")
+            .env("UPSTROKE_OVERLAY", "1")
+            .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "8000")
+            .env("UPSTROKE_OVERLAY", "2")
+            .stdin(b"question".to_vec());
+        assert_eq!(
+            spec.env, overlay,
+            "the fixture's overlay, duplicate key and all"
+        );
+        let workspace = PathBuf::from("/tmp/decide");
+        let agent = AgentId::new("claude-code");
+        let timeout = Duration::from_secs(13);
+        let invocation = InvocationId::Decide { ordinal: 4 };
+
+        let request = decide_request(
+            spec.clone(),
+            workspace.clone(),
+            agent.clone(),
+            timeout,
+            invocation.clone(),
+        );
+        assert_eq!(request.role, ExecutionRole::Decide);
+        assert_eq!(request.credential_profile, None);
+        assert_eq!(
+            request.command.env, overlay,
+            "the overlay exactly as given: order, duplicates and values"
+        );
+        assert_eq!(request.command, spec, "the whole command spec, unchanged");
+        assert_eq!(request.workspace, workspace);
+        assert_eq!(request.agent, Some(agent.clone()));
+        assert_eq!(request.timeout, timeout);
+        assert_eq!(request.invocation, invocation);
+        assert_eq!(
+            request.agent.is_some(),
+            request.role.is_slotted(),
+            "the binding and the slot pair are the same fact"
+        );
+
+        let review = review_request(spec, workspace.clone(), agent.clone(), timeout, invocation);
+        assert_eq!(review.role, ExecutionRole::Review);
+        let as_review = RunnerRequest {
+            role: ExecutionRole::Review,
+            ..request
+        };
+        assert_eq!(
+            format!("{as_review:?}"),
+            format!("{review:?}"),
+            "the request review_request builds, but for its role"
+        );
+
+        let bare = decide_request(
+            CommandSpec::new("prog"),
+            workspace,
+            agent,
+            timeout,
+            InvocationId::Decide { ordinal: 0 },
+        );
+        assert!(
+            bare.command.env.is_empty(),
+            "a spec with no env carries no overlay: {:?}",
+            bare.command.env
+        );
+        assert_eq!(bare.role, ExecutionRole::Decide);
+        assert_eq!(bare.credential_profile, None);
     }
 
     #[test]
@@ -1312,6 +1438,7 @@ pub(crate) mod tests {
             (ExecutionRole::Implement, true),
             (ExecutionRole::Gate, true),
             (ExecutionRole::Review, true),
+            (ExecutionRole::Decide, true),
             (ExecutionRole::Probe(ProbeTarget::Shell), false),
             (
                 ExecutionRole::Probe(ProbeTarget::Agent(AgentId::new("claude-code"))),
@@ -1337,7 +1464,7 @@ pub(crate) mod tests {
         assert_eq!(
             outside.len(),
             2,
-            "two of the five roles spawn outside the context this site names — \
+            "two of the six roles spawn outside the context this site names — \
              counted so the boundary cannot grow in silence"
         );
     }
@@ -1610,13 +1737,14 @@ pub(crate) mod tests {
             ),
             (
                 "src/runner/contract.rs",
-                3,
-                8,
+                4,
+                10,
                 "worker_request, review_request, gate_request: the three \
-                 in-attempt roles, where the binding is R3's rule rather than \
-                 the call site's — three literals, three return types, the \
-                 declaration of the type itself, and the impl that carries \
-                 with_credential_profile, which binds no role",
+                 in-attempt roles, and decide_request, the decider's, where \
+                 the binding is R3's rule rather than the call site's — four \
+                 literals, four return types, the declaration of the type \
+                 itself, and the impl that carries with_credential_profile, \
+                 which binds no role",
             ),
         ];
 
@@ -1642,7 +1770,7 @@ pub(crate) mod tests {
         assert_eq!(
             expected.values().map(|(roles, _)| roles).sum::<usize>(),
             ExecutionRole::all().len(),
-            "five roles, five construction points, and this is the count"
+            "six roles, six construction points, and this is the count"
         );
         for absent in [
             "src/gates.rs",

@@ -155,6 +155,30 @@ The recorded shell executing `exit 0`. Non-slotted.
 Which seat a process occupies (DESIGN.md:224), with the probe target the
 contract adds.
 
+## `pub enum ExecutionRole` › `Decide,`
+
+A decider: an agent CLI asked to read and answer, which writes nothing —
+a read-only agent invocation, as a review pass is.
+
+It is `Review` in every answer the runner keys on a role, written beside
+`Review` in each `match` rather than as an arm of its own, so the two
+cannot drift apart without one of those lines changing: slotted (R3,
+[`ExecutionRole::is_slotted`]); told its agent's credential location on the
+host (`host::supplies_credentials`) and in a container
+(`container::env::supplies_credential_location`); started outside the
+started checkout (`host::starts_in_the_started_checkout`); given the
+worktree, mounted read-only, with every configured mount forced read-only
+(`container::exec::receives_a_worktree`,
+`container::exec::forces_configured_mounts_read_only`, and the workspace
+mount's own `read_only`); and its settings file mounted the way a
+reviewer's is. What differs is its label, `decide`, and its identity:
+[`InvocationId::Decide`], a form no attempt, sequence or pre-flight
+renders, and one the topology selector never admits to a slot pair.
+
+Declared, and listed in [`ExecutionRole::all`], after `Review`, so every
+earlier role keeps its place in the derived order and in every grid built
+from the list.
+
 ## `impl ExecutionRole` › `pub fn all() -> Vec<Self> {`
 
 Every role, with both probe targets.
@@ -174,7 +198,7 @@ the broker that acts on it is PR11.
 ## `impl ExecutionRole` › `pub fn label(&self) -> String {`
 
 The role as it is written in a record: `probe(shell)`, `probe(<agent>)`,
-`implement`, `gate`, `review`.
+`implement`, `gate`, `review`, `decide`.
 
 ## `pub struct RunnerRequest {`
 
@@ -259,6 +283,19 @@ agent, carrying that pass's or re-ask's identity. See [`worker_request`].
 A reviewer is an agent CLI, so it is slotted and `host-v1` gives it its
 agent's credential location — the same rule as the worker, and the reason
 the two share a shape rather than each being spelled out where it is sent.
+
+## `pub fn decide_request(`
+
+One decider process: `ExecutionRole::Decide`, bound to the deciding agent,
+carrying a decider's identity ([`InvocationId::Decide`]), and no credential
+profile. See [`review_request`]: the request is the one it builds in every
+field but the role.
+
+The command passes through whole, so the environment overlay
+([`CommandSpec`]'s `env`) arrives exactly as the caller wrote it — order,
+repeated keys and values — and a spec with no `env` gives a request with an
+empty overlay. A profile is added the way any other role's is, with
+[`RunnerRequest::with_credential_profile`].
 
 ## `pub fn gate_request(`
 

@@ -9767,7 +9767,7 @@ fn the_legacy_engine_routes_every_process_through_the_runner() {
     assert_eq!(by_role(&ExecutionRole::Review), 2);
     for process in &seen {
         match process.role {
-            ExecutionRole::Implement | ExecutionRole::Review => {
+            ExecutionRole::Implement | ExecutionRole::Review | ExecutionRole::Decide => {
                 assert!(process.slotted, "{process:?}");
                 assert_eq!(process.agent.as_deref(), Some("claude-code"), "{process:?}");
             }

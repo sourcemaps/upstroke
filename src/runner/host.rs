@@ -67,6 +67,7 @@ const fn supplies_credentials(role: &ExecutionRole) -> bool {
     match role {
         ExecutionRole::Implement
         | ExecutionRole::Review
+        | ExecutionRole::Decide
         | ExecutionRole::Probe(ProbeTarget::Agent(_)) => true,
         ExecutionRole::Gate | ExecutionRole::Probe(ProbeTarget::Shell) => false,
     }
@@ -76,7 +77,7 @@ const fn starts_in_the_started_checkout(role: &ExecutionRole, worker_in_checkout
     match role {
         ExecutionRole::Probe(_) => true,
         ExecutionRole::Implement => worker_in_checkout,
-        ExecutionRole::Gate | ExecutionRole::Review => false,
+        ExecutionRole::Gate | ExecutionRole::Review | ExecutionRole::Decide => false,
     }
 }
 

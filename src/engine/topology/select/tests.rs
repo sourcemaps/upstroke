@@ -1922,3 +1922,106 @@ fn an_interrupted_integration_verification_keeps_its_known_charges_and_makes_the
         ],
     );
 }
+
+mod decide {
+    use super::*;
+
+    #[test]
+    fn a_decide_invocation_is_never_admitted_by_any_standing() {
+        use crate::runner::invocation::{AttemptRole, SequenceRole};
+        use crate::runner::{AgentId, ProbeTarget};
+
+        let mut attempting = started();
+        in_flight(&mut attempting, ALEPH, 0);
+        let verifying = {
+            let mut trace = crate::topology::census::tests::deferred_verification_trace();
+            trace.truncate(trace.len().saturating_sub(1));
+            TopologyFold::replay(crate::topology::census::tests::inputs(), &trace)
+                .expect("a prefix of the census's deferred-verification trace replays")
+        };
+        let open = verifying
+            .transaction()
+            .expect("the prefix has a verification open")
+            .sequence;
+        let mut poisoned = started();
+        in_flight(&mut poisoned, ALEPH, 0);
+        poisoned.poison();
+
+        let worker = InvocationId::attempt(
+            ALEPH,
+            GenerationId(0),
+            AttemptNumber(1),
+            AttemptRole::Worker,
+            0,
+        );
+        let reviewer = InvocationId::attempt(
+            ALEPH,
+            GenerationId(0),
+            AttemptNumber(1),
+            AttemptRole::ReviewPass(0),
+            0,
+        );
+        let verifier = InvocationId::sequence(open, SequenceRole::ReviewPass(0), 0);
+        let shell = InvocationId::probe(ProbeTarget::Shell, 0).expect("the shell probe");
+        let agent = InvocationId::probe(ProbeTarget::Agent(AgentId::new("claude-code")), 0)
+            .expect("an agent probe");
+        let decides = [
+            InvocationId::Decide { ordinal: 0 },
+            InvocationId::Decide { ordinal: 9 },
+        ];
+        let others = [&worker, &reviewer, &verifier, &shell, &agent];
+
+        assert_eq!(Standing::of(&attempting, &worker).holds(), Holds::Pipeline);
+        assert_eq!(
+            Standing::of(&verifying, &verifier).holds(),
+            Holds::PipelineAndMerge
+        );
+
+        let folds = [
+            ("unstarted", TopologyFold::new(inputs())),
+            ("started", started()),
+            ("attempting", attempting),
+            ("verifying", verifying),
+            ("poisoned", poisoned),
+        ];
+        let mut standings = vec![("the pre-flight's".to_owned(), Standing::preflight())];
+        for (name, fold) in &folds {
+            for decide in &decides {
+                assert_eq!(
+                    Standing::of(fold, decide).holds(),
+                    Holds::Nothing,
+                    "{name}: the fold holds an entitlement for `{decide}`"
+                );
+            }
+            for id in others.iter().copied().chain(decides.iter()) {
+                standings.push((format!("{name}, read for `{id}`"), Standing::of(fold, id)));
+            }
+        }
+        assert_eq!(
+            standings.len(),
+            1 + folds.len() * (others.len() + decides.len())
+        );
+
+        let mut admitting = 0_usize;
+        for (name, standing) in &standings {
+            for decide in &decides {
+                let refused = standing
+                    .admits(decide)
+                    .expect_err("a decider is admitted by no standing");
+                assert!(
+                    refused.to_string().contains(&decide.render()),
+                    "{name}: {refused}"
+                );
+            }
+            if others.iter().any(|id| standing.admits(id).is_ok()) {
+                admitting += 1;
+            }
+        }
+        assert!(
+            admitting >= 3,
+            "the pre-flight's, the attempt's and the verification's standings each \
+             admit their own invocations, so the refusals above are not a grid that \
+             admits nothing: {admitting}"
+        );
+    }
+}

@@ -53,7 +53,10 @@ pub struct RunIdentity {
 #[must_use]
 pub const fn receives_a_worktree(role: &ExecutionRole) -> bool {
     match role {
-        ExecutionRole::Implement | ExecutionRole::Gate | ExecutionRole::Review => true,
+        ExecutionRole::Implement
+        | ExecutionRole::Gate
+        | ExecutionRole::Review
+        | ExecutionRole::Decide => true,
         ExecutionRole::Probe(_) => false,
     }
 }
@@ -61,7 +64,7 @@ pub const fn receives_a_worktree(role: &ExecutionRole) -> bool {
 #[must_use]
 pub const fn forces_configured_mounts_read_only(role: &ExecutionRole) -> bool {
     match role {
-        ExecutionRole::Review | ExecutionRole::Probe(_) => true,
+        ExecutionRole::Review | ExecutionRole::Decide | ExecutionRole::Probe(_) => true,
         ExecutionRole::Implement | ExecutionRole::Gate => false,
     }
 }
@@ -743,7 +746,10 @@ impl ContainerRunner {
         command: &CommandSpec,
     ) -> Result<(Vec<String>, Vec<Mount>), UpstrokeError> {
         let unchanged = || Ok((command.args.clone(), Vec::new()));
-        if !matches!(role, ExecutionRole::Implement | ExecutionRole::Review) {
+        if !matches!(
+            role,
+            ExecutionRole::Implement | ExecutionRole::Review | ExecutionRole::Decide
+        ) {
             return unchanged();
         }
         let Some(own) = command.settings_file.as_deref() else {
@@ -815,7 +821,7 @@ impl ContainerRunner {
             mounts.push(Mount::Path {
                 source: request.workspace.clone(),
                 target: self.layout.workspace().to_owned(),
-                read_only: request.role == ExecutionRole::Review,
+                read_only: matches!(request.role, ExecutionRole::Review | ExecutionRole::Decide),
             });
         }
         if let Some(layout) = git {
@@ -1122,9 +1128,9 @@ impl ImageIdMismatch {
     pub const fn of(invocation: &InvocationId) -> Self {
         match invocation {
             InvocationId::Probe { .. } => Self::RefusedBeforeStart,
-            InvocationId::Attempt { .. } | InvocationId::Sequence { .. } => {
-                Self::SpawnFailureOutage
-            }
+            InvocationId::Attempt { .. }
+            | InvocationId::Sequence { .. }
+            | InvocationId::Decide { .. } => Self::SpawnFailureOutage,
         }
     }
 

@@ -105,7 +105,8 @@ same way if one is ever added.
 
 ## `pub enum InvocationId {`
 
-The identity of one Runner process — one of the packet's three forms.
+The identity of one Runner process — one of the packet's three forms, or
+a decider's.
 
 A closed enumeration rather than a string, because the value is a key in
 four separate ledgers (R3's slot pairs, R4's invocation registrations, PR6's
@@ -139,6 +140,24 @@ incarnations by construction — the packet says so, and says how it
 is handled: "because probe identities repeat across incarnations,
 every container name and intent path additionally carries the
 coordinator incarnation id".
+
+## `pub enum InvocationId` › `Decide {`
+
+`(decide, ordinal)`: one decider's process ([`crate::runner::ExecutionRole`]'s
+`Decide`), rendered `decide.o<ordinal>`. The ordinal says which decider;
+whoever asks for one assigns it.
+
+A form of its own rather than an attempt or sequence role, so that no
+run's identity can equal a decider's: its leading component is `decide`,
+which none of `k…`, `s…` or `p` is, and it has two components where every
+other form has three or five, so neither the rendering nor
+[`InvocationId::parse`] can confuse it with another form in either
+direction. Its longest rendering, `decide.o4294967295`, is 18 bytes, well
+inside [`MAX_LEN`], which stays the attempt form's maximum.
+
+The topology selector reads it as a pipeline of its own that holds
+nothing, so a decider's identity is never admitted to a slot pair under
+any standing (`engine::topology::select`, `Pipeline::Decide`).
 
 ## `pub const LEGACY_GENERATION: GenerationId = GenerationId(0);`
 
@@ -214,10 +233,11 @@ The grammar, one line per form:
 k<key>.g<generation>.a<attempt>.<role>.o<ordinal>
 s<sequence>.<role>.o<ordinal>
 p.shell.o<ordinal>   |   p.agent-<id>.o<ordinal>
+decide.o<ordinal>
 ```
 
-The leading component is `k…`, `s…` or `p`, which no other form can
-produce, so the forms are disjoint; within a form the component count is
+The leading component is `k…`, `s…`, `p` or `decide`, which no other form
+can produce, so the forms are disjoint; within a form the component count is
 fixed and no component may contain the separator, so two distinct tuples
 differ in some component and therefore in the rendering.
 
@@ -226,9 +246,9 @@ differ in some component and therefore in the rendering.
 Rebuild a recorded identity.
 
 The domain is closed on the way back in as well as on the way out: a
-value that is not one of the three forms is refused rather than carried
-as an opaque string, so a record cannot smuggle a fourth shape into a
-ledger keyed by this type.
+value that is not one of the forms — the packet's three, and the
+decider's — is refused rather than carried as an opaque string, so a
+record cannot smuggle another shape into a ledger keyed by this type.
 
 ### Errors
 

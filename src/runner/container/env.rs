@@ -117,6 +117,7 @@ pub const fn supplies_credential_location(role: &ExecutionRole) -> bool {
     match role {
         ExecutionRole::Implement
         | ExecutionRole::Review
+        | ExecutionRole::Decide
         | ExecutionRole::Probe(ProbeTarget::Agent(_)) => true,
         ExecutionRole::Gate | ExecutionRole::Probe(ProbeTarget::Shell) => false,
     }
@@ -363,7 +364,9 @@ mod tests {
         match role {
             ExecutionRole::Gate | ExecutionRole::Probe(ProbeTarget::Shell) => None,
             ExecutionRole::Probe(ProbeTarget::Agent(agent)) => Some(agent.clone()),
-            ExecutionRole::Implement | ExecutionRole::Review => Some(AgentId::new("claude-code")),
+            ExecutionRole::Implement | ExecutionRole::Review | ExecutionRole::Decide => {
+                Some(AgentId::new("claude-code"))
+            }
         }
     }
 
@@ -436,9 +439,9 @@ mod tests {
                 .expect("a non-reserved overlay key composes");
             allowed += 1;
         }
-        assert_eq!(refused, 5 * 6, "five roles crossed with six reserved keys");
-        assert_eq!(allowed, 5);
-        assert_eq!(ExecutionRole::all().len(), 5);
+        assert_eq!(refused, 6 * 6, "six roles crossed with six reserved keys");
+        assert_eq!(allowed, 6);
+        assert_eq!(ExecutionRole::all().len(), 6);
     }
 
     #[test]
@@ -578,8 +581,8 @@ mod tests {
                 }
             }
         }
-        assert_eq!(supplied, 3, "three of the ten cells supply a location");
-        assert_eq!(withheld, 7);
+        assert_eq!(supplied, 4, "four of the twelve cells supply a location");
+        assert_eq!(withheld, 8);
 
         let claude = AgentId::new("claude-code");
         let mut hostile = 0_usize;
@@ -855,8 +858,8 @@ mod tests {
         }
         assert_eq!(
             (refused, composed_ok),
-            (10, 5),
-            "five roles, two refusals each"
+            (12, 6),
+            "six roles, two refusals each"
         );
     }
 
@@ -871,6 +874,7 @@ mod tests {
             (ExecutionRole::Implement, true),
             (ExecutionRole::Gate, false),
             (ExecutionRole::Review, true),
+            (ExecutionRole::Decide, true),
         ];
         assert_eq!(expected.len(), ExecutionRole::all().len());
         for (role, supplies) in &expected {
@@ -881,6 +885,6 @@ mod tests {
                 "{role}: INV-18 splits slots and credentials the same way"
             );
         }
-        assert_eq!(expected.iter().filter(|(_, supplies)| *supplies).count(), 3);
+        assert_eq!(expected.iter().filter(|(_, supplies)| *supplies).count(), 4);
     }
 }

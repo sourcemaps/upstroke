@@ -2586,7 +2586,9 @@ pub(super) fn wide_responder_asking(
     Box::new(move |request: &RunnerRequest| {
         let role = match &request.invocation {
             InvocationId::Attempt { role, .. } => Some(*role),
-            InvocationId::Sequence { .. } | InvocationId::Probe { .. } => None,
+            InvocationId::Sequence { .. }
+            | InvocationId::Probe { .. }
+            | InvocationId::Decide { .. } => None,
         };
         if matches!(request.role, ExecutionRole::Review) {
             return Ok(exited(0, PASSING_VERDICT.to_owned()));
