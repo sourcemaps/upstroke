@@ -847,6 +847,11 @@ Two reviewers rather than one, because
 snapshot per reviewer, never reused across roles or attempts", and a
 single reviewer cannot distinguish a fresh snapshot from a reused one.
 
+It names no credential profile. A test that needs one sets
+`credential_profile` over this plan by struct update, as
+`attempt::tests::a_worker_runs_under_the_credential_profile_its_plan_names`
+does.
+
 ## `pub(super) fn attempt_plan(&self, key: TaskKey, attempt: u32) -> AttemptPlan {` › `gates: vec![{`
 
 Through the production assembler, not invented here. A fixture
@@ -1179,7 +1184,8 @@ coordinator must classify as it arrives (round R1, the early review's
 `R1-CONC-2`). `pools` names a pool per agent, overriding `pool` for the agents it
 lists — an entry of `None` gives that agent no pool while the others keep theirs —
 which is how phase 6's runtime pool tests give two agents pools of their own, or one
-agent none beside a pooled one.
+agent none beside a pooled one. Its pools are names only, so its attempt plans carry no
+credential profile (`credential_profile: None`).
 
 ## `impl WidePlans` › `fn pool_of(&self, agent: &str) -> Option<String> {`
 

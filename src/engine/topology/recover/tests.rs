@@ -6789,6 +6789,88 @@ fn a_reviewer_runs_at_the_review_effort_not_the_implementers() {
 }
 
 #[test]
+fn a_plan_carries_the_credential_profile_of_its_pool() {
+    let fixture = Fixture::healthy("plan-profile");
+    let harness = harness();
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(&fixture, &runtime, &certifies);
+    let (outcome, _) = resume_holding(&fixture, &harness, &given);
+    let (_recovered, handle) = outcome.expect("the healthy resume completes");
+
+    let entry = handle
+        .fold
+        .registry()
+        .and_then(|registry| registry.get(TaskKey(0)))
+        .expect("the fixture registers alpha");
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
+    let paths = crate::rundir::RunPaths::with_private_root(
+        &fixture.repo_root,
+        &fixture.started.run_id,
+        &fixture.private_root,
+    );
+    paths.create().expect("the run directories are creatable");
+
+    for profile in [Some("/profiles/implementer"), None] {
+        let mut implementers = crate::capacity::Pool::discovered(
+            "the-implementers-pool",
+            crate::capacity::PoolKind::SubscriptionWindow,
+            AGENT,
+            vec![crate::capacity::Source::Signals],
+        );
+        implementers.profile = profile.map(str::to_owned);
+        let mut spare = crate::capacity::Pool::discovered(
+            "the-implementers-spare-pool",
+            crate::capacity::PoolKind::SubscriptionWindow,
+            AGENT,
+            vec![crate::capacity::Source::Signals],
+        );
+        spare.profile = Some("/profiles/spare".to_owned());
+        let pools = vec![implementers, spare];
+        let plans = crate::engine::assembly::FrozenPlans {
+            adapters: &adapters,
+            paths: &paths,
+            gates: &[],
+            pools: &pools,
+            caps: &[],
+            worker_timeout: std::time::Duration::from_secs(300),
+            decisions: &[],
+        };
+        let binding = handle
+            .fold
+            .frozen_rung_binding(TaskKey(0), 0)
+            .expect("rung 0 is frozen");
+        let plan = crate::engine::topology::attempt::AttemptPlans::plan(
+            &plans,
+            &crate::engine::topology::attempt::PlanRequest {
+                key: TaskKey(0),
+                entry,
+                attempt: crate::topology::events::AttemptNumber(1),
+                rung: 0,
+                binding,
+                workspace: &fixture.repo_root,
+                resume_session: None,
+                feedback: Vec::new(),
+                materialization_observed: None,
+            },
+        )
+        .expect("the plan assembles");
+
+        assert_eq!(
+            plan.pool.as_deref(),
+            Some("the-implementers-pool"),
+            "the plan is not on the pool whose profile this test set, so the profile below \
+             would be another pool's"
+        );
+        assert_eq!(
+            plan.credential_profile,
+            profile.map(PathBuf::from),
+            "the plan does not carry its own pool's profile (`{profile:?}`), as written"
+        );
+    }
+}
+
+#[test]
 fn the_loop_inherits_the_committed_digest_recovery_verified() {
     let fixture = Fixture::healthy("digest-inherited");
     let harness = harness();

@@ -376,9 +376,11 @@ frozen inputs, which `create_run` consumes while the run keeps its own.
 
 **The runner is profiled before anything uses it.** Right after it is built,
 the runner goes through `profiled::profiled` with the configuration's pools,
-so the creation-time probes, the workers and the reviewers each carry their
-agent's bound credential profile. With no profiled pool that returns the
-runner unchanged (see `engine::topology::profiled`'s notes).
+so the creation-time probes and the reviewers each carry their agent's bound
+credential profile. A worker carries its attempt plan's profile, which the
+plans read from the same pools, and the wrapper leaves a worker's request as
+it arrived. With no profiled pool that returns the runner unchanged (see
+`engine::topology::profiled`'s notes).
 
 **The profiles were refused before the lease, not here.** Every profile this
 body profiles the runner with has already passed
@@ -558,8 +560,9 @@ is `RunnerPreflight::certify`, which records what it probed before it returns
 `Ok`, so the default discards no error (§7).
 
 The runner is profiled with the configuration's pools as on the fresh path,
-before `RunPreflight` is built over it, so the resume's probes, workers and
-reviewers carry their agent's bound credential profile too. The same pools
+before `RunPreflight` is built over it, so the resume's probes and reviewers
+carry their agent's bound credential profile too, and its workers carry their
+attempt plan's as on the fresh path. The same pools
 go to the pre-flight (`RunPreflight::with_pools`), whose `certify` refuses a
 profile the run cannot honour before anything is spawned for it: one on the
 container runner, one for an agent other than Claude Code, a relative one, one

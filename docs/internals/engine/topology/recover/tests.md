@@ -2282,9 +2282,15 @@ the pool goes into the frozen plans, and the recording runner is wrapped with
 runner. One step runs the worker; every worker request reaches the recording
 runner carrying the profile, and any request with no agent carries none.
 
+The worker's profile comes from its attempt's plan: `FrozenPlans::plan` reads
+it from the plan's pool, and the wrapper passes a worker's request through as
+it arrived. Until the plan carried it the wrapper stamped it, and this test
+read the same directory then. So it holds the whole path a production run
+takes, the plans and the wrapper over one pools table, and not either half.
+
 It lives here for the reason the driver test does: this file's fixture is the
 one that produces a real resumed run. The wrapper's own cases (unprofiled
-pool, no agent, first pool wins, no wrapper at all) are
+pool, no agent, first pool wins, a worker left alone, no wrapper at all) are
 `engine::topology::profiled`'s tests.
 
 ## `fn the_driver_carries_an_accepted_attempt_through_the_candidate_sequence() {`
@@ -3063,6 +3069,25 @@ the implementer's pool yields `the-implementers-pool` and fails.
 Through the scaffold's own constant rather than a literal: it is the
 agent that fixture's `alternative` binding already names, so this is the
 second agent the run actually probed and not one invented here.
+
+## `fn a_plan_carries_the_credential_profile_of_its_pool() {`
+
+**A plan carries the credential profile of the pool it is on.** Built as the
+reviewer test above is: a real resumed run's registry entry and frozen rung
+binding, and a production `FrozenPlans` over pools written here.
+
+Two pools for the implementer's agent. The first, the one the plan is on,
+names `/profiles/implementer` in one round and no profile in the other. The
+second always names `/profiles/spare`. The plan answers the first pool's
+profile, then `None`.
+
+The spare is what makes the `None` round say something: a plan that took a
+profile from any pool for its agent would answer `/profiles/spare` there.
+The pool assertion before it says the plan is on the pool whose profile the
+round set.
+
+The profile is compared as `PathBuf::from` of the configured string, which is
+all `FrozenPlans::plan` does to it.
 
 ## `fn the_loop_inherits_the_committed_digest_recovery_verified() {`
 

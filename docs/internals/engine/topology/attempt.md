@@ -410,6 +410,18 @@ The binding this attempt used.
 
 The capacity pool, where the agent names one.
 
+## `pub struct AttemptPlan` › `pub credential_profile: Option<std::path::PathBuf>,`
+
+The credential directory the worker runs under: the `profile` of the pool
+this plan is on. `None` when that pool names no profile, or the plan has no
+pool, and the worker then runs with the coordinator's own credentials.
+
+It is on the plan so that the pool an attempt is planned on decides its
+worker's credentials. The runner wrapper that stamps reviewers and probes
+(`engine::topology::profiled`) knows only the first pool for an agent, and
+leaves a worker's request alone for that reason. [`Judge::run_worker`] is the
+one reader.
+
 ## `pub struct AttemptPlan` › `pub resume_session: Option<SessionId>,`
 
 The session this attempt resumes. `Some` only for a same-session retry
@@ -1726,6 +1738,18 @@ announce then [`Self::run_worker`], for the callers that do both at once.
 
 The worker's request, built from the plan and the site, executed through the
 registrar. Shared by [`AttemptContext::run_worker`] and [`attempt_body`].
+
+## `impl Judge<'_> {` › `let request = match &plan.credential_profile {`
+
+When the plan names a credential profile, the request carries it
+(`RunnerRequest::with_credential_profile`). When it names none, the request
+is the one [`worker_request`] built, with no profile. Nothing after this
+changes it: the `profiled` wrapper passes a worker's request through as it
+arrives, so the plan's answer is the runner's.
+
+The profile is set before the request is executed and before
+`composed_common_dir` is asked about it, so both see the request the worker
+ran as.
 
 ## `impl Judge<'_> {` › `pub fn judge_attempt(`
 

@@ -361,6 +361,26 @@ resolution rather than one of three. This read
 `Self::pool_for`'s body, character for character -- while that
 method's own doc said the plan builder read it.
 
+## `fn plan(&self, request: &PlanRequest<'_>) -> Result<AttemptPlan, UpstrokeError> {` › `let credential_profile = pool`
+
+The worker's credential profile is the `profile` of the pool this plan is
+on. The plan's `pool` is a name, so the pool is found by that name in the
+frozen table, and its `profile` is the configured string used as a path with
+no expansion (`PathBuf::from`), the same as `profiled::profiles` reads it for
+reviewers and probes. A pool that names no profile gives `None`, and so does
+a plan with no pool.
+
+It is looked up from the plan's own pool, by name, and not from the agent a
+second time. Today the two give the same pool, because `Self::pool_for`
+binds the plan to its agent's first pool. They are kept apart so that the pool a
+plan names and the credentials its worker runs under cannot be two answers.
+It is also not a second resolution of an agent's pool, so
+`run::tests::the_frozen_pool_table_is_read_through_one_seam` still counts
+one.
+
+`recover::tests::a_plan_carries_the_credential_profile_of_its_pool` holds
+both answers.
+
 ## `fn plan(&self, request: &PlanRequest<'_>) -> Result<AttemptPlan, UpstrokeError> {` › `let gate_cmds: Vec<String> = self.gates.iter().map(|gate| gate.cmd.clone()).collect();`
 
 The cmdlines, not the specs: this is what the worker's prompt quotes

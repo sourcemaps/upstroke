@@ -6,7 +6,7 @@
     clippy::disallowed_macros
 )]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -244,6 +244,12 @@ impl AttemptPlans for FrozenPlans<'_> {
             ImplementerBinding::of_frozen(&request.binding),
             self.pool_for(&request.binding.agent),
         );
+        let pool = pool_option(&profile.pool);
+        let credential_profile = pool
+            .as_deref()
+            .and_then(|name| self.pools.iter().find(|listed| listed.name == name))
+            .and_then(|listed| listed.profile.as_ref())
+            .map(PathBuf::from);
         let adapter = self
             .adapters
             .get(&profile.agent)
@@ -281,7 +287,8 @@ impl AttemptPlans for FrozenPlans<'_> {
             attempt: request.attempt,
             rung: request.rung,
             binding: request.binding.clone(),
-            pool: pool_option(&profile.pool),
+            pool,
+            credential_profile,
             resume_session: request.resume_session.clone(),
             materialization_observed: request.materialization_observed,
             agent: AgentId::new(&profile.agent),

@@ -902,6 +902,34 @@ fn gates_take_no_slot_and_the_worker_and_reviewers_do() {
     assert!(process.balances(), "every pair and registration settled");
 }
 
+#[test]
+fn a_worker_runs_under_the_credential_profile_its_plan_names() {
+    for (name, planned) in [
+        ("planned-profile", Some(PathBuf::from("/profiles/spare"))),
+        ("planned-no-profile", None),
+    ] {
+        let mut run = Run::started(name);
+        let dispatched = run.dispatch(ALPHA, 0);
+        let plan = AttemptPlan {
+            credential_profile: planned.clone(),
+            ..run.attempt_plan(ALPHA, 1)
+        };
+        let mut process = Process::new();
+
+        context!(run, process)
+            .start(dispatched.site(), &plan)
+            .expect("the attempt starts");
+
+        let ran = run.runner.ran();
+        assert_eq!(ran.len(), 1, "one worker, and nothing else yet");
+        assert_eq!(ran[0].role, crate::runner::ExecutionRole::Implement);
+        assert_eq!(
+            ran[0].request.credential_profile, planned,
+            "the worker's request does not carry the credential profile its attempt's plan names"
+        );
+    }
+}
+
 fn retained_tree(worktree: &Path) -> String {
     agent_edits(worktree);
     git(worktree, &["add", "-A"]);

@@ -139,6 +139,7 @@ pub struct AttemptPlan {
     pub rung: u32,
     pub binding: RungBinding,
     pub pool: Option<String>,
+    pub credential_profile: Option<std::path::PathBuf>,
     pub resume_session: Option<SessionId>,
     pub materialization_observed: Option<Materialization>,
     pub agent: AgentId,
@@ -955,6 +956,10 @@ impl Judge<'_> {
             plan.worker_timeout,
             invocation,
         );
+        let request = match &plan.credential_profile {
+            Some(profile) => request.with_credential_profile(profile.clone()),
+            None => request,
+        };
         let worker = self.execute(&request, plan.pool.clone())?;
         let worker_common_dir = self.runner.composed_common_dir(&request);
         Ok(AttemptRun {

@@ -61,8 +61,9 @@ engine never automates.
 host runner (§17). On a schema-4 run, each agent's bound pool, which
 [`pool_for`] says is the first pool in the file naming it, supplies the
 `profile`. The host runner then sets it as `CLAUDE_CONFIG_DIR` on that agent's
-work, review and probe processes (`src/engine/topology/profiled.rs` stamps the
-request, and `src/runner/host/environment.rs` composes it). The value is the
+work, review and probe processes (`src/engine/assembly.rs` puts it on a
+worker's attempt plan, `src/engine/topology/profiled.rs` stamps a review or
+probe request, and `src/runner/host/environment.rs` composes it). The value is the
 configured string used as a path, with no `~/` expansion. A profile the run
 cannot honour is refused before anything runs for it, by one function
 (`src/engine/topology/preflight.rs`) that both paths call: a fresh run before
@@ -203,7 +204,9 @@ moving a pool up the file promotes it.
 in v0.1. It fills `WorkerProfile.pool` so the ledger can say which
 subscription paid, and it also selects the profile an agent runs under:
 the answer for an agent is its bound pool, and only that pool's `profile`
-is set on the agent's processes (`src/engine/topology/profiled.rs`).
+is set on the agent's processes (`src/engine/topology/profiled.rs` for its
+reviews and probes; a worker's is its attempt plan's, read from the pool
+`src/engine/assembly.rs` got from this answer).
 
 ## `pub struct Spend {`
 

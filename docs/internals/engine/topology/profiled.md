@@ -8,17 +8,33 @@ in the linked module, using the enclosing item to distinguish repeated lines.
 
 ## Module
 
-Each agent request carries its agent's bound credential profile.
+Each review and agent-probe request carries its agent's bound credential
+profile. A worker's request is not stamped here: its attempt's plan names its
+credentials.
 
 A pool in the pools file, `~/.upstroke/pools.toml`, may name a `profile`: the
 credential directory its agent's CLI is to run under. The runners already honour
 `RunnerRequest::credential_profile` (the host runner composes the child's
 environment from it; the container runner refuses it before starting anything);
-what was missing is anything that sets it. This module is that: a private
-wrapper over the run's `Arc<dyn Runner>`, installed by `entry` on both the
-fresh and the resume path right after the runner is built, so every request
-the run makes — the creation-time probes, `RunPreflight`'s probes on resume,
-workers and reviewers on either driver — passes through it.
+what was missing is anything that sets it. This module is that for every agent
+request except a worker's: a private wrapper over the run's
+`Arc<dyn Runner>`, installed by `entry` on both the fresh and the resume path
+right after the runner is built, so every request the run makes — the
+creation-time probes, `RunPreflight`'s probes on resume, workers and reviewers
+on either driver — passes through it.
+
+**Workers are not stamped here.** A worker runs under the profile of the pool
+its attempt is planned on. That is `AttemptPlan::credential_profile`, which
+`FrozenPlans::plan` reads from the plan's own pool and `Judge::run_worker`
+puts on the worker's request. This wrapper knows one pool per agent, the
+first, and a plan knows the pool its attempt is on. If the wrapper stamped a
+worker, an attempt planned on a later pool for its agent would run under the
+first pool's `CLAUDE_CONFIG_DIR`, a different account from the one it was
+planned on. So a request whose role is `ExecutionRole::Implement` goes through
+as it arrived, with the plan's profile or with none. Today a plan's pool is
+still its agent's first pool (`FrozenPlans::plan` asks `pool_for`), so a
+worker gets the same directory it got when this wrapper stamped it. What has
+moved is where that directory comes from.
 
 It is engine-side and private (`mod profiled;`, not `pub mod`) because it is
 an assembly detail of `entry`: nothing outside the topology engine builds a
@@ -62,12 +78,16 @@ The wrapper: the inner runner and the map. It holds nothing per request.
 
 ## `impl Profiled` › `fn stamped(&self, request: &RunnerRequest) -> Option<RunnerRequest> {`
 
-`Some` only when the request has an agent and that agent has a profile; the
-stamped request is the original with `credential_profile` replaced and every
-other field unchanged. A request with no agent (a gate, the shell probe) is
-never stamped. A request whose `credential_profile` was already set by its
-builder is overwritten by the agent's bound profile — today no builder sets
-one, and the pool binding is the authority.
+`Some` only when the request is not a worker's, has an agent, and that agent
+has a profile; the stamped request is the original with `credential_profile`
+replaced and every other field unchanged. A worker's request
+(`ExecutionRole::Implement`) is never stamped, whatever it carries: its
+attempt's plan decided its profile, and `None` there means the plan's pool
+names none (see the module section). A request with no agent (a gate, the
+shell probe) is never stamped. A review or agent-probe request whose
+`credential_profile` was already set is overwritten by the agent's bound
+profile — nothing sets one for those roles today, and for them the pool
+binding is the authority.
 
 ## `impl Runner for Profiled {` › `fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {`
 
@@ -88,16 +108,22 @@ change what the workspace manager's closure checks see.
 ## `mod tests {`
 
 The wrapper's own contract, through a recording inner runner. The run-level
-proof — a run assembled with a profiled pool hands its worker that profile —
-is `recover::tests::a_run_assembled_with_a_profiled_pool_hands_its_worker_that_profile`,
+proof — a run assembled with a profiled pool hands its worker that profile,
+from the attempt's plan and with this wrapper installed over the runner — is
+`recover::tests::a_run_assembled_with_a_profiled_pool_hands_its_worker_that_profile`,
 because the fixture that produces a real resumed run is that file's.
 
 Requests are compared through their `Debug` rendering: `RunnerRequest` has
 no `PartialEq`, and the rendering covers every field.
 
+The tests of what the wrapper stamps send a review request (`reviewer`). Four
+of them sent a worker's until workers stopped being stamped here; with a
+worker's request each would now pass or fail for the role alone, whatever the
+pools said. `worker` is left for the one test about workers.
+
 ## `mod tests {` › `fn a_request_from_an_agent_with_a_profiled_pool_carries_that_profile() {`
 
-A worker whose agent has a profiled pool arrives with that profile, and with
+A reviewer whose agent has a profiled pool arrives with that profile, and with
 nothing else changed. A reviewer for a second agent takes its own agent's
 profile, so the map is keyed by agent rather than "the" profile.
 
@@ -105,13 +131,26 @@ profile, so the map is keyed by agent rather than "the" profile.
 
 An agent whose pool names no profile is untouched even while another agent's
 pool names one — the wrapper is installed then, and must still pass this
-request through unchanged.
+request through unchanged. The request is a reviewer's, so it is the pool
+that leaves it alone and not the role.
 
 ## `mod tests {` › `fn the_first_pool_for_an_agent_decides_its_profile_as_everywhere_else() {`
 
 `capacity::pool_for` binds an agent to its first pool. A second pool for the
 same agent with a profile must not be applied to an agent whose bound pool
-has none.
+has none. The request is a reviewer's: the first-pool rule is pinned for what
+the wrapper still stamps.
+
+## `mod tests {` › `fn a_worker_request_keeps_the_credentials_its_attempt_was_planned_with() {`
+
+Two pools for one agent, both profiled: `max` first, then `spare`. A worker's
+request carrying no profile arrives with none, and one carrying `spare`'s
+arrives with `spare`'s, each otherwise unchanged. The wrapper installed over
+these pools would stamp a reviewer for the same agent with `max`'s profile;
+it leaves both workers alone.
+
+Both arrivals are compared in one assertion, so a failure shows what each
+worker was given. When workers were stamped, both arrived with `max`'s.
 
 ## `mod tests {` › `fn a_request_with_no_agent_goes_through_untouched() {`
 
@@ -124,5 +163,6 @@ pools that name no profile, `profiled` returns the runner it was given.
 
 ## `mod tests {` › `fn a_profile_is_the_configured_string_used_as_a_path() {`
 
-A `~/` profile is passed as written. The configuration has no `~/` expansion
-helper; if one is added, this test is the one to change with it.
+A `~/` profile is passed as written, on a reviewer's request. The
+configuration has no `~/` expansion helper; if one is added, this test is the
+one to change with it.
