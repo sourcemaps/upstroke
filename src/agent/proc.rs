@@ -1104,20 +1104,6 @@ mod windows_job {
         }
     }
 
-    /// A child in a private job of its own, for a test outside this module
-    /// whose kill has to reach every process the child starts: the census
-    /// kill sampler's `SampledChild` in `workspace_manager::tests`, on
-    /// Windows.
-    ///
-    /// Test-only, and made of this module's own functions and nothing else.
-    /// [`Self::spawn`] is [`spawn_suspended_in_job`] with no hooks: the job is
-    /// created with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and the child is
-    /// assigned to it while still suspended, before its first instruction
-    /// runs, so every process it starts is in the job; the job is closed when
-    /// this drops. [`Self::terminate`] is [`real_terminate_job`], and
-    /// [`Self::active_processes`] is [`Job::active_processes_with`] over
-    /// [`real_query_accounting`]. It derefs to the [`Child`], whose `wait`
-    /// is the reap.
     #[cfg(test)]
     pub(crate) struct ChildInJob {
         child: Child,
@@ -1126,17 +1112,12 @@ mod windows_job {
 
     #[cfg(test)]
     impl ChildInJob {
-        /// Spawn `command` suspended, assign it to a new private job and
-        /// resume it. A refusal keeps the OS error's kind and carries what
-        /// became of the child in its message.
         pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {
             let (child, job) = spawn_suspended_in_job(command, &mut super::NoHooks)
                 .map_err(|failure| io::Error::new(failure.error.kind(), failure.to_string()))?;
             Ok(Self { child, job })
         }
 
-        /// End every process in the job, with exit code 1
-        /// (`TerminateJobObject`), without waiting for any of them.
         pub(crate) fn terminate(&self) -> io::Result<()> {
             if real_terminate_job(self.job.handle) == 0 {
                 return Err(io::Error::last_os_error());
@@ -1144,8 +1125,6 @@ mod windows_job {
             Ok(())
         }
 
-        /// How many processes of the job are active at this moment, from
-        /// the job's accounting. A failed query is an error, never zero.
         pub(crate) fn active_processes(&self) -> io::Result<u32> {
             self.job.active_processes_with(real_query_accounting)
         }

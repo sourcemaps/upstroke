@@ -13276,8 +13276,8 @@ fn sampled_git_child_kills_every_residue_classified_and_recovered() {
         );
         assert!(
             record.recovered,
-            "{site}: every sample recovered by its classified action; these did not, each \
-                 with its report taken before the recovery ran:\n{}",
+            "every sample recovered by its classified action; at {site} these did not, \
+                 each with its report taken before the recovery ran:\n{}",
             run.unrecovered.join("\n")
         );
         records.push((site, record, run.budget, run.replayed));
