@@ -3233,16 +3233,35 @@ B begins to end and its child goes to A while B is still listed; read B's list, 
 A and B again. The two listings are equal, the pass counted, and the child was in neither
 answer.
 
+**A task id may be reused.** Until `PR366-TID-REUSE-FALSE-STABILITY` the listings were of
+task ids alone, and the kernel gives a gone thread's id to a later one. So: list A and B;
+read A's list, empty; B ends after its list was opened, hands its child to A, already read,
+and its list reads empty; a new thread then takes B's id before the states are asked and
+the tasks listed again. Both listings hold A and B, the new B is running normally, the pass
+counted, and the child was in neither list. A task is therefore its id together with its
+start time: the `starttime` field of its own `/proc/<pid>/task/<tid>/stat`, read as
+`stat_of` reads a process's, after the last `)`, the twentieth whitespace-separated field
+(index 19). A thread that takes a reused id started after the thread that had it, so the
+second listing holds B with another start time, differs from the first, and the pass is
+discarded. A task whose `stat` has gone while the tasks are listed (not found, or `ESRCH`,
+as for the state below) is left out of that listing. That loses nothing: its `stat` goes
+when the kernel releases it (`release_task`), after it has handed its children on, and
+every list of the pass is read after the listing. Any other failure to read a `stat`, a
+`stat` with no twentieth field after the command, or a start time that does not parse is
+an error returned at once. The children list and the state are read through the id alone;
+the start time only tells the tasks of two listings apart.
+
 **The rule.** `children_in_passes` holds it, apart from the filesystem. A pass lists the
-task ids, reads every listed task's list, asks of every listed task whether it is still
-running normally, and lists the task ids again. It counts only if no read failed with
-not-found, every listed task was still running normally when asked, after the reads, and
-the second listing holds exactly the task ids of the first. A thread that ended during the
-pass is missing from the second listing, whichever way its read went; a thread that began
-to end during the pass and is still listed is reported as not running normally. A pass that
-does not count is discarded whole, the lists it did read included, and another is made,
-within the same five, after a pause. A pass that counts answers its children sorted and
-without repeats.
+tasks, each by its id and start time, reads every listed task's list, asks of every listed
+task whether it is still running normally, and lists the tasks again. It counts only if no
+read failed with not-found, every listed task was still running normally when asked, after
+the reads, and the second listing holds exactly the tasks of the first, ids and start times
+both. A thread that ended during the pass is missing from the second listing, whichever way
+its read went, or, if a new thread has taken its id, is listed with another start time; a
+thread that began to end during the pass and is still listed is reported as not running
+normally. A pass that does not count is discarded whole, the lists it did read included,
+and another is made, within the same five, after a pause. A pass that counts answers its
+children sorted and without repeats.
 
 **The pauses.** A thread that is ending stays listed, in its dead state, until the kernel
 releases it, and it can be descheduled in that window. Five passes made one straight after
@@ -3262,7 +3281,10 @@ read the state, or a `stat` with no state field, is an error returned at once. T
 sets an ending thread's exit state in the same step, `exit_notify`, in which it hands its
 children on. So if a thread's state, asked after every list was read, is still not an exit
 state, it had not handed its children on when its own list was read, and they were in that
-list; and if it had handed them on before that, its state, asked later, says so.
+list; and if it had handed them on before that, its state, asked later, says so. The state
+is read through the task's id, so where a new thread has taken the id it is that thread's
+state, running; it is the start time in the second listing, not the state, that tells the
+new thread from the one listed first.
 
 **The bound.** At most five passes are made. One more pass answers the interleaving that was
 seen, and the rest absorb a few threads ending in quick succession; five is that allowance,
@@ -3271,7 +3293,8 @@ says what changed in it, the lists not found, the tasks not running normally and
 listings, and never an answer; a kernel with no children lists at all fails the same way,
 after five passes. Every other failure is returned at once, as before: a task directory that
 cannot be listed (as when the process itself is gone), a list or a state that fails for any
-other reason, and a child that does not parse as a pid. Every caller therefore still
+other reason, a start time that cannot be read for any reason but the task's `stat` having
+gone, and a child that does not parse as a pid. Every caller therefore still
 receives an error for a list that stays unreadable, and what each does with one is
 unchanged. Each error names the task directory, `/proc/<pid>/task`, and every path is built
 by joining `Path` components, never by formatting.
@@ -3283,23 +3306,30 @@ never with children: it fails closed, and no child is lost to it. No process thi
 reads is known to end its main thread first. The argument that the state closes the
 hand-off window is read from the kernel's exit path, not observed in a run: the reads of
 the lists and of the states take no lock in common with the exit, so it rests on the order
-of the steps in `exit_notify`, not on one snapshot of the process. And, as before, a child
+of the steps in `exit_notify`, not on one snapshot of the process. The start time is
+counted in clock ticks since boot, so a thread that took a reused id in the same tick as
+the thread that had it would be listed as the same task; the kernel hands ids out in turn
+through the whole id space before it reuses one, so that would need the space cycled
+within one tick. That too is read from the kernel, not observed. And, as before, a child
 forked during a pass by a thread already read is not in the answer: a list read is
 discovery, never evidence that no child remains.
 
 **What witnesses it.** The interleavings cannot be produced on demand on a live process, so
 the rule is tested apart from the filesystem: the tests below drive `children_in_passes`
-with scripted closures.
+with scripted closures, a task id reused between the listings of a pass included. The
+reading of the start time from `stat` is not scripted; it runs only where the harnesses
+call `children_of` on live processes.
 
 ## `#[cfg(target_os = "linux")]` › `fn children_in_passes<T: Ord + std::fmt::Debug>(`
 
-The rule of `children_of`, over four closures: `list_tasks` lists a process's task ids,
+The rule of `children_of`, over four closures: `list_tasks` lists a process's tasks,
 `read_children` reads one task's children list, `running_normally` says whether one task
 is still running normally, neither ending nor gone, and `pause` waits the time it is given.
-`children_of` gives it the three readers of the proc filesystem: the entry names of
-`/proc/<pid>/task`, which are the task ids, the text of `<task>/children`, and the state
-field of `<task>/stat` (zombie, dead, or a `stat` gone is not running normally); and, as
-`pause`, `std::thread::sleep`. The core chooses the waits, 1, 5, 20 and 50 ms, and asks
+`children_of` gives it the three readers of the proc filesystem: each entry name of
+`/proc/<pid>/task`, which is a task id, paired with the start time in that task's `stat`
+(a task whose `stat` has gone is left out); the text of `<id>/children`; and the state
+field of `<id>/stat` (zombie, dead, or a `stat` gone is not running normally); and, as
+`pause`, `std::thread::sleep`. Both reads go through the id alone. The core chooses the waits, 1, 5, 20 and 50 ms, and asks
 `pause` for the next one before each pass after the first, that is after each discarded
 pass that has a pass after it, so at most four pauses and none after the fifth pass. The
 scripted tests give a `pause` that records the wait it is asked for and does not sleep.
@@ -3307,9 +3337,11 @@ A read's error keeps its kind, which is how a not-found read
 is told from every other failure. After a pass's reads the core asks `running_normally` of
 every task of the first listing, in order, and only then lists the tasks again; a task
 reported not running normally discards the pass, and a failure to answer is returned at
-once. The two listings of a pass are compared as sets. The task id is generic, so the tests
-below name their tasks (`"A"`, `"B"`, or a number) and read no proc filesystem. The core's
-errors name the task; `children_of` puts the task directory in front of each.
+once. The two listings of a pass are compared as sets, so two tasks are the same only if
+every part of them is equal: for `children_of`, id and start time both. The task is
+generic, so the tests below name their tasks (`"A"`, `"B"`, a number, or a name paired
+with a start time, `("B", 2)`) and read no proc filesystem. The core's errors name the
+task; `children_of` puts the task directory in front of each.
 
 ## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_not_lost_when_a_task_ends_after_its_list_was_opened() {`
 
@@ -3325,6 +3357,27 @@ Measured witness, restored byte-for-byte: with the comparison of the two listing
 The test below with tasks changing under every pass fails too, answering `Ok([4242])` where
 the error is required; the not-found test still passes. Its `running_normally` answers every
 task running, so the listing comparison alone discards its first pass.
+
+## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_not_lost_when_a_task_id_is_reused_between_the_listings() {`
+
+`PR366-TID-REUSE-FALSE-STABILITY`'s interleaving, scripted, each task a name paired with a
+start time. The first listing holds `("A", 1)` and `("B", 1)`. A's list reads empty; B's
+list, opened before B ended, reads empty too, and B's child, 4242, is now A's, whose list
+this pass has already read. A new thread then takes B's id: the second listing holds
+`("A", 1)` and `("B", 2)`, the same ids, B's with a new start time. `running_normally`
+answers every task running, as the state read through B's id, now the new thread's, would.
+The core must discard that pass for its listings alone and make another: it lists
+`("A", 1)` and `("B", 2)`, reads A's list holding 4242 and B's empty, lists the same two
+tasks again, and answers 4242: four listings, and the reads of `("A", 1)`, `("B", 1)`,
+`("A", 1)` and `("B", 2)` in that order.
+
+Measured witnesses, each restored byte-for-byte. With the first pass's second listing
+scripted as listings of ids alone would see it, `("B", 1)` in place of `("B", 2)`, this test
+alone fails, at its first assertion, `left: Ok([])` against `right: Ok([4242])`: the first
+pass counted and the child was lost. With the core's comparison of the two listings made
+`if false`, this test fails at the same assertion with the same `left` and `right`, and so
+do the test of a task that ends after its list was opened and the test of tasks changing
+under every pass; the other three tests of the core still pass.
 
 ## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_not_lost_when_a_task_still_listed_is_ending() {`
 
@@ -3344,7 +3397,7 @@ this test fails at its first assertion, `left: Ok([])` against `right: Ok([4242]
 first pass counted and the child was lost. Under this mutation
 `an_engines_children_are_found_after_pauses_when_a_task_stays_listed_while_ending` fails as
 well: its first pass then counts with the task still ending, and the recorded pauses are
-empty where `[1ms, 5ms, 20ms]` is required. The other three tests of the core still pass.
+empty where `[1ms, 5ms, 20ms]` is required. The other four tests of the core still pass.
 
 ## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_found_after_pauses_when_a_task_stays_listed_while_ending() {`
 
@@ -3361,7 +3414,7 @@ Measured witness, restored byte-for-byte: with the core's call to `pause` remove
 the passes follow one another with no wait, this test fails at its first assertion, on its
 count of pauses, `left: []` against `right: [1ms, 5ms, 20ms]`. The test of tasks changing
 under every pass fails too, on its pauses, `left: []` against
-`right: [1ms, 5ms, 20ms, 50ms]`; the other three tests of the core still pass.
+`right: [1ms, 5ms, 20ms, 50ms]`; the other four tests of the core still pass.
 
 ## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_read_in_another_pass_when_a_list_is_not_found() {`
 

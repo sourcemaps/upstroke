@@ -9597,16 +9597,41 @@ fn stat_of(pid: libc::pid_t) -> Result<(Identified, char), String> {
 #[cfg(target_os = "linux")]
 fn children_of(pid: &str) -> Result<Vec<libc::pid_t>, String> {
     let task_dir = Path::new("/proc").join(pid).join("task");
+    let gone = |error: &std::io::Error| {
+        error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
+    };
     children_in_passes(
         || {
+            // A task is its id and its start time, since ids are reused. The
+            // start time is the twentieth field after the command, which
+            // closes at the last `)`. A task whose `stat` is gone is left out.
             let mut listed = BTreeSet::new();
             for task in std::fs::read_dir(&task_dir)? {
-                listed.insert(task?.file_name());
+                let id = task?.file_name();
+                let stat = task_dir.join(&id).join("stat");
+                let text = match std::fs::read_to_string(&stat) {
+                    Ok(text) => text,
+                    Err(error) if gone(&error) => continue,
+                    Err(error) => return Err(error),
+                };
+                let start = text
+                    .rsplit_once(')')
+                    .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+                    .ok_or_else(|| {
+                        std::io::Error::other(format!("{}: no starttime field", stat.display()))
+                    })?
+                    .parse::<u64>()
+                    .map_err(|error| {
+                        std::io::Error::other(format!("{}: starttime: {error}", stat.display()))
+                    })?;
+                listed.insert((id, start));
             }
             Ok(listed)
         },
-        |task: &std::ffi::OsString| std::fs::read_to_string(task_dir.join(task).join("children")),
-        |task: &std::ffi::OsString| {
+        |(task, _): &(std::ffi::OsString, u64)| {
+            std::fs::read_to_string(task_dir.join(task).join("children"))
+        },
+        |(task, _): &(std::ffi::OsString, u64)| {
             // The state is the first field after the command, which closes at
             // the last `)`. A zombie (`Z`) or dead (`X`, `x`) task is ending,
             // and so is one whose `stat` is gone.
@@ -9621,12 +9646,7 @@ fn children_of(pid: &str) -> Result<Vec<libc::pid_t>, String> {
                         })?;
                     Ok(!matches!(state, "Z" | "X" | "x"))
                 }
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::NotFound
-                        || error.raw_os_error() == Some(libc::ESRCH) =>
-                {
-                    Ok(false)
-                }
+                Err(error) if gone(&error) => Ok(false),
                 Err(error) => Err(error),
             }
         },
@@ -9740,6 +9760,55 @@ fn an_engines_children_are_not_lost_when_a_task_ends_after_its_list_was_opened()
         Ok(vec![4242]),
         "the child B handed to A is found by a second pass, not lost to a first pass that read \
          B's list empty after B ended"
+    );
+    assert_eq!(
+        listed, 4,
+        "two passes, each listing the tasks before and after its reads"
+    );
+    assert_eq!(reads.next(), None, "every scripted read was made");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_engines_children_are_not_lost_when_a_task_id_is_reused_between_the_listings() {
+    // B ends after its list was opened and hands its child to A, already read;
+    // a new thread takes B's id, with a new start time, before the second
+    // listing. Its state, read through the id, is running.
+    let mut listings = [
+        BTreeSet::from([("A", 1), ("B", 1)]),
+        BTreeSet::from([("A", 1), ("B", 2)]),
+        BTreeSet::from([("A", 1), ("B", 2)]),
+        BTreeSet::from([("A", 1), ("B", 2)]),
+    ]
+    .into_iter();
+    let mut reads = [
+        (("A", 1), ""),
+        (("B", 1), ""),
+        (("A", 1), "4242 "),
+        (("B", 2), ""),
+    ]
+    .into_iter();
+    let mut listed = 0;
+    let answer = children_in_passes(
+        || {
+            listed += 1;
+            listings
+                .next()
+                .ok_or_else(|| std::io::Error::other("no listing is scripted"))
+        },
+        |task| {
+            let (expected, list) = reads.next().expect("a read the script holds");
+            assert_eq!(*task, expected, "the reads follow the listed tasks");
+            Ok(list.to_owned())
+        },
+        |_| Ok(true),
+        |_| {},
+    );
+    assert_eq!(
+        answer,
+        Ok(vec![4242]),
+        "the child B handed to A is found by a second pass, not lost to a first pass whose two \
+         listings held the same task ids, B's taken by a new thread"
     );
     assert_eq!(
         listed, 4,
