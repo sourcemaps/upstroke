@@ -126,10 +126,10 @@ impl BuiltinClient {
     ) -> Option<Vec<(u64, &String, &String)>> {
         let record = limit.record;
         let failure = record.failure.as_ref()?;
-        let candidates = match failure.origin {
-            crate::ladder::FailureOrigin::Worker => limit.worker_pools.clone(),
+        let candidates: &[String] = match failure.origin {
+            crate::ladder::FailureOrigin::Worker => &limit.worker_pools,
             crate::ladder::FailureOrigin::Reviewer => {
-                vec![super::limited_pool(record)?.clone()]
+                std::slice::from_ref(super::limited_pool(record)?)
             }
         };
         let fails_over =
@@ -403,63 +403,169 @@ mod tests {
     }
 
     /// Whether `code`, with comments, literals and test-only items blanked,
-    /// names `capacity` as a path segment that does not go on to `::client`.
+    /// names the capacity module other than through `capacity::client`.
     ///
-    /// An occurrence is a path segment when `::` joins it to the path before
-    /// or after it, or when a `use` declaration names it (`use
-    /// crate::{capacity as c};`). It is not one after a `.` (a method or field
-    /// such as `v.capacity()`), nor after a type's `::` (`Vec::capacity`,
-    /// `Vec::<u8>::capacity`): neither is the module. A binding or field
-    /// called `capacity` (`capacity: Box<dyn CapacityClient>`) is not joined
-    /// to a path and is not a segment either.
+    /// A word-bounded `capacity` that does not follow a `.` is a segment of
+    /// the module's path when `::` follows it (after optional whitespace), or
+    /// when a `use` declaration names it (`use crate::capacity;`, `use
+    /// crate::{capacity as c};`). It goes through the seam only when that
+    /// `::` is followed by a word-bounded `client`. What comes before it is
+    /// not read: `crate::capacity`, `super::capacity` and `Root::capacity`
+    /// after `use crate as Root;` all name the module, whatever the case of
+    /// their owner. A method or field after a `.` (`v.capacity()`), a type's
+    /// associated function (`Vec::capacity(v)`, `Vec::<u8>::capacity(v)`,
+    /// followed by `(`) and a binding or field called `capacity` (`capacity:
+    /// Box<dyn CapacityClient>`) are neither followed by `::` nor named by a
+    /// `use`, so none is a segment.
+    ///
+    /// A text census reads what is written, not what a macro expands to: a
+    /// macro that builds the path (`reach!(capacity)` over a body that writes
+    /// `crate::$module::pool_for`) names the module where `capacity` is not
+    /// followed by `::`, and passes unseen.
     fn reaches_capacity_around_the_seam(code: &str) -> bool {
         const NAME: &str = "capacity";
         code.match_indices(NAME).any(|(at, _)| {
-            let raw_before = &code[..at];
-            let raw_after = &code[at + NAME.len()..];
-            if !bounded(raw_before.chars().next_back()) || !bounded(raw_after.chars().next()) {
+            let before = &code[..at];
+            let after = &code[at + NAME.len()..];
+            if !bounded(before.chars().next_back()) || !bounded(after.chars().next()) {
                 return false;
             }
-            let before = raw_before.trim_end();
-            let after = raw_after.trim_start();
-            if before.ends_with('.') {
+            if before.trim_end().ends_with('.') {
                 return false;
             }
-            let owner = before.strip_suffix("::").map(str::trim_end);
-            let owned_by_a_type = owner.is_some_and(|owner| {
-                owner.ends_with('>')
-                    || owner
-                        .rsplit(|character: char| !is_identifier(character))
-                        .next()
-                        .and_then(|segment| segment.chars().next())
-                        .is_some_and(char::is_uppercase)
-            });
-            if owned_by_a_type {
+            let joined = after.trim_start().strip_prefix("::");
+            if joined.is_none() && !in_a_use_declaration(code, at) {
                 return false;
             }
-            let segment =
-                owner.is_some() || after.starts_with("::") || in_a_use_declaration(code, at);
-            let through_the_client = after
-                .strip_prefix("::")
+            let through_the_client = joined
                 .map(str::trim_start)
                 .and_then(|rest| rest.strip_prefix("client"))
                 .is_some_and(|rest| bounded(rest.chars().next()));
-            segment && !through_the_client
+            !through_the_client
         })
     }
 
-    /// The engine's production files, but the legacy writer's, whose code
-    /// reaches the capacity module other than through `capacity::client`.
-    fn bypasses_the_seam(sources: &[(String, String)]) -> Vec<&str> {
+    /// The engine's production files, but the legacy writer's, each with its
+    /// production code: comments, literals and test-only items blanked.
+    fn engine_production_code(
+        sources: &[(String, String)],
+    ) -> impl Iterator<Item = (&str, String)> {
         sources
             .iter()
             .filter(|(path, _)| {
                 path.starts_with("src/engine/") && !LEGACY_WRITER.contains(&path.as_str())
             })
-            .filter(|(_, source)| {
-                reaches_capacity_around_the_seam(&crate::effects::production_code(source))
+            .map(|(path, source)| (path.as_str(), crate::effects::production_code(source)))
+    }
+
+    /// The engine's production files, but the legacy writer's, whose code
+    /// reaches the capacity module other than through `capacity::client`.
+    fn bypasses_the_seam(sources: &[(String, String)]) -> Vec<&str> {
+        engine_production_code(sources)
+            .filter(|(_, code)| reaches_capacity_around_the_seam(code))
+            .map(|(path, _)| path)
+            .collect()
+    }
+
+    /// The byte offsets of the word-bounded occurrences of `word` in `code`.
+    fn word_occurrences(code: &str, word: &str) -> Vec<usize> {
+        code.match_indices(word)
+            .map(|(at, _)| at)
+            .filter(|at| {
+                bounded(code[..*at].chars().next_back())
+                    && bounded(code[at + word.len()..].chars().next())
             })
-            .map(|(path, _)| path.as_str())
+            .collect()
+    }
+
+    /// Each `use` declaration in `code`, from its word-bounded `use` to the
+    /// `;` that ends it.
+    fn use_declarations(code: &str) -> impl Iterator<Item = &str> {
+        word_occurrences(code, "use").into_iter().map(move |at| {
+            let rest = &code[at..];
+            rest.find(';').map_or(rest, |end| &rest[..end])
+        })
+    }
+
+    const BUILTIN_CLIENT: &str = "BuiltinClient";
+
+    /// The engine's production files, but the legacy writer's, that name
+    /// `BuiltinClient` outside a `use` declaration, each with how many times
+    /// it does: every such name is a site that can build a built-in client
+    /// (`BuiltinClient::replay(..)`, `<BuiltinClient as Default>::default()`,
+    /// `type B = BuiltinClient;`).
+    fn builtin_client_sites(sources: &[(String, String)]) -> Vec<(&str, usize)> {
+        engine_production_code(sources)
+            .map(|(path, code)| {
+                let sites = word_occurrences(&code, BUILTIN_CLIENT)
+                    .into_iter()
+                    .filter(|at| !in_a_use_declaration(&code, *at))
+                    .count();
+                (path, sites)
+            })
+            .filter(|(_, sites)| *sites > 0)
+            .collect()
+    }
+
+    /// Whether a `use` declaration renames `BuiltinClient` (`BuiltinClient
+    /// as B`), so the file can build one under a name the sites do not count.
+    fn renames_the_builtin_client(declaration: &str) -> bool {
+        word_occurrences(declaration, BUILTIN_CLIENT)
+            .into_iter()
+            .any(|at| {
+                declaration[at + BUILTIN_CLIENT.len()..]
+                    .trim_start()
+                    .strip_prefix("as")
+                    .is_some_and(|rest| bounded(rest.chars().next()))
+            })
+    }
+
+    /// Whether a `use` declaration, its whitespace dropped, globs the client
+    /// module: `capacity::client::*`, or a `*` among the items of the group
+    /// that follows `capacity::client::` (`capacity::client::{Pool, *}`), so
+    /// the file has `BuiltinClient` without naming it.
+    fn globs_the_client_module(declaration: &str) -> bool {
+        const MODULE: &str = "capacity::client::";
+        let compact: String = declaration
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        compact.match_indices(MODULE).any(|(at, _)| {
+            let imported = &compact[at + MODULE.len()..];
+            let Some(group) = imported.strip_prefix('{') else {
+                return imported.starts_with('*');
+            };
+            let mut depth = 0_usize;
+            let mut previous = '{';
+            for character in group.chars() {
+                match character {
+                    '*' if depth == 0 && matches!(previous, '{' | ',') => return true,
+                    '{' => depth += 1,
+                    '}' if depth == 0 => return false,
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+                previous = character;
+            }
+            false
+        })
+    }
+
+    /// The engine's production files, but the legacy writer's, with a `use`
+    /// declaration that lets the file build a `BuiltinClient` without naming
+    /// it: one that renames it, or globs the client module.
+    ///
+    /// Like the seam's census, this reads text: a macro that builds the name,
+    /// or a glob through an alias of the module (`use crate::capacity::client
+    /// as c; use c::*;`), is not seen.
+    fn hides_the_builtin_client(sources: &[(String, String)]) -> Vec<&str> {
+        engine_production_code(sources)
+            .filter(|(_, code)| {
+                use_declarations(code).any(|declaration| {
+                    renames_the_builtin_client(declaration) || globs_the_client_module(declaration)
+                })
+            })
+            .map(|(path, _)| path)
             .collect()
     }
 
@@ -535,6 +641,14 @@ mod tests {
                 "use crate::capacity::{client, Pool};\n",
             ),
             (
+                "src/engine/rooted.rs",
+                "use crate as Root;\nuse Root::capacity::drain_of;\n",
+            ),
+            (
+                "src/engine/upper.rs",
+                "fn f() { let _ = Root::capacity::pool_for; }\n",
+            ),
+            (
                 "src/engine/seam.rs",
                 "use crate::capacity::client::{CapacityClient, Pool};\n",
             ),
@@ -571,6 +685,103 @@ mod tests {
                 "src/engine/planted.rs",
                 "src/engine/aliased.rs",
                 "src/engine/bare.rs",
+                "src/engine/grouped.rs",
+                "src/engine/rooted.rs",
+                "src/engine/upper.rs",
+            ]
+        );
+    }
+
+    #[test]
+    fn only_the_run_constructor_builds_the_builtin_client() {
+        const RUN: &str = "src/engine/topology/run.rs";
+        let sources = production_sources();
+        assert!(
+            crate::effects::production_code(source_of(&sources, RUN))
+                .contains("BuiltinClient::replay(&handle.events)"),
+            "`TopologyRun::resumed` in `{RUN}` no longer builds the run's client with \
+             `BuiltinClient::replay(&handle.events)`, so the one site this census allows is not \
+             the run's constructor"
+        );
+        assert_eq!(
+            builtin_client_sites(&sources),
+            vec![(RUN, 1)],
+            "the run asks the client it installed (`self.capacity`, which `TopologyRun::resumed` \
+             builds), so a second built-in client, built anywhere else in the engine, answers \
+             capacity questions an installed handler never sees. The legacy writer of schemas \
+             1–3 ({LEGACY_WRITER:?}) is the one named exception"
+        );
+        assert_eq!(
+            hides_the_builtin_client(&sources),
+            Vec::<&str>::new(),
+            "a `use` that renames `BuiltinClient` or globs `capacity::client` lets a file build a \
+             second built-in client without naming it, and that client answers capacity \
+             questions an installed handler never sees"
+        );
+    }
+
+    #[test]
+    fn the_builtin_client_census_sees_a_second_client() {
+        let planted: Vec<(String, String)> = [
+            (
+                "src/engine/topology/run.rs",
+                "use crate::capacity::client::{BuiltinClient, CapacityClient};\n\
+                 fn resumed(handle: H) -> Box<dyn CapacityClient> {\n    \
+                 Box::new(BuiltinClient::replay(&handle.events))\n}\n",
+            ),
+            (
+                "src/engine/second.rs",
+                "fn f(e: &[E]) { BuiltinClient::replay(e).grant(&[], e, 0); }\n",
+            ),
+            (
+                "src/engine/renamed.rs",
+                "use crate::capacity::client::BuiltinClient as B;\n",
+            ),
+            ("src/engine/globbed.rs", "use crate::capacity::client::*;\n"),
+            (
+                "src/engine/grouped.rs",
+                "use crate::capacity::client::{\n    CapacityClient, *,\n};\n",
+            ),
+            (
+                "src/engine/qualified.rs",
+                "fn f() { let _ = <BuiltinClient as Default>::default(); }\n",
+            ),
+            (
+                "src/engine/prose.rs",
+                "// a BuiltinClient answers from the run's signals\n\
+                 const S: &str = \"BuiltinClient::replay(e)\";\n",
+            ),
+            (
+                "src/engine/tested.rs",
+                "fn f() {}\n#[cfg(test)]\nmod tests {\n    \
+                 use crate::capacity::client::BuiltinClient as B;\n    \
+                 fn g(e: &[E]) { B::replay(e); BuiltinClient::replay(e); }\n}\n",
+            ),
+            (
+                "src/engine/coordinator.rs",
+                "fn f(e: &[E]) { BuiltinClient::replay(e); }\n",
+            ),
+            (
+                "src/cli.rs",
+                "use crate::capacity::client::*;\nfn f(e: &[E]) { BuiltinClient::replay(e); }\n",
+            ),
+        ]
+        .into_iter()
+        .map(|(path, source)| (path.to_owned(), source.to_owned()))
+        .collect();
+        assert_eq!(
+            builtin_client_sites(&planted),
+            vec![
+                ("src/engine/topology/run.rs", 1),
+                ("src/engine/second.rs", 1),
+                ("src/engine/qualified.rs", 1),
+            ]
+        );
+        assert_eq!(
+            hides_the_builtin_client(&planted),
+            vec![
+                "src/engine/renamed.rs",
+                "src/engine/globbed.rs",
                 "src/engine/grouped.rs",
             ]
         );
