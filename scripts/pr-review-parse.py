@@ -349,7 +349,11 @@ VERDICT_RUN = re.compile(r"VERDICT:\**:? *" + NOT_SPACE + r"*")
 VERDICT_WHOLE = re.compile(r"VERDICT:[*]*:? *([A-Z_]+)[*]*\Z")
 NUMBERED_FINDING = re.compile(r"[0-9]+\. \*\*(P[0-3])")
 
-USAGE = "usage: pr-review-parse.py {review|ledger} [--nul] [--out FILE] FILE"
+USAGE = (
+    "usage: pr-review-parse.py {review|ledger} [--nul] [--out FILE] FILE\n"
+    "  review: the review's kind, reviewed commit, verdict, base, stray token and findings\n"
+    "  ledger: the pull-request body's ledger rows, each as its id, severity and disposition"
+)
 
 
 class Unparsed(Exception):
@@ -1023,13 +1027,19 @@ LEDGER_SEPARATOR = re.compile(r"-+\Z")
 
 
 def ledger_result(args):
-    """ledger FILE: the id and disposition of every row of the pull-request body's finding ledger.
+    """ledger FILE: the id, severity and disposition of every row of the body's finding ledger.
 
     The header row, the separator and the canonical `None yet` row are not rows, exactly as the
     awk this replaces judged them -- on the untrimmed cell, which is why the patterns carry their
     own spaces. Everything else in the section is a row and is reported as one; a cell holding
     something no finding id could equal can neither match a finding nor hide a match, so there is
     nothing here for a malformed row to gain.
+
+    THE SEVERITY IS THE ROW'S OWN, the table's second column, and it is reported so the audit can
+    hold it against the review's. Without it an `accepted-risk` row was judged on the review's
+    severity alone: a review P3 whose row recorded P2 read READY, though a P2 recorded as
+    `accepted-risk` is the owner's call. A row too short to carry the column reports it empty,
+    which equals no severity a review can give -- so it, too, can only block.
     """
     if len(args) != 1:
         raise Unparsed("ledger takes one file")
@@ -1052,6 +1062,7 @@ def ledger_result(args):
         rows.append(
             {
                 "id": identifier.strip(" "),
+                "severity": (cells[2] if len(cells) > 2 else "").strip(" "),
                 "disposition": (cells[9] if len(cells) > 9 else "").strip(" "),
             }
         )
@@ -1059,10 +1070,11 @@ def ledger_result(args):
 
 
 def ledger_fields(result):
-    """The ledger as flat fields: two, the second of which is the row count, then two each."""
+    """The ledger as flat fields: two, the second of which is the row count, then three per row --
+    its id, its severity and its disposition, in that order."""
     fields = ["ledger", str(len(result["rows"]))]
     for row in result["rows"]:
-        fields += [row["id"], row["disposition"]]
+        fields += [row["id"], row["severity"], row["disposition"]]
     return fields
 
 

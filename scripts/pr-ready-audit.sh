@@ -92,10 +92,12 @@
 #     exactly one file under findings/ on the branch whose YAML frontmatter (the block
 #     between the opening --- and the next) carries `id: <the finding id>` -- or, when the
 #     finding's severity is one `may_accept_for` answers for the lane (P3, in every lane, by the
-#     owner's ruling of 2026-11-13), whose disposition is accepted-risk, which needs no file: the
-#     row is its record. Every other accepted-risk row, and every rejected row, is the owner's
-#     call and sends the pull request to MANUAL. A witnessed or MUST P3 never reaches its row:
-#     both are blocked first, whatever the row says (the two hard rules, below)
+#     owner's ruling of 2026-11-13), whose disposition is accepted-risk, which needs that same
+#     one file (an accepted finding is still open, and findings/ is the whole of the open work)
+#     and a row recording the review's own severity: a row whose severity differs is
+#     `severity-mismatch`, NOT-READY. Every other accepted-risk row, and every rejected row, is
+#     the owner's call and sends the pull request to MANUAL. A witnessed or MUST P3 never reaches
+#     its row: both are blocked first, whatever the row says (the two hard rules, below)
 #
 # This script decides whether to merge, so every uncertainty resolves to NOT-READY. A read that
 # failed, a read that may be short, and a field the review did not record are each an uncertainty,
@@ -899,7 +901,8 @@ audit_one() {
   may_accept="$(may_accept_for "$lane")" || may_accept_status=$?
   blockers=()
   state=READY
-  # THE SEVERITIES THIS LANE MAY ACCEPT ON A LEDGER ROW ALONE (owner, 2026-11-13), and a lane it
+  # THE SEVERITIES THIS LANE MAY ACCEPT WITHOUT A MANUAL READ (owner, 2026-11-13) -- on a ledger
+  # row recording the review's severity and one finding file, not on the row alone -- and a lane it
   # cannot answer for is not a lane that accepts nothing quietly: it is a blocker, so the pull
   # request is NOT-READY and says why. The set is emptied as well, so no `accepted-risk` row below
   # is read as accepted on an answer that never came.
@@ -1124,8 +1127,13 @@ audit_one() {
   # not spill, and either `awk` dying all ended the run through `set -e` rather than through
   # anything that had decided what to do about it. What the audit does is stated here instead, and
   # the lookup itself is an expansion, so there is no command in it left to fail.
-  local body_file ledger_file ledger_status=0 ledger_body_status=0 disposition nfiles j k
-  ledger_id=(); ledger_disposition=()
+  #
+  # Three fields per row: its id, its severity and its disposition. The severity is the ROW'S, and
+  # it is read so an `accepted-risk` row is held to the severity the review gave: judged on the
+  # review's alone, a review P3 whose row recorded P2 and `accepted-risk` read READY, though a P2
+  # recorded so is the owner's call.
+  local body_file ledger_file ledger_status=0 ledger_body_status=0 disposition row_severity nfiles j k
+  ledger_id=(); ledger_severity=(); ledger_disposition=()
   body_file="$(mktemp)"
   ledger_file="$(mktemp)"
   gh pr view "$pr" --repo "$repo" --json body --jq .body > "$body_file" || ledger_body_status=$?
@@ -1135,12 +1143,13 @@ audit_one() {
     run_review_parser ledger "$body_file" "$ledger_file" || ledger_status=$?
     if ((ledger_status != 0)); then
       blockers+=("ledger-parse-failed:$ledger_status")
-    elif ! read_parser_fields "$ledger_file" ledger 2 2; then
+    elif ! read_parser_fields "$ledger_file" ledger 2 3; then
       blockers+=("ledger-parse-incomplete")
     else
-      for ((j = 2; j < ${#fields[@]}; j += 2)); do
+      for ((j = 2; j < ${#fields[@]}; j += 3)); do
         ledger_id+=("${fields[j]}")
-        ledger_disposition+=("${fields[j + 1]}")
+        ledger_severity+=("${fields[j + 1]}")
+        ledger_disposition+=("${fields[j + 2]}")
       done
     fi
   fi
@@ -1162,8 +1171,9 @@ audit_one() {
     # THESE TWO RUN BEFORE THE LEDGER IS CONSULTED, AND `continue`, AND THAT ORDER IS WHAT KEEPS
     # STEP 5'S TWO HARD RULES. A witnessed finding and a MUST deviation are fixed whatever their
     # severity, so a witnessed or MUST P3 is blocked here and never reaches the `accepted-risk` arm
-    # below, where a P3 is otherwise accepted on its row alone. Moving the ledger lookup above
-    # these, or dropping a `continue`, lets that row accept what step 5 says is fixed.
+    # below, where a P3 is otherwise accepted on its row and its one finding file. Moving the
+    # ledger lookup above these, or dropping a `continue`, lets that row accept what step 5 says is
+    # fixed.
     if (( wit & 2 )); then
       blockers+=("must-deviation:${id:-unnamed}")
       continue
@@ -1183,9 +1193,11 @@ audit_one() {
     # The first row with this id wins, as the `awk`'s `exit` made it win. Compared by expansion:
     # a here-string bash could not spill left the previous finding's disposition in place, which
     # is a deferred row standing in for a finding that has none.
-    disposition=""
+    disposition=""; row_severity=""
     for ((j = 0; j < ${#ledger_id[@]}; j++)); do
-      if [[ "${ledger_id[j]}" == "$id" ]]; then disposition="${ledger_disposition[j]}"; break; fi
+      if [[ "${ledger_id[j]}" == "$id" ]]; then
+        disposition="${ledger_disposition[j]}"; row_severity="${ledger_severity[j]}"; break
+      fi
     done
     case "$disposition" in
       deferred)   # the lane rule: an allowed finding is filed and deferred, one file per finding
@@ -1199,13 +1211,32 @@ audit_one() {
           *) blockers+=("duplicate-file:$id") ;;
         esac ;;
       accepted-risk)
-        # A P3 ACCEPTED ON ITS ROW ALONE (owner, 2026-11-13): a severity `may_accept_for` answers
-        # for this lane blocks nothing and needs no file under findings/ -- the row is its record.
-        # Only an unwitnessed, non-MUST finding gets here at all: the two hard rules are applied
-        # above and `continue`, and that order is what keeps them. Any other severity recorded
-        # as accepted-risk is still the owner's call, not the audit's.
-        if [[ " $may_accept " != *" $sev "* ]]; then
+        # A P3 ACCEPTED WITHOUT A MANUAL READ (owner, 2026-11-13), and on three conditions, every
+        # one of which must hold. Only an unwitnessed, non-MUST finding gets here at all: the two
+        # hard rules are applied above and `continue`, and that order is what keeps them.
+        #
+        #   - THE ROW RECORDS THE REVIEW'S SEVERITY. Tested on the review's severity alone, a
+        #     review P3 whose row said P2 read READY, though a P2 recorded as accepted-risk is the
+        #     owner's call. The row and the finding disagree, so this is NOT-READY, not MANUAL:
+        #     there is nothing for the owner to rule on until the row says what the review said.
+        #   - THAT SEVERITY IS ONE `may_accept_for` ANSWERS FOR THIS LANE. Any other severity
+        #     recorded as accepted-risk is still the owner's call, not the audit's.
+        #   - EXACTLY ONE FILE UNDER findings/ AT THE HEAD CARRIES THE ID, by the same count and
+        #     with the same blockers as a deferred finding. An accepted finding is still open, and
+        #     findings/ is the whole of the outstanding work: the release and integration
+        #     re-triage reads it, and a finding the row alone recorded dropped out of that queue.
+        if [[ "$row_severity" != "$sev" ]]; then
+          blockers+=("severity-mismatch:$id")
+        elif [[ " $may_accept " != *" $sev "* ]]; then
           blockers+=("manual:disposition-$disposition:$id")
+        elif ! nfiles="$(finding_file_count "$id" "$head")"; then
+          blockers+=("finding-file-lookup-failed:$id")
+        else
+          case "$nfiles" in
+            1) ;;
+            0) blockers+=("no-file:$id") ;;
+            *) blockers+=("duplicate-file:$id") ;;
+          esac
         fi ;;
       rejected) blockers+=("manual:disposition-$disposition:$id") ;;   # the owner's call, not the audit's
       fixed)

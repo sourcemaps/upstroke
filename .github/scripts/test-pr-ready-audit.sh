@@ -46,14 +46,25 @@
 #                                not counted against three, or a witnessed one was counted as
 #                                unwitnessed
 #   MUT-P3-LANE-DEFERS           the P3 lane let a P3 be deferred
-#   MUT-P3-ACCEPT-MANUAL         an unwitnessed P3 recorded `accepted-risk` on its ledger row was
-#                                still sent to a manual read, or `may_accept_for` failed to answer
-#                                P3 for a lane `lane_for` returns -- the owner's ruling of
-#                                2026-11-13 not applied
+#   MUT-P3-ACCEPT-MANUAL         an unwitnessed P3 recorded `accepted-risk` on a ledger row giving
+#                                its own severity, with its one finding file, was still sent to a
+#                                manual read, or `may_accept_for` failed to answer P3 for a lane
+#                                `lane_for` returns -- the owner's ruling of 2026-11-13 not applied
 #   MUT-P3-ACCEPT-WIDENED        the acceptance reached past what was ruled: a P2 `accepted-risk`
 #                                row, a `rejected` row, a witnessed P3 or a `MUST` P3 stopped
 #                                blocking, or a lane `may_accept_for` cannot answer for was read
 #                                as one that accepts
+#   MUT-P3-ACCEPT-SEVERITY-UNBOUND  the `accepted-risk` arm tested the REVIEW'S severity and never
+#                                the row's, so a review P3 whose row recorded P2 read READY -- a
+#                                P2 recorded `accepted-risk` being the owner's call -- instead of
+#                                NOT-READY, `severity-mismatch:<id>`
+#   MUT-P3-ACCEPT-UNFILED        an accepted P3 was read on its row alone, so one with no file
+#                                under findings/ read READY instead of `no-file:<id>`, or one with
+#                                two read READY instead of `duplicate-file:<id>` -- an open finding
+#                                dropped from the queue findings/ is
+#   MUT-LEDGER-SEVERITY-DROPPED  the `ledger` subcommand returned a row's id and disposition and not
+#                                its severity, so the audit had no row severity to hold the
+#                                review's against
 #   MUT-JSON-SPLIT-BY-REGEX     findings read by splitting text on "},{" instead of a parser
 #   MUT-NULL-WITNESS             a null witness field counted as a witness
 #   MUT-MUST-UNSEEN              a MUST deviation was not flagged
@@ -7885,18 +7896,43 @@ Text with a | pipe.
 
 | not | a | ledger | row |
 EOF
-ledger_rows() {  # ledger_rows FILE: "<status>|<id>:<disposition>;..."
+ledger_rows() {  # ledger_rows FILE: "<status>|<id>:<severity>:<disposition>;..."
   local out status=0
   out="$("$parser_python" scripts/pr-review-parse.py ledger "$1" 2>/dev/null)" || status=$?
   ((status == 0)) || { printf '%s|' "$status"; return 0; }
-  printf '%s|%s' "$status" "$(printf '%s' "$out" | jq -j '[.rows[] | "\(.id):\(.disposition)"] | join(";")')"
+  printf '%s|%s' "$status" \
+    "$(printf '%s' "$out" | jq -j '[.rows[] | "\(.id):\(.severity):\(.disposition)"] | join(";")')"
 }
 expect MUT-LEDGER-HEADER-AS-ROW "$(ledger_rows "$tmp/body.md")" \
-  '0|A-DEFERRABLE:deferred;B-FIXED:fixed'
+  '0|A-DEFERRABLE:P3:deferred;B-FIXED:P2:fixed'
 # The payload the audit reads, whose second field is the row count: the same rule as the review's,
-# so a ledger that stopped arriving is not a pull request with fewer rows in it.
+# so a ledger that stopped arriving is not a pull request with fewer rows in it. THREE FIELDS PER
+# ROW -- id, severity, disposition -- because the audit holds an `accepted-risk` row's own severity
+# against the review's, and a payload without it leaves the audit nothing to hold.
 expect MUT-PARSE-PAYLOAD-COUNT "$(parse_nul ledger "$tmp/body.md")" \
-  '0|ledger|2|A-DEFERRABLE|deferred|B-FIXED|fixed|'
+  '0|ledger|2|A-DEFERRABLE|P3|deferred|B-FIXED|P2|fixed|'
+expect MUT-LEDGER-SEVERITY-DROPPED "$(parse_nul ledger "$tmp/body.md")" \
+  '0|ledger|2|A-DEFERRABLE|P3|deferred|B-FIXED|P2|fixed|'
+# and the audit's own read of it takes three per row: two would read this payload's five records'
+# worth of fields as the wrong length and refuse it, which is the point -- a reader and a writer
+# that disagree about the shape fail closed rather than pairing an id with a severity.
+"$parser_python" scripts/pr-review-parse.py ledger --nul --out "$tmp/ledger.payload" "$tmp/body.md"
+expect MUT-LEDGER-SEVERITY-DROPPED "$(
+  fields=(); read_parser_fields "$tmp/ledger.payload" ledger 2 3 && echo "${#fields[@]}"
+)" 8
+ledger_two_status=0
+( fields=(); read_parser_fields "$tmp/ledger.payload" ledger 2 2 ) || ledger_two_status=$?
+expect "MUT-LEDGER-SEVERITY-DROPPED two per row refused" "$ledger_two_status" 1
+# A row too short to reach the severity column reports it empty, which equals no severity a review
+# gives, rather than shifting the disposition or another cell into its place.
+cat > "$tmp/short-row-body.md" <<'EOF'
+## Review finding ledger
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| SHORT-ROW
+EOF
+expect MUT-LEDGER-SEVERITY-DROPPED "$(ledger_rows "$tmp/short-row-body.md")" '0|SHORT-ROW::'
 # A body the audit could not fetch is not a body with no ledger in it. It used to be `gh pr view
 # ... | ledger_rows_from_body` captured into a variable, so a failed fetch ended the whole run
 # through `set -e` -- not a decision about this pull request, just an exit -- and any rewrite of
@@ -7911,21 +7947,50 @@ got="$(STUB_REVIEW_BODY="$tmp/truncating-review.md" STUB_COMMENTS_STATUS=0 run_s
 [[ "$got" == *ledger-lookup-failed* ]] \
   && error "MUT-LEDGER-LOOKUP-SUPPRESSED: a readable body was reported unreadable"
 
-# --- a P3 accepted on its ledger row alone, through main ----------------------------------------
-# THE OWNER'S RULING OF 2026-11-13: a P3, in every lane, may be recorded `accepted-risk` with its
-# ledger row and nothing else -- no file under findings/, no manual read -- and the audit accepts
-# it. A P2 or higher recorded so is still the owner's call, a `rejected` row always is, and the two
-# hard rules outrank the label: a witnessed P3 and a `MUST` P3 are fixed, whatever their row says.
+# --- a P3 accepted on its ledger row and its finding file, through main --------------------------
+# THE OWNER'S RULING OF 2026-11-13: a P3, in every lane, may be recorded `accepted-risk` without a
+# manual read, and the audit accepts it -- on a ledger row that records the review's own severity,
+# P3, and with exactly one file under findings/ at the head carrying its id, as a deferred finding
+# has. An accepted finding is still open, and findings/ is the whole of the outstanding work. A row
+# recording another severity than the review's is NOT-READY, `severity-mismatch`; a P2 or higher
+# recorded `accepted-risk` is still the owner's call, a `rejected` row always is, and the two hard
+# rules outrank the label: a witnessed P3 and a `MUST` P3 are fixed, whatever their row says.
 #
 # Run through main against the enqueue harness's own repository, because READY is the assertion and
 # only that harness can reach it -- its reviewed and base commits are real -- and because the row is
 # read inside `audit_one`, where no call on a helper reaches. Its stub is the enqueue stub with the
-# two things these cases vary made inputs: the BRANCH, which decides the lane, and the BODY, which
-# carries the ledger. Each review's only finding is the one under test, so a READY here is that
-# row's doing and no other finding's, and each MANUAL or NOT-READY names the blocker that made it.
+# three things these cases vary made inputs: the BRANCH, which decides the lane, the BODY, which
+# carries the ledger, and the HEAD, which carries the finding files. Each review's only finding is
+# the one under test, so a READY here is that row's doing and no other finding's, and each MANUAL or
+# NOT-READY names the blocker that made it.
+#
+# The heads are commits on the harness head made with plumbing -- the harness repository's own
+# branch and index are left where the cases above put them -- each adding findings/ with the named
+# files, every one of which files ACCEPT-P3 in its frontmatter. The harness head itself has none.
+accept_head_with() {  # accept_head_with NAME...: a commit on the harness head, one file per NAME
+  local blob listing="" name findings_tree root_tree
+  blob="$(printf -- '---\nid: ACCEPT-P3\nseverity: P3\n---\n\nAccepted, and still open.\n' \
+    | git -C "$enqueue_repo" hash-object -w --stdin)"
+  for name in "$@"; do listing+="100644 blob $blob"$'\t'"$name"$'\n'; done
+  findings_tree="$(printf '%s' "$listing" | git -C "$enqueue_repo" mktree)"
+  root_tree="$(printf '040000 tree %s\tfindings\n' "$findings_tree" | git -C "$enqueue_repo" mktree)"
+  git -C "$enqueue_repo" -c user.email=t@example -c user.name=t \
+    commit-tree "$root_tree" -p "$enqueue_head" -m "file ACCEPT-P3 under findings/"
+}
+accept_head_one="$(accept_head_with accept-p3.md)"
+accept_head_two="$(accept_head_with accept-p3.md accept-p3-again.md)"
+accept_head_none="$enqueue_head"
+# The heads are what they say, counted by the audit's own helper, so a READY or a `no-file` below is
+# about the row and not about a head that was built wrong.
+expect "MUT-P3-ACCEPT-UNFILED one-file head" \
+  "$(cd "$enqueue_repo" && finding_file_count ACCEPT-P3 "$accept_head_one")" 1
+expect "MUT-P3-ACCEPT-UNFILED two-file head" \
+  "$(cd "$enqueue_repo" && finding_file_count ACCEPT-P3 "$accept_head_two")" 2
+expect "MUT-P3-ACCEPT-UNFILED no-file head" \
+  "$(cd "$enqueue_repo" && finding_file_count ACCEPT-P3 "$accept_head_none")" 0
 accept_gh="$tmp/accept-gh"
 mkdir -p "$accept_gh"
-printf '#!/usr/bin/env bash\nhead=%s\n' "$enqueue_head" > "$accept_gh/gh"
+printf '#!/usr/bin/env bash\nhead=${STUB_HEAD:-%s}\n' "$enqueue_head" > "$accept_gh/gh"
 cat >> "$accept_gh/gh" <<'GH'
 case "$*" in
   "repo view"*)               echo eventloops/upstroke ;;
@@ -7944,10 +8009,11 @@ case "$*" in
 esac
 GH
 chmod +x "$accept_gh/gh"
-accept_review() {  # accept_review FILE FINDING-JSON: a review of the harness head with that one finding
-  { printf 'Reviewed head: %s\n\n```json\n' "$enqueue_head"
+accept_review() {  # accept_review FILE FINDING-JSON [HEAD]: a review of HEAD with that one finding
+  local reviewed="${3:-$enqueue_head}"
+  { printf 'Reviewed head: %s\n\n```json\n' "$reviewed"
     printf '{"reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[%s]}' \
-      "$enqueue_head" "$enqueue_base" "$2"
+      "$reviewed" "$enqueue_base" "$2"
     printf '\n```\n'; } > "$1"
 }
 accept_ledger() {  # accept_ledger FILE ID SEVERITY DISPOSITION: a body whose ledger is that one row
@@ -7957,25 +8023,35 @@ accept_ledger() {  # accept_ledger FILE ID SEVERITY DISPOSITION: a body whose le
     printf '| %s | %s | %s / src/x.rs:1 | a -> b | pre_existing | correctness | — | `guard` | %s |\n' \
       "$2" "$3" "${enqueue_head:0:7}" "$4"; } > "$1"
 }
-accept_run() {  # accept_run BRANCH REVIEW BODY: "<status>|<the audit's output, on one line>"
+accept_run() {  # accept_run BRANCH REVIEW BODY [HEAD]: "<status>|<the audit's output, on one line>"
   local out status=0
   out="$(cd "$enqueue_repo" && STUB_BRANCH="$1" STUB_REVIEW_BODY="$2" STUB_LEDGER_BODY="$3" \
+    STUB_HEAD="${4:-$enqueue_head}" \
     PATH="$accept_gh:$PATH" bash "$root/scripts/pr-ready-audit.sh" 999 2>&1)" || status=$?
   printf '%s|%s' "$status" "$(tr '\n' ' ' <<< "$out")"
 }
-accept_review "$tmp/accept-p3.md" '{"id":"ACCEPT-P3","severity":"P3"}'
+# Every P3 review but the two unfiled ones reads the head that files ACCEPT-P3 exactly once, so a
+# MANUAL or NOT-READY among them is the row's or the hard rules' doing and never a missing file's.
+accept_review "$tmp/accept-p3.md" '{"id":"ACCEPT-P3","severity":"P3"}' "$accept_head_one"
+accept_review "$tmp/accept-p3-no-file.md" '{"id":"ACCEPT-P3","severity":"P3"}' "$accept_head_none"
+accept_review "$tmp/accept-p3-two-files.md" '{"id":"ACCEPT-P3","severity":"P3"}' "$accept_head_two"
 accept_review "$tmp/accept-p2.md" '{"id":"ACCEPT-P2","severity":"P2"}'
-accept_review "$tmp/accept-p3-witnessed.md" '{"id":"ACCEPT-P3","severity":"P3","witness":"a failing test"}'
+accept_review "$tmp/accept-p2-as-p3.md" '{"id":"ACCEPT-P3","severity":"P2"}' "$accept_head_one"
+accept_review "$tmp/accept-p3-witnessed.md" \
+  '{"id":"ACCEPT-P3","severity":"P3","witness":"a failing test"}' "$accept_head_one"
 accept_review "$tmp/accept-p3-must.md" \
-  '{"id":"ACCEPT-P3","severity":"P3","correction":"This is a MUST deviation of standards section 7"}'
+  '{"id":"ACCEPT-P3","severity":"P3","correction":"This is a MUST deviation of standards section 7"}' \
+  "$accept_head_one"
 accept_ledger "$tmp/accept-p3-row.md" ACCEPT-P3 P3 accepted-risk
+accept_ledger "$tmp/accept-p3-row-says-p2.md" ACCEPT-P3 P2 accepted-risk
 accept_ledger "$tmp/accept-p2-row.md" ACCEPT-P2 P2 accepted-risk
 accept_ledger "$tmp/reject-p3-row.md" ACCEPT-P3 P3 rejected
 
-# The ruling: an unwitnessed P3 on an `accepted-risk` row is READY, with no file and no manual read,
-# in a lane that fixes P0-P1 under the fix-P0/fix-P1 prefixes and in the feature lane alike.
+# The ruling: an unwitnessed P3 on an `accepted-risk` row recording P3, with its one finding file,
+# is READY with no manual read, in a lane that fixes P0-P1 under the fix-P0/fix-P1 prefixes and in
+# the feature lane alike.
 for accept_branch in fix-P0/correctness_a-slug fix-P1/correctness_a-slug feature/a-slug; do
-  got="$(accept_run "$accept_branch" "$tmp/accept-p3.md" "$tmp/accept-p3-row.md")"
+  got="$(accept_run "$accept_branch" "$tmp/accept-p3.md" "$tmp/accept-p3-row.md" "$accept_head_one")"
   contains "MUT-P3-ACCEPT-MANUAL [$accept_branch]" "$got" " READY "
   expect "MUT-P3-ACCEPT-MANUAL status [$accept_branch]" "${got%%|*}" 0
   [[ "$got" == *disposition-accepted-risk* || "$got" == *no-file:* || "$got" == *NOT-READY* ]] \
@@ -7983,8 +8059,44 @@ for accept_branch in fix-P0/correctness_a-slug fix-P1/correctness_a-slug feature
   [[ "$got" == *GH-UNSTUBBED* ]] \
     && error "MUT-P3-ACCEPT-MANUAL: the audit made a call this case does not model: [$got]"
 done
-contains MUT-P3-ACCEPT-MANUAL "$(accept_run fix-P0/correctness_a-slug "$tmp/accept-p3.md" "$tmp/accept-p3-row.md")" \
-  "fix-p0p1"
+contains MUT-P3-ACCEPT-MANUAL "$(accept_run fix-P0/correctness_a-slug "$tmp/accept-p3.md" \
+  "$tmp/accept-p3-row.md" "$accept_head_one")" "fix-p0p1"
+
+# THE ROW'S SEVERITY IS THE REVIEW'S, OR NOTHING IS ACCEPTED. The review gives P3, the head files it
+# once, and the row records P2 and `accepted-risk`: judged on the review's severity alone this was
+# READY, though a P2 recorded `accepted-risk` is the owner's call. The row and the finding disagree,
+# so it is NOT-READY, saying so -- and not MANUAL, which would ask the owner to rule on a row that
+# does not say what the review said. The other direction, a review P2 on a row recording P3, is the
+# same disagreement and the same blocker: a row cannot lower a finding into the accepted set.
+for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
+  got="$(accept_run "$accept_branch" "$tmp/accept-p3.md" "$tmp/accept-p3-row-says-p2.md" \
+    "$accept_head_one")"
+  contains "MUT-P3-ACCEPT-SEVERITY-UNBOUND [$accept_branch]" "$got" " NOT-READY "
+  contains "MUT-P3-ACCEPT-SEVERITY-UNBOUND [$accept_branch]" "$got" "severity-mismatch:ACCEPT-P3"
+  [[ "$got" == *" READY "* || "$got" == *" MANUAL "* ]] \
+    && error "MUT-P3-ACCEPT-SEVERITY-UNBOUND: a P2 row accepted a review P3 on [$accept_branch]: [$got]"
+  got="$(accept_run "$accept_branch" "$tmp/accept-p2-as-p3.md" "$tmp/accept-p3-row.md" \
+    "$accept_head_one")"
+  contains "MUT-P3-ACCEPT-SEVERITY-UNBOUND P2-as-P3 [$accept_branch]" "$got" " NOT-READY "
+  contains "MUT-P3-ACCEPT-SEVERITY-UNBOUND P2-as-P3 [$accept_branch]" "$got" \
+    "severity-mismatch:ACCEPT-P3"
+done
+
+# AN ACCEPTED P3 IS STILL OPEN, SO IT IS FILED, ONCE. The same review and the same row as the READY
+# case above, on a head that files nothing and on one that files the id twice: findings/ is the
+# whole of the outstanding work, and a finding its row alone recorded dropped out of the queue the
+# release and integration re-triage reads. Each is NOT-READY and names the blocker a deferred
+# finding in the same state gets.
+for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
+  got="$(accept_run "$accept_branch" "$tmp/accept-p3-no-file.md" "$tmp/accept-p3-row.md" \
+    "$accept_head_none")"
+  contains "MUT-P3-ACCEPT-UNFILED no file [$accept_branch]" "$got" " NOT-READY "
+  contains "MUT-P3-ACCEPT-UNFILED no file [$accept_branch]" "$got" "no-file:ACCEPT-P3"
+  got="$(accept_run "$accept_branch" "$tmp/accept-p3-two-files.md" "$tmp/accept-p3-row.md" \
+    "$accept_head_two")"
+  contains "MUT-P3-ACCEPT-UNFILED two files [$accept_branch]" "$got" " NOT-READY "
+  contains "MUT-P3-ACCEPT-UNFILED two files [$accept_branch]" "$got" "duplicate-file:ACCEPT-P3"
+done
 
 # A P2 recorded `accepted-risk` is still the owner's call: MANUAL, as before, in a lane where a P2
 # is not must-fix and so reaches its row at all.
@@ -7996,7 +8108,7 @@ done
 
 # A `rejected` row is the owner's call whatever the severity, a P3's included.
 for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
-  got="$(accept_run "$accept_branch" "$tmp/accept-p3.md" "$tmp/reject-p3-row.md")"
+  got="$(accept_run "$accept_branch" "$tmp/accept-p3.md" "$tmp/reject-p3-row.md" "$accept_head_one")"
   contains "MUT-P3-ACCEPT-WIDENED rejected [$accept_branch]" "$got" " MANUAL "
   contains "MUT-P3-ACCEPT-WIDENED rejected [$accept_branch]" "$got" "manual:disposition-rejected:ACCEPT-P3"
 done
@@ -8005,10 +8117,12 @@ done
 # deviation, are blocked before the ledger is consulted -- with the same `accepted-risk` row that
 # makes the unwitnessed P3 above READY -- so these two are what prove the order is kept.
 for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
-  got="$(accept_run "$accept_branch" "$tmp/accept-p3-witnessed.md" "$tmp/accept-p3-row.md")"
+  got="$(accept_run "$accept_branch" "$tmp/accept-p3-witnessed.md" "$tmp/accept-p3-row.md" \
+    "$accept_head_one")"
   contains "MUT-P3-ACCEPT-WIDENED witnessed [$accept_branch]" "$got" "NOT-READY"
   contains "MUT-P3-ACCEPT-WIDENED witnessed [$accept_branch]" "$got" "witnessed:ACCEPT-P3"
-  got="$(accept_run "$accept_branch" "$tmp/accept-p3-must.md" "$tmp/accept-p3-row.md")"
+  got="$(accept_run "$accept_branch" "$tmp/accept-p3-must.md" "$tmp/accept-p3-row.md" \
+    "$accept_head_one")"
   contains "MUT-P3-ACCEPT-WIDENED MUST [$accept_branch]" "$got" "NOT-READY"
   contains "MUT-P3-ACCEPT-WIDENED MUST [$accept_branch]" "$got" "must-deviation:ACCEPT-P3"
 done
@@ -8020,7 +8134,7 @@ done
 got="$(
   cd "$enqueue_repo" || exit 99
   export STUB_BRANCH=feature/a-slug STUB_REVIEW_BODY="$tmp/accept-p3.md" \
-    STUB_LEDGER_BODY="$tmp/accept-p3-row.md"
+    STUB_LEDGER_BODY="$tmp/accept-p3-row.md" STUB_HEAD="$accept_head_one"
   may_accept_for() { return 1; }
   PATH="$accept_gh:$PATH" main 999 2>&1
 )" || got="exit $?: $got"
