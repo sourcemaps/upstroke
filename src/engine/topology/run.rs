@@ -11,14 +11,14 @@ use crate::topology::events::TopologyEventBody;
 use crate::topology::fold::QuestionOrigin;
 
 use crate::events::AttemptRecord;
-use crate::interaction::{Notifier, Sleeper};
+use crate::interaction::{self, Notifier, Sleeper};
 use crate::topology::events::{
     AttemptNumber, AttemptSettlement, CandidateLeaseEffect, CandidateRef, CommitSha,
-    FrozenQuestion, GenerationCloseReason, GenerationId, InfrastructureKind, Materialization,
-    MergeVerificationCharged, QuestionRaised4, RunStarted4, SequenceId, SessionId,
+    DeferWaitElapsed4, FrozenQuestion, GenerationCloseReason, GenerationId, InfrastructureKind,
+    Materialization, MergeVerificationCharged, QuestionRaised4, RunStarted4, SequenceId, SessionId,
     SettlementTransition, TopologyEvent,
 };
-use crate::topology::fold::{FrozenInputs, TopologyFold};
+use crate::topology::fold::{FrozenInputs, TaskState, TopologyFold};
 use crate::topology::registry::TaskKey;
 use crate::workspace_manager::WorkspaceManager;
 
@@ -48,8 +48,8 @@ use super::recover::RunHandle;
 use super::seams::{IdSource, TimeSource, TopologyHooks};
 use super::select::{Admitted, Ceiling, Entitlements, Spend, Standing, Step, checkpoint, select};
 use super::settle::{
-    Deferral, FinishedAttempt, ManagedWorktrees, RetryOutcome, RetryRequest, WorktreeVerify,
-    close_generation, settle_failed,
+    Deferral, FinishedAttempt, ManagedWorktrees, ResetWaited, RetryOutcome, RetryRequest,
+    WorktreeVerify, close_generation, settle_failed,
 };
 
 pub struct RunEmitter<'a> {
@@ -1404,7 +1404,20 @@ pub enum Progress {
         waited_ms: u64,
         round: u32,
     },
+    Waiting {
+        slept_ms: u64,
+        until_unix: u64,
+    },
     BudgetExceeded,
+}
+
+/// The reset a back-off waits toward: the pool whose limit named it, the reset as its
+/// `pool_exhausted` recorded it, and the Unix second the wait ends, two minutes past it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AwaitedReset {
+    pool: String,
+    reset_at: String,
+    until_unix: u64,
 }
 
 pub struct TopologyRun {
@@ -1793,7 +1806,32 @@ impl TopologyRun {
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<Progress, UpstrokeError> {
-        let elapsed = self.deferral.wait(seams.sleeper);
+        let now = unix_seconds(seams.clock);
+        let Some(awaited) = self.awaited_reset(now) else {
+            let elapsed = self.deferral.wait(seams.sleeper);
+            return self.wait_elapsed(elapsed, seams, hooks);
+        };
+        if !self.deferral.holds_wait_toward(awaited.until_unix) {
+            self.announce_reset_wait(&awaited, now);
+        }
+        match self
+            .deferral
+            .wait_toward(seams.sleeper, now, awaited.until_unix)
+        {
+            ResetWaited::Slept { slept } => Ok(Progress::Waiting {
+                slept_ms: u64::try_from(slept.as_millis()).unwrap_or(u64::MAX),
+                until_unix: awaited.until_unix,
+            }),
+            ResetWaited::Elapsed(elapsed) => self.wait_elapsed(elapsed, seams, hooks),
+        }
+    }
+
+    fn wait_elapsed(
+        &mut self,
+        elapsed: DeferWaitElapsed4,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<Progress, UpstrokeError> {
         let (waited_ms, round) = (elapsed.waited_ms, elapsed.round);
         self.emit(
             TopologyEventBody::DeferWaitElapsed { data: elapsed },
@@ -1801,6 +1839,51 @@ impl TopologyRun {
             hooks,
         )?;
         Ok(Progress::Waited { waited_ms, round })
+    }
+
+    /// The earliest known reset among the pools the deferred tasks' limits named, when one is
+    /// ahead within [`interaction::RESET_WAIT_BOUND`].
+    fn awaited_reset(&self, now_unix: u64) -> Option<AwaitedReset> {
+        let fold = &self.handle.fold;
+        let len = fold.registry().map_or(0, |registry| {
+            u32::try_from(registry.len()).unwrap_or(u32::MAX)
+        });
+        let known: Vec<(u64, &String, &String)> = (0..len)
+            .map(TaskKey)
+            .filter(|key| {
+                fold.task(*key)
+                    .is_some_and(|task| task.state == TaskState::Deferred)
+            })
+            .filter_map(|key| {
+                let record = last_settled_record(&self.handle.events, key)?;
+                let pool = crate::capacity::limited_pool(record)?;
+                let reset_at = self.exhausted_pools.get(pool)?.as_ref()?;
+                Some((unix_seconds_of(reset_at)?, pool, reset_at))
+            })
+            .collect();
+        let until_unix =
+            interaction::reset_wait_until(now_unix, known.iter().map(|(reset, ..)| *reset))?;
+        let chosen = until_unix.checked_sub(interaction::RESET_WAIT_MARGIN.as_secs())?;
+        let (_, pool, reset_at) = known.iter().find(|(reset, ..)| *reset == chosen)?;
+        Some(AwaitedReset {
+            pool: (*pool).clone(),
+            reset_at: (*reset_at).clone(),
+            until_unix,
+        })
+    }
+
+    /// Tell each notifier once that the run waits for `awaited`'s reset
+    /// ([`interaction::reset_wait_line`]); the CLI's prints it to standard error.
+    fn announce_reset_wait(&self, awaited: &AwaitedReset, now_unix: u64) {
+        let wait = std::time::Duration::from_secs(awaited.until_unix.saturating_sub(now_unix));
+        let line = interaction::reset_wait_line(&awaited.pool, &awaited.reset_at, wait);
+        let mut told: Vec<&'static str> = Vec::new();
+        for notifier in &self.notifiers {
+            if !told.contains(&notifier.id()) {
+                told.push(notifier.id());
+                notifier.waiting(&line);
+            }
+        }
     }
 
     fn first_attempt(
@@ -2930,6 +3013,14 @@ fn escalated_onto(settlement: &AttemptSettlement) -> Option<u32> {
         } => Some(*rung),
         AttemptSettlement::Closed { .. } | AttemptSettlement::Retained { .. } => None,
     }
+}
+
+/// The record of `key`'s latest settled attempt: its last `attempt_finished`.
+fn last_settled_record(events: &[TopologyEvent], key: TaskKey) -> Option<&AttemptRecord> {
+    events.iter().rev().find_map(|event| match &event.body {
+        TopologyEventBody::AttemptFinished { data } if data.key == key => Some(&*data.record),
+        _ => None,
+    })
 }
 
 fn unix_seconds(clock: &dyn TimeSource) -> u64 {

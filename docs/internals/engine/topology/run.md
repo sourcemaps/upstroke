@@ -388,7 +388,9 @@ measured the reservation ledger at 0 there and read it as a release).
 `Deferral::wait` sleeps the backoff and returns the event;
 `TopologyRun::step` appends it. In that order — the event records
 a wait that *elapsed*, so appending it first would put a claim in
-the log a kill during the sleep would make false.
+the log a kill during the sleep would make false. A wait toward a
+known reset is slept in slices by `Deferral::wait_toward`, and only
+its last slice returns the event (`TopologyRun::back_off`).
 
 ## `pub const fn disposition(self) -> Disposition` › `Self::ReadyDispatch => Disposition::Performed,`
 
@@ -1032,6 +1034,21 @@ How long this round slept.
 
 Which wait it was.
 
+## `pub enum Progress` › `Waiting {`
+
+One slice of a wait toward a known reset was slept, and the reset is
+still ahead. Nothing was appended: the wait is recorded once, by the
+`defer_wait_elapsed` of the slice that reaches it (`Waited`). See
+`back_off`.
+
+## `pub enum Progress` › `slept_ms: u64,`
+
+How long this slice slept, at most ten minutes.
+
+## `pub enum Progress` › `until_unix: u64,`
+
+The Unix second the wait ends: two minutes past the reset.
+
 ## `pub enum Progress` › `BudgetExceeded,`
 
 A ceiling refused the next spawn and `budget_exceeded` is durable.
@@ -1443,6 +1460,71 @@ first would put a claim in the log that a kill during the sleep
 would make false. The coordinator takes this arm only when no pipeline
 is live (R-AB), so a `defer_wait_elapsed` is never placed among in-flight
 settlements.
+
+**A known reset is waited out, not backed off.** When a deferred task's
+limit named a reset ([`Self::awaited_reset`]), the run waits until two
+minutes past the earliest one, in slices of at most ten minutes
+(`Deferral::wait_toward`). The doubling backoff would otherwise wake the
+task after a minute, run it into the same limit, and spend one of its
+`max_defers` on each wake, long before a five-hour window clears. Each
+slice that leaves the reset ahead appends nothing and answers
+`Progress::Waiting`. The next step selects again, so an answer, a task made
+ready or the end of the run comes before the next slice, and a later
+`Backoff` continues the same wait. The slice that reaches the target
+appends its `defer_wait_elapsed`, for the whole wait, in the order and form
+the plain backoff appends one ([`Self::wait_elapsed`]), and answers
+`Progress::Waited`.
+
+The run says once that it is waiting, when the wait starts
+([`Self::announce_reset_wait`]). A step that continues a held wait says
+nothing.
+
+With no known reset in range the arm is the plain backoff, unchanged. That
+covers a limit naming a reset more than `interaction::RESET_WAIT_BOUND`
+ahead (the weekly one, usually), a pool exhausted with no reset recorded,
+a recorded reset the clock has already passed, and a deferred queue
+verification, which names no pool.
+
+## `impl TopologyRun` › `fn wait_elapsed(`
+
+Append a wait's `defer_wait_elapsed` and answer `Progress::Waited`. Both of
+`back_off`'s waits end here, so the record of a wait that elapsed has one
+shape whichever wait it was.
+
+## `impl TopologyRun` › `fn awaited_reset(&self, now_unix: u64) -> Option<AwaitedReset> {`
+
+The reset a back-off waits toward, chosen from the log and the run's
+memory of exhausted pools:
+
+1. each task the fold holds `Deferred`;
+2. its last `attempt_finished` ([`last_settled_record`]);
+3. the pool that attempt's failure names, as `capacity::retire_signals`
+   chooses it (`capacity::limited_pool`);
+4. that pool's recorded reset in `exhausted_pools`, read as Unix seconds
+   by [`unix_seconds_of`];
+5. the earliest of those resets that `interaction::reset_wait_until` waits
+   for, given the run's clock.
+
+The pool and reset text come back with the target, for the line
+[`Self::announce_reset_wait`] prints. A pool a later attempt proved serving
+is no longer in `exhausted_pools`, so its old reset is not waited for.
+
+## `impl TopologyRun` › `fn announce_reset_wait(&self, awaited: &AwaitedReset, now_unix: u64) {`
+
+Hand each notifier [`interaction::reset_wait_line`] once, for the wait
+from now to the target. The CLI notifier prints it to standard error, and a
+production run always holds that notifier (`interaction::notifiers_for`).
+A notifier named twice in `[interaction] notify` is told once.
+
+## `struct AwaitedReset {`
+
+What [`TopologyRun::awaited_reset`] chose. `until_unix` is the target
+`Deferral::wait_toward` is given, and `Progress::Waiting` reports it.
+
+## `fn last_settled_record(events: &[TopologyEvent], key: TaskKey) -> Option<&AttemptRecord> {`
+
+The record of `key`'s latest settled attempt: its last `attempt_finished`.
+A deferred task's latest settlement is the one that deferred it.
 
 ## `pub(super) fn begin_dispatch<O: Operator + ?Sized>(`
 

@@ -127,13 +127,6 @@ struct HeldWait {
     slept: Duration,
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "nothing in the driver waits toward a target yet; the suite is the only caller"
-    )
-)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResetWaited {
     Slept { slept: Duration },
@@ -165,13 +158,6 @@ impl Deferral {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "nothing in the driver waits toward a target yet; the suite is the only caller"
-        )
-    )]
     pub fn wait_toward(
         &mut self,
         sleeper: &dyn Sleeper,
@@ -206,6 +192,12 @@ impl Deferral {
             waited_ms: u64::try_from(slept.as_millis()).unwrap_or(u64::MAX),
             round: self.round,
         })
+    }
+
+    #[must_use]
+    pub fn holds_wait_toward(&self, until_unix: u64) -> bool {
+        self.toward
+            .is_some_and(|held| held.until_unix == until_unix)
     }
 
     pub fn progressed(&mut self) {

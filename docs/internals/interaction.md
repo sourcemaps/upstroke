@@ -228,11 +228,27 @@ text inside it, exactly as `review.rs` does with a diff.
 §8 `Notifier` — delivery only. Answers never come back through this trait,
 which is what lets a run outlive its notifier.
 
+## `pub trait Notifier` › `fn waiting(&self, _line: &str) {}`
+
+Say that the run is waiting, in the one line the caller wrote: the schema-4
+run's `back_off` passes [`reset_wait_line`] once, when it starts a wait
+toward a usage-limit reset. Delivery only, like `ask`, and nothing comes
+back. A notifier with nowhere sensible to put such a line keeps the default,
+which says nothing.
+
+The run reaches standard error through this method and not through a free
+function here. A function of this module that printed would be an
+`effectful` wrapper in `effects/wrappers.toml`, denied in `clippy.toml` to
+the driver that must call it. A trait impl's method is `effectful_unnameable`,
+and the driver already holds its notifiers for `ask`.
+
 ## `pub struct CliNotifier;`
 
 Announces a question on stderr as soon as it is raised (§12: eagerly, at
 detection). One line — the full text belongs in the prompt at the hard
 block and in the question file, not repeated in the middle of a run.
+
+It prints a waiting line to stderr as it is given.
 
 ## `pub fn notifiers_for(ids: &[String], warnings: &mut Vec<String>) -> Vec<&'static dyn Notifier> {`
 

@@ -223,6 +223,7 @@ pub fn render_question(question: &Question) -> String {
 pub trait Notifier {
     fn id(&self) -> &'static str;
     fn ask(&self, question: &Question) -> Result<(), UpstrokeError>;
+    fn waiting(&self, _line: &str) {}
 }
 
 pub struct CliNotifier;
@@ -230,6 +231,10 @@ pub struct CliNotifier;
 impl Notifier for CliNotifier {
     fn id(&self) -> &'static str {
         "cli"
+    }
+
+    fn waiting(&self, line: &str) {
+        eprintln!("{line}");
     }
 
     fn ask(&self, question: &Question) -> Result<(), UpstrokeError> {

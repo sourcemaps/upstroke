@@ -489,18 +489,27 @@ A runner that answers the way `wide_responder` does, except for the worker of ea
 stderr. `on_claude_max` starts a run with it, and the resume tests hand a fresh one to the next
 process.
 
+## `fn rate_limited_step_past_any_wait(`
+
+`step_answered_by` with the rate-limiting adapters, repeated while the step answers
+`Progress::Waiting`. A five-hour limit read at 03:00 names a reset the back-off waits out, in
+sixteen slices on this fixed clock, and a test about what the limit writes is about the step
+after them.
+
 ## `fn a_second_rate_limit_naming_the_same_reset_writes_no_second_pool_exhausted() {`
 
 `TopologyRun` writes `pool_exhausted` once for each pool and reset, as the sequential engine
 does. A rate limit is an outage, so the ladder defers the task: its generation closes, the
-backoff wakes it, and it is dispatched again under the next generation. The second attempt hits
-the same five-hour limit, and the log keeps its single `pool_exhausted`.
+backoff wakes it, and it is dispatched again under the next generation. The backoff waits out
+the 05:30 reset the first limit recorded, in the slices `rate_limited_step_past_any_wait` steps
+through, before it wakes the task. The second attempt hits the same five-hour limit, and the log
+keeps its single `pool_exhausted`.
 
 ## `fn a_second_rate_limit_naming_a_different_reset_writes_one_more_pool_exhausted() {`
 
-The same deferral, with a second limit that names a different reset: the weekly one, at 17:00 UTC
-on 14 November. A pool still marked exhausted gets one more `pool_exhausted` when the reset
-moves, so the log holds both, in order.
+The same deferral, waited out to 05:32 the same way, with a second limit that names a different
+reset: the weekly one, at 17:00 UTC on 14 November. A pool still marked exhausted gets one more
+`pool_exhausted` when the reset moves, so the log holds both, in order.
 
 ## `fn a_rate_limit_after_an_attempt_the_pool_served_writes_pool_exhausted_again() {`
 
@@ -550,6 +559,107 @@ interrupted, which carries no record and retires nothing. When `alpha` runs agai
 five-hour limit, the log still holds a single `pool_exhausted`. So the resumed run held the pool
 exhausted at 05:30, the reset the cut log recorded. Had it held the pool with no reset, the 05:30
 limit would have counted as a new reset and been written again.
+
+## `struct RecordingSleeper(std::cell::RefCell<Vec<std::time::Duration>>);`
+
+A sleeper that sleeps nothing and keeps every duration it was asked for, in order, so a test reads
+the whole of a wait as the slices it was slept in.
+
+## `fn defer_waits(wide: &crate::engine::topology::scaffold::Wide) -> Vec<(u64, u32)> {`
+
+Every `defer_wait_elapsed` the log holds, as its `waited_ms` and `round`.
+
+## `struct Stepped {`
+
+One step of `stepped_until_waited`: what it answered, every `defer_wait_elapsed` durable after
+it, and how many slices the sleeper had slept by then.
+
+## `fn stepped_until_waited(`
+
+Step the run on `clock` and `sleeper` until a step answers `Progress::Waited`, keeping each step.
+It reads the log after every step, so a test can say that no `defer_wait_elapsed` was appended
+before the last slice and not only that one was appended in the end. `answers` replaces the
+scaffold's unattended answer source when a test needs an answer to arrive. The bound of 64 steps
+is four times the sixteen slices the wait from 03:00 to 05:32 takes.
+
+## `fn deferred_on_claude_max(`
+
+`on_claude_max` with `alpha`'s first generation limited by `limit`, stepped once at `RunClock`:
+the attempt settles rate limited and the task is `Deferred`. Every reset-wait test starts here,
+at 03:00 UTC on 11 November 2026, with one deferred task.
+
+## `fn a_deferred_rate_limit_naming_a_reset_is_waited_out_to_two_minutes_past_it() {`
+
+The witness. Claude Code's five-hour limit, read at 03:00, names a 05:30 reset, and the run waits
+until two minutes past it, at 05:32. The sleeper records slices of at most ten minutes that come
+to 9,120 seconds, which is 05:32:00 less 03:00:00. The log holds exactly one `defer_wait_elapsed`,
+with `waited_ms` 9,120,000 and `round` 1, and no step before the last appended one.
+
+Before `back_off` waited toward a reset, the first back-off slept the default sixty seconds and
+appended a `defer_wait_elapsed` of 60,000. The task woke after a minute, met the same limit, and
+spent one of its `max_defers` on each wake, so the fixture's allowance of two was gone within
+minutes, hours before the window cleared.
+
+## `fn assert_backs_off_as_before(tag: &str, steps: &[Stepped], sleeper: &RecordingSleeper) {`
+
+The back-off when no known reset is waited for: one step, which sleeps the doubling backoff's
+first minute and appends a `defer_wait_elapsed` of 60,000 in round 1.
+
+## `fn a_limit_naming_a_reset_past_the_bound_backs_off_as_before() {`
+
+Claude Code's weekly limit, read at 03:00 on 11 November, names 17:00 on 14 November. That is
+more than `interaction::RESET_WAIT_BOUND` (five hours and a quarter) ahead, so
+`reset_wait_until` waits for nothing and the run backs off as it did before.
+
+## `const UNREAD_LIMIT: &str = "429 Too Many Requests";`
+
+A rate-limit message that names no reset.
+
+## `fn a_rate_limit_whose_reset_is_not_read_backs_off_as_before() {`
+
+The pool is recorded exhausted with no reset, so there is nothing to wait for and the run backs
+off as before.
+
+The task names an agent whose reset is not read, which is any agent but Claude Code
+(`capacity::pool_exhausted_to_record`). This scaffold's ladder runs Claude Code on every rung,
+so the test gets the same record another way: a Claude Code limit whose message names no reset.
+`back_off` reads only the `exhausted_pools` entry, and either way that entry is
+`("claude-max", None)`, which the test asserts before it steps.
+
+## `struct AfterTheReset;`
+
+The run's clock at 06:00 UTC on 11 November 2026, half an hour after the reset `RunClock` reads
+from the five-hour limit.
+
+## `fn a_recorded_reset_already_passed_backs_off_as_before() {`
+
+The five-hour limit is read at 03:00, so the pool is recorded exhausted until 05:30. The run then
+backs off at 06:00. A reset already behind the clock is not waited for (`reset_wait_until`), so
+the back-off is the plain one.
+
+## `struct AnsweredAfterSlices<'a> {`
+
+An answer source that has nothing to say until the sleeper has slept `slices` slices, and then
+answers `answer`: an answer published between two slices of the wait.
+
+## `struct WaitingLines(std::sync::Mutex<Vec<String>>);`
+
+A notifier that keeps every waiting line it is given. It is a `static` because a run holds its
+notifiers as `&'static dyn Notifier`. Only the one test below hands it to a run, so no other test
+writes to it.
+
+## `fn an_answer_published_between_two_slices_is_ingested_before_the_wait_continues() {`
+
+`alpha` is rate limited and deferred until 05:32, and `beta` waits for an answer to a spend
+approval, raised through `ask_to_approve_spend`. The answer source declines it once two slices
+have been slept. The step after the second slice ingests the decline, and sleeps nothing. Every
+other step sleeps one slice toward 05:32. The run selects before it sleeps, so an answer that
+arrives during the wait is taken in at most one slice late.
+
+The decline fails `beta` and leaves `alpha` deferred, so the next step backs off again. It
+continues the wait it held, which ingesting an answer does not drop: the slices still come to
+9,120 seconds in all, and the log holds one `defer_wait_elapsed`, at the end. The notifier is
+told about the wait once, when it starts, and not again when it continues after the answer.
 
 ## `fn escalated_log(interrupted_first: bool) -> (TopologyFold, Vec<TopologyEvent>) {`
 

@@ -661,7 +661,7 @@ effect_free = [
 [[module]]
 path = "src/interaction.rs"
 crate_path = "upstroke::interaction"
-shared = { ask = 2, id = 6, poll = 2, resolve = 4, sleep = 2 }
+shared = { ask = 2, id = 6, poll = 2, resolve = 4, sleep = 2, waiting = 2 }
 funnel = []
 effectful = [
     "write_question",
@@ -671,6 +671,7 @@ effectful_unnameable = [
     "ask",
     "poll",
     "resolve",
+    "waiting",
 ]
 effect_free = [
     "answer_for_option",
@@ -1800,6 +1801,7 @@ effect_free = [
     "exhausted_pools_of",
     "fmt",
     "is_empty",
+    "limited_pool",
     "observe",
     "parse",
     "parse_duration",

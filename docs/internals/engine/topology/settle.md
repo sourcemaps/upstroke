@@ -355,19 +355,11 @@ progress, and nothing in it is durable: appending a `defer_wait_elapsed` per
 slice would wake the deferred task, through the fold, after the first slice
 rather than at the target.
 
-### Why `allow` and not `#[expect]`
-
-Nothing in the driver calls [`Deferral::wait_toward`] yet, so outside tests
-the method and this enum are dead code. The method carries
-`#[cfg_attr(not(test), expect(dead_code, …))]`, which retires itself when a
-caller lands. The enum carries `allow` rather than the `#[expect]` §2
-prefers, because the two toolchains CI runs disagree about it. Stable reports
-the enum dead beside the method that returns it. The 1.85 MSRV counts the
-method's expectation as a use of the enum and reports nothing, and
-`cargo +1.85.0 check` then gives `unfulfilled_lint_expectations` on the
-enum's expectation (measured). An expectation cannot be fulfilled on both,
-the same split `src/workspace_manager.rs` records for its walk table. Remove
-this `allow` together with the method's expectation.
+The driver's caller is `TopologyRun::back_off`. It answers a `Slept` as
+`Progress::Waiting` and appends nothing, and appends the `Elapsed` event as
+the plain backoff's is appended. Until that caller landed, the method carried
+`#[cfg_attr(not(test), expect(dead_code, …))]` and this enum an `allow`, and
+both went with it.
 
 ## `pub enum ResetWaited` › `Slept { slept: Duration },`
 
@@ -423,6 +415,13 @@ The wait is still recorded once, by the call that reaches the target.
 
 The sleep comes before the answer for the reason `wait` gives: `Elapsed` is
 the record of a wait that has elapsed.
+
+## `impl Deferral` › `pub fn holds_wait_toward(&self, until_unix: u64) -> bool {`
+
+Whether a wait toward `until_unix` is in progress, so the next
+[`Deferral::wait_toward`] naming it continues that wait rather than starting
+one. `TopologyRun::back_off` asks it before each slice and says once, when
+the answer is no, that the run is waiting for a reset.
 
 ## `impl Deferral` › `pub fn progressed(&mut self) {`
 
