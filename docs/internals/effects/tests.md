@@ -3081,18 +3081,19 @@ must select `cli_tests::inert`. The other legs emit only the suite marker.
 ## `fn the_category_inventory_counts_shared_names_in_distinct_harnesses() {`
 
 Compile a library and binary harness with the same ordinary and ignored names,
-plus a CLI registration in the binary, and an empty example harness. Feed their
-paths through Cargo artifact fixtures, including an unrelated non-test artifact.
-Only Cargo's build response is substituted; every listing uses the real native
-harness, and every fixture body panics if executed. No Cargo process is started.
+plus a CLI registration in the binary, and an empty example harness. Only Cargo's
+answer is stubbed: like Cargo, the stub lists every harness in turn with the words
+after `--`, so each line still comes from a real native harness. Every fixture
+body panics if executed. No Cargo process is started.
 
-Require five registrations with distinct harness identities, four util counts
-and one CLI count, including both ignored occurrences. Validate each occurrence's
-owner on all three platforms, retain the empty example, reject a duplicate within
-one harness, and prove the two nonempty harnesses' real selections. Finally run
-the standalone `check --explain` entry point over these artifacts and its copied
-workflow, exercising synchronization, collection, ownership, remainder and reporting
-together without altering the caller's checkout.
+Cargo's answer names the two shared registrations on two lines each, and each
+line counts: require five registrations, four util and one CLI, including both
+ignored occurrences, and validate each occurrence's owner on all three platforms.
+Prove the two nonempty harnesses' real selections, then require `prove` to refuse
+the same lines as one harness's listing with the duplicate-name diagnostic. Finally
+run the standalone `check --explain` entry point over the stub and its copied
+workflow, exercising synchronization, both Cargo listings, ownership, remainder and
+reporting together without altering the caller's checkout.
 
 ## `fn the_category_generator_and_workflow_use_the_rust_registry() {`
 
@@ -3110,12 +3111,11 @@ owner's set. Across legs every registration must occur exactly once, and the
 all-skipped list must be empty. Ignored registrations are included. This
 proof starts no Cargo process inside the running test. Separately, standalone
 `check` first compares the committed matrices with the registry, then starts Cargo
-with `--no-run --message-format=json` to build the native all-target, all-feature
-harnesses. Each harness is listed separately, preserving its identity alongside
-each name through ownership and counting. Empty harnesses are allowed; an empty
-aggregate or missing `unit/cli` membership is refused. The Cargo build never runs
-from a test; the standalone entry point's composition is covered by the artifact
-fixture above. These are native proofs, so the other operating
+to build and list the native all-target, all-feature inventory across all harnesses
+and requires nonzero `unit/cli` membership. A name on two of Cargo's lines counts
+twice; only `prove`, which lists one harness, refuses a repeat. Cargo never runs
+from a test; the standalone entry point's composition is covered by the stubbed
+Cargo answer above. These are native proofs, so the other operating
 systems still supply their own inventories in CI.
 
 ## `fn the_category_check_refuses_bootstrap_before_starting_a_subprocess() {`
@@ -3143,35 +3143,6 @@ Compile a libtest fixture twice. Both builds contain ordinary and ignored
 the second must fail with that name and `TEST_CATEGORIES` in its diagnostic.
 Every fixture body panics if executed, making this a listing-only refusal
 witness and a positive control for the CLI requirement.
-
-## `fn inert_category_harness(directory: &Path, name: &str, body: &str, flags: &[&str]) -> PathBuf {`
-
-Compile `body` plus one `cli_tests::registers` registration into a libtest
-harness with `rustc --test` and the given flags, never Cargo. The compiler runs
-in `directory`, so a later `rustc` query from the same fixture root resolves the
-same toolchain. Every fixture body panics if executed.
-
-## `fn the_category_check_holds_its_build_slot_until_the_last_listing() {`
-
-`PR439-INVENTORY-OUTLIVES-BUILD-SLOT`. A one-slot `upstroke-build` model runs
-its child inside the slot; when the slot is released, a second worktree relinks
-the same executable path with its own, fully categorised harness. The candidate
-harness adds the uncategorised `not_assigned::new_registration`. Standalone
-`check` must fail with that name and the slot's path, list nothing after the
-release, build once, and never acquire the slot twice: inside the slot the check
-runs Cargo bare. Before the repair the wrapper covered only the build, so the
-listing certified the second worktree's harness and the check passed. Only the
-wrapper and Cargo's build response are substituted; the listings run the real
-harnesses.
-
-## `fn the_category_check_lists_a_prefer_dynamic_harness_with_cargos_library_path() {`
-
-`PR439-INVENTORY-DIRECT-LISTING-LIBRARY-PATH`, Linux only. Compile the harness
-with `-C prefer-dynamic` into a fixture `target/debug/deps`, then run standalone
-`check` over it with `LD_LIBRARY_PATH` and `RUSTC` removed, as a shell outside
-Cargo would. The direct listing must load libstd from rustc's target libdir and
-report one categorised registration. Before the repair it exited 127. Only
-Cargo's build response is substituted.
 
 ## `mod merge_gate_answers {`
 

@@ -1409,8 +1409,8 @@ true value. Step field and script pins still govern the check.
 
 The check first refuses matrices that differ from the registry using the generator's
 comparison, including when invoked independently by lint. It then lists the native
-inventory, including ignored registrations, without executing test bodies. Harness
-identity accompanies each name so shared library/binary names count separately.
+inventory, including ignored registrations, without executing test bodies. A name
+on two lines of Cargo's listing, as a library and a binary can share, counts twice.
 The ledger removes Linux and Windows checks and changes
 the macOS condition to read a missing field. First-match ownership and generation live
 in `ci_model::TEST_CATEGORIES` and `ci_model::category_legs`; there is no

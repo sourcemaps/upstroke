@@ -1148,20 +1148,12 @@ oracle still checks each actual YAML entry, required aggregate context, suite
 command and witness. Its mutation controls still delete, move, widen and narrow
 selectors, lower floors, remove legs, change matrix expansion and remove checks.
 
-`bash .github/scripts/test-categories.sh` builds Cargo's native all-target,
-all-feature harnesses with `--no-run --message-format=json`, then obtains each
-harness's terse list, including ignored tests. A registration is the harness and
-name together: identical names in a library and binary each count and receive an
-owner. A repeated name within one harness is refused. The check validates exactly
-one named selection per registration, then lists every harness with all category
-filters skipped. Any remaining registration fails with its harness and the table
-location. An empty example harness is permitted; an empty aggregate or failed
-listing fails.
-On a build box `upstroke-build` runs the whole check, so one slot covers the
-build and every listing of its executables; inside it Cargo runs bare. On CI it
-uses Cargo directly. Each listing runs with the library path `cargo test` would
-give it: build-script link paths inside the output directory, the deps and base
-output directories, then rustc's target libdir. Windows uses
+`bash .github/scripts/test-categories.sh` obtains Cargo's native all-target,
+all-feature terse list, including ignored tests, validates ownership and exactly
+one named selection, and repeats the native list with every category filter skipped.
+A name on two lines, as when a library and a binary share one, counts twice.
+Any remaining name fails with the table location. Empty or failed listings fail.
+On a build box it uses `upstroke-build`; on CI it uses Cargo directly. Windows uses
 the same Python implementation. Listing occurs before every Linux and Windows suite;
 on macOS the pinned condition runs it before the generated owner's suite. C3's existing equality
 between shell gate files and Linux lint invocations is retained: lint also runs the
@@ -1170,13 +1162,14 @@ leg. No hosted overhead measurement is claimed.
 
 The standalone `check` builds and lists the native all-target, all-feature
 inventory across all harnesses and requires nonzero CLI membership. Its Cargo
-build never runs from a test; a fixture supplies artifact records to exercise the
-standalone entry point with already built inert harnesses. Its `--explain` option
-prints the count for every subcategory and each registration also matched by a
-later row, identifying its harness. Separately,
+listing never runs from a test; a fixture stubs Cargo's answer from already built
+inert harnesses to exercise the standalone entry point. Its `--explain` option
+prints the count for every subcategory and each name also matched by a later row.
+Separately,
 the native-libtest test uses `prove --harness` on the current library executable
 to list each generated selector and compare the sets to first-match ownership,
-without starting Cargo. A compiled
+without starting Cargo. That listing is one harness's, so `prove` refuses a name
+listed twice. A compiled
 fixture proves the CLI prefix, ordinary and ignored registrations, and rejection
 of an inert ignored registration named `newly_registered_unclassified`. Its bodies
 panic if executed; the proof only lists them.

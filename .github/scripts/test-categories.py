@@ -3,12 +3,10 @@
 
 The Rust table is the only registry. Planning inventories and timings are not
 inputs to this program. No check ever executes an unmatched test.
-Under upstroke-build one slot holds the whole check, so it lists only the
-executables it built, with the library path Cargo gives a test it runs.
 """
 import argparse
 import ast
-from collections import Counter, namedtuple
+from collections import Counter
 import json
 import os
 from pathlib import Path
@@ -21,10 +19,6 @@ ROOT = Path(__file__).resolve().parents[2]
 MODEL = ROOT / "src/effects/tests/ci_model.rs"
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
 PLATFORMS = ("ubuntu", "macos", "windows")
-# Set for the check that upstroke-build runs inside the slot it holds.
-SLOT_HELD = "TEST_CATEGORIES_BUILD_SLOT"
-Registration = namedtuple("Registration", "harness name")
-Build = namedtuple("Build", "harnesses linked_paths")
 
 
 def registry():
@@ -139,56 +133,51 @@ def runs(selection, name):
     return (not filters or any(f in name for f in filters)) and not any(f in name for f in skips)
 
 
-def validate(rows, platform, registrations, require_cli=False):
-    if not registrations:
+def validate(rows, platform, names, require_cli=False):
+    if not names:
         raise ValueError("libtest listed no tests; refusing an empty inventory")
     selections = legs(rows, platform)
     errors = []
     counts = Counter()
-    for harness, name in registrations:
+    for name in names:
         try:
             expected = owner(rows, platform, name)
         except ValueError as error:
-            errors.append(f"{error} (harness {harness})")
+            errors.append(str(error))
             continue
         actual = [leg_key(leg) for leg in selections if runs(leg["tests"], name)]
         if actual != [expected]:
-            errors.append(f"category selection: {name} (harness {harness}) — "
-                          f"expected {expected}, selected {actual}; "
+            errors.append(f"category selection: {name} — expected {expected}, selected {actual}; "
                           "update TEST_CATEGORIES (libtest filters are substrings)")
         counts[expected] += 1
     if errors:
         raise ValueError("\n".join(errors))
     if require_cli and not any(
         row["category"] == "unit" and row["subcategory"] == "cli"
-        for row in (category_row(rows, item.name) for item in registrations)
+        for row in (category_row(rows, name) for name in names)
     ):
         raise ValueError("libtest listed no unit/cli registrations; refusing an incomplete all-target inventory")
     return counts
 
 
-def listed(output, harness):
-    names = [line[:-6] for line in output.splitlines() if line.endswith(": test")]
-    if len(set(names)) != len(names):
-        raise ValueError(f"libtest listed duplicate test names in harness {harness}")
-    return [Registration(harness, name) for name in names]
+def listed(output):
+    return [line[:-6] for line in output.splitlines() if line.endswith(": test")]
 
 
-def explain(rows, registrations):
+def explain(rows, names):
     counts = Counter()
     collisions = []
-    for registration in registrations:
+    for name in names:
         matches = [(row["category"], row["subcategory"]) for row in rows
-                   if any(f in registration.name for f in row["filters"])]
+                   if any(f in name for f in row["filters"])]
         counts[matches[0]] += 1
         if len(matches) > 1:
-            collisions.append((registration, matches))
+            collisions.append((name, matches))
     for row in rows:
         pair = row["category"], row["subcategory"]
         print(f"subcategory {pair[0]}/{pair[1]}: {counts[pair]}")
-    for (harness, name), matches in collisions:
-        print(f"first-match overlap: {name} (harness {harness}): "
-              f"{matches[0]} owns it; later matches {matches[1:]}")
+    for name, matches in collisions:
+        print(f"first-match overlap: {name}: {matches[0]} owns it; later matches {matches[1:]}")
 
 
 def checked(command):
@@ -200,9 +189,7 @@ def checked(command):
 
 def cargo():
     # A build box owns target isolation. CI and workstations use ordinary Cargo.
-    # Inside the slot a whole check holds (see main), Cargo runs bare: the
-    # wrapper has already bound that slot's target directory.
-    wrapper = None if os.environ.get(SLOT_HELD) == "1" else shutil.which("upstroke-build")
+    wrapper = shutil.which("upstroke-build")
     return [wrapper, "cargo"] if wrapper else ["cargo"]
 
 
@@ -210,92 +197,27 @@ def native_platform():
     return {"linux": "ubuntu", "darwin": "macos", "win32": "windows"}[sys.platform]
 
 
-def built_harnesses():
-    return build().harnesses
-
-
-def build():
-    output = checked(cargo() + ["test", "--all-targets", "--all-features", "--no-run",
-                                "--message-format=json"])
-    harnesses, linked = [], []
-    for line in output.splitlines():
-        artifact = json.loads(line)
-        if artifact.get("reason") == "build-script-executed":
-            linked.extend(artifact.get("linked_paths", []))
-        elif (artifact.get("reason") == "compiler-artifact"
-                and artifact.get("profile", {}).get("test")
-                and artifact.get("executable")):
-            harness = artifact["executable"]
-            if harness in harnesses:
-                raise ValueError(f"Cargo listed duplicate test harness: {harness}")
-            harnesses.append(harness)
-    if not harnesses:
-        raise ValueError("Cargo listed no test harnesses; refusing an empty inventory")
-    return Build(harnesses, linked)
-
-
-def dylib_variable():
-    # The variable Cargo extends for each program it runs, per host platform.
-    if sys.platform == "win32":
-        return "PATH"
-    if sys.platform == "darwin":
-        return "DYLD_FALLBACK_LIBRARY_PATH"
-    return "LIBPATH" if sys.platform.startswith("aix") else "LD_LIBRARY_PATH"
-
-
-def runtime_library_path(built):
-    """Return the loader variable and value `cargo test` gives these harnesses.
-
-    Cargo prepends build-script link paths inside the base output directory,
-    the deps and base output directories, and rustc's target libdir, where a
-    `-C prefer-dynamic` harness finds libstd. Existing entries follow.
-    """
-    deps = list(dict.fromkeys(Path(harness).parent for harness in built.harnesses))
-    roots = list(dict.fromkeys(directory.parent for directory in deps))
-    native = []
-    for entry in built.linked_paths:
-        kind, separator, path = entry.partition("=")
-        path = Path(path if separator and kind in ("native", "crate", "dependency", "all") else entry)
-        if any(path == root or root in path.parents for root in roots):
-            native.append(path)
-    rustc = [os.environ.get("RUSTC") or "rustc", "--print", "target-libdir"]
-    process = subprocess.run(rustc, cwd=ROOT, encoding="utf-8", stdout=subprocess.PIPE)
-    if process.returncode or not process.stdout.strip():
-        raise ValueError(f"command failed ({process.returncode}): {rustc}")
-    variable = dylib_variable()
-    existing = [entry for entry in os.environ.get(variable, "").split(os.pathsep) if entry]
-    if sys.platform == "darwin" and not existing:
-        existing = [str(Path.home() / "lib"), "/usr/local/lib", "/usr/lib"]
-    search = [*map(str, dict.fromkeys(native + deps + roots)), process.stdout.strip()]
-    return variable, os.pathsep.join(search + existing)
-
-
-def inventory(harnesses, selection=()):
-    return [registration for harness in harnesses
-            for registration in listed(
-                checked([harness, "--list", "--format", "terse", *selection]), harness)]
-
-
 def prove(rows, platform, harness, require_cli=False):
-    registrations = inventory([harness])
-    validate(rows, platform, registrations, require_cli=require_cli)
+    names = listed(checked([harness, "--list", "--format", "terse"]))
+    # One harness lists each name once; only Cargo's listing may repeat a name.
+    if len(set(names)) != len(names):
+        raise ValueError("libtest listed duplicate test names")
+    validate(rows, platform, names, require_cli=require_cli)
     observed = Counter()
     for leg in legs(rows, platform):
-        actual = inventory([harness], leg["tests"].split())
-        expected = {item for item in registrations
-                    if owner(rows, platform, item.name) == leg_key(leg)}
+        actual = listed(checked([harness, "--list", "--format", "terse", *leg["tests"].split()]))
+        expected = {name for name in names if owner(rows, platform, name) == leg_key(leg)}
         if set(actual) != expected:
             raise ValueError(f"{leg['name']}: real libtest differs; missing {sorted(expected-set(actual))}, "
                              f"extra {sorted(set(actual)-expected)}")
         observed.update(actual)
-    if observed != Counter(registrations):
+    if observed != Counter(names):
         raise ValueError("real libtest did not list each registration exactly once")
     skips = [word for row in rows for f in row["filters"] for word in ("--skip", f)]
-    unmatched = inventory([harness], skips)
+    unmatched = listed(checked([harness, "--list", "--format", "terse", *skips]))
     if unmatched:
         raise ValueError(f"uncategorised: {unmatched}")
-    print(f"{platform}: real libtest, {len(registrations)} registrations, "
-          "exactly one leg each (ignored included)")
+    print(f"{platform}: real libtest, {len(names)} registrations, exactly one leg each (ignored included)")
 
 
 def matrix(rows, platform):
@@ -361,36 +283,20 @@ def main():
         prove(rows, args.platform, args.harness, require_cli=args.require_cli)
     else:
         sync_workflow(rows, check=True)
-        wrapper = cargo()[:-1]
-        if wrapper:
-            # One slot must cover the build and every listing of what it built:
-            # once released, another tree may relink the same executable paths.
-            # So the wrapper runs this whole check, which then runs Cargo bare.
-            process = subprocess.run([*wrapper, sys.executable, str(Path(__file__).resolve()),
-                                      *sys.argv[1:]], env={**os.environ, SLOT_HELD: "1"})
-            sys.exit(process.returncode)
-        standalone(rows, args.platform, args.explain)
-
-
-def standalone(rows, platform, explain_rows=False):
-    built = build()
-    harnesses = built.harnesses
-    # From here this process only lists harnesses, each as `cargo test` runs it.
-    variable, value = runtime_library_path(built)
-    os.environ[variable] = value
-    registrations = inventory(harnesses)
-    counts = validate(rows, platform, registrations, require_cli=True)
-    skips = [word for row in rows for f in row["filters"] for word in ("--skip", f)]
-    unmatched = inventory(harnesses, skips)
-    if unmatched:
-        raise ValueError("\n".join(f"uncategorised: {name} (harness {harness}) — "
-                                   f"update TEST_CATEGORIES in {MODEL}"
-                                   for harness, name in unmatched))
-    print(f"{platform}: {len(registrations)} registrations including ignored; uncategorised: 0")
-    for (category, number), count in sorted(counts.items()):
-        print(f"  {category}/{number}: {count}")
-    if explain_rows:
-        explain(rows, registrations)
+        names = listed(checked(cargo() + ["test", "--all-targets", "--all-features",
+                                         "--", "--list", "--format", "terse"]))
+        counts = validate(rows, args.platform, names, require_cli=True)
+        skips = [word for row in rows for f in row["filters"] for word in ("--skip", f)]
+        unmatched = listed(checked(cargo() + ["test", "--all-targets", "--all-features",
+                                              "--", "--list", "--format", "terse", *skips]))
+        if unmatched:
+            raise ValueError("\n".join(f"uncategorised: {name} — update TEST_CATEGORIES in {MODEL}"
+                                       for name in unmatched))
+        print(f"{args.platform}: {len(names)} registrations including ignored; uncategorised: 0")
+        for (category, number), count in sorted(counts.items()):
+            print(f"  {category}/{number}: {count}")
+        if args.explain:
+            explain(rows, names)
 
 
 if __name__ == "__main__":

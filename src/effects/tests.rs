@@ -6763,54 +6763,51 @@ mod util {
             r#"
 from collections import Counter
 import importlib.util
-import json
 import sys
 
 spec = importlib.util.spec_from_file_location("categories", sys.argv[1])
 tool = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tool)
 harnesses = sys.argv[2:]
-artifacts = [dict(reason="compiler-artifact", target=dict(name=name, kind=[kind]),
-                  profile=dict(test=True), executable=harness)
-             for name, kind, harness in zip(
-                 ("fixture", "fixture", "empty_example"), ("lib", "bin", "example"), harnesses)]
-artifacts.append(dict(reason="compiler-artifact", profile=dict(test=False), executable="not-a-test"))
-artifacts.append(dict(reason="build-finished", success=True))
+cargo_listing = ["fixture-cargo", "test", "--all-targets", "--all-features", "--"]
 native_checked = tool.checked
-builds = []
+answers = []
+
+def cargo_answer(words):
+    # Cargo runs every harness with the words after `--` and prints each listing in turn.
+    return "".join(native_checked([harness, *words]) for harness in harnesses)
 
 def checked(command):
     if command[0] == "fixture-cargo":
-        assert command == ["fixture-cargo", "test", "--all-targets", "--all-features",
-                           "--no-run", "--message-format=json"], command
-        builds.append(command)
-        return "\n".join(json.dumps(artifact) for artifact in artifacts)
+        assert command[:len(cargo_listing)] == cargo_listing, command
+        assert command[len(cargo_listing):][:3] == ["--list", "--format", "terse"], command
+        answers.append(command)
+        return cargo_answer(command[len(cargo_listing):])
+    if command[0] == "one-harness":
+        # Cargo's lines, as if a single harness had listed them.
+        return cargo_answer(command[1:])
     assert command[0] in harnesses and command[1:4] == ["--list", "--format", "terse"], command
     return native_checked(command)
 
 tool.cargo = lambda: ["fixture-cargo"]
 tool.checked = checked
-assert tool.built_harnesses() == harnesses
-registrations = tool.inventory(harnesses)
-assert Counter(item.harness for item in registrations) == {harnesses[0]: 2, harnesses[1]: 3}
-assert {item.harness for item in registrations if item.name == "util::shared_name"} == set(harnesses[:2])
-assert {item.harness for item in registrations if item.name == "util::shared_ignored"} == set(harnesses[:2])
-assert tool.inventory([harnesses[2]]) == []
+names = tool.listed(cargo_answer(["--list", "--format", "terse"]))
+assert Counter(names) == {"util::shared_name": 2, "util::shared_ignored": 2, "cli_tests::cli": 1}
 rows = tool.registry()
 for platform in tool.PLATFORMS:
-    assert tool.validate(rows, platform, registrations, require_cli=True) == {("unit", 1): 5}
-    assert all(tool.owner(rows, platform, item.name) == ("unit", 1) for item in registrations)
-try:
-    tool.listed("util::shared_name: test\nutil::shared_name: test\n", harnesses[0])
-except ValueError as error:
-    assert "duplicate test names" in str(error) and harnesses[0] in str(error)
-else:
-    raise AssertionError("a duplicate within one harness was accepted")
+    assert tool.validate(rows, platform, names, require_cli=True) == {("unit", 1): 5}
+    assert all(tool.owner(rows, platform, name) == ("unit", 1) for name in names)
 for harness in harnesses[:2]:
     tool.prove(rows, tool.native_platform(), harness)
+try:
+    tool.prove(rows, tool.native_platform(), "one-harness")
+except ValueError as error:
+    assert str(error) == "libtest listed duplicate test names", error
+else:
+    raise AssertionError("one harness listing a name twice was accepted")
 sys.argv = [sys.argv[1], "check", "--explain"]
 tool.main()
-assert len(builds) == 2
+assert len(answers) == 2, answers
 "#,
         ])
         .arg(directory.path().join(".github/scripts/test-categories.py"))
@@ -6818,7 +6815,7 @@ assert len(builds) == 2
         .env_remove("RUSTC_BOOTSTRAP")
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .output()
-        .expect("check target-aware fixture inventory without starting Cargo");
+        .expect("check a stubbed Cargo listing of shared names without starting Cargo");
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -7028,214 +7025,6 @@ fn newly_registered_unclassified() { panic!("the catch-all must not execute"); }
             assert!(String::from_utf8_lossy(&output.stdout).contains("2 registrations"));
         }
     }
-}
-
-fn inert_category_harness(directory: &Path, name: &str, body: &str, flags: &[&str]) -> PathBuf {
-    const INERT_CLI: &str =
-        "mod cli_tests {\n#[test]\nfn registers() { panic!(\"listing only\"); }\n}\n";
-    let source = directory.join(format!("{name}.rs"));
-    let harness = directory
-        .join(name)
-        .with_extension(std::env::consts::EXE_EXTENSION);
-    fs::write(&source, format!("{body}\n{INERT_CLI}")).expect("write inert harness source");
-    let output = std::process::Command::new("rustc")
-        .arg("--test")
-        .args(flags)
-        .arg(&source)
-        .arg("-o")
-        .arg(&harness)
-        .current_dir(directory)
-        .output()
-        .expect("compile inert harness without Cargo");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    harness
-}
-
-#[test]
-fn the_category_check_holds_its_build_slot_until_the_last_listing() {
-    let directory = category_fixture();
-    let candidate = inert_category_harness(
-        directory.path(),
-        "candidate",
-        "mod not_assigned {\n#[test]\nfn new_registration() { panic!(\"listing only\"); }\n}",
-        &[],
-    );
-    let second = inert_category_harness(
-        directory.path(),
-        "second_worktree",
-        "mod util {\n#[test]\nfn belongs_to_second_worktree() { panic!(\"listing only\"); }\n}",
-        &[],
-    );
-    let slot = directory
-        .path()
-        .join("slot1/debug/deps/fixture_harness")
-        .with_extension(std::env::consts::EXE_EXTENSION);
-    let output = std::process::Command::new(if cfg!(windows) { "python" } else { "python3" })
-        .args([
-            "-c",
-            r#"
-import importlib.util
-import json
-import os
-from pathlib import Path
-import shutil
-import subprocess
-import sys
-
-script, candidate, second, slot = sys.argv[1:5]
-spec = importlib.util.spec_from_file_location("categories", script)
-tool = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(tool)
-real_run, real_which = subprocess.run, shutil.which
-held, events, errors = [], [], []
-
-def build(command):
-    assert command == ["cargo", "test", "--all-targets", "--all-features", "--no-run",
-                       "--message-format=json"], command
-    assert held, "Cargo built outside the slot"
-    Path(slot).parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(candidate, slot)
-    events.append("candidate built")
-    artifact = dict(reason="compiler-artifact", profile=dict(test=True), executable=slot)
-    return subprocess.CompletedProcess(command, 0, json.dumps(artifact))
-
-def check_in_slot(command, env):
-    assert command[0] == sys.executable and Path(command[1]) == Path(script).resolve(), command
-    saved_env, saved_argv = dict(os.environ), sys.argv
-    os.environ.clear()
-    os.environ.update(env)
-    sys.argv = command[1:]
-    try:
-        tool.main()
-        return 0
-    except ValueError as error:
-        errors.append(str(error))
-        return 1
-    finally:
-        os.environ.clear()
-        os.environ.update(saved_env)
-        sys.argv = saved_argv
-
-def wrapper(command, kwargs):
-    # A one-slot pool: acquiring it again while held would wait for ever.
-    assert not held, f"nested slot acquisition: {command}"
-    held.append(command)
-    try:
-        if command[0] == "cargo":
-            return build(command)
-        return subprocess.CompletedProcess(command, check_in_slot(command, kwargs["env"]))
-    finally:
-        held.pop()
-        # The released slot goes to the second worktree, which relinks the same path.
-        shutil.copy(second, slot)
-        events.append("slot released")
-
-def run(command, **kwargs):
-    command = [str(word) for word in command]
-    if command[0] == "fixture-upstroke-build":
-        return wrapper(command[1:], kwargs)
-    if Path(command[0]).stem == "cargo":
-        return build(command)
-    if command[0] == slot and not held:
-        events.append("listed after release")
-    return real_run(command, **kwargs)
-
-subprocess.run = run
-shutil.which = lambda name, *rest, **options: (
-    "fixture-upstroke-build" if name == "upstroke-build" else real_which(name, *rest, **options))
-sys.argv = [script, "check"]
-try:
-    tool.main()
-    code = 0
-except SystemExit as exit:
-    code = exit.code
-except ValueError as error:
-    errors.append(str(error))
-    code = 1
-assert code == 1, ("the candidate was accepted", code, events, errors)
-assert any("uncategorised: not_assigned::new_registration" in error and slot in error
-           for error in errors), errors
-assert "listed after release" not in events, events
-assert events.count("candidate built") == 1 and events.count("slot released") == 1, events
-"#,
-        ])
-        .arg(directory.path().join(".github/scripts/test-categories.py"))
-        .args([&candidate, &second, &slot])
-        .env_remove("RUSTC_BOOTSTRAP")
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .output()
-        .expect("model a one-slot pool shared with a second worktree, without Cargo");
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn the_category_check_lists_a_prefer_dynamic_harness_with_cargos_library_path() {
-    let directory = category_fixture();
-    let deps = directory.path().join("target/debug/deps");
-    fs::create_dir_all(&deps).expect("create the fixture's deps directory");
-    let harness = inert_category_harness(&deps, "prefer_dynamic", "", &["-C", "prefer-dynamic"]);
-    let output = std::process::Command::new("python3")
-        .args([
-            "-c",
-            r#"
-import importlib.util
-import json
-import subprocess
-import sys
-
-script, harness = sys.argv[1:3]
-spec = importlib.util.spec_from_file_location("categories", script)
-tool = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(tool)
-native_checked = tool.checked
-builds = []
-
-def checked(command):
-    if command[0] == "fixture-cargo":
-        assert command == ["fixture-cargo", "test", "--all-targets", "--all-features", "--no-run",
-                           "--message-format=json"], command
-        builds.append(command)
-        return json.dumps(dict(reason="compiler-artifact", profile=dict(test=True),
-                               executable=harness))
-    assert command[0] == harness and command[1:4] == ["--list", "--format", "terse"], command
-    return native_checked(command)
-
-tool.cargo = lambda: ["fixture-cargo"]
-tool.checked = checked
-sys.argv = [script, "check"]
-tool.main()
-assert len(builds) == 1, builds
-"#,
-        ])
-        .arg(directory.path().join(".github/scripts/test-categories.py"))
-        .arg(&harness)
-        .env_remove("RUSTC_BOOTSTRAP")
-        .env_remove("RUSTC")
-        .env_remove("LD_LIBRARY_PATH")
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .output()
-        .expect("list a prefer-dynamic harness without Cargo's environment");
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        report.contains("1 registrations including ignored; uncategorised: 0"),
-        "{report}"
-    );
 }
 
 #[cfg(target_os = "linux")]
