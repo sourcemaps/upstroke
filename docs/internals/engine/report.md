@@ -477,7 +477,7 @@ is an owned snapshot of a state the caller keeps (§6).
 Tasks that never started append in plan order, so the report reads
 as the run happened and still accounts for everything.
 
-## `let pool_drain = capacity::drain_of(state.progress.iter().flat_map(|p| p.records.iter()))`
+## `let pool_drain = drain_of(state.progress.iter().flat_map(|p| p.records.iter()))`
 
 §13's second currency: what each subscription drained, folded from the
 same attempt records the dollar column comes from — so the two halves of

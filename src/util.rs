@@ -587,9 +587,6 @@ pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
-/// The unix seconds an RFC 3339 UTC reading (`YYYY-MM-DDTHH:MM:SSZ`, with an
-/// optional fraction of a second) names. `None` for any other shape, a field
-/// out of range, or a day its month lacks. Calendar arithmetic, no clock.
 pub(crate) fn unix_seconds_of(reading: &str) -> Option<u64> {
     let [
         y0,

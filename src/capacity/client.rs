@@ -98,6 +98,10 @@ pub struct AwaitedReset {
     /// The reset as its signal recorded it.
     pub reset_at: String,
     /// The unix second the wait runs to: the reset plus the margin.
+    ///
+    /// The run's deferral is given it when the wait starts
+    /// (`Deferral::wait_toward`) and holds it while later slices are slept
+    /// toward it (`Deferral::held_until`), and `Progress::Waiting` reports it.
     pub until_unix: u64,
 }
 
@@ -118,6 +122,31 @@ impl BuiltinClient {
         }
     }
 
+    /// The recorded resets one deferred `limit` waits on, each as unix
+    /// seconds with its pool and its text.
+    ///
+    /// `None` when a pool it would run on is free. A pool a later attempt
+    /// proved serving, for another task perhaps, can take this one at its
+    /// next wake, and waiting out the reset of a pool it no longer needs
+    /// would only hold it back.
+    ///
+    /// Which pools those are depends on who was limited. A worker's limit
+    /// waits on every pool of its agent (`limit.worker_pools`): the
+    /// candidates [`serving_pool`] chooses among when the task wakes, so the
+    /// two agree about where it can run. It defers only when it could not
+    /// fail over ([`CapacityClient::fails_over`]), which leaves every one of
+    /// them held, and the task can run again as soon as any one resets. A
+    /// reviewer's limit waits on the reviewer's pool, the one `limited_pool`
+    /// names: a reviewer runs on its agent's first pool whatever is held, so
+    /// no other pool's reset helps it.
+    ///
+    /// A held candidate gives no reset when none is recorded, when its reset
+    /// does not read as a date ([`unix_seconds_of`]), or when it is in
+    /// `spent`. When the limit cannot fail over, a worker's on an agent with
+    /// one pool or a reviewer's, a reset at or behind `now_unix` gives none
+    /// too. Only a limit that fails over can leave a passed reset on another
+    /// pool than the one that refused, so only there does
+    /// [`CapacityClient::awaited_reset`] wait out its margin.
     fn resets_awaited_by(
         &self,
         limit: &DeferredLimit<'_>,
@@ -237,6 +266,15 @@ impl CapacityClient for BuiltinClient {
     }
 }
 
+/// `exhausted_pools` with each spent reset ([`spent_resets`], read from
+/// `events`) read as no reset: the held map [`CapacityClient::grant`] gives
+/// [`serving_pool`].
+///
+/// So a pool whose reset is spent is held with no known reset: it serves
+/// only when no pool is free and no other held pool's reset and margin have
+/// passed, as a pool whose limit named no reset does. `exhausted_pools`
+/// itself keeps the reset, so [`CapacityClient::fails_over`] and
+/// [`CapacityClient::exhaustion`] see the pool held.
 fn held_unspent(
     exhausted_pools: &BTreeMap<String, Option<String>>,
     events: &[TopologyEvent],
@@ -251,6 +289,36 @@ fn held_unspent(
         .collect()
 }
 
+/// The pools whose recorded reset is spent: the pool refused an attempt
+/// again, two minutes or more past that reset, after the `pool_exhausted`
+/// that recorded it.
+///
+/// Read from the log alone, so a resumed run reads the same set as the
+/// process that wrote it. A `pool_exhausted` records the reset it names, or
+/// none, and its pool is not spent. An `attempt_finished` limited on the
+/// pool, its `ts` at or past the recorded reset plus
+/// [`interaction::RESET_WAIT_MARGIN`], spends it, unless it is the refusal
+/// that recorded the reset: the `attempt_finished` that follows its
+/// `pool_exhausted` with nothing between, as `exhausted_pools_of` reads it.
+/// That one is not counted, even when the reset it named was already behind
+/// the clock. Any other event has no effect on its pool.
+///
+/// The margin is added as [`serving_pool`] adds it: the instant a held pool
+/// serves from, and the one a wait toward the reset runs to. A pool can come
+/// back a little after the reset it names, which is what the margin is for,
+/// so a refusal inside it says nothing yet about whether the reset brought
+/// the pool back.
+///
+/// A later refusal past the reset and its margin is the evidence that the
+/// reset did not bring the pool back. It names the same reset, or none it
+/// can read, so `pool_exhausted_to_record` writes no new signal for it, and
+/// without this rule the run would keep the old reset and serve the pool
+/// from it again and again. A later `pool_exhausted` for the pool, with a
+/// reset of its own, makes it unspent.
+///
+/// [`held_unspent`] (for [`serving_pool`]) and
+/// [`BuiltinClient::resets_awaited_by`] read it; `exhausted_pools` itself
+/// and the failover do not.
 fn spent_resets(events: &[TopologyEvent]) -> BTreeSet<String> {
     let margin = interaction::RESET_WAIT_MARGIN.as_secs();
     let mut recorded: BTreeMap<&String, u64> = BTreeMap::new();
@@ -285,6 +353,31 @@ fn spent_resets(events: &[TopologyEvent]) -> BTreeSet<String> {
     spent
 }
 
+/// The pool a new attempt binds, among `candidates`: its agent's pools in
+/// file order.
+///
+/// `held` is each pool held exhausted, with its reset ([`held_unspent`]'s
+/// map, as [`CapacityClient::grant`] gives it), and `now_unix` the run's
+/// clock.
+///
+/// 1. The first candidate `held` does not contain. Whether a held pool
+///    earlier in the order has a reset behind the clock does not matter
+///    here: a pool no signal holds is taken before any pool one does.
+/// 2. With every candidate held, the first whose recorded reset, plus
+///    [`interaction::RESET_WAIT_MARGIN`], is at or before `now_unix`. That
+///    is the moment a wait toward the reset ends
+///    ([`interaction::reset_wait_until`]), so a pool whose reset the run
+///    waited out counts as passed when the task it deferred wakes. A pool
+///    held with no reset, or with one that does not read as a date
+///    ([`unix_seconds_of`]), has not passed.
+/// 3. With every candidate held and none passed, the first candidate. The
+///    attempt runs into the limit again, and the ladder's deferral bounds
+///    how often.
+/// 4. `None` when there are no candidates: an agent no pool names binds
+///    none.
+///
+/// A pool that is held but is not a candidate is another agent's and
+/// changes nothing.
 pub(crate) fn serving_pool<'a>(
     candidates: &'a [String],
     held: &BTreeMap<String, Option<String>>,

@@ -612,6 +612,55 @@ exactly that. The arithmetic is plain `i64`, exact for any year whose day
 count fits with room to spare: a year derived from a clock in seconds that
 fits in a `u64` is below 6 × 10¹¹, far inside it.
 
+## `pub(crate) fn unix_seconds_of(reading: &str) -> Option<u64> {`
+
+The unix seconds an RFC 3339 UTC reading names. It reads only, byte for
+byte, `YYYY-MM-DDTHH:MM:SS`, then optionally `.` and one or more ASCII
+digits, then `Z`, each letter one ASCII digit, and answers `None` for any
+other shape, a field out of range, or a day its month lacks. The month is
+01 to 12, the day one that month has, the hour 00 to 23, and the minute
+and second 00 to 59. A fraction is accepted and dropped. Calendar
+arithmetic, no clock.
+
+**Nothing reads but the writer's shape**
+(`PR390-RESET-YEAR-OVERFLOW-PANIC`, `PR390-MALFORMED-RESET-SUFFIX-WAITS`).
+The parser split the reading on `T`, `-` and `:` and handed each piece
+to `str::parse`, which takes any number of digits and a leading `+`. It
+read the seconds up to a `.` and never looked at what followed. So a
+persisted reset with the year `9223372036854775807` reached
+[`days_from_civil`], whose `era * 146_097` overflows `i64`, and the
+back-off panicked reading it (`TopologyRun::awaited_reset`). And
+`2026-11-11T05:30:00.not-a-fractionZ` read as 05:30, so the run waited
+toward a reset no writer had written. A bare `.`, seconds of `+0`, a
+one-digit month, a five-digit year and a 60th second read the same way.
+Every reset the engine records and every reading of `SystemClock` comes
+from [`rfc3339_utc`] (through
+`agent::adapter::reset_at_from_limit_message` and [`rfc3339_utc_now`]),
+which writes four digits of year, two of every other field and `Z`. The
+parser now matches that shape with a slice pattern over the bytes, plus
+the one widening the old grammar promised, a fraction of digits. Four
+digits keep the year far below anything `days_from_civil` can overflow
+on. What reads is what the writer writes for the value read, less any
+fraction.
+
+**A day its month lacks is no date** (`PR390-INVALID-RESET-DRIVES-WAIT`).
+The range checks admit a day from 1 to 31 in any month, and
+[`days_from_civil`] counts a day past the month's end on into the next
+month, so `2026-02-31T01:00:00Z` read as 01:00 on 3 March. A reset read
+back from the log comes through here (`capacity::client`), and no fold
+validates `pool_exhausted.reset_at`, because the field is informational.
+So a corrupted or hand-edited log could start a wait of hours toward a
+reset no limit named. The parser now keeps a date only when
+[`civil_from_days`] gives the same year, month and day back, which is the
+check `agent::adapter` makes on a date it reads from a limit message.
+29 February reads in a leap year and in no other.
+
+A reset that does not read is no known reset, so a deferred task whose
+pool records one backs off as if no reset were recorded. The schema-4
+run's own clock goes through the same parser (`unix_seconds` in
+`engine::topology::run`), and a reading refused here falls back to the
+host clock ([`unix_seconds_now`]), as any other unreadable reading does.
+
 ## `#[cfg(test)]`
 
 Whether `left` and `right` name the same directory or file on disk.

@@ -293,7 +293,7 @@ The run's directories — where permissions and artifacts live.
 
 The gate set, in the order the config wrote it.
 
-## `pub struct FrozenPlans<'a>` › `pub pools: &'a [crate::capacity::Pool],`
+## `pub struct FrozenPlans<'a>` › `pub pools: &'a [crate::capacity::client::Pool],`
 
 The pool table §13 attributes spend against.
 
