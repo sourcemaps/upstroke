@@ -10,7 +10,8 @@ in the linked module, using the enclosing item to distinguish repeated lines.
 
 The Event funnel: the one place in this crate that writes `events.jsonl`.
 
-`decisions.effect_site_inventory.mechanism` puts this module in the allowlist's *funnel* section:
+The design packet's `decisions.effect_site_inventory.mechanism`, which is not in this repository,
+put this module in the allowlist's *funnel* section:
 "`EventLog::open` and `EventLog::append` are classified as the Event funnel (site-taking) rather
 than as wrappers, and the raw writer they wrap is reachable only inside `src/events/log.rs`".
 `EffectSiteId::module` for [`FunnelGroup::Event`] names this file.
@@ -283,8 +284,9 @@ this type is the reason a schema-4 append outside this module cannot be written 
 of the three ways to try it are type errors, and the fixtures below pin the *reason* rather than
 the failure — a `compile_fail` block with an error code fails the test if the code compiles **or
 if it fails for a different reason**. (The third way — writing the bytes with `std::fs` from
-another module — is not a type error and is denied by the effect denylist; see
-`effects/allowlist.toml`.)
+another module — is not a type error. The effect denylist refuses it in a module without an
+allowance; a funnel module with a module-level allowance, such as `src/rundir.rs`, can name those
+methods, and only its review clause keeps it off the log; see `effects/allowlist.toml`.)
 
 Reaching the handle:
 
@@ -856,8 +858,9 @@ deriving state from the survivors would produce a confident wrong answer. That e
 Read the exact bytes a whole-log consumer will parse. Kept separate so a consumer that needs a
 stable snapshot can compare two reads before trusting the first one.
 
-[`crate::util::read_file_bounded`] rather than `std::fs::read`, here and at every other read of a
-log in this module: `read_to_end` does not terminate on a source that never reaches end of file,
+[`crate::util::read_file_bounded`] rather than `std::fs::read`, here and at the module's other
+whole-log reads (`LogTail::poll` is the exception: it reads on from its offset with
+`read_to_end`): `read_to_end` does not terminate on a source that never reaches end of file,
 and a log path is a path in a run directory rather than a value this crate chose. The bound is the
 file's own length, so a real log of any size is still read in full.
 
@@ -890,9 +893,13 @@ Every complete line written since the last poll.
 
 ### Errors
 
-[`UpstrokeError::Io`] if the log cannot be read; [`UpstrokeError::EventLog`] for a rewritten log.
+[`UpstrokeError::Io`] if the log, once opened, cannot be measured, sought or read;
+[`UpstrokeError::EventLog`] for a rewritten log. A log that cannot be opened is not an error: the
+poll returns no events.
 
 ## `pub fn poll(&mut self, warnings: &mut Vec<String>) -> Result<Vec<Event>, UpstrokeError> {` › `if length < self.offset {`
 
-Truncated or replaced underneath us: start over rather than read from an offset that now means
-something else.
+Shorter than the last offset: the log was truncated or replaced, so start over rather than read
+from an offset that now means something else. A replacement at least as long as the last offset
+is not detected, and the poll reads on from that offset
+(`PR407-LOG-FOLLOWER-MISSES-A-LONGER-REPLACEMENT`).
