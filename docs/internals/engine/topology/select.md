@@ -651,9 +651,16 @@ count of the ones recorded.
 
 The open generation of `key`, if it has one.
 
-## `fn keys(fold: &TopologyFold) -> impl Iterator<Item = TaskKey> + '_ {`
+## `fn keys(len: usize) -> impl DoubleEndedIterator<Item = TaskKey> {`
 
-Every registered key, ascending.
+Every representable registered key, ascending, through the crate-private
+`TaskKey::range` shared with fold admissibility. Both dispatch and retry
+selection pass the registry's `usize` length unchanged; an absent registry
+supplies zero and yields no candidates. A length of `u32::MAX + 1` on a
+64-bit platform includes the maximum key, once, as do larger lengths.
+The length parameter and double-ended iterator let boundary tests inspect
+the actual selector candidate range without allocating a huge registry or
+walking billions of keys. Backoff remains the fold predicate below.
 
 ## `fn backoff_pending(fold: &TopologyFold) -> bool {`
 

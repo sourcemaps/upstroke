@@ -89,6 +89,71 @@ fn no_spend() -> Spend {
     Spend::new()
 }
 
+#[test]
+fn selector_candidates_include_every_representable_key() {
+    assert_eq!(keys(0).next(), None);
+    assert_eq!(keys(0).next_back(), None);
+    assert!(keys(1).eq([TaskKey(0)]));
+    assert!(keys(3).eq([ALEPH, BET, GIMEL]));
+    for (len, last) in [
+        (u64::from(u32::MAX), u32::MAX - 1),
+        (u64::from(u32::MAX) + 1, u32::MAX),
+        (u64::from(u32::MAX) + 2, u32::MAX),
+    ] {
+        if let Ok(len) = usize::try_from(len) {
+            let mut candidates = keys(len);
+            assert_eq!(candidates.next(), Some(TaskKey(0)));
+            assert_eq!(candidates.next_back(), Some(TaskKey(last)));
+            assert_eq!(candidates.next_back(), Some(TaskKey(last - 1)));
+        }
+    }
+    assert_eq!(
+        keys(usize::MAX).next_back(),
+        Some(TaskKey(if usize::BITS > u32::BITS {
+            u32::MAX
+        } else {
+            u32::MAX - 1
+        }))
+    );
+}
+
+#[test]
+fn selection_and_admissibility_reach_the_last_registered_task() {
+    let unstarted = TopologyFold::new(inputs());
+    assert_eq!(first_ready(&unstarted), None);
+    assert_eq!(first_ready_retry(&unstarted), None);
+    assert!(!unstarted.structurally_admissible());
+    assert_eq!(
+        select(&unstarted, &Ceiling::unlimited(), &no_spend()),
+        Step::NotStarted
+    );
+
+    let mut fold = started();
+    for key in [ALEPH, BET] {
+        in_flight(&mut fold, key, 0);
+        settle_into(&mut fold, &finished(key, 0, 1, Next::Fail));
+    }
+    assert!(fold.structurally_admissible());
+    assert_eq!(
+        select(&fold, &Ceiling::unlimited(), &no_spend()),
+        Step::Dispatch {
+            key: GIMEL,
+            generation: GenerationId(0),
+            continuing: false,
+        }
+    );
+    retained_generation(&mut fold, GIMEL, 0);
+    assert!(fold.structurally_admissible());
+    assert_eq!(
+        select(&fold, &Ceiling::unlimited(), &no_spend()),
+        Step::Retry {
+            key: GIMEL,
+            generation: GenerationId(0),
+            attempt: AttemptNumber(2),
+        }
+    );
+}
+
 fn review_costing(cost: Option<f64>) -> crate::events::ReviewRecord {
     crate::events::ReviewRecord {
         pass: "review".to_owned(),

@@ -2,11 +2,6 @@
 
 use super::*;
 
-pub(super) fn last_task_key(len: usize) -> Option<TaskKey> {
-    len.checked_sub(1)
-        .map(|index| TaskKey(u32::try_from(index).unwrap_or(u32::MAX)))
-}
-
 impl RunState {
     pub(super) fn derived_outcome(&self) -> DerivedOutcome {
         if !self.common() {
@@ -38,11 +33,7 @@ impl RunState {
     }
 
     pub(super) fn structurally_admissible(&self) -> bool {
-        last_task_key(self.tasks.len())
-            .into_iter()
-            .flat_map(|last| 0..=last.0)
-            .map(TaskKey)
-            .any(|key| self.ready(key) || self.ready_retry(key))
+        TaskKey::range(self.tasks.len()).any(|key| self.ready(key) || self.ready_retry(key))
             || self.integration_admissible()
     }
 

@@ -51,24 +51,20 @@ const BETA: TaskKey = TaskKey(3);
 
 #[test]
 fn the_last_task_key_is_reached_at_every_length() {
-    use super::outcome::last_task_key;
-
-    assert_eq!(last_task_key(0), None);
-    assert_eq!(last_task_key(1), Some(TaskKey(0)));
-    assert_eq!(
-        last_task_key(u32::MAX as usize),
-        Some(TaskKey(u32::MAX - 1))
-    );
-    #[cfg(target_pointer_width = "64")]
-    {
-        assert_eq!(
-            last_task_key(u32::MAX as usize + 1),
-            Some(TaskKey(u32::MAX))
-        );
-        assert_eq!(
-            last_task_key(u32::MAX as usize + 2),
-            Some(TaskKey(u32::MAX))
-        );
+    assert_eq!(TaskKey::range(0).next_back(), None);
+    assert!(TaskKey::range(1).eq([TaskKey(0)]));
+    assert!(TaskKey::range(3).eq([TaskKey(0), TaskKey(1), TaskKey(2)]));
+    for (len, last) in [
+        (u64::from(u32::MAX), u32::MAX - 1),
+        (u64::from(u32::MAX) + 1, u32::MAX),
+        (u64::from(u32::MAX) + 2, u32::MAX),
+    ] {
+        if let Ok(len) = usize::try_from(len) {
+            let mut keys = TaskKey::range(len);
+            assert_eq!(keys.next(), Some(TaskKey(0)));
+            assert_eq!(keys.next_back(), Some(TaskKey(last)));
+            assert_eq!(keys.next_back(), Some(TaskKey(last - 1)));
+        }
     }
 }
 

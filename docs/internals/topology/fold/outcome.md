@@ -26,10 +26,12 @@ No generation is open and no integration transaction is unresolved.
 Some task could be dispatched, retried, or integrated from this state
 alone. Budget, capacity and runner availability are not consulted.
 
-The key range is derived once, by converting the length: a `TaskKey` is
-a `u32`, so a length past `u32::MAX` narrows the domain scanned rather
-than mapping every index past the boundary onto key `u32::MAX`, which
-is a different task and would answer this predicate about it.
+The fold scans `TaskKey::range(self.tasks.len())`, the same range helper
+the selector uses for the registry length. Zero tasks yields no keys;
+otherwise the inclusive endpoint is `min(len - 1, u32::MAX)`. On a 64-bit
+platform, a length of `u32::MAX + 1` therefore includes `TaskKey(u32::MAX)`.
+Larger lengths visit that maximum once, without aliasing unrepresentable
+indices onto it. The range is lazy and allocates nothing.
 
 ## `impl RunState` › `pub(super) fn dispatch_lease_check(`
 
