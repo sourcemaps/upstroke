@@ -26,13 +26,13 @@ source, documentation, workflows, release machinery and this file.
 
    **The Windows suite has two homes.** It runs on the guest unless the run's
    `pick-windows-home` job answers `hosted`; then `test-windows` is skipped and
-   `test-windows-hosted` runs the suite on `windows-latest` in five shards,
-   `test (windows-latest, k of 5)`. Each shard installs and asserts the guest image's compiler,
+   `test-windows-hosted` runs the suite on `windows-latest` in ten shards,
+   `test (windows-latest, k of 10)`. Each shard installs and asserts the guest image's compiler,
    runs the guest's suite step with that shard's test-name filter, and holds a share of the
-   guest's passing-test floor; the shares sum to it. A test runs in exactly one shard: each
+   guest's passing-test floor of 1700; the shares sum to it. A test runs in exactly one shard: each
    shard skips the filters of the shards before it, and the last takes what no filter names.
    `upstroke-ci` still requires exactly one of the two jobs to pass, and the hosted one passes
-   only when all five shards do. The answer is `hosted` in three cases: the repository variable
+   only when all ten shards do. The answer is `hosted` in three cases: the repository variable
    `WINGUEST_BUSY` is `1`; the run is a pull request's and the repository variable
    `WINGUEST_PR_HOSTED` is `1`; or the repository variable `WINGUEST_QUEUE_LIMIT` is a whole
    number from 1 to 999999 and the guest's queue reaches it: the guest's jobs queued or running in other
@@ -53,11 +53,16 @@ source, documentation, workflows, release machinery and this file.
    `WINGUEST_BUSY` to `1` while baselines or Upstroke runs hold the machine, and clears it
    afterwards. A hosted run is not free: measured on 2026-11-15 (run 43719719561), the whole
    suite takes 59 to 76 minutes on `windows-latest` and three of its shards took 14m42s, 17m17s
-   and 22m53s (the fourth shard of that run never ended, and is now shards 2 and 3 of 5, which
-   have not run as separate jobs),
-   against the guest's 13 for the whole. Each shard runs under a 40-minute limit. In that run
-   one whole-suite job failed a kill-timing test, and one shard did not end after its tests had
-   passed; a leftover test process is inferred to have held its output. Neither followed a change.
+   and 22m53s (the fourth shard of that run never ended, and was divided in two, which made
+   five), against the guest's 13 for the whole. The five were measured on 2026-11-19 (run
+   44614925593): their test harnesses took 1201, 508, 976, 564 and 860 seconds and the slowest
+   job took 24.3 minutes, about 3.6 minutes of every leg being fixed. A run's slowest leg sets
+   its wall clock, so the ten shards divide the suite by that measured time. Their slowest leg
+   is predicted at about 13 to 16 minutes, and the ten were not timed before they landed: the
+   CI run of the pull request that landed them is their first measurement. Each shard runs
+   under a 40-minute limit. In the 2026-11-15 run one whole-suite job failed a kill-timing
+   test, and one shard did not end after its tests had passed; a leftover test process is
+   inferred to have held its output. Neither followed a change.
 
    The two homes share the compiler and the suite, and the floor in sum. What still differs is the runner:
    GitHub's image against the curated guest's, their filesystems and temporary directories,
