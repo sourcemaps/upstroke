@@ -1315,6 +1315,7 @@ pub struct WindowView {
 pub enum Blocked {
     NoReading,
     Conflicting,
+    PlanChanged,
     Stale,
     Refilled,
     Insufficient { usable: f64 },
@@ -1441,6 +1442,12 @@ enum Verdict {
 }
 
 #[derive(Debug, Clone)]
+struct Held {
+    view: WindowView,
+    plan: Option<PlanId>,
+}
+
+#[derive(Debug, Clone)]
 pub struct Ledger {
     setup: Setup,
     now_unix: u64,
@@ -1449,7 +1456,8 @@ pub struct Ledger {
     inventory: InventoryEvidence,
     inventory_at: Option<u64>,
     plan: Option<(u64, PlanId)>,
-    windows: BTreeMap<WindowId, WindowView>,
+    plans: BTreeSet<(u64, PlanId)>,
+    windows: BTreeMap<WindowId, Held>,
     state: GrantState,
     settle_after: Option<u64>,
     claims: Vec<(ClaimId, RequestId)>,
@@ -1468,6 +1476,7 @@ impl Ledger {
             inventory: InventoryEvidence::Unknown,
             inventory_at: None,
             plan: None,
+            plans: BTreeSet::new(),
             windows: BTreeMap::new(),
             state: GrantState::Absent,
             settle_after: None,
@@ -1545,8 +1554,16 @@ impl Ledger {
     }
 
     pub fn usable(&self, window: WindowId) -> Result<f64, Blocked> {
-        let view = self.windows.get(&window).ok_or(Blocked::NoReading)?;
+        let held = self.windows.get(&window).ok_or(Blocked::NoReading)?;
+        let view = held.view;
         let used = view.used_percent.ok_or(Blocked::Conflicting)?;
+        if self
+            .plans
+            .range((view.observed_at_unix, PlanId(String::new()))..)
+            .any(|(_, plan)| held.plan.as_ref() != Some(plan))
+        {
+            return Err(Blocked::PlanChanged);
+        }
         if self.now_unix.saturating_sub(view.observed_at_unix) > self.setup.stale_after_secs {
             return Err(Blocked::Stale);
         }
@@ -1580,7 +1597,7 @@ impl Ledger {
 
     #[must_use]
     pub fn window(&self, window: WindowId) -> Option<&WindowView> {
-        self.windows.get(&window)
+        self.windows.get(&window).map(|held| &held.view)
     }
 
     #[must_use]
@@ -1638,13 +1655,13 @@ impl Ledger {
         let touched: Vec<(WindowId, Schedule)> = self
             .windows
             .iter()
-            .filter_map(|(id, view)| self.touch(*id, view).map(|schedule| (*id, schedule)))
+            .filter_map(|(id, held)| self.touch(*id, &held.view).map(|schedule| (*id, schedule)))
             .collect();
         for (id, schedule) in touched {
-            if let Some(view) = self.windows.get_mut(&id) {
-                view.awaiting_re_read = true;
+            if let Some(held) = self.windows.get_mut(&id) {
+                held.view.awaiting_re_read = true;
                 if schedule == Schedule::MustReRead {
-                    view.refill = Refill::AwaitingReRead;
+                    held.view.refill = Refill::AwaitingReRead;
                 }
             }
         }
@@ -1744,33 +1761,66 @@ impl Ledger {
         if reading.account != self.setup.grant.account || reading.observed_at_unix > self.now_unix {
             return Verdict::Rejected;
         }
+        let at = reading.observed_at_unix;
+        if let Some(plan) = &reading.plan {
+            self.plans.insert((at, plan.clone()));
+        }
         let Some(used) = reading.used_percent else {
             return Verdict::Missing;
         };
-        let at = reading.observed_at_unix;
         if !(0.0..=FULL_PERCENT).contains(&used)
             || reading.resets_at_unix.is_some_and(|resets| resets <= at)
         {
             return Verdict::Rejected;
         }
-        let refill = reading
-            .resets_at_unix
-            .map_or(Refill::Unreported, Refill::At);
-        if let Some(view) = self.windows.get_mut(&reading.window) {
-            let too_early = self.settle_after.is_none_or(|after| at < after);
-            if at < view.observed_at_unix
-                || (view.awaiting_re_read && (too_early || at <= view.observed_at_unix))
+        let mut view = WindowView {
+            used_percent: Some(used),
+            refill: reading
+                .resets_at_unix
+                .map_or(Refill::Unreported, Refill::At),
+            observed_at_unix: at,
+            awaiting_re_read: false,
+        };
+        if let Some(held) = self.windows.get_mut(&reading.window) {
+            let prior = held.view;
+            if reading.resets_at_unix.is_none()
+                && matches!(prior.refill, Refill::At(known) if known > at)
             {
+                view.refill = prior.refill;
+            }
+            if at < prior.observed_at_unix {
                 return Verdict::Delayed;
             }
-            if at == view.observed_at_unix {
-                if view.used_percent.map(f64::to_bits) == Some(used.to_bits())
-                    && view.refill == refill
+            if prior.awaiting_re_read {
+                let early = at == prior.observed_at_unix
+                    || self.settle_after.is_none_or(|after| at < after);
+                let unscheduled = prior.refill == Refill::AwaitingReRead
+                    && reading.resets_at_unix.is_none()
+                    && !matches!(
+                        natural_clock(self.setup.provider, reading.window),
+                        Clock::Rolling(_)
+                    );
+                if early || unscheduled {
+                    let busier = prior.used_percent.is_some_and(|before| used > before);
+                    if at == prior.observed_at_unix || !busier {
+                        return if early {
+                            Verdict::Delayed
+                        } else {
+                            Verdict::Missing
+                        };
+                    }
+                    view.refill = prior.refill;
+                    view.awaiting_re_read = true;
+                }
+            }
+            if at == prior.observed_at_unix {
+                if prior.used_percent.map(f64::to_bits) == Some(used.to_bits())
+                    && prior.refill == view.refill
                 {
                     return Verdict::Repeated;
                 }
-                view.used_percent = None;
-                view.refill = Refill::Conflicting;
+                held.view.used_percent = None;
+                held.view.refill = Refill::Conflicting;
                 self.readings.push(reading);
                 return Verdict::Conflicting;
             }
@@ -1782,11 +1832,9 @@ impl Ledger {
         }
         self.windows.insert(
             reading.window,
-            WindowView {
-                used_percent: Some(used),
-                refill,
-                observed_at_unix: at,
-                awaiting_re_read: false,
+            Held {
+                view,
+                plan: reading.plan.clone(),
             },
         );
         self.readings.push(reading);
@@ -4104,5 +4152,301 @@ mod tests {
             state(&states(changed), WindowId::Weekly),
             WindowState::Unknown(WindowUnknown::InsufficientHistory)
         );
+    }
+
+    #[test]
+    fn pending_claim_must_honor_observed_exhaustion() {
+        let mut ledger = claude_ledger(GrantKind::Fable, 48 * HOUR, claude_fable_exhausted());
+        let basis = ledger.recommend(&work(&one_job(4.0)));
+        assert_eq!(basis.decision(), Some(Decision::Redeem));
+        let claim = claimed(ledger.apply(
+            NOW + MIN,
+            claim_of(ALPHA, GrantKind::Fable, 48 * HOUR, basis),
+        ));
+        assert_eq!(ledger.usable(WindowId::Session), Ok(80.0));
+        let busy = NOW + 2 * MIN;
+        assert_eq!(
+            ledger.apply(
+                busy,
+                observe(
+                    vec![claude_at(
+                        WindowId::Session,
+                        busy,
+                        100.0,
+                        Some(NOW + 3 * HOUR)
+                    )],
+                    InventoryEvidence::Unknown,
+                ),
+            ),
+            observed(Observation {
+                adopted: 1,
+                missing: 1,
+                ..Observation::default()
+            })
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Session),
+            (Refill::AwaitingReRead, true)
+        );
+        assert_eq!(
+            ledger.apply(busy, permit(BETA, &[(WindowId::Session, 10.0)])),
+            insufficient(WindowId::Session, 0.0)
+        );
+        let early = busy + 30;
+        assert_eq!(
+            ledger.apply(
+                early,
+                observe(
+                    vec![claude_at(WindowId::Session, early, 0.0, None)],
+                    InventoryEvidence::Unknown,
+                ),
+            ),
+            observed(Observation {
+                delayed: 1,
+                missing: 1,
+                ..Observation::default()
+            })
+        );
+        assert_eq!(ledger.usable(WindowId::Session), Ok(0.0));
+        ledger.apply(NOW + 3 * MIN, reply(claim, Reply::Accepted));
+        let after = NOW + 4 * MIN;
+        ledger.apply(
+            after,
+            observe(
+                vec![claude_at(WindowId::Session, after, 0.0, None)],
+                inventory_at(after, vec![counted(GrantKind::Fable, 48 * HOUR, 0)]),
+            ),
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Session),
+            (Refill::Unreported, false)
+        );
+        assert_eq!(ledger.usable(WindowId::Session), Ok(100.0));
+    }
+
+    #[test]
+    fn restarted_codex_window_needs_its_refresh_before_spending() {
+        let mut ledger = codex_ledger(GrantKind::Full, 48 * HOUR, codex_pro_session_spent());
+        let basis = ledger.recommend(&work(&one_job(4.0)));
+        assert_eq!(basis.decision(), Some(Decision::Redeem));
+        let claim = claimed(ledger.apply(
+            NOW + MIN,
+            claim_of(ALPHA, GrantKind::Full, 48 * HOUR, basis),
+        ));
+        ledger.apply(NOW + 2 * MIN, reply(claim, Reply::Accepted));
+        let after = NOW + 3 * MIN;
+        assert_eq!(
+            ledger.apply(
+                after,
+                observe(
+                    vec![seen("pro", WindowId::Session, after, 0.0, None)],
+                    inventory_at(after, vec![counted(GrantKind::Full, 48 * HOUR, 0)]),
+                ),
+            ),
+            observed(Observation {
+                adopted: 1,
+                missing: 1,
+                ..Observation::default()
+            })
+        );
+        assert!(matches!(
+            ledger.grant_state(),
+            GrantState::Spent { by: ALPHA, .. }
+        ));
+        assert_eq!(
+            clock(&ledger, WindowId::Session),
+            (Refill::AwaitingReRead, true)
+        );
+        let whole = [(WindowId::Session, 100.0)];
+        assert_eq!(
+            ledger.apply(after, permit(BETA, &whole)),
+            insufficient(WindowId::Session, 0.0)
+        );
+        let reported = after + MIN;
+        let refresh = reported + 5 * HOUR;
+        ledger.apply(
+            reported,
+            observe(
+                vec![seen("pro", WindowId::Session, reported, 0.0, Some(refresh))],
+                InventoryEvidence::Unknown,
+            ),
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Session),
+            (Refill::At(refresh), false)
+        );
+        assert!(matches!(
+            ledger.apply(reported, permit(BETA, &whole)),
+            Transition::Permitted(_)
+        ));
+    }
+
+    #[test]
+    fn missing_timestamp_cannot_erase_claudes_fixed_weekly_boundary() {
+        let boundary = NOW + 30 * MIN;
+        let mut readings = burning(WindowId::Weekly, 100.0, 2.0, 30 * MIN);
+        readings.extend(burning(WindowId::Session, 10.0, 10.0, 4 * HOUR));
+        let mut ledger = claude_ledger(GrantKind::Weekly, 240 * HOUR, readings);
+        let basis = ledger.recommend(&work(&one_job(4.0)));
+        assert_eq!(basis.decision(), Some(Decision::Redeem));
+        let claim = claimed(ledger.apply(NOW + MIN, weekly_claim(ALPHA, basis)));
+        ledger.apply(NOW + 2 * MIN, reply(claim, Reply::Accepted));
+        let after = NOW + 3 * MIN;
+        let report = observe(
+            vec![claude_at(WindowId::Weekly, after, 0.0, None)],
+            weekly_count(after, 0),
+        );
+        ledger.apply(after, report.clone());
+        assert!(matches!(
+            ledger.grant_state(),
+            GrantState::Spent { by: ALPHA, .. }
+        ));
+        assert_eq!(
+            clock(&ledger, WindowId::Weekly),
+            (Refill::At(boundary), false)
+        );
+        assert_eq!(
+            ledger.apply(after, report),
+            observed(Observation {
+                repeated: 2,
+                ..Observation::default()
+            })
+        );
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(100.0));
+        assert_eq!(
+            ledger.apply(boundary + 1, permit(BETA, &[(WindowId::Weekly, 100.0)])),
+            Transition::Refused(Refusal::Blocked(WindowId::Weekly, Blocked::Refilled))
+        );
+    }
+
+    #[test]
+    fn full_codex_allowance_keeps_its_clock_on_partial_refresh() {
+        let boundary = NOW + 30 * MIN;
+        let mut readings = burning(WindowId::Session, 100.0, 25.0, 3 * HOUR);
+        readings.extend(burning(WindowId::Weekly, 0.0, 0.0, 30 * MIN));
+        let mut ledger = codex_ledger(GrantKind::Full, 48 * HOUR, on_plan("pro", readings));
+        let basis = ledger.recommend(&work(&one_job(4.0)));
+        assert_eq!(basis.decision(), Some(Decision::Redeem));
+        let claim = claimed(ledger.apply(
+            NOW + MIN,
+            claim_of(ALPHA, GrantKind::Full, 48 * HOUR, basis),
+        ));
+        assert_eq!(
+            clock(&ledger, WindowId::Weekly),
+            (Refill::At(boundary), false)
+        );
+        ledger.apply(NOW + 2 * MIN, reply(claim, Reply::Accepted));
+        let after = NOW + 3 * MIN;
+        let refresh = after + 5 * HOUR;
+        ledger.apply(
+            after,
+            observe(
+                vec![
+                    seen("pro", WindowId::Session, after, 0.0, Some(refresh)),
+                    seen("pro", WindowId::Weekly, after, 0.0, None),
+                ],
+                inventory_at(after, vec![counted(GrantKind::Full, 48 * HOUR, 0)]),
+            ),
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Session),
+            (Refill::At(refresh), false)
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Weekly),
+            (Refill::At(boundary), false)
+        );
+        let past = boundary + 1;
+        assert_eq!(
+            ledger.apply(past, permit(BETA, &[(WindowId::Weekly, 100.0)])),
+            Transition::Refused(Refusal::Blocked(WindowId::Weekly, Blocked::Refilled))
+        );
+        assert!(matches!(
+            ledger.apply(past, permit(BETA, &[(WindowId::Session, 100.0)])),
+            Transition::Permitted(_)
+        ));
+    }
+
+    #[test]
+    fn changed_plan_cannot_allocate_old_plans_weekly_allowance() {
+        let mut ledger = claude_ledger(
+            GrantKind::Weekly,
+            240 * HOUR,
+            vec![
+                claude_at(WindowId::Weekly, NOW, 0.0, Some(NOW + 72 * HOUR)),
+                claude_at(WindowId::Session, NOW, 10.0, Some(NOW + 4 * HOUR)),
+            ],
+        );
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(100.0));
+        let switched = NOW + MIN;
+        assert_eq!(
+            ledger.apply(
+                switched,
+                observe(
+                    vec![seen(
+                        "pro",
+                        WindowId::Session,
+                        switched,
+                        0.0,
+                        Some(switched + 5 * HOUR),
+                    )],
+                    InventoryEvidence::Unknown,
+                ),
+            ),
+            observed(Observation {
+                adopted: 1,
+                missing: 1,
+                ..Observation::default()
+            })
+        );
+        let job = [(WindowId::Session, 10.0), (WindowId::Weekly, 100.0)];
+        assert_eq!(ledger.usable(WindowId::Weekly), Err(Blocked::PlanChanged));
+        assert_eq!(
+            ledger.apply(switched, permit(ALPHA, &job)),
+            Transition::Refused(Refusal::Blocked(WindowId::Weekly, Blocked::PlanChanged))
+        );
+        let back = NOW + 2 * MIN;
+        ledger.apply(
+            back,
+            observe(
+                vec![claude_at(
+                    WindowId::Session,
+                    back,
+                    0.0,
+                    Some(switched + 5 * HOUR),
+                )],
+                InventoryEvidence::Unknown,
+            ),
+        );
+        assert_eq!(ledger.usable(WindowId::Session), Ok(100.0));
+        assert_eq!(ledger.usable(WindowId::Weekly), Err(Blocked::PlanChanged));
+        let read = NOW + 3 * MIN;
+        ledger.apply(
+            read,
+            observe(
+                vec![claude_at(
+                    WindowId::Weekly,
+                    read,
+                    20.0,
+                    Some(NOW + 72 * HOUR),
+                )],
+                InventoryEvidence::Unknown,
+            ),
+        );
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(80.0));
+        assert_eq!(
+            ledger.apply(read, permit(ALPHA, &job)),
+            insufficient(WindowId::Weekly, 80.0)
+        );
+        assert!(matches!(
+            ledger.apply(
+                read,
+                permit(
+                    ALPHA,
+                    &[(WindowId::Session, 10.0), (WindowId::Weekly, 80.0)]
+                )
+            ),
+            Transition::Permitted(_)
+        ));
     }
 }

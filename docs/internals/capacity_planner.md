@@ -349,8 +349,9 @@ its count changes), the provider, the freshness bound and, for Codex, the plan-s
 allowances (`Setup::coverage`). The initial `Snapshot` seeds the windows and inventory.
 
 The state is small and plain: the accepted readings (which `recommend` hands to `plan`), the
-latest accepted inventory, one `WindowView` per window, the `GrantState`, the registered claims,
-the outstanding permits and a `generation` that every accepted change advances. Nothing is
+latest accepted inventory, one `WindowView` per window with the plan its reading named, every plan
+the account's readings have named and the second each was read, the `GrantState`, the registered
+claims, the outstanding permits and a `generation` that every accepted change advances. Nothing is
 derived from the wall clock: `apply(now_unix, event)` moves the ledger's clock forward and refuses
 an earlier one (`Refusal::ClockBehind`).
 
@@ -382,7 +383,10 @@ At the claim, each window the redemption may touch is marked `awaiting_re_read`:
 keeps its fixed boundary. A Codex covered allowance observed full is not restarted, so it is not
 marked and keeps its schedule; a window the plan does not cover is unrelated and stays as it was.
 A marked window keeps its pre-claim balance as its allocatable balance: a reset only lowers use,
-so that balance is a lower bound, and nothing restored is credited.
+so that balance is a lower bound, and nothing restored is credited. A newer reading that shows more
+use than the window holds is evidence that the balance fell even where it cannot be the re-read,
+because it was observed before the reply or lacks the next refill its window must report (below):
+it becomes the window's balance at once, and the window stays marked with its refill unchanged.
 
 ### `impl Ledger` › `fn reply(&mut self, claim: ClaimId, reply: Reply) -> Transition {`
 
@@ -402,11 +406,19 @@ reading, oldest first, is:
 | Verdict | When |
 |---|---|
 | rejected | another account, observed after the ledger's clock, a percent out of range or a reset not after its observation |
-| missing | no percent (the window was not reported); the window keeps its last view |
-| delayed | older than the window's view, or, for a window awaiting a re-read, observed before the reply (or with no reply yet) or not after its pre-claim view |
+| missing | no percent (the window was not reported), or a re-read after the reply that reports no next refill for a window whose schedule must be re-read (below) and shows no more use than the window holds; the window keeps its last view |
+| delayed | older than the window's view, or, for a window awaiting a re-read, not after the window's view, or observed before the reply (or with no reply yet) and showing no more use than the window holds |
 | repeated | the same second and values as the window's view |
 | conflicting | the same second with different values: the window's balance and clock become unknown (`Refill::Conflicting`) until a later reading |
-| adopted | otherwise: the reading becomes the window's view, with its reported reset (`Refill::Unreported` when none is reported) and its mark cleared |
+| adopted | otherwise: the reading becomes the window's view and its mark is cleared, except that a reading of a marked window that is not yet its re-read becomes its balance only, as above, and leaves the mark and the refill as they were |
+
+An adopted reading's refill is the reset it reports. One that reports none keeps a refill the view
+already knows when that refill falls after the reading, since the window has not reached it:
+Claude's fixed weekly boundary, or the clock of a Codex allowance a redemption did not restart.
+Otherwise the refill is `Refill::Unreported`.
+
+Every reading of the account observed by the ledger's clock is evidence of the plan it names,
+whatever its verdict, and is recorded with its second (see `usable` below).
 
 The inventory is judged the same way by its second. An adopted inventory settles the grant:
 `Banked` and `Absent` follow the count; a `Replied` grant settles only on an inventory observed at
@@ -417,15 +429,24 @@ disagree leave the inventory unknown, which the planner reports as no decision.
 
 Settling the grant does not settle a window: a restored window stays at its pre-claim balance
 until a reading of its own, observed after the reply, is adopted. The two are independent, so a
-snapshot that confirms the spend but omits the window credits nothing. Repeated snapshots change
-nothing and do not advance the generation.
+snapshot that confirms the spend but omits the window credits nothing. A window whose schedule
+must be re-read (`Refill::AwaitingReRead`) needs that reading to report its next refill as well,
+since §13 has the reported refresh checked rather than one calculated from the redemption: a
+restarted Codex allowance read at 0% with no refresh stays at its pre-claim balance. The one
+exception is Claude's session window, whose new five-hour window opens only at its next use
+(`Clock::Rolling`), so its re-read may report no reset. Repeated snapshots change nothing and do
+not advance the generation.
 
 ### `impl Ledger` › `pub fn usable(&self, window: WindowId) -> Result<f64, Blocked> {`
 
 The percent a new permit may draw: `100` less the window's observed use, less what outstanding
 permits draw from it. It is `Blocked` when the window was never read (`NoReading`), its reports
-conflict (`Conflicting`), its view is older than the freshness bound (`Stale`), or its reported
-reset has passed (`Refilled`: the refill is real but unread, and is not credited). A permit
+conflict (`Conflicting`), any reading of the account at or after the window's reading names a plan
+other than the one the window was read under (`PlanChanged`: its balance is the previous plan's
+allowance, even after a change back, until the window is read again), its view is older than the
+freshness bound (`Stale`), or its reported reset has passed (`Refilled`: the refill is real but
+unread, and is not credited). A window read with no plan is `PlanChanged` once any plan is reported
+at or after it. A permit
 (`Event::Permit`) is issued only when every window it draws has the balance; the first window in
 `WindowId` order that lacks it is named in `Refusal::Blocked`. `Event::Release` returns a permit.
 A permit outlives the grant: expiry (below) removes no balance and no permit.
@@ -487,6 +508,11 @@ All are synthetic (`Source::Fixture` or the planner fixtures above) and timed fr
 | weekly grant ending in 30 min | `Expired` at the end; balances and the permit unchanged; a lagging inventory does not revive it |
 | Codex `plus`, full grant: weekly full (0%, 100 h), uncovered session 100% (2 h), 1 h job | `LetExpire(NoUnlock)`; the claim refused; neither window's clock is touched |
 | `claude_fable_exhausted()`, Fable grant, 1 h of Sonnet work; then the same hour as Fable work | `LetExpire(NoUnlock)` and the claim refused, while the Sonnet work is permitted from existing session and weekly balance; `Redeem` for the Fable work |
+| Claude Fable grant; the session read at 100% before the reply, then at 0% before it, then at 0% after it | the 100% reading is adopted and the session stays marked and `AwaitingReRead`, so a 10% draw is refused at 0; the 0% reading before the reply is delayed; the re-read restores 100 |
+| Codex `pro`, full grant; the session re-read at 0% with no refresh, then with one | `missing`: the session stays marked at 0 and a 100% draw is refused; with its refresh it is `At` the refresh and the draw is permitted |
+| Claude weekly grant, weekly exhausted until 30 min; the re-read reports no reset | the weekly keeps `At(NOW + 30 min)`, the same report again is `repeated`, and a draw a second past the boundary is `Refilled` |
+| Codex `pro`, full grant, weekly full until 30 min; the re-read omits the weekly's reset | the unrestarted weekly keeps `At(NOW + 30 min)` and is `Refilled` a second past it, while the session draws on its reported refresh |
+| weekly at 0% and session under `max`; a session reading under `pro`; another under `max`; then the weekly at 20% under `max` | the weekly is `PlanChanged` after each change; once read again it serves 80, and a 100% draw is refused |
 
 A planner test pins the history rule above: weekly readings under `max` two hours apart, with a
 session reading under `pro` between them, are two segments (`First`, `PlanChange`) and the weekly
