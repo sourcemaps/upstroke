@@ -1036,8 +1036,9 @@ Which wait it was.
 
 ## `pub enum Progress` › `Waiting {`
 
-One slice of a wait toward a known reset was slept, and the reset is
-still ahead. Nothing was appended: the wait is recorded once, by the
+One slice of a wait toward a known reset was slept, and the wait's
+target, two minutes past the reset, is still ahead. Nothing was
+appended: the wait is recorded once, by the
 `defer_wait_elapsed` of the slice that reaches it (`Waited`). See
 `back_off`.
 
@@ -1467,7 +1468,7 @@ minutes past the earliest one, in slices of at most ten minutes
 (`Deferral::wait_toward`). The doubling backoff would otherwise wake the
 task after a minute, run it into the same limit, and spend one of its
 `max_defers` on each wake, long before a five-hour window clears. Each
-slice that leaves the reset ahead appends nothing and answers
+slice that leaves the target ahead appends nothing and answers
 `Progress::Waiting`. The next step selects again, so an answer, a task made
 ready or the end of the run comes before the next slice, and a later
 `Backoff` continues the same wait. The slice that reaches the target
@@ -1475,15 +1476,33 @@ appends its `defer_wait_elapsed`, for the whole wait, in the order and form
 the plain backoff appends one ([`Self::wait_elapsed`]), and answers
 `Progress::Waited`.
 
-The run says once that it is waiting, when the wait starts
-([`Self::announce_reset_wait`]). A step that continues a held wait says
-nothing.
+**A held wait is continued before any reset is chosen.** The arm first
+asks the deferral for the target of the wait it holds
+(`Deferral::held_until`). With one held, it sleeps the next slice toward
+that target and does not call [`Self::awaited_reset`] at all. Only with no
+wait held does it choose: if [`Self::awaited_reset`] picks a reset, a wait
+toward it starts, and if it picks none, the arm is the plain backoff
+below. The order matters because the clock moves while the wait is
+slept. Fifteen ten-minute slices from 03:00 bring it to 05:30, the reset
+itself, and `interaction::reset_wait_until` waits only for a reset still
+ahead. When the arm chose before every slice, that choice found nothing
+at 05:30. The arm then slept the plain backoff's minute, recorded 60,000
+ms after 9,060 seconds of sleep, and woke the task at 05:31, before the
+05:32 it had announced (`PR390-HELD-RESET-LOSES-MARGIN`). Continued, the wait runs through its
+two-minute margin, and its `defer_wait_elapsed` records every slice
+(`Deferral::wait_toward`'s `Elapsed`).
 
-With no known reset in range the arm is the plain backoff, unchanged. That
-covers a limit naming a reset more than `interaction::RESET_WAIT_BOUND`
-ahead (the weekly one, usually), a pool exhausted with no reset recorded,
-a recorded reset the clock has already passed, and a deferred queue
-verification, which names no pool.
+The run says once that it is waiting, when the wait starts
+([`Self::announce_reset_wait`]). A step that continues a held wait
+chooses nothing and says nothing.
+
+With no wait held and no known reset in range, the arm is the plain
+backoff, unchanged. That covers a limit naming a reset more than
+`interaction::RESET_WAIT_BOUND` ahead (the weekly one, usually), a pool
+exhausted with no reset recorded, a recorded reset the clock had already
+passed when the back-off began, and a deferred queue verification, which
+names no pool. A reset the clock passes during a held wait is not one of
+these: that wait is continued to its target.
 
 ## `impl TopologyRun` › `fn wait_elapsed(`
 
@@ -1493,8 +1512,11 @@ shape whichever wait it was.
 
 ## `impl TopologyRun` › `fn awaited_reset(&self, now_unix: u64) -> Option<AwaitedReset> {`
 
-The reset a back-off waits toward, chosen from the log and the run's
-memory of exhausted pools:
+The reset a back-off starts a wait toward. It is asked only when the
+deferral holds no wait (`Deferral::held_until`), so a held wait is never
+chosen again, and a reset that has fallen behind the clock during the
+wait cannot end it early. It chooses from the log and the run's memory
+of exhausted pools:
 
 1. each task the fold holds `Deferred`;
 2. its last `attempt_finished` ([`last_settled_record`]);
@@ -1533,7 +1555,9 @@ The reset as the pool's `pool_exhausted` recorded it.
 ## `struct AwaitedReset` › `until_unix: u64,`
 
 The Unix second the wait ends, two minutes past the reset: the target
-`Deferral::wait_toward` is given, and `Progress::Waiting` reports it.
+`Deferral::wait_toward` is given when the wait starts. The deferral then
+holds it (`Deferral::held_until`), later slices are slept toward it, and
+`Progress::Waiting` reports it.
 
 ## `fn last_settled_record(events: &[TopologyEvent], key: TaskKey) -> Option<&AttemptRecord> {`
 

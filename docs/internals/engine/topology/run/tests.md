@@ -661,6 +661,36 @@ continues the wait it held, which ingesting an answer does not drop: the slices 
 9,120 seconds in all, and the log holds one `defer_wait_elapsed`, at the end. The notifier is
 told about the wait once, when it starts, and not again when it continues after the answer.
 
+## `struct MovingClock<'a>(&'a RecordingSleeper);`
+
+`RunClock`'s 03:00, moved on by every slice the sleeper has slept, read back as RFC 3339 UTC
+(`util::rfc3339_utc`). The clock and the sleeper share one count, the sleeper's record, so the
+clock reads 05:30 once the slices come to two and a half hours, as a real run's clock would, and
+the two cannot drift apart. `RunClock` stays at 03:00 however long the run sleeps, which is why
+the tests above never reached the reset and never saw a held wait lose it.
+
+## `fn a_held_reset_wait_runs_through_its_margin_on_a_moving_clock() {`
+
+`PR390-HELD-RESET-LOSES-MARGIN` (P1): the witness's run, on a clock that moves. Fifteen
+ten-minute slices bring the clock from 03:00 to 05:30, the reset itself. `back_off` used to
+choose its reset again before every slice, and at 05:30 `reset_wait_until` chose none, because
+the reset was no longer ahead. The run then slept the plain backoff's minute, appended a
+`defer_wait_elapsed` of 60,000 in round 1, and woke the task at 05:31, before the 05:32 it had
+announced, with 9,000 seconds of completed sleep missing from the log.
+
+A held wait is now continued before any reset is chosen, so it runs on through its two-minute
+margin. The slices come to 9,120 seconds, none longer than ten minutes, the clock ends at 05:32,
+and the log holds exactly one `defer_wait_elapsed`, of 9,120,000 in round 1. On the code before
+the repair the test fails on its first assertion, 9,060 seconds slept against 9,120.
+
+## `fn every_elapsed_wait_records_all_of_its_sleeps() {`
+
+The same run on the same moving clock, stepped until `Progress::Waited`. Each
+`defer_wait_elapsed` appended must record, in `waited_ms`, the sum of the slices slept since the
+one before it, or since stepping began. A back-off that drops a held wait for the plain one
+records only its own minute: on the code before the repair, the one `defer_wait_elapsed` said
+60 seconds where 9,060 had been slept.
+
 ## `fn escalated_log(interrupted_first: bool) -> (TopologyFold, Vec<TopologyEvent>) {`
 
 A schema-4 log replayed into the settle fixture's fold, every event applied, so

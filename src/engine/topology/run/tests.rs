@@ -2410,6 +2410,101 @@ fn an_answer_published_between_two_slices_is_ingested_before_the_wait_continues(
     );
 }
 
+struct MovingClock<'a>(&'a RecordingSleeper);
+
+impl TimeSource for MovingClock<'_> {
+    fn now_rfc3339(&self) -> String {
+        let from = unix_seconds_of(&RunClock.now_rfc3339()).expect("`RunClock` reads as UTC");
+        let slept: std::time::Duration = self.0.slept().iter().sum();
+        crate::util::rfc3339_utc(from + slept.as_secs())
+    }
+}
+
+#[test]
+fn a_held_reset_wait_runs_through_its_margin_on_a_moving_clock() {
+    use crate::engine::topology::scaffold::WideTask;
+
+    let mut wide = deferred_on_claude_max(
+        "reset-wait-moving-clock",
+        &[WideTask::independent("alpha")],
+        FIVE_HOUR_LIMIT,
+    );
+    assert_eq!(pools_exhausted(&wide), [signal("2026-11-11T05:30:00Z")]);
+    let mut hooks = wide.env.hooks();
+
+    let sleeper = RecordingSleeper::default();
+    let clock = MovingClock(&sleeper);
+    let steps = stepped_until_waited(&mut wide, &clock, &sleeper, None, &mut hooks);
+
+    let slept = sleeper.slept();
+    assert_eq!(
+        slept.iter().sum::<std::time::Duration>(),
+        std::time::Duration::from_secs(9_120),
+        "the run sleeps from 03:00:00 to 05:32:00, through the margin past the 05:30 reset: \
+         {slept:?}"
+    );
+    assert!(
+        slept
+            .iter()
+            .all(|slice| *slice <= std::time::Duration::from_secs(600)),
+        "every slice is at most ten minutes: {slept:?}"
+    );
+    assert_eq!(
+        clock.now_rfc3339(),
+        "2026-11-11T05:32:00Z",
+        "the task wakes two minutes past the reset, not before"
+    );
+    assert_eq!(
+        steps.last().map(|step| step.defer_waits.clone()),
+        Some(vec![(9_120_000, 1)]),
+        "exactly one `defer_wait_elapsed`, for the whole wait, in the first round: {steps:?}"
+    );
+}
+
+#[test]
+fn every_elapsed_wait_records_all_of_its_sleeps() {
+    use crate::engine::topology::scaffold::WideTask;
+
+    let mut wide = deferred_on_claude_max(
+        "reset-wait-every-sleep",
+        &[WideTask::independent("alpha")],
+        FIVE_HOUR_LIMIT,
+    );
+    let mut hooks = wide.env.hooks();
+    let mut recorded = defer_waits(&wide).len();
+
+    let sleeper = RecordingSleeper::default();
+    let steps = stepped_until_waited(
+        &mut wide,
+        &MovingClock(&sleeper),
+        &sleeper,
+        None,
+        &mut hooks,
+    );
+
+    let slept = sleeper.slept();
+    let mut since = 0;
+    let mut checked = 0;
+    for step in &steps {
+        for (waited_ms, round) in &step.defer_waits[recorded..] {
+            let sleeps = &slept[since..step.slices];
+            assert_eq!(
+                std::time::Duration::from_millis(*waited_ms),
+                sleeps.iter().sum::<std::time::Duration>(),
+                "the `defer_wait_elapsed` of round {round} records every sleep since the one \
+                 before it: {sleeps:?}"
+            );
+            since = step.slices;
+            checked += 1;
+        }
+        recorded = step.defer_waits.len();
+    }
+    assert!(
+        checked > 0,
+        "the step that answered `Waited` appended a `defer_wait_elapsed`: {steps:?}"
+    );
+}
+
 fn escalated_log(interrupted_first: bool) -> (TopologyFold, Vec<TopologyEvent>) {
     use crate::engine::topology::settle::tests::{
         ALEPH, apply, attempt_started, dispatch, ev, finished, settle_into, started,

@@ -1805,20 +1805,19 @@ impl TopologyRun {
         hooks: &mut dyn TopologyHooks,
     ) -> Result<Progress, UpstrokeError> {
         let now = unix_seconds(seams.clock);
-        let Some(awaited) = self.awaited_reset(now) else {
+        let until_unix = if let Some(until) = self.deferral.held_until() {
+            until
+        } else if let Some(awaited) = self.awaited_reset(now) {
+            self.announce_reset_wait(&awaited, now);
+            awaited.until_unix
+        } else {
             let elapsed = self.deferral.wait(seams.sleeper);
             return self.wait_elapsed(elapsed, seams, hooks);
         };
-        if !self.deferral.holds_wait_toward(awaited.until_unix) {
-            self.announce_reset_wait(&awaited, now);
-        }
-        match self
-            .deferral
-            .wait_toward(seams.sleeper, now, awaited.until_unix)
-        {
+        match self.deferral.wait_toward(seams.sleeper, now, until_unix) {
             ResetWaited::Slept { slept } => Ok(Progress::Waiting {
                 slept_ms: u64::try_from(slept.as_millis()).unwrap_or(u64::MAX),
-                until_unix: awaited.until_unix,
+                until_unix,
             }),
             ResetWaited::Elapsed(elapsed) => self.wait_elapsed(elapsed, seams, hooks),
         }

@@ -195,9 +195,8 @@ impl Deferral {
     }
 
     #[must_use]
-    pub fn holds_wait_toward(&self, until_unix: u64) -> bool {
-        self.toward
-            .is_some_and(|held| held.until_unix == until_unix)
+    pub fn held_until(&self) -> Option<u64> {
+        self.toward.map(|held| held.until_unix)
     }
 
     pub fn progressed(&mut self) {
