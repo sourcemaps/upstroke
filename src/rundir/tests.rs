@@ -12893,7 +12893,8 @@ const STAGING_WRITE_LIMIT: libc::rlim_t = 16;
 #[test]
 #[ignore = "spawned as a subprocess by a_failed_staging_write_removes_its_staged_file"]
 fn failed_staging_write_child() {
-    let answers = PathBuf::from(std::env::var("UPSTROKE_TEST_ANSWERS_DIR").expect("answers dir"));
+    let answers =
+        PathBuf::from(std::env::var_os("UPSTROKE_TEST_ANSWERS_DIR").expect("answers dir"));
     let answer = serde_json::json!({"text": "an answer longer than the file-size limit"});
     let size = serde_json::to_string_pretty(&answer)
         .expect("serializable")
