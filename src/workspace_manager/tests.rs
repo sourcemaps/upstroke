@@ -14215,7 +14215,14 @@ fn sample_site(site: EffectSiteId) -> SamplingRun {
 
         let (args, cwd) = sampled_command(site, &fixture, &slot);
         let delay = budget.mul_f64(f64::from(run + 1) / f64::from(SAMPLING_N + 1));
-        let kill = kill_git_child(&cwd, &args, delay);
+        let kill = kill_git_child(
+            &cwd,
+            &args,
+            delay,
+            std::time::Instant::elapsed,
+            std::thread::sleep,
+            &SAMPLED_LAUNCHES,
+        );
 
         let target = ResidueTarget::new(&base).at(&path).from_base(&fixture.head);
         // `.ok()` is what the tally needs, and it is not what a reader of a
@@ -14893,8 +14900,9 @@ impl SampledChild {
 }
 
 /// What [`kill_git_child`] recorded for the one child it launched, handed
-/// back to the sample that launched it: the very record it pushed to
-/// [`SAMPLED_LAUNCHES`], and the child itself, reaped.
+/// back to its caller (in [`sample_site`], the sample that launched it):
+/// the very record it pushed to the log it was handed (there,
+/// [`SAMPLED_LAUNCHES`]), and the child itself, reaped.
 struct SampleKill {
     launch: SampledLaunch,
     /// The reaped child, kept so that [`report_sample`] can ask whether a
@@ -14904,9 +14912,33 @@ struct SampleKill {
     child: SampledChild,
 }
 
-fn kill_git_child(cwd: &Path, args: &[String], after: std::time::Duration) -> SampleKill {
+/// Launch the sampled Git child, wait out the rung `after` its kill is
+/// aimed at ([`wait_out_rung`]), kill it, reap it and push the launch to
+/// `log`: the one function that does each of those, for every sample.
+///
+/// The wait's clock (`elapsed`, read off the instant the child was
+/// spawned), its sleeper (`sleep`) and the launch log (`log`) are arguments
+/// so that a test can hand the sampler's own kill path a fake clock, a fake
+/// sleeper and a private log, and fail when the wait stops going through
+/// [`wait_out_rung`]:
+/// `kill_git_child_waits_out_its_rung_on_the_clock_and_sleeper_it_is_given`.
+///
+/// What no test shows is that [`sample_site`] hands it the real clock
+/// (`std::time::Instant::elapsed`), `std::thread::sleep` and
+/// [`SAMPLED_LAUNCHES`]. An early clock there fails the sampler's
+/// `fired >= after`, and a wrong log its 4 × N launch count; a late clock
+/// would fail only a ceiling on a firing, which the sampler declines to
+/// assert.
+fn kill_git_child(
+    cwd: &Path,
+    args: &[String],
+    after: std::time::Duration,
+    mut elapsed: impl FnMut(&std::time::Instant) -> std::time::Duration,
+    sleep: impl FnMut(std::time::Duration),
+    log: &std::sync::Mutex<Vec<SampledLaunch>>,
+) -> SampleKill {
     let mut child = SampledChild::spawn(cwd, args);
-    wait_out_rung(after, || child.spawned.elapsed(), std::thread::sleep);
+    wait_out_rung(after, || elapsed(&child.spawned), sleep);
     // Kept, not discarded. A kill can answer an error without anything being
     // wrong -- while the Windows kill was `Child::kill`, `TerminateProcess`
     // answered `ERROR_ACCESS_DENIED` for a child that had already exited --
@@ -14923,10 +14955,7 @@ fn kill_git_child(cwd: &Path, args: &[String], after: std::time::Duration) -> Sa
         end: launch_end(&status),
         group_ended: child.group_ended.unwrap_or_default(),
     };
-    SAMPLED_LAUNCHES
-        .lock()
-        .expect("the launch log")
-        .push(launch.clone());
+    log.lock().expect("the launch log").push(launch.clone());
     SampleKill { launch, child }
 }
 
@@ -14992,8 +15021,9 @@ const RUNG_TEST_TICK: std::time::Duration = std::time::Duration::from_micros(1);
 /// the macOS job's 32 kills fired 148.31 ms after its rung.
 const RUNG_TEST_OVERSHOOT: std::time::Duration = std::time::Duration::from_nanos(148_311_690);
 
-/// What [`wait_out_rung`] did on the fake clock of
-/// [`wait_out_rung_on_a_fake_clock`].
+/// What [`wait_out_rung`] did on the fake clock of [`on_a_fake_clock`],
+/// run there directly ([`wait_out_rung_on_a_fake_clock`]) or by
+/// [`kill_git_child`].
 struct RungWait {
     /// Every reading it took of the clock, in order.
     readings: Vec<std::time::Duration>,
@@ -15026,23 +15056,37 @@ impl RungWait {
     }
 }
 
-/// Run [`wait_out_rung`] for `rung` on a fake clock whose first reading is
-/// `start`. The `elapsed` it hands in reads the clock, then moves it on by
-/// [`RUNG_TEST_TICK`]; the `sleep` records each duration it is asked for
-/// and moves the clock on by that much plus `overshoot`, how late the sleep
-/// returns. A reading taken after one at or past the rung panics: the wait
-/// should have returned, and one that never does would read for ever.
-fn wait_out_rung_on_a_fake_clock(
+/// A fake clock whose first reading is `start`, for a wait on `rung`: it
+/// hands `body` a reading of the clock and a sleeper, and returns every
+/// reading taken and every sleep asked for. The reading reads the clock,
+/// then moves it on by [`RUNG_TEST_TICK`]; the sleeper records each
+/// duration it is asked for and moves the clock on by that much plus
+/// `overshoot`, how late the sleep returns.
+///
+/// Each refuses, with a panic, what a wait on this clock never does. A
+/// reading taken after one at or past the rung: the wait should have
+/// returned, and one that never does would read for ever. A sleep asked
+/// with no reading of this clock since the last sleep, or since the start:
+/// the wait asking it ignores the clock it was given, and fails at once
+/// rather than asking this sleeper for sleeps that pass no time on the
+/// clock it reads.
+fn on_a_fake_clock<B>(
     rung: std::time::Duration,
     start: std::time::Duration,
     overshoot: std::time::Duration,
-) -> RungWait {
+    body: B,
+) -> RungWait
+where
+    B: FnOnce(&mut dyn FnMut() -> std::time::Duration, &mut dyn FnMut(std::time::Duration)),
+{
     let clock = std::cell::Cell::new(start);
+    // Whether the clock has been read since the last sleep, or since the
+    // start.
+    let read_since_sleep = std::cell::Cell::new(false);
     let mut readings: Vec<std::time::Duration> = Vec::new();
     let mut sleeps: Vec<std::time::Duration> = Vec::new();
-    wait_out_rung(
-        rung,
-        || {
+    body(
+        &mut || {
             let now = clock.get();
             if let Some(passed) = readings.last().filter(|last| **last >= rung) {
                 panic!(
@@ -15051,15 +15095,39 @@ fn wait_out_rung_on_a_fake_clock(
                 );
             }
             readings.push(now);
+            read_since_sleep.set(true);
             clock.set(now + RUNG_TEST_TICK);
             now
         },
-        |asked| {
+        &mut |asked| {
+            if !read_since_sleep.replace(false) {
+                let since = match sleeps.last() {
+                    Some(last) => format!("its last sleep, of {last:?}"),
+                    None => "the start".to_owned(),
+                };
+                panic!(
+                    "the wait asked to sleep {asked:?} with no reading of the fake clock since \
+                     {since}: it ignores the clock it was given"
+                );
+            }
             sleeps.push(asked);
             clock.set(clock.get() + asked + overshoot);
         },
     );
     RungWait { readings, sleeps }
+}
+
+/// Run [`wait_out_rung`] for `rung` on the fake clock of
+/// [`on_a_fake_clock`], whose first reading is `start` and whose sleeps
+/// return `overshoot` late.
+fn wait_out_rung_on_a_fake_clock(
+    rung: std::time::Duration,
+    start: std::time::Duration,
+    overshoot: std::time::Duration,
+) -> RungWait {
+    on_a_fake_clock(rung, start, overshoot, |reading, sleeper| {
+        wait_out_rung(rung, reading, sleeper);
+    })
 }
 
 /// A rung inside [`RUNG_SPIN_WITHIN`], from a clock at zero, is spun out
@@ -15125,6 +15193,69 @@ fn a_rung_already_passed_returns_without_waiting() {
         wait.readings,
         [start],
         "the wait reads the clock once, finds it past the rung and returns"
+    );
+}
+
+/// [`kill_git_child`], the sampler's own kill path, waits out its rung
+/// through [`wait_out_rung`], on the clock and the sleeper it is handed. A
+/// real `git --version` child is aimed at a rung of 735.527593 ms, on a fake
+/// clock at zero whose sleeps return [`RUNG_TEST_OVERSHOOT`] late: the wait
+/// sleeps once, on the fake sleeper, for the rung less the 250 ms margin,
+/// and returns at its first reading of the fake clock at or past the rung;
+/// and the one launch is pushed to the private log it is handed, aimed at
+/// that rung and fired at.
+///
+/// Three regressions of the kill path fail here. A sleep of the whole rung
+/// put back in place of the wait asks the fake sleeper for nothing. A wait
+/// on the child's own clock asks it for a sleep before any reading of the
+/// fake clock, which it refuses at once. A launch pushed to the sampler's
+/// own log leaves the private one empty. The three tests above drive
+/// [`wait_out_rung`] itself, and stayed green with the first.
+///
+/// The 735.527593 ms pass on the fake clock alone, so the launch's `fired`,
+/// which [`SampledChild::kill`] reads off the real clock, is asserted to be
+/// there and not when. Nothing is asserted of how the child ended either:
+/// the kill races `git --version`'s own exit.
+#[test]
+fn kill_git_child_waits_out_its_rung_on_the_clock_and_sleeper_it_is_given() {
+    let tree = scratch("sampled-git-rung-wait");
+    let args = ["--version".to_string()];
+    // A log of its own: the sampler's is asserted to hold exactly the 4 × N
+    // launches of its four sites.
+    let log: std::sync::Mutex<Vec<SampledLaunch>> = std::sync::Mutex::new(Vec::new());
+    let rung = std::time::Duration::from_nanos(735_527_593);
+    let wait = on_a_fake_clock(
+        rung,
+        std::time::Duration::ZERO,
+        RUNG_TEST_OVERSHOOT,
+        |reading, sleeper| {
+            kill_git_child(tree.path(), &args, rung, |_| reading(), sleeper, &log);
+        },
+    );
+    // What was left at the first reading, the whole rung, less the 250 ms
+    // margin: a number, for the reason
+    // `a_rung_inside_the_spin_margin_is_never_slept` gives.
+    assert_eq!(
+        wait.sleeps,
+        [std::time::Duration::from_nanos(485_527_593)],
+        "kill_git_child's wait for {rung:?} from a fake clock at zero sleeps once, on the \
+         sleeper it is handed, for the rung less the 250 ms margin"
+    );
+    wait.assert_returned_at_first_reading_past(rung);
+    let launches = log.into_inner().expect("the private launch log");
+    let [launch] = launches.as_slice() else {
+        panic!(
+            "kill_git_child pushed {} launches to the private log it was handed, not one",
+            launches.len()
+        );
+    };
+    assert_eq!(
+        launch.after, rung,
+        "the launch kill_git_child logged is aimed at the rung it was handed"
+    );
+    assert!(
+        launch.fired.is_some(),
+        "kill_git_child logged a launch it never fired at"
     );
 }
 
