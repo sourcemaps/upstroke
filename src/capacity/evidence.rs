@@ -21,7 +21,7 @@
     clippy::disallowed_macros
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::events::{AttemptRecord, Event, EventBody, PoolExhausted, ReviewRecord};
 use crate::topology::events::{RejectionDisposition, TopologyEvent, TopologyEventBody};
@@ -236,23 +236,96 @@ pub fn of_topology(events: &[TopologyEvent]) -> Vec<Evidence> {
 
 /// Every run's evidence as one sequence, oldest first.
 ///
+/// Each run is given with a key that names it: `gather` gives the run's id,
+/// then its log's path.
+///
 /// Within a run the log's order is kept exactly: undated evidence takes the
 /// time of the dated evidence before it, and a timestamp that runs backwards
 /// is raised to the latest already seen, so a clock stepped back mid-run
 /// cannot reorder a signal past the settlement that retires it. Between runs
-/// the order is by time, and at equal times by the order the runs were given.
+/// the order is by time, and at an equal time by the evidence and the keys,
+/// never by the order the runs are given in: evidence that marks a pool
+/// refused waits while another run's evidence of that second still to come
+/// proves the pool served, so that a success does not clear a refusal another
+/// run met in the same second, and otherwise the run whose key sorts first
+/// goes first. Where two runs' refusals and successes of one second cross, no
+/// order can keep every refusal, and `next_lane` says which goes first.
 #[must_use]
-pub fn merge(runs: Vec<Vec<Evidence>>) -> Vec<Evidence> {
-    let mut keyed: Vec<(u64, usize, usize, Evidence)> = Vec::new();
-    for (run, evidence) in runs.into_iter().enumerate() {
+pub fn merge<K: Ord>(mut runs: Vec<(K, Vec<Evidence>)>) -> Vec<Evidence> {
+    runs.sort_by(|(one, _), (other, _)| one.cmp(other));
+    let mut seconds: BTreeMap<u64, Vec<VecDeque<Evidence>>> = BTreeMap::new();
+    for (_, evidence) in runs {
         let mut latest = 0_u64;
-        for (position, item) in evidence.into_iter().enumerate() {
+        let mut lane_at = None;
+        for item in evidence {
             latest = latest.max(item.at.unwrap_or(latest));
-            keyed.push((latest, run, position, item));
+            let lanes = seconds.entry(latest).or_default();
+            match lanes.last_mut() {
+                Some(lane) if lane_at == Some(latest) => lane.push_back(item),
+                _ => {
+                    lanes.push(VecDeque::from([item]));
+                    lane_at = Some(latest);
+                }
+            }
         }
     }
-    keyed.sort_by_key(|(time, run, position, _)| (*time, *run, *position));
-    keyed.into_iter().map(|(_, _, _, item)| item).collect()
+    let mut merged = Vec::new();
+    for lanes in seconds.into_values() {
+        interleave(lanes, &mut merged);
+    }
+    merged
+}
+
+/// One second's evidence, a lane per run in key order, onto the end of
+/// `merged`, each lane's own order kept.
+fn interleave(mut lanes: Vec<VecDeque<Evidence>>, merged: &mut Vec<Evidence>) {
+    while let Some(item) = next_lane(&lanes).and_then(|lane| lanes.get_mut(lane)?.pop_front()) {
+        merged.push(item);
+    }
+}
+
+/// The lane whose head goes next: the first whose head need not wait. A head
+/// waits while it marks a pool refused that evidence still in another lane
+/// proves served. Where every head waits, the first lane goes. That takes
+/// runs whose refusals and successes of one second cross, one refusing `p`
+/// before it serves `q` and another refusing `q` before it serves `p`: no
+/// order keeps both refusals and both runs' own order, and it is the runs'
+/// own order that is kept.
+fn next_lane(lanes: &[VecDeque<Evidence>]) -> Option<usize> {
+    let heads = || {
+        lanes
+            .iter()
+            .enumerate()
+            .filter_map(|(lane, items)| Some((lane, items.front()?)))
+    };
+    let waits = |lane: usize, head: &Evidence| {
+        refused(head).is_some_and(|pool| {
+            let others = lanes.iter().enumerate().filter(|&(other, _)| other != lane);
+            others
+                .flat_map(|(_, items)| items)
+                .any(|item| serves(item, pool))
+        })
+    };
+    heads()
+        .find(|&(lane, head)| !waits(lane, head))
+        .or_else(|| heads().next())
+        .map(|(lane, _)| lane)
+}
+
+/// The pool `evidence` marks refused, if it marks one.
+fn refused(evidence: &Evidence) -> Option<&str> {
+    match &evidence.what {
+        What::Signal { pool, .. } => Some(pool.as_str()),
+        What::Work { limited, .. } => limited.as_deref(),
+    }
+}
+
+/// Whether `evidence` proves `pool` served.
+fn serves(evidence: &Evidence, pool: &str) -> bool {
+    match &evidence.what {
+        What::Signal { .. } => false,
+        What::Work { served, .. } => served.iter().any(|name| name == pool),
+    }
 }
 
 /// Apply evidence, in the order given, to nothing.
@@ -452,13 +525,16 @@ mod tests {
             record("claude-max", Some(1.0), None),
         )]);
 
-        let merged = merge(vec![refused.clone(), served_later]);
+        let merged = merge(vec![
+            ("refusing", refused.clone()),
+            ("serving", served_later),
+        ]);
         assert!(
             exhausted(&merged).is_empty(),
             "a later attempt the pool served, in any repository, proves it is serving again"
         );
 
-        let merged = merge(vec![served_earlier, refused]);
+        let merged = merge(vec![("serving", served_earlier), ("refusing", refused)]);
         assert_eq!(
             exhausted(&merged).get("claude-max"),
             Some(&Some(RESET.to_owned())),
@@ -500,7 +576,10 @@ mod tests {
                 reset_at: None,
             },
         }];
-        let merged = merge(vec![stepped_back.clone(), other.clone()]);
+        let merged = merge(vec![
+            ("stepped-back", stepped_back.clone()),
+            ("other", other.clone()),
+        ]);
         let own: Vec<&Evidence> = merged
             .iter()
             .filter(|item| stepped_back.contains(item))
@@ -511,6 +590,76 @@ mod tests {
             exhausted(&merged).keys().collect::<Vec<_>>(),
             vec!["q", "r"],
             "the settlement written after the signal still retires it"
+        );
+    }
+
+    #[test]
+    fn a_success_in_the_second_of_another_runs_refusal_does_not_clear_it() {
+        let refused = of_legacy(&[
+            finished(
+                NOON,
+                record("claude-max", None, Some(FailureKind::RateLimited)),
+            ),
+            signalled(NOON, "claude-max", Some(RESET)),
+        ]);
+        let served = of_legacy(&[finished(NOON, record("claude-max", Some(1.0), None))]);
+
+        for (refusing, serving) in [("01A", "01B"), ("01B", "01A")] {
+            for runs in [
+                vec![(refusing, refused.clone()), (serving, served.clone())],
+                vec![(serving, served.clone()), (refusing, refused.clone())],
+            ] {
+                let merged = merge(runs);
+                assert_eq!(merged.len(), refused.len() + served.len());
+                assert_eq!(
+                    exhausted(&merged),
+                    BTreeMap::from([("claude-max".to_owned(), Some(RESET.to_owned()))]),
+                    "refused in run {refusing} and served in run {serving} in the same second: \
+                     neither which run is given first nor whose id sorts first decides it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_runs_own_success_in_the_second_of_its_refusal_still_clears_it() {
+        let recovered = of_legacy(&[
+            signalled(NOON, "claude-max", Some(RESET)),
+            finished(NOON, record("claude-max", Some(1.0), None)),
+        ]);
+        assert!(
+            exhausted(&merge(vec![("01A", recovered.clone())])).is_empty(),
+            "within one run the log's order stands, and the success was written after the refusal"
+        );
+
+        let served = of_legacy(&[finished(NOON, record("claude-max", Some(1.0), None))]);
+        for (own, other) in [("01A", "01B"), ("01B", "01A")] {
+            for runs in [
+                vec![(own, recovered.clone()), (other, served.clone())],
+                vec![(other, served.clone()), (own, recovered.clone())],
+            ] {
+                assert!(
+                    exhausted(&merge(runs)).is_empty(),
+                    "run {own}'s success after its own refusal still clears it beside run \
+                     {other}'s success of the same second"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn where_two_runs_refusals_and_successes_cross_the_order_given_still_decides_nothing() {
+        let refused_then_served = |refused: &str, served: &str| {
+            of_legacy(&[
+                signalled(NOON, refused, Some(RESET)),
+                finished(NOON, record(served, Some(1.0), None)),
+            ])
+        };
+        let one = refused_then_served("claude-max", "codex-pro");
+        let other = refused_then_served("codex-pro", "claude-max");
+        assert_eq!(
+            exhausted(&merge(vec![("01A", one.clone()), ("01B", other.clone())])),
+            exhausted(&merge(vec![("01B", other), ("01A", one)])),
         );
     }
 

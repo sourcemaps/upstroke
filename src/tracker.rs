@@ -1410,7 +1410,7 @@ agent = \"claude-code\"
                 report.gathered.repositories,
                 report.gathered.unread
             ),
-            (2, 2, 1)
+            (2, 2, 3)
         );
         assert_eq!(report.warnings.len(), 3, "{:?}", report.warnings);
         let warned = |needle: &str| {
@@ -1444,8 +1444,8 @@ agent = \"claude-code\"
         let rendered = report.render();
         assert!(
             rendered.contains(
-                "on this machine; the draw counts this calendar month (UTC); 1 more run could \
-                 not be read and nothing from it is shown (a warning names it)"
+                "on this machine; the draw counts this calendar month (UTC); 3 more runs could \
+                 not be read and nothing from them is shown (the warnings name them)"
             ),
             "the scope line counts what the warnings name: {rendered}"
         );

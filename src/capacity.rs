@@ -2763,6 +2763,155 @@ pub(crate) mod tests {
         assert!(!rendered.contains("could not be read"), "{rendered}");
     }
 
+    const REFUSING_RUN: &str = "01CAPACITYREFUSING00000001";
+    const SERVING_RUN: &str = "01CAPACITYSERVING000000001";
+    const TORN_RUN: &str = "01CAPACITYTORN000000000001";
+
+    fn on_the_machine(
+        repo: &std::path::Path,
+        machine_dir: &std::path::Path,
+    ) -> (Gathered, Vec<String>) {
+        let mut warnings = Vec::new();
+        let gathered = machine::gather(
+            &machine::GatherOptions {
+                scope: Scope::Machine,
+                repo_root: repo,
+                machine_dir: Some(machine_dir),
+                pools: &[],
+                now_unix: FIXTURE_NOW,
+            },
+            &mut warnings,
+        );
+        (gathered, warnings)
+    }
+
+    fn owner_record(machine_dir: &std::path::Path, private_half: &str, bytes: &[u8]) {
+        let record = machine_dir
+            .join("runs")
+            .join(private_half)
+            .join(crate::rundir::OWNER_RECORD);
+        crate::workspace_manager::fixture::write_file(&record, bytes);
+    }
+
+    fn owner_record_of(machine_dir: &std::path::Path, repo: &std::path::Path, run_id: &str) {
+        let located = serde_json::json!({
+            "run_id": run_id,
+            "public_dir": crate::rundir::public_dir(repo, run_id),
+        });
+        owner_record(machine_dir, run_id, located.to_string().as_bytes());
+    }
+
+    #[test]
+    fn review409_machine_signal_does_not_depend_on_launch_repository() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-machine-tie");
+        let machine_dir = tree.path().join("machine");
+        let refusing = tree.path().join("refusing");
+        let serving = tree.path().join("serving");
+        let _refused = schema_4_run_signalling(&refusing, REFUSING_RUN, "shared", FIVE_THIRTY);
+        let _served = schema_4_run_limited_then_drawing(
+            &serving,
+            SERVING_RUN,
+            ("claude-max", FIVE_THIRTY),
+            ("shared", 1.0),
+        );
+        owner_record_of(&machine_dir, &refusing, REFUSING_RUN);
+        owner_record_of(&machine_dir, &serving, SERVING_RUN);
+
+        let (from_refusing, warnings) = on_the_machine(&refusing, &machine_dir);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(
+            (
+                from_refusing.runs,
+                from_refusing.repositories,
+                from_refusing.unread
+            ),
+            (2, 2, 0)
+        );
+        let (from_serving, warnings) = on_the_machine(&serving, &machine_dir);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(
+            from_refusing.observations.exhausted, from_serving.observations.exhausted,
+            "one machine, one answer, whichever repository it is asked from"
+        );
+        assert_eq!(
+            from_refusing.observations.exhausted,
+            exhausted(&[
+                ("claude-max", Some(FIVE_THIRTY)),
+                ("shared", Some(FIVE_THIRTY)),
+            ]),
+            "the success on `shared` was written in the second of the other run's refusal, so it \
+             proves nothing about the pool after it"
+        );
+    }
+
+    #[test]
+    fn unreadable_owner_must_be_counted_in_the_scope_line() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-unread-owner");
+        let machine_dir = tree.path().join("machine");
+        owner_record(&machine_dir, TORN_RUN, b"{");
+
+        let (gathered, warnings) = on_the_machine(&tree.path().join("repo"), &machine_dir);
+        assert_eq!(
+            (gathered.runs, gathered.repositories, gathered.unread),
+            (0, 0, 1),
+            "{warnings:?}"
+        );
+        let [warning] = warnings.as_slice() else {
+            panic!("one warning names the record and the error: {warnings:?}");
+        };
+        assert!(
+            warning.contains(TORN_RUN) && warning.contains("is not an owner record"),
+            "{warning}"
+        );
+        assert_eq!(
+            gathered.describe(),
+            "the 1 run found on this machine could not be read, so no rate-limit signal and no \
+             self-metered draw is shown; a warning names it"
+        );
+    }
+
+    #[test]
+    fn a_private_half_with_no_owner_record_is_not_counted() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-no-owner");
+        let machine_dir = tree.path().join("machine");
+        crate::workspace_manager::fixture::create_dir(&machine_dir.join("runs").join(LEGACY_RUN));
+
+        let (gathered, warnings) = on_the_machine(&tree.path().join("repo"), &machine_dir);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!((gathered.runs, gathered.unread), (0, 0));
+        assert!(
+            gathered
+                .describe()
+                .starts_with("no run on this machine yet"),
+            "{}",
+            gathered.describe()
+        );
+    }
+
+    #[test]
+    fn an_owner_record_that_leads_nowhere_is_not_counted_for_a_run_read_from_its_repository() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-listed-owner");
+        let machine_dir = tree.path().join("machine");
+        let repo = tree.path().join("repo");
+        let _run = schema_4_run_signalling(&repo, SCHEMA_4_RUN, "claude-max", FIVE_THIRTY);
+        owner_record(&machine_dir, SCHEMA_4_RUN, b"{");
+
+        let (gathered, warnings) = on_the_machine(&repo, &machine_dir);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!((gathered.runs, gathered.unread), (1, 0));
+        assert_eq!(
+            gathered.observations.exhausted,
+            exhausted(&[("claude-max", Some(FIVE_THIRTY))])
+        );
+
+        let (elsewhere, warnings) = on_the_machine(&tree.path().join("elsewhere"), &machine_dir);
+        assert_eq!(
+            (elsewhere.runs, elsewhere.unread),
+            (0, 1),
+            "from another repository the same record is the only way to the run: {warnings:?}"
+        );
+    }
+
     #[test]
     fn self_metering_cannot_talk_an_exhausted_pool_back_up() {
         let mut p = pool("claude-max");
