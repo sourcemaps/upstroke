@@ -1159,11 +1159,59 @@ clear a refusal another run met in the same second, and the pool reads
 exhausted, which is the conservative reading of two facts of one second.
 Otherwise the run whose key sorts first goes first. A run's own order is kept
 throughout, so a refusal and then a success of one second in one run still
-clear the pool. The one case no order can keep is two runs whose refusals and
-successes of one second cross, one refusing `p` before it serves `q` and the
-other refusing `q` before it serves `p`. There the run whose key sorts first
-goes first and one of the two refusals is cleared, and the answer still does
-not depend on which repository asked.
+clear the pool. Two runs whose refusals and successes of one second cross,
+one refusing `p` before it serves `q` and the other refusing `q` before it
+serves `p`, have no order that puts both refusals after both successes, and
+there the run whose key sorts first goes first. Until 2026-11-24 one of the
+two refusals was then cleared. Where both successes are schema-4 runs', both
+refusals now stand, by the rule below; where a success is a legacy log's, the
+refusal it follows is still cleared, as before. Either way the answer does not
+depend on which repository asked.
+
+**Whose refusal a success retires.** The order alone cannot say whether a
+success came after another run's refusal
+(`PR409-DELAYED-SETTLEMENT-CLEARS-NEWER-LIMIT`). A schema-4 run proves a pool
+served at the event that carries the attempt's record, `attempt_finished` or
+`candidate_prepared`, which it writes after the attempt's gates and its
+judgement, and `fold` used to retire every refusal of each pool the record
+served. So a worker that served `shared` from 11:00:00 to 11:01:00 and settled
+at 11:20 cleared another run's refusal of `shared` at 11:05, reset at 16:00,
+although nothing served `shared` after 11:05: that run alone held the pool to
+16:00, and the two merged gave the witness's pool at most 99% left. Dating the
+evidence by its service instead does not work: `merge` raises a run's
+timestamps that run backwards to the latest already seen, so the serving run's
+own later evidence would raise it back past the refusal.
+
+So `fold` asks whose refusal it is. It holds refusals per pool and per run: a
+pool is exhausted while any run's refusal of it stands, and it shows the reset
+of the refusal applied last. A signal adds or replaces its run's refusal of
+its pool, with its own reset, and a rate-limited settlement does the same,
+keeping the reset the pool shows. Each piece of evidence carries its run,
+which `merge` records as the run's place in key order. Evidence of one log is
+one run, so one log alone folds exactly as it did, and a resume, which replays
+`exhausted_pools_of` (§4.4), sees no change. A schema-4 attempt's record also
+carries `served_at`: the latest `attempt_started` of that attempt before it,
+plus the record's duration in whole seconds, never later than the record's
+own event. A success retires its own run's refusal of a pool always, in that
+run's order, and another run's only when its `served_at` is known and strictly
+later than that refusal's time. A refusal whose time cannot be read yields to
+its own run alone, and so does every refusal to a schema-4 success whose
+attempt has no dated start. A success of a log of schemas 1–3 has no
+`served_at` and keeps the rule every success had before: it retires every
+run's refusal of the pool that the merged order puts before it, and `merge`'s
+wait is what keeps another run's refusal of its own second standing.
+`evidence.rs`'s tests pin each case, the witness ported among them.
+
+Three limits remain, each stated here because the rule cannot see past it. A
+reviewer's pool is dated by its worker's end, the earliest its review can
+have run, so a review that served after another run's refusal leaves that
+refusal standing when its worker ended before it. Inside one run a late
+settlement still retires that run's own newer refusal: a worker that served
+before a refusal its own run met, and settled after it, clears that refusal,
+which is `master`'s rule for one run and is filed `deferred` as
+`PR409-LATE-SETTLEMENT-RETIRES-OWN-RUNS-NEWER-REFUSAL`. And a legacy log's
+late settlement still retires another run's newer refusal, since nothing in
+that log dates its service.
 
 Pools are user-level (§17), so a listing outside a repo is still worth
 having, and with the machine scope it now says what other repositories drew.
