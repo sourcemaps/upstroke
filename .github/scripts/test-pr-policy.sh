@@ -6914,6 +6914,9 @@ credit_saved_system="${GIT_CONFIG_SYSTEM-}" credit_had_system="${GIT_CONFIG_SYST
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 
 credit_script="$root/.github/scripts/validate-pr-commits.sh"
+# Syntax checking is part of this configured gate, including the new failure fixtures below.
+"$BASH" -n "$credit_script"
+"$BASH" -n "${BASH_SOURCE[0]}"
 credit_repo="$fixture_dir/repo-commit-credit"
 new_repo "$credit_repo"
 credit_date='2026-11-25T12:00:00 +0000'
@@ -7105,6 +7108,133 @@ credit_orphan="$(printf 'an unrelated history\n' \
   | credit_git commit-tree "$(credit_git mktree < /dev/null)")" \
   || { echo 'could not build the commit-credit orphan' >&2; exit 1; }
 credit_fail_closed 'two commits with no merge base' "$credit_target" "$credit_orphan"
+
+# Complete, empty, shallow and missing ancestry are different outcomes. This is all local:
+# a shallow boundary hides a credited side-branch ancestor while leaving a merge base visible.
+credit_clean="$(plain_commit "$credit_base" 'the complete-history control')" || exit 1
+credit_pass 'a verified empty PR range' "$credit_base" 0
+credit_pass 'identical ends with complete ancestry' "$credit_clean" 0 "$credit_clean"
+credit_hidden="$(plain_commit "$credit_base" $'hidden side ancestor\n\nClaude-Session: private-session')" || exit 1
+credit_boundary="$(plain_commit "$credit_hidden" 'plain shallow boundary')" || exit 1
+credit_git checkout -q --detach "$credit_clean"
+credit_git merge -q --no-ff --no-verify "$credit_boundary" -m 'merge a side branch'
+credit_shallow_head="$(credit_git rev-parse HEAD)"
+credit_refuse 'complete side ancestry exposes the credit' "$credit_shallow_head" "$credit_hidden:claude-session"
+printf '%s\n' "$credit_boundary" > "$credit_repo/.git/shallow"
+[[ -n "$(credit_git merge-base --all "$credit_target" "$credit_shallow_head")" ]] \
+  || { echo 'commit credit: shallow fixture lost its merge base' >&2; exit 1; }
+credit_fail_closed 'a shallow side branch with a visible merge base' "$credit_target" "$credit_shallow_head"
+credit_fail_closed 'a shallow checkout cannot verify even an empty range' "$credit_clean" "$credit_clean"
+rm "$credit_repo/.git/shallow"
+credit_pass 'complete history restored' "$credit_clean" 1
+
+# Even when both tips and their merge base exist, an unavailable ancestor below the base must
+# fail. The object is loose in this fixture and is restored before any later case uses it.
+credit_missing_object="$credit_repo/.git/objects/${credit_old:0:2}/${credit_old:2}"
+mv "$credit_missing_object" "$fixture_dir/credit-saved-object"
+credit_fail_closed 'missing ancestry below the merge base' "$credit_target" "$credit_clean"
+mv "$fixture_dir/credit-saved-object" "$credit_missing_object"
+credit_pass 'missing ancestor restored' "$credit_clean" 1
+
+# Inject producer and read failures at the Bash process boundary, without networking, races,
+# permissions that root can bypass, or changes to the validator's entry point. Real git handles
+# every operation except the selected fault. The control uses the same injection path.
+credit_fault_env="$fixture_dir/credit-fault-env"
+cat > "$credit_fault_env" <<'EOF'
+git() {
+  if [[ "$CREDIT_PHASE" == "$1" ]] &&
+      { [[ "$1" != rev-list ]] || [[ "${3:-}" == --not ]]; }; then
+    case "$CREDIT_FAULT" in
+      records) printf '%s' "$CREDIT_RECORDS"; return 0 ;;
+      nul) printf '%s\0\n' "$CREDIT_RECORDS"; return 0 ;;
+      failure)
+        printf '%s\n' "$CREDIT_RECORDS"
+        echo '/private/diagnostic-path Private Identity <private@example.com>' >&2
+        return 1 ;;
+    esac
+  fi
+  command git "$@"
+}
+mktemp() {
+  if [[ "$CREDIT_FAULT" == setup ]]; then
+    echo '/private/diagnostic-path Private Identity <private@example.com>' >&2
+    return 1
+  fi
+  command mktemp "$@"
+}
+read() {
+  if [[ "$CREDIT_FAULT" == read && "${*: -1}" == record ]]; then
+    credit_reads=$(( ${credit_reads:-0} + 1 ))
+    # Read the merge base and its EOF, then one commit. Fail before the second commit.
+    if (( credit_reads == 4 )); then
+      echo '/private/diagnostic-path Private Identity <private@example.com>' >&2
+      return 1
+    fi
+  fi
+  builtin read "$@"
+}
+EOF
+
+credit_contract_failure() {  # <label> <diagnostic substring> [<head>]
+  credit_fail_closed "$1" "$credit_target" "${3:-$credit_clean}"
+  if [[ -s "$fixture_dir/credit-out" ]] ||
+      [[ "$(wc -l < "$fixture_dir/credit-err")" -ne 1 ]] ||
+      ! grep -Fq "commit-credit-policy: $2" "$fixture_dir/credit-err" ||
+      grep -Eq '/private/|Private Identity|@' "$fixture_dir/credit-err"; then
+    echo "commit credit: $1: expected one concise private diagnostic" >&2
+    exit 1
+  fi
+}
+
+for credit_phase in merge-base rev-list; do
+  credit_label=commit credit_record="$credit_clean"
+  if [[ "$credit_phase" == merge-base ]]; then
+    credit_label=merge-base credit_record="$credit_base"
+  fi
+  BASH_ENV="$credit_fault_env" CREDIT_PHASE="$credit_phase" CREDIT_FAULT=records \
+    CREDIT_RECORDS="$credit_record"$'\n' \
+    credit_pass 'complete newline-terminated producer output' "$credit_clean" 1
+  for credit_records in "$credit_record" "$credit_record"$'\n'"$credit_record" "$credit_record"$'\npartial'; do
+    BASH_ENV="$credit_fault_env" CREDIT_PHASE="$credit_phase" CREDIT_FAULT=records \
+      CREDIT_RECORDS="$credit_records" credit_contract_failure \
+      'missing final terminator, alone or after a valid record' \
+      "the $credit_label list holds an incomplete object-name record"
+  done
+  for credit_records in $'invalid\n' "$credit_record"$'\n\n' "$credit_record"$'\r\n'; do
+    BASH_ENV="$credit_fault_env" CREDIT_PHASE="$credit_phase" CREDIT_FAULT=records \
+      CREDIT_RECORDS="$credit_records" credit_contract_failure \
+      'invalid terminated record' "the $credit_label list holds a line that is not an object name"
+  done
+  BASH_ENV="$credit_fault_env" CREDIT_PHASE="$credit_phase" CREDIT_FAULT=nul \
+    CREDIT_RECORDS="$credit_record" credit_contract_failure \
+    'NUL bytes cannot disappear during reading' "could not read the complete $credit_label list"
+  BASH_ENV="$credit_fault_env" CREDIT_PHASE="$credit_phase" CREDIT_FAULT=failure \
+    CREDIT_RECORDS="$credit_record" credit_contract_failure 'producer failure is private' ''
+done
+
+# Two valid IDs were measured, but the reader returns EOF after the first. It must not accept
+# the shorter range, even though the retained commit is clean.
+credit_read_head="$(plain_commit "$credit_clean" 'second clean commit for a failed read')" || exit 1
+BASH_ENV="$credit_fault_env" CREDIT_PHASE=rev-list CREDIT_FAULT=read \
+  credit_contract_failure 'failed read is not EOF' 'could not read the complete commit list' "$credit_read_head"
+BASH_ENV="$credit_fault_env" CREDIT_PHASE=none CREDIT_FAULT=setup \
+  credit_contract_failure 'temporary setup error is private' 'could not create temporary workspace'
+TMPDIR="$fixture_dir/private@example.com/nonexistent" \
+  credit_contract_failure 'real mktemp error is private' 'could not create temporary workspace'
+
+# Git's SHA-256 mode exercises the same framing and the unchanged full-ID rule output.
+credit_sha1_repo="$credit_repo"
+credit_repo="$fixture_dir/repo-credit-sha256"
+git init -q --object-format=sha256 "$credit_repo"
+credit_git -c user.name='Jane Doe' -c user.email=jane@example.com commit -q --allow-empty -m root
+credit_sha256_base="$(credit_git rev-parse HEAD)"
+credit_sha256_clean="$(plain_commit "$credit_sha256_base" 'plain SHA-256 change')" || exit 1
+credit_pass 'SHA-256 complete range' "$credit_sha256_clean" 1 "$credit_sha256_base"
+credit_pass 'SHA-256 empty range' "$credit_sha256_base" 0 "$credit_sha256_base"
+credit_sha256_bad="$(plain_commit "$credit_sha256_base" $'SHA-256 credit\n\nClaude-Session: private-session')" || exit 1
+credit_target="$credit_sha256_base" credit_refuse 'SHA-256 rule output' \
+  "$credit_sha256_bad" "$credit_sha256_bad:claude-session"
+credit_repo="$credit_sha1_repo"
 
 # Criss-crossed histories: two merge bases, and both are the target's. A and C are siblings on
 # the target side, each crediting Claude; the target merges A then C, the head merges C then A,

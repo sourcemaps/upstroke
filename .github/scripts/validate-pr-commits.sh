@@ -83,7 +83,8 @@
 # could do about it. A pull request that merges master in brings those commits along, and they are
 # still not its own: they are reachable from the target, so they are still not judged.
 #
-# AN END THAT WILL NOT RESOLVE, OR TWO ENDS WITH NO MERGE BASE, FAILS CLOSED at exit 2, never with
+# SHALLOW OR UNAVAILABLE ANCESTRY, AN END THAT WILL NOT RESOLVE, OR TWO ENDS WITH NO MERGE BASE
+# FAILS CLOSED at exit 2, never with
 # an empty set. An empty set is a pass, and a pass that nothing was checked for is the direction
 # that turns a refusal into an acceptance. Every git command that fails after that is exit 2 too.
 #
@@ -105,14 +106,16 @@
 # wrote the file, where it is a status; through a pipe or `< <(...)` it belongs to nobody, and a
 # failed rev-list would read as a pull request with no commits. And a read that fails mid-file
 # looks to `read` exactly like the end of it, so the number of lines written is counted first and
-# the loop must reach it: a short read is exit 2, never fewer lines judged. A short read of the
+# the loop must reach it: a short read is exit 2, never fewer lines judged. Object-name lists also
+# account for every byte and require the final newline before any commit is judged. A short read of the
 # merge bases is the dangerous one -- an exclusion list left empty judges the target's own history
 # -- so each of its lines must also be a full object name (40 or 64 hex digits). These are the
 # rules .github/scripts/changed-in-range.sh and test-docs-consistency.sh state for their own
 # listings.
 #
-# NOTHING THE SCRIPT PRINTS CARRIES AN EMAIL ADDRESS: refusals, failures, the pass line and git's
-# own error output on a failure all pass through one redaction. A refusal is one line on stderr per
+# NOTHING THE SCRIPT PRINTS CARRIES AN EMAIL ADDRESS: refusals and the pass line pass through one
+# redaction. Failures use concise diagnostics; raw command errors and input paths are never printed.
+# A refusal is one line on stderr per
 # rule a commit breaks:
 #
 #   claude-credit: <full-sha> <rule-id>: <the author or committer's name, or the message line>
@@ -125,7 +128,7 @@
 #
 #   commit-credit-policy: <n> commit(s) checked, none credits Claude
 
-set -euo pipefail
+set -Eeuo pipefail
 export PATH="/usr/bin:/bin:$PATH"
 # Byte-wise classes and ASCII case folding, whatever locale the runner has: every rule here is
 # spelled in ASCII, and a multibyte locale would only add ways for a class to mean something else.
@@ -133,7 +136,13 @@ export LC_ALL=C
 # A replace ref swaps one object for another under the same name. The object judged is the object
 # the name was written for.
 export GIT_NO_REPLACE_OBJECTS=1
+# Missing objects must fail locally, not trigger a promisor remote fetch.
+export GIT_NO_LAZY_FETCH=1
 shopt -s nocasematch
+
+# Keep the diagnostic channel separate from command and shell errors (including redirection
+# failures, whose text can contain private paths). Only our deliberate output uses descriptor 3.
+exec 3>&2 2>/dev/null
 
 # shown <text>: the text as this script may print it -- control characters as `?`, and every
 # token holding an `@` replaced, so no email address reaches the log.
@@ -147,40 +156,31 @@ say() {  # say <text>: one `commit-credit-policy:` line, redacted
 }
 
 fail() {  # fail <text>: the closed failure, redacted, at exit 2
-  say "$1" >&2
+  say "$1" >&3
   exit 2
 }
 
+trap 'fail "could not complete validation"' ERR
 work=""
-# fail_git <text>: the closed failure, then what git printed to $work/git-err, every line of it
-# redacted, at exit 2.
-fail_git() {
-  local line
-  say "$1" >&2
-  if [[ -n "$work" && -s "$work/git-err" ]]; then
-    while IFS= read -r line || [[ -n "$line" ]]; do
-      say "git: $line" >&2
-    done < "$work/git-err"
-  fi
-  exit 2
-}
+# Even redacted git errors can contain private paths or raw identity names.
+fail_git() { fail "$1"; }
 
 target="${1:-}"
 head="${2:-}"
 
 if [[ -z "$target" || -z "$head" ]]; then
-  say "usage: validate-pr-commits.sh <target-sha> <head-sha>" >&2
+  say "usage: validate-pr-commits.sh <target-sha> <head-sha>" >&3
   exit 2
 fi
 
-# rev-parse's own diagnostics are dropped: the end that did not resolve is named below, redacted,
-# and that is all they could have said.
+# Do not echo the supplied ends: an invalid ref may itself be a private path or identity.
 target_sha="$(git rev-parse --verify --quiet "$target^{commit}" 2> /dev/null)" \
-  || fail "target commit $target is not in this checkout"
+  || fail "target commit is not in this checkout"
 head_sha="$(git rev-parse --verify --quiet "$head^{commit}" 2> /dev/null)" \
-  || fail "head commit $head is not in this checkout"
+  || fail "head commit is not in this checkout"
 
-work="$(mktemp -d)"
+work="$(mktemp -d)" || fail "could not create temporary workspace"
+[[ -n "$work" && -d "$work" ]] || fail "could not create temporary workspace"
 trap 'rm -rf -- "$work"' EXIT
 
 # lines_in <file>: the number of newline-terminated lines in it, measured before a loop reads it.
@@ -191,6 +191,43 @@ lines_in() {
 }
 
 object_name_re='^([0-9a-f]{40}|[0-9a-f]{64})$'
+[[ "$target_sha" =~ $object_name_re && "$head_sha" =~ $object_name_re ]] \
+  || fail "could not resolve complete commit IDs"
+
+# A merge base can exist in a shallow checkout even though a merged side branch's offending
+# ancestor is hidden. Walk BOTH ends without exclusions, so missing ancestors below the merge
+# bases cannot be mistaken for a complete (possibly empty) PR range either.
+shallow="$(git rev-parse --is-shallow-repository)" \
+  || fail "could not determine history completeness"
+[[ "$shallow" == false ]] || fail "complete local history is unavailable"
+git rev-list "$target_sha" "$head_sha" -- > /dev/null \
+  || fail "complete local history is unavailable"
+
+# read_object_names <file> <label>: populate names only from complete newline-terminated records.
+# Counting bytes as well as records detects read failures and bytes Bash read silently drops
+# (notably NUL). EOF is acceptable only after every measured byte has been accounted for.
+read_object_names() {
+  local file="$1" label="$2" bytes consumed=0 record status
+  names=()
+  bytes="$(wc -c < "$file")" || fail "could not measure the $label list"
+  [[ "$bytes" =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]] \
+    || fail "could not measure the $label list"
+  while :; do
+    record=""
+    status=0
+    IFS= read -r record || status=$?
+    if (( status != 0 )); then
+      [[ -z "$record" ]] || fail "the $label list holds an incomplete object-name record"
+      (( status == 1 )) || fail "could not read the $label list"
+      break
+    fi
+    [[ "$record" =~ $object_name_re ]] \
+      || fail "the $label list holds a line that is not an object name"
+    consumed=$(( consumed + ${#record} + 1 ))
+    names+=("$record")
+  done < "$file"
+  (( consumed == bytes )) || fail "could not read the complete $label list"
+}
 
 # No common ancestor is not an empty range: it means the two ends are unrelated histories, and the
 # head's whole history is not this pull request's to answer for.
@@ -199,28 +236,22 @@ git merge-base --all "$target_sha" "$head_sha" > "$work/merge-bases" 2> "$work/g
 [[ -s "$work/merge-bases" ]] \
   || fail "no merge base between $target_sha and $head_sha"
 
-based="$(lines_in "$work/merge-bases")" \
-  || fail "could not measure the merge-base list"
-bases=()
-while IFS= read -r merge_base; do
-  [[ "$merge_base" =~ $object_name_re ]] \
-    || fail "the merge-base list holds a line that is not an object name"
-  bases+=("$merge_base")
-done < "$work/merge-bases"
-(( ${#bases[@]} == based && based > 0 )) \
-  || fail "read ${#bases[@]} of the $based merge bases listed"
+names=()
+read_object_names "$work/merge-bases" merge-base
+bases=("${names[@]}")
 
 # No pathspec, so no history simplification: a commit reached only through a merge of a side
 # branch is listed like any other, and so is the merge.
 git rev-list "$head_sha" --not "${bases[@]}" > "$work/commits" 2> "$work/git-err" \
   || fail_git "could not list the commits between the merge base and $head_sha"
+read_object_names "$work/commits" commit
 
 refusals=0
 hits=" "
 refuse() {  # refuse <sha> <rule-id> <text>: at most once per rule per commit
   [[ "$hits" == *" $2 "* ]] && return 0
   hits="$hits$2 "
-  printf 'claude-credit: %s %s: %s\n' "$1" "$2" "$(shown "$3")" >&2
+  printf 'claude-credit: %s %s: %s\n' "$1" "$2" "$(shown "$3")" >&3
   refusals=$(( refusals + 1 ))
 }
 
@@ -369,17 +400,11 @@ judge() {
     || fail "read $read_trailers of the $parsed trailer lines of commit $sha"
 }
 
-listed="$(lines_in "$work/commits")" \
-  || fail "could not measure the commit list"
 checked=0
-while IFS= read -r sha; do
-  [[ "$sha" =~ $object_name_re ]] \
-    || fail "the commit list holds a line that is not an object name"
+for sha in ${names[@]+"${names[@]}"}; do
   judge "$sha"
   checked=$(( checked + 1 ))
-done < "$work/commits"
-(( checked == listed )) \
-  || fail "read $checked of the $listed commits listed"
+done
 
 if (( refusals > 0 )); then
   exit 1
