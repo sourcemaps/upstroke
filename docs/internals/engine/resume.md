@@ -253,6 +253,17 @@ failure predate atomic parking and are three durable appends. Preserve
 every crash prefix so a closed question can never strand its task in
 AwaitingInput with no legal way to answer it again.
 
+The declined-answer repair reads each affected task's state and progress
+with checked access, never by indexing, although every index comes from
+`index_of` (`standards/07`, `PR380-RESUME-PANICKING-INDEX`). A task with
+no state row counts as not awaiting that answer: it is left out of the
+question's affected tasks at replay, and skipped when the decline is
+settled. A task whose state row exists but whose progress row does not is
+an engine defect. The resume refuses it with `UpstrokeError::Refused`,
+naming the answer, the task, its position and how many rows the state
+holds. That is the variant [`coordinator`](coordinator.md) uses for a
+position its state does not hold (`unscheduled_position`).
+
 ## `let paths = match &opts.private_root {`
 
 Resolve the recorded private root before touching the worktree so a

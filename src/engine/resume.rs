@@ -403,8 +403,8 @@ pub(super) fn resume_harness_inner_on(
                     .index_of(task_id.as_str())
                     .is_some_and(|index| {
                         matches!(
-                            &replayed.state.states[index],
-                            TaskState::AwaitingInput(open) if open == &record.question.id
+                            replayed.state.states.get(index),
+                            Some(TaskState::AwaitingInput(open)) if open == &record.question.id
                         )
                     })
             })
@@ -808,14 +808,22 @@ pub(super) fn resume_harness_inner_on(
             let Some(index) = run.state.index_of(task_id.as_str()) else {
                 continue;
             };
-            if !matches!(&run.state.states[index], TaskState::AwaitingInput(open) if open == &question)
-            {
+            if !matches!(
+                run.state.states.get(index),
+                Some(TaskState::AwaitingInput(open)) if open == &question
+            ) {
                 continue;
             }
-            let reason = format!(
-                "declined at the human rung: {}",
-                last_reason(&run.state.progress[index])
-            );
+            let Some(progress) = run.state.progress.get(index) else {
+                return Err(UpstrokeError::Refused {
+                    message: format!(
+                        "declined answer {question} names task `{task_id}` at position {index}, \
+                         which this run's state does not hold (it holds {})",
+                        run.state.progress.len()
+                    ),
+                });
+            };
+            let reason = format!("declined at the human rung: {}", last_reason(progress));
             run.fail_task_with_policy(index, FailureKind::Declined, reason, halts_run)?;
         }
     }
