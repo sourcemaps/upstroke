@@ -30,8 +30,10 @@ tree-retention is broken. `run_resumed` clears both.
 ## `pub use log::{EventLog, LogTail, read_all};`
 
 The writer lives in `src/events/log.rs`; this re-export keeps `crate::events::EventLog`,
-`crate::events::read_all` and `crate::events::LogTail` as the paths every caller outside this
-module names. `decisions.pr_sequence[6].scope` requires the first of those to stay put.
+`crate::events::read_all` and `crate::events::LogTail` available to callers outside this module.
+Not every caller uses them: `src/engine/topology/recover.rs` names `crate::events::log::EventLog`
+directly. The design packet's `decisions.pr_sequence[6].scope`, which is not in this repository,
+asked for `crate::events::EventLog` to stay put when the writer moved.
 
 ## `pub const SCHEMA_VERSION: u32 = 3;`
 
@@ -622,8 +624,8 @@ a counter only the live path incremented.
 **And which caller writes it is not a property of this field.**
 `classify::FeedbackCarrier` decides, because the builder is shared with
 the legacy coordinator and the two engines answer differently.
-`decisions/2026-08-26-durable-retry-feedback.md` is the Class C
-authorization for this field and states its bounds.
+The retired record `decisions/2026-08-26-durable-retry-feedback.md` authorized this field;
+DESIGN.md's retired-records table places its substance in §15.
 
 ## `#[must_use]`
 
