@@ -217,8 +217,12 @@ Read from the job's log as GitHub's API serves it, with ANSI escape sequences re
 - Line 2975:
   `test result: FAILED. 2426 passed; 1 failed; 107 ignored; 0 measured; 1727 filtered out; finished in 312.08s`.
   This test was the only failure.
-- In the same run 44 of the 46 jobs passed; the other failure was the aggregate `upstroke-ci` (job
-  `140267605699`).
+
+Read from the run's attempt-1 job list as GitHub's API serves it
+(`~/selfhost-findings-20261128/evidence/run-45925135358-attempt-1-jobs.json`, SHA256
+`393204fa3875967c405b60a3d2491bb62f1f63985624be5d1f263067e83b15f3`), not from the log: 44 of the
+run's 46 jobs passed, and the two failures were this job and the aggregate `upstroke-ci` (job
+`140267605699`).
 
 **What the test asserts, by line at `bc645322`.** `bc645322`'s `src/agent/proc.rs` and
 `src/agent/proc` directory are `552c0395`'s byte for byte, and `a8b816f` is their merge. Line 3027
@@ -250,6 +254,10 @@ and 674) and the library's `test result: ok. 2427 passed; 0 failed; 107 ignored`
   on macOS.
 - These readings are not exhaustive.
 - **Not established: the rate.**
+- `CI-FLAKE-MACOS-TERMINAL-INTERRUPT-LEFT-THE-AGENT-TREE-ALIVE`
+  (`findings/P3_correctness_202611220300_a-terminal-interrupt-left-the-agent-tree-alive-on-hosted-macos.md:116-122`)
+  records a different test failing on native macOS in the same signal-helper harness, and compares
+  its assertion with this test's.
 
 **What was done.** No re-run of this job was made: #437 was parked at the time. It merged later, as
 `ca058512`. The guard in this finding's frontmatter still applies.
