@@ -911,7 +911,9 @@ impl ClaudeCli {
     fn discoveries(&self) -> Vec<(String, Option<PathBuf>)> {
         self.requests()
             .into_iter()
-            .filter(|request| request.command.args == ["auth", "status", "--json"])
+            .filter(|request| {
+                request.command.args == ["--setting-sources", "", "auth", "status", "--json"]
+            })
             .map(|request| (request.invocation.render(), request.credential_profile))
             .collect()
     }
@@ -933,7 +935,7 @@ impl crate::runner::contract::tests::InlineRunner for ClaudeCli {
         Ok(match args.as_slice() {
             ["--version"] => answered(0, "2.1.226 (Claude Code)\n"),
             ["--help"] => answered(0, CLAUDE_HELP),
-            ["auth", "status", "--json"] => {
+            ["--setting-sources", "", "auth", "status", "--json"] => {
                 (self.auth_status)(request.credential_profile.as_deref())
             }
             _ => answered(2, ""),
@@ -1642,6 +1644,178 @@ fn refuses_a_signed_out_claude_code_default_account_that_no_pool_names() {
     assert!(preflight.ledgers_balance());
 }
 
+struct SettingsDependentCli {
+    cli: ClaudeCli,
+    with_settings: fn(Option<&Path>) -> ProcessOutput,
+}
+
+impl SettingsDependentCli {
+    fn answering(
+        without_settings: fn(Option<&Path>) -> ProcessOutput,
+        with_settings: fn(Option<&Path>) -> ProcessOutput,
+    ) -> Self {
+        Self {
+            cli: ClaudeCli::answering(without_settings),
+            with_settings,
+        }
+    }
+
+    fn bare_discoveries(&self) -> usize {
+        self.cli
+            .requests()
+            .iter()
+            .filter(|request| request.command.args == ["auth", "status", "--json"])
+            .count()
+    }
+}
+
+impl crate::runner::contract::tests::InlineRunner for SettingsDependentCli {
+    fn run_inline(
+        &self,
+        request: &RunnerRequest,
+    ) -> Result<ProcessOutput, crate::runner::RunnerError> {
+        let answered =
+            crate::runner::contract::tests::InlineRunner::run_inline(&self.cli, request)?;
+        if request.command.args != ["auth", "status", "--json"] {
+            return Ok(answered);
+        }
+        Ok((self.with_settings)(request.credential_profile.as_deref()))
+    }
+}
+
+fn settings_dependent_over(cli: &Arc<SettingsDependentCli>, pools: &[Pool]) -> Arc<dyn Runner> {
+    crate::engine::topology::profiled::profiled(Arc::clone(cli) as Arc<dyn Runner>, pools)
+}
+
+const NO_SETTINGS_LOADED: &str = concat!(
+    "reported no signed-in account. The check loads no user, project or local settings, as a ",
+    "worker loads none, so a credential that only a settings file supplies does not count. ",
+    "Nothing was spawned"
+);
+
+#[test]
+fn certifies_an_account_signed_in_with_no_settings_loaded_on_a_resume_and_a_fresh_run() {
+    for (label, pools) in [
+        ("the default account", vec![pool("max", AGENT, None)]),
+        ("two profiles", two_profiled_pools().to_vec()),
+    ] {
+        let cli = Arc::new(SettingsDependentCli::answering(
+            answers_signed_in,
+            answers_signed_out,
+        ));
+        let runner = settings_dependent_over(&cli, &pools);
+        let preflight = claude_code_preflight(&*runner, &pools);
+        preflight.certify(&host_policy()).unwrap_or_else(|error| {
+            panic!("{label}: signed in with no settings loaded, as a worker runs, passes: {error}")
+        });
+        assert_eq!(
+            cli.cli.discoveries().len(),
+            pools.len(),
+            "{label}: one discovery per account, each with no settings loaded"
+        );
+        assert_eq!(
+            cli.bare_discoveries(),
+            0,
+            "{label}: and none that loads them"
+        );
+        assert!(preflight.ledgers_balance(), "{label}");
+
+        let fresh_cli = Arc::new(SettingsDependentCli::answering(
+            answers_signed_in,
+            answers_signed_out,
+        ));
+        let fresh_runner = settings_dependent_over(&fresh_cli, &pools);
+        let (on_fresh, balanced) = on_a_fresh_run(&*fresh_runner, &pools);
+        on_fresh.unwrap_or_else(|error| panic!("{label}: a fresh run certifies it too: {error}"));
+        assert_eq!(
+            fresh_cli.cli.discoveries().len(),
+            pools.len(),
+            "{label}: the same discoveries on the fresh run"
+        );
+        assert_eq!(fresh_cli.bare_discoveries(), 0, "{label}");
+        assert!(balanced, "{label}");
+    }
+}
+
+#[test]
+fn refuses_an_account_signed_in_only_with_its_settings_loaded_on_a_resume_and_a_fresh_run() {
+    for (label, pools, account, profile) in [
+        (
+            "the default account",
+            vec![pool("max", AGENT, None)],
+            MAX_DEFAULT_ACCOUNT.to_owned(),
+            None,
+        ),
+        (
+            "a profile",
+            two_profiled_pools().to_vec(),
+            format!(
+                "pool `max`'s account, the credential profile directory `{EXISTING_DIRECTORY}`"
+            ),
+            Some(PathBuf::from(EXISTING_DIRECTORY)),
+        ),
+    ] {
+        let cli = Arc::new(SettingsDependentCli::answering(
+            answers_signed_out,
+            answers_signed_in,
+        ));
+        let runner = settings_dependent_over(&cli, &pools);
+        let preflight = claude_code_preflight(&*runner, &pools);
+        let on_resume = preflight
+            .certify(&host_policy())
+            .expect_err("signed in only with settings loaded, which a worker loads none of");
+
+        let text = a_sign_in_refusal(&on_resume);
+        assert!(
+            text.contains(&format!("is not signed in under {account}; ")),
+            "{label}: the refusal names the account: {text}"
+        );
+        assert!(
+            text.contains(NO_SETTINGS_LOADED),
+            "{label}: and says which settings the check loads: {text}"
+        );
+        assert_eq!(
+            cli.cli.discoveries(),
+            vec![("p.agent-claude-code.o2".to_owned(), profile.clone())],
+            "{label}: one discovery, with no settings loaded, and it refuses"
+        );
+        assert_eq!(
+            cli.bare_discoveries(),
+            0,
+            "{label}: no discovery loaded the settings"
+        );
+        assert!(
+            preflight.probed().is_none(),
+            "{label}: nothing was certified"
+        );
+        assert!(preflight.ledgers_balance(), "{label}");
+
+        let fresh_cli = Arc::new(SettingsDependentCli::answering(
+            answers_signed_out,
+            answers_signed_in,
+        ));
+        let fresh_runner = settings_dependent_over(&fresh_cli, &pools);
+        let (on_fresh, balanced) = on_a_fresh_run(&*fresh_runner, &pools);
+        assert_eq!(
+            on_fresh
+                .expect_err("a fresh run refuses the same account")
+                .to_string(),
+            text,
+            "{label}: one refusal, worded once, on both paths"
+        );
+        assert_eq!(
+            fresh_cli.cli.discoveries(),
+            vec![("p.agent-claude-code.o2".to_owned(), profile)],
+            "{label}: the same discovery on the fresh run"
+        );
+        assert_eq!(fresh_cli.bare_discoveries(), 0, "{label}");
+        assert!(
+            balanced,
+            "{label}: every process the fresh probe ran settled"
+        );
+    }
+}
+
 struct UnresolvedDiscovery(ClaudeCli);
 
 impl crate::runner::contract::tests::InlineRunner for UnresolvedDiscovery {
@@ -1650,7 +1824,7 @@ impl crate::runner::contract::tests::InlineRunner for UnresolvedDiscovery {
         request: &RunnerRequest,
     ) -> Result<ProcessOutput, crate::runner::RunnerError> {
         let answered = crate::runner::contract::tests::InlineRunner::run_inline(&self.0, request)?;
-        if request.command.args != ["auth", "status", "--json"] {
+        if request.command.args != ["--setting-sources", "", "auth", "status", "--json"] {
             return Ok(answered);
         }
         Err(crate::runner::RunnerError::unresolved(

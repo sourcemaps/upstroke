@@ -401,6 +401,12 @@ fn signed_out(agent: &str, account: &Account) -> UpstrokeError {
             "with the agent's own CLI".to_owned()
         }
     };
+    let settings = if claude_code {
+        " The check loads no user, project or local settings, as a worker loads none, so a \
+         credential that only a settings file supplies does not count."
+    } else {
+        ""
+    };
     let (account, login) = match account {
         Account::Profile { pool, profile } => (
             format!(
@@ -431,8 +437,9 @@ fn signed_out(agent: &str, account: &Account) -> UpstrokeError {
     UpstrokeError::Refused {
         message: format!(
             "pre-flight: agent `{agent}` is not signed in under {account}; its sign-in discovery \
-             reported no signed-in account. Nothing was spawned for the run and no event was \
-             appended; run the same command again once that account is signed in ({login})"
+             reported no signed-in account.{settings} Nothing was spawned for the run and no \
+             event was appended; run the same command again once that account is signed in \
+             ({login})"
         ),
     }
 }

@@ -99,13 +99,18 @@ The agents whose sign-in pre-flight checks: Claude Code
 `discover` and runs no discovery process for it
 (`tests::certifies_codex_without_asking_its_sign_in_on_a_resume_and_a_fresh_run`).
 
-Claude Code's discovery, `claude auth status --json`, sees the routes its CLI
-authenticates through: with no login and `ANTHROPIC_API_KEY` set it answers
-`loggedIn: true`, `authMethod: api_key` (measured when
-`PR386-PROFILE-AUTH-NOT-PREFLIGHTED` was resolved), and
-`CLAUDE_CODE_OAUTH_TOKEN` is the profile checks' concern
+Claude Code's discovery, `claude --setting-sources "" auth status --json`, sees
+the routes its workers authenticate through. It loads no user, project or local
+settings, as a worker loads none (`agent/claude.md`, `fn discover`); with no
+login and `ANTHROPIC_API_KEY` set, `auth status --json` answers
+`loggedIn: true`, `authMethod: api_key` (measured, on the bare
+`auth status --json`, when `PR386-PROFILE-AUTH-NOT-PREFLIGHTED` was resolved);
+and `CLAUDE_CODE_OAUTH_TOKEN` is the profile checks' concern
 ([`refuse_unusable_profiles`], check 5). So when it answers signed out, the run
-would meet that account signed out at its first attempt.
+would meet that account signed out at its first attempt. Until round three of
+#408's review, the discovery was the bare `auth status --json`, which loads the
+settings files, so a credential only a settings file supplied answered signed
+in for an account every worker would meet signed out.
 
 Codex's does not. `codex login status` reports the credentials Codex has
 stored, and nothing else: with no stored login it prints `Not logged in`, which
@@ -660,6 +665,20 @@ sign-in of any agent but Claude Code ([`SIGN_IN_CHECKED`];
 `PR408-CODEX-SIGN-IN-NOT-PREFLIGHTED`). And any account after the first that
 fails, which a run refused at that account never reaches.
 
+Nor three things about Claude Code's own answer (`agent/claude.md`,
+`fn discover`). That a credential the CLI reports as configured works:
+`auth status` does not use it, so an expired or invalid key passes, and the run
+meets it at its first attempt. Anything from a CLI that rejects
+`--setting-sources` before `auth`: it answers with no JSON, which the adapter
+reads as `Unknown`, and `Unknown` passes. And a worker given arguments the
+discovery did not send: `build_args` appends a profile's `extra_args` after its
+own, and nothing produces them today (`src/engine/assembly.rs:140`,
+`src/review.rs:466`), but a producer for them would reopen the gap between
+discovery's context and the worker's
+(`tests::certifies_an_account_signed_in_with_no_settings_loaded_on_a_resume_and_a_fresh_run`
+and `tests::refuses_an_account_signed_in_only_with_its_settings_loaded_on_a_resume_and_a_fresh_run`
+hold the context that is checked).
+
 Until it stopped at the first failing account, every account's discovery ran,
 so each account's answer was registered and settled whichever of them was
 signed out, and the refusal came after the last: a first pool's signed-out
@@ -736,6 +755,21 @@ account is signed in", with how to sign it in in parentheses (for Claude Code,
 `claude auth login`, with `CLAUDE_CONFIG_DIR` set to the profile when there is
 one; for the default account it is unset, and the hint names none). Like
 [`refused`]'s and [`profile_refused`]'s, it ends without a full stop.
+
+For Claude Code, one sentence comes between the discovery's report and the
+closing: "The check loads no user, project or local settings, as a worker loads
+none, so a credential that only a settings file supplies does not count." It is
+true on both paths: a fresh run and a resume ask through the same adapter
+`discover`, which sends `--setting-sources ""` before `auth status --json`, the
+pair every worker is given (`agent/claude.md`, `fn settings_isolation`). It is
+there for round three of #408's review: an operator whose settings file signs
+the CLI in (an `env` that sets `ANTHROPIC_API_KEY`, or an `apiKeyHelper`) sees
+their own `claude auth status` answer signed in, and without it would read the
+refusal as wrong. The sentence says why that credential does not count: no
+worker would load it. Other agents' wording is unchanged, as the sentence is
+about Claude Code's discovery; and only Claude Code's sign-in is checked
+([`SIGN_IN_CHECKED`])
+(`tests::refuses_an_account_signed_in_only_with_its_settings_loaded_on_a_resume_and_a_fresh_run`).
 
 While Codex's sign-in was checked, the hint for an agent with environment
 credentials also named them ("or by setting one of `CODEX_API_KEY`,

@@ -361,14 +361,21 @@ account is signed out and every profile directory signed in.
 
 A runner that plays the Claude Code CLI to the real adapter
 (`crate::agent::BuiltinAdapters`): `--version` and `--help` as above,
-`auth status --json` by the request's profile through `auth_status`, and
-exit 0 for anything that is not `claude` (the shell probe). It records every
-request, so a test reads which identities ran under which profiles.
+`--setting-sources "" auth status --json` by the request's profile through
+`auth_status`, and exit 0 for anything that is not `claude` (the shell probe).
+Any other `claude` argument list, a bare `auth status --json` among them,
+exits 2 with no output. It records every request, so a test reads which
+identities ran under which profiles.
+
+Until the adapter's discovery loaded no settings, the list it answered through
+`auth_status` was the bare `auth status --json`; it follows the adapter's
+argument list (`agent/claude.md`, `fn discover`).
 
 ## `impl ClaudeCli` › `fn discoveries(&self) -> Vec<(String, Option<PathBuf>)> {`
 
-The `auth status --json` requests, in the order they ran: each one's rendered
-identity and the profile it reached the CLI with.
+The `--setting-sources "" auth status --json` requests, in the order they ran:
+each one's rendered identity and the profile it reached the CLI with. Until
+the discovery loaded no settings it collected the bare `auth status --json`.
 
 ## `fn claude_code_preflight<'a>(runner: &'a dyn Runner, pools: &[Pool]) -> RunPreflight<'a> {`
 
@@ -605,6 +612,71 @@ Until the sign-in check read no environment, this was
 same run with `CODEX_API_KEY` set, which held that a Codex variable never
 excused Claude Code.
 
+## `struct SettingsDependentCli {`
+
+---------------------------------------------------------------------------
+No settings loaded, as a worker runs
+---------------------------------------------------------------------------
+
+## `struct SettingsDependentCli {`
+
+A Claude Code CLI whose sign-in depends on the settings it loads, for round
+three of #408's review. It is a [`ClaudeCli`] answering
+`--setting-sources "" auth status --json` through its `auth_status`, that is,
+with no user, project or local settings loaded, and it answers a bare
+`auth status --json`, which would load them, through `with_settings`. Every
+request is recorded by the inner [`ClaudeCli`]. A test gives the two lists
+opposite answers, so the pre-flight's outcome says which one the discovery
+asked.
+
+## `impl SettingsDependentCli` › `fn bare_discoveries(&self) -> usize {`
+
+How many bare `auth status --json` requests reached the CLI: requests that
+would have loaded the settings files. Zero on every path now.
+
+## `fn settings_dependent_over(cli: &Arc<SettingsDependentCli>, pools: &[Pool]) -> Arc<dyn Runner> {`
+
+[`SettingsDependentCli`] with `profiled` over it, as [`profiled_over`] builds
+the run's runner over [`ClaudeCli`].
+
+## `const NO_SETTINGS_LOADED: &str = concat!(`
+
+The sentence the sign-in refusal carries for Claude Code, with the end of the
+sentence before it and the start of the closing after it, so its place in the
+refusal is pinned too: the check loads no user, project or local settings, as
+a worker loads none, so a credential that only a settings file supplies does
+not count. Spelled out, as [`SIGN_IN_REFUSAL_CLOSING`] is, so a change of
+wording is a change to these tests.
+
+## `fn certifies_an_account_signed_in_with_no_settings_loaded_on_a_resume_and_a_fresh_run() {`
+
+Signed in with no settings loaded and signed out with them: an account a
+worker, which loads none, would meet signed in. For the default account
+(one unprofiled pool) and for two profiles ([`two_profiled_pools`]), a resume's
+`certify` passes and a fresh run's `RunnerProbes` ([`on_a_fresh_run`]) passes,
+each with one discovery per account, every one of them
+`--setting-sources "" auth status --json` and none bare, and each ledger
+balances.
+
+On the code before the discovery loaded no settings, it was the bare
+`auth status --json`, which this double answers signed out, so both paths
+refused an account its workers would have met signed in.
+
+## `fn refuses_an_account_signed_in_only_with_its_settings_loaded_on_a_resume_and_a_fresh_run() {`
+
+The reverse: signed out with no settings loaded and signed in with them, the
+shape of a credential that only a settings file supplies. For the default
+account and for two profiles, a resume's `certify` refuses, naming the first
+account ([`MAX_DEFAULT_ACCOUNT`], or `max`'s profile directory), with
+[`NO_SETTINGS_LOADED`] in the refusal. One discovery ran, at `o2`, with no
+settings loaded and under that account's profile or none, and none was bare.
+Nothing was certified and the ledger balances. A fresh run refuses in the same
+words, with the same one discovery, and its pair balances.
+
+On the code before, the bare discovery answered signed in, so both paths
+certified, and every worker under that account would have met it signed out at
+its first attempt.
+
 ## `struct UnresolvedDiscovery(ClaudeCli);`
 
 ---------------------------------------------------------------------------
@@ -613,8 +685,10 @@ The first failure, and the account cap
 
 ## `struct UnresolvedDiscovery(ClaudeCli);`
 
-[`ClaudeCli`], whose every `auth status --json` request is recorded and then
-fails with a report whose process fate is `ProcessFate::Unresolved`
+[`ClaudeCli`], whose every `--setting-sources "" auth status --json` request
+(the bare `auth status --json` until the discovery loaded no settings) is
+recorded and then fails with a report whose process fate is
+`ProcessFate::Unresolved`
 (`RunnerError::unresolved`): the Runner could not establish that the process
 ended. Every other request is answered as [`ClaudeCli`] answers it, so the
 real adapter's probe passes and reaches its discovery.
