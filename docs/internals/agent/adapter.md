@@ -1069,8 +1069,11 @@ No adapter holds process-wide resolution state, and this is the answer to "what 
 on": **nothing is cached, so there is no key.** A cell keyed on nothing would, with two runners in
 one process, hand one boundary's answer to the other, and a cache of a constant is
 indistinguishable from no cache to a *behavioural* test even with two runners. So the claim is
-structural: an adapter that starts remembering an answer fails here on the line that declares the
-cell, before any behaviour depends on it.
+structural: an adapter that starts remembering an answer in a `static`, `thread_local!`, `OnceLock`
+or `LazyLock` written in `bin.rs` or one of the three adapters' source files fails here on that
+line, before any behaviour depends on it. State held another way, such as a `Mutex` field added to
+an adapter struct, or declared in a file the checker does not read, such as `adapter.rs`, is not
+seen.
 
 The checker uses `effects::production_code`, which blanks comments and literals and removes
 test-only items, so a string constant containing `OnceLock` does not declare state. It reads

@@ -37,10 +37,11 @@ until that timeout.
 
 **Permissions are argv** (§20). There is no settings file and no path-deny surface as Claude Code
 has, so the guarantee is the allow-list plus §15's split: an allow-list that names exactly the gate
-commands, no URL grant at all, and never a skip-all flag. That rests on un-allowed tools being
-denied by default, which `--allow-url`'s existence implies but nothing here can verify without the
-binary, so the reviewer profile denies `write` and `shell` outright rather than trusting it where
-the stakes are highest. Docs:
+commands, no URL grant at all, and no skip-all flag of this adapter's own (a profile's `extra_args`
+are appended verbatim). That rests on un-allowed tools being denied by default, which
+`--allow-url`'s existence implies but nothing here can verify without the binary, so the reviewer
+profile denies `write` and `shell` outright rather than trusting it where the stakes are highest.
+Docs:
 <https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-programmatic-reference>
 (flags verified Aug 2026).
 
@@ -166,8 +167,9 @@ review re-ask in `src/review.rs` reuses its first ask's `session_id`. This adapt
 
 The per-attempt permission surface as argv (§20). Edit profiles get the write tool and exactly the
 configured gate commands; reviewers get neither. Nobody is granted a URL, so network access stays
-behind a permission this adapter never gives, and with `--no-ask-user` the agent cannot ask for
-one either.
+behind a permission this adapter never gives. `--no-ask-user` is passed, but whether it also
+suppresses tool-permission prompts is undocumented (above), so a request for a URL could wait for
+the wall-clock timeout rather than be refused.
 
 Reading is not granted explicitly because this CLI allows the working directory by default and
 `--add-dir` is what widens that; the engine never widens it, so an agent sees the workspace and
@@ -243,8 +245,10 @@ is executing the diff under review.
 
 ## `fn no_profile_is_ever_handed_the_whole_machine()` › `for permissions in [PermissionMode::Edit, PermissionMode::ReadOnly] {`
 
-§20: the skip-all class of flags is never used, and no URL is ever granted — that is what keeps an
-edit profile off the network.
+§20: for either permission mode, `build_args` emits none of the skip-all flags and grants no URL,
+which is what keeps an edit profile off the network. The fixture's `extra_args` is empty:
+`build_args` appends a profile's `extra_args` verbatim (`extra_args_are_appended_last`), and
+nothing here checks what they hold.
 
 ## `fn the_short_flag_check_is_not_fooled_by_longer_flags()` › `assert!(!crate::agent::advertises_flag(`
 

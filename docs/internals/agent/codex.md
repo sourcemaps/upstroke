@@ -94,8 +94,8 @@ must refuse the run up front, not fail attempts once spending (§19).
 
 Which of this adapter's pre-flight processes each identity is, named rather than counted for the
 reason [`super::probe_request`] gives. The adapter names its CLI and the boundary resolves it, so
-every process it starts is a fixed, named step; that the table is the whole domain is what
-`preflight_starts_exactly_the_processes_the_ordinal_table_declares` asserts.
+every process it starts is a fixed, named step; that the table is the whole domain at one boundary
+is what `preflight_starts_exactly_the_processes_the_ordinal_table_declares` asserts.
 
 ## `mod probe_ordinal` › `pub const CONFIG_BASE: u32 = 3;`
 
@@ -298,7 +298,8 @@ Vendor names differ; the concepts line up. `cached_input_tokens` is a read from 
 
 ## `fn add_usage` › `total.num_turns = Some(total.num_turns.unwrap_or(0) + 1);`
 
-One `turn.completed` is one turn.
+One `turn.completed` that carries `usage` is one turn: `add_usage` returns before counting when
+`usage` is absent, so such an event adds no turn.
 
 ## `fn parse_login_status(out: &ProcessOutput) -> Discovery {`
 
@@ -335,8 +336,10 @@ type.
 
 ## `mod tests` › `const FORBIDDEN: [&str; 4] = [`
 
-Flags `build_args` must never emit: three would hand the agent the machine (§20), and
-`--ephemeral` would discard the session a same-rung retry resumes.
+Flags `build_args` must never emit from its own arguments: three would hand the agent the machine
+(§20), and `--ephemeral` would discard the session a same-rung retry resumes. The fixture's
+`extra_args` is empty, and `build_args` appends a profile's `extra_args` verbatim, so what they
+hold is not checked here.
 
 ## `mod tests` › `fn debug_models_json(levels: &[&str]) -> String {`
 
@@ -485,9 +488,10 @@ table cannot drift apart.
 
 ## `mod tests` › `fn preflight_starts_exactly_the_processes_the_ordinal_table_declares() {`
 
-The twelve declared ordinals are **exactly** the processes this adapter's pre-flight starts: no
-process takes an identity the table does not enumerate. Both entry points run, `probe` and
-`discover`, with ten and two processes.
+The twelve declared ordinals are **exactly** the processes this adapter's `probe` and `discover`
+start at one boundary, ten and two: no process takes an identity the table does not enumerate. A
+run's pre-flight calls only `probe` for this agent, since its sign-in check covers Claude Code alone
+(`SIGN_IN_CHECKED` in `engine::topology::preflight`).
 
 ## `fn preflight_starts_exactly_the_processes_the_ordinal_table_declares` › `let declared: BTreeSet<u32> = probe_ordinal::ALL.into_iter().collect();`
 

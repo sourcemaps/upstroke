@@ -12,10 +12,10 @@ history. Search each backticked heading fragment separately in the source.
 Claude Code adapter (DESIGN.md §16).
 
 `claude -p` with the prompt on stdin, `--output-format json` parsed defensively, `--model`,
-`--effort`, `--max-turns`, `--resume` for same-rung retries. Permissions are never the skip-all
-flag: [`permission_settings`] generates a narrow per-run settings JSON the engine materializes to
-a file and this adapter passes via `--settings`, keeping the workspace's own
-`.claude/settings.json` untouched.
+`--effort`, `--max-turns`, `--resume` for same-rung retries. This adapter never adds the skip-all
+flag (a profile's `extra_args` are appended verbatim): [`permission_settings`] generates a narrow
+per-run settings JSON the engine materializes to a file and this adapter passes via `--settings`,
+keeping the workspace's own `.claude/settings.json` untouched.
 
 ## `#![allow(clippy::disallowed_methods, clippy::disallowed_macros)]`
 
@@ -174,8 +174,10 @@ Read `claude auth status --json` defensively: a missing or malformed field yield
 The signed-out shape observed in Aug 2026 was `{"loggedIn": bool, "authMethod": "…",
 "apiProvider": "…"}`; signed in (observed 2026-08-10, Max plan) it grew `email`, `orgId`,
 `orgName` and `subscriptionType: "max"`. `loggedIn` drives the auth state; the rest distinguish
-§13's two billing shapes, which decide the estimator rule the written pool gets, and
-`subscriptionType` is the definitive one where present.
+§13's two billing shapes, which decide the estimator rule the written pool gets. `subscriptionType`
+classifies the shape even when `authMethod` matches neither token set, but it does not override the
+other fields: when the three fields' tokens match both the API set and the subscription set,
+`classify_shape` returns `None`.
 
 ## `fn parse_auth_status(out: &ProcessOutput) -> Discovery` › `return discovery.with_note(format!(`
 
@@ -302,10 +304,12 @@ to pass the file too.
 
 ## `mod tests` › `fn every_preflight_process_has_its_own_ordinal() {`
 
-Each pre-flight process carries its own identity, and this adapter runs 3 of them (`--version`,
-`--help`, `auth status --json`), so the ordinals must be 3 distinct values. The expected count is
-written from the steps the adapter performs, not read from the table under test, which would agree
-with itself after losing an entry.
+Each pre-flight process carries its own identity, and at one boundary this adapter runs 3 of them
+(`--version`, `--help`, `auth status --json`), so the ordinals must be 3 distinct values. A run's
+pre-flight runs `auth status --json` again for each further account its pools use, under ordinals
+shifted by `PreflightIdentities::FURTHER_POOL_STRIDE` (`PreflightIdentities::further_pool`); this
+test covers one boundary. The expected count is written from the steps the adapter performs, not
+read from the table under test, which would agree with itself after losing an entry.
 
 ## `fn every_preflight_process_has_its_own_ordinal()` › `let ids: BTreeSet<String> = probe_ordinal::ALL`
 
@@ -324,13 +328,12 @@ CLI, asked of `util::find_program` rather than of the adapter, which does not kn
 ## `fn auth_status_reads_the_signed_in_shape_including_the_plan` › `let signed_in = output(`
 
 The field set observed on a signed-in machine (2026-08-10, Max plan), identifiers dummied.
-`subscriptionType` is the definitive billing field: it must classify even if `authMethod` were
-something no token matches.
+`subscriptionType` must classify the shape even if `authMethod` were something no token matches.
 
 ## `fn auth_status_reads_the_signed_in_shape_including_the_plan` › `let sso = output(`
 
-The same payload with an unrecognized auth method still classifies, because `subscriptionType`
-alone names the billing relationship.
+The same payload with an unrecognized auth method still classifies, because the method matches
+neither token set and `subscriptionType` matches the subscription set.
 
 ## `fn auth_status_reads_the_signed_in_shape_including_the_plan` › `let signed_out = output(`
 
