@@ -518,6 +518,20 @@ pub fn load_for_report(
         }
         Err(refusal) => refusal,
     };
+    let repo_path = captured.repo.path().to_path_buf();
+    let machine_path = captured
+        .machine
+        .as_ref()
+        .filter(|machine| matches!(machine.content, Ok(Some(_))))
+        .map(|machine| machine.path().to_path_buf());
+    let files = match &machine_path {
+        Some(machine_path) => format!(
+            "the settings in {} and the machine-level settings in {}",
+            repo_path.display(),
+            machine_path.display()
+        ),
+        None => format!("the settings in {}", repo_path.display()),
+    };
     let mut narrowed_warnings = Vec::new();
     match load_captured_with(
         &captured.narrowed_to_report(),
@@ -528,8 +542,8 @@ pub fn load_for_report(
         Ok(config) => {
             warnings.push(format!(
                 "{refusal} — `upstroke capacity` reads only `[routing.strategy]` and \
-                 `[capacity]` from this configuration (with the pools file), so it reports \
-                 from those; a run created now would refuse the file"
+                 `[capacity]` from {files} (with the pools file), so it reports from those; \
+                 a run created now would refuse the file"
             ));
             warnings.append(&mut narrowed_warnings);
             Ok(config)
@@ -1106,43 +1120,49 @@ impl CapturedConfig {
             .map(Path::to_path_buf)
     }
 
-    fn narrowed_to_report(&self) -> Self {
+    fn narrowed_to_report(self) -> Self {
         Self {
-            repo: narrowed_to_report(&self.repo),
-            machine: self.machine.as_ref().map(narrowed_to_report),
-            pools: self.pools.clone(),
+            repo: narrowed_to_report(self.repo),
+            machine: self.machine.map(narrowed_to_report),
+            pools: self.pools,
         }
     }
 }
 
-fn narrowed_to_report(snapshot: &FileSnapshot) -> FileSnapshot {
+fn narrowed_to_report(snapshot: FileSnapshot) -> FileSnapshot {
     let Ok(Some(bytes)) = &snapshot.content else {
-        return snapshot.clone();
+        return snapshot;
     };
     let Ok(text) = std::str::from_utf8(bytes) else {
-        return snapshot.clone();
+        return snapshot;
     };
     let Ok(mut table) = text.parse::<toml::Table>() else {
-        return snapshot.clone();
+        return snapshot;
     };
     let mut narrowed = toml::Table::new();
     if let Some(capacity) = table.remove("capacity") {
         narrowed.insert("capacity".to_owned(), capacity);
     }
-    if let Some(toml::Value::Table(mut routing)) = table.remove("routing") {
-        if let Some(strategy) = routing.remove("strategy") {
-            let mut kept = toml::Table::new();
-            kept.insert("strategy".to_owned(), strategy);
-            narrowed.insert("routing".to_owned(), toml::Value::Table(kept));
+    match table.remove("routing") {
+        Some(toml::Value::Table(mut routing)) => {
+            if let Some(strategy) = routing.remove("strategy") {
+                let mut kept = toml::Table::new();
+                kept.insert("strategy".to_owned(), strategy);
+                narrowed.insert("routing".to_owned(), toml::Value::Table(kept));
+            }
         }
+        Some(malformed) => {
+            narrowed.insert("routing".to_owned(), malformed);
+        }
+        None => {}
     }
     match toml::to_string(&narrowed) {
         Ok(serialised) => FileSnapshot {
-            path: snapshot.path.clone(),
+            path: snapshot.path,
             required: snapshot.required,
             content: Ok(Some(serialised.into_bytes())),
         },
-        Err(_) => snapshot.clone(),
+        Err(_) => snapshot,
     }
 }
 

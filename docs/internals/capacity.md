@@ -1636,6 +1636,22 @@ scope that is not one, is refused by the narrowed reading too. The report
 fails with the full reading's refusal, which names the key or the value, and
 not with a warning.
 
+## `fn a_capacity_report_refuses_a_routing_that_is_not_a_table() {`
+
+`routing = "not-a-table"` is refused by the full reading, and the narrowed
+reading keeps the value as written so it refuses it too. The report fails
+with the full reading's refusal and no warning. Before the narrowing kept a
+malformed `routing`, it dropped it, and the report succeeded with the default
+`conserve` strategy over a file a run refuses.
+
+## `fn a_capacity_report_names_an_explicit_settings_file_its_warning_is_about() {`
+
+A file named by `--config` (`elsewhere-settings.toml`) whose `value-max`
+strategy the report reads, with a pin to a model the catalog does not know.
+The pin's refusal says only "fix the pin in upstroke.toml", so the one
+warning that a run would refuse the file names `elsewhere-settings.toml`
+itself, from the path the capture read.
+
 ## `fn a_capacity_report_on_an_accepted_file_warns_of_no_refusal() {`
 
 A file the full reading accepts gives the full reading's result, and no

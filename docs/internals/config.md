@@ -6,19 +6,23 @@ Extended notes for [`src/config.rs`](../../src/config.rs).
 
 Config loading (DESIGN.md §17 subset for `validate`).
 
-Two optional files: repo-level `upstroke.toml` (routing overrides, pins,
-strategy) and user-level `~/.upstroke/pools.toml` (capacity pools, normally
-written by `upstroke connect`). Both missing is the normal fresh-repo case
-and falls back to derived defaults silently.
+Three optional files: the repository's `upstroke.toml`, the machine-level
+`~/.upstroke/upstroke.toml` beside the pools file, and `~/.upstroke/pools.toml`
+(capacity pools, normally written by `upstroke connect`). The repository's
+file is laid over the machine-level one (`design/17`, "Two scopes"). All
+three missing is the normal fresh case and falls back to derived defaults
+silently; a machine-level file that supplies a setting the repository left
+alone is said, in one warning naming both files and each such key. An
+explicit `--config` or `--pools` path that is missing is an error.
 LEGACY-EFFECT: this module is in the **frozen legacy section** of
 `effects/allowlist.toml`, which carries its justification and the condition
 under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2).
 
 ## `#[serde(deny_unknown_fields)]`
 
-The top level of `upstroke.toml`. Its seven fields are exactly the sections
+The top level of `upstroke.toml`. Its eight fields, `[capacity]` among them, are exactly the sections
 `design/17` documents for the repo-level file, so an unknown section name is a
-typo and is refused naming it and the accepted seven. Before this attribute a
+typo and is refused naming it and the accepted eight. Before this attribute a
 misspelled header -- `[budgts]`, `[interation]`, `[runer]` -- deserialized into
 nothing: the whole section vanished, its defaults took effect (no budget
 ceiling; `on_block` interaction in CI; the host runner where the file read as
@@ -735,7 +739,11 @@ refuses, the same reading runs again over
 [`CapturedConfig::narrowed_to_report`]. When that reading accepts, the
 original refusal leads the warnings, followed by the note that the report
 reads only those sections and that a run created now would refuse the file.
-The refusal's own text names the file and the key. When the narrowed reading
+The warning names the settings file read, and the machine-level file too when
+it has content, because a refusal's own text may not: an unknown pinned
+model's says only "fix the pin in upstroke.toml", which is not the file an
+explicit `--config` named. The paths are taken before the narrowing consumes
+the capture. When the narrowed reading
 refuses too, the original refusal is returned rather than the narrowed one.
 The narrowed text is re-serialised, so its line numbers belong to no file.
 
@@ -969,20 +977,25 @@ Capture what a [`load_with`] with these arguments would read.
 
 The captured files, for a caller that has to name them.
 
-## `fn narrowed_to_report(&self) -> Self {`
+## `fn narrowed_to_report(self) -> Self {`
 
 The capture as [`load_for_report`] reads it after a refusal. The repository
 file and the machine-level file are each narrowed to what the report reads.
-The pools file is kept unchanged, because the report reads all of it.
+The pools file is kept unchanged, because the report reads all of it. The
+capture is taken by value and moves through: the full reading is done with
+it, so nothing is copied.
 
-## `fn narrowed_to_report(snapshot: &FileSnapshot) -> FileSnapshot {`
+## `fn narrowed_to_report(snapshot: FileSnapshot) -> FileSnapshot {`
 
 One snapshot, reduced to the top-level `capacity` value and a `routing` table
-that holds only `strategy`, each present only if the file had it. The result
-is re-serialised with `toml::to_string`, keeping the snapshot's path and
-`required`. A snapshot that cannot be narrowed is returned unchanged: a file
-that is absent, unreadable, not UTF-8 or not TOML, or a table that does not
-serialise. The narrowed reading then refuses as the full one did, and
+that holds only `strategy`, each present only if the file had it. A `routing`
+that is not a table is kept as written, so the narrowed reading refuses it as
+the full one did; dropping it would let the report print the default
+strategy over a file a run refuses. The result is re-serialised with
+`toml::to_string`; the snapshot's path is moved into it and `required` is
+copied. A snapshot that cannot be narrowed is returned itself, not a copy: a
+file that is absent, unreadable, not UTF-8 or not TOML, or a table that does
+not serialise. The narrowed reading then refuses as the full one did, and
 [`load_for_report`] returns the original refusal.
 
 ## `mod read;`

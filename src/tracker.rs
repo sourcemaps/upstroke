@@ -110,7 +110,7 @@ pub fn refresh(
     // asks `capacity::report` next, which loads the same files and reports
     // every one of them.
     let mut unreported = Vec::new();
-    let config = crate::config::load(
+    let config = crate::config::load_for_report(
         opts.config_path.as_deref(),
         &opts.repo_root,
         opts.pools_path.as_deref(),
@@ -1300,6 +1300,28 @@ agent = \"claude-code\"
         let rendered = refresh(&none.options(), &Table::new(&[]), &environment)
             .expect("a refresh with nothing to ask")
             .render();
+        assert!(
+            rendered.contains("no pool names a `usage_provider`"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_refresh_reads_past_settings_it_never_uses() {
+        let machine = Machine::new(
+            "tracker-refresh-past-engine",
+            "[pools.claude-max]\nkind = \"subscription-window\"\nagent = \"claude-code\"\n",
+        );
+        std::fs::write(
+            machine.tree.path().join("upstroke.toml"),
+            "[engine]\nmax_paralel = 2\n",
+        )
+        .expect("the machine-level settings");
+
+        let rendered = match refresh(&machine.options(), &Table::new(&[]), &environment) {
+            Ok(report) => report.render(),
+            Err(error) => panic!("the refresh refused the machine-level settings: {error}"),
+        };
         assert!(
             rendered.contains("no pool names a `usage_provider`"),
             "{rendered}"
