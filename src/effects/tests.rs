@@ -5553,8 +5553,10 @@ fn windows_suite_start(selection: &str) -> String {
         "$env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) {{ $suite = Start-Process \
          -FilePath $h -ArgumentList '{selection} {WINDOWS_SUITE_TIMES}' -NoNewWindow -PassThru \
          -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; \
-         $null = $suite.Handle; $suite.WaitForExit(); Get-Content \"$out.part\" | Add-Content \
-         $out; Get-Content \"$err.part\" | Add-Content $err; $code = $suite.ExitCode; \
+         $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try {{ Get-Content \
+         \"$out.part\" | Add-Content $out }} catch {{ \"copying the output of $h failed: $_\"; \
+         if ($code -eq 0) {{ throw }} }}; try {{ Get-Content \"$err.part\" | Add-Content $err }} \
+         catch {{ \"copying the errors of $h failed: $_\"; if ($code -eq 0) {{ throw }} }}; \
          if ($code -ne 0) {{ break }} }}"
     )
 }
@@ -5585,7 +5587,7 @@ fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {
     let collects = "$harnesses = @(Get-Content $built | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -ceq 'compiler-artifact' -and $_.profile.test -and $_.executable } | ForEach-Object { $_.executable }); if ($harnesses.Count -eq 0) { throw \"Cargo built no test harness, so this shard would run nothing\" }";
     let bootstraps = "$env:RUSTC_BOOTSTRAP = '1'; ";
     let runs = "$suite = Start-Process ";
-    let stops = "; $code = $suite.ExitCode; if ($code -ne 0) { break } }\n";
+    let stops = "$suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n";
     let lines: Vec<&str> = script.lines().collect();
     let line_of = |text: &str| lines.iter().position(|line| line.contains(text));
     let build_at = line_of(builds);
@@ -5690,8 +5692,12 @@ fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {
     if !follows(stops, exits) || !follows(exits, counts) {
         out.push(
             "does not stop at the first test harness that fails and exit with that harness's \
-             code before it counts, so a failed harness is judged by its count, or by the code \
-             of a harness that ran after it",
+             code before it counts, having kept the code as `WaitForExit()` returns and only \
+             then copied the harness's two outputs, each in a `try` whose `catch` throws only \
+             for a harness that passed: the text from `WaitForExit()` to the loop's end is read \
+             whole and must come before the exit line, or a failed harness is judged by its \
+             count, by the code of a harness that ran after it, or by a failed copy's error, \
+             its own code never kept and its errors never printed",
         );
     }
     if !follows(lists, exits) || !follows(exits, throws) || !follows(throws, counts) {
@@ -6003,9 +6009,28 @@ fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {
         (
             "the loop stopping at a failed harness without keeping its code",
             replaced(
+                &replaced(script, "$code = $suite.ExitCode; ", ""),
+                "if ($code -ne 0) { break } }",
+                "if ($suite.ExitCode -ne 0) { break } }",
+            ),
+            stops,
+        ),
+        (
+            "the harness's code kept only after its two outputs are copied",
+            replaced(
+                &replaced(script, "$code = $suite.ExitCode; ", ""),
+                "; if ($code -ne 0) { break } }",
+                "; $code = $suite.ExitCode; if ($code -ne 0) { break } }",
+            ),
+            stops,
+        ),
+        (
+            "the harness's standard output copied outside a `try` of its own",
+            replaced(
                 script,
-                "$code = $suite.ExitCode; if ($code -ne 0) { break }",
-                "if ($suite.ExitCode -ne 0) { break }",
+                "try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the \
+                 output of $h failed: $_\"; if ($code -eq 0) { throw } }",
+                "Get-Content \"$out.part\" | Add-Content $out",
             ),
             stops,
         ),
