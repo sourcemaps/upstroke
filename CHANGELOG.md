@@ -8,7 +8,8 @@
   three backticks or tildes on any line outside it, an offered option, guidance that never gives
   up), prints it and saves it in its claim of the run, `decide/` in the run's private directory,
   as `proposal.json` beside the raw output; a refused reply makes it exit non-zero after the report, whose
-  exit says the reason is saved in the proposal. Its refusals are one line each. It writes no
+  exit says the reason is saved in the proposal. Its refusals and configuration errors are one
+  line each. It writes no
   answer and replaces no file. The run id is checked as a plain id before any path is built from
   it. The command holds the run's own lock, the one `resume` takes, from before the run is read
   until the proposal is written or the command fails, so no resume starts while it asks and
@@ -24,12 +25,13 @@
   allowance (default 5), and only a clean, successful, priced call is settled, at its price; any
   other outcome is saved as refused. It asks only a Claude Code reviewer of a host run, whose
   pools pass the credential pre-flight a resume would run and whose CLI passes the probe and
-  sign-in checks a run makes of it, giving the call the recorded model and review effort, the
+  sign-in checks a run makes of it, under the profile a resume probes it under, giving the call
+  the recorded model and review effort, the
   allowance as its own `--max-budget-usd`, no web access, no read of the run's private directory
   and no environment overlay, each checked on the command as built; any other run or command is
   refused before anything is written or asked. A question a person has answered already, checked
-  at admission and again immediately before the call, is refused and never asked, and the plan
-  goes into the prompt only when it is the plan the run recorded.
+  at admission and again immediately before the call, is refused and never asked, and the prompt
+  holds only what the run recorded: no plan file of the checkout goes into it.
 - Capacity is now tracked for the machine rather than for a repository; `[capacity] scope = "repo"`
   or `upstroke capacity --scope repo` folds only this repository. Nothing routes on any of this yet.
   Only an attempt that passed, in a run of any schema, clears another run's rate limit on its pool,

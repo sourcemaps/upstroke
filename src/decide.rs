@@ -221,7 +221,6 @@ struct Decider<'a> {
     model: String,
     effort: crate::ir::Effort,
     timeout: std::time::Duration,
-    credential: Option<PathBuf>,
     private_denials: Vec<String>,
 }
 
@@ -234,12 +233,14 @@ fn refused(message: String) -> UpstrokeError {
     }
 }
 
-/// `error`, a refusal made one line by `refused` wherever it was built: the pre-flights this
-/// command runs build some of theirs, a signed-out account's among them.
+/// `error` as the one line the command prints: a refusal made one line by `refused` wherever it
+/// was built (the pre-flights this command runs build some of theirs, a signed-out account's
+/// among them), and any other error, a configuration error among them (a pools file that does
+/// not parse, whose diagnostic spans lines), made a refusal of its own words, one line too.
 fn one_lined(error: UpstrokeError) -> UpstrokeError {
     match error {
         UpstrokeError::Refused { message } => refused(message),
-        other => other,
+        other => refused(other.to_string()),
     }
 }
 
@@ -340,9 +341,10 @@ fn propose(
         &mut warnings,
     )?;
     let private_denials = admit(opts, started, adapter, &config.pools)?;
-    let credential = crate::capacity::pool_for(&primary.agent, &config.pools)
-        .and_then(|pool| pool.profile.as_ref())
-        .map(PathBuf::from);
+    // The wrapper a resume installs over the runner its pre-flight probes through: every request
+    // made for the reviewer, each probe and the call, carries its agent's bound profile, so the
+    // CLI admitted is the one that is asked, under the account a run's reviewer runs under.
+    let runner = crate::engine::topology::profiled::profiled_borrowing(runner, &config.pools);
     let decider = Decider {
         adapter,
         agent: primary.agent.clone(),
@@ -352,7 +354,6 @@ fn propose(
             .reviews
             .pass_timeout()
             .unwrap_or(crate::config::DEFAULT_REVIEW_PASS_TIMEOUT),
-        credential,
         private_denials,
     };
     let answers = observed.paths().answers();
@@ -361,7 +362,7 @@ fn propose(
         &primary.agent,
         adapter,
         &config.pools,
-        runner,
+        &runner,
         &|what| {
             refused(format!(
                 "run `{}`'s recorded reviewer did not pass the pre-flight a run makes of it: \
@@ -370,9 +371,8 @@ fn propose(
             ))
         },
     )?;
-    let plan_text = recorded_plan(&opts.repo_root.join(&started.plan_path), &started.plan_hash);
     let claim = Claim::of(&observed.paths().private);
-    let prompt = build_prompt(observed, asked, &plan_text);
+    let prompt = build_prompt(observed, asked);
     let call = prepare(
         &decider,
         &opts.repo_root,
@@ -391,7 +391,7 @@ fn propose(
             claim.dir.display()
         ))
     };
-    let returned = ask(&decider, runner, call, &claim).map_err(claimed)?;
+    let returned = ask(&decider, &runner, call, &claim).map_err(claimed)?;
     let verdict = match &returned {
         Returned::Settled { reply, .. } => check_reply(&asked.question, reply),
         Returned::Unsettled { reason, .. } => Err(reason.clone()),
@@ -616,28 +616,6 @@ fn bounded(text: &str) -> (&str, bool) {
     (text.get(..end).unwrap_or_default(), true)
 }
 
-/// The plan file's text for the prompt, forwarded only when its bytes hash to the run's recorded
-/// `plan_hash` (`ir::content_hash`, the hash the run froze the plan under); otherwise a line
-/// saying why it is not, so a plan edited since the run started never reaches the reviewer as
-/// the run's own.
-fn recorded_plan(path: &Path, plan_hash: &str) -> String {
-    match crate::util::read_file_bounded(path) {
-        Ok(bytes) if crate::ir::content_hash(&bytes) == plan_hash => {
-            String::from_utf8_lossy(&bytes).into_owned()
-        }
-        Ok(bytes) => format!(
-            "(the plan file {} is not forwarded: its bytes hash to {}, not to the {plan_hash} \
-             the run recorded, so it is not the plan this run froze)",
-            path.display(),
-            crate::ir::content_hash(&bytes)
-        ),
-        Err(error) => format!(
-            "(the plan file {} could not be read: {error})",
-            path.display()
-        ),
-    }
-}
-
 fn section(prompt: &mut String, title: &str, text: &str) {
     let (kept, cut) = bounded(text);
     let _ = writeln!(prompt, "## {title}\n");
@@ -679,7 +657,10 @@ fn question_text(question: &Question, raised_by: Option<RaisedBy>) -> String {
     text
 }
 
-fn build_prompt(observed: &Observed, asked: &OpenAsked, plan_text: &str) -> String {
+/// The prompt, built from the run's own record alone: its log and the frozen plan `observe` read
+/// and checked against the run's `normalized_plan_digest`. No file of the checkout is read, the
+/// plan file included, so nothing edited since the run started reaches the reviewer as the run's.
+fn build_prompt(observed: &Observed, asked: &OpenAsked) -> String {
     let question = &asked.question;
     let raised = observed.raised_questions();
     let opener = raised.iter().find(|(frozen, _)| frozen.id == question.id);
@@ -728,7 +709,6 @@ fn build_prompt(observed: &Observed, asked: &OpenAsked, plan_text: &str) -> Stri
             .filter(|text| !text.is_empty())
             .unwrap_or("(none)"),
     );
-    section(&mut prompt, "The plan file", plan_text);
 
     prompt.push_str(
         "## Your reply\n\nReply with exactly one fenced ```json block holding an object with \
@@ -1183,7 +1163,7 @@ fn ask(
             &pretty(&settings, &claim.file(SETTINGS_FILE))?,
         )?;
     }
-    let mut request = crate::runner::decide_request(
+    let request = crate::runner::decide_request(
         command,
         task_run.workspace,
         AgentId::new(decider.adapter.id()),
@@ -1192,9 +1172,6 @@ fn ask(
             ordinal: CALL_ORDINAL,
         },
     );
-    if let Some(credential) = &decider.credential {
-        request = request.with_credential_profile(credential.clone());
-    }
     let output = match runner.run_blocking(&request) {
         Ok(output) => output,
         Err(error) => {

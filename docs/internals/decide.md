@@ -60,7 +60,9 @@ agent is asked, in these steps:
   person has answered already is refused and never asked.
 - The recorded reviewer passes the pre-flight a run makes of each recorded agent
   (`preflight::certify_agent`, which `RunPreflight::certify` runs too): its CLI probed through
-  the Runner, and every account the pools file configures for its agent found signed in.
+  the Runner behind the wrapper a resume installs over the runner its pre-flight probes through
+  (`profiled::profiled_borrowing`, over `profiled`'s `Profiled`), so under the profile a resume
+  probes it under, and every account the pools file configures for its agent found signed in.
 - `prepare` builds the command and refuses it unless it carries no environment overlay, its
   `--model` and `--effort` are exactly the recorded reviewer's, and `kept` finds every guarantee
   on the command and settings actually built. A claim is never enough on its own: the check
@@ -68,9 +70,9 @@ agent is asked, in these steps:
 - `unanswered` reads the answer file again, immediately before the run is claimed and the call
   started, so an answer a person published while the pre-flight ran is seen and nothing is spent.
 
-The plan file is forwarded in the prompt only when its bytes hash to the run's recorded
-`plan_hash` (`recorded_plan`). The Runner composes the call's environment for the checkout it
-starts in, the one the command was run in, as it does a probe's
+The prompt is built from the run's own record alone (`build_prompt`): no file of the checkout is
+read for it, the plan file included. The Runner composes the call's environment for the checkout
+it starts in, the one the command was run in, as it does a probe's
 (`host::starts_in_the_started_checkout`).
 
 Only Claude Code claims the guarantees (`guarantees_of`). Copilot and Codex report no dollar
@@ -105,10 +107,10 @@ Effects and their containment are stated in `effects/allowlist.toml`'s funnel ro
 
 ## `pub const INPUT_BOUND: usize = 64 * 1024;`
 
-Each prompt input (the question, the task's text, its last failure, the earlier answers, the
-plan file) is cut to this many bytes on a character boundary, and the prompt says where and of
-how many bytes (`an_input_is_cut_on_a_character_boundary`). A plan can be large; one bound per
-input keeps a long input from crowding out the others.
+Each prompt input (the question, the task's text, its last failure, the earlier answers) is cut
+to this many bytes on a character boundary, and the prompt says where and of how many bytes
+(`an_input_is_cut_on_a_character_boundary`). A task's text or a failure can be large; one bound
+per input keeps a long input from crowding out the others.
 
 ## `pub const DEFAULT_MAX_COST_USD: f64 = 5.0;`
 
@@ -227,7 +229,10 @@ proposal keeps the text exactly as the agent wrote it. The report names the prop
 
 Every refusal this module builds is passed through `util::terminal::one_line`, and `decide` passes
 the refusals the pre-flights it runs build themselves (a signed-out account's, a pools file's
-profile) through the same function (`one_lined`). A refusal quotes a run's or a question's id, a
+profile) through the same function (`one_lined`). Every other error `propose` returns, a
+configuration error among them (a pools file with a TOML syntax error, whose diagnostic spans
+lines), becomes a refusal of its own words there, one line too
+(`malformed_fixture_pools_refusal_is_one_line`). A refusal quotes a run's or a question's id, a
 path, an error, or what the reviewer's CLI printed when a probe failed; none of them can start a
 line of its own or reach the terminal as a control, as the report's lines cannot
 (`every_refusal_is_one_line_whatever_the_reviewer_answered`).
@@ -282,9 +287,18 @@ Until the claim, every refusal is the command's error, with nothing written and 
 After it, a call that returns an outcome that does not settle is saved as refused, and a file that
 cannot be written, or that `Claim::admits` no longer admits, fails the command naming the
 question, with no proposal saved (`a_taken_name_is_never_replaced_and_fails_the_command`,
-`a_claim_changed_while_the_reviewer_runs_is_not_written_into`). The claim stays in every case. The
-credential profile is the first pool of the reviewer's agent (`capacity::pool_for`), as a review
-pass of the run would use; the timeout is the run's recorded review pass timeout, or the review
+`a_claim_changed_while_the_reviewer_runs_is_not_written_into`). The claim stays in every case.
+
+Once the pools file is read, the Runner the command was handed is wrapped
+(`profiled::profiled_borrowing`) in the `Profiled` wrapper a resume installs over the runner its
+pre-flight probes through, and the pre-flight's probes and the call both go through it. So each
+carries the profile of the first pool of the reviewer's agent (`capacity::pool_for`), as a
+resume's probes and a review pass of the run would: a CLI that fails its probe under that profile
+is refused here as a resume's pre-flight refuses it, though it passes under the default account,
+and no paid request is made (`same_probe_refusal_for_configured_profile`). A further account's
+sign-in discovery keeps the profile pre-flight gave it. The call's profile used to be set by hand
+on its request while the probes went through the bare Runner; with one wrapper for both, that
+second lookup is gone. The timeout is the run's recorded review pass timeout, or the review
 default. Split from `decide` so a test can hand it a binding question.
 
 The per-question loop is gone, and with it what it needed: the running spend and the
@@ -442,13 +456,16 @@ probed for, and again immediately before the claim and the call, so an answer pu
 pre-flight ran is not paid for. An answer file that cannot be read refuses the command with
 nothing written. The refusal names the answer, which the run applies when it next reads it.
 
-## `fn recorded_plan(path: &Path, plan_hash: &str) -> String {`
+## `fn build_prompt(observed: &Observed, asked: &OpenAsked) -> String {`
 
-The plan file is forwarded only when its bytes hash (`ir::content_hash`, the hash the markdown
-adapter froze it under) to the run's recorded `plan_hash`. A plan edited since the run started is
-not the plan the run is executing, so the prompt carries a line saying it is not forwarded and
-naming both hashes instead
-(`the_plan_is_forwarded_only_when_its_bytes_are_the_plan_the_run_recorded`).
+The prompt holds only what the run recorded: the question, the task's text from the run's
+registry, its last settled attempt and its earlier answers, all read through `observe` from the
+run's log and its frozen plan, which `observe` adopts only when it digests (SHA-256, every byte)
+to the `normalized_plan_digest` the run recorded. No plan file of the checkout is read. The plan
+file used to be forwarded when its bytes hashed to the run's `plan_hash`, but that hash,
+`ir::content_hash`, drops every `\r`, so a plan file given a paragraph break of two lone carriage
+returns hashed as the recorded plan and its edited bytes reached the reviewer; the read and its
+check are gone rather than guarded (`plan_with_an_added_paragraph_break_is_withheld`).
 
 ## `fn chosen_question(`
 

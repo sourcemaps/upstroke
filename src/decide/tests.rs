@@ -511,7 +511,6 @@ fn rendering_decider() -> Decider<'static> {
         model: "opus".to_owned(),
         effort: Effort::Medium,
         timeout: Duration::from_secs(1),
-        credential: None,
         private_denials: Vec::new(),
     }
 }
@@ -1348,7 +1347,6 @@ fn the_request_is_a_decide_request_for_the_runs_reviewer_with_no_overlay() {
         "  1) retry on frontier",
         "t0 title (t0)",
         "t0 body: make the widget",
-        "The widget task makes the widget.",
         "(no settled attempt of this task failed)",
         "exactly one fenced ```json block",
         "Its opening ```json and its closing ``` are each a line of their own",
@@ -1361,6 +1359,10 @@ fn the_request_is_a_decide_request_for_the_runs_reviewer_with_no_overlay() {
     ] {
         assert!(prompt.contains(fragment), "{fragment}: {prompt}");
     }
+    assert!(
+        !prompt.contains("The widget task makes the widget."),
+        "the checkout's plan file is not the run's record: {prompt}"
+    );
 }
 
 #[test]
@@ -3051,36 +3053,40 @@ fn the_recorded_reviewer_passes_the_runs_own_preflight_before_anything_is_writte
     }
 }
 
+/// The reviewer is handed only plan content the run recorded: the task's text from the frozen
+/// plan its log was checked against, and nothing of the plan file in the checkout. A plan file
+/// edited by two lone carriage returns, a paragraph break Markdown reads, still hashes as the
+/// plan the run recorded (`ir::content_hash` drops every `\r`), and still never reaches it.
 #[test]
-fn the_plan_is_forwarded_only_when_its_bytes_are_the_plan_the_run_recorded() {
-    let prompt_of = |fixture: &Fixture| {
-        let runner = Scripted::answering(vec![claude_output(&reply(VALID), Some(0.25))]);
-        decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
-        let seen = runner.seen();
-        let [request] = seen.as_slice() else {
-            panic!("one request: {seen:?}");
-        };
-        String::from_utf8_lossy(&request.command.stdin).into_owned()
+fn plan_with_an_added_paragraph_break_is_withheld() {
+    let fixture = one_question("decide-plan-withheld");
+    let edited = PLAN_TEXT.replacen("task ", "task \r\r", 1);
+    assert_ne!(edited, PLAN_TEXT);
+    assert_eq!(
+        crate::ir::content_hash(edited.as_bytes()),
+        crate::ir::content_hash(PLAN_TEXT.as_bytes()),
+        "the edit is invisible to the hash the run recorded the plan file under"
+    );
+    std::fs::write(fixture.repo.join("docs").join("plan.md"), &edited).expect("edit the plan");
+
+    let runner = Scripted::answering(vec![claude_output(&reply(VALID), Some(0.25))]);
+    decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+    let seen = runner.seen();
+    let [request] = seen.as_slice() else {
+        panic!("one request: {seen:?}");
     };
-
-    let fixture = one_question("decide-plan-recorded");
-    let prompt = prompt_of(&fixture);
-    assert!(prompt.contains(PLAN_TEXT), "{prompt}");
-    assert!(!prompt.contains("is not forwarded"), "{prompt}");
-
-    let fixture = one_question("decide-plan-edited");
-    let edited = "# The plan\n\nThe widget task makes a gadget instead.\n";
-    std::fs::write(fixture.repo.join("docs").join("plan.md"), edited).expect("edit the plan");
-    let prompt = prompt_of(&fixture);
-    assert!(!prompt.contains("makes a gadget instead"), "{prompt}");
-    assert!(!prompt.contains(PLAN_TEXT), "{prompt}");
+    let stdin = String::from_utf8_lossy(&request.command.stdin);
     assert!(
-        prompt.contains(&format!(
-            "is not forwarded: its bytes hash to {}, not to the {} the run recorded",
-            crate::ir::content_hash(edited.as_bytes()),
-            crate::ir::content_hash(PLAN_TEXT.as_bytes())
-        )),
-        "{prompt}"
+        !stdin.contains(&edited),
+        "the edited plan file was forwarded: {stdin}"
+    );
+    assert!(
+        !stdin.contains("# The plan") && !stdin.contains('\r'),
+        "a plan file's bytes reached the reviewer: {stdin}"
+    );
+    assert!(
+        stdin.contains("t0 title (t0)\n\nt0 body: make the widget\n\nacceptance:\nt0 passes"),
+        "the task's text the run recorded: {stdin}"
     );
 }
 
@@ -3160,6 +3166,82 @@ fn every_refusal_is_one_line_whatever_the_reviewer_answered() {
         message.contains("pre-flight: pool `claude-max` names the credential profile directory")
             && message.contains("\\u{1b}[2J\\u{7}"),
         "{message}"
+    );
+}
+
+/// A configuration error is printed as one line too: a pools file with an ordinary TOML syntax
+/// error, whose diagnostic spans lines, refuses the command in one line, before anything is
+/// written, probed or asked.
+#[test]
+fn malformed_fixture_pools_refusal_is_one_line() {
+    let fixture = one_question("decide-one-line-pools");
+    std::fs::write(
+        fixture.repo.join("pools.toml"),
+        "[pools.claude-max\nkind = \"subscription-window\"\n",
+    )
+    .expect("a pools file with an invalid table header");
+    let runner = Acting::priced(0.25);
+    let message = decide(&fixture.options(), &BuiltinAdapters, &runner)
+        .expect_err("a pools file that does not parse")
+        .to_string();
+    assert!(is_one_line(&message), "{message:?}");
+    assert!(message.contains("pools.toml"), "{message}");
+    assert!(runner.probes().is_empty(), "nothing was probed");
+    assert!(runner.seen().is_empty(), "no agent was asked");
+    assert!(!fixture.claimed(), "nothing was written");
+}
+
+/// An installed Claude Code, signed in, whose `--version` probe fails under any credential
+/// profile and passes under the default account.
+fn version_fails_under_a_profile(
+    request: &RunnerRequest,
+) -> Option<Result<ProcessOutput, RunnerError>> {
+    let versioned = request.command.args.iter().any(|arg| arg == "--version");
+    probe_reply(request, SIGNED_IN).map(|probed| {
+        Ok(if versioned && request.credential_profile.is_some() {
+            ProcessOutput {
+                code: Some(1),
+                stderr: "this profile's CLI cannot start".to_owned(),
+                ..probed
+            }
+        } else {
+            probed
+        })
+    })
+}
+
+/// The reviewer's capability probes go through the wrapper a resume's pre-flight probes through
+/// (`engine::topology::profiled`), so each carries the profile the pools file binds the
+/// reviewer's agent to: a CLI whose version probe fails under that profile and passes under the
+/// default account is refused, as a resume's pre-flight refuses it, and no paid request is made.
+#[test]
+fn same_probe_refusal_for_configured_profile() {
+    let fixture = one_question("decide-probe-profile");
+    let runner = Acting::priced(0.25).probing(version_fails_under_a_profile);
+    let message = decide(&fixture.options(), &BuiltinAdapters, &runner)
+        .expect_err("the configured profile's CLI fails its version probe")
+        .to_string();
+    assert!(
+        message.contains(&format!(
+            "run `{RUN}`'s recorded reviewer did not pass the pre-flight a run makes of it: the \
+             `{}` CLI:",
+            crate::agent::claude::ADAPTER_ID
+        )),
+        "{message}"
+    );
+    assert!(
+        runner.seen().is_empty(),
+        "a paid request was made: {:?}",
+        runner.seen()
+    );
+    assert!(!fixture.claimed(), "nothing was written");
+    let probes = runner.probes();
+    assert!(!probes.is_empty(), "the CLI was probed");
+    assert!(
+        probes
+            .iter()
+            .all(|probe| probe.credential_profile.as_ref() == Some(&fixture.profile)),
+        "every probe carries the configured profile: {probes:?}"
     );
 }
 

@@ -1,6 +1,7 @@
 //! Extended notes: `docs/internals/engine/topology/profiled.md`
 
 use std::collections::BTreeMap;
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -21,6 +22,19 @@ pub(super) fn profiled(inner: Arc<dyn Runner>, pools: &[Pool]) -> Arc<dyn Runner
     Arc::new(Profiled { inner, profiles })
 }
 
+/// `inner`, borrowed, behind the wrapper `profiled` installs over a run's runner, for
+/// `upstroke decide`, which holds its runner by reference: its reviewer's pre-flight probes and
+/// its call carry the profile a resume's would.
+pub(crate) fn profiled_borrowing<'r>(
+    inner: &'r dyn Runner,
+    pools: &[Pool],
+) -> impl Runner + use<'r> {
+    Profiled {
+        inner,
+        profiles: profiles(pools),
+    }
+}
+
 fn profiles(pools: &[Pool]) -> BTreeMap<String, PathBuf> {
     pools
         .iter()
@@ -32,12 +46,12 @@ fn profiles(pools: &[Pool]) -> BTreeMap<String, PathBuf> {
         .collect()
 }
 
-struct Profiled {
-    inner: Arc<dyn Runner>,
+struct Profiled<R> {
+    inner: R,
     profiles: BTreeMap<String, PathBuf>,
 }
 
-impl Profiled {
+impl<R> Profiled<R> {
     fn stamped(&self, request: &RunnerRequest) -> Option<RunnerRequest> {
         if request.role == ExecutionRole::Implement
             || request.credential_profile.is_some()
@@ -61,7 +75,11 @@ fn further_account_probe(invocation: &InvocationId) -> bool {
     )
 }
 
-impl Runner for Profiled {
+impl<R> Runner for Profiled<R>
+where
+    R: Deref + Send + Sync,
+    R::Target: Runner,
+{
     fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {
         match self.stamped(request) {
             None => self.inner.run(request, call),

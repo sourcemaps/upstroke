@@ -443,7 +443,10 @@ it claims the run, writes anything or asks any agent: the agent's probe, then
 probe or sign-in discovery: `certify` passes [`refused`] for the run's policy,
 so a run's pre-flight is refused in the same words as before the split; decide
 passes its own, which says nothing was written and no agent asked. The probe's
-capabilities are returned for `certify` to keep.
+capabilities are returned for `certify` to keep. Both hand it a boundary over
+the same `profiled` wrapper: a resume's `registering` sits over the runner
+`entry` profiled, and decide's runner is wrapped by `profiled_borrowing`, so
+the agent's own probes carry its first pool's profile on either path.
 
 ## `pub(crate) fn certify_agent(` › `let accounts = Account::of_agent(pools, agent)?;`
 

@@ -68,7 +68,8 @@ report no dollar cost); a `--max-cost-usd` that is not a positive number; a priv
 that is not a real directory or, on Unix, is not the user's own and closed to group and other
 (§15: the claim relies on it); a private directory no
 permission rule can name exactly; and a reviewer that fails the pre-flight a run makes of each
-recorded agent (its CLI probed, and every account its pools configure signed in). Whether a
+recorded agent (its CLI probed under the profile a resume's pre-flight probes it under, and every
+account its pools configure signed in). Whether a
 person has answered the question is read again immediately before the call. A claim admits
 nothing by itself: the call's command is checked as built, and is refused before it is written or
 started unless it carries no environment overlay, exactly the recorded reviewer's `--model` and
@@ -76,8 +77,10 @@ the recorded review effort as `--effort`, `-p` with `--output-format json`, `--m
 most the allowance, `--permission-mode dontAsk`, `--setting-sources ""`, `--strict-mcp-config`
 and no flag besides the call's own, and settings that allow `Read`, `Glob` and `Grep` at most and
 deny `WebFetch`, `WebSearch`, and reads of `.upstroke/**` and of the run's private directory. The
-plan file goes into the prompt only when its bytes hash to the plan the run recorded, and the call
-starts in the checkout the command was run in, its environment composed for that checkout. A run
+prompt is built from the run's own record alone, its log and its frozen plan, and no plan file of
+the checkout goes into it; the call starts in the checkout the command was run in, its environment
+composed for that checkout. Every refusal and configuration error the command prints is one line.
+A run
 is decided once: immediately before its call the command claims it by creating `decide/` in the
 run's private directory exclusively (§15), and a run whose claim exists, complete, partial or
 anything else at that name, is refused, never adopted, with nothing written and no agent asked;
