@@ -135,3 +135,39 @@ and `await_group_end` returns at once (near lines 3636-3639), so the children `g
 itself starts are neither killed nor waited for, and routing the spawn through
 `fixture::sampled_git`, the change prescribed above, is not shown to cure this fingerprint.
 
+## A fourth and a fifth fingerprint, on hosted Windows, 2026-11-22
+
+The same test, `workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered`,
+failed twice on 2026-11-22 on a GitHub-hosted `windows-latest` runner, in the job
+`test (windows-latest, 8 of 10)`, each time the only failure of its job; the earlier fingerprints
+were on the self-hosted guest. Each log's SHA-256 below is that of the log with its ANSI escapes
+stripped.
+
+- CI run 44970652323, job 137049487605, `pull_request` for #400 at `c3908c6e`, 2026-11-22
+  01:16:13Z. The run checked out `2f0ac78`, GitHub's merge of `c3908c6e` into `master` at
+  `b73d347a`. Log `evidence/job-44970652323-137049487605.log`, SHA-256
+  `a624ef837b7042b99ab455bb90832afd869cd34d243250d283a7baaeb72a4288`. Line 732 reports the test
+  `FAILED`; line 745 is the panic at `src\workspace_manager\tests.rs:14534:10`, and line 746 its
+  message, `forced removal converges: Filesystem { operation: "remove", path: "…\upstroke-sample-proposalcherrypick-KTBYWWEH70\private\workspaces\ef0a5aee9e9181b5\01KZSWEEP00000000000000001\merge\s2_WG9T4H5MXCSP", source: Os { code: 32, … message: "The process cannot access the file because it is being used by another process." } }`.
+  That `expect` is the forced removal in the sampler's recovery
+  (`remove_worktree_proving(…, WriterProof::NoWriterAlive)`). The log holds the `CandidateStage`
+  and `CandidateWriteTree` summary lines and the `ProposalCherryPick` budget line, and no
+  `ProposalCherryPick` summary line: the panic came inside that site's sampling. Line 752:
+  `318 passed; 1 failed; 19 ignored`. #400 changes `src/workspace_manager.rs`,
+  `src/workspace_manager/fixture.rs` and `src/workspace_manager/hooks.rs`. The test passed on
+  #400's next head, `c0f60b7b` (the same tree as `c3908c6e`), in run 44978559642; that run checked
+  out `8c6e32bb`, a merge into a later `master` (`fe2b9bc5`), so it did not test the same tree.
+- CI run 45019915010, job 137200313603, `push` to `master` at `cffdb983`, 2026-11-22 11:58:41Z.
+  Log `evidence/job-45019915010-137200313603.log`, SHA-256
+  `b4402384b52bedb30ea62316728c4df664a7f5369e636af99ce14fc7184126fb`. Line 722 reports the test
+  `FAILED`; line 737 is the panic at `src\workspace_manager\tests.rs:13274:9`, and line 738 its
+  message, `every sample recovered by its classified action`, the third fingerprint's assertion.
+  The log holds all four site summary lines, the last
+  `Worktree.Add: n=8 none=1 internal=2 after=5 unclassified=0`, so the failing site was
+  `Worktree.Add`. Line 744: `319 passed; 1 failed; 19 ignored`. The same tree passed: merge-queue
+  run 45017983663 tested the same commit, `cffdb983`, and passed.
+
+These are a fourth and a fifth fingerprint of this row, not a new row: a forced removal that fails
+and a recovery that fails are consistent with this file's failure sequence — a real `git` still
+running after the kill ended its launcher — and that reading is not established by the logs.
+
