@@ -947,7 +947,7 @@ reader brief 3 had put here. That reader read `<common dir>/config` alone, so
 a `true` set globally, by an include or in the environment read as `Absent` on
 a case-sensitive filesystem. The manager's read, and its `effects/wrappers.toml`
 row, are the one instrument change root authorized for it. The witness is
-`workspace_manager::tests::core_ignorecase_is_gits_effective_answer_at_every_scope`:
+`workspace_manager::tests::guarded_reads::core_ignorecase_is_gits_effective_answer_at_every_scope`:
 - local, global, include and environment precedence;
 - unset, true and false;
 - a value that is not a boolean, and a file Git cannot parse;

@@ -774,7 +774,7 @@ The disarm rule, `R6-C1`: the reaper is cancelled only when nothing is in flight
 cover ended with an established fate — a normal end, or an error return whose every
 container the runner established gone. Otherwise it is kept armed past the runner's last
 handle until the process exits (`tests::a_runner_whose_container_is_unresolved_keeps_its_reaper_armed_past_its_drop`;
-two-process, `engine::topology::coordinator::tests::a_runner_whose_containers_are_unresolved_keeps_its_reaper_armed_past_its_last_handle_until_the_process_exits`).
+two-process, `engine::topology::coordinator::tests::runners::a_runner_whose_containers_are_unresolved_keeps_its_reaper_armed_past_its_last_handle_until_the_process_exits`).
 The fates read are the ones this runner computed for its own containers, so no caller's
 ledger can get the rule wrong.
 

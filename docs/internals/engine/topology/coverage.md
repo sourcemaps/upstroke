@@ -99,7 +99,7 @@ The integrate suite's exact-base fast path, whose assertion the no-execution rec
 Every fast sequence the suite's funnel executions record: `s0` is the
 integrate suite's exact-base fast path; `exact-base-fast` is the
 workspace manager lane's exact-base tour
-(`workspace_manager::tests::every_site_this_lane_owns_executes_both_hook_phases`).
+(`workspace_manager::tests::residue::every_site_this_lane_owns_executes_both_hook_phases`).
 
 ## `pub const FAST_SEQUENCES: &[&str] = &["s0", "exact-base-fast"];`
 
