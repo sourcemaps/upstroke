@@ -3435,3 +3435,32 @@ the daemon's no-such-image answer, and one error. The log holds the six
 questions once each, in order. No logged invocation and no recorded argv
 holds `pull`: the check reads the asked and recorded argv, not the record's
 prose, whose scope statement names what was not done.
+
+## `fn an_unanswered_docker_question_names_the_end_it_met_and_the_time_it_ran() {`
+
+`DOCKER-QUESTION-UNFINISHED-NAMES-NO-END-AND-NO-TIME`: the failure of a
+question that ended before it answered keeps its old words first, then names
+the end it met and how long it ran. Four outputs with no exit code are read
+through `answer_within`, with no daemon and no process: one its bound ended,
+one its bound ended that also came back limited, one limited with no bound, and
+one with neither flag. Each failure is asserted whole, so the old words, the
+end and the time are held together: the bound is read before the limit flag
+that collection can set after the kill, the limit is named only together with a
+signal, which the output cannot tell it from, and the time is the output's
+duration in whole milliseconds, rounded down (4.999 ms reads as 4 ms). The
+cancellation reading is not among them, because `answer_within` reads every
+outcome as that of a question whose stop never fired; the next test holds it.
+
+## `fn an_unanswered_docker_question_names_its_cancellation_only_when_its_stop_fired() {`
+
+An unfinished question names its invocation's cancellation as its end only
+when its stop fired. `answer_recording_stop` is given stand-in questions, with
+no daemon and no process funnel, that each return the same output with no exit
+code: one asks the stop of a cancelled invocation and is told true, one asks
+the stop of a live invocation and is told false, and one never asks the stop of
+a cancelled invocation. Only the first names `its invocation's cancellation`;
+the other two name `a signal`. The first two also hold that the stop passes the
+cancellation's answer through unchanged, and the third that the record is of a
+true answer the question was given and not of the invocation's state when the
+outcome is read: a cancellation the process funnel never acted on did not end
+the question.
