@@ -825,17 +825,24 @@ mod tests {
     fn the_commands_that_spawn_outside_a_run_are_named_and_counted() {
         let outside: Vec<&str> = DISPATCH
             .iter()
-            .filter(|(name, _, _)| matches!(*name, "connect" | "capacity"))
+            .filter(|(name, _, _)| matches!(*name, "connect" | "capacity" | "decide"))
             .map(|(name, _, _)| *name)
             .collect();
-        assert_eq!(outside, vec!["connect", "capacity"]);
-        assert_eq!(outside.len(), 2, "two commands, and this is the count");
-        for name in &outside {
+        assert_eq!(outside, vec!["connect", "capacity", "decide"]);
+        assert_eq!(outside.len(), 3, "three commands, and this is the count");
+        for (name, class) in [
+            ("connect", CommandClass::ReadOnly),
+            ("capacity", CommandClass::ReadOnly),
+            ("decide", CommandClass::Write),
+        ] {
             let row = DISPATCH
                 .iter()
-                .find(|(n, _, _)| n == name)
+                .find(|(n, _, _)| *n == name)
                 .expect("a named command is in the table");
-            assert_eq!(row.2, CommandClass::ReadOnly);
+            assert_eq!(
+                row.2, class,
+                "`{name}`: only `decide` starts a full agent CLI, so only it joins the ambient job"
+            );
         }
     }
 

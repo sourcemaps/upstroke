@@ -11,6 +11,11 @@ The durable run artifacts are **split in two**, by who is allowed to read each h
     answers/<question-id>.json    # answers dropped by `upstroke answer`
     run.lock                      # advisory; OS-released, so a crash leaves nothing stale
     report.json                   # projection of the log for humans; never read back
+<repo>/.upstroke/proposals/<run-id>/  # `upstroke decide`'s advice (§18); no run reads it
+    reservation-<n>.json          # one question slot and the dollars set aside, before its call
+    <question-id>.<n>-decide.json # that call's permission settings
+    <question-id>.<n>.out         # its agent's raw output
+    <question-id>.<n>.json        # the proposal: accepted with its record, or refused with a reason
 ~/.upstroke/runs/<run-id>/          # agent-authored — outside every agent's reach
     transcripts/<task>-<attempt>.json
     reviews/<task>-<attempt>-review.json
@@ -71,6 +76,32 @@ The answer file is part of the run-scoped run-directory
 contents that the effects vocabulary's resource row R21 accounts for. This
 paragraph was added on 2026-11-13 to record what the answer readers already
 do, so that their tests have a design sentence to be held to.
+
+**A proposal is advice, and no run reads it.** `upstroke decide` (§18) writes
+only under `<repo>/.upstroke/proposals/<run-id>/`, never into a run's public or
+private half or its answers, and appends no event. Every file there is created
+new and synced with its directory, and none is replaced or deleted. Each of
+`.upstroke`, `proposals` and `<run-id>` must be a real directory, read without
+following a link (on Unix the repository owner's and writable by no other
+user), and the run's directory must keep the identity it had when a call was
+reserved, checked before each file is created. The run id and a question id are
+written into a name only as plain components: ASCII letters, digits, `-` and
+`_`. The directory is the run's decide accounting, read again before every
+call. `reservation-<n>.json`, numbered from 1 with no gap and created
+exclusively, so concurrent launchers take one number each, records the run, its
+sequence, the question, its slot (each question has two), the dollars reserved,
+the allowance and what was spent before it. A proposal records the run, the
+question, the decider's agent, model and effort, `status` (`accepted` with the
+parsed `record`, or `refused` with a `reason`), the `cost_usd` the agent
+reported or `null`, the `reserved_usd`, and `raw_output`, the raw output's path
+from the repository root with `/` separators, so it names the same file in any
+checkout. A reserved slot counts as its proposal's reported cost, or else as all
+it reserved; a proposal with no reservation counts as its reported cost. A
+reservation that does not parse, a gap in the numbering, a slot reserved twice,
+an entry that is not a regular file, a proposal with no reservation and no cost,
+and a raw output or settings file with neither, leave the spend unknowable, and
+then the run's decide calls start nothing until a person settles those files.
+This paragraph was added on 2026-11-26 with `upstroke decide`.
 
 A fresh sequential run reserves the global private root and its repository's
 public root with exclusive directory creation before creating skeleton files,

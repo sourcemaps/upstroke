@@ -8,7 +8,7 @@ as it is in the source, so the heading is the grep string that finds the code.
 
 ## Module
 
-The runner contract: `CommandSpec`, `AgentId`, `ProbeTarget`, `ExecutionRole`, `RunnerRequest` and its three role builders, `RunnerError`, the `Runner` trait, `SPAWN_SITE` and `HarnessHooks`; and the censuses that pin where a request, a command, a profile and an allowance are built. Every item was `src/runner/mod.rs`'s until #318's third round moved it here, unchanged, and re-exported it from the root (`pub use contract::*`), so `upstroke::runner::CommandSpec` and the rest resolve as they did.
+The runner contract: `CommandSpec`, `AgentId`, `ProbeTarget`, `ExecutionRole`, `RunnerRequest` and its four role builders, `RunnerError`, the `Runner` trait, `SPAWN_SITE` and `HarnessHooks`; and the censuses that pin where a request, a command, a profile and an allowance are built. Every item was `src/runner/mod.rs`'s until #318's third round moved it here, unchanged, and re-exported it from the root (`pub use contract::*`), so `upstroke::runner::CommandSpec` and the rest resolve as they did.
 
 ## `#![forbid(`
 
@@ -858,25 +858,31 @@ effect-before-`run_started` (T-RUNSTART on a fresh run, T-RESUME on a
 resume) while the site it is recorded under says event-before-effect in
 T-ATTEMPT.
 
+Since 2026-11-25 `Decide` is a sixth role, and the third outside. `upstroke
+decide` starts it from the CLI against a run that is parked or finished,
+never from a coordinator: no `attempt_started` precedes it, and it appends
+nothing to any run's event log, so there is no event for its spawn to
+follow at all.
+
 **The site's own variants are not this slice's to add.** The site enum,
 its adjacency and its fault row are `topology::effects` — PR3's, frozen
 here, and in its `sites.rs` and `vocab.rs` children since that module was
 split — and a probe context would be a *new variant* of an
 inventory the packet enumerates. That half is deferred, with an owner,
 in `48f2af7a:reviews/FINDINGS.md`. What this test contributes is that the
-mismatch is counted rather than silent: the two roles are named here,
+mismatch is counted rather than silent: the three roles are named here,
 so ST-07 evidence over `Process.Spawn` cannot be read as covering the
-probe prefixes.
+probe prefixes or a decider.
 
 **This count discharges nothing about the hooks themselves, and must
-not be read as if it did.** Counting that two roles fall outside the
+not be read as if it did.** Counting that three roles fall outside the
 site's declared context proves the mismatch exists; it does not prove
 the containment hooks execute on those roles, and a `HostRunner::run`
 that passed `NoHooks` for `Probe(_)` would leave this test green. That
 obligation is PR4's — `scope`'s "**probes**, workers, gates, reviews go
 through the Runner" and `proof_tests[3]`'s "containment sub-effect hook
-tests (ST-07 subset)" — and it is discharged at runtime, for all five
-roles, by `host::tests::every_role_reaches_the_containment_points_of_this_platform`
+tests (ST-07 subset)" — and it is discharged at runtime, role by role,
+by `host::tests::every_role_reaches_the_containment_points_of_this_platform`
 and `host::tests::a_fault_armed_at_any_containment_point_stops_any_role`.
 
 ## `fn the_spawn_site_files_every_role_under_one_context_and_the_count_says_which() {` › `assert_eq!(SPAWN_SITE, EffectSiteId::Process(ProcessSite::Spawn));`
@@ -887,7 +893,9 @@ Transcribed from PR3's inventory, not read back from PR4.
 
 Which roles this slice spawns, and whether each runs inside an
 attempt — i.e. after the durable event the site is adjacent to.
-Written from the packet's own ordering of a run's phases.
+Written from the packet's own ordering of a run's phases, and for
+`Decide` from where its one caller, `upstroke decide`, starts it:
+outside every run.
 
 ## `mod tests` › `fn the_containment_coordinates_are_pinned_against_written_literals() {`
 

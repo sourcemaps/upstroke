@@ -1438,7 +1438,7 @@ pub(crate) mod tests {
             (ExecutionRole::Implement, true),
             (ExecutionRole::Gate, true),
             (ExecutionRole::Review, true),
-            (ExecutionRole::Decide, true),
+            (ExecutionRole::Decide, false),
             (ExecutionRole::Probe(ProbeTarget::Shell), false),
             (
                 ExecutionRole::Probe(ProbeTarget::Agent(AgentId::new("claude-code"))),
@@ -1457,14 +1457,20 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(
             outside,
-            vec!["probe(shell)".to_owned(), "probe(claude-code)".to_owned()],
-            "the pre-flight roles, whose spawns precede `run_started` and are \
-             nevertheless recorded under a site adjacent to `attempt_started`"
+            vec![
+                "decide".to_owned(),
+                "probe(shell)".to_owned(),
+                "probe(claude-code)".to_owned()
+            ],
+            "the decider, which `upstroke decide` starts outside any run and so \
+             after no `attempt_started`, and the pre-flight roles, whose spawns \
+             precede `run_started`; all three are nevertheless recorded under a \
+             site adjacent to `attempt_started`"
         );
         assert_eq!(
             outside.len(),
-            2,
-            "two of the six roles spawn outside the context this site names — \
+            3,
+            "three of the six roles spawn outside the context this site names — \
              counted so the boundary cannot grow in silence"
         );
     }

@@ -222,11 +222,12 @@ and `crash_reconstruction` anchors the ambient job at the same coordinate:
 ambient Job Object … if the ambient job cannot be created or joined the
 write command refuses at startup with a diagnostic **before any workspace
 effect** (no degraded mode; deferred)". The parenthesis in the census is the
-enumeration: a write command is `run` or `resume`.
+enumeration: a topology write command is `run` or `resume`.
 
-For today's binary that is `Command::Run` and `Command::Resume`, and the
-classification is by **dispatch arm**, so `run --dry-run` is a write command
-too. That is deliberately one notch wider than "makes a workspace effect":
+For today's binary the write commands are `Command::Run`, `Command::Resume`
+and `Command::Decide`, which is not a topology write command and is classified
+for the reason below. The classification is by **dispatch arm**, so
+`run --dry-run` is a write command too. That is deliberately one notch wider than "makes a workspace effect":
 the packet's coordinate is *process start*, which precedes flag
 interpretation, and a preview that shares an arm with the command that
 spends should not be the one place containment is skipped. It is asserted
@@ -235,10 +236,11 @@ rather than left implicit (`the_dry_run_preview_is_classified_with_its_arm`).
 `answer` writes a file into a run directory and `connect` writes the pools
 file, but neither is a topology write command: neither drives a run, and the
 census the packet anchors here is a *run's* census. `connect` and `capacity`
-do spawn agent CLIs to discover them — two commands, counted and asserted in
-`the_commands_that_spawn_outside_a_run_are_named_and_counted` — and those
-children are outside INV-18's "the **coordinator's** ambient … Job Object",
-because neither command is a coordinator of a run.
+do spawn agent CLIs to discover them, and those children are outside INV-18's
+"the **coordinator's** ambient … Job Object", because neither command is a
+coordinator of a run. With `decide` they are the three commands that spawn
+outside a run, counted and asserted with their classes in
+`the_commands_that_spawn_outside_a_run_are_named_and_counted`.
 
 `decide` is the one write command that drives no run, and it is classified
 `Write` on purpose. It starts a full agent CLI (the run's primary reviewer, on
@@ -247,12 +249,18 @@ and that agent's descendants have to be contained as `run`'s are: a decider
 that is killed or times out must not leave a process tree behind it, and the
 ambient job is how the Runner guarantees that. Joining the job costs nothing
 the command needs, and a containment failure refusing it before any agent
-starts is the behaviour wanted. It writes nothing into a run: its proposals go
-under `.upstroke/proposals/<run-id>/` (`docs/internals/decide.md`).
+starts is the behaviour wanted. It writes nothing into a run: its
+reservations, call settings, raw outputs and proposals go under
+`.upstroke/proposals/<run-id>/` (`docs/internals/decide.md`). Its admission
+(`decide::admit`) refuses a run recorded on the container runner before
+anything is written or asked, so the only agent it ever starts is on this
+host, inside this job.
 
 ## `enum CommandClass` › `Write,`
 
-A topology write command: it drives a run and must contain its children.
+A command that starts children which must be contained: a topology write
+command (`run`, `resume`), which drives a run, or `decide`, which drives none
+but starts an agent CLI.
 
 ## `enum CommandClass` › `ReadOnly,`
 
@@ -407,8 +415,9 @@ Every subcommand this binary dispatches, with an invocation that parses
 and the class the packet gives it.
 
 Written here by hand from `decisions.sequential_substrate.startup_census`
-("every topology write command (run, resume)"), so it is an oracle
-independent of [`command_class`]. A command added to the enum without
+("every topology write command (run, resume)"), with `decide` added as the
+one write command that drives no run (`enum CommandClass {`), so it is an
+oracle independent of [`command_class`]. A command added to the enum without
 being added here fails
 [`every_dispatch_arm_is_classified_by_the_packets_rule`] — the list that
 rots is replaced by a list that is checked.
@@ -432,15 +441,25 @@ the widening cannot become invisible.
 
 ## `mod tests` › `fn the_commands_that_spawn_outside_a_run_are_named_and_counted() {`
 
-The two commands that spawn a host child outside a run, counted so the
+The three commands that spawn a host child outside a run, counted so the
 boundary cannot grow in silence. `connect` and `capacity` both probe the
 installed agent CLIs through the adapter probes in `connect::run_with` and
 `capacity::report`; neither
 drives a run, so neither is the "coordinator" whose ambient job INV-18
 names. Since 2026-11-23 `capacity --refresh` also starts `curl`, once per
 pool that names a usage provider, through the same host Runner: it is the
-same command, so the count stands at two, and it is the only child any
-command starts in order to reach a network.
+same command, and it is the only child any command starts in order to reach
+a network.
+
+Since 2026-11-25 `decide` is the third. It drives no run either, but it
+starts a full agent CLI, the run's recorded primary reviewer on a read-only
+profile, through a `HostRunner` (role `Decide`, outside any attempt; the
+Runner's own census,
+`runner::contract::tests::the_spawn_site_files_every_role_under_one_context_and_the_count_says_which`,
+counts it there). So it is the one command of the three classified `Write`
+and the test asserts each one's class: the probes and `curl` are short
+children of a read-only command, where a decider is an agent that must not
+leave a process tree behind it (`enum CommandClass {`).
 
 ## `mod tests` › `fn a_write_command_refuses_before_any_effect_when_containment_fails() {`
 

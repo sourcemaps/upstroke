@@ -864,32 +864,37 @@ proposal and raw output goes through, `std::fs::File::create_new` 1, \
 `std::io::Write::write_all` 1, `util::fsync_file` 1 and `util::fsync_dir` 1. \
 `admit`'s `std::fs::canonicalize`, and the `symlink_metadata`, `metadata` and \
 `read_dir` reads of the proposals directory, are not denied. The test region \
-adds 49 more with `--all-targets` (55 in all): `std::fs::create_dir_all` 8 and \
-`std::fs::write` 8, which build the fixture repository's plan file, pools \
+adds 52 more, counted the same way with `--all-targets` on Linux (58 in all, \
+on 2026-11-26): `std::fs::create_dir_all` 8 \
+and `std::fs::write` 8, which build the fixture repository's plan file, pools \
 files, credential profile directory, private directory, a schema-3 run, \
 earlier proposal history and stray files (the schema-4 run is written through \
-the event funnel); `std::fs::rename` 1 and `std::fs::create_dir` 1, which \
-replace the proposals directory while a call is in flight; \
-`std::fs::set_permissions` 1 and, on Unix, `std::os::unix::fs::symlink` 1, which \
-make an untrusted one; and 29 calls of the module's own denied entry point, \
-`decide`. \
+the event funnel); `std::fs::rename` 2, one moving the whole fixture \
+repository to show a proposal's raw-output reference still names its file, \
+and one with `std::fs::create_dir` 1 replacing the proposals directory while a \
+call is in flight; on Unix, `std::fs::set_permissions` 1 and \
+`std::os::unix::fs::symlink` 1, which make an untrusted one; and 31 calls of \
+the module's own denied entry point, `decide`. \
 `clippy::disallowed_types` and `clippy::disallowed_macros` are FORBIDDEN in this \
 file: it names no `std::process::Command` or `OpenOptions` and prints nothing. \
 NO PROCESS IS STARTED HERE. The agent is the adapter's data-only `CommandSpec`, \
 started by the Runner through `runner::decide_request` (role `Decide`, no \
 environment overlay), which the CLI passes as a `HostRunner` inside the write \
 command's containment. Nothing is written and nothing is started before \
-`admit` has refused a container run, a run the credential pre-flight refuses \
-and a reviewer whose adapter does not claim every guarantee, and before \
-`prepare` has refused a command that carries an environment overlay or does not \
-keep each guarantee as built. \
+`admit` has refused a run recorded on the container runner, a run whose pools \
+the credential pre-flight refuses, a reviewer whose adapter does not claim \
+every guarantee (cost reporting, a per-call dollar ceiling, no web access, the \
+run's private directory unreadable; only Claude Code claims them), a \
+`--max-cost-usd` that is not a positive number and a private directory no \
+permission rule can name, and before `prepare` has refused a command that \
+carries an environment overlay or does not keep each guarantee as built. \
 CONTAINMENT. Every write is under `<repo>/.upstroke/proposals/<run-id>/`, a \
 chain of real directories (no link, no reparse point; on Unix the \
 repository owner's and not writable by every user) whose last one keeps the \
 identity it had when the call was reserved, checked before each file is \
 created. The run id is the exact name of an existing run directory and the \
-question id is one the run's own log froze, written into a file name only when \
-it is a plain component. Nothing is written under a run's public or private \
+question id is one the run's own log froze; each is written into a file name \
+only when it is a plain component. Nothing is written under a run's public or private \
 directory or an answers directory, no file is overwritten (every file, the \
 call's settings file and each reservation included, is `create_new`), and \
 nothing is deleted. \
