@@ -515,8 +515,8 @@ cannot tell the two failures apart: a value such as
 as "one of the two moved after the run committed". That sends an
 operator looking for a log that changed under a record that was
 never well-formed. The predicate is
-[`rundir::is_run_started_sha256`], the recogniser for the one
-spelling [`rundir::run_started_sha256`] writes, so the value
+`rundir::is_run_started_sha256`, the recogniser for the one
+spelling `rundir::run_started_sha256` writes, so the value
 accepted here is exactly the set the comparison could ever match.
 A well-formed digest passes through to the equality check
 unchanged, and its refusal still quotes both digests.
