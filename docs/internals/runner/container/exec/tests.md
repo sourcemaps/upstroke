@@ -3317,7 +3317,10 @@ pass.
 Measured witness, restored byte-for-byte: with the core ignoring `running_normally`'s
 answer (its `Ok(true)` arm made `Ok(_)`, so a task reported ending is taken as running),
 this test fails at its first assertion, `left: Ok([])` against `right: Ok([4242])`: the
-first pass counted and the child was lost. The other three tests of the core still pass.
+first pass counted and the child was lost. Under this mutation
+`an_engines_children_are_found_after_pauses_when_a_task_stays_listed_while_ending` fails as
+well: its first pass then counts with the task still ending, and the recorded pauses are
+empty where `[1ms, 5ms, 20ms]` is required. The other three tests of the core still pass.
 
 ## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_found_after_pauses_when_a_task_stays_listed_while_ending() {`
 
