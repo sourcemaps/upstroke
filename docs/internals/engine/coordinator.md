@@ -557,10 +557,12 @@ progress field the attempt and its ladder decision read comes from the one row
 borrowed after `attempt_started` is appended. The borrow checker holds that
 borrow until `attempt_finished`, so nothing can change the row in between,
 and no new error path opens after the worker has run.
-The attempt number saturates at `u32::MAX` (`saturating_add`, as the
-topology engine numbers its attempts), so a task whose answered `Unblock`
-questions keep resetting its rung allowance cannot panic the scheduler
-(`PR380-STEP-TASK-ATTEMPT-OVERFLOW`).
+Once a task's attempt numbers are exhausted (its counter is at `u32::MAX`, so
+`checked_add` has no next number), the step refuses with
+`UpstrokeError::Refused` naming the task (`attempts_exhausted`) before it
+emits anything for the attempt, `attempt_started` included, so no two
+attempts share a number (`PR380-STEP-TASK-ATTEMPT-OVERFLOW`,
+`PR380-SATURATED-ATTEMPT-REUSES-IDENTITY`).
 
 ## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `let analysis = self.analysis;`
 

@@ -537,7 +537,9 @@ impl Run<'_> {
                 })?;
 
             let progress = self.progress_of(index)?;
-            let attempt = progress.attempts.saturating_add(1);
+            let Some(attempt) = progress.attempts.checked_add(1) else {
+                return Err(attempts_exhausted(&task_id, progress.attempts));
+            };
             let resume = progress
                 .resume_next
                 .then(|| progress.session.clone())
@@ -1318,6 +1320,15 @@ fn unscheduled_position(index: usize, table: &str, held: usize) -> UpstrokeError
         message: format!(
             "the scheduler picked task position {index}, which this run's {table} does not hold \
              (it holds {held})"
+        ),
+    }
+}
+
+fn attempts_exhausted(task_id: &str, last: u32) -> UpstrokeError {
+    UpstrokeError::Refused {
+        message: format!(
+            "task `{task_id}` has exhausted its attempt numbers: attempt {last} was the last one \
+             a u32 can number, so upstroke refuses to start another rather than reuse it"
         ),
     }
 }
