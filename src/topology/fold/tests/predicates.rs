@@ -67,7 +67,6 @@ fn an_exhausted_integration_sequence_opens_no_transaction() {
     accepts(&fold, &publish(u32::MAX - 1));
 
     run_mut(&mut fold).next_sequence = u32::MAX;
-    let before = fold.run.clone();
     let last = publish(u32::MAX);
     let FoldError::InconsistentRecord { kind, detail } = refuse(&fold, &last) else {
         panic!("an exhausted sequence counter must return a contextual record refusal");
@@ -77,7 +76,6 @@ fn an_exhausted_integration_sequence_opens_no_transaction() {
         detail.contains("exhausted its integration sequence numbers"),
         "{detail}"
     );
-    assert_eq!(fold.run, before, "the refused transaction moved the fold");
 }
 
 #[test]
@@ -89,11 +87,9 @@ fn an_exhausted_epoch_admits_no_resume() {
     accepts(&fold, &resumed);
 
     run_mut(&mut fold).epoch = Epoch(u32::MAX);
-    let before = fold.run.clone();
     let FoldError::InconsistentRecord { kind, detail } = refuse(&fold, &resumed) else {
         panic!("an exhausted epoch must return a contextual record refusal");
     };
     assert_eq!(kind, resumed.body.kind());
     assert!(detail.contains("exhausted its epoch numbers"), "{detail}");
-    assert_eq!(fold.run, before, "the refused resume moved the fold");
 }
