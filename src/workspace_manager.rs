@@ -1318,7 +1318,8 @@ pub(crate) enum Primitive {
 ///
 /// **The trust boundary these paths sit inside.** They are not walked because
 /// every writer that can reach them is one the execution root already trusts,
-/// and the redirect gives such a writer nothing it does not already hold:
+/// and, save the sandboxed implementer the third bullet names, the redirect
+/// gives such a writer nothing it does not already hold:
 ///
 /// * A repository's own hooks cannot plant one. Every command this manager
 ///   builds runs with `core.hooksPath` at `hooks-none`, an empty directory
@@ -1332,14 +1333,22 @@ pub(crate) enum Primitive {
 ///   symlink fails with `error: invalid path '.git'`, exit `128`, and checks
 ///   nothing out.
 /// * What can plant one is a process already executing inside the execution
-///   root as this engine's own user — an agent's file tools, or a
-///   repository-authored gate command. `design/15` states that boundary for
+///   root as this engine's own user. `design/15` states that boundary for
 ///   the shipped host runner in terms: adapter deny rules are "defence in
 ///   depth, not an OS boundary", repository-controlled gates "execute
 ///   candidate build/test code as the Upstroke user", and untrusted input
-///   belongs on "a dedicated OS account or VM". Under the host runner such a
-///   writer can already write wherever that user can, so redirecting a
-///   funnel's Git child adds no capability to it.
+///   belongs on "a dedicated OS account or VM". Under the host runner the
+///   file tools of an agent with no OS sandbox, and a repository-authored
+///   gate command, can already write wherever that user can, so redirecting
+///   a funnel's Git child adds no capability to them. That premise does not
+///   hold for a sandboxed implementer — Codex under
+///   `--sandbox workspace-write`, confined to its workspace and holding that
+///   user's authority only through a gate that executes its code. It can
+///   still reach the checkout's `.git` pointer: its workspace is the slot
+///   checkout, the pointer is a `gitdir:` file at that checkout's root,
+///   inside what the sandbox leaves writable, and no measurement shows the
+///   sandbox exempting it. What a redirect there gives it is recorded as
+///   `PR313-ACCEPTED-RISK-RATIONALE-FALSE-FOR-A-SANDBOXED-IMPLEMENTER`.
 /// * Under the container runner the same party is confined to its mounts,
 ///   and the slot checkout is one of them — read-write for an implementer or
 ///   a gate. What keeps it from the checkout's `.git` is not
