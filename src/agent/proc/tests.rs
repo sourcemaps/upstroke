@@ -4949,6 +4949,92 @@ fn a_reapers_record_is_read_only_once_the_record_written_after_it_exists() {
     );
 }
 
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LeaderSeen {
+    Started(u64),
+    Absent,
+    Unread,
+}
+
+#[cfg(unix)]
+fn leader_seen(pgid: i32) -> LeaderSeen {
+    if !cfg!(target_os = "linux") {
+        return LeaderSeen::Unread;
+    }
+    let stat = Path::new("/proc").join(pgid.to_string()).join("stat");
+    let text = match std::fs::read_to_string(&stat) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return LeaderSeen::Absent,
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => return LeaderSeen::Absent,
+        Err(_) => return LeaderSeen::Unread,
+    };
+    text.rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_whitespace().nth(19))
+        .and_then(|start| start.parse().ok())
+        .map_or(LeaderSeen::Unread, LeaderSeen::Started)
+}
+
+#[cfg(unix)]
+fn number_was_reissued(armed: LeaderSeen, now: LeaderSeen) -> bool {
+    match (armed, now) {
+        (LeaderSeen::Started(first), LeaderSeen::Started(later)) => first != later,
+        (LeaderSeen::Absent, LeaderSeen::Started(_)) => true,
+        _ => false,
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_group_number_reissued_to_a_later_process_is_told_from_its_first_holder() {
+    use LeaderSeen::{Absent, Started, Unread};
+
+    let table = [
+        (Started(7), Started(8), true),
+        (Absent, Started(8), true),
+        (Started(7), Started(7), false),
+        (Absent, Absent, false),
+        (Started(7), Absent, false),
+        (Unread, Started(7), false),
+        (Unread, Absent, false),
+        (Unread, Unread, false),
+        (Started(7), Unread, false),
+        (Absent, Unread, false),
+    ];
+    for (armed, now, reissued) in table {
+        assert_eq!(
+            number_was_reissued(armed, now),
+            reissued,
+            "armed with {armed:?} and seen now as {now:?}, the reissue was answered {}: only a \
+             start time other than the armed one, or a start where none was seen, tells one",
+            !reissued
+        );
+    }
+
+    if cfg!(target_os = "linux") {
+        let own = i32::try_from(std::process::id()).expect("a pid fits an i32");
+        let first = leader_seen(own);
+        assert!(
+            matches!(first, Started(start) if start > 0),
+            "this process's own pid {own} was seen as {first:?}, not as a process with a start \
+             time after boot"
+        );
+        let second = leader_seen(own);
+        assert_eq!(
+            second, first,
+            "this process's own pid {own} was seen as {first:?} and then as {second:?}: one \
+             process read twice must answer one start time"
+        );
+        let beyond = leader_seen(i32::MAX);
+        assert_eq!(
+            beyond,
+            Absent,
+            "pid {} was seen as {beyond:?}, though no Linux pid is that large",
+            i32::MAX
+        );
+    }
+}
+
 const READINESS_ROLE: &str = "UPSTROKE_READINESS_ROLE";
 
 const READINESS_SIGNAL: &str = "UPSTROKE_READINESS_SIGNAL";

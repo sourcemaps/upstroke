@@ -2334,6 +2334,139 @@ drop's read of the reaper's record with no agent record beside it
 coordinator staged to stop between its two records, which would need a
 change to the helper's production call sequence or a new helper.
 
+## `enum LeaderSeen {`
+
+What `leader_seen` saw at a process group's number read as a pid.
+`Started(n)`: a process has that pid, and its start time is `n`.
+`Absent`: no process has it. `Unread`: nothing was read, because this
+platform has no reader here or because the read failed for another
+reason.
+
+It is the identity the reaper-group drain lacks. The drain decides that
+the reaper's group has ended by signal 0 to the group's number
+(`drain_reaper_group`'s `group_ended`), and the test holds only that
+number: the reaper is the coordinator's child, not the test's, so the
+test cannot keep it unreaped. Once the group has ended its number is
+free, and an unrelated long-lived group that takes it keeps the probe
+answering, so the drain waits to its bound and fails although every
+original writer ended: the false red the notes for
+`fn reaper_container_cells` › `let mut drain = ReaperDrain {` admit,
+under "Why nothing is signalled".
+
+What tells the two apart without signalling is a POSIX rule (Base
+Definitions, "Process ID Reuse"): a process ID is not reused while a
+process group whose ID equals it still has a member, that is, until
+that group's lifetime ends. So if a process now has the group's number
+as its pid, and it is not the process that had that pid when the drain
+was armed, the original group's lifetime has ended, and with it every
+member that could still write.
+
+Nothing calls this, `leader_seen` or `number_was_reissued` yet outside
+their test. The next task of this run wires them into the drain.
+
+## `fn leader_seen(pgid: i32) -> LeaderSeen {`
+
+On Linux it reads `/proc/<pgid>/stat`, the path built by `Path` joins,
+and takes field 22, `starttime`, the process's start in clock ticks
+since boot. The second field, the command name in parentheses, is
+chosen by the process and can contain spaces and parentheses, so a
+count from the start of the line can land on any field. The fields are
+counted after the last `)` instead: the text after it splits on
+whitespace into `state` at index 0, then `ppid`, `pgrp`, `session`,
+`tty_nr`, `tpgid`, `flags`, `minflt`, `cminflt`, `majflt`, `cmajflt`,
+`utime`, `stime`, `cutime`, `cstime`, `priority`, `nice`,
+`num_threads`, `itrealvalue`, and `starttime` at index 19. A zombie
+still has this file, with the same start time, so a leader that has
+exited but is not yet collected still reads as `Started` with its own
+start.
+
+Text with no `)`, too few fields after it, or a field 22 that does not
+parse as a `u64` is `Unread`. A read refused with `NotFound`, or with
+`ESRCH` (the process ended between the open and the read), is `Absent`.
+Any other error, `EMFILE` while descriptors are exhausted for one, is
+`Unread`: an error that says nothing about the process is not taken for
+its absence.
+
+It never panics, and contains no `.expect(`, `.unwrap()` or `panic!`:
+every failure is a variant. The drain's drop will call it, and that
+drop also runs while a failure unwinds, where a panic aborts the
+process.
+
+It is written with `cfg!(target_os = "linux")` as an ordinary
+condition, not with `#[cfg]` blocks, so every Unix compiles the same
+code and nothing is unused on any of them. Where the condition is
+false it answers `Unread` at once.
+
+macOS has no reader here. The start time is in `libc::proc_bsdinfo`,
+read with `libc::PROC_PIDTBSDINFO`; this repository classifies every
+`libc::` item the tree names in `effects/wrappers.toml`, which this
+change does not write, and neither name is classified there. The
+classified `proc_bsdshortinfo` carries no start time. So on macOS the
+identity stays `Unread`, `number_was_reissued` never answers true from
+it, and the drain keeps its present behaviour.
+
+Nothing calls it yet outside its test; the next task of this run wires
+it into the drain.
+
+## `fn number_was_reissued(armed: LeaderSeen, now: LeaderSeen) -> bool {`
+
+Whether what was seen at the group's number when the drain was armed
+(`armed`) and what is seen at it now (`now`) show that the number has
+been given to a later process, so that, by the POSIX rule under
+`enum LeaderSeen {`, the armed group's lifetime has ended. True for
+exactly two shapes:
+
+- `(Started(a), Started(b))` with `a != b`: a process other than the
+  one armed with now has the pid.
+- `(Absent, Started(_))`: no process had the pid when the drain was
+  armed, the leader having ended while its group lived on, and one has
+  it now, so the pid was issued after the group ended.
+
+False for every other pair. `Unread` on either side is false: nothing
+read is nothing known. `(Started(_), Absent)` is false: a group can
+outlive its leader, so the leader's absence says nothing about the
+other members. `(Absent, Absent)` is false, and so are equal start
+times.
+
+An equal start time is read as the same process. Start times are
+counted in clock ticks, so a process issued the number within one tick
+of the first holder's start, the first holder's whole group having
+ended in between, reads equal and is taken for the first holder. That
+case is not excluded. It errs towards the present behaviour: the drain
+keeps waiting, to its bound, and fails as it does today; it never takes
+a live group for ended.
+
+Nothing calls it yet outside its test; the next task of this run wires
+it into the drain.
+
+## `fn a_group_number_reissued_to_a_later_process_is_told_from_its_first_holder() {`
+
+The witness for `number_was_reissued` and, on Linux, `leader_seen`.
+
+It asserts the whole table of `number_was_reissued`: true for the two
+shapes, `(Started(7), Started(8))` and `(Absent, Started(8))`; false
+for equal start times, for `(Absent, Absent)`, for
+`(Started(7), Absent)`, and for `Unread` on either side with each other
+variant, `(Unread, Unread)` included. The table runs on every Unix.
+
+Inside `if cfg!(target_os = "linux")` it reads this process's own pid
+(`i32::try_from(std::process::id())`): `leader_seen` must answer
+`Started(n)` with `n > 0`, and a second call must answer the same.
+`leader_seen(i32::MAX)` must be `Absent`, since no Linux pid is that
+large. `Absent` is deliberately not tested with the pid of a child the
+test has collected: that number can be reissued, which is the defect
+this work is about.
+
+MEASURED. With `number_was_reissued` returning `false` unconditionally,
+this test failed at the table's first row ("armed with Started(7) and
+seen now as Started(8), the reissue was answered false", `left: false`,
+`right: true`) and every other test of this module passed (84 passed,
+1 failed). With the function restored, it passes (85 passed).
+
+The field index has only a weak witness. An index of 18 reads
+`itrealvalue`, which is zero, and fails the `n > 0` assertion. An index
+of 20 or more would not be caught by this test.
+
 ## `const READINESS_ROLE: &str = "UPSTROKE_READINESS_ROLE";`
 
 =======================================================================
