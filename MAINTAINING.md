@@ -472,9 +472,10 @@ request's lane from its branch prefix alone, counts only the owner's review comm
 `ready-to-merge` is advisory: it reports the audit's verdict on the head it read, while the act
 bound to that head is the enqueue itself, which names the commit), and with `--enqueue` adds
 each ready pull request to the queue in the order its arguments give, so the caller states the
-priority. A finding a lane need not fix is filed and deferred: one file per finding under
-`findings/` with a `deferred` ledger row. A witnessed defect or a `MUST` deviation is
-fixed whatever its label, as step 5 says.
+priority. A finding a lane need not fix is filed, one file per finding under `findings/`, with a
+`deferred` ledger row, or, for an unwitnessed, non-`MUST` P3, an `accepted-risk` row recording the
+review's own severity, which the audit accepts without the owner's read. A witnessed defect or a
+`MUST` deviation is fixed whatever its label, as step 5 says.
 
 **Trust boundary.** There is one trusted same-repository writer: the owner. A pull request can
 edit `ci.yml`, `pr-policy.yml` and the validators they run and still turn both contexts green, so
