@@ -3163,32 +3163,57 @@ not-found read. A review reproduced the second: that repair took the empty read 
 thread's answer and made no further pass, and the child the thread had handed to a task
 already read was in neither list.
 
+**A task still listed may already be ending.** The second repair compared the two listings
+of a pass, which catches a thread that has left the listing. A second review reproduced what
+that misses: the kernel hands an ending thread's children on (`exit_notify`) before it takes
+the thread out of the task listing (`release_task`). So: list A and B; read A's list, empty;
+B begins to end and its child goes to A while B is still listed; read B's list, empty; list
+A and B again. The two listings are equal, the pass counted, and the child was in neither
+answer.
+
 **The rule.** `children_in_passes` holds it, apart from the filesystem. A pass lists the
-task ids, reads every listed task's list, and lists the task ids again. It counts only if no
-read failed with not-found and the second listing holds exactly the task ids of the first:
-a thread that ended during the pass is missing from the second listing, whichever way its
-read went. A pass that does not count is discarded whole, the lists it did read included,
-and another is made. A pass that counts answers its children sorted and without repeats.
+task ids, reads every listed task's list, asks of every listed task whether it is still
+running normally, and lists the task ids again. It counts only if no read failed with
+not-found, every listed task was still running normally when asked, after the reads, and
+the second listing holds exactly the task ids of the first. A thread that ended during the
+pass is missing from the second listing, whichever way its read went; a thread that began
+to end during the pass and is still listed is reported as not running normally. A pass that
+does not count is discarded whole, the lists it did read included, and another is made,
+within the same five. A pass that counts answers its children sorted and without repeats.
+
+**Running normally,** as the helper reads it, is the state field of the task's own
+`/proc/<pid>/task/<tid>/stat`, the first field after the command, which closes at the last
+`)`. A task whose state is zombie (`Z`) or dead (`X`, or `x` on older kernels) is ending,
+and so is a task whose `stat` cannot be read because it has gone (not found, or `ESRCH`).
+Every other state, sleeping and stopped included, is running normally. Any other failure to
+read the state, or a `stat` with no state field, is an error returned at once. The kernel
+sets an ending thread's exit state in the same step, `exit_notify`, in which it hands its
+children on. So if a thread's state, asked after every list was read, is still not an exit
+state, it had not handed its children on when its own list was read, and they were in that
+list; and if it had handed them on before that, its state, asked later, says so.
 
 **The bound.** At most five passes are made. One more pass answers the interleaving that was
 seen, and the rest absorb a few threads ending in quick succession; five is that allowance,
 not a measurement. If the fifth pass does not count either, the helper returns an error that
-says what changed in it, the lists not found and the two listings, and never an answer; a
-kernel with no children lists at all fails the same way, after five passes. Every other
-failure is returned at once, as before: a task directory that cannot be listed (as when the
-process itself is gone), a list that fails for any other reason, and a child that does not
-parse as a pid. Every caller therefore still receives an error for a list that stays
-unreadable, and what each does with one is unchanged. Each error names the task directory,
-`/proc/<pid>/task`, and every path is built by joining `Path` components, never by
-formatting.
+says what changed in it, the lists not found, the tasks not running normally and the two
+listings, and never an answer; a kernel with no children lists at all fails the same way,
+after five passes. Every other failure is returned at once, as before: a task directory that
+cannot be listed (as when the process itself is gone), a list or a state that fails for any
+other reason, and a child that does not parse as a pid. Every caller therefore still
+receives an error for a list that stays unreadable, and what each does with one is
+unchanged. Each error names the task directory, `/proc/<pid>/task`, and every path is built
+by joining `Path` components, never by formatting.
 
-**What the rule does not see.** The kernel hands an ending thread's children on
-(`exit_notify`) before it takes the thread out of the task listing (`release_task`). A
-thread between the two is still listed and its list reads empty, so a pass whose read of
-that list and whose second listing both fall between them counts without the children that
-thread handed on. A process's main thread that ends before its other threads stays listed
-the same way, as a zombie, until the whole process ends. Both are read from the kernel's
-exit path, not observed in a run; closing them needs more than the listings and the lists.
+**What remains outside the rule.** A process's main thread that ends before its other
+threads stays listed as a zombie until the whole process ends. Under this rule every pass
+over such a process is refused, so the helper answers it with an error after five passes,
+never with children: it fails closed, and no child is lost to it. No process this harness
+reads is known to end its main thread first. The argument that the state closes the
+hand-off window is read from the kernel's exit path, not observed in a run: the reads of
+the lists and of the states take no lock in common with the exit, so it rests on the order
+of the steps in `exit_notify`, not on one snapshot of the process. And, as before, a child
+forked during a pass by a thread already read is not in the answer: a list read is
+discovery, never evidence that no child remains.
 
 **What witnesses it.** The interleavings cannot be produced on demand on a live process, so
 the rule is tested apart from the filesystem: the tests below drive `children_in_passes`
@@ -3196,14 +3221,18 @@ with scripted closures.
 
 ## `#[cfg(target_os = "linux")]` › `fn children_in_passes<T: Ord + std::fmt::Debug>(`
 
-The rule of `children_of`, over two closures: `list_tasks` lists a process's task ids, and
-`read_children` reads one task's children list. `children_of` gives it the two readers of
-the proc filesystem: the entry names of `/proc/<pid>/task`, which are the task ids, and the
-text of `<task>/children`. A read's error keeps its kind, which is how a not-found read is
-told from every other failure, and the two listings of a pass are compared as sets. The
-task id is generic, so the tests below name their tasks (`"A"`, `"B"`, or a number) and read
-no proc filesystem. The core's errors name the task; `children_of` puts the task directory
-in front of each.
+The rule of `children_of`, over three closures: `list_tasks` lists a process's task ids,
+`read_children` reads one task's children list, and `running_normally` says whether one task
+is still running normally, neither ending nor gone. `children_of` gives it the three readers
+of the proc filesystem: the entry names of `/proc/<pid>/task`, which are the task ids, the
+text of `<task>/children`, and the state field of `<task>/stat` (zombie, dead, or a `stat`
+gone is not running normally). A read's error keeps its kind, which is how a not-found read
+is told from every other failure. After a pass's reads the core asks `running_normally` of
+every task of the first listing, in order, and only then lists the tasks again; a task
+reported not running normally discards the pass, and a failure to answer is returned at
+once. The two listings of a pass are compared as sets. The task id is generic, so the tests
+below name their tasks (`"A"`, `"B"`, or a number) and read no proc filesystem. The core's
+errors name the task; `children_of` puts the task directory in front of each.
 
 ## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_not_lost_when_a_task_ends_after_its_list_was_opened() {`
 
@@ -3217,7 +3246,25 @@ Measured witness, restored byte-for-byte: with the comparison of the two listing
 `if false`, so that a pass counts without it, this test fails at its first assertion,
 `left: Ok([])` against `right: Ok([4242])`: the first pass counted and the child was lost.
 The test below with tasks changing under every pass fails too, answering `Ok([4242])` where
-the error is required; the not-found test still passes.
+the error is required; the not-found test still passes. Its `running_normally` answers every
+task running, so the listing comparison alone discards its first pass.
+
+## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_not_lost_when_a_task_still_listed_is_ending() {`
+
+The second review's interleaving, scripted. The first pass lists A and B, reads A's list
+empty and B's list empty, and is then told that A is running normally and that B is not: B
+began to end after its list was read and handed its child, 4242, to A, whose list this pass
+had already read. B is still listed, so the second listing holds A and B again and agrees
+with the first. The core must discard that pass and make another: it lists A, reads A's list
+holding 4242, finds A running normally, lists A again, and answers 4242. The test records
+every call to the three closures in one log and requires that order exactly: listing, the
+reads, the states asked after the reads, the second listing, then the same for the second
+pass.
+
+Measured witness, restored byte-for-byte: with the core ignoring `running_normally`'s
+answer (its `Ok(true)` arm made `Ok(_)`, so a task reported ending is taken as running),
+this test fails at its first assertion, `left: Ok([])` against `right: Ok([4242])`: the
+first pass counted and the child was lost. The other three tests of the core still pass.
 
 ## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_read_in_another_pass_when_a_list_is_not_found() {`
 

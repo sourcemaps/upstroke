@@ -9547,16 +9547,43 @@ fn children_of(pid: &str) -> Result<Vec<libc::pid_t>, String> {
             Ok(listed)
         },
         |task: &std::ffi::OsString| std::fs::read_to_string(task_dir.join(task).join("children")),
+        |task: &std::ffi::OsString| {
+            // The state is the first field after the command, which closes at
+            // the last `)`. A zombie (`Z`) or dead (`X`, `x`) task is ending,
+            // and so is one whose `stat` is gone.
+            let stat = task_dir.join(task).join("stat");
+            match std::fs::read_to_string(&stat) {
+                Ok(text) => {
+                    let state = text
+                        .rsplit_once(')')
+                        .and_then(|(_, rest)| rest.split_whitespace().next())
+                        .ok_or_else(|| {
+                            std::io::Error::other(format!("{}: no state field", stat.display()))
+                        })?;
+                    Ok(!matches!(state, "Z" | "X" | "x"))
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        || error.raw_os_error() == Some(libc::ESRCH) =>
+                {
+                    Ok(false)
+                }
+                Err(error) => Err(error),
+            }
+        },
     )
     .map_err(|error| format!("{}: {error}", task_dir.display()))
 }
 
 /// The rule of [`children_of`], over `list_tasks`, which lists a process's task
-/// ids, and `read_children`, which reads one task's children list.
+/// ids, `read_children`, which reads one task's children list, and
+/// `running_normally`, which says whether a task is still running normally:
+/// neither ending nor gone.
 #[cfg(target_os = "linux")]
 fn children_in_passes<T: Ord + std::fmt::Debug>(
     mut list_tasks: impl FnMut() -> std::io::Result<BTreeSet<T>>,
     mut read_children: impl FnMut(&T) -> std::io::Result<String>,
+    mut running_normally: impl FnMut(&T) -> std::io::Result<bool>,
 ) -> Result<Vec<libc::pid_t>, String> {
     const PASSES: usize = 5;
     let mut last = String::new();
@@ -9580,6 +9607,15 @@ fn children_in_passes<T: Ord + std::fmt::Debug>(
                     ));
                 }
                 Err(error) => return Err(format!("the children list of task {task:?}: {error}")),
+            }
+        }
+        for task in &before {
+            match running_normally(task) {
+                Ok(true) => {}
+                Ok(false) => changed.push(format!(
+                    "task {task:?} was not running normally after the reads"
+                )),
+                Err(error) => return Err(format!("the state of task {task:?}: {error}")),
             }
         }
         let after = list_tasks().map_err(|error| error.to_string())?;
@@ -9626,6 +9662,7 @@ fn an_engines_children_are_not_lost_when_a_task_ends_after_its_list_was_opened()
             assert_eq!(*task, expected, "the reads follow the listed tasks");
             Ok(list.to_owned())
         },
+        |_| Ok(true),
     );
     assert_eq!(
         answer,
@@ -9638,6 +9675,58 @@ fn an_engines_children_are_not_lost_when_a_task_ends_after_its_list_was_opened()
         "two passes, each listing the tasks before and after its reads"
     );
     assert_eq!(reads.next(), None, "every scripted read was made");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_engines_children_are_not_lost_when_a_task_still_listed_is_ending() {
+    // B is in both listings of the first pass, but begins to end after its
+    // list was read empty and hands its child to A, already read.
+    let events = std::cell::RefCell::new(Vec::new());
+    let mut listings = [
+        BTreeSet::from(["A", "B"]),
+        BTreeSet::from(["A", "B"]),
+        BTreeSet::from(["A"]),
+        BTreeSet::from(["A"]),
+    ]
+    .into_iter();
+    let mut reads = [("A", ""), ("B", ""), ("A", "4242 ")].into_iter();
+    let mut states = [("A", true), ("B", false), ("A", true)].into_iter();
+    let answer = children_in_passes(
+        || {
+            events.borrow_mut().push("list".to_owned());
+            listings
+                .next()
+                .ok_or_else(|| std::io::Error::other("no listing is scripted"))
+        },
+        |task| {
+            events.borrow_mut().push(format!("read {task}"));
+            let (expected, list) = reads.next().expect("a read the script holds");
+            assert_eq!(*task, expected, "the reads follow the listed tasks");
+            Ok(list.to_owned())
+        },
+        |task| {
+            events.borrow_mut().push(format!("state {task}"));
+            let (expected, running) = states.next().expect("a state the script holds");
+            assert_eq!(*task, expected, "the states asked follow the listed tasks");
+            Ok(running)
+        },
+    );
+    assert_eq!(
+        answer,
+        Ok(vec![4242]),
+        "the child B handed to A is found by a second pass, not lost to a first pass whose two \
+         listings agreed while B was ending"
+    );
+    assert_eq!(
+        events.into_inner(),
+        [
+            "list", "read A", "read B", "state A", "state B", "list", "list", "read A", "state A",
+            "list",
+        ],
+        "two passes, each asking every listed task's state after its reads and before its second \
+         listing"
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -9666,6 +9755,7 @@ fn an_engines_children_are_read_in_another_pass_when_a_list_is_not_found() {
             list.map(str::to_owned)
                 .ok_or_else(|| std::io::ErrorKind::NotFound.into())
         },
+        |_| Ok(true),
     );
     assert_eq!(
         answer,
@@ -9693,6 +9783,7 @@ fn an_engines_tasks_that_change_under_every_pass_end_in_an_error_after_five_pass
             Ok(BTreeSet::from([listed]))
         },
         |_| Ok("4242 ".to_owned()),
+        |_| Ok(true),
     );
     assert_eq!(
         answer,
