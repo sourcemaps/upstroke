@@ -212,10 +212,11 @@ Byte identity with the pre-move writer
 
 Every log shape the open path can meet, each varying one axis.
 
-`None` is "the file does not exist"; the rest are exact byte strings. The torn cases vary the
-*length* of the tail (1, 5, 12 bytes) and its *content* (ASCII, valid JSON, a split multi-byte
-character) independently of whether there is a committed prefix in front of it, because a grid
-that moved those together could be satisfied by a correlated field.
+`None` is "the file does not exist"; the rest are exact byte strings. The torn tails are 1, 5 and
+11 bytes of ASCII, a whole 53-byte JSON line, and the first two bytes of a three-byte character;
+the case named "torn tail of 12 bytes" holds 11. Each follows one committed line except "torn tail
+only, no prefix", which repeats the 11-byte tail with nothing before it, so tail length and prefix
+are not varied independently.
 
 ## `fn open_grid() -> Vec<(&'static str, Option<Vec<u8>>)>` › `split_utf8.extend_from_slice(&[0xE2, 0x82]);`
 
@@ -957,7 +958,8 @@ Structure
 
 ## `fn the_event_log_is_written_in_exactly_one_module() {`
 
-Every module that may write to an event log, and how many places in it do.
+`src/events/log.rs` and `src/events/mod.rs`, and how many places in each name a write primitive.
+It reads those two files only; a write in another module is left to the effect censuses.
 
 `mechanism` (3): "the raw writer they wrap is reachable only inside `src/events/log.rs`". This is
 that sentence as a count. It is a source census, so comments are stripped first and the strip is
