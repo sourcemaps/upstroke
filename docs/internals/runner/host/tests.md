@@ -1914,18 +1914,46 @@ exited, unreaped child whose record names its own pid
 A passing role prints its record too, to stderr, after the assertion
 (`PR173-LIVE-RECORD-ANSWER-NEVER-PRINTED`: until then only a failing
 grid rendered them). On macOS the record carries what `proc_pidinfo`,
-given the non-zero argument that asks for an exited record, answered —
-so a child still running at the look (`before the look running`) shows
-whether that call answers for a live process. That question is still
-open: the `agent/proc` notes read the answer from XNU's source, not
-from a printed record. A record whose child had already exited does not
-answer it, and the grid's children are short-lived, so a run may hold
-none that answers.
+given the non-zero argument that asks for an exited record, answered,
+so a record can show whether that call answers for a live process. That
+question is still open: the `agent/proc` notes read the answer from
+XNU's source, not from a printed record.
+
+`before the look running` does not on its own make a record one that
+answers it. It is the first `waitid` poll's answer, taken before
+`getpgid` and `proc_pidinfo` were called: the child's state before the
+look, not during it. `observe_child_group` takes each observation in a
+separate call, and the child can exit between any two. A child seen
+running can have `getpgid` answer its own pid, then exit, and then
+`proc_pidinfo` returns its zombie's record. The assertion passes on
+`getpgid`'s answer alone, and the line still reads `before the look
+running`. So before reading a record as the call answering for a live
+process, check two more things in it:
+
+- The status `proc_pidinfo` answered. `status 5` is `SZOMB`: the record
+  is a zombie's, whatever the first poll saw, and says nothing about a
+  live process.
+- `after the look`, the second poll, taken after `proc_pidinfo`
+  returned. `running` says the child still had not exited once the call
+  was over. `exited, unreaped`, beside `before the look running`, says
+  it exited at some point between the two polls, and the poll alone
+  cannot say whether that was before the call or after it.
+
+Only a record with a status other than `SZOMB` and `after the look
+running` can show the call answering while the child was alive, and
+even that record leaves one narrow case open: a child that had already
+begun exiting, which `proc_find_zombref` also finds ([`agent/proc`
+notes](../../agent/proc.md)), and was not yet waitable at the second
+poll. A call that failed with `No such process`, with both polls
+reading `running`, is the other answer: the call did not answer for a
+child that was alive across it. The grid's children are short-lived, so
+a run may hold no record that answers either way.
 
 libtest captures a passing test's output and shows it only under
 `--nocapture` or `--show-output`. CI's suite step passes neither, so
-its log does not carry these records; the measurement is one run of
-this test with one of those flags, on the macOS runner.
+its log does not carry these records; the measurement is a run of this
+test with one of those flags, on the macOS runner, read by the checks
+above, and it may take more than one run.
 
 ## `const SPAWN_KILL_POINT: &str = "UPSTROKE_SPAWN_KILL_POINT";`
 
