@@ -378,12 +378,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect",
     },
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect",
     },
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::WriteIntent),
@@ -418,22 +418,22 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::Remove),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect",
     },
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::Remove),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect",
     },
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::RemoveIntent),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect",
     },
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::RemoveIntent),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect",
     },
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::WriteStagingIntent),
@@ -458,22 +458,22 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::RemoveStaging),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect",
     },
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::RemoveStaging),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect",
     },
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::RemoveStagingIntent),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect",
     },
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::RemoveStagingIntent),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect",
     },
     Claim {
         site: EffectSiteId::Snapshot(SnapshotSite::WriteIntent),
@@ -498,22 +498,22 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Snapshot(SnapshotSite::Remove),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect",
     },
     Claim {
         site: EffectSiteId::Snapshot(SnapshotSite::Remove),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect",
     },
     Claim {
         site: EffectSiteId::Snapshot(SnapshotSite::RemoveIntent),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect",
     },
     Claim {
         site: EffectSiteId::Snapshot(SnapshotSite::RemoveIntent),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect",
     },
     Claim {
         site: EffectSiteId::Ref(RefSite::CreateIntegration),
@@ -548,12 +548,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Ref(RefSite::DeleteCandidatesRef),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect",
     },
     Claim {
         site: EffectSiteId::Ref(RefSite::DeleteCandidatesRef),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect",
     },
     Claim {
         site: EffectSiteId::Ref(RefSite::PinCandidatePrepared),
@@ -568,12 +568,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Ref(RefSite::DeleteCandidatePin),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect",
     },
     Claim {
         site: EffectSiteId::Ref(RefSite::DeleteCandidatePin),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect",
     },
     Claim {
         site: EffectSiteId::Ref(RefSite::PinPrepared),
@@ -588,12 +588,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Ref(RefSite::DeletePreparedPin),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect",
     },
     Claim {
         site: EffectSiteId::Ref(RefSite::DeletePreparedPin),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect",
     },
     Claim {
         site: EffectSiteId::Object(ObjectSite::CandidateStage),
@@ -774,22 +774,22 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::WriteReport),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect",
     },
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::WriteReport),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect",
     },
     Claim {
         site: EffectSiteId::Report(ReportSite::Write),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect",
     },
     Claim {
         site: EffectSiteId::Report(ReportSite::Write),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect",
     },
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::WriteQuestionPayload),
