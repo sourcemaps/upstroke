@@ -2312,7 +2312,7 @@ in the transparency and forwarding fixtures. The finding is recorded in
 renaming that inode, would leave an inherited writer alive. Moving the write
 into a separate process prevents that inheritance.
 
-## `mod inherited_writer {`
+## `pub(crate) mod inherited_writer {`
 
 The Linux test `marker_shims_do_not_leave_writers_in_another_threads_fork`
 runs one isolated helper under a 180-second process-tree timeout. Its held
@@ -3369,12 +3369,15 @@ for a moment after the reaper exits (the mechanism of
 `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`), and a hold
 that outlives the bound fails the test.
 
-## `mod inherited_writer` › `fn writes_leave_no_writer_in_another_threads_fork(`
+## `mod inherited_writer` › `pub(crate) fn writes_leave_no_writer_in_another_threads_fork(`
 
 The FIFO oracle, shared since PR11 follow-up A: a writer fills a FIFO larger than its pipe while
 another thread forks a holder of this process's inherited descriptors; once the writer is done,
 the reader sees end-of-file only if no fork holds a writer. The marker shims and the container
-fake's relay writer are each judged by it.
+fake's relay writer are each judged by it. The engine suite now uses it too, with `shim_script`:
+`engine::tests::gate_probe_writer_helper` judges the gate role's stand-in writer,
+`write_the_gate_probe_stand_in`, which is why this suite, this module, the oracle and
+`shim_script` are `pub(crate)`.
 
 ## `mod inherited_writer` › `fn the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork() {`
 

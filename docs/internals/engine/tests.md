@@ -2960,6 +2960,45 @@ exist: a success with output, an unknown revision, an unknown option (Git's
 usage text, several lines, trimmed) and a `-C` that cannot be entered each get
 the answer `probe_git` gives the same command, to the byte.
 
+## `fn the_gate_role_probe_stand_in_writer_leaves_no_writer_in_another_threads_fork() {`
+
+Linux only. The deterministic witness of this branch's repair of
+`CI-FLAKE-GATE-PROBE-TEXT-FILE-BUSY`, described under the gate role's test
+below. It runs `gate_probe_writer_helper` in an isolated child through
+`agent::proc::test_support::run_test_isolated`, with no environment and a
+180-second deadline, and asserts that the child succeeded and that its output
+reports "1 passed", as `runner::host::tests`'
+`the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork` does for the
+container relay writer. The child keeps the oracle's held fork away from the
+other tests of this process. The gate role's section below says that undoing
+the repair fails no test here deterministically and that no deterministic
+witness is added; this test is that witness. With `write_the_gate_probe_stand_in`
+writing through `fs::write(git, script)` instead of
+`runner::container::write_program_in_its_own_process`, it fails, and the child's
+output carries the oracle's "the fork inherited a shim writer" with a
+`WouldBlock` read; with the helper put back, it passes.
+
+## `fn gate_probe_writer_helper() {`
+
+Linux only, and ignored: the child the test above runs. In a scratch tree from
+`temp_engine_scratch` it calls
+`runner::host::tests::inherited_writer::writes_leave_no_writer_in_another_threads_fork`
+with a FIFO path whose name holds shell metacharacters, and a closure that
+writes the oracle's `shim_script(marker)` there through
+`write_the_gate_probe_stand_in`, the writer the gate role's cases use. The FIFO
+is what the gate role's section below found missing: its pipe is smaller than
+the script, so the write stays open, blocked, while another thread of this
+process forks, and the window is entered by construction rather than by racing.
+Once the writer is done, the reader sees end-of-file only if that fork holds no
+writer of the FIFO. The writer helper writes from a process of its own and leaves
+none there; a write from this process leaves its descriptor in the fork, the
+read answers `WouldBlock`, and the oracle fails. The oracle reads the inherited
+writer, not `ETXTBSY`, since a FIFO cannot be executed: what it shows is that
+the stand-in's writer leaves no descriptor for a fork to keep, which is the
+writer half of the repair and holds without the isolated child's single test
+thread, because the oracle makes its own fork from another thread. The stand-in
+writer's `fs::set_permissions` gives the FIFO mode 0700 as it does the stand-in.
+
 ## `fn the_gate_role_sets_its_worktree_value_again_only_past_another_registrations_empty_commondir() {`
 
 Unix only. The call site itself: the gate role (`v1_role_probe_gate`, this test
