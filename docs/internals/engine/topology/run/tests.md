@@ -664,6 +664,48 @@ because a resume wakes the deferred task and runs it again before any back-off. 
 reaches `back_off` only after a second limit, and that limit records its own reset over the one
 under test. Either way, `exhausted_pools` is what `back_off` reads.
 
+## `fn a_reset_reading_outside_the_writers_shape_is_not_read() {`
+
+`PR390-RESET-YEAR-OVERFLOW-PANIC` and `PR390-MALFORMED-RESET-SUFFIX-WAITS`: the witness. Each
+reading is the five-hour limit's `2026-11-11T05:30:00Z` with one thing changed, and each is `None`:
+a year of `9223372036854775807` or of `10000`, a month of `1`, seconds of `+0`, `.not-a-fraction`
+or a bare `.` before the `Z`, a lowercase `t` or `z`, `+00:00` in place of the `Z`, a 60th second,
+and the year in full-width digits. The empty string is `None` too. A fraction of digits still
+reads, as the whole second before it, and so do the epoch and the last second of 9999, the two ends
+of what four digits of year can write.
+
+On the code before the repair the test panics on its first reading, `attempt to multiply with
+overflow` in `util::days_from_civil` (`era * 146_097`). With it set aside, six of the other eleven
+read:
+`10000` as 253,429,536,600, the one-digit month as 11 January 2026, `+0`, `.not-a-fraction` and
+the bare `.` as 05:30, and the 60th second as 05:31.
+
+## `fn whatever_reads_is_what_the_writer_writes() {`
+
+The parser's grammar is the writer's, from both sides. Every instant of a spread from the epoch to
+the last second of 9999, and of a few edges among them (29 February 2000, the five-hour limit's
+reset), reads back from what `util::rfc3339_utc` writes for it. Then every one-character
+insertion, deletion and substitution in `2026-11-11T05:30:00Z` and in `2028-02-29T23:59:59.5Z`,
+drawn from `0 9 + - . : T Z é ２` and a space, either does not read or reads as an instant whose
+`rfc3339_utc` is the edited text less its fraction. A fraction here is `.` and one or more digits
+just before the final `Z`, and anything else after a `.` stays in the text, so a reading the
+parser takes too loosely cannot match. The leap day puts the calendar under the edits too: one that
+moves it into `2029` or `2098` names a day those years lack, and does not read.
+
+On the code before the repair the test fails at `02026-11-11T05:30:00Z`, a `0` inserted before the
+year, which read as 1,794,375,000, written `2026-11-11T05:30:00Z`.
+
+## `fn a_recorded_reset_outside_the_writers_shape_backs_off_as_before() {`
+
+The two defects at the level of the run, as in
+`a_recorded_reset_on_a_day_its_month_lacks_backs_off_as_before` but on `RunClock`. The pool's
+recorded reset is replaced once with the five-hour limit's reset in the year
+`9223372036854775807`, and once with `2026-11-11T05:30:00.not-a-fractionZ`. Neither reads, so each
+is no known reset and the run backs off the plain minute. On the code before the repair the first
+case panicked in `util::days_from_civil` inside `TopologyRun::awaited_reset`. The second read as
+05:30 and waited toward 05:32, in fifteen slices of 600 seconds and one of 120, 9,120 seconds where
+the plain back-off sleeps 60.
+
 ## `struct AnsweredAfterSlices<'a> {`
 
 An answer source that has nothing to say until the sleeper has slept `slices` slices, and then

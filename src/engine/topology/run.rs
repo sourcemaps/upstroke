@@ -3020,22 +3020,55 @@ fn unix_seconds(clock: &dyn TimeSource) -> u64 {
 }
 
 fn unix_seconds_of(reading: &str) -> Option<u64> {
-    let (date, time) = reading.strip_suffix('Z')?.split_once('T')?;
-    let mut date = date.split('-');
-    let year: i64 = date.next()?.parse().ok()?;
-    let month: i64 = date.next()?.parse().ok()?;
-    let day: i64 = date.next()?.parse().ok()?;
-    let mut time = time.split(':');
-    let hour: u64 = time.next()?.parse().ok()?;
-    let minute: u64 = time.next()?.parse().ok()?;
-    let second: u64 = time.next()?.split('.').next()?.parse().ok()?;
-    let in_range = date.next().is_none()
-        && time.next().is_none()
+    let [
+        y0,
+        y1,
+        y2,
+        y3,
+        b'-',
+        mo0,
+        mo1,
+        b'-',
+        d0,
+        d1,
+        b'T',
+        h0,
+        h1,
+        b':',
+        mi0,
+        mi1,
+        b':',
+        s0,
+        s1,
+        zone @ ..,
+    ] = reading.as_bytes()
+    else {
+        return None;
+    };
+    let zone_reads = match zone {
+        [b'Z'] => true,
+        [b'.', fraction @ .., b'Z'] => {
+            !fraction.is_empty() && fraction.iter().all(u8::is_ascii_digit)
+        }
+        _ => false,
+    };
+    let number = |digits: &[&u8]| {
+        digits.iter().try_fold(0_u32, |value, digit| {
+            Some(value * 10 + char::from(**digit).to_digit(10)?)
+        })
+    };
+    let year = i64::from(number(&[y0, y1, y2, y3])?);
+    let month = i64::from(number(&[mo0, mo1])?);
+    let day = i64::from(number(&[d0, d1])?);
+    let hour = u64::from(number(&[h0, h1])?);
+    let minute = u64::from(number(&[mi0, mi1])?);
+    let second = u64::from(number(&[s0, s1])?);
+    let in_range = zone_reads
         && (1..=12).contains(&month)
         && (1..=31).contains(&day)
         && hour < 24
         && minute < 60
-        && second < 61;
+        && second < 60;
     if !in_range {
         return None;
     }

@@ -2306,6 +2306,130 @@ fn a_recorded_reset_on_a_day_its_month_lacks_backs_off_as_before() {
     assert_backs_off_as_before("no such day", &steps, &sleeper);
 }
 
+#[test]
+fn a_reset_reading_outside_the_writers_shape_is_not_read() {
+    for reading in [
+        "9223372036854775807-11-11T05:30:00Z",
+        "10000-11-11T05:30:00Z",
+        "2026-1-11T05:30:00Z",
+        "2026-11-11T05:30:+0Z",
+        "2026-11-11T05:30:00.not-a-fractionZ",
+        "2026-11-11T05:30:00.Z",
+        "2026-11-11t05:30:00Z",
+        "2026-11-11T05:30:00z",
+        "2026-11-11T05:30:00+00:00",
+        "2026-11-11T05:30:60Z",
+        "２０２６-11-11T05:30:00Z",
+        "",
+    ] {
+        assert_eq!(
+            unix_seconds_of(reading),
+            None,
+            "{reading:?} is not what `util::rfc3339_utc` writes, so it is not read"
+        );
+    }
+    assert_eq!(
+        unix_seconds_of("2026-11-11T05:30:00.123Z"),
+        Some(1_794_375_000),
+        "a fraction of digits is read, and its second is the whole second before it"
+    );
+    assert_eq!(
+        unix_seconds_of("1970-01-01T00:00:00Z"),
+        Some(0),
+        "the epoch reads as zero"
+    );
+    assert_eq!(
+        unix_seconds_of("9999-12-31T23:59:59Z"),
+        Some(253_402_300_799),
+        "the last second a four-digit year holds reads"
+    );
+}
+
+#[test]
+fn whatever_reads_is_what_the_writer_writes() {
+    use crate::util::rfc3339_utc;
+
+    const LAST: u64 = 253_402_300_799;
+    let edges = [1, 59, 86_399, 951_782_400, 1_794_375_000, LAST];
+    let spread = (0..=9_973_u64).map(|step| step * (LAST / 9_973));
+    for instant in spread.chain(edges) {
+        let written = rfc3339_utc(instant);
+        assert_eq!(
+            unix_seconds_of(&written),
+            Some(instant),
+            "{written} is what the writer writes for {instant}"
+        );
+    }
+
+    let less_its_fraction = |text: &str| -> String {
+        let Some((whole, rest)) = text.split_once('.') else {
+            return text.to_owned();
+        };
+        match rest.strip_suffix('Z') {
+            Some(fraction)
+                if !fraction.is_empty() && fraction.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                format!("{whole}Z")
+            }
+            _ => text.to_owned(),
+        }
+    };
+    let alphabet = ['0', '9', '+', '-', '.', ':', 'T', 'Z', 'é', '２', ' '];
+    for reading in ["2026-11-11T05:30:00Z", "2028-02-29T23:59:59.5Z"] {
+        let chars: Vec<char> = reading.chars().collect();
+        let mut variants: Vec<String> = Vec::new();
+        for at in 0..=chars.len() {
+            let (before, from) = (chars.iter().take(at), chars.iter().skip(at));
+            for with in alphabet {
+                let inserted = before.clone().chain([&with]).chain(from.clone());
+                variants.push(inserted.collect());
+            }
+        }
+        for at in 0..chars.len() {
+            let (before, after) = (chars.iter().take(at), chars.iter().skip(at + 1));
+            variants.push(before.clone().chain(after.clone()).collect());
+            for with in alphabet {
+                let substituted = before.clone().chain([&with]).chain(after.clone());
+                variants.push(substituted.collect());
+            }
+        }
+        for variant in variants {
+            if let Some(instant) = unix_seconds_of(&variant) {
+                assert_eq!(
+                    rfc3339_utc(instant),
+                    less_its_fraction(&variant),
+                    "{variant:?}, one character from {reading:?}, reads as {instant}, \
+                     which the writer writes otherwise"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_recorded_reset_outside_the_writers_shape_backs_off_as_before() {
+    use crate::engine::topology::scaffold::WideTask;
+
+    for (tag, reset_at) in [
+        (
+            "reset-wait-oversized-year",
+            "9223372036854775807-11-11T05:30:00Z",
+        ),
+        (
+            "reset-wait-not-a-fraction",
+            "2026-11-11T05:30:00.not-a-fractionZ",
+        ),
+    ] {
+        let mut wide =
+            deferred_on_claude_max(tag, &[WideTask::independent("alpha")], FIVE_HOUR_LIMIT);
+        wide.run.exhausted_pools = [signal(reset_at)].into_iter().collect();
+        let mut hooks = wide.env.hooks();
+        let sleeper = RecordingSleeper::default();
+        let steps = stepped_until_waited(&mut wide, &RunClock, &sleeper, None, &mut hooks);
+        assert_backs_off_as_before(tag, &steps, &sleeper);
+    }
+}
+
 struct AnsweredAfterSlices<'a> {
     sleeper: &'a RecordingSleeper,
     slices: usize,

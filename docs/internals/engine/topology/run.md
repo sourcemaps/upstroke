@@ -2184,8 +2184,32 @@ falls back to the host clock, which is what the sequential engine reads.
 
 ## `fn unix_seconds_of(reading: &str) -> Option<u64> {`
 
-`YYYY-MM-DDTHH:MM:SS[.fraction]Z` in Unix seconds, or `None` for
-anything else, a date its month lacks included.
+The reading in Unix seconds when it is, byte for byte,
+`YYYY-MM-DDTHH:MM:SS`, then optionally `.` and one or more ASCII digits,
+then `Z`, and `None` for anything else. Each letter is one ASCII digit.
+The month is 01 to 12, the day one that month has, the hour 00 to 23,
+and the minute and second 00 to 59. A fraction is accepted and dropped.
+
+**Nothing reads but the writer's shape**
+(`PR390-RESET-YEAR-OVERFLOW-PANIC`, `PR390-MALFORMED-RESET-SUFFIX-WAITS`).
+The parser split the reading on `T`, `-` and `:` and handed each piece
+to `str::parse`, which takes any number of digits and a leading `+`. It
+read the seconds up to a `.` and never looked at what followed. So a
+persisted reset with the year `9223372036854775807` reached
+`util::days_from_civil`, whose `era * 146_097` overflows `i64`, and the
+back-off panicked reading it ([`TopologyRun::awaited_reset`]). And
+`2026-11-11T05:30:00.not-a-fractionZ` read as 05:30, so the run waited
+toward a reset no writer had written. A bare `.`, seconds of `+0`, a
+one-digit month, a five-digit year and a 60th second read the same way.
+Every reset the engine records and every reading of `SystemClock` comes
+from `util::rfc3339_utc` (through
+`agent::adapter::reset_at_from_limit_message` and
+`util::rfc3339_utc_now`), which writes four digits of year, two of every
+other field and `Z`. The parser now matches that shape with a slice
+pattern over the bytes, plus the one widening the old grammar promised,
+a fraction of digits. Four digits keep the year far below anything
+`days_from_civil` can overflow on. What reads is what the writer writes
+for the value read, less any fraction.
 
 **A day its month lacks is no date** (`PR390-INVALID-RESET-DRIVES-WAIT`).
 The range checks admit a day from 1 to 31 in any month, and
