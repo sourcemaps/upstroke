@@ -1022,6 +1022,11 @@ exec sh "$CODEX_FIXTURE/cli.sh" "$@"
 
         #[test]
         fn configured_fixture_preserves_directory_bytes_through_the_runner() {
+            use crate::runner::invocation::AttemptRole;
+            use crate::runner::{AgentId, InvocationId, worker_request};
+            use crate::topology::events::{AttemptNumber, GenerationId};
+            use crate::topology::registry::TaskKey;
+
             let tree =
                 crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "codex-fixture-bytes")
                     .expect("isolated fixture tree");
@@ -1045,8 +1050,19 @@ exec sh "$CODEX_FIXTURE/cli.sh" "$@"
                 .build(&run(PermissionMode::ReadOnly, None))
                 .expect("configured execution command");
             command.stdin = b"offline fixture prompt".to_vec();
-            let request = probe_request(ADAPTER_ID, command, 12, PROBE_TIMEOUT)
-                .expect("configured execution request");
+            let request = worker_request(
+                command,
+                directory,
+                AgentId::new(ADAPTER_ID),
+                Duration::from_secs(60),
+                InvocationId::attempt(
+                    TaskKey(0),
+                    GenerationId(0),
+                    AttemptNumber(1),
+                    AttemptRole::Worker,
+                    0,
+                ),
+            );
             let output = runner
                 .run_blocking(&request)
                 .expect("execute the local stub");
