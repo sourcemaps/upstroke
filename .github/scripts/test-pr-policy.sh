@@ -7195,6 +7195,22 @@ fi
 credit_refuse 'a .mailmap mapping the listed identity to a neutral one' "$c" \
   "$c:claude-author" "$c:claude-committer"
 
+# A replace ref that puts a plain commit under a credited commit's name changes no verdict either:
+# the object judged is the one the name was written for. The case is only about anything if git,
+# with the ref in effect, really does report the plain commit's identity under that name. The ref
+# is deleted after the case, so no later case sees it.
+c="$(credit_commit "$credit_target" Claude noreply@anthropic.com Claude noreply@anthropic.com \
+  'feat: a credited commit a replace ref hides')" || exit 1
+credit_replacement="$(plain_commit "$credit_target" 'feat: the plain commit put in its place')" || exit 1
+credit_git replace "$c" "$credit_replacement"
+if [[ "$(credit_git log --no-walk --format='%an <%ae>' "$c")" != 'Jane Doe <jane@example.com>' ]]; then
+  echo 'commit credit: the fixture replace ref is not in effect, so the case proves nothing' >&2
+  exit 1
+fi
+credit_refuse 'a replace ref putting a plain commit under the name of a credited one' "$c" \
+  "$c:claude-author" "$c:claude-committer"
+credit_git replace -d "$c" > /dev/null
+
 # Only the listed identities are refused: an agent name with a suffix, and anthropic.com addresses
 # other than the listed one, pass.
 c="$(credit_commit "$credit_base" 'Claude Fable 5.2' person@anthropic.com \
@@ -7308,6 +7324,37 @@ credit_fail_closed 'missing ancestry below the merge base' "$credit_target" "$cr
 mv "$fixture_dir/credit-saved-object" "$credit_missing_object"
 credit_pass 'missing ancestor restored' "$credit_clean" 1
 
+# A commit the checkout lacks is not fetched to be judged, even where a promisor remote holds it.
+# In a throwaway copy of the fixture, made a partial clone whose promisor is the fixture, a head
+# commit whose object is removed fails closed, and the object is still absent after the run. The
+# absence check carries GIT_NO_LAZY_FETCH=1 too, or asking for the object would fetch it.
+credit_lazy_head="$(plain_commit "$credit_target" 'feat: a commit the partial clone lacks')" || exit 1
+credit_lazy="$fixture_dir/repo-credit-partial-clone"
+cp -a "$credit_repo" "$credit_lazy"
+credit_lazy_object="$credit_lazy/.git/objects/${credit_lazy_head:0:2}/${credit_lazy_head:2}"
+if [[ ! -f "$credit_lazy_object" ]]; then
+  echo 'commit credit: the partial-clone fixture commit is not a loose object, so it cannot be removed' >&2
+  exit 1
+fi
+rm -f "$credit_lazy_object"
+git -C "$credit_lazy" config core.repositoryformatversion 1
+git -C "$credit_lazy" config extensions.partialClone origin
+git -C "$credit_lazy" remote add origin "$credit_repo"
+git -C "$credit_lazy" config remote.origin.promisor true
+credit_fail_closed 'a head commit missing from a partial clone' \
+  "$credit_target" "$credit_lazy_head" "$credit_lazy"
+if [[ -s "$fixture_dir/credit-out" || "$(wc -l < "$fixture_dir/credit-err")" -ne 1 ||
+      "$(cat "$fixture_dir/credit-err")" != 'commit-credit-policy: head commit is not in this checkout' ]]; then
+  echo 'commit credit: a head commit missing from a partial clone: expected one line, that the head commit is not in this checkout:' >&2
+  cat "$fixture_dir/credit-err" >&2
+  exit 1
+fi
+if GIT_NO_LAZY_FETCH=1 git -C "$credit_lazy" cat-file -e "$credit_lazy_head" 2> /dev/null; then
+  echo 'commit credit: the commit missing from the partial clone was fetched into it' >&2
+  exit 1
+fi
+rm -rf "$credit_lazy"
+
 # Inject producer and read failures at the Bash process boundary, without networking, races,
 # permissions that root can bypass, or changes to the validator's entry point. Real git handles
 # every operation except the selected fault. The control uses the same injection path.
@@ -7317,6 +7364,17 @@ git() {
   if [[ "$CREDIT_PHASE" == resolved-end && "$1" == rev-parse && "${2:-}" == --verify ]]; then
     printf '%s\n' "$CREDIT_RECORDS"
     return 0
+  fi
+  # The identity read, found by its format argument wherever it stands. `[` compares the bytes:
+  # under the validator's nocasematch, `[[` would fold the case and take `%aN%n%aE%n%cN%n%cE` too.
+  if [[ "$CREDIT_PHASE" == identities && "$1" == log ]]; then
+    local credit_arg
+    for credit_arg in "$@"; do
+      if [ "$credit_arg" = '--format=%an%n%ae%n%cn%n%ce' ]; then
+        printf '%s' "$CREDIT_RECORDS"
+        return 0
+      fi
+    done
   fi
   if [[ "$CREDIT_PHASE" == "$1" ]] &&
       { [[ "$1" != rev-list ]] || [[ "${3:-}" == --not ]]; }; then
@@ -7397,6 +7455,19 @@ BASH_ENV="$credit_fault_env" CREDIT_PHASE=none CREDIT_FAULT=setup \
   credit_contract_failure 'temporary setup error is private' 'could not create temporary workspace'
 TMPDIR="$fixture_dir/private@example.com/nonexistent" \
   credit_contract_failure 'real mktemp error is private' 'could not create temporary workspace'
+
+# A commit's identities must be exactly its four fields, a field to a line. For the plain control
+# commit, a read of five lines -- a stray line before the fields -- and a read of three -- the
+# committer email missing -- each fail closed. Unchecked, the five would be judged as the wrong
+# fields and pass, and the three would stop on an unset field with nothing said.
+BASH_ENV="$credit_fault_env" CREDIT_PHASE=identities CREDIT_FAULT=records \
+  CREDIT_RECORDS=$'No signature\nJane Doe\njane@example.com\nJane Doe\njane@example.com\n' \
+  credit_contract_failure 'an identity read of five lines, a stray line before the four fields' \
+  'could not read the identities of commit'
+BASH_ENV="$credit_fault_env" CREDIT_PHASE=identities CREDIT_FAULT=records \
+  CREDIT_RECORDS=$'Jane Doe\njane@example.com\nJane Doe\n' \
+  credit_contract_failure 'an identity read of three lines, the committer email missing' \
+  'could not read the identities of commit'
 
 # r72 row 6: producer output has the repository's own width, not either supported width.
 # In SHA-256 the wrong-width record is a resolvable 40-digit abbreviation of the real object.
