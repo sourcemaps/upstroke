@@ -565,470 +565,326 @@ first only drops a candidate, the second refuses the whole reset.
 
 ## `mod tests` › `fn a_successful_answer_from(id: &str) -> String {`
 
-A stdout every adapter would call a **success**, written in that
-adapter's own answer shape.
-
-Load-bearing rather than convenient: it is what makes the supervision
-grid below hostile. With a failure payload, dropping the supervision
-checks would still report `AgentError` and the cells would pass for the
-wrong reason.
+A stdout each shipped adapter parses as a **success**, in that adapter's own answer shape. It is
+what makes the supervision grid below hostile: with a failure payload, dropping the supervision
+checks would still report `AgentError` and the cells would pass for the wrong reason.
 
 ## `mod tests` › `fn every_adapter_maps_every_supervision_result_the_same_way() {`
 
-**Every** adapter maps **every** supervision result the same way.
+Each adapter in `ADAPTERS` maps each of the grid's six supervision shapes to the same status (18
+cells, three distinct statuses). The supervisor's two flags are inputs to parsing: `output_limited`
+means the tree was terminated with the transcript truncated, and `timed_out` that it was terminated
+for exceeding its wall clock. A truncated transcript authorizes nothing, and a timeout is a distinct
+ladder input from a generic agent failure.
 
-`invariants_preserved[0]` is "process supervision, timeout, output
-capture, **adapter parsing** unchanged", and the supervisor's two flags
-are inputs to parsing, not to it alone: `output_limited` means the tree
-was terminated with the transcript truncated, and `timed_out` means it
-was terminated for exceeding its wall clock. A truncated transcript
-authorizes nothing (`PR5-CORRECTNESS-013`) and a timeout is a distinct
-ladder input from a generic agent failure (`PR5-CORRECTNESS-014`).
-
-The domain is `ADAPTERS`, from the type, and the expectations are
-literals — a table, not a re-derivation of the branch order. That is the
-point: the two rows where an exit code of 0 meets a set flag are exactly
-the rows a re-derivation would get wrong in the same direction the code
-would.
-
-Claude and Copilot had direct flag-to-status tests; Codex's flag
-fixtures exercised its strict-config *preflight validators*, so no test
-had ever parsed an output-limited or timed-out Codex execution. That is
-the "guarantee proved for the variant that was looked at" class, and the
-guard for it is a domain taken from the type.
+The domain is `ADAPTERS`, so no adapter is left out of the grid, and the expectations are literals,
+a table rather than a re-derivation of the branch order: the two rows where an exit code of 0 meets
+a set flag are the rows a re-derivation would get wrong in the same direction the code would.
 
 ## `fn every_adapter_maps_every_supervision_result_the_same_way` › `type SupervisionCell = (`
 
-One supervision shape: name, exit code, `timed_out`,
-`output_limited`, the status every adapter must report, and a
-substring the detail must carry.
+One supervision shape: name, exit code, `timed_out`, `output_limited`, the status every adapter must
+report, and a substring the detail must carry (empty: not checked).
 
 ## `fn every_adapter_maps_every_supervision_result_the_same_way` › `assert_eq!(outcome.duration, out.duration, "{cell}: duration");`
 
-The duration is the supervisor's, on every route.
+The duration is the supervisor's, in every cell.
 
 ## `fn every_adapter_maps_every_supervision_result_the_same_way` › `assert_ne!(OutcomeStatus::Timeout, OutcomeStatus::AgentError);`
 
-A `Timeout` really is a different answer from an `AgentError`, which
-is what makes cells 4 and 5 worth having: the ladder acts on it.
+A `Timeout` is a different answer from an `AgentError`, which is what makes cells 4 and 5 (the two
+timeout rows) worth having: the ladder acts on it.
 
 ## `mod tests` › `fn an_agent_probe_request_is_slotted_names_its_agent_and_carries_the_probe_identity() {`
 
-What an agent probe *is*, against the two passages that say so.
-
-INV-18: "every agent CLI invocation **incl. agent probes** acquires its
-atomic {agent, pool?} pair while gates and the shell probe register
-without slots" — so it is slotted and it names its agent.
-`decisions.admission_and_leases.permits.invocation_identity`: the third
-form is "(probe, target: Agent(name) | Shell, ordinal) at pre-flight",
-and the shell probe is the *other* target — so an agent probe's
-identity names the agent, never `shell`.
-
-The expected values are written from those sentences, not read back
-from the request under test.
+What an agent probe is: slotted, and naming its agent in its role, its `agent` field and its
+identity (`p.agent-claude-code.o0`), never the shell probe, the other probe target, which is not
+slotted. The expected values are literals, not read back from the request under test.
 
 ## `fn an_agent_probe_request_is_slotted_names_its_agent_and_carries_the_probe_identity` › `assert_ne!(request.invocation.render(), "p.shell.o0");`
 
-The role the request carries and the target its identity carries are
-the same agent, and neither is the shell probe's. A request whose
-identity said `shell` would be a non-slotted process wearing a
-slotted role.
+The role and the identity's target name the same agent, and neither is the shell probe's: a request
+whose identity said `shell` would be a non-slotted process wearing a slotted role.
 
 ## `fn an_agent_probe_request_is_slotted_names_its_agent_and_carries_the_probe_identity` › `let ids: std::collections::BTreeSet<String> = ADAPTERS`
 
-Every shipped adapter id can be one, and the three are three
-distinct identities at the same ordinal — the target is a field, not
-decoration.
+Each of the three shipped adapter ids gives a probe request, and the three are distinct identities
+at the same ordinal: the target is a field, not decoration.
 
 ## `fn an_agent_probe_request_is_slotted_names_its_agent_and_carries_the_probe_identity` › `let ordinals: std::collections::BTreeSet<String> = (0..4)`
 
-And one adapter's successive pre-flight processes are successive
-identities, which is what makes "unique per process" hold for a
-probe that runs `--version` and then `--help`.
+Four ordinals of one adapter give four identities, which keeps identities unique per process for a
+pre-flight that starts several processes, such as `--version` and then `--help`.
 
 ## `mod tests` › `fn a_probe_request_refuses_an_agent_id_that_would_not_survive_a_container_name() {`
 
-An id that could not survive a container name is refused rather than
-carried. `decisions.pr_sequence[7].scope` puts an invocation id inside
-`<R>/containers/<name>.intent`, and `.` is the identity's own field
-separator.
+An id that could not survive in an invocation identity is refused rather than carried:
+`claude.code`, `clau de`, the empty id and `codex/../etc` are refused, and the three shipped ids and
+`aider_2` accepted. An invocation id names a container and an intent file (`validate` in
+`src/runner/invocation.rs`), and `.` is the identity's own field separator.
 
 ## `mod tests` › `fn the_observed_hit_your_five_hour_limit_message_signals() {`
 
-This is the message Claude Code printed when an account reached its limit,
-copied verbatim from the event log of run `01M740JX5N8HB94RNC7W2MM777`
-(2026-11-11, exit code 1), middle dot included. None of the twelve phrases
-matches it, so only the quota-window rule can make it signal, through its
-hours window. Remove the rule and this test fails.
+The message Claude Code printed when an account reached its limit, middle dot included. None of the
+twelve phrases matches it, so only the quota-window rule's hours window makes it signal.
 
 ## `mod tests` › `fn a_hit_your_weekly_limit_message_signals() {`
 
-The weekly window in the same wording. This text has not been observed from
-the CLI. The test pins what the rule claims to cover on the expectation that
-the weekly message is worded like the five-hour and session ones.
+The weekly window in the same wording. This text has not been observed from the CLI; the test pins
+what the rule claims to cover, on the expectation that the weekly message is worded like the
+five-hour and session ones.
 
 ## `mod tests` › `fn the_recorded_hit_your_session_limit_message_signals() {`
 
-The session window, in the words `48f2af7a:reviews/FINDINGS.md` records from a worker
-that returned rc=1 with `You've hit your session limit`. None of the twelve
-phrases matches it. Remove "session" from the windows and this test fails.
+`You've hit your session limit`, as a worker that returned rc=1 printed it. None of the twelve
+phrases matches it, so removing "session" from the windows fails this test.
 
 ## `mod tests` › `fn a_hit_your_context_window_limit_message_does_not_signal() {`
 
-A context-window limit is a fault in the task, not a quota window: a shorter
-prompt fixes it and waiting does not. "hit your " is followed by
-"context-window", which is none of the three windows and not a name of one
-word, so the text does not signal. Under the earlier rule, which took any
-"limit" after "hit your", it
-did, and the ladder would have deferred a real failure three times and asked
-a human.
+A context-window limit is a fault in the task, not a quota window: a shorter prompt fixes it and
+waiting does not. The word after "hit your " is "context", which is none of the windows or model
+names, so the text does not signal.
 
 ## `mod tests` › `fn hit_your_limit_with_no_window_does_not_signal() {`
 
-"you hit your limit" names no window. The rule needs a window or a name
-between "hit your " and " limit", so this does not signal. A rule that made
-the window optional would fail this test.
+"you hit your limit" names no window, so it does not signal; a rule that made the window optional
+would fail this test.
 
 ## `mod tests` › `fn an_hours_window_is_spelt_hour_then_limit() {`
 
-"hit your 5-hours limit" has digits and "-hour", but then "s limit", not
-" limit". The window must be followed immediately by " limit", so this does
-not signal. A rule that looked for " limit" anywhere after the window, or
-accepted "-hours", would fail this test.
+"hit your 5-hours limit" has digits and "-hour", then "s limit", not " limit", so it does not
+signal. A rule that looked for " limit" anywhere after the window, or accepted "-hours", would fail
+this test.
 
 ## `mod tests` › `fn a_window_after_a_later_hit_your_signals() {`
 
-The first "hit your " is followed by "branch", the second by "weekly limit".
-The text signals because every occurrence of "hit your " is checked. A rule
-that read only the first occurrence, as `split_once` does, would miss it and
-fail this test.
+The first "hit your " is followed by "branch", the second by "weekly limit". The text signals because
+each occurrence of "hit your " is checked; a rule that read only the first, as `split_once` does,
+would fail this test.
 
 ## `mod tests` › `fn limit_before_hit_your_and_none_after_does_not_signal() {`
 
-"limit" before "hit your", with no window after it, does not signal. The
-rule reads only what follows "hit your ", so a "limit" earlier in the text
-plays no part.
-
-The first text, "no limit was hit; your change is in", is the example from
-the task that added the first form of the rule. Its semicolon means it never
-contains "hit your " as a substring, so it is a fair negative but cannot
-tell one rule from another. The second text has a real "hit your " followed
-by "branch", with "limit" only before it. It witnesses that a rule matching
-"limit" anywhere in a text that contains "hit your" would be wrong: that
-rule would signal on it and this test would fail.
+"limit" before "hit your", with no window after it, does not signal: the rule reads only what follows
+"hit your ". The first text, "no limit was hit; your change is in", never contains "hit your " (the
+semicolon), so it is a fair negative that cannot tell one rule from another. The second has a real
+"hit your " followed by "branch", with "limit" only before it: a rule matching "limit" anywhere in a
+text that contains "hit your" would signal on it and fail this test.
 
 ## `mod tests` › `fn hit_your_without_limit_does_not_signal() {`
 
-"hit your" alone is ordinary English, as in a patch that hit your branch. It
-is not a limit message. It witnesses that the rule needs more than the
-words "hit your": a rule that signalled on them alone would fail this test.
-The tests above pin what more it needs, a window and then " limit".
+"hit your" alone is ordinary English, as in a patch that hit your branch, not a limit message; a
+rule that signalled on those words alone would fail this test.
 
 ## `mod tests` › `fn a_session_limiter_does_not_signal() {`
 
-The text the round-two review used to show the first form of the rule was
-too wide: "hit your session" and then " limiter". "limit" is followed by
-"e", a letter, so it does not end there and the text does not signal. A
-rule that checked only that " limit" came next, with no boundary after it,
-would signal and fail this test.
+"hit your session" and then " limiter": "limit" is followed by "e", a letter, so it does not end
+there and the text does not signal. A rule with no boundary after " limit" would fail this test.
 
 ## `mod tests` › `fn a_weekly_limitation_does_not_signal() {`
 
-The weekly window followed by " limitation". "limit" is followed by "a", so
-the text does not signal. The same unbounded rule would fail this test,
-through the weekly window rather than the session one.
+The weekly window followed by " limitation", so the text does not signal; the same unbounded rule
+would fail this test through the weekly window.
 
 ## `mod tests` › `fn a_five_hour_limited_quota_does_not_signal() {`
 
-The hours window followed by " limited". "limit" is followed by "e", so the
-text does not signal. The same unbounded rule would fail this test, through
-the hours window, so each of the three windows has a negative of its own.
+The hours window followed by " limited", so the text does not signal. With the two tests above, each
+of the three windows has a boundary negative of its own.
 
 ## `mod tests` › `fn a_full_stop_after_limit_signals() {`
 
-"limit" ended by a full stop, a character that is not a word character, so
-the text signals. A boundary that accepted only a space or the end of the
-text, or that refused punctuation, would fail this test.
+"limit" ended by a full stop, which is not a word character, so the text signals. A boundary that
+accepted only a space or the end of the text would fail this test.
 
 ## `mod tests` › `fn limit_at_the_very_end_of_the_text_signals() {`
 
-"limit" as the last word, with nothing after it, so the text signals. The
-text is the one `a_hit_your_weekly_limit_message_signals` uses; it is here
-again to pin the end-of-text half of the boundary beside the full stop
-above. A boundary that demanded a following character, as a check reading
-the next character without allowing for none would, fails this test.
+"limit" as the last word, with nothing after it, so the text signals. The text is the one
+`a_hit_your_weekly_limit_message_signals` uses, here to pin the end-of-text half of the boundary
+beside the full stop above: a boundary that demanded a following character fails this test.
 
 ## `mod tests` › `fn the_observed_hit_your_fable_limit_message_signals() {`
 
-The message Claude Code printed on the build machine on 2026-11-12, when the
-Fable model's own weekly allowance was spent: `FABLE`, the same text the
-reset tests below read. None of the twelve phrases matches it, so only the
-name form of the quota-window rule can make it signal. Before that form
-existed this test failed, and an attempt that printed the message was an
-`AgentError` that spent an attempt against an exhausted pool.
+The dated message Claude Code printed when the Fable model's own allowance was spent (`FABLE`, the
+text the reset tests below read). None of the twelve phrases matches it, so only the name form of the
+quota-window rule makes it signal.
 
 ## `mod tests` › `fn a_hit_your_opus_limit_message_with_a_reset_signals() {`
 
-The same form with another model's name and a time-only reset. It has not
-been observed. It witnesses that the rule accepts more than "fable": a rule
-that listed only the observed name would fail this test.
+The name form with another model's name and a time-only reset, not observed. A rule that listed only
+the observed name would fail this test.
 
 ## `mod tests` › `fn each_claude_model_name_with_a_reset_signals() {`
 
-Each of the four names, "Opus", "Sonnet", "Haiku" and "Fable", followed by a
-limit and a reset, with time-only and dated resets, and two of them in
-another case ("SONNET", "haiku"). None of them but Fable has been observed.
-It witnesses the whole list: drop a name from it, or compare the names case
-included, and this test fails.
+"Opus", "Sonnet", "Haiku" and "Fable", each followed by a limit and a reset, with time-only and dated
+resets, and two in another case ("SONNET", "haiku"). Only Fable has been observed. Each of the four
+names is a case, so dropping one from the list, or comparing the names case included, fails this
+test.
 
 ## `mod tests` › `fn a_context_token_or_request_limit_with_a_reset_does_not_signal() {`
 
-The round-three defect. "hit your context limit · resets after compaction"
-is the text the review gave, a Copilot or Codex message about the context,
-not the pool; the others are "context", "token" and "request" limits with a
-reset that does parse. Each is one word of ASCII letters and the next word
-after "limit" is "resets", so the rule this replaced, which took any such
-word, signalled on all four. The name must be one of Claude's four, so none
-signals. A rule that took any one-word name with a reset fails this test.
+"hit your context limit · resets after compaction" is a Copilot or Codex message about the context,
+not the pool; the other three are "context", "token" and "request" limits with a reset that parses.
+Each is one word of ASCII letters with "resets" as the next word after "limit", and none is one of
+Claude's four names, so none signals. A rule that took any one-word name with a reset fails this
+test.
 
 ## `mod tests` › `fn a_name_that_is_not_one_of_claudes_four_with_a_reset_does_not_signal() {`
 
-Names close to the list that are not on it: other agents' names, "Codex" and
-"Copilot", and the plurals "Opuses" and "Fables". The name is compared whole,
-so none signals. A rule that took any name, or one that asked only whether a
-name started with one of the four, fails this test.
+Names close to the list but not on it: "Codex", "Copilot", "Opuses" and "Fables". The name is
+compared whole, so none signals; a rule that took any name, or asked only whether a name started
+with one of the four, fails this test.
 
 ## `mod tests` › `fn a_hit_your_token_limit_message_without_a_reset_does_not_signal() {`
 
-"hit your token limit" and "hit your context limit", the first with nothing
-after it and the second with a semicolon and advice. Both are about the
-prompt, not the pool, and neither "token" nor "context" is a model name, so
-neither signals. It was written when any one-word name signalled with a
-reset, to pin that a name without one did not; the test above now pins that
-these names do not signal with a reset either.
+"hit your token limit" alone and "hit your context limit" with a semicolon and advice: both are about
+the prompt, not the pool, and neither "token" nor "context" is a model name, so neither signals.
 
 ## `mod tests` › `fn a_model_named_limit_without_a_reset_does_not_signal() {`
 
-The observed Fable message with its reset cut off. A model's name is not
-enough on its own: it says what was spent, and it is the reset that makes
-the message a quota. It witnesses that the reset is required for the model
-names, which "session", "weekly" and the hours window do not need.
+`FABLE` with its reset cut off does not signal. A model's name says what was spent; the reset is what
+makes the message a quota, which "session", "weekly" and the hours window do not need.
 
 ## `mod tests` › `fn a_named_limit_whose_next_word_is_not_resets_does_not_signal() {`
 
-"resets" appears after the limit, but the next word after "limit" is "the".
-The reset has to follow the limit, as in the observed message, not merely
-appear later in the text. A rule that looked for "resets" anywhere after the
-limit would fail this test.
-
-The "token" text was the only case when any one-word name could signal.
-Since only Claude's four names can, "token" no longer signals with any
-reset, so that text cannot tell one reset rule from another. The "Fable"
-text, a model name with the same "; the cache resets" after it, is the case
-that still does.
+"resets" appears after the limit, but the next word after "limit" is "the". The reset has to follow
+the limit, not merely appear later in the text. The "Fable" text is the case that tells this rule
+from one that looks for "resets" anywhere after the limit; "token" does not signal with any reset,
+so its text cannot.
 
 ## `mod tests` › `fn a_named_limiter_with_a_reset_does_not_signal() {`
 
-The observed Fable message with "limiter" for "limit". The name form keeps
-the same whole-word boundary as the three windows, so the reset after it does
-not help. A name form that skipped `after_a_whole_limit` would fail this
-test.
+`FABLE` with "limiter" for "limit". The name form keeps the whole-word boundary of the three
+windows, so the reset after it does not help; a name form that skipped `after_a_whole_limit` would
+fail this test.
 
 ## `mod tests` › `fn a_name_of_more_than_one_word_with_a_reset_does_not_signal() {`
 
-Three names that are not one word of ASCII letters, each followed by a
-limit and a reset: "context window", "context-window" and "Fable4". The name
-stops at the space, the hyphen and the digit, and what follows is not
-" limit", so none signals. A rule that took everything up to " limit" as the
-name would fail this test. Now that the name must be one of Claude's four,
-"context" is refused whatever follows it, so "Fable4", which starts with a
-name on the list, is the case that pins where the name ends.
+"context window", "context-window" and "Fable4", each followed by a limit and a reset. The name stops
+at the space, the hyphen and the digit, and what follows is not " limit", so none signals. Since
+"context" is refused whatever follows it, "Fable4", which starts with a listed name, is the case that
+pins where the name ends.
 
 ## `mod tests` › `const NOV_11_2026: u64 = 1_794_355_200;`
 
-The reset tests read their messages at fixed instants, never at the
-clock's. Each constant is a UTC midnight written as a literal, and
-`the_reset_fixtures_are_the_midnights_they_are_named_for` checks each
-against the date it is named for, so a miscounted constant fails there,
-by name, rather than as a wrong reset further down. `JAN_1_10000` is
-checked there by its day count from `util::days_from_civil` instead,
-since its year has five digits and `util::rfc3339_utc` writing it is not
-what the check is for.
+The reset tests read their messages at fixed instants, never at the clock's. The six dated
+constants from `NOV_11_2026` to `FEB_27_2029` are UTC midnights written as literals, and
+`the_reset_fixtures_are_the_midnights_they_are_named_for` checks each against the date it is named
+for, so a miscounted constant fails there, by name, rather than as a wrong reset further down.
+`JAN_1_10000` is checked there by its day count from `util::days_from_civil` instead, since its
+year has five digits and `util::rfc3339_utc` writing it is not what the check is for.
 
 ## `mod tests` › `fn after_a_limit(reset: &str) -> String {`
 
-A reset as the session limit gives it: `You've hit your session limit · `
-before the reset's text. The tests of the reset's grammar and of the clock
-(`12am`, the year end, `Feb 29`, the zones, the malformations) wrote their
-resets bare, `resets 12am (UTC)`, while a lone reset was still read. Now a
-reset is read only from a limit, so a bare one gives `None` whatever it
-says, and a malformation test written bare would pass with a parser that
-read nothing. Each such text is put after a limit instead, and each
-expectation is the one it had. The session limit is used because it signals
-alone and takes either form of reset, time-only or dated.
+A reset as the session limit gives it: `You've hit your session limit · ` before the reset's text.
+A reset is read only from a limit, so a bare one gives `None` whatever it says, and a malformation
+test written bare would pass with a parser that read nothing. The session limit is used because it
+signals alone and takes either form of reset, time-only or dated.
 
 ## `mod tests` › `fn the_observed_five_hour_message_resets_later_the_same_day() {`
 
-The five-hour message as Claude Code printed it, read at 03:00 on the day
-it was seen: the reset is 05:30 that day.
+`FIVE_HOUR` read at 03:00 on 11 November 2026: the reset is 05:30 that day.
 
 ## `mod tests` › `fn the_observed_fable_message_resets_on_its_date() {`
 
-The dated message as Claude Code printed it, read on 12 November 2026: the
-reset is 14 November 2026 at 09:00.
+`FABLE` read on 12 November 2026: the reset is 14 November 2026 at 09:00.
 
 ## `mod tests` › `fn a_time_only_reset_read_just_after_itself_is_its_own() {`
 
-The first defect the frontier review found. The five-hour message read at
-05:30 exactly, at 05:30:01 and at 06:00 gives 05:30 that morning each time.
-Under the rule this replaced, "the first such time at or after", the last
-two gave the next morning's, a day ahead of the reset the message named.
-This test replaced `a_time_only_reset_already_passed_today_is_tomorrows`,
-which pinned that rule.
+`FIVE_HOUR` read at 05:30 exactly, at 05:30:01 and at 06:00 gives 05:30 that morning each time, not
+the next morning's.
 
 ## `mod tests` › `fn a_time_only_reset_read_the_evening_before_is_the_next_mornings() {`
 
-Read at 20:00, `5:30am` is the next morning's, 9.5 hours ahead rather than
-14.5 hours past. 17:30 is halfway between the two mornings: one second
-before it the morning just gone is the nearer, and at it the two are as
-near as each other and the later is taken, so both sides of the tie are
-pinned.
+Read at 20:00, `5:30am` is the next morning's, 9.5 hours ahead rather than 14.5 hours past. 17:30 is
+halfway between the two mornings: one second before it the morning just gone is the nearer, and at
+it the two are equally near and the later is taken, so both sides of the tie are pinned.
 
 ## `mod tests` › `fn twelve_am_is_midnight_and_twelve_pm_is_noon() {`
 
-Read at 01:00: `12am` and `12:45am` are an hour and a quarter of an hour
-past, and are today's 00:00 and 00:45; `12pm` and `12:45pm` are today's
-12:00 and 12:45. `1am`, `1pm` and `11:59pm` pin the hours either side of the
-wrap: `1am` is now, `1pm` is twelve hours either way and so the later,
-today's, and `11:59pm` is yesterday's, an hour past. Reading `12am` as
-12:00, as a parser that only adds twelve for `pm` would, fails here.
-
-The read time is the one this test had under the rule this replaced, when
-`12am`, `12:45am` and `11:59pm` gave tomorrow's 00:00, tomorrow's 00:45 and
-today's 23:59. The nearest-occurrence rule moved those three expectations,
-and the wrap is pinned just as well by the new ones.
+Read at 01:00: `12am` and `12:45am` are today's 00:00 and 00:45, an hour and a quarter of an hour
+past; `12pm` and `12:45pm` are today's 12:00 and 12:45. `1am` is now, `1pm` is twelve hours either
+way and so the later, today's, and `11:59pm` is yesterday's, just over an hour past. Reading `12am`
+as 12:00, as a parser that only adds twelve for `pm` would, fails here.
 
 ## `mod tests` › `fn a_dated_reset_is_its_own_until_the_next_years_is_nearer() {`
 
-The `Nov 14, 9am` message read on 14 November at 20:00, at 09:00 on 15
-November, and a second after that gives 14 November 2026. Under the rule
-this replaced, that last read was past its day of tolerance and gave 14
-November 2027; this test replaced
-`a_dated_reset_read_just_after_itself_stays_in_its_year`, which pinned it.
-The two resets are 365 days apart, so halfway between them is 21:00 on 15
-May 2027, which the test checks first. One second before it the reset is
-still 2026's, and at it the two are as near as each other and the later,
-2027's, is taken.
+`FABLE` read at 20:00 on 14 November, at 09:00 on 15 November and a second after that gives 14
+November 2026. The two years' resets are 365 days apart, so halfway between them is 21:00 on 15 May
+2027, which the test asserts before using it: one second before it the reset is still 2026's, and
+at it the two are equally near and the later, 2027's, is taken.
 
 ## `mod tests` › `fn a_dated_reset_across_a_year_end_is_next_years() {`
 
-Read at 20:00 on 31 December 2026, `Jan 2` is 2 January 2027 and a time-only
-`5am` is 1 January 2027, nine hours ahead. `Dec 31, 11pm` is later that same
-day. Read at noon on 30 December, `Jan 2` is still the coming 2 January, not
-the one just under a year past.
-
-The read time was noon until the nearest-occurrence rule: at noon, `5am` is
-seven hours past and the rule gives that morning's, which is no longer a
-year-end case, so the read moved to 20:00 rather than the expectation.
+Read at 20:00 on 31 December 2026, `Jan 2` is 2 January 2027, a time-only `5am` is 1 January 2027,
+nine hours ahead, and `Dec 31, 11pm` is later that same day. Read at noon on 30 December, `Jan 2`
+is still the coming 2 January, not the one just under a year past.
 
 ## `mod tests` › `fn a_reset_read_just_after_a_year_end_is_last_years() {`
 
-The second defect the frontier review found. At 00:30 on 1 January 2027,
-`Dec 31, 11pm` is 31 December 2026, an hour and a half past, and not 31
-December 2027, the date in the year read from the clock, which the rule
-this replaced gave. A time-only `11pm` read then is the same instant,
-yesterday's.
+At 00:30 on 1 January 2027, `Dec 31, 11pm` is 31 December 2026, an hour and a half past, not 31
+December 2027, the date in the year read from the clock. A time-only `11pm` read then is the same
+instant, yesterday's.
 
 ## `mod tests` › `fn feb_29_is_a_neighbouring_years_leap_day_or_none() {`
 
-`Feb 29, 3pm` read on 27 February of four years in a row. In 2028 it is
-29 February 2028. In 2027 and in 2029, years without that day, it is 29
-February 2028, the leap day in the next year and in the year before: the
-nearest leap year is a candidate when it is a neighbouring year, whether that
-puts the reset a year ahead or in the past. In 2026 it is `None`, since none
-of 2025, 2026 and 2027 has the day; it is never moved to 1 March. The test
-was `feb_29_resets_in_a_leap_year_and_is_refused_in_another`, which gave
-`None` in 2027 because only the current year and, after it, the next were
-read; with the next year a candidate whatever the date, 2027's expectation
-changed.
+`Feb 29, 3pm` read on 27 February of 2026 to 2029. In 2028 it is 29 February 2028. In 2027 and 2029,
+years without that day, it is also 29 February 2028, the leap day in the next year and in the year
+before: a neighbouring leap year is a candidate whether that puts the reset a year ahead or in the
+past. In 2026 it is `None`, since none of 2025, 2026 and 2027 has the day; it is never moved to 1
+March.
 
 ## `mod tests` › `fn a_zone_other_than_utc_gives_none() {`
 
-The five-hour message with `(Europe/London)` in place of `(UTC)` gives
-`None`, and so do `(GMT)`, a lower-case `(utc)`, `UTC` without parentheses
-or without the space before them, and no zone at all, each after a limit
-(`after_a_limit`).
+The five-hour message with `(Europe/London)` in place of `(UTC)` gives `None`, and so do, each
+after a limit (`after_a_limit`), `(GMT)`, a lower-case `(utc)`, `UTC` without parentheses or without
+the space before them, no zone at all, and a dated reset in `(America/New_York)`.
 
 ## `mod tests` › `fn text_without_a_reset_gives_none() {`
 
-Texts with no reset in them: the empty text, the session-limit message, the
-older "5-hour limit reached", a time and zone with no `resets` before them,
-`reset` without the `s`, `resets` with nothing after it, and `presets`,
-which contains `resets ` but not as a word. Each gives `None` alone and
-after a limit, so a limit is not what makes them read.
+Texts with no reset in them: the empty text, the session-limit message, the older "5-hour limit
+reached", a time and zone with no `resets` before them, `reset` without the `s`, `resets` with
+nothing after it, and `presets`, which contains `resets ` but not as a word. Each gives `None` alone
+and after a limit, so adding a limit does not make them read.
 
 ## `mod tests` › `fn malformed_hours_minutes_months_and_days_give_none() {`
 
-One malformation per text, each otherwise in the observed shape: hours 0,
-13 and 123, a signed hour, a space before `am`, upper-case `AM`, no `am` or
-`pm`, minutes 60 and 99, one or three minute digits, a `.` for the `:`, a
-misspelt, lower-case, unabbreviated or four-letter month, 31 November,
-31 April, 30 February, day 0, a three-digit day, no day, no comma, no space
-after the comma, and a dated reset with an hour of 13 or no time. Each is
-read after a limit (`after_a_limit`), so it is the malformation that gives
-`None`, not the want of a limit.
+One malformation per text, each otherwise in the observed shape: hours 0, 13 and 123, a signed hour,
+a space before `am`, upper-case `AM`, no `am` or `pm`, no hour, minutes 60 and 99, no, one or three
+minute digits, a `.` for the `:`, a misspelt, lower-case, unabbreviated or four-letter month, 31
+November, 31 April, 30 February, day 0, a three-digit day, no day, no comma, no space after the
+comma, and a dated reset with an hour of 13 or no time. Each is read after a limit, so it is the
+malformation that gives `None`, not the want of a limit.
 
 ## `mod tests` › `fn the_reset_after_the_limit_is_read_not_an_earlier_unrelated_one() {`
 
-The defect `PR380-RESET-PARSER-TAKES-UNRELATED-FIRST-RESET`: `MCP cache
-resets 9am (UTC)` on the line before the observed five-hour message gives
-05:30, not 09:00. So does the same with `\r\n` line endings, with the
-lines the other way round, with a session limit, and with the unrelated
-reset on a line that has a "hit your" which is not a limit: a context-window
-limit or "the patch hit your branch". The Fable message under the same
-line gives its own 14 November.
+`MCP cache resets 9am (UTC)` on the line before the five-hour message gives 05:30, not 09:00. So
+does the same with `\r\n` line endings, with the lines the other way round, with a session limit
+below a bare reset, and with the unrelated reset on a line that has a "hit your" which is not a
+limit: a context-window limit or "the patch hit your branch". `FABLE` under the same line gives its
+own 14 November.
 
 ## `mod tests` › `fn several_resets_and_none_after_a_limit_give_none() {`
 
-Two resets and no limit's to choose: `None`. That covers two resets with no
-limit at all, which gave the first under the rule this replaced (the test
-was `the_first_of_several_resets_is_read`), and a limit whose line has a
-reset after another word ("the queue resets"), or a context-window limit,
-which is not a quota window, each below an unrelated reset.
-
-It also held `MCP cache resets 9am (UTC)` above a session limit with
-`resets 5:30am (UTC)` on the line after it, which was `None` while a reset
-on the next line was not the limit's. That case now gives 05:30, the
-limit's own reset, and moved to the test below.
+Two resets and no limit's to choose give `None`: two resets with no limit at all (two texts), and,
+each below an unrelated reset, a limit whose line has a reset after another word ("the queue
+resets") and a context-window limit, which is not a quota window.
 
 ## `mod tests` › `fn a_reset_beginning_the_line_after_a_limit_with_none_is_the_limits() {`
 
-The next-line case. When nothing after the limit on its line is a reset, a
-`resets` that begins the very next line is the limit's: the session limit
-with `resets 5:30am (UTC)` under it gives 05:30, and so does the same after
-a full stop with `\r\n` endings, after advice ("try again later"), below an
-unrelated reset, and above one. A Fable limit wrapped the same way gives its
-14 November: the model name signals on the reset that follows it across the
-line break, and that reset is the one read.
-
-The test was `a_lone_reset_is_read_as_before`, which pinned the fallback
-that read a text's only reset wherever it was. Its first case, the session
-limit with the reset on the next line, is this test's first. Its other two,
-a reset after "the queue" on the limit's line and `MCP cache resets 5:30am
-(UTC)` with no limit at all, gave 05:30 under the fallback and now give
-`None`; they are in the test below.
+When nothing after the limit on its line is a reset, a `resets` that begins the very next line is
+the limit's: the session limit with `resets 5:30am (UTC)` under it gives 05:30, and so does the same
+after a full stop with `\r\n` endings, below an unrelated reset, and above one, and a five-hour limit
+followed by advice ("try again later"). A Fable limit wrapped the same way gives its 14 November:
+the model name signals on the reset that follows it across the line break, and that reset is the
+one read.
 
 ## `mod tests` › `fn a_reset_no_limit_gives_is_not_read() {`
 
-`PR380-UNRELATED-LONE-RESET-ATTRIBUTED`. A reset that no limit gives is not
-read, even when it is the text's only one: `MCP cache resets 5:30am (UTC)`
-alone, the same as a failure's reason, a session limit with `MCP cache
-resets 9am (UTC)` after a blank line or after another line, a session limit
-with a bare `resets 9am (UTC)` after a blank line, the cache's reset on the
-very next line (it does not begin the line), a reset after "the queue" on
-the limit's line with or without a bare reset on the next, and a reset
-before the limit on its line. Each gives `None`. Under the fallback each
-had one reset, and each gave it.
+A reset that no limit gives is not read, even when it is the text's only one: `MCP cache resets
+5:30am (UTC)` alone, the same as a failure's reason, a session limit with `MCP cache resets 9am
+(UTC)` after a blank line or after another line, a session limit with a bare `resets 9am (UTC)`
+after a blank line, the cache's reset on the very next line (it does not begin the line), a reset
+after "the queue" on the limit's line with or without a bare reset on the next, and a reset before
+the limit on its line. Each gives `None`.
 
 ## `mod tests` › `fn names_a_quota_limit_recognises_the_limits_a_reset_is_read_from() {`
 
@@ -1047,75 +903,61 @@ A limit's reset with an hour of 13, or in `(Europe/London)`, gives `None`
 though the text's other reset parses: an unrelated one above or below, a
 bare `resets 9am (UTC)` on the next line, a later limit's own valid reset,
 or, for a malformed reset on the line after a limit, an unrelated one below
-it. The limit's reset is the one the walk stops at, so no other stands in.
-Two resets with no limit, the first malformed, give `None` as well, now
-because neither is a limit's.
+it. The limit's reset is the one the walk stops at, so no other stands in. Two resets with no limit,
+the first malformed, give `None` as well, because neither is a limit's.
 
 ## `mod tests` › `fn arbitrary_non_ascii_text_never_panics() {`
 
-Texts with non-ASCII characters where the reset's parts would be (a
-full-width digit, an accented month or `am`, full-width `UTC`, a
-no-break space, a middle dot in place of each space, Japanese before the
-message, an emoji or a NUL against `resets`; and, for the limit's reset,
-limits with a no-break space before `resets`, a non-ASCII model name, an
-accented `résets`, a limit in capitals, a limit whose `resets` has nothing
-after it and a bare "hit your "), each read at five instants
-from 0 to `u64::MAX`. With them, every prefix and every suffix of both
-observed messages, cut at each character boundary, so a cut lands inside
-every part of the grammar, including just after the multibyte middle dot.
-Each prefix stops before the closing `)` and must give `None`. None of
-these may panic, and at `u64::MAX`, past what an `i64` second count holds,
-both messages give `None`.
+Texts with non-ASCII characters where the reset's parts would be (a full-width digit, an accented
+month or `am`, full-width `UTC`, a no-break space, a middle dot in place of each space, Japanese
+before the message, an emoji or a NUL against `resets`; and, for the limit's reset, limits with a
+no-break space before `resets`, a non-ASCII model name, an accented `résets`, a limit in capitals, a
+limit whose `resets` has nothing after it and a bare "hit your "), each read at five instants from 0
+to `u64::MAX`, with both observed messages. With them, each proper prefix and each non-empty suffix
+of both observed messages, cut at each character boundary, so a cut lands inside every part of the
+grammar, including just after the multibyte middle dot. Each prefix stops before the closing `)`
+and must give `None`. None of these may panic, and at `u64::MAX`, past what an `i64` second count
+holds, both messages give `None`.
 
-The Japanese text before a reset, `制限に達しました · resets 5:30am (UTC)`,
-gave 05:30 while a lone reset was read. It has no recognised limit, so it
-now gives `None`, and the same Japanese before the five-hour message gives
-05:30: the multibyte prefix still does not move the offsets the limit's end
-is carried by. The full-width minute is read after a limit for the same
-reason as `after_a_limit`'s other texts.
+The Japanese text before a lone reset gives `None`, since it has no recognised limit, and the same
+Japanese before the five-hour message gives 05:30: the multibyte prefix does not move the offsets
+the limit's end is carried by. The full-width minute is read after a limit for the same reason as
+`after_a_limit`'s other texts.
 
 ## `mod tests` › `fn a_reset_in_the_year_10000_gives_none() {`
 
-Finding `PR380-RESET-PARSER-NON-RFC3339-YEAR`. The five-hour message read
-at 10000-01-01T00:00:00Z (`JAN_1_10000`) gives `None`: its nearest candidate
-is 05:30 that morning, whose year has five digits, and this test failed
-while that came back as `10000-01-01T05:30:00Z`. So does a time-only
-`5:30am` read at 23:00 on 31 December 9999, whose nearest candidate is the
-next morning's, in 10000, and so do `Jan 1, 9am` read at that midnight and
-`Jan 2, 9am` read at noon on 31 December 9999, both nearest in 10000.
+Finding `PR380-RESET-PARSER-NON-RFC3339-YEAR`. `FIVE_HOUR` read at 10000-01-01T00:00:00Z
+(`JAN_1_10000`) gives `None`: its nearest candidate is 05:30 that morning, whose year has five
+digits. So do a time-only `5:30am` read at 23:00 on 31 December 9999, whose nearest candidate is the
+next morning's, in 10000, and `Jan 1, 9am` read at that midnight and `Jan 2, 9am` read at noon on 31
+December 9999, both nearest in 10000.
 
 ## `mod tests` › `fn a_reset_on_the_last_day_of_9999_is_four_digits() {`
 
-The other side of the bound. The five-hour message read at 03:00 on
-31 December 9999 is `9999-12-31T05:30:00Z`, and `11:59pm` read at its last
-second is `9999-12-31T23:59:00Z`, the last minute a reset can name. `Dec 31,
-11pm` read at noon that day is that evening, though one of its candidates is
-in 10000. Read at 00:30 on 1 January 10000, `Dec 31, 11pm` and a time-only
-`11pm` are both the evening before, in 9999: a clock past the bound does
-not refuse a reset that is not. A check that refused a reset at or after the
-last day of 9999, or one that looked at `now_unix` rather than the chosen
-reset, fails here.
+The other side of the bound. `FIVE_HOUR` read at 03:00 on 31 December 9999 is
+`9999-12-31T05:30:00Z`, and `11:59pm` read at its last second is `9999-12-31T23:59:00Z`, the last
+minute a reset can name. `Dec 31, 11pm` read at noon that day is that evening, though one of its
+candidates is in 10000. Read at 00:30 on 1 January 10000, `Dec 31, 11pm` and a time-only `11pm` are
+both the evening before, in 9999: a clock past the bound does not refuse a reset that is not. A
+check that refused a reset at or after the last day of 9999, or one that looked at `now_unix` rather
+than the chosen reset, fails here.
 
 ## `mod built_program_tests` › `struct Boundary {`
 
 A boundary with an agent CLI installation the test invents.
 
-**This is the test's oracle, and it is deliberately not this machine's
-filesystem.** The property being measured — *which* environment an
-adapter's program was resolved against — cannot be measured with a
-predicate over the same filesystem production consults: `is_file()` is
-true of a host-resolved path whether the resolution was right or wrong,
-so the oracle blesses either answer (`PR4-CONF-012`). A boundary the
-test invents has an installation the test knows about and the host does
-not, so "the boundary decided" and "the coordinator host decided" become
-different observations.
+**This is the test's oracle, and it is deliberately not this machine's filesystem.** Which
+environment an adapter's program was resolved against cannot be measured with a predicate over the
+filesystem production consults: `is_file()` is true of a host-resolved path whether the resolution
+was right or wrong. A boundary the test invents has an installation the test knows about and the
+host does not, so "the boundary decided" and "the coordinator host decided" are different
+observations.
 
-It refuses any program that is not the one it has, the way a real
-boundary would, and records every request so a boundary that was
-**never asked** is distinguishable from one that answered. It also
-reports a **version of its own**, because `Caps.version` certifying the
-host's CLI while the attempt runs the image's is DESIGN.md:612's
-sentence and a distinct failure from either of the other two.
+It refuses any program but the one it has, as a real boundary would, and records every request, so
+a boundary that was **never asked** is distinguishable from one that answered. It reports a
+**version of its own**, because `Caps.version` certifying the host's CLI while the attempt runs the
+image's is a failure of its own (design/21's runner commitments: pre-flight "could certify a host
+CLI/version different from the one the attempt executes").
 
 ## `struct Boundary` › `installed: String,`
 
@@ -1123,353 +965,232 @@ The only program string this boundary will execute.
 
 ## `struct Boundary` › `version: String,`
 
-What `--version` prints here. Unforgeable by the host: no machine
-has an agent CLI at this version.
+What `--version` prints here: an invented version, so one read from the host's CLI would not match
+it.
 
 ## `mod built_program_tests` › `fn expected_name(id: &str) -> &'static str {`
 
-The bare name each adapter's CLI is installed under, **written here**
-rather than read from the adapter's own constant: a name compared only
-against the code that produced it proves nothing.
+The bare name each adapter's CLI is installed under, **written here** rather than read from the
+adapter's own constant: a name compared only against the code that produced it proves nothing.
 
 ## `mod built_program_tests` › `fn scripted_help(cli: &str) -> &'static str {`
 
-The help text each adapter's `--help` contract demands, written here
-from the flags each adapter requires rather than captured from a CLI.
+The help text each adapter's `--help` contract demands, written here from the flags each adapter
+requires rather than captured from a CLI.
 
 ## `mod built_program_tests` › `fn scripted_answer(cli: &str, args: &[String], version: &str) -> (i32, String, String) {`
 
-A boundary that can satisfy a whole pre-flight, answering **by
-argument** and never by program.
-
-Keying an answer on the program string would make the fixture agree
-with whatever the adapter sent, which is the self-oracle this whole
-file exists to avoid. The one place the program is consulted is
-[`Boundary::run`]'s presence check, which is the boundary's own
-question — "do I have this?" — and the thing under test.
+A boundary that can satisfy a whole pre-flight, answering **by argument** and by its own installed
+CLI, never by the program a request carried. Keying an answer on that program would make the fixture
+agree with whatever the adapter sent. The one place it is consulted is the presence check in
+`Boundary`'s `run_inline`, which is the boundary's own question, "do I have this?", and the thing
+under test.
 
 ## `fn scripted_answer` › `if joined.contains("upstroke_probe_deliberately_unknown") {`
 
-Codex's six strict-config parser probes. The two assignments are
-transcribed here rather than read from that adapter's private
-constants, so a renamed probe key fails this fixture loudly instead
-of silently agreeing with itself.
+Codex's six strict-config parser probes. The unknown key and the `model_reasoning_effort=`
+assignment are transcribed here rather than read from `codex.rs`, so a renamed probe key fails this
+fixture instead of agreeing with itself.
 
 ## `mod built_program_tests` › `fn an_adapters_program_is_the_boundarys_and_the_coordinator_host_is_never_asked() {`
 
-An adapter's program is the **boundary's**, and the coordinator host is
-never asked what it has.
+An adapter's program is the **boundary's**, and the coordinator host is never asked what it has.
+For each shipped adapter, `build`'s program is the name written in `expected_name`, one path
+component and not absolute, so a spec never carries a path that names nothing at the boundary;
+`probe` against a boundary holding that name certifies the boundary's invented `9.9.9`; and the
+boundary was asked, every request carried that name, and the first was `--version`. That pre-flight
+and the attempt send one program in both call orders is held by
+`the_program_preflight_certifies_is_the_program_the_attempt_would_run`, that a CLI this host lacks
+still certifies by `a_cli_this_host_does_not_have_still_certifies_at_the_boundary`, and a version
+per boundary by `two_boundaries_in_one_process_each_certify_their_own_cli`.
 
-This replaces `an_adapters_program_is_the_coordinator_hosts_and_the_
-boundary_supplies_none`, which pinned PR4's behaviour deliberately and
-which a correct PR6 must fail by name. The property that **moved
-across** is the old test's claim 2 — "what pre-flight sends and what the
-attempt would send are one program", DESIGN.md:612 in the only form PR4
-could hold it. It is now held by
-[`the_program_preflight_certifies_is_the_program_the_attempt_would_run`]
-in both call orders, because the ordering PR4 needed was a property of
-the process-wide resolution cache and that cache is gone. The old
-claims 1 and 3 are **inverted** here: the boundary is asked, and a CLI
-the coordinator host cannot resolve is no longer refused before it is.
-
-`PR4-ADAPTER-RESOLVES-ON-THE-HOST`'s three separate failures, and where
-each dies:
-
-1. *the normal container case is refused before the runtime is asked* —
-   every adapter certifies against a boundary the coordinator host does
-   not share, and
-   [`a_cli_this_host_does_not_have_still_certifies_at_the_boundary`]
-   witnesses the absent-on-the-host half on a machine that really lacks
-   one;
-2. *every spec carries a path that names nothing at the boundary* — the
-   program every request carries is one path component, not absolute,
-   and equal to the name written in [`expected_name`]; and
-3. *`Caps.version` certifies the host's CLI while the attempt runs the
-   image's* — the version returned is the boundary's invented `9.9.9`,
-   which no installation on any machine reports, and
-   [`two_boundaries_in_one_process_each_certify_their_own_cli`] holds it
-   across two boundaries.
-
-The second field this holds constant is **what this machine has
-installed**: the assertions above are true whichever branch a machine
-takes, and both branches are counted so a machine cannot make the test
-mean less by having more.
+The assertions hold whichever branch `find_program` takes on a machine; both branches are counted
+and their sum checked against `ADAPTERS.len()`.
 
 ## `fn an_adapters_program_is_the_boundarys_and_the_coordinator_host_is_never_asked` › `match crate::util::find_program(name) {`
 
-The discrimination against the old behaviour, on either kind of
-machine. Where this host has the CLI, the old code would have
-sent that absolute path and this boundary would have refused it;
-where it does not, the old code refused before asking at all.
+Where this host has the CLI, the built program must not be the host's resolved path; where it does
+not, the probe above has already certified at the boundary.
 
 ## `mod built_program_tests` › `fn a_cli_this_host_does_not_have_still_certifies_at_the_boundary() {`
 
-A CLI this coordinator host does not have certifies anyway, because the
-boundary has it.
+A CLI this coordinator host does not have certifies anyway, because the boundary has it: design/21's
+container case is "an image with version-pinned CLIs". For each adapter whose CLI `find_program`
+does not find here, `probe` certifies `9.9.9` and `build` succeeds.
 
-`PR4-ADAPTER-RESOLVES-ON-THE-HOST` failure (1), witnessed rather than
-argued: DESIGN.md:612's normal container case is "an image with
-version-pinned CLIs", and until PR6 that image's CLI was refused at
-pre-flight because *this* machine had no such file.
-
-The premise is asserted rather than hoped for: with all three CLIs
-installed here the absence half is unobservable, and a silent skip would
-measure nothing while looking green. Both machines this slice was
-measured on satisfied it — this box has `claude` and `codex` and no
-`copilot`, and the Windows guest, retired on 2026-11-20, had none of the
-three.
+The premise is asserted rather than hoped for: with all three CLIs installed here the absence half
+is unobservable, and a silent skip would measure nothing while looking green, so the test fails
+instead.
 
 ## `mod built_program_tests` › `fn a_cli_this_host_does_not_have_is_refused_by_name_and_by_boundary() {`
 
-The other side of that: when the boundary **is** this host and this host
-does not have the CLI, the operator is told so, by name and by boundary.
+The other side of that: when the boundary **is** this host and this host does not have the CLI, the
+operator is told so, by name and by boundary. The runner's own refusal is asserted in
+`runner::host::tests`; this is the sentence the operator reads, `bin::boundary_refused` wrapping it.
+It must name the CLI, the boundary that lacks it and the remedy. A bare `NotFound` names no boundary
+and no remedy, and cannot be diagnosed from a log.
 
-The fail-closed half of `PR6D-001`'s repair, end to end. The runner's own
-refusal is asserted in `runner::host::tests`; this is the sentence the
-operator actually reads, which is [`bin::boundary_refused`] wrapping it,
-and the two had never been composed. What it must not be is a bare
-`NotFound`: before the runner resolved names, an npm-installed CLI on
-Windows failed with "program not found" naming no boundary and no
-remedy, which is the failure nobody could diagnose from a log.
-
-The premise — that this machine lacks at least one of the three — is
-asserted rather than hoped for, the same way its sibling above asserts
-it, so a machine with all three installed reports that it cannot observe
-this instead of passing vacuously. Both measured machines satisfied it:
-this box has no `copilot`, and the Windows guest, retired on 2026-11-20,
-had none of the three.
+The premise, that this machine lacks at least one of the three, is asserted as in the sibling above,
+so a machine with all three installed fails instead of passing vacuously.
 
 ## `fn a_cli_this_host_does_not_have_is_refused_by_name_and_by_boundary` › `assert!(`
 
-And it is the **resolution's** refusal, not a spawn's. This is
-the fail-closed clause itself: a runner that handed the name to
-`Command` anyway would produce a `NotFound` here, which names no
-boundary and is what an operator cannot act on.
+And it is the **resolution's** refusal, not a spawn's: a runner that handed the name to `Command`
+anyway would produce a `NotFound` here, which names no boundary and is what an operator cannot act
+on.
 
 ## `fn a_cli_this_host_does_not_have_is_refused_by_name_and_by_boundary` › `assert_eq!(`
 
-One distinct sentence per absent CLI: a refusal that named the first
-adapter for all of them would collapse this to one.
+One distinct message per absent CLI: a refusal that named the first adapter for all of them would
+collapse this to one.
 
 ## `mod built_program_tests` › `fn the_program_preflight_certifies_is_the_program_the_attempt_would_run() {`
 
-Pre-flight certifies the program the attempt would run — in **both call
-orders**.
-
-This is the property that moved here from the test this replaced.
-There, `build` had to run **first**, and its comment said why: each
-adapter memoised its resolution in a process-wide `OnceLock`, so a probe
-reaching an unfilled cache wrote the fixture's answer into it and
-changed what every sibling test in the binary resolved. The ordering was
-load-bearing because the answer was *state*. It is now a function of its
-argument, so the order cannot matter — and asserting both orders is what
-says so.
-
-The second field held constant is the adapter; what varies is the order,
-and the two orders must agree exactly.
+Pre-flight certifies the program the attempt would run, in **both call orders**: `build` then
+`probe`, and `probe` then `build`, each against a fresh boundary. The two builds must be equal, the
+two boundaries must have been sent the same programs, and each program pre-flight sent must be the
+one `build` produced. Resolution is a function of its argument, not state, so the order cannot
+matter, and asserting both orders is what says so.
 
 ## `mod built_program_tests` › `fn two_boundaries_in_one_process_each_certify_their_own_cli() {`
 
-Two boundaries in one process each certify **their own** CLI.
+Two boundaries in one process each certify **their own** CLI. With two runners in one process, as
+the container runner brings, a resolution cached on nothing hands one boundary's answer to the
+other, and a value correct on first use and wrong on the second is invisible to any test that
+constructs one runner. This fails if an adapter hands one boundary's version to the next.
 
-The hazard this exists for: with two runners in one process — which is
-exactly what the container runner introduces — a resolution cached on
-nothing hands one boundary's answer to the other, and a value that is
-correct on first use and wrong on the second is invisible to any test
-that constructs one runner. The repair is that there is no cache; this
-is what says so, and it is what fails if one comes back.
-
-Two independently varying fields, and their intersection is the test:
-**which boundary** (two, reporting different versions) x **in which
-order** (both). Two distinct versions (1.1.1 and 2.2.2), probed in both
-orders, are asserted as a distinct-value count rather than described, so
-a fixture that lost a version reports it instead of agreeing with itself.
+The test is the intersection of two varying fields: **which boundary** (two, reporting 1.1.1 and
+2.2.2) x **in which order** (both). The distinct versions are asserted as a count, so a fixture that
+lost a version reports it instead of agreeing with itself.
 
 ## `mod built_program_tests` › `fn the_adapters_hold_no_process_wide_resolution_state() {`
 
-No adapter holds process-wide resolution state, and this is the answer
-to "what is the cache keyed on".
+No adapter holds process-wide resolution state, and this is the answer to "what is the cache keyed
+on": **nothing is cached, so there is no key.** A cell keyed on nothing would, with two runners in
+one process, hand one boundary's answer to the other, and a cache of a constant is
+indistinguishable from no cache to a *behavioural* test even with two runners. So the claim is
+structural: an adapter that starts remembering an answer fails here on the line that declares the
+cell, before any behaviour depends on it.
 
-**Nothing is cached, so there is no key.** Each adapter used to memoise
-its resolved binary in a `static RESOLVED: OnceLock<Option<Invocation>>`
-— a cell keyed on nothing, which with two runners in one process hands
-one boundary's answer to the other. A resolution that is correct on
-first use and wrong on the second is the hardest shape in this slice
-precisely because it is invisible to any test that constructs one
-runner, and it stays invisible to a *behavioural* test even with two,
-because a cache of a constant is indistinguishable from no cache.
-
-So the claim is structural and the census is the only thing that can
-make it: an adapter that starts remembering an answer fails here on the
-line that declares the cell, before any behaviour depends on it.
-
-The checker uses `effects::production_code`, which blanks comments and literals
-and removes test-only items. A string constant containing `OnceLock` does not
-declare state. The same checker reads all four source files and the controls:
-inert comments and literals, excluded test-only state, and real holder
-declarations. A production declaration after a test-only item remains visible.
-The `static ` needle excludes a preceding apostrophe, so a `'static` lifetime
-does not count as a static declaration; the harmless-code control covers it.
+The checker uses `effects::production_code`, which blanks comments and literals and removes
+test-only items, so a string constant containing `OnceLock` does not declare state. It reads
+`bin.rs` and the three adapters' source files, and first runs controls: inert comments and
+literals, excluded test-only state, and four real holder declarations, alone and after the inert and
+test-only text, so a production declaration after a test-only item remains visible. The `static `
+needle skips a match preceded by an apostrophe, so a `'static` lifetime does not count as a static
+declaration; the inert control's `&'static str` covers it.
 
 ## `fn the_adapters_hold_no_process_wide_resolution_state()` › `const HOLDERS: [&str; 4] = ["static ", "thread_local!", "OnceLock", "LazyLock"];`
 
-Every way an adapter could hold a value across calls. Written out
-rather than derived: a list read from the tree would shrink with it.
+The needles for a value held across calls, written out rather than derived: a list read from the
+tree would shrink with it.
 
-`static ` rather than a list of cell types, and that is deliberate.
-Every adapter is a unit struct with no state of its own, so the only
-way one remembers anything between calls is a module-level item —
-and naming `OnceLock` alone would miss the `static X: Mutex<_>` that
-a `const fn` constructor makes just as easy. `OnceLock` and
-`LazyLock` are named as well so a `let`-bound or field-held cell is
-caught too.
+`static ` rather than a list of cell types: each adapter is a unit struct with no state of its own,
+so the only way one remembers anything between calls is a module-level item, and naming `OnceLock`
+alone would miss a `static X: Mutex<_>`. `OnceLock` and `LazyLock` are named as well so a
+`let`-bound or field-held cell is caught too.
 
 ## `fn the_adapters_hold_no_process_wide_resolution_state()` › `assert!(`
 
-The controls run actual holder declarations through the checker and assert the
-detected holder names. They also combine declarations with inert literal/comment
-text and test-only items, so those regions cannot hide later production state.
+The controls run real holder declarations through the checker and assert the holder names found,
+alone and after inert literal and comment text and a test-only item, so neither region can hide
+later production state.
 
 ## `mod built_program_tests` › `fn the_host_runner_executes_a_bare_program_name_as_it_executes_the_resolved_path() {`
 
-The host runner executes a bare program name as it executes the path
-the adapters used to resolve.
+The host runner executes a bare program name as it executes the absolute path `util::find_program`
+picks for it: a change that resolves correctly for a container boundary must not change what the
+**host** runner runs. This spawns `git --version` through the real
+`crate::runner::host::HostRunner`, once named and once at that path, and requires the same exit code
+and output. `git` rather than an agent CLI because every machine that can build this repository has
+it. The two program strings are asserted to differ first; if they did not, this would compare a
+thing with itself.
 
-The other direction of this repair, and the one every existing test and
-the whole v0.1 product depends on: a change that resolves correctly for
-a container boundary and quietly changes what the **host** runner runs is
-a defect. The suite cannot show this on its own — it was written against
-the old shape and largely still passes — so this spawns the same program
-twice through the real [`crate::runner::host::HostRunner`], once named
-and once at the absolute path `util::find_program` picks (which is the
-resolution the adapters performed), and requires the two to agree.
-
-`git` rather than an agent CLI because every machine that can build this
-repository has it, so the observation is not a property of what happens
-to be installed. The two program strings are asserted to actually differ
-first; if they did not, this would compare a thing with itself.
-
-**What this row cannot express, and where that lives instead.** `git` is
-a native `.exe`, and on Windows `CreateProcessW` appends `.exe` to a bare
-name, so the bare spelling reaches it whether or not this runner resolves
-anything — which is exactly the installation shape `PR6D-001` did *not*
-break. As a witness for the Windows case this row is therefore
-correlated: it was green while the defect was live. It is kept as the
-control it can honestly be — a real program on this machine's real
-`PATH`, which the repair must not have changed — and the axis it cannot
-vary, an npm-style `.cmd`-only installation reachable only through
-`PATHEXT`, is
-`runner::host::tests::an_npm_style_installation_runs_by_bare_name_exactly_as_it_runs_by_path`.
-That test lives beside the resolution because writing a shim needs the
-effect allowance `effects/allowlist.toml` gives `src/runner/host.rs` and
-does not give this module.
+**What this row cannot express, and where that lives instead.** `git` is a native `.exe`, and on
+Windows `CreateProcessW` appends `.exe` to a bare name, so the bare spelling reaches it whether or
+not this runner resolves anything. As a witness for the Windows case this row is therefore
+correlated. It is kept as a control, a real program on this machine's real `PATH`, and the axis it
+cannot vary, an npm-style `.cmd`-only installation reachable only through `PATHEXT`, is
+`runner::host::tests::an_npm_style_installation_runs_by_bare_name_exactly_as_it_runs_by_path`. That
+test lives beside the resolution because writing a shim needs the effect allowance
+`effects/allowlist.toml` gives `src/runner/host.rs` and does not give this module.
 
 ## `mod probe_identity_tests` › `fn each_agent_probe_request_names_its_own_agent_in_every_field() {`
 
-Each agent probe names **its own** agent, in every field that names one.
-
-`invariants_introduced[1]` — "RunnerRequest carries a typed
-InvocationId (… probes included; the probe role carries target
-`Agent(name)` | `Shell`)". Every probe fixture in this suite probes one
-agent, so a `probe_request` that filled the target with the first
-configured adapter's name would agree with itself on every one of them.
-Two independently named probes, and each request checked against the
-name it was asked for rather than against the other request.
-
-Both iteration orders, because "the first configured agent" is a
-property of order: a fixture that only ever built them in one order
-would pass for the agent that happened to be first.
+Each agent probe names **its own** agent, in its role, its `agent` field and its rendered identity.
+A fixture that probes one agent cannot tell this from a `probe_request` that filled the target with
+the first configured adapter's name, so this builds three, each checked against the name it was
+asked for rather than against another request. Both iteration orders, because "the first configured
+agent" is a property of order.
 
 ## `fn each_agent_probe_request_names_its_own_agent_in_every_field` › `const NAMES: [&str; 3] = ["claude-code", "codex", "copilot"];`
 
-Written here, not read from the adapter registry: the names are the
-expected values.
+Written here, not read from the adapter registry: the names are the expected values.
 
 ## `fn each_agent_probe_request_names_its_own_agent_in_every_field` › `assert_eq!(roles.len(), 3, "{roles:?}");`
 
-Hostility as counts: three names in, three distinct values out of
-each field that carries one.
+Hostility as counts: three names in, three distinct values out of each field that carries one.
 
 ## `mod probe_identity_tests` › `fn use_sites(source: &str) -> Vec<String> {`
 
-The file minus its `#[cfg(test)] mod tests { … }` block and minus the
-`mod probe_ordinal { … }` declaration, so what is left is the
-production code that *uses* an ordinal.
+The file's lines that mention `probe_ordinal::`, skipping each `#[cfg(test)]` module, the
+`mod probe_ordinal { … }` declaration and comment lines, so what is left is the production code that
+*uses* an ordinal.
 
 ## `fn use_sites(source: &str) -> Vec<String>` › `if trimmed.contains("probe_ordinal::")`
 
-Prose mentions an ordinal too, and a comment starts no
-process.
+Prose mentions an ordinal too, and a comment starts no process.
 
 ## `mod probe_identity_tests` › `fn every_probe_call_site_passes_its_own_ordinal_constant() {`
 
-Every ordinal an adapter's pre-flight passes to the Runner, **read
-from the call sites** rather than from the table beside them.
+Every ordinal an adapter's pre-flight passes to the Runner, **read from the call sites** rather than
+from the table beside them.
 
-`decisions.admission_and_leases.permits.invocation_identity`: an
-invocation identity is "unique **per process**", and "every
-RunnerRequest carries it". Each adapter's
-`every_preflight_process_has_its_own_ordinal` builds its set from the
-`probe_ordinal::ALL` array, so what it asserts is that a *table* has
-distinct entries — which stays true when a call site passes another
-entry's constant (codex's `debug models` step passing `VERSION`) or an
-arithmetic expression over one (`HELP.saturating_sub(1)`). Two
-processes then carry `p.agent-<name>.o0` and the ledger cannot tell
-them apart, which is exactly what "unique per process" forbids.
+An invocation identity is unique per process. Each adapter's
+`every_preflight_process_has_its_own_ordinal` builds its set from the `probe_ordinal::ALL` array, so
+it asserts that a *table* has distinct entries, which stays true when a call site passes another
+entry's constant (codex's `debug models` step passing `VERSION`) or an arithmetic expression over
+one (`HELP.saturating_sub(1)`). Two processes then carry one identity and the ledger cannot tell
+them apart.
 
-This asserts the property one step later, at the point of use: each
-declared constant is used **once**, every one is used, and the only
-non-bare uses are the one block codex documents — a base plus an index,
-for its six strict-config parser probes.
-
-Codex had a second such block until PR6, one process per PATH
-candidate, because it resolved its binary by spawning each candidate on
-the coordinator host. `PR4-ADAPTER-RESOLVES-ON-THE-HOST` removed the
-resolution, so `RESOLUTION_BASE` and its call site are gone and the
-counts below drop by one.
+This asserts the property at the point of use: each constant a use site names is declared, none is
+used twice, every declared one is used, and the only non-bare uses are codex's documented block, a
+base plus an index, for its six strict-config parser probes.
 
 ## `struct Adapter` › `declared: &'static [&'static str],`
 
-The constants the module declares, written out here from the
-steps the adapter performs rather than read from the module.
+The constants the module declares, written out here from the steps the adapter performs rather than
+read from the module.
 
 ## `struct Adapter` › `block_parts: &'static [&'static str],`
 
-Constants that may appear in an expression, with the block they
-open. Everything else must reach the Runner as a bare
-`probe_ordinal::NAME` argument.
+Constants that may appear in an expression, with the block they open. Everything else must reach
+the Runner as a bare `probe_ordinal::NAME` argument.
 
 ## `struct Adapter` › `call_sites: usize,`
 
-How many processes this adapter starts through
-`probe_request`, counting each variable-length block as one
-call site.
+How many processes this adapter starts through `probe_request`, counting each variable-length block
+as one call site.
 
 ## `fn every_probe_call_site_passes_its_own_ordinal_constant()` › `block_parts: &["CONFIG_BASE", "CONFIG_PER_SURFACE"],`
 
-The one variable-length step: six strict-config parser
-probes (two surfaces x three assignments). `probe_ordinal`
-documents it as a block precisely because it cannot be one
-constant.
+The one variable-length step: six strict-config parser probes (two surfaces x three assignments).
+`probe_ordinal` documents it as a block because it cannot be one constant.
 
 ## `fn every_probe_call_site_passes_its_own_ordinal_constant()` › `let collisions: Vec<(&String, &usize)> =`
 
-No constant is used twice: that is the collision this exists to
-catch, and it is what a table-only test cannot see.
+No constant is used twice: that is the collision this exists to catch, and it is what a table-only
+test cannot see.
 
 ## `fn every_probe_call_site_passes_its_own_ordinal_constant()` › `let declared: BTreeSet<&str> = adapter.declared.iter().copied().collect();`
 
-And every declared constant is used: an ordinal declared and
-never passed is a step whose identity came from somewhere else.
+And every declared constant is used: an ordinal declared and never passed is a step whose identity
+came from somewhere else.
 
 ## `fn every_probe_call_site_passes_its_own_ordinal_constant()` › `let calls = adapter`
 
-The number of processes, counted from the call sites rather
-than from the table.
+The number of processes, counted from the call sites rather than from the table.
 
 ## `fn every_probe_call_site_passes_its_own_ordinal_constant()` › `assert_eq!(total_sites, 12, "the adapters' probe call sites moved");`
 
-Hostility as a count: 3 + 2 + 7 across the three adapters, written
-from what each pre-flight does. Codex was 8 until PR6 removed the
-per-PATH-candidate resolution spawn
-(`PR4-ADAPTER-RESOLVES-ON-THE-HOST`).
+Hostility as a count: 3 + 2 + 7 across the three adapters, written from what each pre-flight does.
