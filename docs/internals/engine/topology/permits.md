@@ -275,8 +275,12 @@ the broker alone.
 
 ## `mod tests` › `fn broker_only_one_agent_in_two_pools_serializes_on_the_agent() {`
 
-**Broker-only**, for the same reason: an agent is in one pool, so the agent
-limit binding across two pools is shown on the broker alone.
+**Broker-only**, though its old reason, that an agent is in one pool, no
+longer holds. Failover makes the case reachable: a worker on the agent's
+spare pool while another invocation of the agent is on its primary, such as
+a review pass, which holds its slot on the agent's first pool, or a worker
+whose attempt bound the primary. The agent limit binding across two pools is
+still shown on the broker alone.
 
 ## `mod tests` › `fn a_reviewer_and_a_worker_of_one_agent_never_hold_its_slot_at_once() {`
 

@@ -246,10 +246,18 @@ was inline in `coordinator.rs`, where the schema-4 driver could not reach
 it; a driver that rebuilt it would be a second answer to `permissions`, and
 a worker spawned `ReadyOnly` edits nothing while reporting success.
 
-`pool` is passed rather than resolved here because resolving it needs the
-run's config: §13 is read-only, so this is **attribution only** — which
+`pool` is passed rather than resolved here because choosing it needs the
+run's config and its signals. The schema-4 driver chooses it
+(`run::serving_pool`) and `FrozenPlans::plan` hands it on from
+`PlanRequest::pool`; the legacy coordinator passes its agent's first pool.
+On the schema-4 path it is no longer attribution only. It still says which
 subscription pays for the attempt, so the ledger and the estimator can say
-so. Nothing routes on it.
+so, and the worker now runs on it: the plan's `pool`, the `{agent, pool}`
+slot pair the worker holds and its credential profile all follow this one
+name. That is the one profile rule: a worker runs under its attempt's pool's
+profile, and a review or probe runs under its agent's first pool's
+(`profiled::profiles`), which is also the pool a review pass is attributed
+to and holds its slot on (`reviewer_plans` reads `pool_for`).
 
 ## `effort: Some(binding.effort),`
 

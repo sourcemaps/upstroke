@@ -74,9 +74,14 @@ than of a code path, and no existing test can observe a difference.
 ## `fn profiles(pools: &[Pool]) -> BTreeMap<String, PathBuf> {`
 
 The agent-to-profile map, built once per run from the run's pools. For each
-agent named by a pool, the agent's pool is `capacity::pool_for` — the first
-pool for that agent, the same binding the attempt plans, the slot table and
-the capacity report use — and only that pool's `profile` counts. A later
+agent named by a pool, the agent's pool is `capacity::pool_for`, the first
+pool for that agent, and only that pool's `profile` counts. That is half of
+the one profile rule: a review or probe runs under its agent's first pool's
+profile, and a worker under its attempt's pool's, which its plan carries
+(see the module section). The first pool is also the one a review pass is
+attributed to and holds its slot on (`FrozenPlans::reviewer_plans` reads
+`pool_for`), but not an attempt's: an attempt plans, and its worker holds
+its slot on, the pool `serving_pool` chose, which may be a later one. A later
 pool for the same agent never lends its profile to the first: if the agent's
 bound pool has `profile: None`, the agent contributes nothing.
 

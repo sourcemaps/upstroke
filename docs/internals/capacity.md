@@ -68,7 +68,8 @@ of its agent's first pool, which is what [`pool_for`] answers. The attempt's
 pool is chosen in `src/engine/topology/run.rs` (`serving_pool`): the first pool
 naming the agent, in file order, that the run's signals do not hold exhausted;
 with every one held, the first whose recorded reset is two minutes past, or
-else the first. A retry that resumes its session keeps its pool. The host
+else the first. A spent reset, one its pool has refused again at or past,
+counts as none. A retry that resumes its session keeps its pool. The host
 runner then sets the profile as `CLAUDE_CONFIG_DIR` on the process
 (`src/engine/assembly.rs` puts the bound pool's on a worker's attempt plan,
 `src/engine/topology/profiled.rs` stamps a review or probe request, and
@@ -375,10 +376,14 @@ no pool.
 toward, so the two cannot disagree about which subscription refused. For
 a worker's limit it reads every pool of the worker's agent instead
 (`TopologyRun::resets_awaited_by`): the task can run again on whichever of
-them resets first, and that need not be the one that refused last. A
-held pool among them whose reset has already passed ends the wait
-(`TopologyRun::awaited_reset`): there is none once the clock is two
-minutes past that reset, and before that the wait runs only until then.
+them resets first, and that need not be the one that refused last. When
+the earliest of those resets has passed (`TopologyRun::awaited_reset`),
+the wait runs only until two minutes past it, and once the clock is past
+that there is no reset wait, only the ordinary back-off. Only a worker's
+limit on an agent with more than one pool keeps a passed reset; with one
+pool, or for a reviewer's limit, it is dropped and only a reset ahead is
+waited for, as before the failover. A reset is spent once its pool
+refuses again at or past it (`run::spent_resets`), and is not waited for.
 `limited_pool` is effect-free in `effects/wrappers.toml`.
 
 ## `pub(crate) fn retire_served_pools(`
