@@ -102,6 +102,76 @@ The same test failed on the same assertion, `killed_while_writing >= 1`, on a Gi
 
 The file's name and title say macOS; this sighting is on Linux.
 
+## A third sighting, on macOS, on master's own push run, 2026-11-28
+
+| run | job | platform | date | pull request | checkout |
+|---|---|---|---|---|---|
+| `46139491098` (`push` to `master`), attempt 1 | `140962038951`, `test (macos-latest, 12 of 12)` | a GitHub-hosted `macos-latest` runner, image `macos-26-arm64` version `20261123.0526.1` (log lines 17-18) | 2026-11-28, 11:21:25Z to 11:29:20Z (the job's record; 7 min 55 s, inside the leg's 30-minute limit, `.github/workflows/ci.yml:281`) | none: the push of `b6d4879b`, the merge of #445 | `b6d4879b835ada30c133b59f1fee0089cc64d2b6` (log line 111) |
+
+Read from the job's log as GitHub's API serves it, with ANSI escape sequences removed
+(`~/selfhost-findings-20261128b/evidence/job-46139491098-140962038951.log`, SHA-256
+`1f581f6176f7bc5660f963145d2a18f0927aab246fbe95f52a04fdca99007f9a`):
+
+- Line 2088:
+  `test engine::topology::recover::tests::sampled_cherry_pick_child_kills_every_residue_classified_and_recovered ... FAILED`.
+  It is the only test line in the log that reads `... FAILED`.
+- Line 2973: the panic at `src/engine/topology/recover/tests.rs:11902:5`. Line 2974 gives the
+  message, which begins:
+
+  > none of the 7 kills in 16 spawns landed while the pick was writing — each found a child that had
+  > not begun (`None`, nothing written) or one that had published its commit (`After`) — so the
+  > sample interrupted no pick under way
+
+- It goes on: the probe measured **9.96675ms**, and the ladder followed **9 completion(s)**.
+- Its list of the sixteen spawns' ends: **seven** `(None, ExitStatus(unix_wait_status(9)))` and
+  **nine** `(After, ExitStatus(unix_wait_status(0)))`. So seven children were killed before they had
+  begun (`None`, signal 9), in the message's own reading of `None`, and nine completed (`After`,
+  exit 0).
+- Its ladder: runs 0 to 2 and 8 to 11 read "killed, the kill returned at", at times from 1.094917ms
+  to 4.32975ms, for aims from 1.077903ms to 4.311611ms; runs 3 to 7 and 12 to 15 read "completed
+  in", at times from 8.799625ms to 10.968083ms.
+- Line 2980:
+  `test result: FAILED. 2427 passed; 1 failed; 107 ignored; 0 measured; 1732 filtered out; finished in 266.91s`.
+
+Read from the run's attempt-1 job list as GitHub's API serves it, not from the log
+(`~/selfhost-findings-20261128b/evidence/job-records/run-46139491098-attempt-1-jobs.json`, SHA-256
+`a0a2b90e869a2eb6cda881990a51fd4c420f4bae1e124c27e255d76d4fa4492e`): 44 of the run's 46 jobs
+succeeded, and the two failures were this job and the aggregate `upstroke-ci` (job `140964183595`).
+The run's record, fetched at 15:40Z on 2026-11-28, gives `run_attempt` 1.
+
+**What the test asserts**, by line at `b6d4879b`. The test starts at
+`src/engine/topology/recover/tests.rs:11727`. It samples eight spawns, and eight more when no kill
+in the first eight landed while the pick was writing (`:11730-11734`, `:11875-11877`). A kill counts
+as landing while the pick was writing when the child died by the kill and its residue class is
+`Internal` (`:11842-11843`). Two assertions end the test: `killed_while_running >= 1`, "no sample
+died by the kill" (`:11890-11901`), and `killed_while_writing >= 1` (`:11902-11911`), the one that
+failed; the first runs before the second, so it passed. `src/engine/topology/recover/` is the same
+at `b6d4879b` and at `master` `d431d220`.
+
+**What the pushed commit changed.** `b6d4879b` is the merge of #445, whose diff from `master`
+`6513c22d` changes only files under `findings/` (`git diff --name-only 6513c22d b6d4879b`).
+
+**The same commit passed.** Run `46138654089`, the merge-queue run that tested #445 (`merge_group`),
+checked out `b6d4879b835ada30c133b59f1fee0089cc64d2b6` itself (line 111 of its job's log): job
+`140959498813`, `test (macos-latest, 12 of 12)`, 11:10:59Z to 11:20:42Z, on image version
+`20261123.0526.1` (line 18). Line 1972 logs the test `... ok`, and line 2972 reads
+`test result: ok. 2428 passed; 0 failed; 107 ignored; 0 measured; 1732 filtered out; finished in 343.81s`.
+Its log: `~/selfhost-findings-20261128b/evidence/job-46138654089-140959498813.log`, SHA-256
+`0b9f2771e300927650cab7f60b541f1730b6da235289a1d1faa3316909647993`.
+
+**What is and is not established for this sighting.**
+
+- **Established:** on a hosted macOS runner, at `master`'s `b6d4879b`, each of the test's seven
+  kills ended its child by signal 9 with its residue `None`, and the `killed_while_writing >= 1`
+  assertion failed; the same commit passed the test in the merge-queue run `46138654089`.
+- The log does not show when each child began writing, or when each killed child died relative to
+  its kill's return.
+- **Not established:** the cause.
+- **Not established: the rate.**
+- `PR281-RECOVER-SAMPLER-NO-SAMPLE-DIED-BY-THE-KILL`
+  (`findings/P2_correctness_202609131201_the-recover-sampler-cold-probe-sibling.md:16-19`) records
+  this test failing the other assertion, "no sample died by the kill".
+
 ## What the change that takes this up should do
 
 - **Establish from further sightings which way the kills are missing:** whether they land early
