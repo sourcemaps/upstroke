@@ -143,6 +143,12 @@ the shard reported 217 passing tests against its floor of 94. Its log:
   test's thread not scheduled.
 - These readings are not exhaustive.
 - **Not established: the rate.**
+- `PR329-R14-A-CANDIDATE-NO-ENVIRONMENT-CHANGE-ANSWERS-HAS-NO-CLEARING-PROCEDURE`
+  (`findings/P2_liveness_202610081321_a-candidate-no-environment-change-answers-has-no-clearing-procedure.md:41-45`)
+  names this test among the tests it executed.
+- `CI-FLAKE-WINDOWS-WORKSPACE-TEAR-REGISTRATION-GONE`
+  (`findings/P3_correctness_202611220302_a-snapshot-removal-beside-a-tear-lost-its-registration-on-hosted-windows.md:174-177`)
+  names this finding as a different test, with a different assertion.
 
 ## What the change that takes this up should do
 
