@@ -171,3 +171,32 @@ These are a fourth and a fifth fingerprint of this row, not a new row: a forced 
 and a recovery that fails are consistent with this file's failure sequence — a real `git` still
 running after the kill ended its launcher — and that reading is not established by the logs.
 
+## A sixth fingerprint, 2026-11-24
+
+The same test, `workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered`,
+failed on 2026-11-24 on a GitHub-hosted `windows-latest` runner, in the job
+`test (windows-latest, 13 of 14)`, the only failure of its job. The log's SHA-256 below is that of
+the log with its ANSI escapes stripped.
+
+- CI run 45376131057, job 138382806648, `pull_request` for #413 at `d4b85ec8`, 2026-11-24
+  10:34:52Z. #413 changes only `CONTRIBUTING.md`, `MAINTAINING.md` and `README.md`. The run checked
+  out `56d2102`, GitHub's merge of `d4b85ec8` into `master` at `e9408020`. Log
+  `evidence/job-45376131057-138382806648.log`, SHA-256
+  `34b8dd47b171492b730ad8b1ea22bddaf0b16c895db1d9991a19edc49e731100`. The checkout step reports
+  `git version 2.56.1.windows.1` (line 58). Line 467:
+  `test workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered ... FAILED <138.310s>`.
+  The log holds the summary lines `CandidateStage n=8 none=0 internal=0 after=8 unclassified=0`,
+  `CandidateWriteTree n=8 none=8 …` and, at line 477,
+  `ProposalCherryPick n=8 none=0 internal=2 after=6 unclassified=0`, then the budget line
+  `Worktree.Add: budget=66556us` (line 478) and no `Worktree.Add` summary line: the panic came
+  inside that site's sampling. Line 480 is the panic at `src\workspace_manager\tests.rs:14534:10`,
+  and line 481 its message, `forced removal converges: Io { path: "…\upstroke-sample-add-9HBJ7VZ6QG\repo\.git\worktrees\kalpha-g1_WG9T4H5MXCSP\gitdir", source: Os { code: 5, kind: PermissionDenied, message: "Access is denied." } }`.
+  That is the shape of this row's second fingerprint — a registration file of a `git worktree add`
+  that the forced removal could not delete — here on a hosted runner and on the registration's
+  `gitdir` file. Line 488: `test result: FAILED. 90 passed; 1 failed; 3 ignored`. No later run of
+  the same tree had been recorded when this was written.
+
+This is a sixth fingerprint of this row, not a new row: a forced removal that fails is consistent
+with this file's failure sequence — a real `git` still running after the kill ended its launcher —
+and that reading is not established by the log.
+
