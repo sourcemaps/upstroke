@@ -49,7 +49,7 @@ source, documentation, workflows, release machinery and this file.
    the first time, and with them the Linux and macOS legs of the `test` matrix, divided by
    measured time as well: the slowest Windows leg took 18.6 minutes against the 13 to 16
    predicted, the slowest of the five macOS legs 15.8 against 14 to 15, and the slower of the
-   two Linux legs 8.2 against 8 to 9. The Linux split stands. The Windows and macOS suites
+   two Linux legs 8.2 against 8 to 9. That Linux split stood until 2026-11-25. The Windows and macOS suites
    were divided again on 2026-11-20, from that run: each test's sequential Linux duration
    scaled so that the leg it ran in sums to that leg's measured harness, blended half and half
    with a uniform per-test model, and the filters chosen by a search for the slowest leg. The

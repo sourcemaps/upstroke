@@ -82,7 +82,7 @@ libtest in every harness `--all-targets` builds.
 
 - On every leg, Linux or macOS, the value is the shard's filters, if it has
   any, and a `--skip` for each filter of the legs before it on the same
-  runner. Without the selection each of the seven legs runs its platform's
+  runner. Without the selection each of the seventeen legs runs its platform's
   whole suite.
 - Until the Linux suite was divided its one leg's value was the empty
   string: the line ended at `--`, libtest was handed nothing, and the leg

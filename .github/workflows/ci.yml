@@ -929,7 +929,7 @@ jobs:
   # `macos-latest` when GitHub ran at most five macOS jobs at once for the
   # account and each run asked for seven: this leg, an `msrv` leg and the five
   # macOS test legs. Run 45175187088 shows each macOS job starting as another
-  # ended. The five macOS test legs still run natively, and the `msrv` leg is
+  # ended. The twelve macOS test legs still run natively, and the `msrv` leg is
   # native again, for the reason the comment above `msrv` gives.
   lint-macos:
     name: lint (macos)
