@@ -450,15 +450,20 @@ fn repository_of(log: &Path) -> PathBuf {
 /// checked replay against the run's frozen inputs, so a log the engine would
 /// refuse to resume contributes nothing here either, and the caller says so.
 /// It never truncates, syncs or locks, so a run that is live in another
-/// repository is read as it stands. A log of schemas 1–3 is read by the
-/// sequential reader.
+/// repository is read as it stands. What it folds is what `status`'s ledger
+/// folds (`Observed::accounting_events`): the committed log of a run that
+/// nothing holds and that has not finished is followed by the interrupted
+/// settlements its resume will append, so each attempt it left in flight
+/// counts once, unpriced, on the pool its `attempt_started` named, and a run
+/// another process holds is folded as committed. A log of schemas 1–3 is read
+/// by the sequential reader.
 ///
 /// An incomplete final line is not reported from here: both readers fold the
 /// committed lines, which is all the evidence there is, and what a torn tail
 /// means for the run is `status`'s to say.
 fn evidence_in(run: &RunLog) -> Result<Vec<Evidence>, String> {
     match crate::engine::topology::observe::observe(&run.repo_root, &run.run_id) {
-        Ok(Some(observed)) => Ok(evidence::of_topology(observed.events())),
+        Ok(Some(observed)) => Ok(evidence::of_topology(&observed.accounting_events())),
         Ok(None) => {
             let mut torn_tail = Vec::new();
             crate::events::read_all(&run.log(), &mut torn_tail)

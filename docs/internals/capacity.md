@@ -1011,14 +1011,34 @@ machine, and a limit met in one is the state of the pool in all; and an
 allowance is a month's, not a run's. `machine::gather` keeps that reader's
 rules and applies them to every run in scope:
 
-- It asks `engine::topology::observe::observe` first. `Some(observed)` is a
-  schema-4 log, already checked by a full replay, and `evidence::of_topology`
-  reduces `observed.events()`.
+- It asks `engine::topology::observe::observe` first, in `evidence_in`.
+  `Some(observed)` is a schema-4 log, already checked by a full replay, and
+  `evidence::of_topology` reduces `observed.accounting_events()`, the events
+  `status`'s ledger folds.
 - `None` is a legacy log. It is read by `events::read_all` and reduced by
   `evidence::of_legacy`. `read_all`'s torn-tail notice is not passed on: the
   committed lines are all the evidence there is, the schema-4 reader has
   never reported its own torn tail here, and `status` is where an incomplete
   final line is said.
+
+**A schema-4 run's in-flight attempts count as `status` counts them**, in
+every run the gatherer reads, whether its scope is the machine or this
+repository. If nothing holds a run and it has not finished, its coordinator
+died before the attempts it had started settled. `accounting_events` follows
+that run's committed log with the interrupted settlements its resume will
+append, so each such attempt counts once on the pool its `attempt_started`
+named, with its cost unknown. That is how `status` counts it. A run another
+process holds, in this repository or another, is folded as committed: its
+live coordinator still owns those attempts, and they count when they settle.
+A settlement added here is dated when the log is read, as the one a resume
+writes is dated at the resume, so the draw of the month it is read in counts
+it, whenever its attempt started. Until the gatherer's read went through
+`accounting_events` it folded `observed.events()`, the committed log alone,
+so between a coordinator's death and its resume `status` counted the attempt
+in flight and `capacity` and `validate` did not. The legacy reader keeps that
+gap: it folds the committed log alone, and `status::load`'s
+`settle_interrupted` is not applied here.
+
 - An error from either reader folds nothing from that run, counts it in
   `Gathered::unread`, and pushes one warning naming the run and the error.
 
@@ -1316,6 +1336,24 @@ reads $1.00 over two attempts, one of them unpriced, and `report` renders
 its draw as `$1.0000? over 2 attempt(s)`. A fold that skips
 `attempt_interrupted` reports $1.00 over one attempt, with no mark that
 anything is missing from it.
+
+## `fn an_unresumed_runs_in_flight_attempt_counts_once_unpriced_on_the_pool_it_started_on() {`
+
+The same run as the test above, stopped one line earlier: the log ends at
+the second attempt's `attempt_started`, and nothing holds the run. Its
+coordinator died and nobody has resumed it. The gatherer, over the
+repository the run is in, folds the one run with no warning, and the pool
+reads $1.00 over two attempts, one of them unpriced, as when the attempt had
+settled as interrupted. `status` prints the same draw for this run,
+`claude-max: 2 attempt(s), $1.0000?`, and `report` renders it as
+`upstroke on this machine drew, this month, $1.0000? over 2 attempt(s)`.
+The interrupted settlement the gatherer adds is dated when it reads the
+log, after the start of `FIXTURE_NOW`'s month, so it is counted whenever the
+suite runs. Then the test takes the run's lock, as a live coordinator holds
+it, and the pool reads one priced attempt: the attempt in flight is that
+coordinator's, not yet settled. A gatherer that folds only the committed log
+fails the first assertion on the pool with $1.00 over one attempt, with no
+mark that anything is missing.
 
 ## `fn an_interrupted_attempt_whose_start_names_no_pool_adds_to_no_pools_spend() {`
 
