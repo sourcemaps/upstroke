@@ -331,6 +331,12 @@ run identity's strings and paths, which the runner owns; the frozen inputs'
 plan, which [`fresh_record`] still reads from the analysis; and the request's
 frozen inputs, which `create_run` consumes while the run keeps its own.
 
+**The runner is profiled before anything uses it.** Right after it is built,
+the runner goes through `profiled::profiled` with the configuration's pools,
+so the creation-time probes, the workers and the reviewers each carry their
+agent's bound credential profile. With no profiled pool that returns the
+runner unchanged (see `engine::topology::profiled`'s notes).
+
 ## `pub fn route_resume(opts: &ResumeOptions) -> Result<Option<RootDerived>, UpstrokeError> {`
 
 Which engine resumes this run: `None` for a legacy log (or one whose header
@@ -493,6 +499,10 @@ for the reasons given there. The probed capabilities default only where
 nothing was probed, which cannot follow a recovery that returned: its step C
 is `RunnerPreflight::certify`, which records what it probed before it returns
 `Ok`, so the default discards no error (§7).
+
+The runner is profiled with the configuration's pools as on the fresh path,
+before `RunPreflight` is built over it, so the resume's probes, workers and
+reviewers carry their agent's bound credential profile too.
 
 ## `fn fresh_record(fresh: &FreshRecord<'_>) -> Result<RunStarted4, UpstrokeError> {`
 

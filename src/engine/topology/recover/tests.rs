@@ -4988,6 +4988,91 @@ fn the_driver_takes_over_from_the_recovery_order_and_steps() {
 }
 
 #[test]
+fn a_run_assembled_with_a_profiled_pool_hands_its_worker_that_profile() {
+    use crate::capacity::{Pool, PoolKind};
+    use crate::engine::topology::profiled::profiled;
+    use crate::engine::topology::run::{RunSeams, TopologyRun};
+    use crate::engine::topology::select::Ceiling;
+
+    let fixture = Fixture::healthy("driver-profiled");
+    let harness = harness();
+    let (_recovered, handle) =
+        resume_with_real_refs(&fixture, &harness).expect("the healthy resume completes");
+
+    let mut run = TopologyRun::resumed(handle, fixture.inputs(), Ceiling::unlimited());
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
+    let sleeper = RecordingSleeper::default();
+    let manager = fixture.manager();
+    let profile = fixture.repo_root.join("profiles").join("personal");
+    let mut pool = Pool::discovered("max", PoolKind::SubscriptionWindow, AGENT, Vec::new());
+    pool.profile = Some(profile.to_string_lossy().into_owned());
+    let pools = vec![pool];
+    let recording = Arc::new(RecordingRunner::default());
+    let runner = profiled(Arc::clone(&recording) as Arc<dyn Runner>, &pools);
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
+    let paths = crate::rundir::RunPaths::with_private_root(
+        &fixture.repo_root,
+        &fixture.started.run_id,
+        &fixture.private_root,
+    );
+    paths.create().expect("the run directories are creatable");
+    let plans = crate::engine::assembly::FrozenPlans {
+        adapters: &adapters,
+        paths: &paths,
+        gates: &[],
+        pools: &pools,
+        caps: &[],
+        worker_timeout: std::time::Duration::from_secs(300),
+        decisions: &[],
+    };
+    let seams = RunSeams {
+        manager: &manager,
+        clock: &Frozen,
+        sleeper: &sleeper,
+        runner: &*runner,
+        adapters: &adapters,
+        paths: &paths,
+        plans: &plans,
+        reviews: &crate::engine::attempt::LegacyReviewPasses,
+        input_policy: &crate::engine::attempt::LegacyReviewInputPolicy,
+        answers: &crate::interaction::UnattendedAnswers,
+        ids: &FixedIds,
+        halts_run: false,
+    };
+
+    run.step(&seams, &mut hooks)
+        .expect("the branch performs its first four clauses");
+
+    let requests = recording.requests();
+    let workers: Vec<&RunnerRequest> = requests
+        .iter()
+        .filter(|request| request.role == crate::runner::ExecutionRole::Implement)
+        .collect();
+    assert!(
+        !workers.is_empty(),
+        "the step ran no worker, so there is nothing to read a profile from: {requests:?}"
+    );
+    for worker in workers {
+        assert_eq!(
+            worker.agent.as_ref().map(crate::runner::AgentId::as_str),
+            Some(AGENT),
+            "the fixture's worker is the profiled pool's agent"
+        );
+        assert_eq!(
+            worker.credential_profile.as_deref(),
+            Some(profile.as_path()),
+            "the worker reached the runner without its agent's bound profile"
+        );
+    }
+    for request in requests.iter().filter(|request| request.agent.is_none()) {
+        assert_eq!(
+            request.credential_profile, None,
+            "a request with no agent was given a profile: {request:?}"
+        );
+    }
+}
+
+#[test]
 fn the_driver_carries_an_accepted_attempt_through_the_candidate_sequence() {
     use crate::engine::topology::run::{Progress, RunSeams, TopologyRun};
     use crate::engine::topology::select::Ceiling;

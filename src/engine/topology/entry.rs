@@ -51,6 +51,7 @@ use super::create::{ProbePair, Request, RunnerProbes, create_run};
 use super::identity::{InvocationLedger, SlotLimits};
 use super::preflight::RunPreflight;
 use super::prelock::{self, PreLock, PreLockChecked, RunnerResolved};
+use super::profiled::profiled;
 use super::recover::{
     RecordsVerified, ResumeSeams, RootDerived, recover_verified, verify_for_recovery,
 };
@@ -332,6 +333,7 @@ impl FreshLeased {
                 base,
             )?),
         };
+        let runner = profiled(runner, &analysis.config.pools);
         let census = startup_census(
             WorktreeLocked::from(worktree),
             &mut hooks,
@@ -659,6 +661,7 @@ impl ResumeVerified {
                 base,
             )?),
         };
+        let runner = profiled(runner, &config.pools);
         one_spelling(&include_spelling, &manager)?;
         let paths = RunPaths::from_parts(
             root.public_dir().to_path_buf(),
