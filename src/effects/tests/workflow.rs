@@ -2145,10 +2145,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-GATE-TOOLCHAIN-DOWNGRADED",
-        escape: "the Windows gate installs the guest's own `1.97.1` instead of `stable`: the \
-                 hosted witness then links the same toolchain the self-hosted leg links, so no \
-                 leg compiles the Windows tree on current stable and a build script emitting a \
-                 bad link directive only on newer rustc goes green",
+        escape: "the Windows gate installs `1.97.1`, the compiler the suite's shards pin, \
+                 instead of `stable`: the build witness then links with the compiler the shards \
+                 already link with, so no leg compiles the Windows tree on current stable and a \
+                 build script emitting a bad link directive only on newer rustc goes green",
         job: Some("lint-windows"),
         anchor: "          toolchain: stable\n",
         replacement: "          toolchain: 1.97.1\n",
@@ -2209,8 +2209,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-WORKFLOW-PERMISSIONS-WIDENED",
         escape: "the job token widened to `write-all`: every build script and test the \
                  candidate ships runs with a token that can push, the checkout leaves that \
-                 credential configured for later Git commands, and destroying the guest \
-                 afterwards recalls nothing",
+                 credential configured for later Git commands, and GitHub discarding the runner \
+                 after the job recalls nothing",
         job: None,
         anchor: "permissions:\n  contents: read\n",
         replacement: "permissions: write-all\n",
@@ -2231,8 +2231,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-WITNESS-CHECKOUT-REF",
         escape: "the witness carrier's checkout points at `master`: the current-stable build \
-                 witness links a tree the candidate never touched while the guest, one stable \
-                 behind, links and passes the candidate",
+                 witness links a tree the candidate never touched while the suite's shards, on \
+                 the pinned `1.97.1`, link and pass the candidate",
         job: Some("lint-windows"),
         anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
         replacement: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\
@@ -2253,10 +2253,11 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-WINDOWS-BUILD-WITNESS-DELETED",
-        escape: "the hosted `cargo build --all-targets` step removed. Clippy and MSRV still \
+        escape: "the `cargo build --all-targets` step removed. Clippy and MSRV still \
                  type-check the Windows tree on GitHub's runner, but nothing on current \
                  stable code-generates or links it: a Windows-only codegen or link failure \
-                 passes every hosted leg while the guest, one stable behind, links and passes.",
+                 that only current stable has passes every leg, the suite's shards among them, \
+                 which link with the pinned `1.97.1` and pass.",
         job: Some("lint-windows"),
         anchor: "      - run: cargo build --all-targets --all-features\n",
         replacement: "",
@@ -3038,11 +3039,12 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED",
-        escape: "the hosted twin keeps the suite command and loses the count: the line that \
-                 sums it, the line that holds it to the shard's floor and the line that prints \
-                 it. A Cargo target runner in the image's environment or Cargo home then hands \
-                 every harness to a wrapper that exits zero, and each of the ten legs of the \
-                 run the picker sent off the guest is green having executed nothing",
+        escape: "the shards' suite step keeps the suite command and loses the count: the line \
+                 that sums it, the line that holds it to the shard's floor and the line that \
+                 prints it. A Cargo target runner in the runner's environment or Cargo home \
+                 then hands every harness to a wrapper that exits zero, and each of the ten \
+                 legs is green having executed nothing, on every event: no other job runs the \
+                 Windows suite",
         job: Some("test-windows-hosted"),
         anchor: "          $passed = [int](($log | Select-String -Pattern '^test result: ok\\. (\\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)\n          if ($passed -lt ${{ matrix.floor }}) { throw \"shard ${{ matrix.shard }} reported $passed passing tests, below its floor of ${{ matrix.floor }}: Cargo compiled the harnesses and executed almost none of this shard's tests\" }\n          \"shard ${{ matrix.shard }} reported $passed passing tests; its floor is ${{ matrix.floor }}\"\n",
         replacement: "",
@@ -3050,10 +3052,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-FLOOR-DROPPED",
-        escape: "the hosted twin's count stays and the floor it is held to drops from the \
-                 shard's to zero, so a shard that executed no test clears it, on every leg at \
-                 once and with the table of floors untouched: a floor the guest holds and its \
-                 twin does not",
+        escape: "the shards' count stays and the floor it is held to drops from the shard's to \
+                 zero, so a shard that executed no test clears it, on every leg at once and \
+                 with the table of floors untouched: the matrix still hands each leg its floor, \
+                 and the step holds no leg to it",
         job: Some("test-windows-hosted"),
         anchor: "          if ($passed -lt ${{ matrix.floor }}) { throw \"shard ${{ matrix.shard }} reported $passed passing tests, below its floor of ${{ matrix.floor }}: Cargo compiled the harnesses and executed almost none of this shard's tests\" }\n",
         replacement: "          if ($passed -lt 0) { throw \"shard ${{ matrix.shard }} reported $passed passing tests, below its floor of ${{ matrix.floor }}: Cargo compiled the harnesses and executed almost none of this shard's tests\" }\n",
@@ -3061,12 +3063,12 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-COMPILER-CHECK-DROPPED",
-        escape: "the twin's two compiler lines dropped, the install left at the image's \
-                 version. The toolchain action tolerates a failed `rustup default` and verifies \
+        escape: "the suite step's two compiler lines dropped, the install left at the pinned \
+                 `1.97.1`. The toolchain action tolerates a failed `rustup default` and verifies \
                  only `rustc +1.97.1`, so the install can report success while bare `cargo` is \
                  the runner's preinstalled stable, and a `RUSTC` or a PATH naming another \
                  install is read by nothing else here: every shard runs its tests on a compiler \
-                 the guest never ran them on with every other pin matching",
+                 this workflow did not choose, with every other pin matching",
         job: Some("test-windows-hosted"),
         anchor: "          $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\n\
                  \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\n",
@@ -3088,8 +3090,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-ON-THE-GUEST",
-        escape: "the twin moved onto the guest's labels: a run the picker sent away for a busy \
-                 guest waits for that guest anyway",
+        escape: "the ten legs moved onto the labels of a self-hosted guest deleted on \
+                 2026-11-20, which no runner carries: every leg of every run is queued for a \
+                 machine that does not exist, and the Windows suite starts on no event",
         job: Some("test-windows-hosted"),
         anchor: "    runs-on: windows-latest\n",
         replacement: "    runs-on: [self-hosted, windows, winguest]\n",
@@ -3097,12 +3100,11 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-DOWNGRADED",
-        escape: "the twin installs `1.96.0`, a compiler the guest's image never carried. The \
-                 action, its input keys and its components value are allowlisted, so every \
-                 step-level pin holds. With the suite step intact its compiler questions throw \
-                 on every run sent to the twin; edited together with it, the twin omits a \
-                 Windows test enabled only on 1.97 and later, so a run's result depends on how \
-                 busy the guest was",
+        escape: "the shards install `1.96.0`, below the pinned `1.97.1`. The action, its input \
+                 keys and its components value are allowlisted, so every step-level pin holds. \
+                 With the suite step intact its compiler questions throw on every leg of every \
+                 run; edited together with it, the suite omits a Windows test enabled only on \
+                 1.97 and later, on every event, and no run says so",
         job: Some("test-windows-hosted"),
         anchor: "          toolchain: 1.97.1\n",
         replacement: "          toolchain: 1.96.0\n",
@@ -3112,9 +3114,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-WINDOWS-HOSTED-CACHE-RESTORED",
         escape: "the cache step this job first had, put back between the install and the \
                  identity step. The action is pinned and given no input, so every other pin \
-                 holds; the step uploads a cache per run that no later run reads, from a queue \
-                 entry's fresh ref and with `master` almost never saving one, and spends the \
-                 upload inside each leg's 40 minutes",
+                 holds. Every push to `master` now runs the shards, so `master` would save a \
+                 cache that pull requests and queue entries could restore; whether one pays \
+                 inside a leg's 40 minutes is not measured, and the oracle refuses the step \
+                 until a change measures it",
         job: Some("test-windows-hosted"),
         anchor: "      - name: Configure git identity\n",
         replacement: "      - name: Cache cargo\n\
@@ -3124,14 +3127,16 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-FLOATS",
-        escape: "the twin installs `stable`, the shape this job first had, which is already \
-                 ahead of the image's compiler. With the suite step intact its compiler \
-                 questions throw on every run sent to the twin; edited together with it, the \
-                 twin runs the suite on a compiler the guest never ran it on, and a test whose \
-                 outcome depends on the compiler -- a std change to Windows process spawning, a \
-                 new lint in test code under `-D warnings` -- passes on one home and fails on \
-                 the other. The compiler split the hosted merge-queue lane's pin removed, and \
-                 that the first review of #375 found this job had brought back",
+        escape: "the shards install `stable`, the shape this job first had, which is already \
+                 ahead of the pinned `1.97.1`. With the suite step intact its compiler \
+                 questions throw on every leg of every run; edited together with it, the \
+                 suite's compiler moves with GitHub's stable and not by an edit here, and a \
+                 test whose outcome depends on the compiler -- a std change to Windows process \
+                 spawning, a new lint in test code under `-D warnings` -- passes one week and \
+                 fails the next on an unchanged tree. While a guest also ran the suite this was \
+                 a compiler split between the suite's two homes, which the hosted merge-queue \
+                 lane's pin had removed and the first review of #375 found this job had brought \
+                 back",
         job: Some("test-windows-hosted"),
         anchor: "          toolchain: 1.97.1\n",
         replacement: "          toolchain: stable\n",
@@ -3139,9 +3144,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-WITHOUT-CLIPPY",
-        escape: "the twin installs the image's compiler without `clippy`, so the effect-denial \
-                 fixtures in the \
-                 suite it runs have no `clippy-driver`",
+        escape: "the shards install the pinned `1.97.1` without `clippy`, so the effect-denial \
+                 fixtures in the suite they run have no `clippy-driver`",
         job: Some("test-windows-hosted"),
         anchor: "          components: clippy\n",
         replacement: "",
@@ -3149,8 +3153,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-CASEFOLD-DECLARATION-DROPPED",
-        escape: "the twin's suite step no longer declares that the runner's NTFS folds case, so \
-                 the alias test observes its native branch there instead of requiring it",
+        escape: "the shards' suite step no longer declares that the runner's NTFS folds case, \
+                 so the alias test observes its native branch there instead of requiring it, on \
+                 the one job that runs the Windows suite",
         job: Some("test-windows-hosted"),
         anchor: "      - name: Test, and witness that the suite ran\n\
                  \x20       env:\n\
@@ -3160,8 +3165,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-CAPTURE-SEPARATED-FROM-THE-WITNESS",
-        escape: "a pinned cache step between the twin's suite step and its capture: the record \
-                 need not come from the harness the witness counted",
+        escape: "a pinned cache step between the shards' suite step and their capture: the \
+                 record need not come from the harness the witness counted",
         job: Some("test-windows-hosted"),
         anchor: "      - name: Capture the native host acceptance record\n",
         replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
@@ -3170,8 +3175,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-CHECKOUT-REF",
-        escape: "the twin checks out `master`: every run the picker sends to it tests a tree the \
-                 candidate never touched",
+        escape: "the shards check out `master`: on every event the ten legs test a tree the \
+                 candidate never touched, and the Windows suite is green over a candidate it \
+                 never ran",
         job: Some("test-windows-hosted"),
         anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
         replacement: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\
@@ -3231,8 +3237,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-ZEROED",
         escape: "the last shard's floor set to zero in the table, the script untouched. It is \
-                 the largest of the ten, 965 of the guest's 1700, and with it gone the leg is \
-                 green having executed nothing: the count the step sums is never below zero. \
+                 the largest of the ten, 965 of 1700, the floor the whole suite was held to as \
+                 one job, and with it gone the leg is green having executed nothing: the count \
+                 the step sums is never below zero. \
                  `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED`'s floor of 1 still asks for one \
                  test; this asks for none, which is the arrival the count exists to refuse",
         job: Some("test-windows-hosted"),
@@ -3243,8 +3250,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-FAIL-FAST-ENABLED",
         escape: "`fail-fast: true` on the shard matrix: the first leg to fail cancels the legs \
-                 still running, so a run sent to the twin reports one shard's failing tests and \
-                 none of the others', and the run that repairs them finds the next shard's",
+                 still running, so a run reports one shard's failing tests and none of the \
+                 others', and the run that repairs them finds the next shard's",
         job: Some("test-windows-hosted"),
         anchor: "      fail-fast: false\n",
         replacement: "      fail-fast: true\n",
@@ -3282,10 +3289,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED",
-        escape: "the cargo line loses the leg's selection and is the guest's again, the table \
-                 and the floors untouched: each of the ten legs runs the whole suite. Measured \
-                 on 2026-11-15 at 59 to 76 minutes a job, that is ten legs cancelled at their \
-                 limit; on a faster runner it is ten green legs and no shard",
+        escape: "the cargo line loses the leg's selection and is the whole suite's again, the \
+                 table and the floors untouched: each of the ten legs runs the whole suite. \
+                 Measured on 2026-11-15 at 59 to 76 minutes a job, that is ten legs cancelled \
+                 at their limit; on a faster runner it is ten green legs and no shard",
         job: Some("test-windows-hosted"),
         anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- ${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
         replacement: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
@@ -3341,8 +3348,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  leg's. Both Linux legs then run the tests whose names contain `engine::` and \
                  neither runs any other; they hold no count to a floor, and both are green. The \
                  macOS shards and the Windows suite still run the rest on their platforms; the \
-                 tests that run on Linux alone, the picker's and the aggregate's scripts \
-                 executed among them, then run nowhere",
+                 tests that run on Linux alone, the one that executes the aggregate's script \
+                 among them, then run nowhere",
         job: Some("test"),
         anchor: "            leg: \"ubuntu-latest, 2 of 2\"\n            tests: \"--skip engine::\"\n",
         replacement: "            leg: \"ubuntu-latest, 2 of 2\"\n            tests: \"engine::\"\n",
@@ -3436,6 +3443,135 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         anchor: "          if ($left.Count -gt 0) { throw \"$($left.Count) test process(es) outlived the suite, listed above: a test leaves a process running, which would hold this step open\" }\n",
         replacement: "",
         refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-RENAMED-AWAY",
+        escape: "the job renamed: the pinned name has no job. Not a false green -- the \
+                 aggregate's derived `needs` refuses the renamed workflow too -- but a lost \
+                 handle: every pin on the Windows suite hangs from this name, so the contract \
+                 must notice the name going before it notices nothing else",
+        job: None,
+        anchor: "\n  test-windows-hosted:\n",
+        replacement: "\n  test-windows-shards:\n",
+        refused_as: "test-windows-hosted-missing",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-CONDITIONED",
+        escape: "a job-level `if:` that excludes the merge queue: the routing by event that \
+                 this workflow dropped on 2026-11-20, put back. A pull request and a push still \
+                 run the ten legs; on a queue entry the job is skipped, the aggregate reads \
+                 `skipped` and fails, and no entry lands. Not a false green: the oracle refuses \
+                 it before it is pushed, where the queue would refuse it one entry at a time",
+        job: Some("test-windows-hosted"),
+        anchor: "    runs-on: windows-latest\n",
+        replacement: "    runs-on: windows-latest\n    if: github.event_name != 'merge_group'\n",
+        refused_as: "unexpected-job-field",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-SUITE-ON-ONE-LANE",
+        escape: "the merge-queue condition on the step that runs the suite. On a pull request \
+                 or a push every leg skips that step and reports success; the queue still runs \
+                 the suite, so the merge is still guarded, and every pull request is green on \
+                 Windows having run none of its tests. No step of this job may carry an `if:`.",
+        job: Some("test-windows-hosted"),
+        anchor: "      - name: Test, and witness that the suite ran\n",
+        replacement: "      - name: Test, and witness that the suite ran\n\
+                      \x20       if: github.event_name == 'merge_group'\n",
+        refused_as: "unexpected-step-field",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-RUN-RETARGETED",
+        escape: "the shards' identity step fetches `master` and checks it out detached before \
+                 the suite runs. The runner, the fields, the shells, the input-free checkout \
+                 and the suite's script all still match; all ten legs test `master`, on every \
+                 event, and are green over a candidate they never ran",
+        job: Some("test-windows-hosted"),
+        anchor: "          git config --global user.name \"upstroke CI\"\n",
+        replacement: "          git config --global user.name \"upstroke CI\"\n\
+                      \x20         git fetch origin master\n\
+                      \x20         git checkout --detach FETCH_HEAD\n",
+        refused_as: "test-windows-hosted-run-script",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-CAPTURE-CASEFOLD-DROPPED",
+        escape: "the shards' capture no longer declares that the runner's NTFS folds case, so \
+                 it runs under an environment its suite step did not, with its script still on \
+                 its pin",
+        job: Some("test-windows-hosted"),
+        anchor: "      - name: Capture the native host acceptance record\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
+        replacement: "      - name: Capture the native host acceptance record\n",
+        refused_as: "test-windows-hosted-capture-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-CAPABILITY-STEP-DELETED",
+        escape: "the shards' observation step is gone (omitted). Every leg witnesses its suite \
+                 and captures the host record, reports success and leaves no Windows container \
+                 capability record, and no other job of this workflow makes one.",
+        job: Some("test-windows-hosted"),
+        anchor: r##"      - name: Capture the container capability observation
+        timeout-minutes: 4
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
+        run: |
+          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not ($capture -ccontains 'test runner::container::tests::container_capability_record ... ok') -or -not ($capture -cmatch '^test result: ok\. 1 passed; 0 failed; 0 ignored; ')) { throw "the observation did not run exactly the one container capability test to a pass" }
+          $f = @($capture | Where-Object { $_ -cmatch '^UPSTROKE-CONTAINER-CAPABILITY-RECORD ' } | ForEach-Object { ,($_ -split ' ') })
+          $ok = $f.Count -ge 3 -and $f[0].Count -eq 7 -and $f[-1].Count -eq 7 -and $f[0][1] -ceq 'v1' -and $f[0][2] -ceq 'BEGIN' -and $f[-1][1] -ceq 'v1' -and $f[-1][2] -ceq 'END' -and ($f[0][3..6] -join ' ') -ceq ($f[-1][3..6] -join ' ') -and $f[0][4] -ceq "$($f.Count - 2)"
+          for ($k = 1; $ok -and $k -lt $f.Count - 1; $k++) { $ok = $f[$k].Count -eq 5 -and $f[$k][1] -ceq 'v1' -and $f[$k][2] -ceq $f[0][3] -and $f[$k][3] -ceq "$k" -and $f[$k][4].Length -eq $(if ($k -lt $f.Count - 2) { 192 } else { 2 * ([long]$f[0][5] - ([long]$f[0][4] - 1) * 96) }) }
+          if (-not $ok) { throw "the container capability record is missing or its framing is incomplete" }
+"##,
+        replacement: "",
+        refused_as: "test-windows-hosted-capability-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-CAPABILITY-TIMEOUT-DROPPED",
+        escape: "the 4-minute bound on the shards' observation is gone: a stalled question is \
+                 held by the leg's own 40 minutes, past the step's budget",
+        job: Some("test-windows-hosted"),
+        anchor: "        timeout-minutes: 4\n",
+        replacement: "",
+        refused_as: "test-windows-hosted-capability-step",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-CAPABILITY-CASEFOLD-DROPPED",
+        escape: "the shards' observation no longer declares that the runner's NTFS folds case, \
+                 so it runs under an environment its suite step did not",
+        job: Some("test-windows-hosted"),
+        anchor: "        timeout-minutes: 4\n\
+                 \x20       env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
+        replacement: "        timeout-minutes: 4\n",
+        refused_as: "test-windows-hosted-capability-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-JOB-PERMISSIONS-ON-THE-HOSTED-SHARDS",
+        escape: "a `permissions:` block on the shards' job, reading actions and contents. A \
+                 block on a job replaces the workflow's for that job, and this job runs the \
+                 candidate's build scripts and tests, so whatever the block names is theirs: \
+                 here a token that reads other runs. The field set refuses the key as well, \
+                 and the permission scan is what names the cause.",
+        job: Some("test-windows-hosted"),
+        anchor: "    timeout-minutes: 40\n",
+        replacement: "    timeout-minutes: 40\n\
+                      \x20   permissions:\n\
+                      \x20     actions: read\n\
+                      \x20     contents: read\n",
+        refused_as: "job-permissions",
+    },
+    WorkflowEscape {
+        name: "MUT-AGGREGATE-ACCEPTS-THE-HOSTED-SHARDS-SKIPPED",
+        escape: "the aggregate accepts `skipped` from the hosted shards: the old rule's \
+                 acceptance of a skipped Windows suite job, put back for the one job left. The \
+                 loop still names all six gates and every other one must still succeed, so a \
+                 run whose shards are skipped is green with no Windows suite: under \
+                 `MUT-TEST-WINDOWS-HOSTED-CONDITIONED`'s `if:`, every queue entry",
+        job: Some("merge-gate"),
+        anchor: "            if [[ \"$result\" != \"success\" ]]; then\n",
+        replacement: "            if [[ \"$result\" != \"success\" && \"$gate=$result\" != \"TEST_WINDOWS_HOSTED=skipped\" ]]; then\n",
+        refused_as: "aggregate-script",
     },
 ];
 
