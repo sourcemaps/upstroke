@@ -1551,21 +1551,50 @@ wait cannot end it early. It chooses from the log, the plans and the run's
 memory of exhausted pools:
 
 1. each task the fold holds `Deferred`, and the resets that task waits on
-   ([`Self::resets_awaited_by`]);
+   ([`Self::resets_awaited_by`]). A spent reset ([`spent_resets`]) is not
+   among them, and neither is a reset at or behind the clock for a task
+   whose limit cannot fail over;
 2. the earliest of all those resets, which decides the wait:
-   - **passed, and its margin too.** If the clock is at or past both the
-     earliest reset and the two minutes after it
-     (`interaction::RESET_WAIT_MARGIN`), there is no wait and it answers
-     `None`. That pool can serve now ([`serving_pool`] serves a held pool
-     from its reset plus the margin), so `back_off` takes the plain backoff's
-     minute and the task wakes onto it.
-   - **passed, its margin not.** If the clock is at or past the earliest
-     reset but short of the two minutes after it, the wait runs to two
-     minutes past that reset, under two minutes, for that pool.
-   - **ahead.** Otherwise every reset is ahead of the clock, and the wait is
-     for the earliest one ahead by at most `interaction::RESET_WAIT_BOUND`,
-     the one `interaction::reset_wait_until` waits for. With none within
-     the bound it answers `None`.
+
+| The earliest reset | Its margin | Answer |
+|---|---|---|
+| at or behind the clock | passed too | `None`: the plain backoff's minute |
+| at or behind the clock | not passed | two minutes past that reset, for its pool |
+| ahead of the clock | | `interaction::reset_wait_until`'s target, or `None` |
+
+- **passed, and its margin too.** If the clock is at or past both the
+  earliest reset and the two minutes after it
+  (`interaction::RESET_WAIT_MARGIN`), there is no wait and it answers
+  `None`. That pool can serve now ([`serving_pool`] serves a held pool from
+  its reset plus the margin), so `back_off` takes the plain backoff's minute
+  and the task wakes onto it.
+- **passed, its margin not.** If the clock is at or past the earliest reset
+  but short of the two minutes after it, the wait runs to two minutes past
+  that reset, under two minutes, for that pool.
+- **ahead.** Otherwise every reset is ahead of the clock, and the wait is for
+  the earliest one ahead by at most `interaction::RESET_WAIT_BOUND`, the one
+  `interaction::reset_wait_until` waits for. With none within the bound it
+  answers `None`.
+
+The two rows for a passed reset hold only for a worker's limit on an agent
+with more than one pool: only there can a passed reset be another pool's
+than the one that refused, waiting while that refusal's own pool is held.
+For one pool, or a reviewer's limit, `resets_awaited_by` drops a reset at or
+behind the clock, so only the third row is asked, as before the failover. An
+agent with one pool whose limit names `resets 3am (UTC)` at 03:00:00 backs
+off the plain minute, as it did then
+(`tests::with_one_pool_a_reset_at_the_clock_backs_off_as_before`,
+`tests::a_reviewers_limit_whose_pool_resets_at_the_clock_backs_off_as_before`).
+
+A spent reset is left out for the reason it is left out of `serving_pool`'s
+input: the pool refused past it, so it says nothing about when the pool
+serves again. Waited for, the passed rows would wake the task onto that pool
+again and again. With `spare` refusing again at 03:01 past its 02:59 reset,
+the wait runs to 05:32 for `primary`
+(`tests::a_reset_its_pool_has_refused_past_is_spent_and_the_wait_runs_to_the_other_pools_reset`),
+and with `primary` refusing again at 03:03 past its 03:01 reset, to 05:32 for
+`spare`
+(`tests::a_pool_that_refuses_again_past_its_reset_with_none_readable_is_not_served_from_that_reset`).
 
 A pool's reset plus the margin is when it can serve again, so the earliest
 reset is also the earliest a pool comes back, passed or not. The two cases
@@ -1621,7 +1650,27 @@ needs would only hold it back.
 
 Of the held candidates, one with no reset recorded gives none, and so does
 one whose reset does not read as a date ([`unix_seconds_of`]), such as a
-reset on a day its month lacks.
+reset on a day its month lacks. So does one whose reset is in `spent`
+([`spent_resets`], read once by `awaited_reset` for every task).
+
+When the limit cannot fail over, a worker's on an agent with one pool or a
+reviewer's, a reset at or behind `now_unix` gives none too. Only a limit that
+fails over can leave a passed reset on another pool than the one that
+refused, so only there does `awaited_reset` wait out its margin; for the
+rest it asks `interaction::reset_wait_until` alone, as before the failover.
+
+`spent` and `now_unix` are new with the spent rule: the signature was
+`fn resets_awaited_by(&self, key: TaskKey, plans: &dyn AttemptPlans)`.
+
+## `impl TopologyRun` › `fn held_unspent(&self) -> BTreeMap<String, Option<String>> {`
+
+`exhausted_pools` with each spent reset ([`spent_resets`], read from
+`self.handle.events`) read as no reset. It is the held map
+`prepare_attempt` gives [`serving_pool`], so a pool whose reset is spent is
+held with no known reset: it serves only when no pool is free and no other
+held pool's reset and margin have passed, as a pool whose limit named no
+reset does. `exhausted_pools` itself keeps the reset, so the failover and
+`capacity::pool_exhausted_to_record` see the pool held as before.
 
 ## `impl TopologyRun` › `fn announce_reset_wait(&self, awaited: &AwaitedReset, now_unix: u64) {`
 
@@ -2384,6 +2433,36 @@ for it.
 the log, and applying the event as it will be read back is what makes
 a live run and a replay of its own log one computation rather than two
 that agree by inspection (§15, "one fold, not two").
+
+## `fn spent_resets(events: &[TopologyEvent]) -> BTreeSet<String> {`
+
+The pools whose recorded reset is spent: the pool refused an attempt again,
+at or past that reset, after the `pool_exhausted` that recorded it. Read from
+the log alone, so a resumed run reads the same set as the process that wrote
+it. Resumed at 05:32 after `primary` refused past its 03:01, the woken task
+binds `spare` and not `primary`
+(`tests::a_resumed_run_reads_a_reset_its_pool_refused_past_as_spent`).
+
+| Event | Effect on its pool |
+|---|---|
+| `pool_exhausted` | records the reset it names (or none), and the pool is not spent |
+| `attempt_finished` limited on the pool, its `ts` at or past the recorded reset, not the refusal that recorded it | spent |
+| any other | none |
+
+The refusal that recorded a reset is the `attempt_finished` that follows its
+`pool_exhausted` with nothing between, as `capacity::exhausted_pools_of`
+reads it. It is not counted, even when the reset it named was already
+behind the clock: a pool that names 02:59 at 03:00 is waited for to 03:01
+(`tests::a_held_pool_whose_reset_passed_inside_the_margin_is_waited_for_only_to_two_minutes_past_it`).
+A later refusal past the reset is the evidence that the reset did not bring
+the pool back. It names the same reset, or none it can read, so
+`capacity::pool_exhausted_to_record` writes no new signal for it, and
+without this rule the run would keep the old reset and serve the pool from
+it again and again. A later `pool_exhausted` for the pool, with a reset of
+its own, makes it unspent.
+
+`held_unspent` (for `serving_pool`) and `awaited_reset` (through
+`resets_awaited_by`) read it; `exhausted_pools` and the failover do not.
 
 ## `fn serving_pool<'a>(`
 

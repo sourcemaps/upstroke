@@ -3390,6 +3390,302 @@ fn a_held_pool_whose_reset_passed_inside_the_margin_is_waited_for_only_to_two_mi
     );
 }
 
+struct SleptClock<'a>(&'a RecordingSleeper);
+
+impl TimeSource for SleptClock<'_> {
+    fn now_rfc3339(&self) -> String {
+        let slept: u64 = self
+            .0
+            .slept()
+            .iter()
+            .map(std::time::Duration::as_secs)
+            .sum();
+        let at = 3 * 3_600 + slept;
+        format!(
+            "2026-11-11T{:02}:{:02}:{:02}Z",
+            at / 3_600,
+            at / 60 % 60,
+            at % 60
+        )
+    }
+}
+
+fn on_primary_and_spare(
+    tag: &str,
+    limited: &[(TaskKey, GenerationId, &'static str)],
+    durable: bool,
+) -> crate::engine::topology::scaffold::Wide {
+    use crate::engine::topology::scaffold::{AGENT, Wide, WidePlans, WideTask};
+
+    let tasks = [WideTask::independent("alpha")];
+    let plans = WidePlans {
+        pools: vec![
+            (AGENT, Some("primary".to_owned())),
+            (AGENT, Some("spare".to_owned())),
+        ],
+        ..WidePlans::default()
+    };
+    let runner = limited_runner(&tasks, limited, &[]);
+    if durable {
+        Wide::durable(tag, &tasks, 1, plans, runner)
+    } else {
+        Wide::started_with(tag, &tasks, 1, plans, runner)
+    }
+}
+
+fn stepped_on_a_clock_that_sleeps(
+    wide: &mut crate::engine::topology::scaffold::Wide,
+    limits: usize,
+    sleeper: &RecordingSleeper,
+    hooks: &mut dyn TopologyHooks,
+    done: impl Fn(&crate::engine::topology::scaffold::Wide, &Progress) -> bool,
+) -> Vec<Progress> {
+    use crate::engine::topology::scaffold::ScaffoldAdapters;
+
+    let clock = SleptClock(sleeper);
+    let mut steps = Vec::new();
+    loop {
+        assert!(steps.len() < 64, "the run never got there: {steps:?}");
+        let adapters = if attempts_started(wide, TaskKey(0)).len() < limits {
+            ScaffoldAdapters::rate_limiting()
+        } else {
+            ScaffoldAdapters::new()
+        };
+        wide.env.adapters = std::sync::Arc::new(adapters);
+        let seams = RunSeams {
+            clock: &clock,
+            sleeper,
+            ..wide.env.seams()
+        };
+        let progress = wide.run.step(&seams, hooks).expect("a step");
+        let finished = done(wide, &progress);
+        steps.push(progress);
+        if finished {
+            return steps;
+        }
+    }
+}
+
+fn accepted(_: &crate::engine::topology::scaffold::Wide, progress: &Progress) -> bool {
+    matches!(progress, Progress::Settled { accepted: true, .. })
+}
+
+fn pools_of_attempts(wide: &crate::engine::topology::scaffold::Wide) -> Vec<Option<String>> {
+    attempts_started(wide, TaskKey(0))
+        .into_iter()
+        .map(|attempt| attempt.pool)
+        .collect()
+}
+
+#[test]
+fn a_reset_its_pool_has_refused_past_is_spent_and_the_wait_runs_to_the_other_pools_reset() {
+    let mut wide = on_primary_and_spare(
+        "spent-reset-past-initially",
+        &[
+            (TaskKey(0), GenerationId(0), FIVE_HOUR_LIMIT),
+            (TaskKey(0), GenerationId(1), LIMIT_RESET_A_MINUTE_AGO),
+            (TaskKey(0), GenerationId(2), LIMIT_RESET_A_MINUTE_AGO),
+        ],
+        false,
+    );
+    let mut hooks = wide.env.hooks();
+    let sleeper = RecordingSleeper::default();
+    let steps = stepped_on_a_clock_that_sleeps(&mut wide, 3, &sleeper, &mut hooks, accepted);
+
+    assert_eq!(
+        pools_exhausted(&wide),
+        [
+            (
+                "primary".to_owned(),
+                Some("2026-11-11T05:30:00Z".to_owned())
+            ),
+            ("spare".to_owned(), Some("2026-11-11T02:59:00Z".to_owned())),
+        ],
+        "{steps:?}"
+    );
+    assert_eq!(
+        sleeper.slept().iter().sum::<std::time::Duration>(),
+        std::time::Duration::from_secs(9_120),
+        "a minute to 03:01, then to 05:32, two minutes past `primary`'s reset: {steps:?}"
+    );
+    assert_eq!(
+        pools_of_attempts(&wide),
+        [
+            Some("primary".to_owned()),
+            Some("spare".to_owned()),
+            Some("spare".to_owned()),
+            Some("primary".to_owned()),
+        ],
+        "{steps:?}"
+    );
+}
+
+const LIMIT_RESET_AT_THREE_OH_ONE: &str = "You've hit your 5-hour limit · resets 3:01am (UTC)";
+
+const MIRRORED: [(TaskKey, GenerationId, &str); 3] = [
+    (TaskKey(0), GenerationId(0), LIMIT_RESET_AT_THREE_OH_ONE),
+    (TaskKey(0), GenerationId(1), FIVE_HOUR_LIMIT),
+    (TaskKey(0), GenerationId(2), UNREAD_LIMIT),
+];
+
+#[test]
+fn a_pool_that_refuses_again_past_its_reset_with_none_readable_is_not_served_from_that_reset() {
+    let mut wide = on_primary_and_spare("spent-reset-mirrored", &MIRRORED, false);
+    let mut hooks = wide.env.hooks();
+    let sleeper = RecordingSleeper::default();
+    let steps = stepped_on_a_clock_that_sleeps(&mut wide, 3, &sleeper, &mut hooks, accepted);
+
+    assert_eq!(
+        pools_exhausted(&wide),
+        [
+            (
+                "primary".to_owned(),
+                Some("2026-11-11T03:01:00Z".to_owned())
+            ),
+            ("spare".to_owned(), Some("2026-11-11T05:30:00Z".to_owned())),
+        ],
+        "{steps:?}"
+    );
+    assert_eq!(
+        sleeper.slept().iter().sum::<std::time::Duration>(),
+        std::time::Duration::from_secs(9_120),
+        "accepted at 05:32, two minutes past `spare`'s reset: {steps:?}"
+    );
+    assert_eq!(
+        pools_of_attempts(&wide),
+        [
+            Some("primary".to_owned()),
+            Some("spare".to_owned()),
+            Some("primary".to_owned()),
+            Some("spare".to_owned()),
+        ],
+        "{steps:?}"
+    );
+}
+
+#[test]
+fn a_resumed_run_reads_a_reset_its_pool_refused_past_as_spent() {
+    let mut wide = on_primary_and_spare("spent-reset-resumed", &MIRRORED, true);
+    let mut hooks = wide.env.hooks();
+    let sleeper = RecordingSleeper::default();
+    let steps =
+        stepped_on_a_clock_that_sleeps(&mut wide, 3, &sleeper, &mut hooks, |wide, progress| {
+            matches!(progress, Progress::Settled { .. })
+                && attempts_started(wide, TaskKey(0)).len() == 3
+        });
+    assert_eq!(
+        (
+            pools_of_attempts(&wide).last().cloned(),
+            SleptClock(&sleeper).now_rfc3339()
+        ),
+        (
+            Some(Some("primary".to_owned())),
+            "2026-11-11T03:03:00Z".to_owned()
+        ),
+        "`primary` refused again at 03:03, past its 03:01 reset: {steps:?}"
+    );
+
+    struct AtFiveThirtyTwo;
+    impl TimeSource for AtFiveThirtyTwo {
+        fn now_rfc3339(&self) -> String {
+            "2026-11-11T05:32:00Z".to_owned()
+        }
+    }
+    let (_, mut resumed) = wide
+        .resume(
+            "inc-2",
+            limited_runner(
+                &[crate::engine::topology::scaffold::WideTask::independent(
+                    "alpha",
+                )],
+                &MIRRORED,
+                &[],
+            ),
+            Ceiling::unlimited(),
+        )
+        .expect("the next process resumes the run");
+    resumed.env.adapters =
+        std::sync::Arc::new(crate::engine::topology::scaffold::ScaffoldAdapters::new());
+    let mut hooks = resumed.env.hooks();
+    let served = {
+        let seams = RunSeams {
+            clock: &AtFiveThirtyTwo,
+            ..resumed.env.seams()
+        };
+        resumed.run.step(&seams, &mut hooks).expect("a step")
+    };
+    assert!(
+        matches!(served, Progress::Settled { accepted: true, .. }),
+        "the resume wakes the task, and generation 3 is served: {served:?}"
+    );
+    assert_eq!(
+        pools_of_attempts(&resumed).last().cloned(),
+        Some(Some("spare".to_owned())),
+        "at 05:32 both resets and their margins have passed, and `primary`'s 03:01 is spent, so \
+         generation 3 binds `spare`"
+    );
+}
+
+#[test]
+fn with_one_pool_a_reset_at_the_clock_backs_off_as_before() {
+    use crate::engine::topology::scaffold::WideTask;
+
+    let mut wide = deferred_on_claude_max(
+        "one-pool-reset-at-the-clock",
+        &[WideTask::independent("alpha")],
+        "You've hit your 5-hour limit · resets 3am (UTC)",
+    );
+    assert_eq!(pools_exhausted(&wide), [signal("2026-11-11T03:00:00Z")]);
+    let now = unix_seconds_of(&RunClock.now_rfc3339()).expect("`RunClock` reads as UTC");
+    assert_eq!(wide.run.awaited_reset(now, wide.env.seams().plans), None);
+    let mut hooks = wide.env.hooks();
+    let sleeper = RecordingSleeper::default();
+    let steps = stepped_until_waited(&mut wide, &RunClock, &sleeper, None, &mut hooks);
+    assert_backs_off_as_before("one pool", &steps, &sleeper);
+}
+
+#[test]
+fn a_reviewers_limit_whose_pool_resets_at_the_clock_backs_off_as_before() {
+    use crate::engine::topology::scaffold::{
+        AGENT, REVIEW_AGENT, RecordingRunner, ScaffoldAdapters, Wide, WidePlans, WideTask,
+        wide_responder,
+    };
+
+    let tasks = [WideTask::independent("alpha")];
+    let mut wide = Wide::started_with(
+        "reviewer-limit-reset-at-the-clock",
+        &tasks,
+        1,
+        WidePlans {
+            reviewers: 2,
+            pools: vec![
+                (AGENT, Some("claude-max".to_owned())),
+                (AGENT, Some("claude-max-2".to_owned())),
+                (REVIEW_AGENT, Some("copilot-pool".to_owned())),
+                (REVIEW_AGENT, Some("copilot-pool-2".to_owned())),
+            ],
+            ..WidePlans::default()
+        },
+        RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+    );
+    let mut hooks = wide.env.hooks();
+    step_answered_by(
+        &mut wide,
+        ScaffoldAdapters::rate_limiting_the_second_reviewer(),
+        &mut hooks,
+    );
+    assert_eq!(deferral_of(&wide, TaskKey(0)), (TaskState::Deferred, 1));
+    wide.run.exhausted_pools.insert(
+        "copilot-pool".to_owned(),
+        Some("2026-11-11T03:00:00Z".to_owned()),
+    );
+    let now = unix_seconds_of(&RunClock.now_rfc3339()).expect("`RunClock` reads as UTC");
+    assert_eq!(wide.run.awaited_reset(now, wide.env.seams().plans), None);
+    let sleeper = RecordingSleeper::default();
+    let steps = stepped_until_waited(&mut wide, &RunClock, &sleeper, None, &mut hooks);
+    assert_backs_off_as_before("reviewer", &steps, &sleeper);
+}
+
 #[test]
 fn a_rate_limit_with_no_other_pool_for_the_agent_still_defers() {
     use crate::engine::topology::scaffold::{

@@ -1840,9 +1840,10 @@ impl TopologyRun {
         let len = self.handle.fold.registry().map_or(0, |registry| {
             u32::try_from(registry.len()).unwrap_or(u32::MAX)
         });
+        let spent = spent_resets(&self.handle.events);
         let known: Vec<(u64, &String, &String)> = (0..len)
             .map(TaskKey)
-            .filter_map(|key| self.resets_awaited_by(key, plans))
+            .filter_map(|key| self.resets_awaited_by(key, plans, &spent, now_unix))
             .flatten()
             .collect();
         let margin = interaction::RESET_WAIT_MARGIN.as_secs();
@@ -1869,6 +1870,8 @@ impl TopologyRun {
         &self,
         key: TaskKey,
         plans: &dyn AttemptPlans,
+        spent: &BTreeSet<String>,
+        now_unix: u64,
     ) -> Option<Vec<(u64, &String, &String)>> {
         let fold = &self.handle.fold;
         let task = fold
@@ -1887,18 +1890,33 @@ impl TopologyRun {
                 vec![crate::capacity::limited_pool(record)?.clone()]
             }
         };
+        let fails_over =
+            failure.origin == crate::ladder::FailureOrigin::Worker && candidates.len() > 1;
         let held = candidates
             .iter()
             .map(|pool| self.exhausted_pools.get_key_value(pool))
             .collect::<Option<Vec<_>>>()?;
         Some(
             held.into_iter()
+                .filter(|(pool, _)| !spent.contains(*pool))
                 .filter_map(|(pool, reset_at)| {
                     let reset_at = reset_at.as_ref()?;
-                    Some((unix_seconds_of(reset_at)?, pool, reset_at))
+                    let reset = unix_seconds_of(reset_at)?;
+                    (fails_over || reset > now_unix).then_some((reset, pool, reset_at))
                 })
                 .collect(),
         )
+    }
+
+    fn held_unspent(&self) -> BTreeMap<String, Option<String>> {
+        let spent = spent_resets(&self.handle.events);
+        self.exhausted_pools
+            .iter()
+            .map(|(pool, reset_at)| {
+                let reset_at = reset_at.clone().filter(|_| !spent.contains(pool));
+                (pool.clone(), reset_at)
+            })
+            .collect()
     }
 
     fn announce_reset_wait(&self, awaited: &AwaitedReset, now_unix: u64) {
@@ -2591,7 +2609,7 @@ impl TopologyRun {
         } else {
             serving_pool(
                 &seams.plans.pools_for(&binding.agent),
-                &self.exhausted_pools,
+                &self.held_unspent(),
                 unix_seconds(seams.clock),
             )
             .cloned()
@@ -3095,6 +3113,38 @@ fn last_settled_record(events: &[TopologyEvent], key: TaskKey) -> Option<&Attemp
         TopologyEventBody::AttemptFinished { data } if data.key == key => Some(&*data.record),
         _ => None,
     })
+}
+
+fn spent_resets(events: &[TopologyEvent]) -> BTreeSet<String> {
+    let mut recorded: BTreeMap<&String, u64> = BTreeMap::new();
+    let mut spent = BTreeSet::new();
+    let mut signalled: Vec<&String> = Vec::new();
+    for event in events {
+        match &event.body {
+            TopologyEventBody::PoolExhausted { data } => {
+                spent.remove(&data.pool);
+                match data.reset_at.as_deref().and_then(unix_seconds_of) {
+                    Some(reset) => recorded.insert(&data.pool, reset),
+                    None => recorded.remove(&data.pool),
+                };
+                signalled.push(&data.pool);
+            }
+            TopologyEventBody::AttemptFinished { data } => {
+                if let Some(pool) = crate::capacity::limited_pool(&data.record) {
+                    let refused_past = recorded
+                        .get(pool)
+                        .zip(unix_seconds_of(&event.ts))
+                        .is_some_and(|(reset, at)| at >= *reset);
+                    if refused_past && !signalled.contains(&pool) {
+                        spent.insert(pool.clone());
+                    }
+                }
+                signalled.clear();
+            }
+            _ => signalled.clear(),
+        }
+    }
+    spent
 }
 
 fn serving_pool<'a>(
