@@ -28,8 +28,13 @@ upstroke.toml                       # repo-root config, checked in
 reads it, and no reader of answers removes or rewrites it, so an ingestion
 leaves the file exactly as it found it. Publication is create-once: each
 publisher stages its answer in a file of its own and publishes it only where
-no answer file exists, so a second answer to a question is refused and never
-replaces the first. The answer file is part of the run-scoped run-directory
+no answer file exists, so wherever an answer file has been published a second
+answer to the question is refused and never replaces the first. That does not
+cover a legacy run whose log records a terminal answer with no answer file: a
+crash before the question payload is rewritten leaves the payload open, and a
+later `upstroke answer` publishes a second answer that is never ingested
+(`docs/internals/engine/resume.md`, `for record in &run.state.questions {`).
+The answer file is part of the run-scoped run-directory
 contents that the effects vocabulary's resource row R21 accounts for. This
 paragraph was added on 2026-11-13 to record what the answer readers already
 do, so that their tests have a design sentence to be held to.
