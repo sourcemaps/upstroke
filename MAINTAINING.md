@@ -160,13 +160,16 @@ source, documentation, workflows, release machinery and this file.
 
    A repair-only push after a pass that found no serious P1 needs no second pass: the owner reads
    `git diff <reviewed> <head>`, confirms it contains those repairs and nothing else — never a
-   workflow, gate script or validator edit — and says so in the body. A push that only adds files to
-   the finding ledger (new files under `findings/`, or a change to `reviews/FINDINGS.md` on a branch
-   cut before that ledger left master), or a conflict-free merge of `master` that leaves
+   workflow, gate script or validator edit — and says so in the body. A push confined to additions
+   under `findings/`, additions under `reviews/findings/` where the reviewed commit's tree carries
+   that directory, or in-place modification of `reviews/FINDINGS.md` where that tree carries the
+   regular file, or a conflict-free merge of `master` that leaves
    `git diff master...HEAD` byte-identical with CI green on the merged head and no gate edited by
    the pull request, keeps the review as well; a push that modifies, deletes or renames a file
-   already under `findings/` is a repair-only push, read as above, because it can rewrite or unfile
-   an open finding; record both SHAs, and for the merge-in both base SHAs and the diff hash
+   already under `findings/` or `reviews/findings/` is a repair-only push, read as above, because it
+   can rewrite or unfile an open finding. Adding or deleting `reviews/FINDINGS.md`, or adding under
+   `reviews/findings/` when the reviewed tree lacks that directory, is a repair-only push too;
+   record both SHAs, and for the merge-in both base SHAs and the diff hash
    before and after. Anything wider is a new change and is reviewed again. A panel-reviewed
    checkpoint candidate is the exception: any head movement re-runs every seat.
 
@@ -393,9 +396,20 @@ Provenance explains where a defect came from; it does not make it less real. Eve
 fixed in the pull request gets a regression test that fails on the first-bad shape. Keep fixed and
 rejected rows: the ledger preserves why, not only what remains open.
 
-`validate-pr-body.sh` enforces the header and tokens. `validate-pr-ledger-evidence.sh` resolves
-each row against the exact head: the reviewed SHA must be an ancestor, the path and line must exist
-at that commit, and every backticked regression or guard identifier must occur in tracked content.
+`validate-pr-body.sh` enforces the header and tokens, including the full reviewed SHA and a positive
+line number. In `upstroke-pr-policy`, `validate-pr-ledger-evidence.sh` checks that the reviewed SHA
+resolves to a commit and is an ancestor of the exact head, that a repository path and its line exist
+at the reviewed commit, and that every backticked regression or guard identifier occurs in tracked
+content at the exact head. Exactly `pr.md:<line>` names the reviewed pull request body's virtual
+location: it has no tree lookup or line-count check, because the body is in no tree and may have
+changed since review. Its SHA and guard checks still run.
+
+`scripts/pr-ready-audit.sh` runs `validate-pr-body.sh` on the live body it parses; it relies on the
+successful `upstroke-pr-policy` check for ledger evidence and does not re-run the evidence validator.
+For step 5's `body-fixed:<id>` route it requires the same ID, severity and body-location category in
+the review and row, with disposition `fixed`: P3 in every lane, or P2 only on a `findings/` branch,
+with the head unchanged or moved only by step 5's ledger pushes or clean merges. This needs the
+personal read under step 5 and is NEEDS-ATTEST, never READY on the row alone.
 Bind rows to the first integrated commit, never to a lane commit that was later cherry-picked.
 Change a validator and its fixtures in the same pull request as any schema change.
 
