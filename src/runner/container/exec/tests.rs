@@ -6476,16 +6476,25 @@ fn real_docker_a_container_descendant_test_is_gated_to_linux() {
 /// first, each with its trailing whitespace removed so that a CRLF checkout
 /// (the Windows guest's) reads the same as an LF one: `str::lines` keeps the
 /// `\r` of the last line, because `source[..at]` ends before its `\n`.
+///
+/// The signature and the attribute lines are found in `source` with its
+/// comments and literals blanked (`PR366-CFG-SCAN-LITERAL-SPOOF`), so a
+/// Linux-gated copy of the signature in a block comment or a raw string above
+/// the function cannot stand in for it. The blanker keeps every byte where it
+/// was and every `\n`, so each line it yields is read back from `source` at
+/// the same offsets: the blanked one spells `"linux"` as spaces.
 fn attributes_of_test<'a>(source: &'a str, name: &str) -> Vec<&'a str> {
+    let blanked = crate::effects::blank_comments_and_strings(source);
     let signature = format!("\nfn {name}() {{");
-    let at = source
+    let at = blanked
         .find(&signature)
         .unwrap_or_else(|| panic!("`{name}` is not a test here"));
-    source[..at]
+    blanked[..at]
         .lines()
         .rev()
-        .map(str::trim_end)
-        .take_while(|line| line.starts_with("#["))
+        .zip(source[..at].lines().rev())
+        .take_while(|(code, _)| code.trim_end().starts_with("#["))
+        .map(|(_, line)| line.trim_end())
         .collect()
 }
 
@@ -6500,6 +6509,34 @@ fn real_docker_a_container_descendant_gate_reads_lf_and_crlf_alike() {
             ["#[cfg(target_os = \"linux\")]", "#[test]"],
             "the attributes of {source:?}"
         );
+    }
+}
+
+#[test]
+fn real_docker_a_container_descendant_gate_reads_past_a_decoy_in_a_comment_or_a_raw_string() {
+    let decoy = "#[test]\n#[cfg(target_os = \"linux\")]\nfn guarded() {\n}\n";
+    let real = "\n#[test]\n#[cfg(unix)]\nfn guarded() {\n}\n";
+    let in_a_comment = format!("/*\n{decoy}*/\n{real}");
+    let in_a_raw_string = format!("const EXAMPLE: &str = r#\"\n{decoy}\"#;\n{real}");
+    for lf in [in_a_comment, in_a_raw_string] {
+        let crlf = lf.replace('\n', "\r\n");
+        for source in [lf.as_str(), crlf.as_str()] {
+            let first = source
+                .find("\nfn guarded() {")
+                .expect("the fixture spells the signature");
+            assert!(
+                source[..first]
+                    .trim_end()
+                    .ends_with("#[cfg(target_os = \"linux\")]"),
+                "the first spelling of the signature in {source:?} is not the decoy's, so a scan \
+                 of the raw text would not be fooled by it"
+            );
+            assert_eq!(
+                attributes_of_test(source, "guarded"),
+                ["#[cfg(unix)]", "#[test]"],
+                "the attributes of {source:?}"
+            );
+        }
     }
 }
 

@@ -2317,6 +2317,19 @@ show it. The signature it looks for is built with `format!` so that this
 test's own text never spells `fn <that name>(`. `every_gated_test_of_this_lane_is_counted`
 and the effects contract mapping both look tests up by that spelling.
 
+`attributes_of_test` reads the source with its comments and its string, character, byte-string
+and raw-string literals blanked by `effects::blank_comments_and_strings`
+(`PR366-CFG-SCAN-LITERAL-SPOOF`). It used to search the raw text for the first spelling of the
+signature, so a block comment or a raw string earlier in the file holding a Linux-gated copy of
+it satisfied the scan while the real function was still `#[cfg(unix)]`. The blanker keeps every
+byte where it was and every `\n`, so the signature is found and the attribute lines are told
+apart in the blanked text, and each attribute line is read back from the original at the same
+offsets: blanked, `"linux"` is only spaces. `real_docker_a_container_descendant_gate_reads_lf_and_crlf_alike`
+holds an LF and a CRLF fragment, and
+`real_docker_a_container_descendant_gate_reads_past_a_decoy_in_a_comment_or_a_raw_string` puts
+each decoy, LF and CRLF, before a `#[cfg(unix)]` copy. Its control checks that the decoy is the
+signature's first raw spelling, and the scan must report the real function's `#[cfg(unix)]`.
+
 ## `fn real_docker_a_container_slow_to_start_still_reaches_its_timeout() {`
 
 The regression for `CI-FLAKE-REAL-DOCKER-START-DEADLINE`: a container whose `docker start` is
