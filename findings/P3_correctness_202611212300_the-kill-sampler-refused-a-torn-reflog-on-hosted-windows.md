@@ -197,9 +197,11 @@ commit on #400), 45239059571 (#410 entering the merge queue again after the red 
 - **`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`**
   (`findings/P2_correctness_202609090020_pr5s-census-sampler-kills-gits-launcher-on-windows.md`)
   is the launcher cause: `SampledChild::spawn` runs `git` by name, so on Windows the kill can end
-  the launcher and not Git. Its first three fingerprints, on the self-hosted guest
-  (`test (winguest)`), are recovery failures at `Worktree.Add`: a forced removal denied access to a
-  registration's `locked`, and `record.recovered` failing. The hosted-runner fingerprints that row
+  the launcher and not Git. Its first fingerprint is that launcher measurement itself (the PR9
+  repair-materialization sampler on the self-hosted guest at `56ea88c9`: 30 kills in 32 spawns, none
+  landing mid-write). Its second and third, on the self-hosted guest (`test (winguest)`), are
+  recovery failures at `Worktree.Add`: a forced removal denied access to a registration's `locked`,
+  and `record.recovered` failing. The hosted-runner fingerprints that row
   gained on 2026-11-24 include a forced removal during `ProposalCherryPick`'s sampling, refused
   with os error 32, which is still a recovery failure. This one is a classifier refusal at
   `ProposalCherryPick`, on a GitHub-hosted runner, raised before any recovery was asserted. It

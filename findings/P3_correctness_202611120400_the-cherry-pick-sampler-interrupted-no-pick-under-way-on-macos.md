@@ -87,7 +87,10 @@ The same test failed on the same assertion, `killed_while_writing >= 1`, on a Gi
   completed (exit 0), each recorded as having "outran the kill".
 - **The kills' timeline, as the payload prints it:** kills were aimed between 245.012µs and
   2.076647ms; the kills that returned did so between 386.375µs and 3.811152ms; ten of sixteen
-  children exited before their kill returned, between 2.215365ms and 3.821434ms.
+  children were recorded as having outrun their kill, and the parent saw them exited ("exited by")
+  at times between 2.215365ms and 3.821434ms. Those times are taken after `wait()` returns, so they
+  bound each exit from above and do not measure it: run 11's kill returned at 2.205358ms and its
+  child had "exited by 2.215365ms" (job 137318868062 of run 45058469607).
 - **Line 1978:** `test result: FAILED. 1418 passed; 1 failed; 86 ignored`. It was the job's only
   failure. #404 changes only `findings/`.
 - **The same tree passed.** Merge-queue run `45061116652` tested `e215c508` and merge-queue run
