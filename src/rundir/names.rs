@@ -1,45 +1,67 @@
-//! The names one run's files carry on disk, as constants.
+//! The names one run's files and directories carry on disk, as constants.
 //!
 //! The marker, the two private records and their staging siblings, the event
-//! log and the frozen plan. They are consts rather than a literal at each call
-//! site because the sites that have to agree on the byte string sit in
-//! different files.
+//! log, the frozen plan, the report and the three names its staging takes, and
+//! the eight directories of the run's skeleton. They are consts rather than a
+//! literal at each call site because the sites that have to agree on the byte
+//! string sit in different files — or, for the report and the skeleton, in
+//! different functions of one file. Until `SWEEP-NAMES-004` moved them here,
+//! each of those nine was spelt once by what makes it and again by the
+//! `RunPaths` accessor that returns it, so a skeleton directory could be
+//! created at one name and read at another.
 //!
-//! **Who writes each, exactly.** Seven of the eight are published by a funnel
-//! in `src/rundir.rs`: `stage_marker` and `publish_marker`, the owner and
-//! commit-record pairs, and `write_plan` for [`PLAN`]. [`EVENT_LOG`] is the
-//! exception and is worth knowing about — `src/rundir.rs` only *names* it, in
-//! `RunPaths::events` and in the re-export; the log itself is opened and
-//! appended by `EventLog` in `src/events/log.rs`, which takes the path it is
-//! given. So this module names a file that `rundir` does not write.
+//! **Who writes each, exactly.** Of the marker, the records, the log and the
+//! plan, seven are published by a funnel in `src/rundir.rs`: `stage_marker` and
+//! `publish_marker`, the owner and commit-record pairs, and `write_plan` for
+//! [`PLAN`]. [`EVENT_LOG`] is the exception and is worth knowing about —
+//! `src/rundir.rs` only *names* it, in `RunPaths::events` and in the re-export;
+//! the log itself is opened and appended by `EventLog` in `src/events/log.rs`,
+//! which takes the path it is given. So this module names a file that `rundir`
+//! does not write. [`REPORT`] and its three staging names belong to
+//! `write_report`, which publishes the one and makes and reclaims what the
+//! other three name. The eight directories `rundir` *makes* and nothing more:
+//! `RunPaths::create_hooked` and its fresh-run sibling iterate `PUBLIC_DIRS` and
+//! `PRIVATE_DIRS`, which are built from these constants, as
+//! `create_private_skeleton` iterates the second. What goes inside each is
+//! named by whoever takes the accessor's path, not here.
 //!
-//! Reading them back: the classifier in `classify.rs` (`EVENT_LOG`), and the
-//! ownership proof in `ownership.rs`, below. Pinning them:
+//! Reading them back: the classifier in `classify.rs` (`EVENT_LOG`), the
+//! ownership proof in `ownership.rs`, below, the `RunPaths` accessors, and
+//! `find_question` in `discovery.rs`, which lists [`QUESTIONS_DIR`] for each run
+//! without building a `RunPaths`. Pinning them:
 //! `the_names_on_disk_are_the_names_the_packet_writes` in `tests.rs` binds
-//! every const to its literal. A second test,
-//! `the_event_log_and_plan_accessors_return_the_paths_their_constants_name`, fails on
-//! an **accessor drift** — a `RunPaths` accessor spelling something other than
-//! its const. It does not fail on a change to the const, which moves both sides
-//! of its assertion, and it cannot witness the substitution that put accessor
-//! and const in agreement at all; its own doc says why.
+//! every const to its literal. Three more fail on an **accessor drift** — a
+//! `RunPaths` accessor spelling something other than what its writer or
+//! creator used. `the_event_log_and_plan_accessors_return_the_paths_their_constants_name`
+//! holds [`EVENT_LOG`] and [`PLAN`]; it does not fail on a change to the const,
+//! which moves both sides of its assertion, and it cannot witness the
+//! substitution that put accessor and const in agreement at all; its own doc
+//! says why.
+//! `the_skeleton_accessors_name_exactly_the_directories_the_skeleton_arrays_create`
+//! asserts each directory accessor's last component against the element of
+//! `PUBLIC_DIRS` or `PRIVATE_DIRS` that the creator iterates, never against a
+//! literal, so it fails from either end — an accessor that leaves its array, or
+//! an array element that leaves its accessor. And
+//! `the_report_accessor_returns_the_file_write_report_publishes` writes a report
+//! through the funnel and reads it back through `RunPaths::report_json`.
 //!
-//! **One source of truth, for the crate as well as for `rundir`.**
-//! [`EVENT_LOG`] and [`PLAN`] name the two files a command outside this module
-//! opens by path rather than through `RunPaths`, and the commands that do so —
-//! `export.rs`, `validate.rs`, `engine/resume.rs`, `status.rs` and
-//! `capacity.rs` — join the constant. No production code outside `rundir`
-//! spells `events.jsonl` or `plan.normalized.json` as a path into a run, so a
-//! rename of either const is a one-file edit as far as production code goes.
-//! `upstroke validate --emit-json` also writes a `plan.normalized.json`, from
-//! `main.rs`, but into the working directory: a different file, deliberately
-//! not [`PLAN`]. Suites outside `rundir` still spell both names by hand —
-//! `export.rs`'s fixture writes the log and the plan under their literals — so
-//! a rename reddens those tests until they follow it; that is the suite seeing
-//! the rename, not a production site left behind. The six names above them are
-//! in the same position: no production code outside `rundir` spells any of the
-//! six as a path. One test does — `engine/topology/emit/tests.rs`, joining
-//! `committed.json` — and that one is load-bearing rather than untidy; see
-//! below and `SWEEP-NAMES-003`.
+//! **One source of truth for `rundir`, not yet for the crate.** [`EVENT_LOG`]
+//! and [`PLAN`] name the two files a command outside this module opens by path
+//! rather than through `RunPaths`, and no production code outside `rundir`
+//! spells either as a run-directory path any longer: the sites that did now
+//! go through the constant. (`validate --emit-json`
+//! writes a file of [`PLAN`]'s name into the working directory, which is not a
+//! run directory.) The nine this module took from `src/rundir.rs` have not had
+//! that pass, and **six production sites in three files** still spell three of
+//! them for themselves: four of `questions` (three in `answer.rs`, and one in
+//! `engine/report.rs`, in the path its summary prints), one of `answers`
+//! (`answer.rs`) and one of `report.json` (`engine/topology/finalize.rs`). A
+//! rename of [`QUESTIONS_DIR`], [`ANSWERS_DIR`] or [`REPORT`] is therefore still
+//! a multi-file edit. The other six directories are not, and neither are the
+//! six names of the creation protocol: no production code outside `rundir`
+//! spells any of them as a path. One test does — `engine/topology/emit/tests.rs`,
+//! joining `committed.json` — and that one is load-bearing rather than untidy;
+//! see below and `SWEEP-NAMES-003`.
 //!
 //! **What the proof consults, exactly.** `prove_private_half_ownership` reads
 //! two of these back and parses each ([`MARKER`], then [`OWNER_RECORD`] at the
@@ -50,14 +72,17 @@
 //! read would be weakening the deletion boundary, not tidying it.
 //!
 //! **What has product authority here, and what does not.** `DESIGN.md` §15's
-//! run-directory drawing carries [`EVENT_LOG`] and [`PLAN`]. The other six
-//! appear in no `design/` section at all, so this repository states no rule
-//! about renaming them — and for these six a rename is not a refactor. A run
-//! killed after old P5b still holds a file called `committed.json`; a proof
-//! built on the new name would stat it, find it absent, mint a deletion token
-//! on that absence and delete a private half that had crossed the deletion
-//! boundary. The missing compatibility contract is `SWEEP-NAMES-008`, deferred:
-//! it belongs in §15 and `DESIGN.md` is the owner's.
+//! run-directory drawing carries [`EVENT_LOG`] and [`PLAN`], and all nine this
+//! module took from `src/rundir.rs`: [`REPORT`] and the eight skeleton
+//! directories. The six names of the creation protocol — the marker and the two
+//! private records, each with its staging sibling — appear in no `design/`
+//! section at all, so this repository states no rule about renaming them — and
+//! for these six a rename is not a refactor. A run killed after old P5b still
+//! holds a file called `committed.json`; a proof built on the new name would
+//! stat it, find it absent, mint a deletion token on that absence and delete a
+//! private half that had crossed the deletion boundary. The missing
+//! compatibility contract is `SWEEP-NAMES-008`, deferred: it belongs in §15 and
+//! `DESIGN.md` is the owner's.
 //!
 //! One test stands between that and a green suite today, and it is not in this
 //! module: `engine/topology/emit/tests.rs` joins `"committed.json"` by hand.
@@ -69,7 +94,7 @@
 //! decision record establishes no product contract, and neither does
 //! implementation or test code quoting one, so no citation of
 //! `decisions.workspace_candidates.run_creation` appears above. Until §15 says
-//! otherwise, the six byte strings below are pinned by
+//! otherwise, the creation protocol's six byte strings are pinned by
 //! `the_names_on_disk_are_the_names_the_packet_writes` and by nothing with
 //! design standing.
 
@@ -108,6 +133,8 @@ pub const COMMIT_RECORD: &str = "committed.json";
 pub const COMMIT_RECORD_STAGED: &str = "committed.json.tmp";
 /// `<public>/events.jsonl`.
 pub const EVENT_LOG: &str = "events.jsonl";
+/// `<public>/report.json` — the projection of the log `write_report` publishes
+/// and `RunPaths::report_json` returns.
 pub const REPORT: &str = "report.json";
 
 /// `<public>/.report-staging-<ulid>/` — the directory one report write makes
@@ -147,3 +174,24 @@ pub const REPORT_STAGING_RECORD: &str = "report-staging.json";
 pub const REPORT_STAGING_RECORD_STAGED: &str = "report-staging.json.tmp";
 /// `<public>/plan.normalized.json`.
 pub const PLAN: &str = "plan.normalized.json";
+
+// The skeleton: the eight directories `RunPaths::create_hooked` makes by
+// iterating `PUBLIC_DIRS` and `PRIVATE_DIRS` in `src/rundir.rs`, which are built
+// from these, and that each `RunPaths` accessor of the same name returns.
+
+/// `<public>/artifacts/`.
+pub const ARTIFACTS_DIR: &str = "artifacts";
+/// `<public>/questions/` — one rendered payload per question.
+pub const QUESTIONS_DIR: &str = "questions";
+/// `<public>/answers/` — where `upstroke answer` drops an answer.
+pub const ANSWERS_DIR: &str = "answers";
+/// `<private>/transcripts/`.
+pub const TRANSCRIPTS_DIR: &str = "transcripts";
+/// `<private>/reviews/`.
+pub const REVIEWS_DIR: &str = "reviews";
+/// `<private>/settings/` — the per-attempt permission surface.
+pub const SETTINGS_DIR: &str = "settings";
+/// `<private>/gates/`.
+pub const GATES_DIR: &str = "gates";
+/// `<private>/gate-worktrees/` — durable intents and disposable exact worktrees.
+pub const GATE_WORKTREES_DIR: &str = "gate-worktrees";

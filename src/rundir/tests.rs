@@ -3856,6 +3856,29 @@ fn the_names_on_disk_are_the_names_the_packet_writes() {
         "the report's staging directory's prefix under the public half, and its record and \
          the record's staging name in the private half"
     );
+    // The report and the skeleton, written out of `DESIGN.md` §15's drawing.
+    assert_eq!(
+        (REPORT, ARTIFACTS_DIR, QUESTIONS_DIR, ANSWERS_DIR),
+        ("report.json", "artifacts", "questions", "answers"),
+        "the report and the public skeleton"
+    );
+    assert_eq!(
+        (
+            TRANSCRIPTS_DIR,
+            REVIEWS_DIR,
+            SETTINGS_DIR,
+            GATES_DIR,
+            GATE_WORKTREES_DIR
+        ),
+        (
+            "transcripts",
+            "reviews",
+            "settings",
+            "gates",
+            "gate-worktrees"
+        ),
+        "the private skeleton"
+    );
 }
 
 /// `RunPaths::events` and `RunPaths::plan_json` return the paths [`EVENT_LOG`]
@@ -3888,6 +3911,105 @@ fn the_event_log_and_plan_accessors_return_the_paths_their_constants_name() {
 
     assert_eq!(paths.events(), paths.public.join(EVENT_LOG));
     assert_eq!(paths.plan_json(), paths.public.join(PLAN));
+}
+
+/// Each skeleton accessor on [`RunPaths`] returns `<half>/<name>`, where `half`
+/// is the root [`RunPaths::create_hooked`] makes it under and `name` is an
+/// element of the array it iterates there, one accessor to one element
+/// (`SWEEP-NAMES-004`).
+///
+/// **Against the arrays, never against a literal.** What this guards is the
+/// creator and the reader agreeing, and a literal here would be a third
+/// spelling both of them could leave together. So it fails from either end: an
+/// accessor that reads a name its half's array does not hold, or an array
+/// element no accessor reads, which is the mutation that separates them. A
+/// change to one of the constants moves both ends at once and does not fail
+/// here; `the_names_on_disk_are_the_names_the_packet_writes` pins each constant
+/// to its spelling.
+#[test]
+fn the_skeleton_accessors_name_exactly_the_directories_the_skeleton_arrays_create() {
+    // Lexical: `RunPaths` joins, it does not touch the filesystem.
+    let paths = paths_in(Path::new("skeleton-accessors"), BOUND_RUN);
+    let public = [
+        ("artifacts", paths.artifacts()),
+        ("questions", paths.questions()),
+        ("answers", paths.answers()),
+    ];
+    let private = [
+        ("transcripts", paths.transcripts()),
+        ("reviews", paths.reviews()),
+        ("settings", paths.settings()),
+        ("gates", paths.gates()),
+        ("gate_worktrees", paths.gate_worktrees()),
+    ];
+    for (half, root, created, accessors) in [
+        (
+            "public",
+            &paths.public,
+            PUBLIC_DIRS.as_slice(),
+            public.as_slice(),
+        ),
+        (
+            "private",
+            &paths.private,
+            PRIVATE_DIRS.as_slice(),
+            private.as_slice(),
+        ),
+    ] {
+        let mut read = Vec::new();
+        for (accessor, path) in accessors {
+            assert_eq!(
+                path.parent(),
+                Some(root.as_path()),
+                "RunPaths::{accessor} is not under the {half} half"
+            );
+            let name = path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .expect("a UTF-8 last component");
+            assert!(
+                created.contains(&name),
+                "RunPaths::{accessor} reads `{name}`, a directory the {half} skeleton never \
+                 creates: it creates {created:?}"
+            );
+            read.push(name);
+        }
+        read.sort_unstable();
+        let mut made = created.to_vec();
+        made.sort_unstable();
+        assert_eq!(
+            read, made,
+            "the {half} accessors read exactly the directories the {half} skeleton creates, \
+             one each"
+        );
+    }
+}
+
+/// `RunPaths::report_json` returns the file [`write_report`] publishes
+/// (`SWEEP-NAMES-004`). The report is written through the funnel and read back
+/// through the accessor, so neither end's spelling is asserted, only that the
+/// two meet: an accessor that leaves [`REPORT`] reads nothing here, and so does
+/// a writer that does.
+#[test]
+fn the_report_accessor_returns_the_file_write_report_publishes() {
+    let tree = scratch("report-accessor");
+    let paths = paths_in(tree.path(), BOUND_RUN);
+    paths.create().expect("the skeleton");
+    let payload = serde_json::json!({"run_id": BOUND_RUN, "outcome": "parked"});
+    write_report(&paths.public, &paths.private, &payload, &mut NoHooks).expect("the report");
+
+    let report = paths.report_json();
+    let read = fs::read(&report).unwrap_or_else(|error| {
+        panic!(
+            "RunPaths::report_json names {}, where write_report published nothing: {error}",
+            report.display()
+        )
+    });
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&read).expect("the report parses"),
+        payload,
+        "RunPaths::report_json reads back the report write_report published"
+    );
 }
 
 #[test]

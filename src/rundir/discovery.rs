@@ -90,8 +90,9 @@ use std::path::{Path, PathBuf};
 use crate::error::UpstrokeError;
 
 use super::{
-    CreatingMarker, EVENT_LOG, MARKER, PrivateHalfOwnership, RepoKey, RetainReason, RunDirClass,
-    UnboundShape, classify_run_dir, fs, prove_private_half_ownership, public_dir, runs_root,
+    CreatingMarker, EVENT_LOG, MARKER, PrivateHalfOwnership, QUESTIONS_DIR, RepoKey, RetainReason,
+    RunDirClass, UnboundShape, classify_run_dir, fs, prove_private_half_ownership, public_dir,
+    runs_root,
 };
 
 /// Every run in this repo, oldest first.
@@ -777,7 +778,7 @@ fn find_question_observed(
     let mut matches: Vec<FoundQuestion> = Vec::new();
     for run_id in names_classified(&census, listed_as_run) {
         let public = public_dir(repo_root, &run_id);
-        let Ok(entries) = fs::read_dir(public.join("questions")) else {
+        let Ok(entries) = fs::read_dir(public.join(QUESTIONS_DIR)) else {
             continue;
         };
         for entry in entries.flatten() {
