@@ -1542,6 +1542,16 @@ pub(crate) fn docker_gate(test: &str, trace: ContainerTrace) -> Result<Box<Docke
     Err(reason)
 }
 
+pub(crate) fn processes_out_of_sight_reason() -> String {
+    format!(
+        "the container runtime's processes are not visible in this host's `/proc`: a probe \
+         container ran to its deadline and no process of it appeared here, as with a `{}` \
+         daemon that is remote (`DOCKER_HOST`) or in another PID namespace (rootless Docker, a \
+         virtual machine)",
+        super::DOCKER_PROGRAM
+    )
+}
+
 pub(crate) fn slot_repo_key() -> &'static str {
     static KEY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         scoped_repo_key(&std::env::var("CARGO_TARGET_DIR").unwrap_or_default())

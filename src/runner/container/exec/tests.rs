@@ -4742,10 +4742,10 @@ const CREDENTIAL_ENV_CONTROL: (&str, &str) = ("GH_CONFIG_DIR", "/image/gh");
 const ROOM_FOR_A_SLOW_CONTAINER_START: Duration = Duration::from_secs(30);
 
 fn skipped(reason: &str) {
-    assert_eq!(
-        reason,
-        crate::runner::container::fake::absent_reason(),
-        "a Docker-gated test skipped for a reason the gate does not know about"
+    use crate::runner::container::fake::{absent_reason, processes_out_of_sight_reason};
+    assert!(
+        [absent_reason(), processes_out_of_sight_reason()].contains(&reason.to_owned()),
+        "a Docker-gated test skipped for a reason the gate does not know about: {reason}"
     );
 }
 
@@ -6302,6 +6302,7 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
         .map_or(0, |found| std::os::unix::fs::MetadataExt::ino(&found));
     let leader_marker = format!("1{pid:07}.{namespace:020}{clock:039}");
     let descendant_marker = format!("2{pid:07}.{namespace:020}{clock:039}");
+    let probe_marker = format!("3{pid:07}.{namespace:020}{clock:039}");
 
     let trace = ContainerTrace::recording();
     let docker = match docker_gate(
@@ -6339,6 +6340,59 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
     .expect("a container policy")
     .with_hooks(Box::new(RecordingHooks::new(trace.clone())))
     .with_poll(Duration::from_millis(10));
+
+    let probe = gate_request(
+        ShellKind::Sh.spec(&format!("sleep {probe_marker}")),
+        workspace.clone(),
+        ROOM_FOR_A_SLOW_CONTAINER_START,
+        gate_id(1),
+    );
+    let cancellation = Cancellation::new();
+    let probe_returned = AtomicBool::new(false);
+    let (visible, probed) = std::thread::scope(|scope| {
+        let sampler = scope.spawn(|| {
+            while !probe_returned.load(Ordering::SeqCst) {
+                if !pids_with(&probe_marker).is_empty() {
+                    cancellation.cancel();
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            false
+        });
+        let probed = {
+            let _returned = SetOnDrop(&probe_returned);
+            runner.run_blocking_with(&probe, RunnerCall::new(cancellation.clone()))
+        };
+        (
+            sampler.join().expect("the probe's sampler panicked"),
+            probed,
+        )
+    });
+    match probed {
+        Ok(output) => assert!(
+            output.timed_out,
+            "the probe's `sleep` ended before its deadline, so its absence from `/proc` says \
+             nothing about this host: {output:?}"
+        ),
+        Err(error) => {
+            assert!(error.is_cancelled(), "the probe invocation failed: {error}");
+            assert_eq!(
+                error.fate,
+                ProcessFate::Gone,
+                "the probe was cancelled and its container may outlive it: {error}"
+            );
+        }
+    }
+    if !visible {
+        let reason = crate::runner::container::fake::processes_out_of_sight_reason();
+        assert!(
+            std::env::var_os(crate::runner::container::fake::REQUIRE_DOCKER).is_none(),
+            "{} is set and this test would have skipped: {reason}",
+            crate::runner::container::fake::REQUIRE_DOCKER
+        );
+        return skipped(&reason);
+    }
 
     let mut request = gate_request(
         ShellKind::Sh.spec(&format!(

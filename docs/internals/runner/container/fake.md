@@ -625,6 +625,22 @@ cannot exist; and when [`REQUIRE_DOCKER`] is set and Docker is not
 available, which is how a skip becomes a **failure** on a machine that has a
 runtime.
 
+## `pub(crate) fn processes_out_of_sight_reason() -> String {`
+
+Why a gated test that watches its containers' processes through this host's
+`/proc` skipped: the daemon answered, so `docker_gate` let it run, and a probe
+container it started ran to its deadline without any process of it appearing
+here. That is a remote daemon (`DOCKER_HOST`) or one in another PID namespace
+(rootless Docker, a virtual machine), whose containers are not this host's
+processes (`PR366-LINUX-DOCKER-PROC-TOPOLOGY`).
+
+A value beside `absent_reason`, and the only other one `exec::tests`'s
+`skipped` accepts, so this skip is as loud and as checked as the gate's. The
+probe and the `UPSTROKE_REQUIRE_DOCKER` check that turns this skip into a
+failure live in `exec::tests::real_docker_a_container_contains_a_daemonised_descendant`,
+the one test that gives this reason: that test is Linux-only, and a helper only
+it called would be dead code on every other platform.
+
 ## `pub(crate) fn slot_repo_key() -> &'static str {`
 
 The repository key every container name **that a pre-clean touches** is

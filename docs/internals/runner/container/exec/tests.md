@@ -1618,14 +1618,20 @@ timeout they wait for into the runner's refusal of `start`; thirty seconds is ro
 start and still far below what either program sleeps (`CI-FLAKE-REAL-DOCKER-START-DEADLINE`).
 One value for both, named for what it is for, and
 `real_docker_a_container_slow_to_start_still_reaches_its_timeout` is what fails if it shrinks
-back.
+back. The descendant test's probe container has the same deadline for the same reason, though
+it reaches it only where its process cannot be seen (`let probe = gate_request(`, below).
 
 ## `fn skipped(reason: &str) {`
 
-What a Docker-gated test does when there is no runtime.
+What a Docker-gated test does when there is no runtime, or when the
+runtime's processes cannot be seen from this host.
 
 It **reads** the reason rather than returning silently, so a skip that
-stopped saying why would not compile.
+stopped saying why would not compile. It takes exactly the two reasons
+`fake` writes: `absent_reason`, the `docker_gate` refusal every gated test
+can meet, and `processes_out_of_sight_reason`, which only
+`real_docker_a_container_contains_a_daemonised_descendant` gives, for the
+cause its probe container establishes.
 
 ## `fn no_image(reason: &str) {`
 
@@ -2157,6 +2163,16 @@ have no Docker, so CI never ran it there. Nothing outside the test is
 used by it alone: `SetOnDrop` and `pids_with` live in its body, and every
 helper it borrows is also used by tests compiled on every platform.
 
+Linux is not enough on its own either. `docker_gate` accepts any daemon
+that answers, and a Linux client can reach one whose containers this
+host's `/proc` does not hold: a remote daemon (`DOCKER_HOST`), or one in
+another PID namespace (rootless Docker, a virtual machine). There the
+controls would fail exactly as on macOS, although the container contained
+everything. So before the measured run a probe container establishes that
+this host sees the daemon's processes, and where it does not the test
+**skips** with that cause, or fails under `UPSTROKE_REQUIRE_DOCKER`
+(`PR366-LINUX-DOCKER-PROC-TOPOLOGY`; `let probe = gate_request(`, below).
+
 ## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `let clock = std::time::SystemTime::now()`
 
 The two markers, the run's own. `pids_with` reads every process on the
@@ -2166,7 +2182,7 @@ found another run's live `sleep` and reported it as its own leaked
 descendant (`CONTAINER-DESCENDANT-TEST-SCANS-THE-WHOLE-HOST`).
 
 Each marker is a decimal number. Its integer part is one role digit
-(`1` the leader, `2` the descendant) and this process's id in seven
+(`1` the leader, `2` the descendant, `3` the probe) and this process's id in seven
 digits (the kernel's ceiling, 4 194 304, fits). Its fraction is the
 inode of this process's pid namespace (`/proc/self/ns/pid`) in twenty
 digits and the wall clock's whole reading, nanoseconds since the epoch,
@@ -2183,17 +2199,19 @@ untruncated, in thirty-nine. Every field has a fixed width, so no two
   nanosecond the earlier run read.
 
 That last case is the one the construction does not rule out; nothing
-else shares the markers. Distinct roles, so the leader and the
-descendant are told apart by value and not by order.
+else shares the markers. Distinct roles, so the leader, the descendant
+and the probe are told apart by value and not by order.
 
-They are the **durations** the two `sleep` calls are given, so they
+They are the **durations** the three `sleep` calls are given, so they
 have to be numbers — `sleep 999111r3b` answers `invalid number` and
 exits 1, which is a container that ends before its timeout and a
 fixture that measures nothing. The fraction is where the identity
 goes so that the duration itself stays an ordinary one: the integer
 part is at most about 3·10⁷ seconds, far beyond the thirty-second
 timeout, and a `sleep` that parses fractions reads the long tail as a
-fraction of a second. A `sleep` that refused it would exit at once, and
+fraction of a second. A `sleep` that refused it would exit at once: the
+probe's assertion that its invocation timed out would fail, rather than
+the test skipping as if the host could not see it, and past the probe
 the controls in `let seen` would fail rather than pass vacuously. Where
 `/proc` is missing the namespace reads as zero, but there `pids_with`
 finds nothing either and those controls fail the same way.
@@ -2208,6 +2226,43 @@ argument mentions both markers, cannot match; only the `sleep`s, which
 take a marker as an argument of its own, do. It reads the whole host on purpose: the
 container's processes are host processes in another namespace, and the
 markers being the run's own is what makes the whole host safe to read.
+
+## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `let probe = gate_request(`
+
+The premise, established rather than assumed: this host sees the
+daemon's container processes. `PR366-LINUX-DOCKER-PROC-TOPOLOGY`: on a
+Linux client of a remote daemon (`DOCKER_HOST`) or of one in another PID
+namespace (rootless Docker, a virtual machine), `pids_with` finds nothing,
+and without this the controls in `let seen` failed and blamed a
+containment that was correct.
+
+One container of the discovered image, through the same runner and so
+under the same private root, runs `sleep` with the probe marker, as its
+own gate invocation (`gate_id(1)`, so its container name is not the
+measured one's). A sampler looks for the marker every 50 ms and cancels
+the invocation the moment it finds it, so where the host can see, the
+probe costs one container start and its removal, and the measured run
+then goes ahead as before. The cancelled invocation is the runner's own
+cleanup, the path the measured run's timeout takes: it stops and removes
+the container and reports `ProcessFate::Gone`, which is asserted, and
+`LeaveNoResidue` still covers both containers if anything panics.
+
+The bound is the probe's own deadline, `ROOM_FOR_A_SLOW_CONTAINER_START`:
+the time to find a process is counted from before Docker creates the
+container, so a shorter one would turn a slow start into a skip, or into
+the runner's refusal of `start` (`CI-FLAKE-REAL-DOCKER-START-DEADLINE`).
+Only a host that cannot see the process waits it out. The sampler stops
+when the invocation returns, by the same `SetOnDrop` guard the measured
+run's sampler uses.
+
+What decides the skip is the pair of results. An invocation that timed
+out without its marker ever being seen ran its `sleep` to the deadline
+where this host could not see it: the test returns through `skipped` with
+`processes_out_of_sight_reason`, and under `UPSTROKE_REQUIRE_DOCKER` it
+fails instead, as `docker_gate` and `no_image` do when their prerequisite
+is missing. Anything else that is not the cancellation is a failure and
+never a skip: a `sleep` that ended before its deadline observed nothing,
+and an invocation that failed says nothing about visibility.
 
 ## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `let mut request = gate_request(`
 
