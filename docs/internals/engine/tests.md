@@ -3378,10 +3378,12 @@ path put back and the attribute file copied out and removed, as the advice says,
 holds the paid bytes and the rest of the output but not the attribute file, which only the operator's copy keeps, and
 its copy puts the pin back. On Unix the filter's driver appends to a marker, with `git hash-object` as the positive
 control (`a_marking_filter`), and no Git child of the run or of any resume runs it; elsewhere no driver is configured,
-the refusal is the same and the marker is not checked. The words are checked last, whole: the kept note, the refusal
-and the refusal after the move are each compared with their exact text, so that an alternative added to the advice in
-any words, a move-out among them, fails the test (a list of forbidden words, which this replaces, passed any other
-wording). Only what varies is spliced in, from the run itself: the kept pin `kept_pin_of` names and the run's public
+the refusal is the same and the marker is not checked. The run's warnings are taken whole: there is exactly one, the
+kept note, and no other warning (the run's warnings were once searched for the one that names the pin, which let any
+further warning pass unread). The words are checked last, whole: the kept note, the refusal and the refusal after the
+move are each compared with their exact text, so that an alternative added to the advice in any words, a move-out
+among them, fails the test, whether it is appended to a text or carried by a warning of its own (a list of forbidden
+words, which this replaces, passed any other wording). Only what varies is spliced in, from the run itself: the kept pin `kept_pin_of` names and the run's public
 directory. The note says attempt 1 of `t1`'s output is kept in the checkout and its pin failed on the filter refusal
 before `git add`, then gives `kept_on_error`'s advice: nothing outside this checkout keeps the output, `git clean` or
 `git reset --hard` there would lose it, and what stopped the pin is fixed first (for a filter, by removing the
@@ -3393,7 +3395,9 @@ attribute's removal after copying out anything to keep.
 
 Measured before commit: with "Alternatively, try renaming the filtered file to a location outside this checkout and
 resume" appended to `kept_on_error`'s advice, the test fails on the kept note's comparison; appended instead to the
-resume refusal's advice, it fails on the refusal's.
+resume refusal's advice, it fails on the refusal's. With that sentence given instead as a second warning of its own,
+which `kept_on_error` adds beside the unchanged kept note when no candidate is present, the test fails on the count:
+"the kept note, and no other warning", listing both.
 
 ## `fn two_gated_tasks(repo: &Path) {`
 

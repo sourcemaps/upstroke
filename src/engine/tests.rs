@@ -17159,11 +17159,15 @@ fn a_tracked_filtered_path_moved_out_stays_refused_and_is_pinned_once_its_attrib
     let Err(UpstrokeError::WithWarnings(warned)) = &run else {
         panic!("the capture's own refusal, with the kept note: {run:?}");
     };
-    let warning = warned
-        .warnings
-        .iter()
-        .find(|warning| warning.contains("pinning it at"))
-        .expect("the kept note");
+    assert_eq!(
+        warned.warnings.len(),
+        1,
+        "the kept note, and no other warning: {:?}",
+        warned.warnings
+    );
+    let [warning] = warned.warnings.as_slice() else {
+        panic!("the kept note, and no other warning: {:?}", warned.warnings);
+    };
     let pin = kept_pin_of(&repo, 1);
     assert_eq!(pin_target(&repo, &pin), None, "no pin holds the output");
     assert!(kept_copies(&repo).is_empty(), "and no copy");
