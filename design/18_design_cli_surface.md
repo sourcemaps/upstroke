@@ -74,15 +74,17 @@ into the prompt only when its bytes hash to the plan the run recorded, and the c
 checkout the command was run in, its environment composed for that checkout. A run is decided
 once: immediately before its first call the command claims it by creating its proposals directory
 exclusively (§15), and a run whose directory exists, complete, partial, of an older format or
-anything else at that name, is refused with nothing written and no agent asked; the claim is never
-removed, after a failure or an interruption included. Each question gets at most one call.
-`--max-cost-usd` (default 5) is the run's dollar allowance, which a run's one command keeps in
-memory: each call is given what is left as its own `--max-budget-usd`, and only a clean, successful
-and priced call (exit 0 within its limits, an outcome the adapter reads as completed, a cost of $0
-or more) is counted, at its price. Any other outcome a call returns is saved as refused and ends
-the command, since what it spent is unknown. Once nothing is left, or when the command stops on
-such an outcome or on a write that fails, no further question is started, and the report names
-those left. A reply
+anything else at that name, is refused, never adopted, with nothing written and no agent asked;
+the claim is never removed, after a failure or an interruption included. That directory is the
+run's one spending claim: a later decide of the run, or one started beside it that loses the
+`create_dir`, is refused rather than given what the first left. Each question gets at most one
+call. `--max-cost-usd` (default 5) is the run's dollar allowance, which a run's one command keeps
+in memory: each call is given what is left as its own `--max-budget-usd`, and only a clean,
+successful and priced call (exit 0 within its limits, an outcome the adapter reads as completed, a
+cost of $0 or more) is counted, at its price. Any other outcome a call returns is saved as refused
+and ends the command, since what it spent is unknown. Once nothing is left, or when the command
+stops on such an outcome, on a write that fails or on a later call it cannot build, no further
+question is started, and the report names those left. A reply
 is accepted only when it holds exactly one closed fenced `json` block, its fences whole lines, and
 no line outside that block holds three backticks or three tildes anywhere, a fence of another
 block or a run within a line alike (the block's own closing line is the block's), holding

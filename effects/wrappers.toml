@@ -1867,7 +1867,7 @@ effectful = [
 ]
 effectful_unnameable = []
 effect_free = [
-    # Turns the refused replies' ids into a `Result`.
+    # Turns the ids of the refused, unsaved and left questions into a `Result`.
     "outcome",
     # Joins the repository root, `.upstroke/proposals` and a run id.
     "proposals_dir",

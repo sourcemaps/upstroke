@@ -8,11 +8,15 @@ proposal with `upstroke answer`.
 A run is decided once. The command claims it by creating `.upstroke/proposals/<run-id>/`
 exclusively, immediately before its first call, and never reads that directory or removes it: a
 run whose directory exists, from a complete, partial or older decide or anything else, is
-refused with nothing written and no agent asked (`claim`). So the accounting is this command's
-own, in memory: each question gets at most one call, each call is capped at what is left of
-`--max-cost-usd`, and only a clean, successful, priced call is counted, at its price
-(`settle`). Any other outcome a call returns ends the command, and a command that stops with
-questions left names them and exits non-zero (`Decided::outcome`).
+refused, never adopted, with nothing written and no agent asked (`claim`), as a fresh run's
+execution root is (`workspace_manager::FreshExecutionRoot`). That directory is the run's one
+spending claim: every call decide makes for the run is made by the command that created it, so a
+later decide, or one started beside it that loses the `create_dir`, spends nothing. So the
+accounting is this command's own, in memory: each question gets at most one call, each call is
+capped at what is left of `--max-cost-usd`, the run's allowance, and only a clean, successful,
+priced call is counted, at its price (`settle`). Any other outcome a call returns ends the
+command, and a command that stops with questions left names them and exits non-zero
+(`Decided::outcome`).
 
 ## Module
 
@@ -329,24 +333,30 @@ What a directory of the chain keeps from every user but its owner. `Closed` is `
 run created it with the umask's mode, other commands read the run's public half under it, and
 decide neither creates nor changes it, so it requires only that no other user can write it, and
 so none can add, rename or replace `proposals`. `OwnerOnly` is `.upstroke/proposals` and the run's
-own directory, which decide creates with mode `0700` and which no other user may read, write or
-enter, so nobody else can read a proposal or put a file where one is to be created.
+own directory, which decide creates with mode `0700` on Unix (`make_owner_only`) and which no other
+user may read, write or enter, so nobody else can read a proposal or put a file where one is to be
+created. Both levels are checked on Unix only, and only there does decide narrow a directory it
+creates (`trusted_dir`).
 
 ## `fn trusted_dir(path: &Path, repo_root: &Path, privacy: Privacy) -> Result<(), String> {`
 
-Each directory of the chain is read without following a link and must be a directory: a symlink
-or a file at the name is refused, and so is a Windows reparse point (`owned_and_private`). On
-Unix it must also belong to the repository root's owner and grant no other user what its
-`Privacy` withholds (`the_chain_is_the_owners_and_closed_to_every_other_user`), so the path from
-the repository to every file decide creates is the owner's alone and nothing needs pinning while
-the command runs. std reads no owner or access list on Windows, so there the chain has the ones
-the repository's own directory passes down.
+Each directory of the chain is read without following a link and must be a directory, so the
+chain carries no symlink or reparse point and no regular file: a symlink or a file at the name is
+refused, and on Windows so is a junction or any other reparse point, because `owned_and_private`
+reads the raw `FILE_ATTRIBUTE_REPARSE_POINT`, set for every reparse point whatever its tag, the
+attribute `workspace_manager`'s chain walk reads (`containment::is_reparse_point`). On Unix it must
+also belong to the repository root's owner and grant no other user what its `Privacy` withholds
+(`the_chain_is_the_owners_and_closed_to_every_other_user`), so the path from the repository to
+every file decide creates is the owner's alone and nothing needs pinning while the command runs.
+std reads no owner or access list on Windows, so there neither is checked and `make_owner_only`
+narrows nothing: the chain carries the access list the repository's own directory passes down,
+and decide keeps another user out of it on Windows only as far as that list does.
 
 ## `fn ensure_dir(repo_root: &Path, dir: &Path, privacy: Privacy) -> Result<(), UpstrokeError> {`
 
 `.upstroke` and `.upstroke/proposals`, one level at a time with `create_dir` (never
-`create_dir_all`, which would create through a link): created owner-only where missing, then
-checked and their parent synced whoever created them, the run, another caller or this one, so
+`create_dir_all`, which would create through a link): created where missing, owner-only on Unix,
+then checked and their parent synced whoever created them, the run, another caller or this one, so
 each directory's entry is durable before anything is created under it
 (`each_parent_is_synced_whoever_created_it`). A failure here leaves the run unclaimed.
 
@@ -354,11 +364,14 @@ each directory's entry is durable before anything is created under it
 
 The run's one claim, made immediately before its first call: `ensure_dir` for the two
 directories above, then `create_dir` of `.upstroke/proposals/<run-id>`, which is exclusive.
-Whatever stands at the name already refuses the command with nothing written and no agent asked:
-an earlier decide's directory, complete, partial or of an older format, an empty one, a file or a
-link (`a_run_whose_directory_exists_is_not_asked_and_nothing_is_written`). Nothing in the
+Whatever stands at the name already is refused, never adopted, and refuses the command with
+nothing written and no agent asked: an earlier decide's directory, complete, partial or of an
+older format, an empty one, a file or a link
+(`a_run_whose_directory_exists_is_not_asked_and_nothing_is_written`). Of two commands started
+beside each other, the one whose `create_dir` loses is refused the same way. Nothing in the
 directory is read: its existence is the whole answer, so a person settles what is there and
-nothing is inferred from it. The new directory is made owner-only, checked, and its parent synced;
+nothing is inferred from it. The new directory is made owner-only on Unix, checked, and its parent
+synced;
 a failure there still leaves it in place, and the run claimed. The directory is never removed,
 after a failure, a stop or an interruption, so a run is asked once.
 

@@ -7,15 +7,16 @@
   `json` block and no three backticks or tildes on any line outside it, an offered option,
   guidance that never gives up), prints it and saves it under
   `.upstroke/proposals/<run-id>/`, naming its raw output by a path from the repository root; any
-  refused reply, or a question it stopped before, makes it exit non-zero after the report, whose
-  exit names a saved reason only for the proposals it wrote. Its refusals are one line each. It
-  writes no answer and replaces no file. A run is decided once: immediately before its first call
-  the command claims the run by creating its proposals directory exclusively, owner-only, and a
-  run whose directory exists is refused with nothing written; the claim stays after a failure or
-  an interruption. Each question gets at most one call, each call is capped at what is left of the
-  run's `--max-cost-usd` allowance (default 5), and only a clean, successful, priced call is
-  counted, at its price; any other outcome is saved as refused and ends the command, naming the
-  questions left. It asks only a Claude Code reviewer of a host run that no engine is driving,
+  refused reply or question, or a question it stopped before, makes it exit non-zero after the
+  report, whose exit names a saved reason only for the proposals it wrote. Its refusals are one
+  line each. It writes no answer and replaces no file. A run is decided once: immediately before
+  its first call the command claims the run by creating its proposals directory exclusively
+  (owner-only on Unix; on Windows it carries the repository directory's access list), and a run
+  whose directory exists is refused with nothing written; the claim stays after a failure or an
+  interruption, and no other decide of the run spends anything. Each question gets at most one
+  call, each call is capped at what is left of the run's `--max-cost-usd` allowance (default 5),
+  and only a clean, successful, priced call is counted, at its price; any other outcome is saved
+  as refused and ends the command, naming the questions left. It asks only a Claude Code reviewer of a host run that no engine is driving,
   whose pools pass the credential pre-flight a resume would run and whose CLI passes the probe and
   sign-in checks a run makes of it, giving each call the recorded model and review effort, that
   remainder as its own `--max-budget-usd`, no web access, no read of the run's private directory

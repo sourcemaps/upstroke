@@ -79,17 +79,24 @@ do, so that their tests have a design sentence to be held to.
 **A proposal is advice, and no run reads it.** `upstroke decide` (§18) writes
 only under `<repo>/.upstroke/proposals/<run-id>/`, never into a run's public or
 private half or its answers, and appends no event. The directory is the run's
-claim: the command creates it exclusively, immediately before the run's first
-call, and nothing at that name already, whether an earlier decide's directory
-complete, partial or of an older format or anything else, is read, replaced or
-removed; it refuses the command with nothing written and no agent asked. Every
-file in it is created new and synced with its directory, and none is replaced
-or deleted; the directory stays after a failure or an interruption, so a run
-is decided once. Each of `.upstroke`, `proposals` and `<run-id>` must be a real
-directory, read without following a link; on Unix each is the repository
-owner's, `.upstroke` is writable by no other user, and `proposals` and
-`<run-id>` are created owner-only (`0700`) and must grant no other user
-anything. Each one's parent is synced whoever created it. The run id and a
+one spending claim, made as a fresh run claims its execution root: the command
+creates it with one exclusive `create_dir`, immediately before the run's first
+call, and whatever is at that name already (an earlier decide's directory
+complete, partial or of an older format, an empty directory, a link, anything)
+is refused, never adopted: nothing in it is read, replaced or removed, and the
+command is refused with nothing written and no agent asked. Every file in it is
+created new and synced with its directory, and none is replaced or deleted; the
+directory stays after a failure or an interruption, so a run is decided once,
+and every call decide makes for a run is made by the one command that created
+its directory. The chain `.upstroke`, `proposals`, `<run-id>` must carry no
+symlink or reparse point and no regular file: each is read without following a
+link, and a symlink, junction or other reparse point at any of them is refused
+on every platform. On Unix each is also the repository owner's, `.upstroke` is
+writable by no other user, and `proposals` and `<run-id>` are created
+owner-only (`0700`) and must grant no other user anything. On Windows std reads
+no owner or access list, so neither is checked and no mode is narrowed: the
+directories carry the access list the repository's own directory passes down.
+Each one's parent is synced whoever created it. The run id and a
 question id are written into a name only as plain components: ASCII letters,
 digits, `-` and `_`, so a question's three files never collide with another's.
 A proposal records the run, the question, the decider's agent, model and effort,
