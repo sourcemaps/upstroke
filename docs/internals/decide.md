@@ -57,17 +57,23 @@ input keeps a long input from crowding out the others.
 
 ## `pub const MAX_PROPOSALS_PER_QUESTION: u32 = 2;`
 
-A loop cap. A third `decide` on a question is refused before any agent is asked
-(`a_third_proposal_is_refused_before_a_request_and_the_dollar_cap_stops_the_next_question`), so
-re-running the command until an agent says what someone hoped for costs at most two replies.
+A loop cap. Each call reserves one of its question's two slots before it is started, and a slot
+is never given back, so a third `decide` on a question is refused before any agent is asked
+(`a_third_proposal_is_refused_before_a_request_and_the_dollar_cap_stops_the_next_question`) and
+re-running the command until an agent says what someone hoped for costs at most two calls, however
+they ended.
 
 ## `pub const DEFAULT_MAX_COST_USD: f64 = 5.0;`
 
-The default of `--max-cost-usd`. The costs this command's invocations report are summed, and once
-the sum reaches the cap no further question is started; the report names the questions left. A
-reply with no reported cost counts as unknown and is named, so the total is a floor. Each call is
-also given what is left of the cap as its own ceiling (`call_args`), so a call that runs long
-stops at the cap rather than after it.
+The default of `--max-cost-usd`: the dollar allowance of the run, shared by every decide call of
+the run across every command and launcher (`every_call_of_the_run_shares_one_allowance_and_no_file_is_replaced`).
+What the run's calls have used is read from the proposals directory (`Ledger`): a call whose
+proposal reports a cost used that cost; any other reserved call (interrupted, failed, unpriced, or
+still in flight) used all it reserved. Once nothing is left no further question is started and the
+report names the questions left. Each call reserves all that is left, durably, before it is
+started (`reserve`), and is given that remainder as its own `--max-budget-usd` (`call_args`), so a
+call that runs long stops at the allowance rather than after it. The report's `total cost` is what
+this command's calls reported; a reply with no reported cost is named, so it is a floor.
 
 ## `pub struct DecideOptions {`
 
@@ -163,8 +169,10 @@ One invocation per question through `runner::decide_request`, with
 adapter's built command with its stdin payload and settings file, and no environment overlay
 (`the_request_is_a_decide_request_for_the_runs_reviewer_with_no_overlay`). `admit` runs first,
 after the pools file is read and before anything else; each question's call is then built and
-checked by `prepare`, with what is left of `--max-cost-usd` as its ceiling
-(`each_calls_ceiling_is_what_is_left_of_the_cap`), before `ask` writes or starts anything for it.
+checked by `prepare`, with what is left of the run's allowance as its ceiling
+(`each_calls_ceiling_is_what_is_left_of_the_cap`), and reserved by `reserve`, before `ask` writes
+or starts anything else for it. A question whose id is not a plain component (`plain_id`) is
+refused before anything is written for it.
 The credential profile is the first pool of the reviewer's agent (`capacity::pool_for`), as a
 review pass of the run would use; the timeout is the run's recorded review pass timeout, or the
 review default. A question is not re-asked. Split from `decide` so a test can hand it a binding
@@ -210,9 +218,70 @@ What each guarantee requires of the built command:
 
 ## `fn ask(`
 
-Creates the proposals directory, writes the call's settings with `util::write_json` (as
-`materialize_permissions` wrote them before, replacing a settings file a killed earlier call
-left), starts the call through the Runner, and saves its raw output.
+Writes the reserved call's settings file new, starts the call through the Runner, and saves its
+raw output new, checking before each file that the proposals directory is the one the reservation
+was made in (`ProposalsDir::check`). A settings file a killed earlier call left is never replaced:
+its slot stays reserved, so no later call is given its name.
+
+## `fn plain_id(id: &str) -> bool {`
+
+A question id is written into a file name only when it is 1 to `MAX_ID_BYTES` ASCII letters,
+digits, `-` or `_` and no Windows device name (`CON`, `NUL`, `COM1`, ...): no separator, no `.`,
+no `..`. Without a `.` in an id, `<id>.<n>.json` names one slot exactly and no proposal is ever
+spelled `reservation-<n>.json`. Ids the engine mints are `q-<ulid>`
+(`an_untrusted_proposals_directory_or_a_question_id_that_is_not_plain_is_refused`).
+
+## `fn trusted_dir(path: &Path, repo_root: &Path) -> Result<Option<DirIdentity>, String> {`
+
+Each of `.upstroke`, `.upstroke/proposals` and `.upstroke/proposals/<run-id>` is read without
+following a link and must be a directory: a symlink or a file at the name is refused, and so is a
+Windows reparse point (`owned_and_closed`). On Unix it must also belong to the repository root's
+owner and not be writable by every user, since anyone who can write there can forge the run's
+spend. The identity is the device and inode on Unix and the creation time on Windows, where std
+reads no file id from a path.
+
+## `struct ProposalsDir {`
+
+`open` reads the chain and writes nothing; `establish` creates what is missing one level at a time
+with `create_dir` (never `create_dir_all`, which would create through a link), syncs each parent,
+and pins the run directory's identity; `check` runs before every file is created and refuses once
+the run directory is not the one first seen, so no reservation, settings file, raw output or
+proposal is ever published into a replacement (`the_proposals_directory_keeps_its_identity_through_publication`).
+A reservation made before a replacement stays where it was made.
+
+## `struct Ledger {`
+
+The run's accounting, read from the proposals directory on every reservation:
+
+- `reservation-<n>.json`, numbered from 1 with no gap: a question, one of its slots, and the
+  dollars set aside.
+- `<id>.<n>.json`, a proposal, whose `cost_usd` settles its slot at that cost.
+- `<id>.<n>.out` and `<id>.<n>-decide.json`, which take their slot.
+
+A slot with a reservation used its reported cost if its proposal reports one, else all it
+reserved. A slot with no reservation is earlier history, kept as it is and counted at its
+proposal's reported cost. History whose spend cannot be known is ambiguous, and then no call of
+the run is started and every question left is refused, naming the files, until a person settles
+them: a reservation that does not parse (a torn write), a gap in the numbering, a slot reserved
+twice, an entry that is not a regular file, an earlier proposal that reports no cost, and a raw
+output or settings file with no proposal and no reservation
+(`earlier_history_is_counted_and_ambiguous_history_starts_no_call`).
+
+## `fn reserve(`
+
+The one accounting boundary every launcher shares. It reads the `Ledger`, takes the question's
+first free slot and all that is left of the allowance, builds and checks the call with that
+remainder as its ceiling, and then creates `reservation-<k+1>.json` with `File::create_new`, where
+`k` is the number of reservations it read, syncing the file and the directory before the call is
+started. Creation is exclusive, so of launchers that read the same `k` one takes the number and
+the others read again (at most `RESERVATION_ATTEMPTS` times), now seeing the winner's reservation;
+because every launcher takes the number after the last it read, a reservation that exists was
+made by a launcher that read every one before it
+(`concurrent_launchers_share_one_reservation_boundary`). A reservation is never given back: an
+interrupted, failed or unpriced call keeps its slot and all it reserved
+(`an_interrupted_failed_or_unpriced_call_keeps_its_slot_and_its_whole_reservation`), and a call
+whose proposal reports a cost is counted at that cost from then on
+(`a_slot_and_the_remaining_allowance_are_reserved_durably_before_the_call`).
 
 ## `fn chosen_questions(`
 
@@ -233,12 +302,10 @@ to a decline (or whose text `interaction::interpret` reads as one), and `null` w
 has options are refused (`a_bad_reply_is_refused_with_its_reason`,
 `each_bad_reply_is_refused_saved_and_fails_the_command_after_the_others`).
 
-## `fn next_number(dir: &Path, id: &str) -> Option<u32> {`
+## `fn create_durably(path: &Path, bytes: &[u8]) -> std::io::Result<()> {`
 
-The next free proposal number from 1, or `None` at the cap.
-
-## `fn write_new(path: &Path, bytes: &[u8]) -> Result<(), UpstrokeError> {`
-
-Every proposal and raw output is created new (`File::create_new`) and never overwrites; a name
-that is taken is an error rather than a replacement. The call's settings file is the one file
-`ask` writes in place, and it holds no reply.
+Every file this command writes, each reservation, settings file, raw output and proposal, is
+created new (`File::create_new`), written, and synced with its directory; it never overwrites, and
+a name that is taken is an error rather than a replacement (the stray-file case of
+`every_call_of_the_run_shares_one_allowance_and_no_file_is_replaced`). `write_new` is the same
+with the error naming the path.

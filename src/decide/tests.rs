@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Barrier, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use super::*;
 use crate::agent::{Caps, ProcessOutput};
@@ -8,7 +8,9 @@ use crate::engine::BuiltinAdapters;
 use crate::ir::{Effort, Outcome, QuestionId, QuestionKind, TaskId};
 use crate::review::PassBinding;
 use crate::rundir::scratch_tree::ScratchTree;
-use crate::runner::{ExecutionRole, RunFuture, RunnerCall, RunnerRequest};
+use crate::runner::{
+    ExecutionRole, ProcessFate, RunFuture, RunnerCall, RunnerError, RunnerRequest,
+};
 use crate::topology::events::{
     Answer4, FrozenQuestion, ImageIdentity, QuestionAnswered4, QuestionRaised4, RunStarted4,
     RunnerContract, RunnerPolicy,
@@ -857,25 +859,25 @@ fn a_decide_leaves_every_file_of_the_run_as_it_was_and_writes_no_answer() {
 fn a_third_proposal_is_refused_before_a_request_and_the_dollar_cap_stops_the_next_question() {
     let third = one_question("decide-third");
     for n in 1..=2 {
-        let runner = Scripted::answering(vec![claude_output(&reply(VALID), None)]);
-        let decided = decide(&third.options(), &BuiltinAdapters, &runner).expect("decided");
+        let runner = Scripted::answering(vec![claude_output(&reply(VALID), Some(0.25))]);
+        decide(&third.options(), &BuiltinAdapters, &runner).expect("decided");
         assert_eq!(third.proposal("q-01A", n)["status"], "accepted");
-        assert!(
-            decided.report.contains("cost: unknown")
-                && decided.report.contains("cost unknown for: q-01A"),
-            "{}",
-            decided.report
-        );
     }
-    let runner = Scripted::answering(vec![claude_output(&reply(VALID), None)]);
+    let runner = Scripted::answering(vec![claude_output(&reply(VALID), Some(0.25))]);
     let decided = decide(&third.options(), &BuiltinAdapters, &runner).expect("decided");
     assert!(runner.seen().is_empty(), "refused before any request");
     assert!(
         decided
             .report
-            .contains("q-01A: refused — it already has 2 saved proposals"),
+            .contains("q-01A: refused — it already has 2 reserved proposal slots"),
         "{}",
         decided.report
+    );
+    assert!(
+        !proposals_dir(&third.repo, RUN)
+            .join("reservation-3.json")
+            .exists(),
+        "a refused question reserves nothing"
     );
     assert!(decided.outcome().is_err());
     assert!(
@@ -905,7 +907,7 @@ fn a_third_proposal_is_refused_before_a_request_and_the_dollar_cap_stops_the_nex
     assert!(
         decided
             .report
-            .contains("reaches the --max-cost-usd cap of $1.0000; left without a proposal: q-a"),
+            .contains("this run's decide calls have reserved or spent $1.0000, which reaches the --max-cost-usd allowance of $1.0000 for the run; left without a proposal: q-a"),
         "{}",
         decided.report
     );
@@ -1139,6 +1141,546 @@ fn each_calls_ceiling_is_what_is_left_of_the_cap() {
         [Some("5".to_owned()), Some("3.75".to_owned())],
         "$5 for the first call, and the $3.75 the first left for the second"
     );
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A process that exited 0 having printed `stdout`.
+fn exited(stdout: String) -> ProcessOutput {
+    ProcessOutput {
+        code: Some(0),
+        stdout,
+        stderr: String::new(),
+        duration: Duration::ZERO,
+        timed_out: false,
+        output_limited: false,
+    }
+}
+
+type Act = Box<dyn Fn(&RunnerRequest) -> Result<ProcessOutput, RunnerError> + Send + Sync>;
+
+/// An inert Runner that records each request and answers it with what `act` does while the
+/// call is in flight: no process is started.
+struct Acting {
+    act: Act,
+    seen: Mutex<Vec<RunnerRequest>>,
+}
+
+impl Acting {
+    fn new(
+        act: impl Fn(&RunnerRequest) -> Result<ProcessOutput, RunnerError> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            act: Box::new(act),
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn priced(cost_usd: f64) -> Self {
+        Self::new(move |_| Ok(exited(claude_output(&reply(VALID), Some(cost_usd)))))
+    }
+
+    fn seen(&self) -> Vec<RunnerRequest> {
+        lock(&self.seen).clone()
+    }
+}
+
+impl Runner for Acting {
+    fn run<'a>(&'a self, request: &'a RunnerRequest, _call: RunnerCall<'a>) -> RunFuture<'a> {
+        lock(&self.seen).push(request.clone());
+        let answer = (self.act)(request);
+        Box::pin(async move { answer })
+    }
+}
+
+fn reservation(fixture: &Fixture, sequence: u32) -> Option<Value> {
+    let path = proposals_dir(&fixture.repo, RUN).join(format!("reservation-{sequence}.json"));
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(serde_json::from_str(&text).expect("a reservation is JSON"))
+}
+
+fn ceilings(seen: &[RunnerRequest]) -> Vec<Option<String>> {
+    seen.iter()
+        .map(|request| flag_value(request, "--max-budget-usd"))
+        .collect()
+}
+
+/// Asserts that the next `decide` of the run, at `options`, is stopped by the run's allowance
+/// before any request, and returns its report.
+fn stopped_by_the_allowance(options: &DecideOptions, spent: &str) -> String {
+    let runner = Acting::priced(0.25);
+    let decided = decide(options, &BuiltinAdapters, &runner).expect("decided");
+    assert!(runner.seen().is_empty(), "{}", decided.report);
+    assert!(
+        decided.report.contains(&format!(
+            "stopped: this run's decide calls have reserved or spent {spent}"
+        )),
+        "{}",
+        decided.report
+    );
+    decided.report
+}
+
+#[test]
+fn a_slot_and_the_remaining_allowance_are_reserved_durably_before_the_call() {
+    let fixture = one_question("decide-reserved");
+    let dir = proposals_dir(&fixture.repo, RUN);
+    let during = dir.clone();
+    let runner = Acting::new(move |request| {
+        let text = std::fs::read_to_string(during.join("reservation-1.json"))
+            .expect("the reservation exists while the call is in flight");
+        let reserved: Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(reserved["question_id"], "q-01A");
+        assert_eq!(reserved["slot"], 1);
+        assert_eq!(reserved["reserved_usd"], 5.0);
+        assert_eq!(
+            flag_value(request, "--max-budget-usd").as_deref(),
+            Some("5"),
+            "the reserved remainder is the call's own ceiling"
+        );
+        Ok(exited(claude_output(&reply(VALID), Some(0.25))))
+    });
+    decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+    assert_eq!(runner.seen().len(), 1);
+    let saved = fixture.proposal("q-01A", 1);
+    assert_eq!(saved["reserved_usd"], 5.0);
+    assert_eq!(saved["cost_usd"], 0.25);
+    assert!(
+        reservation(&fixture, 2).is_none(),
+        "one call, one reservation"
+    );
+}
+
+#[test]
+fn every_call_of_the_run_shares_one_allowance_and_no_file_is_replaced() {
+    let fixture = fixture("decide-shared", 2, reviewer(), |log| {
+        log.raise("q-b", 0);
+        log.raise("q-a", 1);
+    });
+    let dir = proposals_dir(&fixture.repo, RUN);
+    let only = |id: &str| DecideOptions {
+        question_id: Some(id.to_owned()),
+        ..fixture.options()
+    };
+    let mut seen = Vec::new();
+    let mut before: BTreeMap<PathBuf, Vec<u8>> = BTreeMap::new();
+    for (id, cost) in [("q-b", 1.25), ("q-a", 1.0), ("q-b", 0.5)] {
+        let runner = Acting::priced(cost);
+        decide(&only(id), &BuiltinAdapters, &runner).expect("decided");
+        seen.extend(runner.seen());
+        let after = snapshot(&dir);
+        for (path, bytes) in &before {
+            assert_eq!(
+                after.get(path),
+                Some(bytes),
+                "{} was kept as it was",
+                path.display()
+            );
+        }
+        before = after;
+    }
+    assert_eq!(
+        ceilings(&seen),
+        [
+            Some("5".to_owned()),
+            Some("3.75".to_owned()),
+            Some("2.75".to_owned())
+        ],
+        "each command's call is given what the run's earlier calls left"
+    );
+    assert_eq!(fixture.proposal("q-b", 2)["status"], "accepted");
+    let names: Vec<String> = before
+        .keys()
+        .filter_map(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
+    for name in [
+        "reservation-1.json",
+        "reservation-2.json",
+        "reservation-3.json",
+        "q-b.1-decide.json",
+        "q-b.1.out",
+        "q-b.1.json",
+        "q-a.1.json",
+        "q-b.2.json",
+    ] {
+        assert!(names.iter().any(|kept| kept == name), "{name}: {names:?}");
+    }
+    let options = DecideOptions {
+        max_cost_usd: 2.75,
+        ..only("q-a")
+    };
+    stopped_by_the_allowance(&options, "$2.7500");
+
+    let runner = Acting::new({
+        let dir = dir.clone();
+        move |_| {
+            std::fs::write(dir.join("q-a.2.out"), "someone else's bytes").expect("a stray file");
+            Ok(exited(claude_output(&reply(VALID), Some(0.25))))
+        }
+    });
+    let error = decide(&only("q-a"), &BuiltinAdapters, &runner)
+        .expect_err("a raw output's name that is taken is an error, not a replacement");
+    assert!(error.to_string().contains("q-a.2.out"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("q-a.2.out")).expect("the stray file"),
+        "someone else's bytes"
+    );
+    assert!(!dir.join("q-a.2.json").exists());
+    assert_eq!(
+        reservation(&fixture, 4).expect("kept")["reserved_usd"],
+        2.25
+    );
+}
+
+#[test]
+fn an_interrupted_failed_or_unpriced_call_keeps_its_slot_and_its_whole_reservation() {
+    let interrupted = one_question("decide-interrupted");
+    let runner = Acting::new(|_| panic!("the launcher is killed while its call is in flight"));
+    let options = interrupted.options();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        decide(&options, &BuiltinAdapters, &runner)
+    }));
+    assert!(unwound.is_err(), "the launcher died mid-call");
+    let dir = proposals_dir(&interrupted.repo, RUN);
+    assert_eq!(
+        reservation(&interrupted, 1).expect("durable")["reserved_usd"],
+        5.0
+    );
+    assert!(dir.join("q-01A.1-decide.json").exists());
+    assert!(!dir.join("q-01A.1.json").exists() && !dir.join("q-01A.1.out").exists());
+    stopped_by_the_allowance(&interrupted.options(), "$5.0000");
+    let runner = Acting::priced(0.25);
+    let widened = DecideOptions {
+        max_cost_usd: 6.0,
+        ..interrupted.options()
+    };
+    decide(&widened, &BuiltinAdapters, &runner).expect("decided");
+    assert_eq!(
+        ceilings(&runner.seen()),
+        [Some("1".to_owned())],
+        "the interrupted call still holds its $5"
+    );
+    assert_eq!(
+        interrupted.proposal("q-01A", 2)["status"],
+        "accepted",
+        "and its slot: the next proposal is the second"
+    );
+
+    let failed = one_question("decide-cancelled");
+    let runner = Acting::new(|request| {
+        Err(RunnerError::cancelled(
+            &request.invocation,
+            ProcessFate::Gone,
+        ))
+    });
+    let decided = decide(&failed.options(), &BuiltinAdapters, &runner).expect("decided");
+    assert!(decided.outcome().is_err());
+    let saved = failed.proposal("q-01A", 1);
+    assert_eq!(saved["status"], "refused");
+    assert_eq!(saved["cost_usd"], Value::Null);
+    stopped_by_the_allowance(&failed.options(), "$5.0000");
+
+    let unpriced = one_question("decide-unpriced");
+    let runner = Acting::new(|_| Ok(exited(claude_output(&reply(VALID), None))));
+    let decided = decide(&unpriced.options(), &BuiltinAdapters, &runner).expect("decided");
+    assert!(
+        decided.report.contains("cost unknown for: q-01A"),
+        "{}",
+        decided.report
+    );
+    stopped_by_the_allowance(&unpriced.options(), "$5.0000");
+}
+
+#[derive(Default)]
+struct Gate {
+    held: usize,
+    finished: usize,
+    released: bool,
+}
+
+/// An inert Runner that holds every call until it is released.
+#[derive(Default)]
+struct Held {
+    gate: Mutex<Gate>,
+    changed: Condvar,
+    seen: Mutex<Vec<RunnerRequest>>,
+}
+
+impl Runner for Held {
+    fn run<'a>(&'a self, request: &'a RunnerRequest, _call: RunnerCall<'a>) -> RunFuture<'a> {
+        lock(&self.seen).push(request.clone());
+        let mut gate = lock(&self.gate);
+        gate.held += 1;
+        self.changed.notify_all();
+        while !gate.released {
+            gate = self
+                .changed
+                .wait(gate)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        drop(gate);
+        let answer = Ok(exited(claude_output(&reply(VALID), Some(0.25))));
+        Box::pin(async move { answer })
+    }
+}
+
+#[test]
+fn concurrent_launchers_share_one_reservation_boundary() {
+    const LAUNCHERS: usize = 6;
+    let ids: Vec<String> = (0..LAUNCHERS).map(|at| format!("q-{at}")).collect();
+    let fixture = fixture("decide-concurrent", LAUNCHERS, reviewer(), |log| {
+        for (key, id) in ids.iter().enumerate() {
+            log.raise(id, u32::try_from(key).expect("a small key"));
+        }
+    });
+    let held = Held::default();
+    let start = Barrier::new(LAUNCHERS);
+    let (results, in_flight) = std::thread::scope(|scope| {
+        let launchers: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                let options = DecideOptions {
+                    question_id: Some(id.clone()),
+                    ..fixture.options()
+                };
+                let (held, start) = (&held, &start);
+                scope.spawn(move || {
+                    start.wait();
+                    let decided = decide(&options, &BuiltinAdapters, held);
+                    lock(&held.gate).finished += 1;
+                    held.changed.notify_all();
+                    decided
+                })
+            })
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut gate = lock(&held.gate);
+        while gate.held + gate.finished < LAUNCHERS && Instant::now() < deadline {
+            gate = held
+                .changed
+                .wait_timeout(gate, Duration::from_millis(50))
+                .map_or_else(|poisoned| poisoned.into_inner().0, |(gate, _)| gate);
+        }
+        let in_flight = gate.held;
+        gate.released = true;
+        held.changed.notify_all();
+        drop(gate);
+        let results: Vec<_> = launchers
+            .into_iter()
+            .map(|launcher| launcher.join().expect("a launcher returns"))
+            .collect();
+        (results, in_flight)
+    });
+    assert_eq!(
+        in_flight, 1,
+        "while one call held the allowance, no other was started"
+    );
+    assert_eq!(lock(&held.seen).len(), 1);
+    let reports: Vec<String> = results
+        .into_iter()
+        .map(|decided| decided.expect("each launcher reports").report)
+        .collect();
+    assert_eq!(
+        reports
+            .iter()
+            .filter(|report| report.contains("decided by"))
+            .count(),
+        1,
+        "{reports:?}"
+    );
+    assert_eq!(
+        reports
+            .iter()
+            .filter(|report| report.contains("stopped:"))
+            .count(),
+        LAUNCHERS - 1,
+        "{reports:?}"
+    );
+    assert_eq!(reservation(&fixture, 1).expect("one")["reserved_usd"], 5.0);
+    assert!(reservation(&fixture, 2).is_none(), "and only one");
+}
+
+#[test]
+fn earlier_history_is_counted_and_ambiguous_history_starts_no_call() {
+    let two = |tag: &str| {
+        fixture(tag, 2, reviewer(), |log| {
+            log.raise("q-b", 0);
+            log.raise("q-a", 1);
+        })
+    };
+    let earlier = |fixture: &Fixture, name: &str, text: &str| {
+        let dir = proposals_dir(&fixture.repo, RUN);
+        std::fs::create_dir_all(&dir).expect("the proposals directory");
+        std::fs::write(dir.join(name), text).expect("an earlier file");
+    };
+
+    let valid = two("decide-history");
+    let record = format!(
+        r#"{{"run_id": "{RUN}", "question_id": "q-b", "status": "accepted", "cost_usd": 0.5}}"#
+    );
+    earlier(&valid, "q-b.1.json", &record);
+    let runner = Acting::priced(0.25);
+    let options = DecideOptions {
+        question_id: Some("q-b".to_owned()),
+        ..valid.options()
+    };
+    decide(&options, &BuiltinAdapters, &runner).expect("decided");
+    assert_eq!(ceilings(&runner.seen()), [Some("4.5".to_owned())]);
+    assert_eq!(valid.proposal("q-b", 2)["status"], "accepted");
+    assert_eq!(
+        std::fs::read_to_string(proposals_dir(&valid.repo, RUN).join("q-b.1.json"))
+            .expect("the earlier record"),
+        record,
+        "an earlier record is kept as it was"
+    );
+
+    let cases = [
+        (
+            "q-b.1.json",
+            r#"{"question_id": "q-b", "cost_usd": null}"#,
+            "`q-b.1.json` reports no usable cost",
+        ),
+        ("q-b.1.out", "raw", "slot 1 of q-b has a raw output"),
+        (
+            "reservation-2.json",
+            r#"{"sequence": 2, "question_id": "q-b", "slot": 1, "reserved_usd": 1.0}"#,
+            "`reservation-1.json` is missing",
+        ),
+        (
+            "reservation-1.json",
+            "",
+            "`reservation-1.json` does not parse",
+        ),
+    ];
+    for (at, (name, text, needle)) in cases.into_iter().enumerate() {
+        let fixture = two(&format!("decide-ambiguous-{at}"));
+        earlier(&fixture, name, text);
+        let dir = proposals_dir(&fixture.repo, RUN);
+        let before = snapshot(&dir);
+        let runner = Acting::priced(0.25);
+        let decided = decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+        assert!(runner.seen().is_empty(), "{name}: no call");
+        assert!(
+            decided.report.contains("decide history under")
+                && decided.report.contains("is ambiguous")
+                && decided.report.contains(needle)
+                && decided.report.contains("left without a proposal: q-b, q-a"),
+            "{name}: {}",
+            decided.report
+        );
+        assert_eq!(decided.refused, ["q-b", "q-a"], "{name}");
+        assert_eq!(snapshot(&dir), before, "{name}: nothing was written");
+    }
+}
+
+#[test]
+fn an_untrusted_proposals_directory_or_a_question_id_that_is_not_plain_is_refused() {
+    for id in ["q-01A", "Q_1", "a"] {
+        assert!(plain_id(id), "{id}");
+    }
+    let long = "a".repeat(MAX_ID_BYTES + 1);
+    for id in [
+        "", ".", "..", "a.b", "a/b", r"a\b", "a:b", "a b", "CON", "nul", "com1", "LPT9", &long,
+    ] {
+        assert!(!plain_id(id), "{id}");
+    }
+    assert_eq!(entry_of("reservation-1.json"), Some(Entry::Reservation(1)));
+    assert_eq!(entry_of("reservation-01.json"), None);
+    assert_eq!(
+        entry_of("reservation-1.2.json"),
+        Some(Entry::Proposal("reservation-1".to_owned(), 2))
+    );
+    assert_eq!(
+        entry_of("q-a.2-decide.json"),
+        Some(Entry::Artifact("q-a".to_owned(), 2))
+    );
+
+    let dotted = fixture("decide-dotted", 1, reviewer(), |log| log.raise("q.01A", 0));
+    let runner = Acting::priced(0.25);
+    let decided = decide(&dotted.options(), &BuiltinAdapters, &runner).expect("decided");
+    assert!(runner.seen().is_empty());
+    assert!(
+        decided
+            .report
+            .contains("\"q.01A\": refused — its id is not a plain file-name component"),
+        "{}",
+        decided.report
+    );
+    assert!(!dotted.proposals_written());
+
+    let filed = one_question("decide-filed");
+    let proposals = filed.repo.join(".upstroke").join("proposals");
+    std::fs::write(&proposals, "not a directory").expect("a file at the name");
+    let message = refused_before_anything(&filed, &filed.options(), &BuiltinAdapters, "a file");
+    assert!(
+        message.contains("is not one decide can trust") && message.contains("is not a directory"),
+        "{message}"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let linked = one_question("decide-linked");
+        let elsewhere = linked.repo.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("a directory elsewhere");
+        let proposals = linked.repo.join(".upstroke").join("proposals");
+        std::fs::create_dir_all(&proposals).expect("the proposals directory");
+        std::os::unix::fs::symlink(&elsewhere, proposals.join(RUN)).expect("a link");
+        let runner = Acting::priced(0.25);
+        let message = decide(&linked.options(), &BuiltinAdapters, &runner)
+            .expect_err("a linked run directory")
+            .to_string();
+        assert!(runner.seen().is_empty());
+        assert!(message.contains("is not a directory"), "{message}");
+        assert!(
+            snapshot(&elsewhere).is_empty(),
+            "nothing was written through the link"
+        );
+
+        let open = one_question("decide-open");
+        let proposals = open.repo.join(".upstroke").join("proposals");
+        std::fs::create_dir_all(&proposals).expect("the proposals directory");
+        std::fs::set_permissions(&proposals, std::fs::Permissions::from_mode(0o777))
+            .expect("open it to every user");
+        let runner = Acting::priced(0.25);
+        let message = decide(&open.options(), &BuiltinAdapters, &runner)
+            .expect_err("a directory every user may write")
+            .to_string();
+        assert!(runner.seen().is_empty());
+        assert!(message.contains("is writable by every user"), "{message}");
+    }
+}
+
+#[test]
+fn the_proposals_directory_keeps_its_identity_through_publication() {
+    let fixture = one_question("decide-replaced");
+    let dir = proposals_dir(&fixture.repo, RUN);
+    let moved = dir.with_file_name(format!("{RUN}-moved"));
+    let runner = Acting::new({
+        let (dir, moved) = (dir.clone(), moved.clone());
+        move |_| {
+            std::fs::rename(&dir, &moved).expect("move the directory away");
+            std::fs::create_dir(&dir).expect("put another at its name");
+            Ok(exited(claude_output(&reply(VALID), Some(0.25))))
+        }
+    });
+    let error = decide(&fixture.options(), &BuiltinAdapters, &runner)
+        .expect_err("a replaced directory is not published into");
+    assert!(
+        error
+            .to_string()
+            .contains("is no longer the directory this command read its reservations from"),
+        "{error}"
+    );
+    assert!(snapshot(&dir).is_empty(), "nothing reached the replacement");
+    assert!(
+        moved.join("reservation-1.json").exists(),
+        "the reservation stays where it was made"
+    );
+    assert!(!moved.join("q-01A.1.out").exists() && !moved.join("q-01A.1.json").exists());
 }
 
 #[test]

@@ -167,7 +167,7 @@ enum Command {
         )]
         question_id: Option<String>,
         #[arg(
-            help = "Stop starting questions once this command's invocations have cost this many dollars"
+            help = "The run's dollar allowance, shared by every decide call of the run; no question is started once its calls have reserved or spent it"
         )]
         #[arg(long, default_value_t = upstroke::decide::DEFAULT_MAX_COST_USD)]
         max_cost_usd: f64,

@@ -5,7 +5,7 @@
 #![allow(clippy::disallowed_methods)]
 #![forbid(clippy::disallowed_types, clippy::disallowed_macros)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -29,6 +29,14 @@ pub const INPUT_BOUND: usize = 64 * 1024;
 pub const MAX_PROPOSALS_PER_QUESTION: u32 = 2;
 pub const DEFAULT_MAX_COST_USD: f64 = 5.0;
 const PROPOSALS_DIR: &str = "proposals";
+/// The start of a reservation's file name, `reservation-<sequence>.json`. A plain question id
+/// holds no `.`, so no proposal, raw output or settings file is ever spelled this way.
+const RESERVATION_PREFIX: &str = "reservation-";
+/// How many reservation numbers a launcher may find taken by other launchers, one after
+/// another, before it gives up on a question.
+const RESERVATION_ATTEMPTS: u32 = 32;
+/// The longest question id this command names a file after.
+const MAX_ID_BYTES: usize = 128;
 
 pub struct DecideOptions {
     pub repo_root: PathBuf,
@@ -274,7 +282,7 @@ fn propose(
         private_denials,
     };
     let plan_text = read_bounded(&opts.repo_root.join(&started.plan_path));
-    let dir = proposals_dir(&opts.repo_root, &opts.run_id);
+    let mut proposals = ProposalsDir::open(&opts.repo_root, &opts.run_id)?;
 
     let mut out = String::new();
     let mut refusals = Vec::new();
@@ -290,42 +298,66 @@ fn propose(
             );
             continue;
         }
-        if spent >= opts.max_cost_usd {
-            let left: Vec<&str> = questions
-                .iter()
-                .skip(index)
-                .filter(|later| !later.binds_an_agent)
-                .map(|later| later.question.id.as_str())
-                .collect();
+        if !plain_id(&id) {
             let _ = writeln!(
                 out,
-                "stopped: this command's invocations have cost ${spent:.4}, which reaches the \
-                 --max-cost-usd cap of ${:.4}; left without a proposal: {}",
-                opts.max_cost_usd,
-                left.join(", ")
-            );
-            break;
-        }
-        let Some(n) = next_number(&dir, &id) else {
-            let _ = writeln!(
-                out,
-                "{id}: refused — it already has {MAX_PROPOSALS_PER_QUESTION} saved proposals \
-                 under {}; no agent was asked",
-                dir.display()
+                "{id:?}: refused — its id is not a plain file-name component (1 to \
+                 {MAX_ID_BYTES} ASCII letters, digits, `-` or `_`, and no device name), so no \
+                 file is named after it; no agent was asked"
             );
             refusals.push(id.clone());
             continue;
+        }
+        let left = || -> Vec<String> {
+            questions
+                .iter()
+                .skip(index)
+                .filter(|later| !later.binds_an_agent)
+                .map(|later| later.question.id.as_str().to_owned())
+                .collect()
         };
         let prompt = build_prompt(observed, asked, &plan_text);
+        let (call, reservation) = match reserve(&mut proposals, &decider, opts, &id, &prompt)? {
+            Admission::Reserved { call, reservation } => (call, reservation),
+            Admission::SlotsTaken => {
+                let _ = writeln!(
+                    out,
+                    "{id}: refused — it already has {MAX_PROPOSALS_PER_QUESTION} reserved \
+                     proposal slots under {}; no agent was asked",
+                    proposals.path().display()
+                );
+                refusals.push(id.clone());
+                continue;
+            }
+            Admission::AllowanceSpent { spent_usd } => {
+                let _ = writeln!(
+                    out,
+                    "stopped: this run's decide calls have reserved or spent ${spent_usd:.4}, \
+                     which reaches the --max-cost-usd allowance of ${:.4} for the run; left \
+                     without a proposal: {}",
+                    opts.max_cost_usd,
+                    left().join(", ")
+                );
+                break;
+            }
+            Admission::Ambiguous(reasons) => {
+                let left = left();
+                let _ = writeln!(
+                    out,
+                    "stopped: this run's decide history under {} is ambiguous, so what is left \
+                     of the --max-cost-usd allowance cannot be known and no call is started: {}; \
+                     a person settles these files; left without a proposal: {}",
+                    proposals.path().display(),
+                    reasons.join("; "),
+                    left.join(", ")
+                );
+                refusals.extend(left);
+                break;
+            }
+        };
         let ordinal = u32::try_from(index + 1).unwrap_or(u32::MAX);
-        let call = prepare(
-            &decider,
-            &opts.repo_root,
-            &dir.join(format!("{id}.{n}-decide.json")),
-            &prompt,
-            opts.max_cost_usd - spent,
-        )?;
-        let asked_once = ask(&decider, runner, &call, &dir, &id, n, ordinal)?;
+        let n = reservation.slot;
+        let asked_once = ask(&decider, runner, &call, &proposals, &id, n, ordinal)?;
         match asked_once.cost_usd {
             Some(cost) => spent += cost,
             None => unknown_cost.push(id.clone()),
@@ -336,7 +368,7 @@ fn propose(
             .map_err(Clone::clone)
             .and_then(|text| check_reply(&asked.question, text));
         let saved = save(
-            &dir,
+            &proposals,
             &id,
             n,
             &SaveRecord {
@@ -344,6 +376,7 @@ fn propose(
                 decider: &decider,
                 verdict: &verdict,
                 cost_usd: asked_once.cost_usd,
+                reserved_usd: reservation.reserved_usd,
                 raw: &asked_once.raw_path,
             },
         )?;
@@ -971,21 +1004,21 @@ fn kept(guarantee: Guarantee, built: &Built<'_>) -> Result<(), String> {
     }
 }
 
+/// Starts one reserved call: writes its settings file new, starts it through the Runner, and
+/// saves its raw output new. The proposals directory is checked to be the one the reservation
+/// was made in before each file is created.
 fn ask(
     decider: &Decider<'_>,
     runner: &dyn Runner,
     call: &Call,
-    dir: &Path,
+    proposals: &ProposalsDir,
     id: &str,
     n: u32,
     ordinal: u32,
 ) -> Result<Asked, UpstrokeError> {
-    std::fs::create_dir_all(dir).map_err(|source| UpstrokeError::Io {
-        path: dir.to_path_buf(),
-        source,
-    })?;
     if let Some(settings_path) = &call.task_run.settings_path {
-        crate::util::write_json(settings_path, &call.settings)?;
+        proposals.check()?;
+        write_new(settings_path, &pretty(&call.settings, settings_path)?)?;
     }
     let mut request = crate::runner::decide_request(
         call.command.clone(),
@@ -997,11 +1030,12 @@ fn ask(
     if let Some(credential) = &decider.credential {
         request = request.with_credential_profile(credential.clone());
     }
-    let raw_path = dir.join(format!("{id}.{n}.out"));
+    let raw_path = proposals.path().join(format!("{id}.{n}.out"));
     let output = match runner.run_blocking(&request) {
         Ok(output) => output,
         Err(error) => {
             let reason = format!("the agent process failed: {}", UpstrokeError::from(error));
+            proposals.check()?;
             write_new(&raw_path, reason.as_bytes())?;
             return Ok(Asked {
                 reply: Err(reason),
@@ -1010,6 +1044,7 @@ fn ask(
             });
         }
     };
+    proposals.check()?;
     write_new(&raw_path, output.stdout.as_bytes())?;
     Ok(match decider.adapter.parse(&output) {
         Ok(outcome) => Asked {
@@ -1137,18 +1172,515 @@ fn check_reply(question: &Question, text: &str) -> Result<Value, String> {
     Ok(record)
 }
 
-/// The next free proposal number for `id`, or `None` when it already has its cap.
-fn next_number(dir: &Path, id: &str) -> Option<u32> {
-    (1..=MAX_PROPOSALS_PER_QUESTION).find(|n| !dir.join(format!("{id}.{n}.json")).exists())
+/// Whether `id` is a plain file-name component on every platform this command runs on: 1 to
+/// `MAX_ID_BYTES` ASCII letters, digits, `-` or `_` (so no separator, no `.`, no `..`), and not
+/// a Windows device name.
+fn plain_id(id: &str) -> bool {
+    let upper = id.to_ascii_uppercase();
+    let device = ["CON", "PRN", "AUX", "NUL"].contains(&upper.as_str())
+        || (upper.len() == 4
+            && (upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper
+                .bytes()
+                .last()
+                .is_some_and(|last| last.is_ascii_digit()));
+    !id.is_empty()
+        && id.len() <= MAX_ID_BYTES
+        && !device
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+/// A directory's identity: on Unix its device and inode; on Windows, where std reads no file id
+/// from a path, its creation time.
+type DirIdentity = (u64, u64);
+
+#[cfg(unix)]
+fn identity(metadata: &std::fs::Metadata) -> DirIdentity {
+    use std::os::unix::fs::MetadataExt as _;
+    (metadata.dev(), metadata.ino())
+}
+
+#[cfg(windows)]
+fn identity(metadata: &std::fs::Metadata) -> DirIdentity {
+    use std::os::windows::fs::MetadataExt as _;
+    (metadata.creation_time(), 0)
+}
+
+/// Unix: the directory belongs to the repository root's owner and no other user may write it.
+#[cfg(unix)]
+fn owned_and_closed(metadata: &std::fs::Metadata, repo_root: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let owner = std::fs::metadata(repo_root)
+        .map_err(|error| format!("cannot be checked against the repository's owner: {error}"))?
+        .uid();
+    if metadata.uid() != owner {
+        return Err(format!(
+            "belongs to uid {}, not to the repository's owner (uid {owner})",
+            metadata.uid()
+        ));
+    }
+    if metadata.mode() & 0o002 != 0 {
+        return Err("is writable by every user".to_owned());
+    }
+    Ok(())
+}
+
+/// Windows: the directory is no reparse point (a junction or a directory symlink).
+#[cfg(windows)]
+fn owned_and_closed(metadata: &std::fs::Metadata, _repo_root: &Path) -> Result<(), String> {
+    use std::os::windows::fs::MetadataExt as _;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err("is a reparse point".to_owned());
+    }
+    Ok(())
+}
+
+/// The identity of the directory at `path` if it is one decide trusts with a run's accounting:
+/// a real directory, read without following a link, that `owned_and_closed` admits. `Ok(None)`
+/// when nothing is there.
+fn trusted_dir(path: &Path, repo_root: &Path) -> Result<Option<DirIdentity>, String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("`{}` cannot be read: {error}", path.display())),
+    };
+    if !metadata.file_type().is_dir() {
+        return Err(format!(
+            "`{}` is not a directory (a link or a file stands at its name)",
+            path.display()
+        ));
+    }
+    owned_and_closed(&metadata, repo_root)
+        .map_err(|reason| format!("`{}` {reason}", path.display()))?;
+    Ok(Some(identity(&metadata)))
+}
+
+/// `.upstroke/proposals/<run-id>` and the two directories above it, each trusted when read,
+/// and the identity of the last once it exists.
+struct ProposalsDir {
+    repo_root: PathBuf,
+    chain: [PathBuf; 3],
+    identity: Option<DirIdentity>,
+}
+
+fn untrusted(reason: &str) -> UpstrokeError {
+    refused(format!(
+        "the proposals directory is not one decide can trust: {reason}; nothing more was written \
+         and no agent was asked"
+    ))
+}
+
+impl ProposalsDir {
+    /// Reads the chain down to the first missing directory, refusing any directory on it that
+    /// is not trusted. Writes nothing.
+    fn open(repo_root: &Path, run_id: &str) -> Result<Self, UpstrokeError> {
+        if !plain_id(run_id) {
+            return Err(untrusted(&format!(
+                "the run id `{run_id}` is not a plain file-name component"
+            )));
+        }
+        let leaf = proposals_dir(repo_root, run_id);
+        let middle = repo_root.join(".upstroke").join(PROPOSALS_DIR);
+        let top = repo_root.join(".upstroke");
+        let mut dir = Self {
+            repo_root: repo_root.to_path_buf(),
+            chain: [top, middle, leaf],
+            identity: None,
+        };
+        dir.observe()?;
+        Ok(dir)
+    }
+
+    fn path(&self) -> &Path {
+        let [_, _, leaf] = &self.chain;
+        leaf
+    }
+
+    fn trusted(&self, path: &Path) -> Result<Option<DirIdentity>, UpstrokeError> {
+        trusted_dir(path, &self.repo_root).map_err(|reason| untrusted(&reason))
+    }
+
+    /// Reads the chain again: once the run's directory has been seen it must be the same one;
+    /// until then a run directory another launcher created is taken up.
+    fn observe(&mut self) -> Result<(), UpstrokeError> {
+        if self.identity.is_some() {
+            return self.check();
+        }
+        for dir in &self.chain {
+            match self.trusted(dir)? {
+                Some(found) if dir == self.path() => self.identity = Some(found),
+                Some(_) => {}
+                None => return Ok(()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Creates each missing directory of the chain, one level at a time and never through a
+    /// link, durably, and pins the run directory's identity.
+    fn establish(&mut self) -> Result<(), UpstrokeError> {
+        for dir in &self.chain {
+            if self.trusted(dir)?.is_some() {
+                continue;
+            }
+            match std::fs::create_dir(dir) {
+                Ok(()) => {
+                    if let Some(parent) = dir.parent() {
+                        crate::util::fsync_dir(parent).map_err(|source| UpstrokeError::Io {
+                            path: parent.to_path_buf(),
+                            source,
+                        })?;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(source) => {
+                    return Err(UpstrokeError::Io {
+                        path: dir.clone(),
+                        source,
+                    });
+                }
+            }
+            if self.trusted(dir)?.is_none() {
+                return Err(untrusted(&format!(
+                    "`{}` is gone just after it was created",
+                    dir.display()
+                )));
+            }
+        }
+        let found = self.trusted(self.path())?;
+        match (self.identity, found) {
+            (_, None) => Err(untrusted(&format!("`{}` is gone", self.path().display()))),
+            (Some(seen), Some(found)) if seen != found => Err(self.replaced()),
+            (_, found) => {
+                self.identity = found;
+                Ok(())
+            }
+        }
+    }
+
+    /// Before each file is created: every directory of the chain is still trusted and the run
+    /// directory is still the one the reservation was made in.
+    fn check(&self) -> Result<(), UpstrokeError> {
+        for dir in &self.chain {
+            if self.trusted(dir)?.is_none() {
+                return Err(self.replaced());
+            }
+        }
+        if self.trusted(self.path())? == self.identity {
+            Ok(())
+        } else {
+            Err(self.replaced())
+        }
+    }
+
+    fn replaced(&self) -> UpstrokeError {
+        refused(format!(
+            "the proposals directory {} is no longer the directory this command read its \
+             reservations from (it was removed or replaced), so nothing more is written into it; \
+             every reservation made stays where it was made",
+            self.path().display()
+        ))
+    }
+}
+
+/// What a run's proposals directory records about one question's proposal slot.
+#[derive(Debug, Default)]
+struct Slot {
+    /// The dollars a reservation of this slot set aside.
+    reserved_usd: Option<f64>,
+    /// A proposal record saved for the slot, and the cost it reports where that is usable.
+    record: Option<Option<f64>>,
+    /// A raw output or settings file of the slot.
+    artifact: bool,
+}
+
+/// The file names decide reads in a run's proposals directory.
+#[derive(Debug, PartialEq, Eq)]
+enum Entry {
+    Reservation(u32),
+    Proposal(String, u32),
+    Artifact(String, u32),
+}
+
+/// A number written in a file name: canonical decimal from 1, so no two names spell one number.
+fn canonical_number(digits: &str) -> Option<u32> {
+    let number: u32 = digits.parse().ok()?;
+    (number >= 1 && number.to_string() == digits).then_some(number)
+}
+
+fn entry_of(name: &str) -> Option<Entry> {
+    if let Some(sequence) = name
+        .strip_prefix(RESERVATION_PREFIX)
+        .and_then(|rest| rest.strip_suffix(".json"))
+        .and_then(canonical_number)
+    {
+        return Some(Entry::Reservation(sequence));
+    }
+    let slot = |stem: &str| {
+        let (id, n) = stem.rsplit_once('.')?;
+        let n = canonical_number(n)?;
+        plain_id(id).then(|| (id.to_owned(), n))
+    };
+    if let Some(stem) = name
+        .strip_suffix("-decide.json")
+        .or_else(|| name.strip_suffix(".out"))
+    {
+        return slot(stem).map(|(id, n)| Entry::Artifact(id, n));
+    }
+    name.strip_suffix(".json")
+        .and_then(slot)
+        .map(|(id, n)| Entry::Proposal(id, n))
+}
+
+fn read_value(path: &Path) -> Result<Value, String> {
+    let bytes =
+        crate::util::read_file_bounded(path).map_err(|error| format!("cannot be read: {error}"))?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("does not parse: {error}"))
+}
+
+/// The question, slot and dollars a reservation file records, if it is one this command wrote.
+fn read_reservation(path: &Path, sequence: u32) -> Result<(String, u32, f64), String> {
+    let value = read_value(path)?;
+    let id = value
+        .get("question_id")
+        .and_then(Value::as_str)
+        .filter(|id| plain_id(id));
+    let slot = value
+        .get("slot")
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|n| (1..=MAX_PROPOSALS_PER_QUESTION).contains(n));
+    let usd = value
+        .get("reserved_usd")
+        .and_then(Value::as_f64)
+        .filter(|usd| usd.is_finite() && *usd > 0.0);
+    let numbered = value.get("sequence").and_then(Value::as_u64) == Some(u64::from(sequence));
+    match (id, slot, usd, numbered) {
+        (Some(id), Some(slot), Some(usd), true) => Ok((id.to_owned(), slot, usd)),
+        _ => Err("is not a whole reservation of a question slot and its dollars".to_owned()),
+    }
+}
+
+/// The cost a saved proposal of `id` reports, where it is a finite number of dollars.
+fn recorded_cost(path: &Path, id: &str) -> Option<f64> {
+    let value = read_value(path).ok()?;
+    if value.get("question_id").and_then(Value::as_str) != Some(id) {
+        return None;
+    }
+    value
+        .get("cost_usd")
+        .and_then(Value::as_f64)
+        .filter(|cost| cost.is_finite() && *cost >= 0.0)
+}
+
+/// What a run's decide calls have reserved and spent, read from its proposals directory.
+#[derive(Debug, Default)]
+struct Ledger {
+    /// How many reservations there are, numbered 1 to this with no gap.
+    reservations: u32,
+    slots: BTreeMap<(String, u32), Slot>,
+    /// Each slot's reported cost where its proposal reports one, else what its reservation set
+    /// aside, summed.
+    spent_usd: f64,
+    /// Why what the history spent cannot be known, if it cannot.
+    ambiguous: Vec<String>,
+}
+
+impl Ledger {
+    fn read(proposals: &mut ProposalsDir) -> Result<Self, UpstrokeError> {
+        let mut ledger = Self::default();
+        proposals.observe()?;
+        if proposals.identity.is_none() {
+            return Ok(ledger);
+        }
+        let dir = proposals.path();
+        let io = |source| UpstrokeError::Io {
+            path: dir.to_path_buf(),
+            source,
+        };
+        let mut sequences = BTreeSet::new();
+        for entry in std::fs::read_dir(dir).map_err(io)? {
+            let entry = entry.map_err(io)?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(kind) = entry_of(&name) else {
+                continue;
+            };
+            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                ledger
+                    .ambiguous
+                    .push(format!("`{name}` is not a regular file"));
+                continue;
+            }
+            let path = entry.path();
+            match kind {
+                Entry::Reservation(sequence) => {
+                    sequences.insert(sequence);
+                    match read_reservation(&path, sequence) {
+                        Ok((id, n, usd)) => {
+                            let slot = ledger.slots.entry((id.clone(), n)).or_default();
+                            if slot.reserved_usd.replace(usd).is_some() {
+                                ledger.ambiguous.push(format!(
+                                    "slot {n} of {id} is reserved twice (`{name}` is the second)"
+                                ));
+                            }
+                        }
+                        Err(reason) => ledger.ambiguous.push(format!("`{name}` {reason}")),
+                    }
+                }
+                Entry::Proposal(id, n) => {
+                    let cost = recorded_cost(&path, &id);
+                    ledger.slots.entry((id, n)).or_default().record = Some(cost);
+                }
+                Entry::Artifact(id, n) => ledger.slots.entry((id, n)).or_default().artifact = true,
+            }
+        }
+        ledger.reservations = u32::try_from(sequences.len()).unwrap_or(u32::MAX);
+        if let Some(missing) = (1..=ledger.reservations).find(|at| !sequences.contains(at)) {
+            ledger.ambiguous.push(format!(
+                "`{RESERVATION_PREFIX}{missing}.json` is missing, so the reservations have a gap"
+            ));
+        }
+        for ((id, n), slot) in &ledger.slots {
+            match (slot.reserved_usd, slot.record) {
+                (_, Some(Some(cost))) => ledger.spent_usd += cost,
+                (Some(reserved), _) => ledger.spent_usd += reserved,
+                (None, Some(None)) => ledger.ambiguous.push(format!(
+                    "`{id}.{n}.json` reports no usable cost and no reservation bounds what its \
+                     call spent"
+                )),
+                (None, None) if slot.artifact => ledger.ambiguous.push(format!(
+                    "slot {n} of {id} has a raw output or settings file but no proposal and no \
+                     reservation, so its call may have spent any amount"
+                )),
+                (None, None) => {}
+            }
+        }
+        Ok(ledger)
+    }
+
+    /// The first of the question's slots nothing has taken.
+    fn free_slot(&self, id: &str) -> Option<u32> {
+        (1..=MAX_PROPOSALS_PER_QUESTION).find(|n| !self.slots.contains_key(&(id.to_owned(), *n)))
+    }
+}
+
+/// A slot and the dollars set aside for it, durably, before its call is started.
+struct Reservation {
+    slot: u32,
+    reserved_usd: f64,
+}
+
+enum Admission {
+    Reserved {
+        call: Box<Call>,
+        reservation: Reservation,
+    },
+    SlotsTaken,
+    AllowanceSpent {
+        spent_usd: f64,
+    },
+    Ambiguous(Vec<String>),
+}
+
+/// Reserves a free slot of `id` and all that is left of the run's allowance, as the next
+/// reservation number, and builds the call with that remainder as its ceiling. The number is
+/// created exclusively, so of launchers that read the same reservations only one takes it;
+/// the others read again. Nothing is written before the call is built and checked.
+fn reserve(
+    proposals: &mut ProposalsDir,
+    decider: &Decider<'_>,
+    opts: &DecideOptions,
+    id: &str,
+    prompt: &str,
+) -> Result<Admission, UpstrokeError> {
+    for _ in 0..RESERVATION_ATTEMPTS {
+        let ledger = Ledger::read(proposals)?;
+        if !ledger.ambiguous.is_empty() {
+            return Ok(Admission::Ambiguous(ledger.ambiguous));
+        }
+        let remaining = opts.max_cost_usd - ledger.spent_usd;
+        if remaining <= 0.0 {
+            return Ok(Admission::AllowanceSpent {
+                spent_usd: ledger.spent_usd,
+            });
+        }
+        let Some(slot) = ledger.free_slot(id) else {
+            return Ok(Admission::SlotsTaken);
+        };
+        let call = prepare(
+            decider,
+            &opts.repo_root,
+            &proposals.path().join(format!("{id}.{slot}-decide.json")),
+            prompt,
+            remaining,
+        )?;
+        let Some(sequence) = ledger.reservations.checked_add(1) else {
+            break;
+        };
+        proposals.establish()?;
+        let document = json!({
+            "run_id": opts.run_id,
+            "sequence": sequence,
+            "question_id": id,
+            "slot": slot,
+            "reserved_usd": remaining,
+            "allowance_usd": opts.max_cost_usd,
+            "spent_before_usd": ledger.spent_usd,
+        });
+        let path = proposals
+            .path()
+            .join(format!("{RESERVATION_PREFIX}{sequence}.json"));
+        proposals.check()?;
+        match create_durably(&path, &pretty(&document, &path)?) {
+            Ok(()) => {
+                return Ok(Admission::Reserved {
+                    call: Box::new(call),
+                    reservation: Reservation {
+                        slot,
+                        reserved_usd: remaining,
+                    },
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(source) => return Err(UpstrokeError::Io { path, source }),
+        }
+    }
+    Err(refused(format!(
+        "{id}: other launchers took {RESERVATION_ATTEMPTS} reservation numbers in a row before \
+         this one could, so it was not reserved; no agent was asked for it"
+    )))
+}
+
+fn pretty(value: &Value, path: &Path) -> Result<Vec<u8>, UpstrokeError> {
+    let mut bytes = serde_json::to_vec_pretty(value).map_err(|error| UpstrokeError::Parse {
+        message: format!("{}: {error}", path.display()),
+    })?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+/// Creates `path` new (`File::create_new`, which never replaces a file), writes `bytes`, and
+/// makes the file and its name durable.
+fn create_durably(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = std::fs::File::create_new(path)?;
+    file.write_all(bytes)?;
+    crate::util::fsync_file(&file)?;
+    match path.parent() {
+        Some(parent) => crate::util::fsync_dir(parent),
+        None => Ok(()),
+    }
 }
 
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), UpstrokeError> {
-    let io = |source| UpstrokeError::Io {
+    create_durably(path, bytes).map_err(|source| UpstrokeError::Io {
         path: path.to_path_buf(),
         source,
-    };
-    let mut file = std::fs::File::create_new(path).map_err(io)?;
-    file.write_all(bytes).map_err(io)
+    })
 }
 
 struct SaveRecord<'a> {
@@ -1156,10 +1688,16 @@ struct SaveRecord<'a> {
     decider: &'a Decider<'a>,
     verdict: &'a Result<Value, String>,
     cost_usd: Option<f64>,
+    reserved_usd: f64,
     raw: &'a Path,
 }
 
-fn save(dir: &Path, id: &str, n: u32, record: &SaveRecord<'_>) -> Result<PathBuf, UpstrokeError> {
+fn save(
+    proposals: &ProposalsDir,
+    id: &str,
+    n: u32,
+    record: &SaveRecord<'_>,
+) -> Result<PathBuf, UpstrokeError> {
     let (status, body) = match record.verdict {
         Ok(parsed) => ("accepted", ("record", parsed.clone())),
         Err(reason) => ("refused", ("reason", Value::String(reason.clone()))),
@@ -1172,16 +1710,15 @@ fn save(dir: &Path, id: &str, n: u32, record: &SaveRecord<'_>) -> Result<PathBuf
         "effort": record.decider.effort,
         "status": status,
         "cost_usd": record.cost_usd,
+        "reserved_usd": record.reserved_usd,
         "raw_output": record.raw.to_string_lossy(),
     });
     if let Some(object) = document.as_object_mut() {
         object.insert(body.0.to_owned(), body.1);
     }
-    let path = dir.join(format!("{id}.{n}.json"));
-    let mut bytes = serde_json::to_vec_pretty(&document).map_err(|error| UpstrokeError::Parse {
-        message: format!("{}: {error}", path.display()),
-    })?;
-    bytes.push(b'\n');
+    let path = proposals.path().join(format!("{id}.{n}.json"));
+    let bytes = pretty(&document, &path)?;
+    proposals.check()?;
     write_new(&path, &bytes)?;
     Ok(path)
 }
