@@ -8,7 +8,7 @@ reviewed_sha: fe2b9bc58af6c3eae0d0a9da64ac25a159db374f
 location: src/agent/proc/tests.rs:2823
 provenance: undetermined
 first_bad:
-guard: the change that makes this test's failure report what of the agent tree was alive and when the marker was written relative to the interrupt, and then either fixes the tree's kill or moves the marker's timer after the ready file, keeping the assertion
+guard: the change that makes this test's failure report what of the agent tree was alive and when the marker was written relative to the signal's submission and Upstroke's exit, and then either fixes the tree's kill or orders the marker after the signal by synchronisation that establishes it (moving the timer after the ready file is only a mitigation), keeping the assertion
 ---
 
 # A terminal interrupt left the agent tree alive, by the test's marker, on a hosted macOS runner
@@ -81,26 +81,45 @@ process group, and 1.3 s later the worker's marker existed. The test failed on t
 it was the job's only failure. #399 does not touch `src/agent/`, and the same tree passed on the
 next run.
 
-**Not established: why the marker existed.** There are two readings. Both are inferred, read from
+**Not established: why the marker existed.** There are three readings. Each is inferred, read from
 the source, and not run. The log does not tell them apart.
 
-1. **A live tree.** The interrupt terminated Upstroke, but the kill of the isolated tree that it
-   should cause did not reach the worker. The worker outlived Upstroke, its timer ran out, and it
-   wrote the marker during the test's 1.3 s sleep. That is a real defect in the supervisor's
-   handling of a terminal interrupt.
-2. **The worker's timer ran out first.** The worker's one-second timer starts before the shell's
-   two `ps` calls and its `ready` file (`:2458-2462`). Before the interrupt can land, the shell must
-   fork `ps` and `tr` twice and write `ready`. The test must then see `ready` on its 20 ms poll and
-   send the signal, and Upstroke must handle it and kill the group. If all of that took more than
-   one second on a loaded runner, the worker wrote the marker before any signal was sent. The tree's
-   kill may then have worked, and the test failed on its own timing. This job's shard finished in
-   346.87 s. Nothing in the log measures how long the shell took to become ready.
+The signal path matters to all three. Upstroke's handler for a terminating signal only records it
+(`record_signal`, `src/agent/proc.rs:2058`, stores it in `PENDING_TERMINATION`). A separate monitor
+thread (`monitor`, `src/agent/proc.rs:2173`) later sees the recorded signal, sends `SIGKILL` to the
+registered groups, and then re-raises the signal to end Upstroke. So three events follow one
+another: the test submits the signal, the monitor kills the group, and Upstroke exits. Time can
+pass between each of them.
 
-**What would establish each.** The failure would print what of the agent tree was still alive,
-meaning the processes still in the supervised group (`supervised_pgid`) when the assertion ran. It
-would also print when the marker was written relative to the signal. A live worker or shell, or a
-marker written after the signal, is the first reading. An empty group and a marker written before
-the signal is the second. The test records neither today.
+1. **A live tree.** *Inferred, read from source, not run.* The interrupt terminated Upstroke, but
+   the kill of the isolated tree that it should cause did not reach the worker. The worker outlived
+   Upstroke, its timer ran out, and it wrote the marker after Upstroke exited, during the test's
+   1.3 s sleep. That is a real defect in the supervisor's handling of a terminal interrupt.
+2. **The worker's timer ran out before the signal.** *Inferred, read from source, not run.* The
+   worker's one-second timer starts before the shell's two `ps` calls and its `ready` file
+   (`:2458-2462`). Before the interrupt can land, the shell must fork `ps` and `tr` twice and write
+   `ready`. The test must then see `ready` on its 20 ms poll and send the signal, and Upstroke must
+   handle it and kill the group. If all of that took more than one second on a loaded runner, the
+   worker wrote the marker before any signal was sent. The tree's kill may then have worked, and the
+   test failed on its own timing. This job's shard finished in 346.87 s. Nothing in the log measures
+   how long the shell took to become ready.
+3. **The timer ran out between the signal and the group's kill.** *Inferred, read from source, not
+   run.* `ready` appears and the test sends `SIGINT`. The handler records it, but the monitor thread
+   is descheduled before it acts. Meanwhile the worker's timer runs out and it writes the marker.
+   The monitor then kills the group, and Upstroke exits. The worker did not outlive Upstroke and the
+   kill worked, yet the marker was written after the signal was sent. The test failed on its own
+   timing, as in the second reading.
+
+**What would establish each.** The failure would distinguish the signal's submission (the test's
+`kill(-pid, signal)` returning), the group's termination (the monitor's `SIGKILL`) and the
+supervisor's exit (the test's wait for Upstroke returning). It would print what of the agent tree
+was still alive, meaning the processes still in the supervised group (`supervised_pgid`) when the
+assertion ran. It would also print when the marker was written relative to Upstroke's exit, and
+relative to the signal's submission. Whether the worker outlived Upstroke is decided by comparing the
+marker against Upstroke's exit, not against the time the signal was sent. A live worker or shell
+after the exit, or a marker written after the exit, is the first reading. An empty group and a
+marker written before the signal's submission is the second. An empty group and a marker written
+after the submission but before the exit is the third. The test records none of these today.
 
 **Not established: the rate.** One sighting. Other runs of this test were not counted.
 
@@ -128,17 +147,22 @@ Both ids were found as written.
 ## What the change that takes this up should do
 
 - **Make the failure report what was alive and when the marker was written**, relative to the
-  interrupt. Then decide the reading from the next sighting.
+  signal's submission and to Upstroke's exit. Then decide the reading from the next sighting.
 - **If the tree was alive**, fix the kill of the isolated tree on a terminal interrupt. The fix is in
   production code, and severity should be reconsidered then.
-- **If the timer ran out first**, move the worker's timer after the `ready` file, so that the
-  marker cannot be written before the signal is sent.
+- **If the timer ran out first** (the second or third reading), moving the worker's timer after the `ready` file is a possible
+  mitigation. It narrows the window but does not guarantee that the marker follows the signal: the
+  shell publishes `ready` and the timer starts, the test is descheduled before it sends `SIGINT`,
+  the timer runs out and the worker writes the marker, and only then does the test resume and send
+  the signal. An ordering guarantee needs synchronisation that establishes it. For example, the
+  worker could start its timer only after the test acknowledges that the signal was sent.
 - **Keep the assertion** that the marker does not exist after the interrupt. Do not retry or skip
   the test, and do not weaken the assertion, to get past this.
 
 **A proposal, not adopted and not reviewed:** the failure message names the processes still in the
 supervised group when the assertion runs, and the marker's write time. The test would note the time
-of its `kill(-pid, signal)` and read the marker's modification time. It would list the group's
+of its `kill(-pid, signal)` and the time its wait saw Upstroke exit, and read the marker's
+modification time. It would list the group's
 remaining members, for example with `ps -o pid=,stat=,command= -g <supervised_pgid>`, before the
-helper is completed. The message would then give both times and that list. There would be no retry,
+helper is completed. The message would then give those times and that list. There would be no retry,
 no skip and no weaker assertion.
