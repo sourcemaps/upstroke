@@ -3858,7 +3858,9 @@ lines, and the suite step's many `1 passed` summaries from child harnesses are n
 **Limits.**
 
 - Host only: the runner kind is `host` and `image` is null by design. No container is used, and
-  container capability on the macOS and Windows runners stays unknown.
+  container capability on the macOS and Windows runners stays unknown. Both runs' censuses met the
+  unarmed absent-runtime double of `engine::topology::entry::container_runtime`, so the record
+  shows nothing of a container runtime on any platform.
 - The owner witness observes only the adapter probes made through the adapter source. It is not
   a direct observation of the shell probe, or of every probe the run makes.
 - No provider is called.
@@ -4150,10 +4152,14 @@ The judgement of the native evidence is root's.
 
 ## `fn the_container_runtime_seam_observes_only_while_armed_and_only_on_its_own_thread() {`
 
-The seam's scope, in the ordinary suite with no runtime needed, since constructing a `DockerCli`
-starts nothing. An unarmed construction is not observed. An armed one on the arming thread is,
-with its call site and, for a runner, its identity. Another thread's construction while armed is
-not. Nothing is observed once the guard drops, and a construction performs no operation.
+The seam observes only while armed, only on the arming thread, and only by wrapping what
+production constructs. Unarmed, and on any other thread, it journals nothing, and constructs for an
+inspection the runtime that answers as an absent one and for a runner exactly what production does.
+The test runs in the ordinary suite with no runtime needed: constructing a `DockerCli` starts
+nothing, and the inspection runtime constructed unarmed asks no container runtime at all. An
+unarmed construction is not observed. An armed one on the arming thread is, with its call site and,
+for a runner, its identity. Another thread's construction while armed is not. Nothing is observed
+once the guard drops, and a construction performs no operation.
 
 ## `enum PrivateEntry {`
 
