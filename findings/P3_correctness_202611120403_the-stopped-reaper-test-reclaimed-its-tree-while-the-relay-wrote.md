@@ -21,8 +21,8 @@ machine, not from CI.
 1. **The test.** `agent::proc::termination::tests::a_stopped_container_reaper_ends_its_caller_rather_than_releasing_it`
    (`src/agent/proc.rs:9990` at the reviewed commit) uses the fake runtime. That runtime's reaper relay is a shell
    stand-in for `docker` that records each call in a `calls` file inside the test's scratch tree.
-2. **The sighting.** In a local run on 2026-11-11 at about 15:40 UTC, at commit `6db8d300` (a notes-only change on pull
-   request #368's branch), on Linux, while the machine was heavily used, the test panicked at
+2. **The sighting.** In a local run on 2026-11-11 at about 15:40 UTC, at commit `6db8d300` (a change to one finding's
+   file on pull request #368's branch), on Linux, while the machine was heavily used, the test panicked at
    `src/rundir/scratch_tree.rs:761:21`, the scratch guard's reclaim, with "scratch tree
    /tmp/upstroke-stopped-container-reaper-ZVP3QJC3ET was not reclaimed: Directory not empty (os error 39)".
 3. **No rate is given.** The local runs that passed were not counted.
@@ -37,8 +37,9 @@ machine, not from CI.
    Whether that is what happened is not established.
 
 **Kept separate:** the same reclaim failure in another test, `unix_reaper_kills_labeled_containers`, is the open finding
-`PR345-REAPER-TEST-SCRATCH-TREE-NOT-EMPTY-AT-RECLAIM`. Pull request #340 repairs that test and does not touch this one.
-This one is filed on its own so that it does not go with that finding when #340 resolves it.
+`PR345-REAPER-TEST-SCRATCH-TREE-NOT-EMPTY-AT-RECLAIM`, whose guard and remedy name only that test, so this failure is
+filed on its own. Pull request #340, which repairs a different failure of `unix_reaper_kills_labeled_containers`, touches
+neither `src/agent/proc.rs` nor `src/runner/container/fake.rs`.
 
 ## What the change that takes this up should do
 
