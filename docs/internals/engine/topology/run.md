@@ -1114,6 +1114,14 @@ the log by the same step the live loop applies.
 closed by that field, authorised as Class C in
 `decisions/2026-08-26-durable-retry-feedback.md`.
 
+## `pub struct TopologyRun` › `exhausted_pools: BTreeMap<String, Option<String>>,`
+
+The pools this run has written `pool_exhausted` for, each with the reset
+it recorded, as the sequential engine's `exhausted_pools` holds them. A
+settled attempt that proves a pool serving again retires it
+(`capacity::retire_served_pools`). What a resume starts it from is the
+`let exhausted_pools` section of `resumed`, below.
+
 ## `impl TopologyRun` › `pub fn resumed(handle: RunHandle, inputs: FrozenInputs, ceiling: Ceiling) -> Self {`
 
 Take over a run a completed recovery handed back.
@@ -2044,6 +2052,18 @@ for it.
 the log, and applying the event as it will be read back is what makes
 a live run and a replay of its own log one computation rather than two
 that agree by inspection (§15, "one fold, not two").
+
+## `fn unix_seconds(clock: &dyn TimeSource) -> u64 {`
+
+The run's clock in Unix seconds: the "now" a limit message's reset is
+read against (`capacity::pool_exhausted_to_record`). It is read through
+the same seam that stamps every event. A reading that is not RFC 3339 UTC
+falls back to the host clock, which is what the sequential engine reads.
+
+## `fn unix_seconds_of(reading: &str) -> Option<u64> {`
+
+`YYYY-MM-DDTHH:MM:SS[.fraction]Z` in Unix seconds, or `None` for
+anything else.
 
 ## `fn promote_candidate<O: Operator + ?Sized>(`
 

@@ -1423,10 +1423,6 @@ pub struct TopologyRun {
     /// ([`Self::with_spend_approval`]).
     approve_spend_over: Option<f64>,
     notifiers: Vec<&'static dyn Notifier>,
-    /// The pools this run has written `pool_exhausted` for, each with the reset it recorded,
-    /// as the sequential engine's `exhausted_pools` holds them. A settled attempt that proves
-    /// a pool serving again retires it (`capacity::retire_served_pools`). A resume rebuilds it
-    /// from the run's own log (`capacity::exhausted_pools_of`).
     exhausted_pools: BTreeMap<String, Option<String>>,
 }
 
@@ -2936,15 +2932,10 @@ fn escalated_onto(settlement: &AttemptSettlement) -> Option<u32> {
     }
 }
 
-/// The run's clock in Unix seconds: the "now" a limit message's reset is read against
-/// (`capacity::pool_exhausted_to_record`). It is read through the same seam that stamps
-/// every event. A reading that is not RFC 3339 UTC falls back to the host clock, which is
-/// what the sequential engine reads.
 fn unix_seconds(clock: &dyn TimeSource) -> u64 {
     unix_seconds_of(&clock.now_rfc3339()).unwrap_or_else(crate::util::unix_seconds_now)
 }
 
-/// `YYYY-MM-DDTHH:MM:SS[.fraction]Z` in Unix seconds, or `None` for anything else.
 fn unix_seconds_of(reading: &str) -> Option<u64> {
     let (date, time) = reading.strip_suffix('Z')?.split_once('T')?;
     let mut date = date.split('-');

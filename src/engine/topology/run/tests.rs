@@ -1890,9 +1890,6 @@ fn a_resumed_run_writes_pool_exhausted_again_only_when_the_limit_names_another_r
     }
 }
 
-/// The run's hooks, which make the append after a `pool_exhausted` fail before its line is
-/// whole: the attempt's `attempt_finished` never becomes durable, and the log ends with the
-/// signal.
 struct CutAfterPoolExhausted {
     inner: crate::engine::topology::seams::HarnessTopologyHooks,
     harness: std::sync::Arc<std::sync::Mutex<crate::topology::effects::HookHarness>>,
