@@ -1,5 +1,5 @@
 ---
-id: BASELINE-FLAKE-FRESH-P4-PROBE-REAPER-ONE-LISTING
+id: LOCAL-RUN-FRESH-P4-PROBE-REAPER-ONE-LISTING
 severity: P3
 disposition: deferred
 category: correctness
@@ -44,25 +44,41 @@ running for over sixty seconds, which fits the test waiting out its bound for
 calls that never came.
 
 The same commit's suite passed when run again an hour later (3737 passed, 0
-failed). This is the only failure of this test among the 273 failed local
-suite runs the operator's logs hold, from September to November 2026.
+failed). No rate can be given, since passing local runs were not counted. The
+test exists from commit `4bc56d21` (2026-10-01); among the operator's retained
+logs of failed local suite runs since then, this is its only failure.
 
 Why the reaper stopped after its first listing is not established. From
-reading the reaper (`reclaim_labeled_containers` in `src/agent/proc.rs`), two
-paths return after the first listing without another call, and they are
-candidates only:
+reading the reaper (`reclaim_labeled_containers` in `src/agent/proc.rs`), it
+can return after its first listing without another call in these ways, and
+they are candidates only:
 
-- the listing reads empty; or
-- the reaper does not establish its exclusion over the worktree, which it
-  tries once without waiting.
+- The listing reads empty.
+- The listing is not empty, but the reaper does not establish its exclusion.
+  It checks three things in this order, and returns at the first that fails:
+  - the worktree's admission lock (`take_the_worktree`): one non-waiting
+    `F_SETLK`, which fails if the lock is held by another process or the lock
+    file is missing. This check does not wait.
+  - the run's lock (`lock_has_no_holder`): one `F_GETLK` check that requires
+    `<public>/run.lock` to have no holder. This check does not wait either.
+    The creator holds that lock from its step P2, so a creator that died
+    holding it gives the same kind of race as the worktree lock.
+  - the cleanup leases (`hold_leases`): each is retried up to
+    `BEFORE_ACTING_LOCK_TRIES`, 300 times, about 10 ms apart. This is the only
+    check that waits, for about three seconds.
+- The exclusion is established, but the listing held no newline-terminated
+  container id, so nothing is killed and the reaper returns
+  (`if settled == 0 { return; }`).
 
-Which one happened, or whether it was something else, the record does not
-show: the test's scratch tree was gone.
+Which of these happened, or whether it was something else, the record does
+not show: the test's scratch tree was gone.
 
 ## What the change that takes this up should do
 
 - On the next sighting, capture the reaper's own diagnostics and the
-  stand-in's record before the scratch tree is removed.
+  stand-in's record before the scratch tree is removed, and record which of
+  the returns above the reaper took: the empty listing, which of the three
+  exclusion checks failed, or the listing with no complete id.
 - Decide from that whether the reaper gave up wrongly under load, which would
   be a defect of the reaper and graver than P3, or the test's setup raced it.
 - Keep the four-call assertion; do not retry or skip the test.
