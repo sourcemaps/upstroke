@@ -8,7 +8,7 @@ reviewed_sha: 47986d013001373cec29f530f75e14f26671e578
 location: src/workspace_manager/tests.rs:17769
 provenance: undetermined
 first_bad:
-guard: the change that makes the test tell a slow single git worktree list apart from a listing attempted again until its deadline, for instance by asserting the listing made no attempt beyond its first (contended_attempts for the repository unchanged across it), without widening the 500 ms bound, keeping the assertion that the add is refused within its deadline
+guard: the change that makes the test tell the three candidate causes apart (one slow git worktree list; a listing attempted again until its deadline; scheduler delay outside the Git process), by asserting the listing made no attempt beyond its first (contended_attempts for the repository unchanged across it) and by timing the Git process itself, from just before it is started to just after it exits, reported beside the listing's duration, without widening the 500 ms bound, keeping the assertion that the add is refused within its deadline
 ---
 
 # A registry listing took 528 ms on the Windows guest, past the 500 ms the test allows
@@ -76,10 +76,15 @@ and the log does not say how many attempts the listing made.
   again from the other two: the test build already counts attempts made again per repository
   (`contended_attempts` in `src/workspace_manager.rs`, near line 9416), so its value for the
   repository should not change across the listing. A slow Git process and time lost outside it
-  both make one attempt, so the change should also record how long the Git attempt itself took
-  (or the time from the access's own deadline being set to `worktree_records`' return) and report
-  it beside the listing's duration: a slow Git process accounts for the time past 500 ms there,
-  time lost outside it does not. Only once the causes are told apart should a repair be chosen.
+  both make one attempt, so the change should also time the Git process itself, from just before
+  it is started to just after it exits, and report that beside the listing's duration: a slow Git
+  process accounts for the time past 500 ms inside that window, and time past 500 ms that is not
+  inside it was lost outside the Git process. A proxy such as the time from the access's own
+  deadline being set to `worktree_records`' return does not separate the causes: after
+  `tolerant_registry_access` sets its deadline (`src/workspace_manager.rs`, near line 2520) the
+  thread can be descheduled before the attempt begins, so one fast attempt can end more than
+  500 ms after the deadline was set with `contended_attempts` unchanged, and that proxy would read
+  it as a slow Git process. Only once the causes are told apart should a repair be chosen.
 - **Do not widen the 500 ms bound.** If the sighting was a listing attempted again until its
   deadline, a wider bound would hide that, and a later fix-check reading this finding would call
   it closed.
