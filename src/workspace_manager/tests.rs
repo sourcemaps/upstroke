@@ -13589,6 +13589,31 @@ fn sampled_git_child_kills_every_residue_classified_and_recovered() {
     }
 }
 
+/// [`SampledChild::command`] runs the program it is given, on every
+/// platform: a spawn that went back to `Command::new("git")` fails here.
+#[test]
+fn sampled_git_child_runs_the_program_it_is_given() {
+    let program = Path::new("sampler-probe-real-git");
+    let command = SampledChild::command(program, Path::new("."), &["status".to_string()]);
+    assert_eq!(command.get_program(), program.as_os_str());
+}
+
+/// [`SampledChild::program`] is [`super::fixture::sampled_git`]'s: on
+/// Windows the real `mingw64\bin\git.exe`, and `git` by name elsewhere.
+#[test]
+fn sampled_git_child_runs_the_resolved_real_git_on_windows() {
+    let program = SampledChild::program();
+    assert_eq!(program, super::fixture::sampled_git());
+    if cfg!(windows) {
+        assert!(
+            program.ends_with(Path::new("mingw64").join("bin").join("git.exe")),
+            "the census sampler runs {program:?}, not the real git"
+        );
+    } else {
+        assert_eq!(program, Path::new("git"));
+    }
+}
+
 /// One site's sampling run: the packet's record, and the per-sample
 /// observations it was tallied from.
 ///
@@ -14424,21 +14449,32 @@ struct SampledChild {
 }
 
 impl SampledChild {
-    /// Spawn the child in a process group of its own on Unix, so that
-    /// [`Self::kill`] reaches the children git starts — `git worktree add`'s
-    /// `reset --hard` — and not the leader alone. Until PR10's round 5 this
-    /// sampler killed the leader alone (round 2's group kill reached
-    /// `fixture::KillableGitChild`, the other samplers' child), and CI's
-    /// macOS leg at `869e336a` met that child still populating the checkout
-    /// — `PR136`'s first fingerprint — at the forced removal.
-    ///
-    /// The `git` it runs is [`super::fixture::sampled_git`]'s, as
-    /// `fixture::KillableGitChild`'s is: on Windows the real
-    /// `mingw64\bin\git.exe` rather than Git for Windows' `cmd\git.exe`
+    /// The program the sampler runs: [`super::fixture::sampled_git`]'s
+    /// `git`, as `fixture::KillableGitChild`'s is. On Windows that is the
+    /// real `mingw64\bin\git.exe` rather than Git for Windows' `cmd\git.exe`
     /// launcher, whose kill would leave the real git running
-    /// (`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`); `git` everywhere else.
-    fn spawn(cwd: &Path, args: &[String]) -> Self {
-        let mut command = Command::new(super::fixture::sampled_git());
+    /// (`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`); `git` by name everywhere else.
+    ///
+    /// It fails closed. `sampled_git` falls back to `git` when `git
+    /// --exec-path` does not lead to the real binary; on Windows that `git`
+    /// is the launcher, so this panics rather than sample it.
+    fn program() -> &'static Path {
+        let program = super::fixture::sampled_git();
+        assert!(
+            !cfg!(windows) || program != Path::new("git"),
+            "the census kill sampler needs Git for Windows' real mingw64\\bin\\git.exe, \
+             and `git --exec-path` did not lead to it: killing the cmd\\git.exe launcher \
+             would leave the real git running (PR249-KILL-SAMPLER-WINDOWS-WRAPPER)"
+        );
+        program
+    }
+
+    /// The command [`Self::spawn`] starts: `program -C cwd -c
+    /// core.fsmonitor=false <args>`, its streams discarded, in a process
+    /// group of its own on Unix. Taking `program` as an argument lets a test
+    /// show that what runs is the program given, on every platform.
+    fn command(program: &Path, cwd: &Path, args: &[String]) -> Command {
+        let mut command = Command::new(program);
         command
             .arg("-C")
             .arg(cwd)
@@ -14452,7 +14488,20 @@ impl SampledChild {
             use std::os::unix::process::CommandExt as _;
             command.process_group(0);
         }
-        let child = command.spawn().expect("spawn the sampled git child");
+        command
+    }
+
+    /// Spawn the child in a process group of its own on Unix, so that
+    /// [`Self::kill`] reaches the children git starts — `git worktree add`'s
+    /// `reset --hard` — and not the leader alone. Until PR10's round 5 this
+    /// sampler killed the leader alone (round 2's group kill reached
+    /// `fixture::KillableGitChild`, the other samplers' child), and CI's
+    /// macOS leg at `869e336a` met that child still populating the checkout
+    /// — `PR136`'s first fingerprint — at the forced removal.
+    fn spawn(cwd: &Path, args: &[String]) -> Self {
+        let child = Self::command(Self::program(), cwd, args)
+            .spawn()
+            .expect("spawn the sampled git child");
         Self {
             child,
             spawned: std::time::Instant::now(),

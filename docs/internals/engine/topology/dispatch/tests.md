@@ -487,9 +487,11 @@ Windows' `cmd\git.exe`, a 46 KB launcher that starts the real
 the launcher and the pick either never began or ran to completion — no
 sampled kill had ever interrupted git on that lane. `KillableGitChild::spawn`
 now runs the real binary, resolved once through `git --exec-path`
-(`fixture::sampled_git`); PR5's four-command census sampler spawns `git` by
-name still and is recorded, not changed
-(`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`). The same run failed the kill-count
+(`fixture::sampled_git`); PR5's four-command census sampler (`SampledChild` in
+`src/workspace_manager/tests.rs`) was recorded, not changed, then
+(`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`); it now runs the same resolved binary
+on Windows, and panics there rather than fall back to the launcher, and runs
+`git` by name elsewhere. The same run failed the kill-count
 floor on macOS with 6 kills in 32 spawns and 26 picks complete before their
 kill — four of the six mid-write — because the budget was one cold probe pick
 spread over a schedule most warm picks beat. The shorter of two probe picks
