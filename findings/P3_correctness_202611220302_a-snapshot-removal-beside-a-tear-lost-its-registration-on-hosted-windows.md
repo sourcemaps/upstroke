@@ -229,6 +229,29 @@ and line 481 reads "shard 4 of 22 reported 92 passing tests; its floor is 40". I
 `75f3f0e4b2e3d5a8110ac1895f38627e9220c690e324e629bc4f381f9738d04d`, the bytes of the copy saved on
 2026-11-25 beside the red's (`cmp`). #432 merged at 2026-11-25T22:21:52Z.
 
+**It passed on the same tree three times more.** Run `45709568289` (`pull_request`, #432 at
+`4a774970`), job `139540165422`, the same leg, 22:01:17Z to 22:08:42Z, on image version
+`20261116.315.1` (line 18), checked out `94347fd` (line 109): line 431 logs the test
+`... ok <1.702s>`, and line 479 reads
+`test result: ok. 89 passed; 0 failed; 4 ignored; 0 measured; 3821 filtered out; finished in 200.55s`.
+The merge-queue run `45711166772`, job `139545654825`, the same leg, 22:12:13Z to 22:19:47Z, on
+image version `20261123.321.1` (line 18), checked out `34604508` (line 96), a merge of `4a774970`
+into `d5aff4f5` like `a630311e` and with its tree, `84c7c4ec`: line 415 logs the test
+`... ok <1.739s>`, and line 463 reads
+`test result: ok. 89 passed; 0 failed; 4 ignored; 0 measured; 3821 filtered out; finished in 203.97s`.
+The push run `45712585657` of that commit to `master`, job `139550490130`, the same leg, 22:21:57Z
+to 22:29:49Z, on image version `20261116.315.1` (line 18), checked it out too (line 96): line 415
+logs the test `... ok <1.784s>`, and line 463 reads
+`test result: ok. 89 passed; 0 failed; 4 ignored; 0 measured; 3821 filtered out; finished in 218.24s`.
+Their logs, as GitHub's API serves them with ANSI escape sequences removed:
+`~/selfhost-findings-20261128b/evidence/job-45709568289-139540165422.log`, SHA-256
+`52893340a55eecf73589ee8ede6f995f86c1d33a1c59fb9d1f7245c7a11644cb`;
+`~/selfhost-findings-20261128b/evidence/job-45711166772-139545654825.log`, SHA-256
+`1b93a96d7145b5eba71d43488ca8f1ad7b33c8ef024e17da8b20ad6a1d5066e0`; and
+`~/selfhost-findings-20261128b/evidence/job-45712585657-139550490130.log`, SHA-256
+`76fa70865138a73a026ea90d7a4db957fe8369900621ddb68ad2e5e8433176bf`, each fetched for this record on
+2026-11-28.
+
 **What is and is not established for this sighting.**
 
 - **Established:** the same assertion failed once more on a hosted Windows runner, in the merge
