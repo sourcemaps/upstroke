@@ -72,8 +72,11 @@ source, documentation, workflows, release machinery and this file.
    under the same rule, which usually gives the same answer. To move a run, re-run all of its
    jobs after setting `WINGUEST_BUSY` to `1` (to the twin), or after clearing it and, where a
    `WINGUEST_QUEUE_LIMIT` is set, unsetting it or waiting for the queue to fall below it (to the
-   guest). These are repository variables, so the change reaches every run that starts while it
-   stands -- other pull requests, pushes to `master` and merge-queue entries go to the same home
+   guest; a pull request's run goes there only if `WINGUEST_PR_HOSTED` is not `1` either, as
+   below). These are repository variables, so the change reaches every run that starts while it
+   stands -- with `WINGUEST_BUSY` at `1`, other pull requests, pushes to `master` and merge-queue
+   entries go to the twin too; with it cleared and no limit reached they go to the guest, except
+   that pull requests go to the twin while `WINGUEST_PR_HOSTED` is `1`
    -- and it is the operator's to make while the operator holds the machine; set it for the
    re-run and put it back once that run's picker has answered. To move one pull request's run,
    `WINGUEST_PR_HOSTED` is the variable that reaches pull-request runs only: re-run all of its
