@@ -1940,9 +1940,12 @@ The child half of [`a_kill_armed_at_any_containment_point_actually_kills`].
 
 A kill is `std::process::abort` for the reason [`proc::apply`] gives: the
 claim under test is what a coordinator that dies **without running any
-cleanup** does, and both `panic!` and `exit` run destructors — including
-the one that closes the very job handle whose close-on-death is the
-mechanism. So it needs a process of its own.
+cleanup** does, and `panic!` and `exit` both run some. `panic!` unwinds and
+runs the stack's destructors — including the one that closes the very job
+handle whose close-on-death is the mechanism. `std::process::exit` runs no
+stack destructors, but it is the orderly exit and runs the process-exit
+handlers registered with the platform. `std::process::abort` runs neither.
+So the kill needs a process of its own.
 
 It **establishes containment first**, which is not decoration. On Windows
 a kill at `CreatedSuspended` leaves a suspended stub by construction —
