@@ -97,6 +97,20 @@ An agent the record names and no adapter provides refuses, naming it.
 from, so an agent in it that this build cannot probe is a run that cannot be
 certified — not one that quietly certifies fewer agents than it recorded.
 
+## `fn a_probe_refusal_ends_saying_the_run_is_resumable_and_without_a_full_stop() {`
+
+The ending of [`refused`], the refusal every failed shell or CLI probe takes:
+its message ends "so the run is resumable", with no full stop after it, since
+`Display` text takes no trailing period (`standards/07`). Checked under both
+policies, because the sentence before it names a different boundary for each:
+the host, or the recorded image.
+
+This test builds the error directly instead of driving `certify`, because the
+ending is in the helper's own text, the same for whatever probe failed.
+[`PROFILE_REFUSAL_CLOSING`] pins `profile_refused`'s ending, and before this
+test nothing pinned `refused`'s, so its period could come back with every test
+still passing (`PR400-PROBE-REFUSAL-PERIOD-UNPINNED`).
+
 ## `fn a_slotted_invocation_without_an_agent_binding_is_refused() {`
 
 A slotted invocation with no agent binding is refused, and its registration

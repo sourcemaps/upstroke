@@ -336,6 +336,37 @@ fn an_agent_with_no_adapter_refuses_naming_it() {
 }
 
 #[test]
+fn a_probe_refusal_ends_saying_the_run_is_resumable_and_without_a_full_stop() {
+    const PROBE_REFUSAL_ENDING: &str = "so the run is resumable";
+
+    for policy in [host_policy(), container_policy()] {
+        let error = refused(&policy, &format!("no adapter is registered for `{AGENT}`"));
+        let text = error.to_string();
+        assert!(
+            matches!(error, UpstrokeError::Refused { .. }),
+            "a refusal, not some other failure: {text}"
+        );
+        assert!(
+            text.starts_with("pre-flight: "),
+            "the refusal shape: {text}"
+        );
+        assert!(
+            text.ends_with(PROBE_REFUSAL_ENDING),
+            "a probe refusal ends saying the run is resumable: {text}"
+        );
+        assert!(
+            !text.ends_with('.'),
+            "and with no full stop, as `Display` text takes no trailing period: {text}"
+        );
+        assert_eq!(
+            text.matches(PROBE_REFUSAL_ENDING).count(),
+            1,
+            "and says it once: {text}"
+        );
+    }
+}
+
+#[test]
 fn a_slotted_invocation_without_an_agent_binding_is_refused() {
     let runner = Recording::default();
     let adapters = Registry;
