@@ -4090,9 +4090,12 @@ kills of nothing.
 The rung's aim, `(rung + 1) / (SAMPLING_N + 1)` of the current budget, and
 `KillableGitChild::run_until` in place of a sleep then a kill: the child is
 polled to the aim — once a millisecond while it is far, continuously through
-its last four — and the poll that reaches the aim with the child still
-running sends the kill itself, with no return to the caller between the two,
-so the sleep that used to sit between the aim and the kill is gone. A child
+its last four — each poll that finds it running is followed by a read of the
+clock, and when that read finds the aim passed the kill is attempted at once,
+with no return to the caller between that poll and the kill, so the sleep
+that used to sit between the aim and the kill is gone. That last poll saw the
+child running before the clock read, at a time these notes do not claim is
+the aim; nothing says it was running at the aim or at the kill. A child
 that exits first is observed at the poll that finds it gone, and that
 observation is the number the budget follows: the parent's clock, from an
 origin read before the spawn — the next poll's when the parent holds a core,
@@ -4104,8 +4107,9 @@ descheduled there lets the child finish, the kill misses, and the child's
 status is a completion. Such a pick is fed back too, where until 2026-09-10 it was thrown away (the
 ultra review of `f837f4ca`, finding 2), and the number it is fed back as is
 the clock at which the parent established the exit: for a child the poll found
-gone, that poll's; for a child that was running at its aim and ended with a
-completion's status, the clock `KillableGitChild::wait` reads once
+gone, that poll's; for a child no poll had found gone when the parent read
+its aim passed, and that ended with a completion's status, the clock
+`KillableGitChild::wait` reads once
 `Child::wait` has returned that status (`reaped`). The kill's own clock is not
 that number. `Child::kill` returns `Ok` once the signal is sent and also for a
 child that has already exited, and `Err` when nothing was sent, so the clock

@@ -3465,25 +3465,33 @@ impl KillableGitChild {
     }
 
     /// Leave the child running until `aim` after its spawn or until it
-    /// exits on its own, and say which: `Some` with how long it ran, as the
-    /// parent saw it, if it exited first; `None` if it was still running at
-    /// the aim — and then **the kill has fired**, sent by the poll that found
-    /// it running there, and [`Self::fired`] says when.
+    /// exits on its own, and say which the parent saw: `Some` with how long
+    /// it ran, as the parent saw it, if a poll found it gone before the
+    /// parent read the aim passed; `None` if none did — and then **the kill
+    /// has been attempted**, straight after the last poll, which found the
+    /// child running, and [`Self::fired`] says when the attempt returned.
+    /// That poll came before the clock read that found the aim passed — by
+    /// however long the parent took between the two, descheduled or not —
+    /// so it fell at a time this does not claim is the aim: `None` says the
+    /// child was running at the last poll, not that it was running at the
+    /// aim or at the kill.
     ///
     /// Polled, never slept through. `sleep(aim)` then `kill` reports nothing
     /// about the child and wakes when the scheduler pleases, so on a loaded
     /// host the kill is late by the wake-up and the sampler cannot tell a
     /// child it missed from one it never aimed inside. Here [`Self::exited`]
     /// is asked once a millisecond while the aim is far and continuously
-    /// once it is within [`Self::SPIN_WITHIN`], and the poll that reaches
-    /// the aim with the child still running sends the kill itself, with no
-    /// return to the caller between the two. What remains is the
+    /// once it is within [`Self::SPIN_WITHIN`], each poll that finds the
+    /// child running is followed by a read of the clock, and when that read
+    /// finds the aim passed the kill is attempted at once, with no return to
+    /// the caller between that poll and the kill. What remains is the
     /// platform's: between that poll's `try_wait` and the kill's own system
     /// call the parent can be descheduled, and a child that exits in that
-    /// window is missed by the kill and ends on its own terms — its status
-    /// is a completion, not the kill's signature, and the samplers feed it
-    /// back like any completion, as [`Self::reaped`], the clock once
-    /// [`Self::wait`] has returned that status.
+    /// window, whether before the aim or after it, is missed by the kill and
+    /// ends on its own terms — its status is a completion, not the kill's
+    /// signature, and the samplers feed it back like any completion, as
+    /// [`Self::reaped`], the clock once [`Self::wait`] has returned that
+    /// status.
     pub(crate) fn run_until(&mut self, aim: std::time::Duration) -> Option<std::time::Duration> {
         let deadline = self.origin + aim;
         loop {

@@ -512,9 +512,12 @@ completions, so an inflated probe is corrected by the first child that
 outruns it and a drifting host is tracked rung by rung. The kill itself is
 `KillableGitChild::run_until` rather than `sleep` then `kill`: the child is
 polled to the aim, once a millisecond while it is far and continuously
-through its last four, and the poll that reaches the aim with the child
-still running sends the kill, with no return to the caller between the two.
-A child that exits first is observed at the poll that finds it gone — the
+through its last four, each poll that finds it running is followed by a read
+of the clock, and when that read finds the aim passed the kill is attempted
+at once, with no return to the caller between that poll and the kill. That
+last poll saw the child running before the clock read, at a time these notes
+do not claim is the aim; nothing says it was running at the aim or at the
+kill. A child that exits first is observed at the poll that finds it gone — the
 parent's clock, from an origin read before the spawn, not the child's own —
 and a child that finishes in the window between that last poll's `try_wait`
 and the kill's system call, the parent descheduled there, ends with a
