@@ -352,20 +352,33 @@ being exhausted, or verified work gets rolled back.
 
 ## `fn hits_a_quota_window(lower: &str) -> bool {`
 
-The quota-window rule described in the section above. Each piece after
-"hit your " is read one of two ways:
+The quota-window rule described in the section above: some piece after
+"hit your " starts with a quota window and its limit, as
+`after_a_quota_window` reads it.
+
+## `fn after_a_quota_window(after: &str) -> Option<&str> {`
+
+What follows " limit", when `after`, the lower-cased text after a
+"hit your ", starts with a quota window and its limit; otherwise `None`. It
+is read one of two ways:
 
 - If it starts with ASCII digits, the window is those digits and "-hour".
 - Otherwise the window is the run of ASCII letters it starts with, which
   must not be empty. "session" and "weekly" signal on their own. Any other
   word, a model name such as "fable" or "opus", signals only if
-  `says_when_it_resets` holds for what follows the limit.
+  `when_it_resets` finds a reset in what follows the limit.
 
 Either way the window must be followed by " limit" as a whole word, which
 `after_a_whole_limit` checks. The window is one word: "context window" and
 "context-window" stop at the space or the hyphen, which is not " limit", and
 "fable4" stops at the digit. So none of them signals, with a reset or
 without.
+
+It is one function, rather than the body of `hits_a_quota_window`, so that
+`the_limits_reset` recognises exactly the limits that signal, and nothing
+else, when it looks for the reset that follows one. What it returns is a
+suffix of `after`, so a caller that knows where `after` ends knows where the
+limit ends.
 
 The model form was added after the pull request that reads resets from limit
 messages. Its parser test read the observed Fable message with
@@ -403,19 +416,23 @@ the next character is a word character. Both work on slices of the same
 string, so the rule still allocates nothing more and cannot panic. The
 character test is ASCII only, like the lower-casing before it.
 
-## `fn says_when_it_resets(after_limit: &str) -> bool {`
+## `fn when_it_resets(after_limit: &str) -> Option<&str> {`
 
-Whether the next word after the limit is "resets", followed by a space, as
-in " · resets Nov 14, 9am (UTC)". Only characters that are neither letters,
-digits (in any script) nor underscores may come between: spaces, `·`, `∙`,
-punctuation. So "hit your token limit; the cache resets 9am (UTC)" does not
-count: the next word is "the".
+What follows "resets " when the next word after the limit is "resets",
+followed by a space, as in " · resets Nov 14, 9am (UTC)"; otherwise `None`.
+Only characters that are neither letters, digits (in any script) nor
+underscores may come between: spaces, `·`, `∙`, punctuation. So "hit your
+token limit; the cache resets 9am (UTC)" does not count: the next word is
+"the".
 
-The test is for the word only, not for a reset that parses. A reset in
-another zone, which `reset_at_from_limit_message` refuses, still says the
-allowance comes back, so the message is still a rate limit; its `reset_at`
-is just unknown. "resets " with a space is the same word
-`reset_at_from_limit_message` looks for.
+`after_a_quota_window` asks only whether there is one. The test there is for
+the word only, not for a reset that parses. A reset in another zone, which
+`reset_at_from_limit_message` refuses, still says the allowance comes back,
+so the message is still a rate limit; its `reset_at` is just unknown.
+"resets " with a space is the same word `reset_at_from_limit_message` looks
+for, and `the_limits_reset` uses what this returns as the reset to read. It
+was `says_when_it_resets`, which returned only whether; it returns the rest
+so that both read one rule for which reset belongs to the limit.
 
 The gap test uses Unicode letters and digits, not ASCII ones, so that a word
 in another script between "limit" and "resets" is a word and stops the
@@ -484,26 +501,85 @@ guess at the offset would be a wrong timestamp recorded as fact. `None` is
 what `reset_at` held before this existed, and the estimate already says
 what it means: the reset is unknown.
 
-If several resets appear, the first is read, and only the first. A text
-whose first reset is malformed gives `None` even when a later one parses:
-the first is the one the message gave, and a later one may be about
-something else.
+Which reset is read is decided before any of it is parsed, by two rules in
+order:
+
+- the reset that belongs to a limit: `resets` as the next word after a
+  limit `hits_a_quota_window` would accept, on the same line
+  (`the_limits_reset`). If several lines carry one, the first such line's
+  is read;
+- failing that, the text's reset if it has exactly one (`the_only_reset`).
+  A text with two or more resets and none of them a limit's gives `None`.
+
+So `MCP cache resets 9am (UTC)` on one line and `You've hit your 5-hour
+limit · resets 5:30am (UTC)` on the next give 05:30, in either order. The
+two observed messages, each alone, read as they always have: their reset is
+both the limit's and the only one. A text with a single reset reads as it
+did before as well, wherever the reset is, so `You've hit your session
+limit` with `resets 5:30am (UTC)` on the next line still gives 05:30.
+
+The chosen reset is the only one parsed. When the limit's reset is
+malformed or in another zone the answer is `None`, even if another reset in
+the text parses: the limit's is the one the message gave, and the other is
+about something else.
+
+The rule was the first `resets` in the text until finding
+`PR380-RESET-PARSER-TAKES-UNRELATED-FIRST-RESET` showed it taking an
+unrelated one. Claude Code's stderr can
+carry other lines before the limit message, and with `MCP cache resets 9am
+(UTC)` above the five-hour message the recorded `reset_at` was 09:00, three
+and a half hours after the pool came back. A lone reset is still read
+without a limit before it because that is what the rule did, and the only
+reset in a failure that is already a rate limit has nothing to be confused
+with. With two and no limit to choose between them, `None`, an unknown
+reset, is the honest answer.
 
 It never panics, on any text and any `now_unix`. The text is read with
-`match_indices`, `strip_prefix`, `starts_with`, `get` and
+`lines`, `match_indices`, `strip_prefix`, `starts_with`, `get` and
 `split_at_checked`, each of which returns a slice of the same string or
-`None`; the only indices come from `find` and `match_indices`, so they
-fall on character boundaries. The clock arithmetic is checked: a
+`None`; the only indices come from `find` and `match_indices`, or are a
+line's length less that of a suffix of its lower-cased copy (with
+`checked_sub`), so they fall on character boundaries. The clock arithmetic is checked: a
 `now_unix` past `i64::MAX`, or a candidate whose seconds would overflow,
 gives `None`. So does a nearest candidate before 1970, which has no unix
 time to format; only a clock read near the epoch can meet one.
 
-## `fn first_reset(text: &str) -> Option<&str> {`
+## `fn the_limits_reset(text: &str) -> Option<&str> {`
 
-What follows the first `resets ` that begins a word: at the start of the
-text, or after a character that is not an ASCII letter, ASCII digit or
+What follows `resets ` where that is the next word after a recognised
+limit, on the first line that has one. The text is lower-cased once, for
+`after_a_quota_window`, and its lines are walked beside the original's.
+`to_ascii_lowercase` changes only ASCII letters, byte for byte, so the two
+have the same lines, of the same lengths, with characters at the same
+offsets. The limit's end is found in the lower-cased line, where "Fable"
+reads as a window, and carried to the original line by its distance from
+the line's end. `when_it_resets` then reads the original, so "resets " must
+be printed in lower case, as the rest of the grammar is matched exactly.
+
+Every "hit your " in a line is tried, as in `hits_a_quota_window`, but the
+piece after it runs to the end of the line rather than to the next
+"hit your ". The two differ only for a limit with "hit your " directly
+against it ("limithit your"), which one reads as a limit with nothing after
+it and the other not as a limit; neither has a reset to take.
+
+Lines are those of `str::lines`, so a `\r\n` ending is a line ending too.
+A reset on the line after the limit, with nothing but the limit on its own
+line, is not the limit's: the observed messages carry theirs on the same
+line, and a line break is where stderr starts something else.
+
+## `fn the_only_reset(text: &str) -> Option<&str> {`
+
+What follows the text's reset when `resets_in` finds exactly one; `None`
+when it finds none or several.
+
+## `fn resets_in(text: &str) -> impl Iterator<Item = &str> {`
+
+What follows each `resets ` that begins a word, in order: at the start of
+the text, or after a character that is not an ASCII letter, ASCII digit or
 underscore, the boundary `after_a_whole_limit` uses. Without it,
-`loaded presets 5:30am (UTC)` would read as a reset.
+`loaded presets 5:30am (UTC)` would read as a reset, and would count against
+a real one. This was `first_reset`, which took the first; it yields them
+all so that `the_only_reset` can count them.
 
 ## `const MONTHS: [&str; 12] = [`
 
@@ -902,18 +978,45 @@ misspelt, lower-case, unabbreviated or four-letter month, 31 November,
 31 April, 30 February, day 0, a three-digit day, no day, no comma, no space
 after the comma, and a dated reset with an hour of 13 or no time.
 
-## `mod tests` › `fn the_first_of_several_resets_is_read() {`
+## `mod tests` › `fn the_reset_after_the_limit_is_read_not_an_earlier_unrelated_one() {`
 
-Two well-formed resets give the first, for a time-only and a dated first.
-A malformed first reset gives `None`; it is not passed over for a later
-one.
+The defect `PR380-RESET-PARSER-TAKES-UNRELATED-FIRST-RESET`: `MCP cache
+resets 9am (UTC)` on the line before the observed five-hour message gives
+05:30, not 09:00. So does the same with `\r\n` line endings, with the
+lines the other way round, with a session limit, and with the unrelated
+reset on a line that has a "hit your" which is not a limit: a context-window
+limit or "the patch hit your branch". The Fable message under the same
+line gives its own 14 November.
+
+## `mod tests` › `fn several_resets_and_none_after_a_limit_give_none() {`
+
+Two resets and no limit's to choose: `None`. That covers two resets with no
+limit at all, which gave the first under the rule this replaced (the test
+was `the_first_of_several_resets_is_read`), and a limit whose reset is on
+the next line, after another word ("the queue resets"), or after a
+context-window limit, which is not a quota window.
+
+## `mod tests` › `fn a_lone_reset_is_read_as_before() {`
+
+The fallback. A single reset is read wherever it is, as under the first-reset
+rule: on the line after the limit, after another word on the limit's line,
+and with no limit in the text at all.
+
+## `mod tests` › `fn a_malformed_reset_after_the_limit_is_not_passed_over() {`
+
+A limit's reset with an hour of 13, or in `(Europe/London)`, gives `None`
+though the text's other reset parses. Two resets with no limit, the first
+malformed, give `None` as well, now because there are two.
 
 ## `mod tests` › `fn arbitrary_non_ascii_text_never_panics() {`
 
 Texts with non-ASCII characters where the reset's parts would be (a
 full-width digit, an accented month or `am`, full-width `UTC`, a
 no-break space, a middle dot in place of each space, Japanese before the
-message, an emoji or a NUL against `resets`), each read at five instants
+message, an emoji or a NUL against `resets`; and, for the limit's reset,
+limits with a no-break space before `resets`, a non-ASCII model name, an
+accented `résets`, a limit in capitals, a limit whose `resets` has nothing
+after it and a bare "hit your "), each read at five instants
 from 0 to `u64::MAX`. With them, every prefix and every suffix of both
 observed messages, cut at each character boundary, so a cut lands inside
 every part of the grammar, including just after the multibyte middle dot.
