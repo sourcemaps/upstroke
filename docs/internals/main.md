@@ -105,7 +105,11 @@ commands never invoke either closure.
 prints no grant status and does not resolve the reset token. The read returns before
 pool/config loading or discovery. Both data flags may be combined, but conflict with all report options;
 `--auth` requires the subscription flag. The CLI child retains its selected config directory
-and native auth but receives an empty reset bearer. Bearer mode reuses the existing fixed
+and native auth but receives an empty reset bearer. `execute` also hands the reader a
+presence-only lookup (`var_os(..).is_some()`, never a value): with both `CLAUDE_CONFIG_DIR`
+and `CLAUDE_CODE_OAUTH_TOKEN` present the token would override the profile, so no CLI starts
+and the subscription report is unavailable, naming both, while a composed reset read and
+exit 0 are unchanged. Bearer mode reuses the existing fixed
 GET for windows and grants, even with both flags, and never starts Claude. Missing bearer
 credentials start no external operation. Neither route retries, falls back, stores a report
 or uses readings in pool arithmetic. The composition tests drive real tracker readers and

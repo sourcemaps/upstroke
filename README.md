@@ -55,7 +55,7 @@ On Windows, Codex can review but not implement.
 | `upstroke capacity` | Checks sign-in once per agent and shows each pool's estimated remaining, from every run on this machine. |
 | `upstroke capacity --refresh` | First asks each pool's billing endpoint what it has drawn this month, for pools you opted in. |
 | `upstroke capacity --reset-credits claude` | Reads advisory voluntary reset grants: count, kind and use-by, independently of pools. Requires provider-authorized `UPSTROKE_CLAUDE_RESET_TOKEN`; native-app-only credentials are unsuitable without that authorization. |
-| `upstroke capacity --subscription-usage claude` | Reads only advisory windows through the signed-in CLI (`--auth cli` is equivalent). Select its profile with `CLAUDE_CONFIG_DIR`. No bearer lookup or grant status. |
+| `upstroke capacity --subscription-usage claude` | Reads only advisory windows through the signed-in CLI (`--auth cli` is equivalent). Select its profile with `CLAUDE_CONFIG_DIR`. If `CLAUDE_CODE_OAUTH_TOKEN` is also set, even empty, the token would override that profile, so no CLI starts and windows are reported unavailable, naming both variables (exit 0). No bearer lookup or grant status. |
 | `upstroke capacity --subscription-usage claude --reset-credits claude` | Reads CLI windows and independently reads bearer grants. Either report remains available if the other fails. |
 | `upstroke capacity --subscription-usage claude --auth bearer` | Reads windows and grants from one fixed GET using the provider-authorized reset token. No CLI or fallback; missing groups stay unknown. Adding `--reset-credits claude` gives the same one-read report. |
 | `upstroke run plan.md --budget 15` | Runs for real on a `upstroke/run-<id>` branch; needs a clean working tree. |

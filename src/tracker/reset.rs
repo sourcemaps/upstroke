@@ -14,6 +14,7 @@
 use serde_json::Value;
 
 use super::provider::{Credential, Secret, UsageRequest, UsageResponse};
+use super::subscription::UniqueValue;
 use super::transport::{MAX_BODY_BYTES, TransportError};
 
 /// An operator-provided bearer explicitly authorized by the provider for
@@ -137,6 +138,10 @@ pub enum Unavailable {
     Status,
     #[error("the provider did not report a recognized reset inventory")]
     NotReported,
+    #[error(
+        "CLAUDE_CONFIG_DIR and CLAUDE_CODE_OAUTH_TOKEN are both set, and the token overrides the profile, so the windows could be another account's; unset one; Claude CLI not started"
+    )]
+    CliProfileOverridden,
     #[error("Claude CLI could not start; check the installation and CLI login")]
     CliNotStarted,
     #[error("Claude CLI usage probe timed out")]
@@ -182,7 +187,8 @@ pub fn parse(response: &UsageResponse, now_unix: u64) -> ResetReport {
 }
 
 /// Shared status, size and JSON checks for the single fixed bearer response.
-/// Errors carry only a fixed category, never the response body.
+/// A key repeated in any object is two competing readings, so the body is
+/// not reported. Errors carry only a fixed category, never the response body.
 pub(super) fn response_value(response: &UsageResponse) -> Result<Value, Unavailable> {
     let unavailable = match response.status {
         200 => None,
@@ -196,7 +202,9 @@ pub(super) fn response_value(response: &UsageResponse) -> Result<Value, Unavaila
     if response.body.len() > MAX_BODY_BYTES {
         return Err(Unavailable::TooLarge);
     }
-    serde_json::from_str(&response.body).map_err(|_| Unavailable::NotReported)
+    serde_json::from_str(&response.body)
+        .map(|UniqueValue(value)| value)
+        .map_err(|_| Unavailable::NotReported)
 }
 
 /// The same validated grant representation for reset-only and combined bearer reads.
@@ -670,6 +678,39 @@ mod tests {
         let mut wire = grant();
         wire["ends_at"] = json!("2026-02-30T00:00:00Z");
         assert_eq!(single(wire, json!(true)).ends_at_unix, None);
+    }
+
+    #[test]
+    fn bearer_parser_rejects_contradictory_counts() {
+        let ends_at = crate::util::rfc3339_utc(NOW + 3600);
+        let body = |counts: &str| {
+            format!(
+                r#"{{"cedar_ember":{{"eligible":true,"grants":[{{{counts},"ends_at":"{ends_at}","type":"weekly","paused":false,"usable_now":true}}]}}}}"#
+            )
+        };
+        let response = |body: String| UsageResponse { status: 200, body };
+        let single = parse(&response(body(r#""resets_left":1"#)), NOW);
+        assert!(single.render().contains("count: 1;"), "{single:?}");
+        assert!(
+            single.render().contains("availability: usable;"),
+            "{single:?}"
+        );
+        let contradictory = response(body(r#""resets_left":0,"resets_left":1"#));
+        let report = parse(&contradictory, NOW);
+        assert_eq!(
+            report,
+            ResetReport::Unavailable(Unavailable::NotReported),
+            "{}",
+            report.render()
+        );
+        let text = report.render();
+        assert!(!text.contains("count: 1"), "{text}");
+        assert!(!text.contains("availability: usable"), "{text}");
+        assert_eq!(
+            response_value(&contradictory),
+            Err(Unavailable::NotReported),
+            "the combined bearer subscription read shares this reader"
+        );
     }
 
     #[test]

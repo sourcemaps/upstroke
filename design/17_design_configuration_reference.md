@@ -97,6 +97,10 @@ The independent `capacity --reset-credits claude` reader needs no pool or usage 
 `--auth cli` keeps the CLI's own login and inherited `CLAUDE_CONFIG_DIR` (or the CLI default),
 and blanks the reset token in the child. Select an already signed-in profile with, for
 example, `CLAUDE_CONFIG_DIR=/absolute/profile upstroke capacity --subscription-usage claude`.
+A set `CLAUDE_CODE_OAUTH_TOKEN` overrides that profile, so the CLI could answer for another
+account. The route judges the two variables by presence alone, never by value: with both set,
+even to empty values, it starts no CLI and reports windows unavailable, naming both variables,
+with exit 0; grants read with `--reset-credits claude` are unaffected. Either alone changes nothing.
 This mode reports windows only and never resolves the bearer or checks grants. Add
 `--reset-credits claude` to read grants independently with the reset token. Either source's
 failure leaves the other's report visible. `--auth bearer` instead reads both windows and

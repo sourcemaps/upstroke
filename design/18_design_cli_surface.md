@@ -41,7 +41,11 @@ is no daemon.
 
 `capacity --subscription-usage claude` reads only advisory subscription windows (§13)
 through the CLI's own login (`--auth cli` is equivalent). Select an already signed-in
-profile through `CLAUDE_CONFIG_DIR`, or leave it unset for the CLI default. It does not
+profile through `CLAUDE_CONFIG_DIR`, or leave it unset for the CLI default. With
+`CLAUDE_CODE_OAUTH_TOKEN` also set, judged by presence alone, the token would override that
+profile, so it starts no CLI and reports windows unavailable, naming both variables; it still
+exits `0`, and a composed `--reset-credits claude` grant read is unaffected. Either variable
+alone changes nothing. It does not
 resolve the reset bearer, send HTTP or print a grant status, even with a token configured.
 
 `capacity --subscription-usage claude --reset-credits claude` composes those same CLI

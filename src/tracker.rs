@@ -100,16 +100,19 @@ fn reset_response(
 
 /// Read advisory windows through the CLI, or windows and grants through one
 /// bearer GET. CLI auth stays inside Claude; bearer auth resolves only TOKEN_ENV.
+/// `present` says only whether a variable is set; the CLI route asks it about
+/// its profile and the token that overrides it, and starts no CLI when both are.
 /// No fallback, persistence, redemption or pool arithmetic occurs here.
 pub fn subscription_usage(
     auth: subscription::Auth,
     runner: &dyn crate::runner::Runner,
     transport: &dyn UsageTransport,
     credential: &dyn Fn(&str) -> Option<String>,
+    present: &dyn Fn(&str) -> bool,
     now_unix: Option<u64>,
 ) -> subscription::Report {
     let payload = match auth {
-        subscription::Auth::Cli => subscription::read_cli(runner),
+        subscription::Auth::Cli => subscription::read_cli(runner, present),
         subscription::Auth::Bearer => reset_response(transport, credential)
             .and_then(|response| reset::response_value(&response)),
     };
@@ -724,6 +727,7 @@ agent = \"claude-code\"
             &runner,
             &table,
             &|_| panic!("CLI must never resolve the bearer"),
+            &|name| name == subscription::OAUTH_TOKEN_ENV,
             Some(NOON),
         );
         assert!(report.render().contains("five-hour: used: 12%"));
@@ -854,6 +858,7 @@ agent = \"claude-code\"
                 &runner,
                 &table,
                 &|_| panic!("no fallback"),
+                &|_| false,
                 Some(NOON),
             );
             assert_eq!(report, subscription::Report::Unavailable(reason));
@@ -878,6 +883,7 @@ agent = \"claude-code\"
                 assert_eq!(name, reset::TOKEN_ENV);
                 Some("synthetic-bearer".to_owned())
             },
+            &|_| false,
             Some(NOON),
         );
         let text = report.render();
@@ -914,6 +920,7 @@ agent = \"claude-code\"
                     assert_eq!(name, reset::TOKEN_ENV);
                     Some("synthetic-bearer".to_owned())
                 },
+                &|_| false,
                 Some(NOON),
             );
             assert!(matches!(report, subscription::Report::Read { .. }));
@@ -946,6 +953,7 @@ agent = \"claude-code\"
                 &runner,
                 &table,
                 &|_| Some("synthetic-bearer".to_owned()),
+                &|_| false,
                 Some(NOON),
             );
             assert_eq!(report, subscription::Report::Unavailable(reason));
@@ -961,6 +969,7 @@ agent = \"claude-code\"
                 &runner,
                 &table,
                 &|_| token.map(str::to_owned),
+                &|_| false,
                 Some(NOON),
             );
             assert!(report.render().contains("no request sent"));

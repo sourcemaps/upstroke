@@ -1,5 +1,6 @@
 //! Advisory Claude subscription readings. The CLI owns its login and profile;
-//! this module never reads credentials. PATH discovery, inherited environment
+//! this module never reads credentials or values, only whether its profile and
+//! override variables are set. PATH discovery, inherited environment
 //! and current working directory use the existing Runner probe contract. The
 //! Runner bounds capture, kills timed-out descendants and closes stdin at EOF.
 //! Only the reset bearer is blanked. No settings, tools, prompt or shell runs.
@@ -20,6 +21,10 @@ use crate::runner::{CommandSpec, Runner};
 use super::reset::{self, ResetReport, Unavailable};
 use super::transport::{MAX_BODY_BYTES, PROCESS_TIMEOUT};
 
+/// Selects the CLI's profile when set.
+pub const PROFILE_ENV: &str = "CLAUDE_CONFIG_DIR";
+/// Overrides whatever profile `PROFILE_ENV` selects when set.
+pub const OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 const MAX_MODELS: usize = 128;
 const INPUT: &str = "{\"type\":\"control_request\",\"request_id\":\"usage-only\",\"request\":{\"subtype\":\"get_usage\",\"skip_behaviors\":true}}\n";
 
@@ -68,7 +73,15 @@ pub enum Report {
     },
 }
 
-pub(super) fn read_cli(runner: &dyn Runner) -> Result<Value, Unavailable> {
+/// `present` answers whether a variable is set, never its value. A profile
+/// with the overriding token set could report another account, so no CLI starts.
+pub(super) fn read_cli(
+    runner: &dyn Runner,
+    present: &dyn Fn(&str) -> bool,
+) -> Result<Value, Unavailable> {
+    if present(PROFILE_ENV) && present(OAUTH_TOKEN_ENV) {
+        return Err(Unavailable::CliProfileOverridden);
+    }
     let mut command = CommandSpec::new("claude");
     for argument in [
         "-p",
@@ -128,7 +141,8 @@ struct ControlResponse {
 
 // Value's default map reader keeps the last duplicate key. A usage payload
 // with two competing readings is ambiguous, including inside a window/grant.
-struct UniqueValue(Value);
+// The CLI payload and the bearer body (`reset::response_value`) both use it.
+pub(super) struct UniqueValue(pub(super) Value);
 
 impl<'de> Deserialize<'de> for UniqueValue {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {

@@ -325,6 +325,7 @@ fn execute(command: Command, contained: Contained) -> anyhow::Result<ExitCode> {
                 &runner,
                 &tracker::CurlTransport::new(&runner),
                 &|variable| std::env::var(variable).ok(),
+                &|variable| std::env::var_os(variable).is_some(),
                 None,
             )
         },
@@ -1122,6 +1123,7 @@ mod tests {
                                         &runner,
                                         &transport,
                                         &credential,
+                                        &|_| false,
                                         Some(0),
                                     )
                                 },
@@ -1182,6 +1184,156 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn subscription_cli_refuses_a_profile_an_oauth_token_would_override() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tracker::subscription::{Auth, OAUTH_TOKEN_ENV, PROFILE_ENV, Report};
+        use upstroke::runner::{RunFuture, Runner, RunnerCall, RunnerRequest};
+
+        #[derive(Default)]
+        struct Recording {
+            cli_calls: AtomicUsize,
+            curl_calls: AtomicUsize,
+        }
+
+        impl Runner for Recording {
+            fn run<'a>(
+                &'a self,
+                request: &'a RunnerRequest,
+                _call: RunnerCall<'a>,
+            ) -> RunFuture<'a> {
+                let stdout = match request.command.program.as_str() {
+                    "claude" => {
+                        self.cli_calls.fetch_add(1, Ordering::Relaxed);
+                        concat!(
+                            "{\"type\":\"control_response\",\"response\":{",
+                            "\"request_id\":\"usage-only\",\"subtype\":\"success\",",
+                            "\"response\":{\"rate_limits_available\":true,\"rate_limits\":{",
+                            "\"five_hour\":{\"utilization\":12}}}}}\n"
+                        )
+                        .to_owned()
+                    }
+                    "curl" => {
+                        self.curl_calls.fetch_add(1, Ordering::Relaxed);
+                        "{\"cedar_ember\":{\"grants\":[{\"resets_left\":2}]}}\n200".to_owned()
+                    }
+                    other => panic!("unexpected external operation: {other}"),
+                };
+                Box::pin(async move {
+                    Ok(upstroke::agent::ProcessOutput {
+                        code: Some(0),
+                        stdout,
+                        stderr: String::new(),
+                        duration: std::time::Duration::ZERO,
+                        timed_out: false,
+                        output_limited: false,
+                    })
+                })
+            }
+        }
+
+        let credential = |name: &str| {
+            assert_eq!(name, tracker::reset::TOKEN_ENV);
+            Some("synthetic-bearer".to_owned())
+        };
+        for (profile, token) in [(false, false), (true, false), (false, true), (true, true)] {
+            let present = |name: &str| match name {
+                PROFILE_ENV => profile,
+                OAUTH_TOKEN_ENV => token,
+                other => panic!("the CLI route judges only its two variables, not {other}"),
+            };
+            let both = profile && token;
+            for include_reset in [false, true] {
+                let runner = Recording::default();
+                let transport = tracker::CurlTransport::new(&runner);
+                let text = read_subscription_report(
+                    Auth::Cli,
+                    include_reset,
+                    || tracker::reset_credits(&transport, &credential, Some(0)),
+                    |selected| {
+                        tracker::subscription_usage(
+                            selected,
+                            &runner,
+                            &transport,
+                            &credential,
+                            &present,
+                            Some(0),
+                        )
+                    },
+                );
+                assert_eq!(
+                    runner.cli_calls.load(Ordering::Relaxed),
+                    usize::from(!both),
+                    "{text}"
+                );
+                assert_eq!(
+                    runner.curl_calls.load(Ordering::Relaxed),
+                    usize::from(include_reset),
+                    "{text}"
+                );
+                assert_eq!(text.contains("five-hour: used: 12%"), !both, "{text}");
+                assert_eq!(
+                    text.contains(&format!(
+                        "claude subscription usage: unavailable — {PROFILE_ENV} and \
+                         {OAUTH_TOKEN_ENV} are both set"
+                    )),
+                    both,
+                    "{text}"
+                );
+                assert_eq!(text.contains("count: 2;"), include_reset, "{text}");
+                assert!(!text.contains("synthetic-bearer"), "{text}");
+            }
+
+            let command = Cli::try_parse_from([
+                "upstroke",
+                "capacity",
+                "--subscription-usage",
+                "claude",
+                "--reset-credits",
+                "claude",
+            ])
+            .expect("subscription command")
+            .command;
+            let contained =
+                containment::establish(&command, || panic!("read only")).expect("no ambient job");
+            let runner = Recording::default();
+            let transport = tracker::CurlTransport::new(&runner);
+            let result = execute_with_readers(
+                command,
+                contained,
+                || tracker::reset_credits(&transport, &credential, Some(0)),
+                |selected| {
+                    tracker::subscription_usage(
+                        selected,
+                        &runner,
+                        &transport,
+                        &credential,
+                        &present,
+                        Some(0),
+                    )
+                },
+            );
+            assert_eq!(result.expect("advisory"), ExitCode::SUCCESS);
+            assert_eq!(runner.cli_calls.load(Ordering::Relaxed), usize::from(!both));
+            assert_eq!(runner.curl_calls.load(Ordering::Relaxed), 1);
+        }
+
+        let runner = Recording::default();
+        let transport = tracker::CurlTransport::new(&runner);
+        let report = tracker::subscription_usage(
+            Auth::Bearer,
+            &runner,
+            &transport,
+            &credential,
+            &|_| panic!("the bearer route never judges the CLI's variables"),
+            Some(0),
+        );
+        assert!(matches!(report, Report::Read { .. }), "{report:?}");
+        assert!(report.render().contains("count: 2;"));
+        assert_eq!(runner.cli_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(runner.curl_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
