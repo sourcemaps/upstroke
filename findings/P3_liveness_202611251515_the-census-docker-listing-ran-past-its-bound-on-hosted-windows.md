@@ -82,6 +82,29 @@ Run `45630176996` (`pull_request`, #426 at `1c6883d2`, an empty commit with `f8f
 
       test result: FAILED. 47 passed; 4 failed; 0 ignored; 0 measured; 3861 filtered out; finished in 280.36s
 
+### Sighting 3
+
+Run `45637680259` (`pull_request`, #429 at `40f2332e`), job `139288287202`, `test (windows-latest, 3 of 22)`,
+image version `20261123.321.1` (line 18). Log SHA-256
+`b714fb8034562b7375afedd533f8a66d77f0a10352fe611fdd579841ddb0eaa3`:
+
+- Line 109, the checkout:
+
+      HEAD is now at da408f2 Merge 40f2332eab0411b5b148951fe3d42a2c2affe87d into 50c11ded63e3d4e5ea87b07d3fc25caff0c46bd3
+
+- Line 636:
+  `engine::tests::a_resume_selects_its_reader_by_the_logs_header_and_refuses_before_any_lock ... FAILED <70.285s>`;
+  line 802, it panicked at `src\engine\tests.rs:21923:64`; line 803, on a `Refused` with the same `list-by-label`
+  message and "ended before it answered".
+- Line 809:
+
+      test result: FAILED. 363 passed; 1 failed; 22 ignored; 0 measured; 3530 filtered out; finished in 318.81s
+
+#429's diff changes files under `src/capacity/`, `src/engine/` and `src/util.rs`, and none under
+`src/runner/container/`; its earlier head `16935754` passed this test in run `45620876733`, job `139228353555` of
+the same shard (log SHA-256 `5d1c459afa9aa92f62de0a621f4af989f241e97d75e39dbec46681d5e847c047`, line 634,
+`ok <46.810s>`).
+
 ## The same tree passed
 
 Run `45607353978` (`pull_request`, #426 at `f8f2815b`) checked out the same merge commit as sighting 1
@@ -101,9 +124,9 @@ Run `45607353978` (`pull_request`, #426 at `f8f2815b`) checked out the same merg
 
 ## What is and is not established
 
-**Established.** In two runs, five tests failed on the census's refusal of `list-by-label` after the question
+**Established.** In three runs, six tests failed on the census's refusal of `list-by-label` after the question
 "ended before it answered", each on a hosted Windows leg. The same tree passed all five in run `45607353978`.
-#426's diff reaches no code.
+#426's diff reaches no code, and #429's changes nothing under `src/runner/container/`.
 
 **Not established:**
 
