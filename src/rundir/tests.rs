@@ -14044,3 +14044,74 @@ fn an_entry_that_fails_mid_listing_fails_the_whole_listing() {
         "the same entries without the failure list, sorted"
     );
 }
+
+/// A real directory whose listing fails **after it opened** is retained, and
+/// the retained answer's `detail` is the filesystem's own error, without the
+/// directory's path (`SWEEP-CLASSIFY-009`).
+///
+/// The finding's husk again: `events.jsonl` and no marker. The listing fault
+/// fails the read after the first entry, through the `read_dir_names` that
+/// both the proof and the removal list with. The test above hands
+/// `collect_entry_names` a built iterator, so it passes with the fault dropped
+/// at the real listing; this one does not. A `.flatten()` that drops the
+/// failed entry answers `Retained(MarkerlessWithContent)` here and lets the
+/// removal delete the event log; a failure folded into an empty list answers
+/// `NothingBound(Bare)`. And a `detail` taken from the crate error's text,
+/// `failed to read <path>: …`, names the directory twice in the report. The
+/// fault is disarmed by its guard, on a panic as on a normal return.
+#[test]
+fn a_listing_that_fails_after_it_opened_retains_the_public_directory() {
+    let tree = scratch("midlistinghusk");
+    let public = public_dir(&tree.path().join("repo"), "01MIDLISTINGHUSK0000000000");
+    fs::create_dir_all(&public).expect("the public directory");
+    write(&public.join(EVENT_LOG), b"a committed run's event log");
+    assert!(!public.join(MARKER).exists(), "the husk has no marker");
+    let _fault = listing_fault::ListingFault::arm(&public, std::io::ErrorKind::Other);
+
+    match prove_private_half_ownership(
+        &public,
+        &RepoKey::v1(&tree.path().join("git-dir")),
+        &tree.path().join("private"),
+    ) {
+        PrivateHalfOwnership::Retained(RetainReason::PublicDirUnreadable { detail }) => {
+            assert!(
+                !detail.contains(&*public.to_string_lossy()),
+                "the detail is the filesystem's own error, without the directory's path: {detail}"
+            );
+            assert_eq!(
+                detail,
+                listing_fault::FAILURE,
+                "the detail is the listing's own failure, as the filesystem gave it"
+            );
+        }
+        PrivateHalfOwnership::Retained(reason) => panic!(
+            "a public directory whose listing failed after it opened was retained as {}, not \
+             public-dir-unreadable: {reason}",
+            reason.kind()
+        ),
+        PrivateHalfOwnership::NothingBound(shape) => panic!(
+            "a public directory whose listing failed after it opened answered \
+             NothingBound({shape:?}); only a retained answer keeps the census from reclaiming \
+             it, events.jsonl and all"
+        ),
+        PrivateHalfOwnership::Proven(proof) => panic!(
+            "a public directory whose listing failed after it opened answered Proven({proof:?}); \
+             only a retained answer keeps the census from reclaiming it, events.jsonl and all"
+        ),
+    }
+
+    let error = remove_public_husk(&public, &mut NoHooks)
+        .expect_err("a removal whose listing fails after it opened reports it");
+    assert!(
+        matches!(
+            &error,
+            UpstrokeError::Io { path, source }
+                if path == &public && source.kind() == std::io::ErrorKind::Other
+        ),
+        "the removal returns the listing's own failure, for the public path: {error}"
+    );
+    assert!(
+        public.join(EVENT_LOG).is_file(),
+        "and it removed nothing: the event log is still there"
+    );
+}

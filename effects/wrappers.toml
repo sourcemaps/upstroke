@@ -610,6 +610,7 @@ effect_free = [
     # only; no file, lock or process.
     "enter_carried_cleanup_scope",
     "enter_cleanup_scope",
+    "entry_names",
     "events",
     "fmt",
     "for_repo",

@@ -1793,7 +1793,7 @@ fn read_dir_names(dir: &Path) -> Result<Vec<OsString>, UpstrokeError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(io_error(error)),
     };
-    collect_entry_names(entries.map(|entry| entry.map(|entry| entry.file_name()))).map_err(io_error)
+    collect_entry_names(listing_fault::entry_names(dir, entries)).map_err(io_error)
 }
 
 /// The names `entries` yields, sorted, or the first error it yields.
@@ -1807,6 +1807,28 @@ fn collect_entry_names(
     let mut names = entries.into_iter().collect::<io::Result<Vec<OsString>>>()?;
     names.sort();
     Ok(names)
+}
+
+/// The name of each entry an opened listing yields, or the error reading it,
+/// in the directory's order: [`read_dir_names`]'s one observation of a
+/// listing after it opened.
+///
+/// A module of its own, twinned by configuration exactly as the ownership
+/// proof's `locator_fault` is, so that a test can fail a real directory's
+/// listing after it opened, for one path (`SWEEP-CLASSIFY-009`): the test
+/// build's twin is this file's last item, so no production item stands below
+/// the census boundary.
+#[cfg(not(test))]
+mod listing_fault {
+    use super::{OsString, Path, fs, io};
+
+    #[inline]
+    pub(super) fn entry_names(
+        _dir: &Path,
+        entries: fs::ReadDir,
+    ) -> impl Iterator<Item = io::Result<OsString>> {
+        entries.map(|entry| entry.map(|entry| entry.file_name()))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2855,3 +2877,74 @@ pub(crate) fn plant_report_staging_of_a_dead_writer(public: &Path, private: &Pat
 
 #[cfg(test)]
 mod tests;
+
+// ===========================================================================
+// The test build's listing fault: the test-only tail
+// ===========================================================================
+
+/// The test build's twin of the production `listing_fault` above: the same
+/// names, except for exactly the directory an armed [`ListingFault`] names,
+/// where the read after the first entry fails with the armed kind in place of
+/// whatever the directory holds next, as a `readdir` that fails mid-listing
+/// does, and the listing ends there. The last item of this file.
+#[cfg(test)]
+mod listing_fault {
+    use super::{OsString, Path, PathBuf, fs, io};
+
+    /// The armed failure's text: what a retained answer's `detail` carries
+    /// when it is the filesystem's own error and nothing added to it.
+    pub(super) const FAILURE: &str =
+        "the listing failed after the directory opened (an armed test fault)";
+
+    /// An armed [`ListingFault`] for exactly `dir` yields its error kind after
+    /// the first entry; every other directory lists as production lists it.
+    pub(super) fn entry_names(
+        dir: &Path,
+        entries: fs::ReadDir,
+    ) -> impl Iterator<Item = io::Result<OsString>> {
+        let armed = FAULTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|(path, _)| path == dir)
+            .map(|(_, kind)| *kind);
+        let read = if armed.is_some() { 1 } else { usize::MAX };
+        entries
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .take(read)
+            .chain(armed.map(|kind| Err(io::Error::new(kind, FAILURE))))
+    }
+
+    /// The armed faults, keyed by the exact directory path a test's husk
+    /// lists, so a fault one test arms reaches no other test's directory.
+    static FAULTS: std::sync::Mutex<Vec<(PathBuf, io::ErrorKind)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    /// While this guard lives, every listing of `dir` fails after its first
+    /// entry with the armed kind; the fault is removed when the guard drops,
+    /// on a panicking assertion as on a normal return.
+    pub(super) struct ListingFault {
+        dir: PathBuf,
+    }
+
+    impl ListingFault {
+        pub(super) fn arm(dir: &Path, kind: io::ErrorKind) -> Self {
+            FAULTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((dir.to_path_buf(), kind));
+            Self {
+                dir: dir.to_path_buf(),
+            }
+        }
+    }
+
+    impl Drop for ListingFault {
+        fn drop(&mut self) {
+            FAULTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|(path, _)| path != &self.dir);
+        }
+    }
+}
