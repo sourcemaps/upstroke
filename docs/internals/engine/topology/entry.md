@@ -338,7 +338,7 @@ census and the whole run, and handed to the `RunHandle` by
 `WorktreeLocked::into_lock` with no release in between. The default root's
 authorization comes first, because the include `run_harness` published just
 before it is what created the root
-(`engine::tests::a_fresh_schema_4_run_over_the_default_root_that_loses_the_worktree_lease_creates_nothing_under_home`
+(`engine::tests::topology_admission::a_fresh_schema_4_run_over_the_default_root_that_loses_the_worktree_lease_creates_nothing_under_home`
 holds a run over a default root that does not exist yet to both halves of
 that: nothing under the home while the lease is held, the root created and
 authorized once it is not).

@@ -1267,7 +1267,7 @@ The legacy engine's handling of a returned append error is unchanged, and the th
 true is that it does not append again.
 
 The hooks are plumbed — `RunOptions::log_hooks`, `NoEventHooks` in production — and the behaviour
-is held by `engine::tests::a_returned_legacy_append_error_stops_the_run` and
+is held by `engine::tests::verification::a_returned_legacy_append_error_stops_the_run` and
 `…_still_leaves_the_partial_report`. What is left here is what a behavioural test cannot see: that
 the branch emits **nothing**, over the whole branch rather than over the paths a fixture happens to
 drive. The census also asserts that the branch still returns the append's own error, and that the

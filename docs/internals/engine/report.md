@@ -290,7 +290,7 @@ stays the authority; this is the command's summary of the same run.
   that could never run as "queued", hiding why it had not. A halted or
   budget-stopped run keeps `Skipped` for every task it did not reach, failed
   ancestor or not, as it always has (the S9 halted guard,
-  `engine::tests::a_halted_schema_4_run_projects_where_it_halted_and_its_outcome`,
+  `engine::tests::topology_execution::a_halted_schema_4_run_projects_where_it_halted_and_its_outcome`,
   holds its failed task's dependent skipped); a pending task behind a parked
   one, or behind any task that has not failed, is still queued.
 - Each task's attempts are the records the log holds for it, in log order:

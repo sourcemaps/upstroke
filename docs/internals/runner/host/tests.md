@@ -1590,7 +1590,7 @@ a channel.
 The simulated failure established nothing, asserted on the per-thread, per-call count rather than on
 `ambient_job_established`: that is a process-wide latch other tests in this binary legitimately set,
 because the library's write coordinator establishes containment
-(`engine::tests::every_public_write_coordinator_entry_point_establishes_containment`).
+(`engine::tests::verification::every_public_write_coordinator_entry_point_establishes_containment`).
 
 ## `fn the_production_containment_mint_propagates_a_join_refusal_and_mints_nothing() {`
 

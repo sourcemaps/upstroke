@@ -130,7 +130,7 @@ The exclusion is also what keeps an admitted fresh run's generated public files
 out of Git (L4, regression review 3, finding 4). Before L2 a schema-4 run made no
 exclusion, so a completed run left `?? .upstroke/` in `git status`, and an
 ordinary `git add -A` took its log, frozen plan, report and locks.
-`engine::tests::a_completed_schema_4_run_leaves_no_generated_file_for_an_ordinary_git_add_to_take`
+`engine::tests::topology_execution::a_completed_schema_4_run_leaves_no_generated_file_for_an_ordinary_git_add_to_take`
 pins that. The schema-4 resume makes the exclusion itself (`resume.md`).
 
 ## `refuse_dirty_tree` › `if !workspace.is_clean()? {`

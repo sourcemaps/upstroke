@@ -506,7 +506,7 @@ first profiled pool. 2, 3 and 4 are made pool by pool, in file order.
 
 Every one of these refusals ends in [`profile_refused`]'s one closing
 sentence, which is the same on a fresh run and a resume and true of both
-(`engine::tests::a_fresh_schema_4_run_whose_pool_names_a_missing_profile_is_refused_before_anything_is_created`
+(`engine::tests::topology_admission::a_fresh_schema_4_run_whose_pool_names_a_missing_profile_is_refused_before_anything_is_created`
 and its relative-profile partner hold the two paths' texts equal, and with the
 token test they hold that the fresh refusal left no `.upstroke`, an empty
 private root and no worktree lease file).

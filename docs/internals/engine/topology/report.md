@@ -74,7 +74,7 @@ cut off before a resume settles it), and one `merge_verification_interrupted` wi
 record. A charged row is a lower bound (`review_cost_incomplete`) and never `none`. The test is on
 the row's own wire fields, so `report.json`, its schema and its digest are unchanged
 (`engine::topology::select::tests::the_integration_ledger_reads_a_charged_record_as_a_lower_bound`
-pins the interrupted rows; `engine::tests::a_schema_4_status_prints_the_ledger_run_reports_for_a_completed_and_an_interrupted_run`
+pins the interrupted rows; `engine::tests::topology_execution::a_schema_4_status_prints_the_ledger_run_reports_for_a_completed_and_an_interrupted_run`
 the fast ones).
 
 ## `pub fn outcome_label(outcome: &RunOutcome) -> String {`

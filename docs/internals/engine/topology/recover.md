@@ -1292,8 +1292,8 @@ write, and `Workspace::recorded_objects_scope`, which writes it, is denied to
 every topology module, so `engine::resume::resume_harness` publishes it there,
 under the root these records proved and with both locks held (PR12-CI-01,
 INV-15, O18). Recovery-only tests call [`run_recovery_order`] and never saw
-that composition; the public guard is `engine::tests`'
-`a_schema_4_resume_proves_its_owner_and_commit_records_before_it_writes_its_include`.
+that composition; the public guard is
+`engine::tests::topology_admission::a_schema_4_resume_proves_its_owner_and_commit_records_before_it_writes_its_include`.
 
 ## `pub fn recover_verified(`
 

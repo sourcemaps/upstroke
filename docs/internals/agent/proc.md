@@ -1421,7 +1421,7 @@ parent's call, the child's `setpgid(0, 0)` returned `EPERM` in 1 to 4 of
 every 20,000 forks across nine tallies, and never in 120,000 forks
 without it; Linux returned no `EPERM` in 60,000 with the parent's call.
 The first READY failure carrying the setup report (CI run 33992302665
-on PR #172, `engine::tests::second_reviewer_spawn_failure_settles_worker_and_first_review_evidence`)
+on PR #172, `engine::tests::verification::second_reviewer_spawn_failure_settles_worker_and_first_review_evidence`)
 named exactly this step: "the reaper reported that moving into its own
 process group failed: Operation not permitted (os error 1)", after a wait
 of 24 µs. The parent's call bought nothing the handshake does not
