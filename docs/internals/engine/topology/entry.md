@@ -346,8 +346,9 @@ run exists.** The statement after the profiling is
 environment in production). It is the function a resume's
 `RunPreflight::certify` calls first, so a fresh run refuses the same cases
 in the same words: a profile on the container runner, a profile for an agent
-other than Claude Code, a profile directory that is missing or not a
-directory, and any profile while `CLAUDE_CODE_OAUTH_TOKEN` is set. It comes
+other than Claude Code, a relative profile, a profile directory that is
+missing or not a directory, and any profile while `CLAUDE_CODE_OAUTH_TOKEN`
+is set. It comes
 before the startup census and before `create_run`, so a refused run has
 spawned nothing and created no run directory, no private half, no execution
 root and no integration ref. The include `run_harness` published before this
@@ -526,8 +527,8 @@ before `RunPreflight` is built over it, so the resume's probes, workers and
 reviewers carry their agent's bound credential profile too. The same pools
 go to the pre-flight (`RunPreflight::with_pools`), whose `certify` refuses a
 profile the run cannot honour before anything is spawned for it: one on the
-container runner, one for an agent other than Claude Code, one whose
-directory is missing, or any profile while `CLAUDE_CODE_OAUTH_TOKEN` is set
+container runner, one for an agent other than Claude Code, a relative one, one
+whose directory is missing, or any profile while `CLAUDE_CODE_OAUTH_TOKEN` is set
 (`engine::topology::preflight`'s notes). Its refusals are
 `preflight::refuse_unusable_profiles`, the function [`FreshLeased::run`]
 calls before a fresh run's creation, so the two paths refuse alike.

@@ -26497,6 +26497,13 @@ fn assert_a_profile_refusal_created_nothing(
         "the pre-flight's refusal, in the shape a resume's takes: {said}"
     );
     assert!(
+        said.ends_with(
+            ". Nothing was created, spawned or appended; correct the pools file or the \
+             environment and run the same command again."
+        ),
+        "a profile refusal ends in its own closing sentence, true of a fresh run: {said}"
+    );
+    assert!(
         !said.contains("stopped at"),
         "refused before the run's creation began, not by a creation that then reclaimed what \
          it made: {said}"
@@ -26566,6 +26573,55 @@ fn a_fresh_schema_4_run_whose_pool_names_a_missing_profile_is_refused_before_any
         Vec::new(),
     );
     pool.profile = Some(missing.display().to_string());
+    let runner = crate::runner::host::HostRunner::new();
+    let resumed = super::topology::preflight::RunPreflight::new(
+        &runner,
+        &stub,
+        crate::gates::ShellKind::native(),
+        &repo,
+        vec![TOPOLOGY_STUB.to_owned()],
+    )
+    .with_pools(&[pool]);
+    let on_resume =
+        crate::runner::container::resolve::RunnerPreflight::certify(&resumed, &host_policy())
+            .expect_err("a resume's pre-flight refuses the same profile");
+    assert_eq!(
+        said,
+        on_resume.to_string(),
+        "one refusal, worded once, on both paths"
+    );
+}
+
+#[test]
+fn a_fresh_schema_4_run_whose_pool_names_a_relative_profile_is_refused_before_anything_is_created()
+{
+    let (tree, repo) = temp_engine_repo("topology-profile-relative");
+    let mut opts = topology_options(&repo);
+    opts.pools_path = Some(profiled_pool_file(&tree, Path::new(".")));
+    opts.coordinator_environment = Some(no_oauth_token);
+    let stub = CountedStub::new();
+
+    let refused = run_with(&opts, &stub)
+        .expect_err("a relative profile refuses the fresh run, though `.` is a directory");
+    let said = assert_a_profile_refusal_created_nothing(&refused, &repo, &stub);
+    assert!(
+        said.contains(
+            "pool `claude-max` names the credential profile `.`, which is a relative path"
+        ),
+        "the refusal names the pool and the value: {said}"
+    );
+    assert!(
+        !said.contains("resumable"),
+        "the refusal precedes `create_run`, so there is no run to resume: {said}"
+    );
+
+    let mut pool = capacity::Pool::discovered(
+        "claude-max",
+        capacity::PoolKind::SubscriptionWindow,
+        TOPOLOGY_STUB,
+        Vec::new(),
+    );
+    pool.profile = Some(".".to_owned());
     let runner = crate::runner::host::HostRunner::new();
     let resumed = super::topology::preflight::RunPreflight::new(
         &runner,

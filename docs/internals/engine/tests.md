@@ -5281,6 +5281,9 @@ reviewer.
 
 What every fresh-run profile refusal shares, asserted once:
 - it is a `Refused` in the pre-flight's own shape (`pre-flight: `);
+- it ends in the one closing sentence every profile refusal takes, on this path and a resume's
+  alike: nothing was created, spawned or appended, so correct the pools file or the environment
+  and run the same command again;
 - it is not a creation's refusal (`stopped at`), so `create_run` never began;
 - the stub was neither probed nor built;
 - [`assert_a_refused_creation_left_nothing`] holds;
@@ -5308,6 +5311,20 @@ Measured before the repair, on the source with only this test, its partner and t
 `coordinator_environment` field added: the `expect_err` panicked. The run had been created and had
 completed, `t1` and `t2` committed with four attempts on `claude-max`, all under a profile directory
 that did not exist.
+
+## `fn a_fresh_schema_4_run_whose_pool_names_a_relative_profile_is_refused_before_anything_is_created()`
+
+A fresh schema-4 run whose one pool's profile is `.` is refused through `run_with` before anything of
+the run is created ([`assert_a_profile_refusal_created_nothing`]). `.` exists and is a directory
+from the coordinator's working directory, and the run's environment has no token, so its being
+relative is the only thing wrong. The refusal names the pool and the value, and its text does not
+contain "resumable": the refusal comes before `create_run`, so there is no run to resume
+(`PR386-FRESH-REFUSAL-NOT-RESUMABLE`). Then a resume's pre-flight over the same pool refuses in
+the same words, as for the missing profile above.
+
+`PR386-RELATIVE-PROFILE-CWD`: before the repair the pre-flight read a relative profile from the
+coordinator's working directory, while the host runner starts each agent process in its own task
+directory, so `.` passed the check and named a different directory for every process.
 
 ## `fn a_fresh_schema_4_run_whose_profile_an_oauth_token_would_override_is_refused_before_anything_is_created()`
 

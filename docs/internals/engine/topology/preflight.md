@@ -95,7 +95,8 @@ token in the coordinator's environment reaches every profiled process.
 
 A pool that names a `profile`: its name and agent, which the refusals cite,
 and the profile as a path. As in `profiled.rs`, the configured string is
-used as written, with no `~/` expansion.
+used as written, with no `~/` expansion, and a relative one is refused rather
+than resolved ([`refuse_unusable_profiles`], check 3).
 
 ## `impl ProfiledPool` › `fn of(pool: &Pool) -> Option<Self> {`
 
@@ -297,7 +298,7 @@ So both paths refuse the same profiles in the same words. Only the pools that
 name a profile count (`ProfiledPool::of`). With none, it returns at once,
 reads no environment and leaves the run as it was before profiles existed.
 
-Each check refuses in `refused`'s shape, naming the pool:
+Each check refuses through [`profile_refused`], naming the pool:
 
 1. **The host runner.** A profile is a host directory handed to the child as
    `CLAUDE_CONFIG_DIR`. The container runner has no way to supply one: it
@@ -309,39 +310,69 @@ Each check refuses in `refused`'s shape, naming the pool:
    profile under any agent's credential-location key (`CODEX_HOME`,
    `COPILOT_HOME`), so the limit is held here rather than by the runner.
    For any other agent the refusal names the pool and that agent.
-3. **An existing directory.** `fs::metadata` follows a symlink, so a link
+3. **An absolute path.** A relative profile is refused, naming the pool and
+   the value as written; it is never resolved or joined to a base. Each task
+   runs in its own directory (the host runner starts every child in its
+   request's `workspace`), and `profiled` stamps the string as written, so a
+   relative path would name a different directory for each process, and a
+   different one again from the coordinator's working directory, where check 4
+   would read it. Pools are user-level, so no base directory is natural to
+   resolve one against. `~` is not expanded (`profiled.md`), so
+   `~/profiles/personal` is relative too, and the refusal says so.
+4. **An existing directory.** `fs::metadata` follows a symlink, so a link
    to a directory passes. A missing path, or a dangling link, is refused as
    not existing. A path that exists and is not a directory is refused as
    such. Any other error, permission denied included, is refused with the
-   error. A relative profile is resolved against the coordinator's working
-   directory.
-4. **No `CLAUDE_CODE_OAUTH_TOKEN`.** A token overrides the profile's
+   error.
+5. **No `CLAUDE_CODE_OAUTH_TOKEN`.** A token overrides the profile's
    credentials, so the run would not use the profile it names. A variable
    that is present counts as set, even with an empty value, and the refusal
    names the variable, never its value.
 
-The checks are made in that order. The run-wide ones (1 and 4) name the
-first profiled pool. 2 and 3 are made pool by pool, in file order.
+The checks are made in that order. The run-wide ones (1 and 5) name the
+first profiled pool. 2, 3 and 4 are made pool by pool, in file order.
 
-The refusal's closing sentence, that nothing was spawned, no recovery event
-was appended and the run is resumable, is the same on a fresh run. There it
-holds trivially: the refusal comes before the run's creation begins, so no
-run directory or private half exists to resume, and the same command can be
-run again once the profile is fixed
+Every one of these refusals ends in [`profile_refused`]'s one closing
+sentence, which is the same on a fresh run and a resume and true of both
 (`engine::tests::a_fresh_schema_4_run_whose_pool_names_a_missing_profile_is_refused_before_anything_is_created`
-holds the two paths' texts equal).
+and its relative-profile partner hold the two paths' texts equal).
+
+Until the relative check existed, `.` passed check 4 from the coordinator's
+working directory and was then handed to every agent process, each of which
+started somewhere else (`PR386-RELATIVE-PROFILE-CWD`;
+`tests::a_relative_profile_refuses_naming_the_pool_and_the_value` began as the
+witness of that). And until the profile refusals had their own closing, they
+went through `refused`, whose last words are "so the run is resumable". On a
+fresh run that was false: the refusal comes before `create_run`, so there is no
+run to resume (`PR386-FRESH-REFUSAL-NOT-RESUMABLE`).
 
 Until this function was shared, these were a method of `RunPreflight` and only
 a resume made them. A fresh run whose pool named a missing directory, or whose
 coordinator had `CLAUDE_CODE_OAUTH_TOKEN` set, was created and ran its
 attempts to completion. Its Claude Code processes were handed a profile
 directory that did not exist, or ran while the token overrode the profile's
-credentials. `engine::tests`' two fresh-run profile tests measured exactly
-that before the repair: each run completed.
+credentials. `engine::tests`' missing-profile and token fresh-run tests
+measured exactly that before the repair: each run completed.
+
+## `fn profile_refused(what: &str) -> UpstrokeError {`
+
+The refusal shape every profile refusal takes: `pre-flight: `, what is wrong,
+and one closing sentence of its own — nothing was created, spawned or appended;
+correct the pools file or the environment and run the same command again.
+
+Not [`refused`], whose closing describes a probe: what was probed and inside
+which boundary, and that the run is resumable. A profile refusal probes nothing,
+and on a fresh run it precedes `create_run`, so there is no run to resume. The
+sentence is true on both paths: a fresh run has created nothing, and a resume
+refuses at recovery step (c), before its shell probe and before any recovery
+event is appended. It takes no `policy`, so the wording cannot differ between
+the policy a fresh run was authorized under and the one a resume rebuilt from
+the record.
 
 ## `fn refused(policy: &RunnerPolicy, what: &str) -> UpstrokeError {`
 
-The refusal shape every pre-flight failure takes.
+The refusal shape every failure of the shell and CLI probes takes. The
+profile refusals, which precede the probes, take [`profile_refused`]'s.
 
 Names the image the probe ran inside, because "a recorded shell or agent CLI
 that fails **inside the recorded image**" is a different fact from the same

@@ -195,29 +195,33 @@ pub(super) fn refuse_unusable_profiles(
         return Ok(());
     };
     if policy.kind == RunnerKind::Container {
-        return Err(refused(
-            policy,
-            &format!(
-                "pool `{}` names the credential profile `{}`, and a profile is supported on \
-                 the host runner only; this run's runner is the container runner",
-                first.pool,
-                first.profile.display()
-            ),
-        ));
+        return Err(profile_refused(&format!(
+            "pool `{}` names the credential profile `{}`, and a profile is supported on the \
+             host runner only; this run's runner is the container runner",
+            first.pool,
+            first.profile.display()
+        )));
     }
     for pool in &profiled {
         if pool.agent != crate::agent::claude::ADAPTER_ID {
-            return Err(refused(
-                policy,
-                &format!(
-                    "pool `{}` names the credential profile `{}` for agent `{}`, and this \
-                     stage supports Claude Code's profile only (agent `{}`)",
-                    pool.pool,
-                    pool.profile.display(),
-                    pool.agent,
-                    crate::agent::claude::ADAPTER_ID
-                ),
-            ));
+            return Err(profile_refused(&format!(
+                "pool `{}` names the credential profile `{}` for agent `{}`, and this stage \
+                 supports Claude Code's profile only (agent `{}`)",
+                pool.pool,
+                pool.profile.display(),
+                pool.agent,
+                crate::agent::claude::ADAPTER_ID
+            )));
+        }
+        if !pool.profile.is_absolute() {
+            return Err(profile_refused(&format!(
+                "pool `{}` names the credential profile `{}`, which is a relative path; each \
+                 task runs in its own directory, so a relative path would name a different \
+                 directory for each process, and `~` is not expanded; give the profile as an \
+                 absolute path",
+                pool.pool,
+                pool.profile.display()
+            )));
         }
         let problem = match std::fs::metadata(&pool.profile) {
             Ok(metadata) if metadata.is_dir() => continue,
@@ -227,28 +231,31 @@ pub(super) fn refuse_unusable_profiles(
             }
             Err(error) => format!("which cannot be inspected: {error}"),
         };
-        return Err(refused(
-            policy,
-            &format!(
-                "pool `{}` names the credential profile directory `{}`, {problem}",
-                pool.pool,
-                pool.profile.display()
-            ),
-        ));
+        return Err(profile_refused(&format!(
+            "pool `{}` names the credential profile directory `{}`, {problem}",
+            pool.pool,
+            pool.profile.display()
+        )));
     }
     if environment(CLAUDE_CODE_OAUTH_TOKEN).is_some() {
-        return Err(refused(
-            policy,
-            &format!(
-                "`{CLAUDE_CODE_OAUTH_TOKEN}` is set in this coordinator's environment, and a \
-                 token overrides a profile's credentials, so the run would not use the \
-                 profile pool `{}` names (`{}`); unset it to run under the profile",
-                first.pool,
-                first.profile.display()
-            ),
-        ));
+        return Err(profile_refused(&format!(
+            "`{CLAUDE_CODE_OAUTH_TOKEN}` is set in this coordinator's environment, and a token \
+             overrides a profile's credentials, so the run would not use the profile pool `{}` \
+             names (`{}`); unset it to run under the profile",
+            first.pool,
+            first.profile.display()
+        )));
     }
     Ok(())
+}
+
+fn profile_refused(what: &str) -> UpstrokeError {
+    UpstrokeError::Refused {
+        message: format!(
+            "pre-flight: {what}. Nothing was created, spawned or appended; correct the pools \
+             file or the environment and run the same command again."
+        ),
+    }
 }
 
 fn refused(policy: &RunnerPolicy, what: &str) -> UpstrokeError {

@@ -537,6 +537,11 @@ fn profiled_preflight<'a>(
         .reading_environment(environment)
 }
 
+const PROFILE_REFUSAL_CLOSING: &str = concat!(
+    ". Nothing was created, spawned or appended; ",
+    "correct the pools file or the environment and run the same command again."
+);
+
 fn refused_before_anything_ran(
     runner: &Recording,
     preflight: &RunPreflight<'_>,
@@ -553,6 +558,19 @@ fn refused_before_anything_ran(
     assert!(
         text.starts_with("pre-flight: "),
         "the refusal shape: {text}"
+    );
+    assert!(
+        text.ends_with(PROFILE_REFUSAL_CLOSING),
+        "a profile refusal ends in its own closing sentence: {text}"
+    );
+    assert_eq!(
+        text.matches(PROFILE_REFUSAL_CLOSING).count(),
+        1,
+        "and says it once: {text}"
+    );
+    assert!(
+        !text.contains("resumable") && !text.contains("probed inside"),
+        "and nothing of the probe refusal's closing, which is false before a run exists: {text}"
     );
     assert!(
         runner.programs().is_empty(),
@@ -633,6 +651,56 @@ fn a_profile_that_is_not_a_directory_refuses_naming_the_pool_and_the_path() {
     assert!(text.contains("`max`"), "the refusal names the pool: {text}");
     assert!(text.contains(A_FILE), "and the path: {text}");
     assert!(text.contains("is not a directory"), "{text}");
+}
+
+#[test]
+fn a_relative_profile_refuses_naming_the_pool_and_the_value() {
+    for (name, relative) in [
+        ("current", "."),
+        ("nested", "profiles/personal"),
+        ("home", "~/profiles/personal"),
+    ] {
+        let runner = Recording::default();
+        let adapters = Registry;
+        let pools = [pool(name, AGENT, Some(relative))];
+        let preflight = profiled_preflight(&runner, &adapters, &pools, no_token);
+
+        let text = refused_before_anything_ran(&runner, &preflight, &host_policy());
+
+        assert!(
+            text.contains(&format!(
+                "pool `{name}` names the credential profile `{relative}`, which is a relative \
+                 path"
+            )),
+            "the refusal names its pool and the value as written: {text}"
+        );
+        for said in [
+            "each task runs in its own directory, so a relative path would name a different \
+             directory for each process",
+            "`~` is not expanded",
+            "give the profile as an absolute path",
+        ] {
+            assert!(text.contains(said), "looked for {said:?} in: {text}");
+        }
+    }
+}
+
+#[test]
+fn a_profile_that_cannot_be_inspected_refuses_with_the_error() {
+    const UNINSPECTABLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/nul\0byte");
+    let runner = Recording::default();
+    let adapters = Registry;
+    let pools = [pool("max", AGENT, Some(UNINSPECTABLE))];
+    let preflight = profiled_preflight(&runner, &adapters, &pools, no_token);
+
+    let text = refused_before_anything_ran(&runner, &preflight, &host_policy());
+
+    assert!(text.contains("`max`"), "the refusal names the pool: {text}");
+    assert!(text.contains("which cannot be inspected: "), "{text}");
+    assert!(
+        !text.contains("does not exist"),
+        "an error other than a missing path is not reported as one: {text}"
+    );
 }
 
 #[test]
