@@ -8232,6 +8232,21 @@ fn a_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_pool_exhaus
     assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
 }
 
+const DEFERRAL_RATE_LIMIT: &str = "You've hit your weekly limit · resets Nov 14, 5pm (UTC)";
+
+#[test]
+fn the_deferral_rate_limit_text_names_one_reset_at_any_time_of_day() {
+    const NOV_11_2026: u64 = 1_794_355_200;
+    for second in 0..86_400 {
+        assert_eq!(
+            crate::agent::reset_at_from_limit_message(DEFERRAL_RATE_LIMIT, NOV_11_2026 + second)
+                .as_deref(),
+            Some("2026-11-14T17:00:00Z"),
+            "read {second}s into the day"
+        );
+    }
+}
+
 #[test]
 fn a_deferral_rate_limit_keeps_the_reset_pool_exhausted_recorded() {
     let (_tree, repo) = temp_engine_repo("poolexhaustedkeepsreset");
@@ -8248,7 +8263,7 @@ fn a_deferral_rate_limit_keeps_the_reset_pool_exhausted_recorded() {
         vec![Effect::RateLimited, Effect::RateLimited, Effect::EditFile],
         vec![ReviewBehavior::Pass],
     );
-    source.adapter.worker_rate_limit = "You've hit your 5-hour limit · resets 5:30am (UTC)";
+    source.adapter.worker_rate_limit = DEFERRAL_RATE_LIMIT;
     let report = run_with(&opts, &source).expect("run");
     assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
 

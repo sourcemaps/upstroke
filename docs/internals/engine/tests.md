@@ -5193,13 +5193,27 @@ failed`) and feedback are what they were, and whose `limit_message` is that stde
 rate-limited outcome whose stderr signals nothing: the reason is the outcome's detail, as before,
 and no `limit_message` is carried, because the stderr did not classify the attempt.
 
+## `fn the_deferral_rate_limit_text_names_one_reset_at_any_time_of_day() {`
+
+The test below reads its text against the real clock once per refusal, so the text must name one
+reset whenever it is read. This reads `DEFERRAL_RATE_LIMIT` at every second of 2026-11-11 and
+requires `2026-11-14T17:00:00Z` each time. The time-only `resets 5:30am (UTC)` it replaced fails
+here at 17:30:00, where the next morning's 05:30 takes over.
+
 ## `fn a_deferral_rate_limit_keeps_the_reset_pool_exhausted_recorded() {`
 
-The same run as the test above, rate limited twice before it succeeds: `[RateLimited, RateLimited,
-EditFile]`, with the text that names the reset. The engine writes one `pool_exhausted` for the
+The same run as `a_rate_limit_that_names_its_reset_records_it_on_pool_exhausted`, rate limited
+twice before it succeeds: `[RateLimited, RateLimited, EditFile]`, with a text that names the reset. The engine writes one `pool_exhausted` for the
 outage, after the first rate-limited `attempt_finished` and before the second; the second is the
-first deferral, and it writes no signal of its own. The estimate folded from the log through that
-second `attempt_finished` still reports the pool exhausted with the reset the signal recorded.
+first deferral, and it writes no signal of its own. The text is the dated `You've hit your weekly
+limit · resets Nov 14, 5pm (UTC)`, not the time-only `resets 5:30am (UTC)`, because the engine reads
+the reset again on each refusal against the real clock. A time-only reset resolves to the nearest
+05:30, and the later one wins a tie, so a run whose first refusal was read at 17:29:59 and whose
+retry was read at 17:30:00 named two different resets and rightly wrote a second signal. The
+dated text gives both reads the same Nov 14 17:00 at any time of day. The year it picks changes
+only once a year, halfway between two Nov 14s in mid-May, and the two reads would have to fall
+either side of that one instant. The estimate folded from the log through that second
+`attempt_finished` still reports the pool exhausted with the reset the signal recorded.
 Before `retire_signals` kept a known reset, that settlement marked the pool again with none, so
 `upstroke validate` said the signal carried no reset time and a resume's `capacity_snapshot` wrote
 `reset_at: null` beside an open signal that named one. The estimate over the whole log no longer
