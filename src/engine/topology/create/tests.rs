@@ -1926,6 +1926,7 @@ fn the_append_error_balance_reads_the_ledger_the_probes_used() {
         policy_digest: host_digest(),
         probed: Default::default(),
         pools: Vec::new(),
+        environment: super::super::preflight::coordinator_environment,
     };
     let refs = FakeRefs::empty();
     let mut hooks = TestHooks::new();
@@ -3536,6 +3537,7 @@ fn the_creation_ledger_accounts_every_probe_process() {
         policy_digest: host_digest(),
         probed: Default::default(),
         pools: Vec::new(),
+        environment: super::super::preflight::coordinator_environment,
     };
 
     probes
@@ -3645,6 +3647,7 @@ fn the_production_probes_run_both_halves_through_the_runs_runner() {
         policy_digest: host_digest(),
         probed: Default::default(),
         pools: Vec::new(),
+        environment: super::super::preflight::coordinator_environment,
     };
     assert_eq!(probes.policy_digest(), host_digest());
 
@@ -4880,6 +4883,7 @@ fn create_over_containers(
         policy_digest: execution.policy_digest().to_owned(),
         probed: Default::default(),
         pools: Vec::new(),
+        environment: super::super::preflight::coordinator_environment,
     };
     let refs = FakeRefs::empty();
     let mut hooks = TestHooks::new();

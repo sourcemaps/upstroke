@@ -350,6 +350,11 @@ Signed out under any profile, or none.
 Signed in under [`EXISTING_DIRECTORY`], the first pool's profile, and signed
 out under every other, the second pool's included.
 
+## `fn answers_signed_in_under_a_profile_only(profile: Option<&Path>) -> ProcessOutput {`
+
+Signed in under any profile, and signed out under none: the agent's default
+account is signed out and every profile directory signed in.
+
 ## `struct ClaudeCli {`
 
 A runner that plays the Claude Code CLI to the real adapter
@@ -424,8 +429,12 @@ the ledger balances.
 ## `fn an_unprofiled_agent_whose_default_account_is_signed_out_refuses_naming_that_account() {`
 
 An agent whose only pool names no profile, signed out: `certify` refuses,
-naming the agent's default account and `claude auth login` with no
-`CLAUDE_CONFIG_DIR`. One discovery ran, under no profile.
+naming the pool, `max`, and that as it names no credential profile it runs
+under the agent's default account, and `claude auth login` with no
+`CLAUDE_CONFIG_DIR`. One discovery ran, under no profile. Until an unprofiled
+pool's default account was checked beside profiled pools, the refusal said
+"under its default account, as no pool of this run names a credential profile
+for it"; it names the pool now, as every account's refusal does.
 
 ## `fn a_discovery_that_cannot_say_whether_the_account_is_signed_in_certifies() {`
 
@@ -448,6 +457,156 @@ settled every process in the pair. Its refusal is the same text a resume's
 On the container runner, a profiled pool is refused by
 `refuse_unusable_profiles`, as before, in its own closing. No discovery ran,
 nor any other process, and nothing was registered.
+
+## `fn a_default_pool_then_a_profiled_spare() -> [Pool; 2] {`
+
+---------------------------------------------------------------------------
+Every account, the default included
+---------------------------------------------------------------------------
+
+## `fn a_default_pool_then_a_profiled_spare() -> [Pool; 2] {`
+
+Two Claude Code pools, `max` first, naming no profile, so it runs under the
+agent's default account, then `spare` on [`SECOND_DIRECTORY`]. With
+`profiled` over them nothing is stamped on the agent's probes, as `max`, the
+agent's bound pool, names no profile.
+
+## `const MAX_DEFAULT_ACCOUNT: &str = concat!(`
+
+How the refusal names `max`'s account: the pool, and that as it names no
+credential profile it runs under the agent's default account. Spelled out, as
+[`SIGN_IN_REFUSAL_CLOSING`] is, so a change of wording is a change to these
+tests.
+
+## `fn lists_each_account_an_agents_pools_use_once_in_file_order() {`
+
+`Account::of_agent` over pools for two agents, in which Claude Code's are an
+unprofiled pool, a profiled one, a second unprofiled one and a second naming
+the same profile: two accounts, the default account named by `max` and then
+the profile named by `spare`, and nothing of the other agent's pool. An agent
+with no pool in the run has its default account alone, named by no pool.
+
+## `fn refuses_a_first_pools_signed_out_default_account_though_its_profiled_spare_is_signed_in() {`
+
+[`a_default_pool_then_a_profiled_spare`], with the default account signed out
+and the spare signed in, on a resume: `certify` over `profiled_over` refuses,
+naming `max` and the agent's default account ([`MAX_DEFAULT_ACCOUNT`]) with
+`claude auth login` and no `CLAUDE_CONFIG_DIR`, and not the spare. Both
+discoveries reached the CLI, in file order: the default account's at the
+adapter's own identity (`o2`) under no profile, then the spare's at its own
+(`o18`) under its profile. Nothing was certified and the ledger balances.
+
+The witness of the default account checked beside a profile. On the code
+before it, the agent's accounts were its profiled pools alone, so the one
+discovery ran under `spare`'s profile, which answers signed in, and `certify`
+passed though `max`'s workers would run under a signed-out account.
+
+## `fn certifies_a_signed_in_default_account_and_profiled_spare_settling_every_discovery() {`
+
+The same pools with both accounts signed in: `certify` passes. The requests
+are the shell probe, Claude Code's two capability probes, then the default
+account's discovery at `o2` and the spare's at `o18`, under no profile and
+under the spare's. Five processes were registered and each completed once;
+nothing is running and the ledger balances, as
+`every_profiled_pool_signed_in_certifies_and_every_discovery_is_registered_and_settled`
+holds for profiled pools alone.
+
+## `fn refuses_a_signed_out_default_account_on_a_fresh_run_in_the_resumes_words() {`
+
+The fresh path, as `a_fresh_runs_probes_refuse_a_signed_out_pool_in_the_resumes_words`
+drives it, over the same pools: `RunnerProbes`, given them with `with_pools`
+and an empty environment with `reading_environment`, refuses naming `max`'s
+default account, records no capabilities, ran the two discoveries at `o2` and
+`o18`, under no profile and the spare's, and settled every process in the
+pair. Its refusal is the text a resume's `certify` returns for the same pools.
+
+## `fn refuses_a_later_unprofiled_pools_signed_out_default_account_discovered_under_no_profile() {`
+
+The other order: `max` on [`EXISTING_DIRECTORY`] first, then `spare` with no
+profile; the profile signed in and the default account signed out. `certify`
+refuses naming `spare` and the agent's default account, not `max` or its
+profile. The first discovery ran at `o2` under `max`'s profile, and the
+second, `spare`'s, at `o18` reached the CLI with no profile.
+
+That last is `profiled`'s further-account rule (`profiled.md`,
+`Profiled::stamped`): `profiled` stamps `max`'s profile on any of the agent's
+probes that carries none, and without the rule `spare`'s discovery would have
+run under `max`'s profile, answered signed in, and certified a default account
+no one asked.
+
+## `fn discovers_each_account_once_however_many_pools_use_it() {`
+
+Two unprofiled pools, and two pools naming one profile: each is one account,
+so one discovery runs, at `o2`, under no profile or under that profile, and
+`certify` passes when it is signed in. Signed out, the refusal names `max`, the
+first pool that uses the account, and not `spare`, and still one discovery
+ran.
+
+## `const CODEX: &str = crate::agent::codex::ADAPTER_ID;`
+
+---------------------------------------------------------------------------
+Environment credentials
+---------------------------------------------------------------------------
+
+## `const CODEX: &str = crate::agent::codex::ADAPTER_ID;`
+
+The agent with environment credentials (`preflight.md`,
+`ENVIRONMENT_CREDENTIALS`), by the id its row is keyed by.
+
+## `const PLACEHOLDER: &str = "placeholder-credential-value";`
+
+What a fixture environment gives a variable it sets: recognisable, so a
+refusal can be asserted not to carry it, and no credential.
+
+## `struct SignedOutCodex;`
+
+An adapter registered as `codex` whose probe is [`Stub`]'s and whose
+`discover` answers `NotAuthenticated` and runs nothing: Codex as its
+`login status` answers with no stored login, whatever its environment holds.
+
+## `struct SignedOutCodexAdapters;`
+
+The registry holding [`SignedOutCodex`] alone.
+
+## `fn codex_preflight(`
+
+A resume's pre-flight of one recorded agent, `codex`, with no pools, reading
+`environment`.
+
+## `fn codex_api_key_set(key: &str) -> Option<OsString> {`
+
+Environments with exactly one of Codex's variables set to [`PLACEHOLDER`]:
+`CODEX_API_KEY` here, `OPENAI_API_KEY` and `CODEX_ACCESS_TOKEN` in the two
+after it.
+
+## `fn codex_variables_empty_and_others_set(key: &str) -> Option<OsString> {`
+
+Codex's three variables present and empty, and every other variable set to
+[`PLACEHOLDER`]: none of Codex's set to a value, and a value within reach of
+any refusal that printed one.
+
+## `fn certifies_a_signed_out_codex_account_while_one_of_its_environment_credentials_is_set() {`
+
+The reviewer's witness, ported. Codex's discovery answers `NotAuthenticated`,
+and with `CODEX_API_KEY` set in the environment pre-flight reads, `certify`
+passes; again with `OPENAI_API_KEY`, and with `CODEX_ACCESS_TOKEN`. On the code
+before the environment-credential table, `NotAuthenticated` refused whatever
+the environment held, so this run, which works, was refused.
+
+## `fn refuses_a_signed_out_codex_account_with_no_environment_credential_naming_never_valuing_them() {`
+
+The same agent with none of its variables set: nothing set at all, or each
+present and empty with every other variable set. `certify` refuses, naming
+`codex` and its default account (no pool of this run names it), in the sign-in
+closing, with a hint that names the three variables, and carries no
+[`PLACEHOLDER`].
+
+## `fn refuses_a_signed_out_claude_code_account_whatever_codex_variable_is_set() {`
+
+The variables are per agent: Claude Code with no pool, its default account
+signed out, and `CODEX_API_KEY` set, refuses as it would with nothing set,
+naming its default account as no pool of this run names it, with `claude auth
+login`, and nothing of Codex's variable.
 
 ## `fn the_refusal_notes_keep_a_probe_whose_process_is_unresolved() {`
 

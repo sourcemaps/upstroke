@@ -177,26 +177,35 @@ adapter that one day mints an ordinal of 16 or more is refused by
 [`PreflightIdentities::further_pool`] rather than given an identity that
 collides, so the stride is widened then, not discovered to be too narrow.
 
+The stride is also how `profiled` tells a further account's discovery from
+the adapter's own probes: it leaves alone any agent probe at an ordinal of the
+stride or more, so a further account's discovery reaches the CLI carrying
+exactly its own account, the default account's with no profile (`profiled.md`,
+`Profiled::stamped`). That reading holds because no adapter mints such an
+ordinal itself.
+
 ## `impl PreflightIdentities` › `pub fn further_pool(`
 
-A probe of `agent` run for the `further`-th further pool of that agent
+A probe of `agent` run for the `further`-th further account of that agent
 (`further` counts from 1), at the adapter's `ordinal`: the agent probe at
-ordinal `further * FURTHER_POOL_STRIDE + ordinal`.
+ordinal `further * FURTHER_POOL_STRIDE + ordinal`. The name says pool because
+each account is named by the first pool that uses it.
 
-Pre-flight runs an agent's sign-in discovery once under each of the agent's
-profiled pools (`preflight.md`, `refuse_signed_out`). An adapter mints its
-discovery's identities with fixed ordinals (Claude Code's `auth status
---json` is ordinal 2), so a second run of it would render the same
-`p.agent-<id>.o<n>` and the ledger would refuse the second registration
-(`InvocationLedger::open`). The first pool's discovery keeps the adapter's own
-identities, and every further pool's is moved here, to a block of ordinals of
-its own. Two further pools, or a further pool and the adapter's own probes,
-never share an identity.
+Pre-flight runs an agent's sign-in discovery once under each account the
+agent's pools use, the default account included (`preflight.md`,
+`Account::of_agent`, `refuse_signed_out`). An adapter mints its discovery's
+identities with fixed ordinals (Claude Code's `auth status --json` is ordinal
+2), so a second run of it would render the same `p.agent-<id>.o<n>` and the
+ledger would refuse the second registration (`InvocationLedger::open`). The
+first account's discovery keeps the adapter's own identities, and every
+further account's is moved here, to a block of ordinals of its own. Two
+further accounts, or a further account and the adapter's own probes, never
+share an identity.
 
 ### Errors
 
-[`UpstrokeError::Refused`] for `further` 0 (the first pool keeps the adapter's
-identities, and has no block here), for an `ordinal` of
+[`UpstrokeError::Refused`] for `further` 0 (the first account keeps the
+adapter's identities, and has no block here), for an `ordinal` of
 [`Self::FURTHER_POOL_STRIDE`] or more, and for a shifted ordinal that does not
 fit in a `u32`; and [`Self::agent`]'s refusals.
 

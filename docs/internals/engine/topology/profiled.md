@@ -54,10 +54,11 @@ refuses in `prepare_fresh`, before its lease, and a resume in its pre-flight,
 under its locks. The profile must be an absolute path and an existing
 directory. The agent's capability probe then runs under the profile, through
 this wrapper. Its sign-in check (`claude auth status --json` for Claude Code)
-runs next, on a fresh run and on a resume, under the profile of each of the
-agent's pools that names one, or under its default account when none does
-(`preflight.md`, `refuse_signed_out`). A signed-out account refuses the run
-before it starts or resumes; a CLI that cannot say passes. It does not expand
+runs next, on a fresh run and on a resume, under each account the agent's
+pools use: each profile a pool names, and the agent's default account when a
+pool names none or the agent has no pool (`preflight.md`, `Account::of_agent`,
+`refuse_signed_out`). A signed-out account refuses the run before it starts or
+resumes; a CLI that cannot say passes. It does not expand
 `~/`: the configuration has no helper for that (the only home lookup is
 `util::user_upstroke_dir`, which finds the home but does not rewrite paths),
 so the profile is the string written in the pools file,
@@ -93,23 +94,43 @@ The wrapper: the inner runner and the map. It holds nothing per request.
 
 ## `impl Profiled` › `fn stamped(&self, request: &RunnerRequest) -> Option<RunnerRequest> {`
 
-`Some` only when the request is not a worker's, carries no profile yet, has
-an agent, and that agent has a profile; the stamped request is the original
-with `credential_profile` set and every other field unchanged. A worker's
-request (`ExecutionRole::Implement`) is never stamped, whatever it carries: its
-attempt's plan decided its profile, and `None` there means the plan's pool
-names none (see the module section). A request with no agent (a gate, the
-shell probe) is never stamped.
+`Some` only when the request is not a worker's, carries no profile yet, is not
+a further account's probe, has an agent, and that agent has a profile; the
+stamped request is the original with `credential_profile` set and every other
+field unchanged. A worker's request (`ExecutionRole::Implement`) is never
+stamped, whatever it carries: its attempt's plan decided its profile, and
+`None` there means the plan's pool names none (see the module section). A
+request with no agent (a gate, the shell probe) is never stamped.
 
 **A request that already carries a profile keeps it** (`None`, so it goes
 through unchanged), whatever its role. Pre-flight sets one: it runs an agent's
-sign-in discovery under each of the agent's profiled pools
-(`preflight.md`, `refuse_signed_out`), and the discovery for a pool other than
-the agent's first carries that pool's profile, which the agent's bound profile
-must not replace. A request that carries none — every review and every
+sign-in discovery under each account the agent's pools use
+(`preflight.md`, `refuse_signed_out`), and the discovery for a profile other
+than the agent's first pool's carries that profile, which the agent's bound
+profile must not replace. A request that carries none — every review and every
 capability probe — is stamped exactly as before. Until pre-flight set one,
 nothing did for these roles, and an already-set profile was overwritten by the
 bound one (`tests::a_probe_that_already_carries_a_profile_keeps_it`).
+
+**A further account's probe is left alone** (`None`), with or without a
+profile: an agent probe whose ordinal is
+`PreflightIdentities::FURTHER_POOL_STRIDE` or more. Those ordinals are the
+blocks pre-flight moves every further account's discovery to
+(`PreflightIdentities::further_pool`; no adapter mints one of its own, and
+`further_pool` refuses an adapter ordinal that wide), so a request there is a
+discovery that already carries exactly its own account. That includes the
+agent's default account, whose discovery carries no profile: under the rule
+above alone it would be stamped with the agent's first pool's profile, so it
+would run under that profile, and the default account it stands for would go
+unchecked. The adapter's own probes, at ordinals below the stride, are stamped
+as before (`tests::a_further_accounts_probe_reaches_the_runner_with_exactly_its_own_account`).
+
+## `fn further_account_probe(invocation: &InvocationId) -> bool {`
+
+Whether `invocation` is an agent probe at an ordinal of
+`PreflightIdentities::FURTHER_POOL_STRIDE` or more: a further account's
+pre-flight discovery. Read from the identity, which `UnderPool` sets, rather
+than from anything a request could carry beside it.
 
 ## `impl Runner for Profiled {` › `fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {`
 
@@ -181,6 +202,16 @@ Two profiled pools for Claude Code, `max` first, then `spare`. Claude Code's
 agent's bound profile. The same request carrying `spare`'s, as pre-flight
 builds it for its discovery under `spare`, arrives with `spare`'s and
 otherwise unchanged.
+
+## `mod tests {` › `fn a_further_accounts_probe_reaches_the_runner_with_exactly_its_own_account() {`
+
+A profiled first pool, `max`, and a later pool naming no profile. Claude Code's
+`auth status --json` probe with no profile at ordinal
+`FURTHER_POOL_STRIDE + 2`, as pre-flight builds the later pool's discovery
+under the agent's default account, arrives with none and otherwise unchanged.
+The same probe at ordinal 2, the adapter's own, arrives with `max`'s profile.
+Without the rule both arrived with `max`'s, and pre-flight's check of the
+default account ran under the profile instead.
 
 ## `mod tests {` › `fn a_request_with_no_agent_goes_through_untouched() {`
 

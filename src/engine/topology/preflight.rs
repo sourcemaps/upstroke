@@ -36,8 +36,27 @@ impl Probed {
 
 const CLAUDE_CODE_OAUTH_TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 
+const ENVIRONMENT_CREDENTIALS: &[(&str, &[&str])] = &[(
+    crate::agent::codex::ADAPTER_ID,
+    &["CODEX_API_KEY", "OPENAI_API_KEY", "CODEX_ACCESS_TOKEN"],
+)];
+
+fn environment_credentials(agent: &str) -> &'static [&'static str] {
+    ENVIRONMENT_CREDENTIALS
+        .iter()
+        .find(|(id, _)| *id == agent)
+        .map(|&(_, variables)| variables)
+        .unwrap_or_default()
+}
+
+fn credentials_in_environment(agent: &str, environment: fn(&str) -> Option<OsString>) -> bool {
+    environment_credentials(agent)
+        .iter()
+        .any(|variable| environment(variable).is_some_and(|value| !value.is_empty()))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ProfiledPool {
+struct ProfiledPool {
     pool: String,
     agent: String,
     profile: PathBuf,
@@ -52,13 +71,45 @@ impl ProfiledPool {
             profile: PathBuf::from(profile),
         })
     }
+}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Account {
+    Default { pool: Option<String> },
+    Profile { pool: String, profile: PathBuf },
+}
+
+impl Account {
     pub(super) fn of_agent(pools: &[Pool], agent: &str) -> Vec<Self> {
-        pools
-            .iter()
-            .filter(|pool| pool.agent == agent)
-            .filter_map(Self::of)
-            .collect()
+        let mut accounts: Vec<Self> = Vec::new();
+        for pool in pools.iter().filter(|pool| pool.agent == agent) {
+            let account = match &pool.profile {
+                Some(profile) => Self::Profile {
+                    pool: pool.name.clone(),
+                    profile: PathBuf::from(profile),
+                },
+                None => Self::Default {
+                    pool: Some(pool.name.clone()),
+                },
+            };
+            if accounts
+                .iter()
+                .all(|listed| listed.profile() != account.profile())
+            {
+                accounts.push(account);
+            }
+        }
+        if accounts.is_empty() {
+            accounts.push(Self::Default { pool: None });
+        }
+        accounts
+    }
+
+    fn profile(&self) -> Option<&Path> {
+        match self {
+            Self::Default { .. } => None,
+            Self::Profile { profile, .. } => Some(profile),
+        }
     }
 }
 
@@ -187,7 +238,8 @@ impl RunnerPreflight for RunPreflight<'_> {
                 adapter,
                 &probed,
                 &registering,
-                &ProfiledPool::of_agent(&self.pools, agent),
+                &Account::of_agent(&self.pools, agent),
+                self.environment,
             )
             .map_err(|failure| match failure {
                 SignIn::SignedOut(refusal) => refusal,
@@ -317,64 +369,87 @@ pub(super) fn refuse_signed_out(
     adapter: &dyn AgentAdapter,
     caps: &Caps,
     through: &dyn Runner,
-    pools: &[ProfiledPool],
+    accounts: &[Account],
+    environment: fn(&str) -> Option<OsString>,
 ) -> Result<(), SignIn> {
-    if pools.is_empty() {
-        let discovery = adapter
-            .discover(through, caps)
-            .map_err(SignIn::Undiscovered)?;
-        return signed_in(agent, None, discovery.auth);
-    }
-    for (further, pool) in (0..).zip(pools) {
-        let under = UnderPool {
-            boundary: through,
-            profile: &pool.profile,
-            further,
+    let mut first_signed_out = None;
+    for (further, account) in (0..).zip(accounts) {
+        let discovered = if further == 0 && account.profile().is_none() {
+            adapter.discover(through, caps)
+        } else {
+            let under = UnderPool {
+                boundary: through,
+                profile: account.profile(),
+                further,
+            };
+            adapter.discover(&under, caps)
         };
-        let discovery = adapter
-            .discover(&under, caps)
-            .map_err(SignIn::Undiscovered)?;
-        signed_in(agent, Some(pool), discovery.auth)?;
+        let discovery = match discovered {
+            Ok(discovery) => discovery,
+            Err(error) => return Err(first_signed_out.unwrap_or(SignIn::Undiscovered(error))),
+        };
+        if first_signed_out.is_none() {
+            first_signed_out = signed_in(agent, account, discovery.auth, environment).err();
+        }
     }
-    Ok(())
+    first_signed_out.map_or(Ok(()), Err)
 }
 
-fn signed_in(agent: &str, pool: Option<&ProfiledPool>, auth: AuthState) -> Result<(), SignIn> {
+fn signed_in(
+    agent: &str,
+    account: &Account,
+    auth: AuthState,
+    environment: fn(&str) -> Option<OsString>,
+) -> Result<(), SignIn> {
     match auth {
-        AuthState::NotAuthenticated => Err(SignIn::SignedOut(signed_out(agent, pool))),
-        AuthState::Authenticated | AuthState::Unknown => Ok(()),
+        AuthState::NotAuthenticated if !credentials_in_environment(agent, environment) => {
+            Err(SignIn::SignedOut(signed_out(agent, account)))
+        }
+        AuthState::NotAuthenticated | AuthState::Authenticated | AuthState::Unknown => Ok(()),
     }
 }
 
-fn signed_out(agent: &str, pool: Option<&ProfiledPool>) -> UpstrokeError {
+fn signed_out(agent: &str, account: &Account) -> UpstrokeError {
     let claude_code = agent == crate::agent::claude::ADAPTER_ID;
-    let (account, login) = match pool {
-        Some(pool) => (
+    let default_login = || {
+        if claude_code {
+            "`claude auth login`".to_owned()
+        } else {
+            "with the agent's own CLI".to_owned()
+        }
+    };
+    let (account, login) = match account {
+        Account::Profile { pool, profile } => (
             format!(
-                "pool `{}`'s account, the credential profile directory `{}`",
-                pool.pool,
-                pool.profile.display()
+                "pool `{pool}`'s account, the credential profile directory `{}`",
+                profile.display()
             ),
             if claude_code {
                 format!(
                     "`claude auth login` with `CLAUDE_CONFIG_DIR` set to `{}`",
-                    pool.profile.display()
+                    profile.display()
                 )
             } else {
-                format!(
-                    "with the agent's own CLI, under `{}`",
-                    pool.profile.display()
-                )
+                format!("with the agent's own CLI, under `{}`", profile.display())
             },
         ),
-        None => (
-            "its default account, as no pool of this run names a credential profile for it"
-                .to_owned(),
-            if claude_code {
-                "`claude auth login`".to_owned()
-            } else {
-                "with the agent's own CLI".to_owned()
-            },
+        Account::Default { pool: Some(pool) } => (
+            format!(
+                "pool `{pool}`'s account, as `{pool}` names no credential profile, so it runs \
+                 under the agent's default account"
+            ),
+            default_login(),
+        ),
+        Account::Default { pool: None } => (
+            "its default account, as no pool of this run names it".to_owned(),
+            default_login(),
+        ),
+    };
+    let login = match environment_credentials(agent) {
+        [] => login,
+        variables => format!(
+            "{login}, or by setting {} in the environment upstroke runs in",
+            one_of(variables)
         ),
     };
     UpstrokeError::Refused {
@@ -386,17 +461,30 @@ fn signed_out(agent: &str, pool: Option<&ProfiledPool>) -> UpstrokeError {
     }
 }
 
+fn one_of(variables: &[&str]) -> String {
+    let named: Vec<String> = variables
+        .iter()
+        .map(|variable| format!("`{variable}`"))
+        .collect();
+    match named.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("one of {} or {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
 struct UnderPool<'a> {
     boundary: &'a dyn Runner,
-    profile: &'a Path,
+    profile: Option<&'a Path>,
     further: u32,
 }
 
 impl UnderPool<'_> {
     fn under(&self, request: &RunnerRequest) -> Result<RunnerRequest, UpstrokeError> {
-        let mut under = request
-            .clone()
-            .with_credential_profile(self.profile.to_path_buf());
+        let mut under = request.clone();
+        if let Some(profile) = self.profile {
+            under = under.with_credential_profile(profile.to_path_buf());
+        }
         if self.further == 0 {
             return Ok(under);
         }
