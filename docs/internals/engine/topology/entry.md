@@ -1001,8 +1001,17 @@ Unarmed, or on any other thread, neither function records anything.
 `for_inspection` returns `AbsentRuntime`, the absent-runtime double: it asks
 no container runtime, and answers every question as an absent runtime answers
 it, `RuntimeError::Unreachable` under the question's own operation with the
-one detail `UNARMED`. It is held to that by the test
-`runner::container::tests::an_unarmed_inspection_runtime_answers_as_an_absent_runtime`.
+one detail `UNARMED`. It counts every question it answers, process-wide and
+never reset, so only a test alone in its own process can assert on the count,
+which `unarmed_answers()` reads, on Unix only. Each such test reads it once,
+after its questions, so the count says how many were answered in that
+process, and not when or on which thread. What the test
+`runner::container::tests::an_unarmed_inspection_runtime_answers_as_an_absent_runtime`
+shows of the double is, on Unix, that it gives those answers to the twelve
+questions, every `ContainerRuntime` method but `reaper_program`, without
+invoking a `docker` program (zero invocations of a recording stub first on
+the `PATH` of the test's child, and the double's count of twelve);
+elsewhere, its answers only.
 It is there so that tests that are not about a
 container runtime no longer depend on the CI machine's runtime answering the
 census's listing inside its bound (the Windows Docker-listing flake,
@@ -1016,7 +1025,9 @@ they assert needs it:
 - the two mount tests' children,
   `engine::tests::inherited_common_dir_mount_child` and
   `engine::tests::recorded_target_resume_child`, whose parents assert that the
-  stub `docker` first on the children's `PATH` was never asked;
+  stub `docker` first on the children's `PATH` was never asked, and each of
+  which asserts after its engine calls that the double answered no question
+  in its process;
 - the Docker-gated absent-image test,
   `runner::container::resolve::tests::real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock`,
   which asserts the refusal of an image the machine's own runtime does not

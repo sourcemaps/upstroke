@@ -4610,8 +4610,12 @@ checkout), a child of this test binary whose environment alone carries it
 run and a resume and records both refusals; the parent requires the child's
 success and libtest's `1 passed`, and that both recorded refusals name the
 canonical common directory as the source's container. Afterwards the stub
-was never asked anything, so no image was inspected, no runner was built and
-no launch plan was made; the recorded log is byte-identical; and the runs
+was never asked anything, and in no child did the unarmed absent-runtime
+double answer a question: the stub sees every runner's commands and the
+inspections of each child's test thread, which arms
+`engine::topology::entry::container_runtime`; the children's count sees any
+other thread's inspections. So no image was inspected, no runner was built
+and no launch plan was made; the recorded log is byte-identical; and the runs
 root holds what it held.
 
 With the fix removed (`MountContext` bound from the checkout's `.git`, the
@@ -4625,8 +4629,9 @@ The child of the test above. `run_with` over the container configuration is
 refused with `[runner] the mount … is refused`, its source lying inside the
 canonical common directory, authoritative Git; `resume_with` on the parked run
 is refused as recording that mount, for the same reason, with nothing
-published, locked or written. It then writes both refusals to the file its
-parent names, the evidence that it ran.
+published, locked or written. After those engine calls it asserts that the
+unarmed absent-runtime double answered no question in its process. It then
+writes both refusals to the file its parent names, the evidence that it ran.
 
 ## `const RECORDED_TARGET_REFUSAL: &str = "UPSTROKE_RECORDED_TARGET_REFUSAL";`
 
@@ -4649,8 +4654,12 @@ records the refusal; the parent requires the child's success and libtest's
 `1 passed`, a refusal that names the run, the mount, the target rule's words
 and that nothing was published, locked or written, and a log byte-identical
 to the one the child was given. Afterwards the stub was never asked
-anything, so the image's environment was not read, no runner was built and
-nothing was recovered; and the runs root holds what it held.
+anything, and in no child did the unarmed absent-runtime double answer a
+question: the stub sees every runner's commands and the inspections of each
+child's test thread, which arms `engine::topology::entry::container_runtime`;
+the children's count sees any other thread's inspections. So the image's
+environment was not read, no runner was built and nothing was recovered; and
+the runs root holds what it held.
 
 The public resume asks the runtime before recovery does: `prepare_resume`
 reads the recorded image's environment. With
@@ -4664,7 +4673,8 @@ check, which a resume reaches only after that question, is the subject of
 
 The child of the test above: `resume_with` on the parked run is refused, and
 the refusal is written to the file its parent names, the evidence that it
-ran.
+ran. After its engine call, and before that write, it asserts that the
+unarmed absent-runtime double answered no question in its process.
 
 ## `fn a_schema_4_follow_prints_one_line_per_event_and_no_raw_control_whatever_the_plan_or_the_record_holds()`
 
