@@ -198,8 +198,7 @@ harnesses and runs none; each harness that build reported, started as a
 process over the leg's selection, asked for every test's time and waited on;
 their output read from files, the test processes they left running, the
 suite's exit status, a count of what libtest reported held to the leg's
-floor, and the count printed. The first eleven lines run and clean up the
-suite; the counter follows. The three `matrix` expressions
+floor, and the count printed. Fourteen lines. The three `matrix` expressions
 are text here, as they are in `ci.yml`; GitHub replaces each with the leg's
 value from the table the job's matrix carries before PowerShell reads the
 script.
@@ -288,9 +287,8 @@ whitespace, and the list closes only if Cargo stops growing. A count does
 not enumerate them: a wrapper that executes nothing and prints nothing
 leaves no `test result: ok.` line, whichever route installed it, and that
 is every misconfiguration and every lazy substitution. It is not every
-substitution. A wrapper written to print libtest's start and completed
-summary can clear the floor, as can a decoy crate whose `harness = false`
-main prints them;
+substitution. A wrapper written to print libtest's summary line clears the
+floor, and so does a decoy crate whose `harness = false` main prints it;
 both are a forgery, on the machine or in the diff, and the paragraph below
 is where forgeries are bounded. Since the legs report their tests' times
 the four runner routes no longer reach them: Cargo only builds, and the
@@ -359,11 +357,9 @@ Between the compiler check and the count is the suite itself, lines 3 to
    copy in a `try` of its own: a copy that fails is printed, and its `catch`
    throws again only where the harness passed, so a failed copy cannot end
    the step in place of a failed harness's code. The loop stops at the first harness whose exit is not zero, as Cargo's
-   own `test` stops at the first harness that fails. The standard-output
-   read is also retained with the executable's name in `$harnessLogs`,
-   initialised on line 3, so counting does not lose executable boundaries.
+   own `test` stops at the first harness that fails.
 8. One `try` block, which reads and then lists. It prints the two files
-   and keeps standard output as `$log` for display; the job log carries
+   and keeps standard output as `$log` for the count; the job log carries
    the suite's output once the loop has ended, not as it runs. It then lists
    every process named `upstroke*` that is still running, with its command
    line, and asks Windows to stop each one; the test harnesses are
@@ -523,7 +519,7 @@ it reads this text's letters. It is drawn unless all of these hold:
    with its dots escaped as line 2 writes them.
 3. The line that starts the build holds `cargo`, in any letter case, once,
    and no other line after line 2 holds it at all. The words
-   `Cargo compiled the harnesses`, in the floor check's message, and
+   `Cargo compiled the harnesses`, in line 13's message, and
    `Cargo built no test harness`, in line 6's, are set aside before the
    count.
 4. `Start-Process` occurs twice: the build's and the loop's.
@@ -550,82 +546,26 @@ never spells still passes it:
 constant or to the workflow is the owner's to read. The rule does not bound
 one, as no pin here bounds a hostile candidate (above).
 
-After the suite, the count starts on line 12 and has three stages:
+After the suite, lines 12 to 14 are the count:
 
-1. Require one retained output for every compiled executable. Within each
-   output, take the first libtest start and the last complete suite summary.
-   Do not pair every nested start: a helper can exit without a summary while
-   the parent completes. Require the final summary's passed, failed, ignored
-   and measured total to match the first start, with status `ok` and zero
-   failures; only its passed count contributes. A complete zero-test harness
-   contributes zero. No harnesses, missing output, either boundary missing,
-   a result before the first start, a start after the last result, a final
-   truncated result or an inconsistent total fails. Each start or result
-   marker clears the current result; only a complete summary sets it again.
-   A nested start announcing the same total as the first start fails closed.
-   A start is libtest's own line, `running N test` or `running N tests`,
-   with the ` (shuffle seed: S)` libtest appends when it shuffles, alone on
-   its line or directly after a `test NAME ... ` or
-   `test NAME - should panic ... ` record that another process's output
-   interrupted. Text anywhere else in a line is not a start, so an ignored
-   test's reason, which libtest writes after `ignored, `, announces none.
-2. Refuse a sum below `${{ matrix.floor }}`. The message names the shard
-   and its floor.
-3. Print the sum, shard and floor, so a later floor change has a measurement.
-
-An earlier count summed every success summary in the merged output,
-including helper processes. Its replacement paired every start with a
-result, but the recorded unit library harness starts three helpers and
-reports only two helper summaries before its complete outer summary; the
-runner library harness starts two helpers and reports only one helper
-summary. These are separate executable logs, not successive top-level runs
-in a shared log. The boundary count gives unit 14 + 1527 + 0 = 1541 passes
-and runner 0 + 0 + 409 = 409 passes. The acceptance reference for Windows engine 4
-is 99 top-level passes plus nine helper passes: its floor input is 99,
-not 108. The native Windows fixture in `super` exercises this count from
-the workflow with those recorded boundaries, nested helpers and a zero
-harness, plus incomplete inputs. It starts no selected suite a second time.
-The count still follows output display, survivor cleanup and the failing
-harness's exit, so a counting refusal cannot replace that exit code.
-
-Mixed stdout carries no process identity. First and last boundaries plus
-balanced totals are completion evidence, not proof of the writer of each
-line. In particular, an outer five-test start followed by a five-test helper
-start and its complete five-test summary is indistinguishable from an outer
-completion if the missing summary's provenance is assumed. The existing
-incomplete fixture stays rejected: any nested start with the outer total
-fails closed, including a completed equal-size helper. Supporting that case
-would require separate corroboration of completion. Individual timed test
-records (`test <name> ... ok <0.123s>`) are not suite summaries and do not
-supply that corroboration. Unobserved or forged helper output is outside
-what these mixed lines can establish; the executable's actual exit status
-and the operator's archived invocation boundaries remain separate evidence.
-
-Round three of #439 closed two gaps in what the count reads as a start.
-It read one only where the line ended at the noun, so a helper libtest
-shuffled, whose start ends with its seed, was not seen: an outer three-test
-start, a shuffled three-test helper passing all three and a parent that
-exited zero before its summary counted the helper's three against a floor
-of 3 (`PR439-WINDOWS-SHUFFLED-HELPER-COMPLETION`). And it read one after any
-whitespace, so an ignored test whose reason ended in `running 1 test`
-announced a nested start of the outer total, and a harness that had
-completed failed as ambiguous
-(`PR439-WINDOWS-IGNORE-REASON-AS-HARNESS-START`). A reason that holds a line
-break and then a start line is still read as a start, since the lines
-cannot tell it from one. An extra start after the first can only refuse a
-run: it marks the run ambiguous or clears a result a later summary must
-set again. The summary matcher is unchanged.
+12. The sum of every `test result: ok.` line's passed count, over every
+    harness the loop ran.
+13. The refusal of a sum below `${{ matrix.floor }}`. The message names the
+    shard and its floor.
+14. The sum, the shard and the floor, printed. A leg that passes then says
+    in its log how far above its floor it ran, which is what a later change
+    to a floor is measured from.
 
 The floor is not in this text. It reaches the script from the matrix, so
-the equality over the script holds that the floor check reads `matrix.floor` and
+the equality over the script holds that line 13 reads `matrix.floor` and
 the oracle's check of the matrix holds what each leg's floor is
 (`category_legs`' summed Windows contributions); a lowered floor in the workflow leaves this pin
 intact and is refused there. The same division holds the selection: this
 text says line 7 reads `matrix.tests`, and the matrix check says what each
 leg's is (`category_legs`' selectors).
-`the_windows_leg_counts_the_tests_it_ran` holds exactly one line to opening with the
+`the_windows_leg_counts_the_tests_it_ran` holds line 13 to opening with the
 test of `matrix.floor`, so the floors the oracle holds the matrix to are
-floors a leg tests. The final report is held by the oracle's pin alone.
+floors a leg tests. Line 14 is held by the oracle's pin alone.
 
 Measured, for the selection,
 `MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED` and

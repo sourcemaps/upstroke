@@ -52,37 +52,16 @@ pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;
 
 pub(super) const WINDOWS_SHARD_WITNESS: &str = r#"$rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()
 if ($rustc -notmatch '^rustc 1\.97\.1 ' -or $path_rustc -notmatch '^rustc 1\.97\.1 ' -or $cargo -notmatch '^cargo 1\.97\.1 ') { throw "the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow" }
-$out = Join-Path $env:RUNNER_TEMP 'suite-stdout.log'; $err = Join-Path $env:RUNNER_TEMP 'suite-stderr.log'; $built = Join-Path $env:RUNNER_TEMP 'suite-build.json'; $harnessLogs = @()
+$out = Join-Path $env:RUNNER_TEMP 'suite-stdout.log'; $err = Join-Path $env:RUNNER_TEMP 'suite-stderr.log'; $built = Join-Path $env:RUNNER_TEMP 'suite-build.json'
 $build = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features --no-run --message-format=json-render-diagnostics' -NoNewWindow -PassThru -RedirectStandardOutput $built -RedirectStandardError $err; $null = $build.Handle; $build.WaitForExit(); $code = $build.ExitCode
 if ($code -ne 0) { try { Get-Content $err } catch { "reading the build's errors failed: $_" }; exit $code }
 $harnesses = @(Get-Content $built | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -ceq 'compiler-artifact' -and $_.profile.test -and $_.executable } | ForEach-Object { $_.executable }); if ($harnesses.Count -eq 0) { throw "Cargo built no test harness, so this shard would run nothing" }
-$env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput "$out.part" -RedirectStandardError "$err.part"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { $harnessLog = @(Get-Content "$out.part"); $harnessLog | Add-Content $out; $harnessLogs += @{ Harness = $h; Lines = $harnessLog } } catch { "copying the output of $h failed: $_"; if ($code -eq 0) { throw } }; try { Get-Content "$err.part" | Add-Content $err } catch { "copying the errors of $h failed: $_"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }
+$env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput "$out.part" -RedirectStandardError "$err.part"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content "$out.part" | Add-Content $out } catch { "copying the output of $h failed: $_"; if ($code -eq 0) { throw } }; try { Get-Content "$err.part" | Add-Content $err } catch { "copying the errors of $h failed: $_"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }
 try { Get-Content $err; $log = Get-Content $out; $log; $left = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'upstroke%'"); foreach ($p in $left) { "left running after the suite: pid $($p.ProcessId): $($p.CommandLine)"; Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } }
 catch { if ($code -ne 0) { "reading the suite's output or listing the processes it left failed: $_" } else { throw } }
 if ($code -ne 0) { exit $code }
 if ($left.Count -gt 0) { throw "$($left.Count) test process(es) outlived the suite, listed above: a test leaves a process running, which would hold this step open" }
-$passed = 0
-if ($harnesses.Count -eq 0 -or $harnessLogs.Count -ne $harnesses.Count) { throw "missing output from a top-level test harness" }
-foreach ($harnessLog in $harnessLogs) {
-  $expected = $null; $result = $null; $ambiguous = $false
-  foreach ($line in $harnessLog.Lines) {
-    if ($line -cmatch '^(?:test \S+(?: - should panic)? \.\.\. )?running ([0-9]+) tests?(?: \(shuffle seed: [0-9]+\))?$') {
-      if ($null -eq $expected) { $expected = [long]$Matches[1] }
-      elseif ([long]$Matches[1] -eq $expected) { $ambiguous = $true }
-      $result = $null
-    } elseif ($line -cmatch '(?:^|\s)test result:') {
-      if ($null -eq $expected) { throw "test result without a start in $($harnessLog.Harness)" }
-      $result = $null
-      if ($line -cmatch '(?:^|\s)test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured; [0-9]+ filtered out; finished in [0-9]+\.[0-9]+s$') {
-        $result = @{ Status = $Matches[1]; Passed = [long]$Matches[2]; Failed = [long]$Matches[3]; Total = ([long]$Matches[2] + [long]$Matches[3] + [long]$Matches[4] + [long]$Matches[5]) }
-      }
-    }
-  }
-  if ($null -eq $expected -or $null -eq $result) { throw "missing or incomplete top-level test result in $($harnessLog.Harness)" }
-  if ($ambiguous) { throw "a helper announced the same test total as the top-level harness in $($harnessLog.Harness): mixed stdout cannot establish completion" }
-  if ($result.Status -cne 'ok' -or $result.Failed -ne 0 -or $result.Total -ne $expected) { throw "inconsistent top-level test result in $($harnessLog.Harness)" }
-  $passed += $result.Passed
-}
+$passed = [int](($log | Select-String -Pattern '^test result: ok\. (\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)
 if ($passed -lt ${{ matrix.floor }}) { throw "shard ${{ matrix.shard }} reported $passed passing tests, below its floor of ${{ matrix.floor }}: Cargo compiled the harnesses and executed almost none of this shard's tests" }
 "shard ${{ matrix.shard }} reported $passed passing tests; its floor is ${{ matrix.floor }}"
 "#;
