@@ -19738,67 +19738,80 @@ impl EffectHooks for StopAt {
 /// (`a_cross_kind_scrub_stopped_at_any_phase_converges_on_the_next`): both
 /// scrubs stopped at the stop-th phase, then both again without injection,
 /// R-O1's assertion after every retry, and a completed run's phases exactly
-/// the frozen test's ten — on both fixtures, so an earlier incarnation's
-/// instance costs no phase of its own.
-#[test]
-fn r_o2_a_cross_kind_scrub_stopped_at_any_phase_converges_with_no_instance_registered() {
-    for earlier in [false, true] {
-        let mut stop = 0;
-        let completed = loop {
-            stop += 1;
-            assert!(
-                stop <= 32,
-                "two scrubs of one slot each consult a bounded number of phases"
-            );
-            let fixture = Fixture::created(&format!("r-o2-{earlier}-{stop}"));
-            let instances = CrossKindInstances::build(&fixture, earlier);
-            let mut hooks = StopAt {
-                stop,
-                seen: Vec::new(),
-            };
-            let stopped = scrub_kind(&fixture.manager, &mut hooks, tasks_only)
-                .and_then(|_| scrub_kind(&fixture.manager, &mut hooks, snapshots_only));
-            for tracked in &instances.tracked {
-                if tracked.checkout.exists() || tracked.admin.exists() {
-                    assert!(
-                        tracked.intent.exists(),
-                        "stopped at phase {stop}: {} outlives its intent",
-                        tracked.checkout.display()
-                    );
-                }
-            }
-            scrub_kind(&fixture.manager, &mut NoHooks, tasks_only)
-                .and_then(|_| scrub_kind(&fixture.manager, &mut NoHooks, snapshots_only))
-                .unwrap_or_else(|error| {
-                    panic!("stopped at phase {stop}, the next scrubs converge: {error}")
-                });
-            instances.assert_converged(&fixture);
-            if stopped.is_ok() {
-                break hooks.seen;
-            }
-        };
-        let remove = EffectSiteId::Worktree(WorktreeSite::Remove);
-        let remove_intent = EffectSiteId::Worktree(WorktreeSite::RemoveIntent);
-        let snapshot_remove = EffectSiteId::Snapshot(SnapshotSite::Remove);
-        let snapshot_remove_intent = EffectSiteId::Snapshot(SnapshotSite::RemoveIntent);
-        assert_eq!(
-            completed,
-            vec![
-                (remove, HookPhase::Before),
-                (remove, HookPhase::After),
-                (snapshot_remove, HookPhase::Before),
-                (snapshot_remove, HookPhase::After),
-                (remove_intent, HookPhase::Before),
-                (remove_intent, HookPhase::After),
-                (snapshot_remove, HookPhase::Before),
-                (snapshot_remove, HookPhase::After),
-                (snapshot_remove_intent, HookPhase::Before),
-                (snapshot_remove_intent, HookPhase::After),
-            ],
-            "the frozen test's ten phases, with {} instance(s) of alpha",
-            if earlier { 2 } else { 1 }
+/// the frozen test's ten — on the frozen fixture or, with `earlier`, on its
+/// second-incarnation twin. The two tests below run one fixture each and
+/// hold both to the same ten, so an earlier incarnation's instance costs no
+/// phase of its own.
+fn stop_a_cross_kind_scrub_at_every_phase(earlier: bool) {
+    let mut stop = 0;
+    let completed = loop {
+        stop += 1;
+        assert!(
+            stop <= 32,
+            "two scrubs of one slot each consult a bounded number of phases"
         );
-    }
+        let fixture = Fixture::created(&format!("r-o2-{earlier}-{stop}"));
+        let instances = CrossKindInstances::build(&fixture, earlier);
+        let mut hooks = StopAt {
+            stop,
+            seen: Vec::new(),
+        };
+        let stopped = scrub_kind(&fixture.manager, &mut hooks, tasks_only)
+            .and_then(|_| scrub_kind(&fixture.manager, &mut hooks, snapshots_only));
+        for tracked in &instances.tracked {
+            if tracked.checkout.exists() || tracked.admin.exists() {
+                assert!(
+                    tracked.intent.exists(),
+                    "stopped at phase {stop}: {} outlives its intent",
+                    tracked.checkout.display()
+                );
+            }
+        }
+        scrub_kind(&fixture.manager, &mut NoHooks, tasks_only)
+            .and_then(|_| scrub_kind(&fixture.manager, &mut NoHooks, snapshots_only))
+            .unwrap_or_else(|error| {
+                panic!("stopped at phase {stop}, the next scrubs converge: {error}")
+            });
+        instances.assert_converged(&fixture);
+        if stopped.is_ok() {
+            break hooks.seen;
+        }
+    };
+    let remove = EffectSiteId::Worktree(WorktreeSite::Remove);
+    let remove_intent = EffectSiteId::Worktree(WorktreeSite::RemoveIntent);
+    let snapshot_remove = EffectSiteId::Snapshot(SnapshotSite::Remove);
+    let snapshot_remove_intent = EffectSiteId::Snapshot(SnapshotSite::RemoveIntent);
+    assert_eq!(
+        completed,
+        vec![
+            (remove, HookPhase::Before),
+            (remove, HookPhase::After),
+            (snapshot_remove, HookPhase::Before),
+            (snapshot_remove, HookPhase::After),
+            (remove_intent, HookPhase::Before),
+            (remove_intent, HookPhase::After),
+            (snapshot_remove, HookPhase::Before),
+            (snapshot_remove, HookPhase::After),
+            (snapshot_remove_intent, HookPhase::Before),
+            (snapshot_remove_intent, HookPhase::After),
+        ],
+        "the frozen test's ten phases, with {} instance(s) of alpha",
+        if earlier { 2 } else { 1 }
+    );
+}
+
+/// R-O2 on the frozen `CrossKind` fixture: one instance of alpha, its own.
+#[test]
+fn r_o2_a_cross_kind_scrub_stopped_at_any_phase_converges_with_no_instance_registered_with_one_instance_of_alpha()
+ {
+    stop_a_cross_kind_scrub_at_every_phase(false);
+}
+
+/// R-O2 on the second fixture: an earlier incarnation's instance of alpha too.
+#[test]
+fn r_o2_a_cross_kind_scrub_stopped_at_any_phase_converges_with_no_instance_registered_with_an_earlier_incarnations_instance()
+ {
+    stop_a_cross_kind_scrub_at_every_phase(true);
 }
 
 /// R-O3, the replacement for `finalize.rs:456`
