@@ -93,11 +93,13 @@ in the `test (winguest)` job (the self-hosted Windows guest), panicked at
 action` — the sampler's assertion that each sample's classified recovery succeeded
 (`record.recovered`), reached after the assertions that every sample was accounted for and that none
 was unclassified had passed. It did so three times on 2026-11-12, each time the only failing test of
-its job, on pull requests whose changes do not touch the workspace manager:
+its job, on pull requests none of which changes the sampler (#375 changes comments elsewhere in the
+same test file, below):
 
 - CI run 43221659775, job 131194404548, pull request #366 at `583e7e6b`: 3369 passed, 1 failed.
 - CI run 43234617706, job 131238552041, pull request #373 at `72ebee2f`: 3388 passed, 1 failed.
-- CI run 43289831147, job 131432857144, pull request #375 at `1132819`: the same panic.
+- CI run 43289831147, job 131432857144, pull request #375 at `274431d0`, the run checking out
+  GitHub's merge of that head into `master`: the same panic.
 
 In the first, the log's per-site summary showed:
 
@@ -112,8 +114,14 @@ The failing site was `Worktree.Add`, the site of this row's second fingerprint. 
 `sample_site`, prints that site's `n=… none=…` line (near line 13201), and then asserts on that
 site, ending with `record.recovered` (near line 13274), so a failing `record.recovered` ends the
 loop. The log holds all four summary lines, so the first three sites passed their assertions and
-the fourth, `Worktree.Add`, failed. The test file is byte-identical at `583e7e6b`, `72ebee2f`,
-`11328197` and `9992447b`. No rate is given: the number of guest jobs that ran this test that day
+the fourth, `Worktree.Add`, failed. Lines 13100-14200 of `src/workspace_manager/tests.rs`, which
+hold the test (near line 13196), `sample_site` (near line 13933) and `SAMPLED_SITES` (near line
+14125), are byte-identical at `583e7e6b`, `72ebee2f`, `274431d0` and `9992447b`. The file as a
+whole differs at `274431d0`, where #375 changes only comments, in another test
+(`the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does` and the constants and
+helpers above it, from near line 15199 down). The merge commit the third run checked out can no
+longer be fetched, but `master` at the time (`2b16cec2`) had not changed the file since #375's
+merge base, so the merged file was #375's own at `274431d0`. No rate is given: the number of guest jobs that ran this test that day
 was not counted for this record.
 
 This is a third fingerprint of this row, not a new row: a recovery that fails is consistent with
