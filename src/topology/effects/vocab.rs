@@ -1429,7 +1429,8 @@ mod tests {
         bytes.len()
     }
 
-    /// `(enum name, variants declared)` for every `pub enum` in `source`.
+    /// `(enum name, variants declared)` for every `pub enum` in `source`, as
+    /// `variants_in` counts them.
     fn declared_variants(source: &str) -> Vec<(String, usize)> {
         let blanked = blank_comments_and_literals(source);
         let lines: Vec<&str> = blanked.lines().collect();
@@ -1443,49 +1444,80 @@ mod tests {
             else {
                 continue;
             };
-            let mut variants = 0usize;
-            while let Some(body) = lines.get(index) {
+            let mut body = String::new();
+            while let Some(body_line) = lines.get(index) {
                 index += 1;
-                if *body == "}" {
+                if *body_line == "}" {
                     break;
                 }
-                if is_variant_line(body.trim()) {
-                    variants += 1;
-                }
+                body.push_str(body_line);
+                body.push('\n');
             }
-            found.push((name.to_owned(), variants));
+            found.push((name.to_owned(), variants_in(&body)));
         }
         found
     }
 
-    /// Whether a trimmed line of an enum body declares a variant.
+    /// The number of variants counted in an enum body whose comments and
+    /// literals are already blank.
     ///
-    /// The identifier is the text before the first `=`, `(` or `{`, so a
-    /// variant is read whatever follows its name: nothing, an explicit
-    /// discriminant, a tuple body or a struct body. Requiring the whole line
-    /// to be alphanumeric, as this once did, left `Timeout = 2,` uncounted and
-    /// let a discriminant-bearing variant go missing from its `ALL` unseen.
-    fn is_variant_line(text: &str) -> bool {
-        let Some(body) = text.strip_suffix(',') else {
-            return false;
-        };
-        let identifier = body
-            .find(['=', '(', '{'])
-            .and_then(|at| body.get(..at))
-            .unwrap_or(body)
-            .trim();
-        let mut characters = identifier.chars();
-        matches!(characters.next(), Some(first) if first.is_ascii_uppercase())
-            && characters.all(|c| c.is_ascii_alphanumeric())
+    /// The body is cut into fragments at each comma outside parentheses,
+    /// square brackets and braces, which always balance once comments and
+    /// literals are blank, and each fragment that is not blank counts as one
+    /// variant. Line boundaries play no part, so a variant is counted once
+    /// wherever its declaration ends, and these shapes are counted exactly: a
+    /// bare name, a tuple body, a struct body on one line or several, and a
+    /// discriminant on one line or several, unless it holds a comma that only
+    /// angle brackets enclose (below). A comma between fields, or inside a
+    /// discriminant's parentheses, square brackets or braces, cuts nothing, so
+    /// no field and no line of such an expression is counted as a variant.
+    /// Reading line by line, as this once did, counted only a line that ends
+    /// in a comma and whose text before any `=`, `(` or `{` is a capitalised
+    /// name, so a variant whose declaration spans lines could escape it:
+    /// `Timeout = {` has no comma, the lines of its block name no variant, and
+    /// `},` names nothing.
+    ///
+    /// Angle brackets are not tracked. `<` is also the comparison and shift
+    /// operator, which this scanner cannot tell from an opening bracket, and
+    /// taking a comparison for a bracket could swallow the variants after it.
+    /// So a comma that only angle brackets enclose, as in a discriminant
+    /// `code::<A, B, C>()` or `<Trio<A, B, C> as Code>::VALUE`, cuts its
+    /// declaration too, and may produce additional fragments that are not
+    /// blank, each counted as a variant: the helper may over-count there and
+    /// never under-counts. That is the safe direction. An over-count fails the
+    /// census on a correct enum, loudly, for a person to repair this helper;
+    /// an under-count could hide a variant that its `ALL` omits.
+    fn variants_in(body: &str) -> usize {
+        let mut depth = 0usize;
+        let mut start = 0usize;
+        let mut fragments = Vec::new();
+        for (index, character) in body.char_indices() {
+            match character {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    fragments.extend(body.get(start..index));
+                    start = index + 1;
+                }
+                _ => {}
+            }
+        }
+        fragments.extend(body.get(start..));
+        fragments
+            .iter()
+            .filter(|fragment| !fragment.trim().is_empty())
+            .count()
     }
 
     #[test]
     fn the_census_reads_variants_and_not_the_text_that_looks_like_them() {
         // The blanker's positive control: a variant named only inside a comment
         // or a string literal is not a variant, and a `'static` lifetime does
-        // not swallow the file behind it. The real variants take every shape a
-        // variant line can -- unit, tuple body, explicit discriminant, struct
-        // body -- so a parser that reads only some of them undercounts here.
+        // not swallow the file behind it. The real variants take each shape
+        // `variants_in` counts exactly -- a bare name, a tuple body, and a
+        // discriminant and a struct body each on one line and over several --
+        // so a census that reads only some of them undercounts here, and one
+        // that counts a field or a match arm as a variant overcounts.
         let fixture = "\
 const NOISE: &'static str = \"pub enum Ghost {\\n    Boo,\\n}\";
 const RAW: &str = r#\"pub enum Phantom {\"#;
@@ -1495,6 +1527,14 @@ pub enum Real {
     Three(Payload),
     Five = 5,
     Six { seven: u8 },
+    Seven {
+        eight: u8,
+        nine: Vec<u8>,
+    },
+    Ten = match WIDTH {
+        8 => 10,
+        _ => 11,
+    },
 }
 ";
         assert_eq!(
@@ -1504,14 +1544,28 @@ pub enum Real {
         );
         assert_eq!(
             declared_variants(fixture),
-            vec![("Real".to_owned(), 4)],
-            "a commented-out or quoted variant was counted, or a real one was not"
+            vec![("Real".to_owned(), 6)],
+            "a commented-out or quoted variant, a field or a match arm was counted, or a real \
+             variant was not"
         );
 
         // The injected violation: one variant added to the enum and to nothing
         // else has to move the count.
         let widened = fixture.replace("    Three(Payload),", "    Three(Payload),\n    Four,");
-        assert_eq!(declared_variants(&widened), vec![("Real".to_owned(), 5)]);
+        assert_eq!(declared_variants(&widened), vec![("Real".to_owned(), 7)]);
+
+        // Pinned on purpose: the over-count `variants_in` documents, where a
+        // comma that only angle brackets enclose cuts a discriminant too. Here
+        // the two commas leave `Twelve = code::<A`, ` B` and ` C>()`, none of
+        // them blank, so one declared variant is counted three times.
+        let angled = "pub enum Angled {\n    Twelve = code::<A, B, C>(),\n}\n";
+        assert_eq!(
+            declared_variants(angled),
+            vec![("Angled".to_owned(), 3)],
+            "a comma that only angle brackets enclose may produce additional fragments that are \
+             not blank, each counted as a variant; this over-count is deliberate, the safe \
+             direction, and never an under-count"
+        );
 
         // And the blanker survives the two literal shapes that make a naive
         // scanner lose its place.
