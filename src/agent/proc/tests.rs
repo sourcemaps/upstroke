@@ -4747,7 +4747,7 @@ fn children_spawned_before_a_failing_spawn_are_ended_and_collected() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "subprocess helper"]
 fn a_guard_unwinding_with_no_process_to_spare_helper() {
@@ -4835,7 +4835,7 @@ fn a_guard_unwinding_with_no_process_to_spare_helper() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn a_guard_unwinding_with_no_process_to_spare_ends_and_collects_its_child() {
     let ended = super::test_support::run_test_isolated(

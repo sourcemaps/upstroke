@@ -2137,6 +2137,16 @@ Without `UPSTROKE_NO_PROCESS_TO_SPARE` it returns at once, so a run of
 the ignored tests inside a shared test process never lowers that
 process's limit.
 
+It is compiled on Linux only (`#[cfg(target_os = "linux")]`), as is its
+parent below. On macOS, in the `test (macos-latest)` job of CI run
+43112671690, the lowering worked and the second spawn was refused as
+intended (`EAGAIN`, os error 35 there), but the restoring `setrlimit`
+was refused with `EPERM` (os error 1) although it was given exactly the
+limit `getrlimit` had returned. The cause is not established. So the
+code comment's reasoning, that a hard limit never changed allows the
+earlier soft limit again, is known to hold on Linux only, where the
+helper now runs, and not on Unix in general.
+
 ## `fn a_guard_unwinding_with_no_process_to_spare_ends_and_collects_its_child() {`
 
 The regression test for `ChildGuard`'s cleanup with no process to
@@ -2156,6 +2166,15 @@ member into process group …: Resource temporarily unavailable (os error
 ("failed to spawn thread"), and the panic in a destructor during
 cleanup aborted the helper, wait status 134 (SIGABRT). With
 `end_and_poll` restored, it passes.
+
+The witness runs on Linux only (`#[cfg(target_os = "linux")]`, with the
+helper above). On macOS, in CI run 43112671690, the helper's restoring
+`setrlimit` was refused with `EPERM` although it was given the limit
+`getrlimit` had returned, and the cause is not established. What is
+therefore not witnessed on macOS is this one path: a guard unwinding
+while no process can be created. The guards' other tests,
+`children_spawned_before_a_failing_spawn_are_ended_and_collected`
+among them, run on every Unix as before.
 
 ## `const READINESS_ROLE: &str = "UPSTROKE_READINESS_ROLE";`
 
