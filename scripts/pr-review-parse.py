@@ -1040,13 +1040,51 @@ def ledger_result(args):
     severity alone: a review P3 whose row recorded P2 read READY, though a P2 recorded as
     `accepted-risk` is the owner's call. A row too short to carry the column reports it empty,
     which equals no severity a review can give -- so it, too, can only block.
+
+    ONE LEDGER, OPENED ONLY BY ITS HEADING, AND ONE ROW PER ID. A section opened at any line that
+    BEGAN with the heading, so a `## Review finding ledger (draft)` placed before the real one was
+    read too and its rows came first; the audit takes the first row carrying a finding's id, and a
+    draft row recording a P3 `accepted-risk` stood in for the real row recording P2 -- READY, where
+    the real ledger says `severity-mismatch`. Now a ledger opens only at a line that IS the heading,
+    with trailing whitespace allowed and nothing else, and any other `## ` line closes it. A body
+    with more than one such line is refused, and so is a ledger with an id in more than one row:
+    either leaves two readings of one finding, and choosing between them is exactly what went wrong.
+    So every id this returns is returned once, and the audit's lookup has nothing to choose.
+
+    THE LINES ARE THE VALIDATOR'S LINES. `validate-pr-body.sh` deletes every carriage return
+    (`tr -d '\\r'`) and its command substitution drops every NUL before it compares a line, so both
+    are deleted here first. Kept, `## Review fi<CR>nding ledger` was the heading to the validator
+    and not to this, and a trailing-space copy elsewhere in the body was the only heading this saw:
+    the validator checked one section and the audit read another.
+
+    AGAINST THE VALIDATORS this is stricter, and is never looser. `validate-pr-body.sh` takes the
+    heading only as the exact line and refuses a second one; every line it takes this takes, so a
+    body it passes has one ledger section here too, and the same one -- and a body carrying the
+    exact heading and a copy with a trailing space, which it passes as one ledger and another
+    section, is refused here. It refuses a repeated id only among the canonical table's rows, from
+    the separator up to the first blank, non-`|` or `## ` line; this refuses one among every row it
+    reads, and it reads every `|` line in the section, past the table's end included.
+    `validate-pr-ledger-evidence.sh` does not look at the heading -- it reads from the first
+    canonical header line anywhere in the body -- and does not look for a repeated id at all.
+
+    EVERY CELL RETURNED IS TRIMMED OF ALL SURROUNDING WHITESPACE, as the body validator trims it
+    (`[[:space:]]`). Trimmed of spaces alone, a policy-valid row with a tab either side of `P3`
+    reached the audit as a tabbed severity and blocked as `severity-mismatch`. Where `str.strip()`
+    and `[[:space:]]` could differ, the difference can only block: a character the validator keeps
+    fails its id, severity and disposition patterns, and one this keeps matches no finding's id and
+    no severity.
     """
     if len(args) != 1:
         raise Unparsed("ledger takes one file")
     rows = []
+    ids = set()
+    headings = 0
     in_ledger = False
-    for line in read_input(args[0]).split("\n"):
-        if line.startswith(LEDGER_HEADING):
+    for line in read_input(args[0]).replace("\r", "").replace(NUL, "").split("\n"):
+        if line.rstrip() == LEDGER_HEADING:
+            headings += 1
+            if headings > 1:
+                raise Unparsed("the body carries more than one %r heading" % LEDGER_HEADING)
             in_ledger = True
             continue
         if line.startswith("## "):
@@ -1059,11 +1097,15 @@ def ledger_result(args):
             continue
         if "None yet" in identifier:
             continue
+        identifier = identifier.strip()
+        if identifier in ids:
+            raise Unparsed("the ledger records %r in more than one row" % identifier)
+        ids.add(identifier)
         rows.append(
             {
-                "id": identifier.strip(" "),
-                "severity": (cells[2] if len(cells) > 2 else "").strip(" "),
-                "disposition": (cells[9] if len(cells) > 9 else "").strip(" "),
+                "id": identifier,
+                "severity": (cells[2] if len(cells) > 2 else "").strip(),
+                "disposition": (cells[9] if len(cells) > 9 else "").strip(),
             }
         )
     return {"tag": "ledger", "rows": rows}

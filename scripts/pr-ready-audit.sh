@@ -1190,9 +1190,11 @@ audit_one() {
       blockers+=("manual:$sev-without-id")
       continue
     fi
-    # The first row with this id wins, as the `awk`'s `exit` made it win. Compared by expansion:
-    # a here-string bash could not spill left the previous finding's disposition in place, which
-    # is a deferred row standing in for a finding that has none.
+    # The row with this id. There is at most one: the parser refuses a body with a second ledger
+    # heading or an id in two rows, and when it took the first of two a draft section's
+    # `accepted-risk` row stood in for the real ledger's. Compared by expansion: a here-string bash
+    # could not spill left the previous finding's disposition in place, which is a deferred row
+    # standing in for a finding that has none.
     disposition=""; row_severity=""
     for ((j = 0; j < ${#ledger_id[@]}; j++)); do
       if [[ "${ledger_id[j]}" == "$id" ]]; then
