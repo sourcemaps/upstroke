@@ -127,7 +127,8 @@ These are invariants, and they are what make it safe to leave running:
   family. If that alternative cannot be probed, the run warns with the affected tasks and
   falls back to the frozen same-model reviewer instead of claiming independence.
   `[routing] review = { cross_family = false }` opts out of that alternative and nothing else: no
-  rebind is made, the primary reviews the tasks its own model implemented, and the run warns once.
+  rebind is made, the primary reviews the tasks its own model implemented, and where a task with no
+  second opinion can run on that model the run warns once, naming those tasks.
   A configured blast-radius second opinion is stricter, and the switch leaves it in place: another
   model family must be available, both reviewers judge the same diff independently, and both must
   pass.

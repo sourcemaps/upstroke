@@ -550,7 +550,8 @@ default.
 ## `pub review_cross_family: bool,`
 
 `[routing] review = { cross_family = … }`, defaulting to `true` — today's
-rebind. `false` makes [`crate::review::plan_for`] name no alternative and
+rebind. `false` makes [`crate::review::plan_for`] name no alternative
+and, where a task with no second opinion can run on the primary's model,
 warn once that the primary reviews its own model's work.
 
 ## `pub review_pass_timeout: Duration,`
