@@ -517,6 +517,41 @@ mod tests {
     }
 
     #[test]
+    fn a_second_answer_to_a_parked_legacy_question_is_refused_and_keeps_the_first() {
+        let tree = scratch("second");
+        let repo = tree.path().join("repo");
+        seed(&repo, "01RUN", "q-1");
+
+        let first = "retry with the fixture regenerated";
+        answer(&repo, "q-1", Reply::Text(first.to_owned())).expect("the first answer lands");
+        let path = rundir::public_dir(&repo, "01RUN")
+            .join("answers")
+            .join("q-1.json");
+        let kept = std::fs::read(&path).expect("the first answer is on disk");
+
+        let err = answer(
+            &repo,
+            "q-1",
+            Reply::Text("skip the fixture entirely".to_owned()),
+        )
+        .expect_err("a second answer is refused");
+        assert!(
+            matches!(err, UpstrokeError::Refused { .. }),
+            "a refusal: {err:?}"
+        );
+        assert!(err.to_string().contains("already answered"), "got: {err}");
+        assert!(
+            err.to_string().contains(first),
+            "names the kept answer: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("still on disk"),
+            kept,
+            "the first answer's bytes are untouched"
+        );
+    }
+
+    #[test]
     fn an_unknown_question_says_where_it_looked() {
         let tree = scratch("missing");
         let repo = tree.path().join("repo");

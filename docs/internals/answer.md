@@ -74,6 +74,16 @@ Answering twice is a mistake worth catching rather than a last-write-
 wins race: the first answer may already have driven a retry, and the
 second would look like it had an effect it cannot have.
 
+This check is only the fast path. The payload's `answer` field is set when an
+engine ingests the answer, and publishing never sets it. So a parked question
+answered while no engine drives the run still reads as unanswered here. A
+second answer to it used to replace the first and report success. The
+guarantee is `publish`: the answer file is create-once, and an answer already
+on disk is refused with this check's sentence (`already_answered`), naming the
+answer read back from `answers/<id>.json`. All three refusals (this check,
+`answer_open`'s check, and `publish`) build that sentence in
+`already_answered`, so they read the same.
+
 ## `fn reply_answer(question: &Question, reply: Reply) -> Result<Answer, UpstrokeError> {` › `format!("1-{}", question.options.len())`
 
 Not `1..N`: every operator of this tool reads
@@ -120,6 +130,18 @@ would instead be ingested as an answer that changes nothing.
 
 Simulate the engine having ingested the first answer and rewritten
 the payload with it.
+
+## `fn a_second_answer_to_a_parked_legacy_question_is_refused_and_keeps_the_first()`
+
+The witness for the case `a_question_is_answered_once` cannot reach. The
+`seed` run is schema 3, and no engine ever ingests its answer, so the
+question payload's `answer` field stays unset and the pre-check passes the
+second answer through. The refusal it asserts therefore comes from `publish`
+seeing the first answer on disk. The test checks three things: the second
+answer is a `Refused`, the refusal names the first answer, and
+`answers/<id>.json` holds byte for byte what the first answer wrote. Before
+`write_answer` was create-once, the second answer replaced the first and
+reported success.
 
 ## `fn reply_answer(question: &Question, reply: Reply) -> Result<Answer, UpstrokeError> {`
 
