@@ -14,7 +14,7 @@ source, documentation, workflows, release machinery and this file.
    pushing.
 3. **Run the ten-command baseline** (`CODING_STANDARDS.md` §2) before every push, then wait for
    the two required contexts: `upstroke-ci` (formatting, Clippy on three platforms, the Linux and macOS
-   test jobs, the Windows suite in `test-windows-hosted` -- fourteen shards on `windows-latest`, on
+   test jobs, the Windows suite in `test-windows-hosted` -- twenty-two shards on `windows-latest`, on
    every pull request, push and merge-queue entry -- the MSRV matrix, the six
    Bash gates) and `upstroke-pr-policy` (title, body sections, ledger). A
    branch behind `master` is not updated by hand to merge once the ruleset carries the merge
@@ -23,13 +23,13 @@ source, documentation, workflows, release machinery and this file.
    Until the ruleset carries the queue, the up-to-date requirement stands: a branch behind
    `master` is updated first and waits again, and the audit reports it as `behind-master`.
 
-   **The Windows suite runs in fourteen shards**, `test (windows-latest, k of 14)`, the legs of
+   **The Windows suite runs in twenty-two shards**, `test (windows-latest, k of 22)`, the legs of
    `test-windows-hosted`. Each shard installs and asserts the pinned compiler, `1.97.1`, runs
    the suite step with its shard's test-name filter, and holds a share of the Windows suite's
    passing-test floor of 1700; the shares sum to it. A test runs in exactly one shard: each
    shard runs the tests whose names contain any of its filters and none of the filters of the
    shards before it, and the last takes what no filter names.
-   `upstroke-ci` requires the job, which passes only when all fourteen shards do. From 2026-09-01
+   `upstroke-ci` requires the job, which passes only when all twenty-two shards do. From 2026-09-01
    to 2026-11-20 the suite ran on an ephemeral self-hosted guest unless the run was sent to
    `windows-latest`: the merge queue's entries ran there from 2026-09-16 until its October
    timeouts, and from 2026-11-12 a `pick-windows-home` job could send any run to
@@ -78,7 +78,9 @@ source, documentation, workflows, release machinery and this file.
    (249.8 s) and
    `engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect`
    (244.5 s). Under the packing, every Windows leg's prediction, about 9 minutes a job, is above
-   that floor.
+   that floor. On 2026-11-25 every suite was divided again, to about seven minutes a leg (Linux
+   5, macOS 12, Windows 22), from the five complete CI runs 45503042270, 45505425187,
+   45506422808, 45508617577 and 45513139892.
    Each shard runs under a 40-minute limit. In the 2026-11-15 run one whole-suite job failed a
    kill-timing test, and one shard did not end after its tests had passed; a leftover test
    process is inferred to have held its output. Neither followed a change.
