@@ -311,10 +311,10 @@ not the test. If the inference is wrong and Cargo itself does not end, line
 [`TEST_COMMAND`]'s arguments make it, and to six things about the process
 it starts: that it waits with `WaitForExit()` and not `-Wait`, pipes nothing
 into `Tee-Object`, exits with Cargo's code before it counts, lists the
-processes before that exit and throws for them after it, runs Cargo and
-starts a process nowhere else, and reads and lists inside the `try` whose
-`catch` keeps Cargo's code. The six are `windows_suite_wait_complaints` in
-the test notes.
+processes before that exit and throws for them after it, opens with lines 1
+and 2 whole and holds `cargo` after them once, on the line that starts the
+process, and reads and lists inside the `try` whose `catch` keeps Cargo's
+code. The six are `windows_suite_wait_complaints` in the test notes.
 Measured in the oracle, each an edit to the workflow that leaves this text
 alone: `MUT-TEST-WINDOWS-SUITE-PIPED-AGAIN`, line 4 a pipeline into
 `Tee-Object` again, and `MUT-TEST-WINDOWS-SURVIVOR-ALLOWED`, line 8 removed.
@@ -323,6 +323,35 @@ the workflow and the constant move together: the suite run a second time,
 and the `try` and its `catch` removed
 (`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit` in the
 test notes).
+
+The fifth of the six is the one that refuses a second run of the suite, and
+it reads this text's letters. It is drawn unless all of these hold:
+
+1. Line 1 is the compiler-questions line, whole.
+2. Line 2 is their refusal, whole, built from [`GOLDEN_IMAGE_TOOLCHAIN`]
+   with its dots escaped as line 2 writes them.
+3. Each later line holds `cargo`, in any letter case, once if it holds
+   `Start-Process` and never otherwise. The words
+   `Cargo compiled the harnesses`, in line 10's message, are set aside
+   before the count.
+4. `Start-Process` occurs once.
+
+Before `PR389-INDIRECT-SECOND-SUITE-RUN-UNREFUSED` the count skipped every
+`cargo` that followed `$` or `^`, on any line. Round two's frontier pass
+over #389 appended
+`& (($cargo -split ' ')[0]) test --all-targets --all-features` after line
+10, here and in `ci.yml` together, and every `effects::` test passed over a
+script that runs the suite twice. No `cargo` after line 2 is skipped now,
+whatever precedes it.
+
+The rule is for an edit made in good faith, a second run a change leaves in
+by mistake. It reads letters and parses nothing, so a second run the text
+never spells still passes it:
+`& ('car' + 'go') test --all-targets --all-features`, appended here and in
+`ci.yml` together. That is read from the text, not run, and it is filed as
+`PR389-UNSPELLED-SECOND-SUITE-RUN-UNREFUSED`, deferred. An edit to this
+constant or to the workflow is the owner's to read. The rule does not bound
+one, as no pin here bounds a hostile candidate (above).
 
 The hosted twin ran this step too, character for character, until it ran
 the suite in shards. Its legs now run [`WINDOWS_SHARD_WITNESS`], which keeps

@@ -5586,7 +5586,15 @@ fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {
     let exits = "if ($code -ne 0) { exit $code }\n";
     let throws = "if ($left.Count -gt 0) { throw ";
     let counts = "$passed = ";
-    let questions = "$rustc = ((cargo rustc -q --lib -- --version)";
+    let questions = "$rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()";
+    let version = GOLDEN_IMAGE_TOOLCHAIN.replace('.', "\\.");
+    let refusal = format!(
+        "if ($rustc -notmatch '^rustc {version} ' -or $path_rustc -notmatch '^rustc {version} ' \
+         -or $cargo -notmatch '^cargo {version} ') {{ throw \"the suite would run on '$rustc' \
+         (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's \
+         {GOLDEN_IMAGE_TOOLCHAIN}: a compiler was chosen by something other than this \
+         workflow\" }}"
+    );
     let catches = "catch { if ($code -ne 0) { \"reading the suite's output or listing the processes it left failed: $_\" } else { throw } }";
     let lines: Vec<&str> = script.lines().collect();
     let mut out = Vec::new();
@@ -5617,29 +5625,24 @@ fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {
              passes unreported",
         );
     }
-    let runs_cargo = |line: &str| {
-        let line = line
-            .replace("(Cargo's compiler)", "")
-            .replace("Cargo compiled the harnesses", "")
-            .to_ascii_lowercase();
-        line.match_indices("cargo")
-            .filter(|(at, _)| !line[..*at].ends_with(['$', '^']))
+    let holds_cargo = |line: &str| {
+        line.replace("Cargo compiled the harnesses", "")
+            .to_ascii_lowercase()
+            .matches("cargo")
             .count()
     };
-    let cargo_elsewhere = lines.iter().enumerate().any(|(index, line)| {
-        let expected = if index == 0 && line.starts_with(questions) {
-            2
-        } else {
-            usize::from(line.contains("Start-Process"))
-        };
-        runs_cargo(line) != expected
-    });
+    let opens_whole = lines.first().copied() == Some(questions)
+        && lines.get(1).copied() == Some(refusal.as_str());
+    let cargo_elsewhere = lines
+        .iter()
+        .skip(2)
+        .any(|line| holds_cargo(line) != usize::from(line.contains("Start-Process")));
     let starts = script.to_ascii_lowercase().matches("start-process").count();
-    if cargo_elsewhere || starts != 1 {
+    if !opens_whole || cargo_elsewhere || starts != 1 {
         out.push(
-            "runs Cargo, or starts a process, on more than the one line that starts the suite, \
-             line 1's two compiler questions aside, so the suite can run twice and be counted \
-             from either run",
+            "is not the compiler questions on line 1 and their refusal on line 2, each whole, and \
+             after them `cargo`, in any letter case, once on the one line that starts a process \
+             and on no other, so the suite can run twice and be counted from either run",
         );
     }
     let kept = lines
@@ -5738,6 +5741,20 @@ fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {
             "{home} suite step has no `try` on line 5 and `catch` on line 6 to remove, so the \
              last mutation below is not the one it is named for:\n{unwrapped}"
         );
+        let indirect = "& (($cargo -split ' ')[0]) test --all-targets --all-features";
+        let joined_to = |line: usize| -> String {
+            script
+                .lines()
+                .enumerate()
+                .map(|(index, text)| {
+                    if index == line {
+                        format!("{text}; {indirect}\n")
+                    } else {
+                        format!("{text}\n")
+                    }
+                })
+                .collect()
+        };
         for (mutation, mutated, complaint) in [
             (
                 "the suite run again on a line after the count",
@@ -5757,6 +5774,21 @@ fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {
             (
                 "a second copy of the line that starts the suite",
                 format!("{script}{start}\n"),
+                twice,
+            ),
+            (
+                "the suite run again through `$cargo`, on a last line",
+                format!("{script}{indirect}\n"),
+                twice,
+            ),
+            (
+                "the suite run again through `$cargo`, joined to the compiler questions' line",
+                joined_to(0),
+                twice,
+            ),
+            (
+                "the suite run again through `$cargo`, joined to the refusal's line",
+                joined_to(1),
                 twice,
             ),
             (
