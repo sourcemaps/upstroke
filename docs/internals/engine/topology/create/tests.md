@@ -274,13 +274,6 @@ The happy path, and the order it runs in
 
 ## `fn a_created_run_hands_itself_to_the_loop() {`
 
-P0-P8, in `run_creation`'s order, each step through its own site.
-
-The ordering claims that are not visible from the returned value are
-asserted from the harness and from the tree: every site of the sequence
-was reached, the private skeleton exists *and* the owner record does
-(O08 is asserted separately by the P3a tests, which is where the
-ordering is observable), and the marker is gone while the log is
 **A freshly created run is drivable, not just creatable.**
 
 `decisions.sequential_substrate.engine` is one sentence about both paths —
@@ -307,6 +300,13 @@ defect on the resumed path, arriving on the created one.
 
 ## `fn the_publication_prefixes_run_in_the_packets_order() {`
 
+P0-P8, in `run_creation`'s order, each step through its own site.
+
+The ordering claims that are not visible from the returned value are
+asserted from the harness and from the tree: every site of the sequence
+was reached, the private skeleton exists *and* the owner record does
+(O08 is asserted separately by the P3a tests, which is where the
+ordering is observable), and the marker is gone while the log is
 committed.
 
 ## `fn the_publication_prefixes_run_in_the_packets_order()` › `let calls = probes.calls();`
