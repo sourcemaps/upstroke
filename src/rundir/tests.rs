@@ -12931,8 +12931,11 @@ fn what_the_funnels_write_is_what_the_packet_says_they_write() {
 ///
 /// Since `SWEEP-CLASSIFY-011` the spelling has one definition,
 /// `run_started_sha256`, and `first_line_digest` delegates to it. This test
-/// stays as the pin on that delegation: a `format!` reintroduced on either side,
-/// or a change to which bytes `first_line_digest` hands over, fails here.
+/// checks only that the two functions agree on the same bytes: a change to which
+/// bytes `first_line_digest` hands over fails here, and so does a `format!` on
+/// either side that spells the digest differently. It does not detect the
+/// delegation being replaced by an independent spelling of the same format; a
+/// byte-identical `format!("sha256:{:x}", ...)` keeps it green.
 ///
 /// The newline is the whole of the difference between the two signatures:
 /// `first_line_digest` is given a log and finds the line, `run_started_sha256`
