@@ -231,7 +231,13 @@ fn hits_a_quota_window(lower: &str) -> bool {
                 .strip_prefix("session")
                 .or_else(|| after.strip_prefix("weekly"))
         };
-        window_end.is_some_and(|rest| rest.starts_with(" limit"))
+        window_end
+            .and_then(|rest| rest.strip_prefix(" limit"))
+            .is_some_and(|after_limit| {
+                !after_limit.starts_with(|character: char| {
+                    character.is_ascii_alphanumeric() || character == '_'
+                })
+            })
     })
 }
 
@@ -527,6 +533,36 @@ mod tests {
     #[test]
     fn hit_your_without_limit_does_not_signal() {
         assert!(!looks_rate_limited("the patch hit your branch cleanly"));
+    }
+
+    #[test]
+    fn a_session_limiter_does_not_signal() {
+        let text = "The request hit your session limiter and returned an internal error.";
+        assert!(!looks_rate_limited(text), "should not signal: {text}");
+    }
+
+    #[test]
+    fn a_weekly_limitation_does_not_signal() {
+        let text = "you hit your weekly limitation";
+        assert!(!looks_rate_limited(text), "should not signal: {text}");
+    }
+
+    #[test]
+    fn a_five_hour_limited_quota_does_not_signal() {
+        let text = "you've hit your 5-hour limited quota";
+        assert!(!looks_rate_limited(text), "should not signal: {text}");
+    }
+
+    #[test]
+    fn a_full_stop_after_limit_signals() {
+        let text = "You've hit your session limit.";
+        assert!(looks_rate_limited(text), "should signal: {text}");
+    }
+
+    #[test]
+    fn limit_at_the_very_end_of_the_text_signals() {
+        let text = "You've hit your weekly limit";
+        assert!(looks_rate_limited(text), "should signal: {text}");
     }
 
     #[test]

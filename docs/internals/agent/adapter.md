@@ -310,7 +310,8 @@ Twelve tasks parked without a commit.
 
 So one rule sits beside the phrases, in `hits_a_quota_window`: the text, in
 lower case, contains "hit your " followed immediately by a quota window and
-then " limit". There are exactly three windows: a number of hours, written as
+then " limit" as a whole word (the boundary is set out in the next section).
+There are exactly three windows: a number of hours, written as
 one or more ASCII digits and then "-hour" ("5-hour"); "session"; and
 "weekly". Every occurrence of "hit your " is checked, not only the first, so
 an ordinary "the patch hit your branch" earlier in the text does not hide a
@@ -341,6 +342,27 @@ engine an untouched pool is exhausted.
 Only ever consulted for a FAILED attempt: a successful task *about* rate
 limiting ("added backoff for 429 responses") must never be read as the pool
 being exhausted, or verified work gets rolled back.
+
+## `fn hits_a_quota_window(lower: &str) -> bool {`
+
+The quota-window rule described in the section above. After the window, the
+text must continue with " limit", and "limit" must then end: at the end of
+the text, or at a character that is not an ASCII letter, ASCII digit or
+underscore. A full stop, a space, a semicolon or the " · resets" of the
+observed five-hour message all end it; "limiter", "limitation" and "limited"
+do not.
+
+The boundary was added after a round-two review of the first form, which
+checked only that the rest began with " limit". That accepted "limiter",
+"limitation" and "limited" as well, so a failed attempt whose error read
+`The request hit your session limiter and returned an internal error.` was
+read as `RateLimited`: the ladder did not count it, deferred it three times
+and asked a human, when a real failure should be retried or escalated.
+
+The check strips " limit" with `strip_prefix` and asks `starts_with` whether
+the next character is a word character. Both work on slices of the same
+string, so the rule still allocates nothing more and cannot panic. The
+character test is ASCII only, like the lower-casing before it.
 
 ## `mod tests` › `fn a_successful_answer_from(id: &str) -> String {`
 
@@ -501,6 +523,40 @@ rule would signal on it and this test would fail.
 is not a limit message. It witnesses that the rule needs more than the
 words "hit your": a rule that signalled on them alone would fail this test.
 The tests above pin what more it needs, a window and then " limit".
+
+## `mod tests` › `fn a_session_limiter_does_not_signal() {`
+
+The text the round-two review used to show the first form of the rule was
+too wide: "hit your session" and then " limiter". "limit" is followed by
+"e", a letter, so it does not end there and the text does not signal. A
+rule that checked only that " limit" came next, with no boundary after it,
+would signal and fail this test.
+
+## `mod tests` › `fn a_weekly_limitation_does_not_signal() {`
+
+The weekly window followed by " limitation". "limit" is followed by "a", so
+the text does not signal. The same unbounded rule would fail this test,
+through the weekly window rather than the session one.
+
+## `mod tests` › `fn a_five_hour_limited_quota_does_not_signal() {`
+
+The hours window followed by " limited". "limit" is followed by "e", so the
+text does not signal. The same unbounded rule would fail this test, through
+the hours window, so each of the three windows has a negative of its own.
+
+## `mod tests` › `fn a_full_stop_after_limit_signals() {`
+
+"limit" ended by a full stop, a character that is not a word character, so
+the text signals. A boundary that accepted only a space or the end of the
+text, or that refused punctuation, would fail this test.
+
+## `mod tests` › `fn limit_at_the_very_end_of_the_text_signals() {`
+
+"limit" as the last word, with nothing after it, so the text signals. The
+text is the one `a_hit_your_weekly_limit_message_signals` uses; it is here
+again to pin the end-of-text half of the boundary beside the full stop
+above. A boundary that demanded a following character, as a check reading
+the next character without allowing for none would, fails this test.
 
 ## `mod built_program_tests` › `struct Boundary {`
 
