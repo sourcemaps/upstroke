@@ -1805,7 +1805,7 @@ impl TopologyRun {
         let now = unix_seconds(seams.clock);
         let until_unix = if let Some(until) = self.deferral.held_until() {
             until
-        } else if let Some(awaited) = self.awaited_reset(now) {
+        } else if let Some(awaited) = self.awaited_reset(now, seams.plans) {
             self.announce_reset_wait(&awaited, now);
             awaited.until_unix
         } else {
@@ -1836,23 +1836,14 @@ impl TopologyRun {
         Ok(Progress::Waited { waited_ms, round })
     }
 
-    fn awaited_reset(&self, now_unix: u64) -> Option<AwaitedReset> {
-        let fold = &self.handle.fold;
-        let len = fold.registry().map_or(0, |registry| {
+    fn awaited_reset(&self, now_unix: u64, plans: &dyn AttemptPlans) -> Option<AwaitedReset> {
+        let len = self.handle.fold.registry().map_or(0, |registry| {
             u32::try_from(registry.len()).unwrap_or(u32::MAX)
         });
         let known: Vec<(u64, &String, &String)> = (0..len)
             .map(TaskKey)
-            .filter(|key| {
-                fold.task(*key)
-                    .is_some_and(|task| task.state == TaskState::Deferred)
-            })
-            .filter_map(|key| {
-                let record = last_settled_record(&self.handle.events, key)?;
-                let pool = crate::capacity::limited_pool(record)?;
-                let reset_at = self.exhausted_pools.get(pool)?.as_ref()?;
-                Some((unix_seconds_of(reset_at)?, pool, reset_at))
-            })
+            .filter_map(|key| self.resets_awaited_by(key, plans))
+            .flatten()
             .collect();
         let until_unix =
             interaction::reset_wait_until(now_unix, known.iter().map(|(reset, ..)| *reset))?;
@@ -1863,6 +1854,42 @@ impl TopologyRun {
             reset_at: (*reset_at).clone(),
             until_unix,
         })
+    }
+
+    fn resets_awaited_by(
+        &self,
+        key: TaskKey,
+        plans: &dyn AttemptPlans,
+    ) -> Option<Vec<(u64, &String, &String)>> {
+        let fold = &self.handle.fold;
+        let task = fold
+            .task(key)
+            .filter(|task| task.state == TaskState::Deferred)?;
+        let record = last_settled_record(&self.handle.events, key)?;
+        let failure = record.failure.as_ref()?;
+        if failure.kind != crate::ladder::FailureKind::RateLimited {
+            return None;
+        }
+        let candidates = match failure.origin {
+            crate::ladder::FailureOrigin::Worker => {
+                plans.pools_for(&fold.rung_binding(key, task.rung)?.agent)
+            }
+            crate::ladder::FailureOrigin::Reviewer => {
+                vec![crate::capacity::limited_pool(record)?.clone()]
+            }
+        };
+        let held = candidates
+            .iter()
+            .map(|pool| self.exhausted_pools.get_key_value(pool))
+            .collect::<Option<Vec<_>>>()?;
+        Some(
+            held.into_iter()
+                .filter_map(|(pool, reset_at)| {
+                    let reset_at = reset_at.as_ref()?;
+                    Some((unix_seconds_of(reset_at)?, pool, reset_at))
+                })
+                .collect(),
+        )
     }
 
     fn announce_reset_wait(&self, awaited: &AwaitedReset, now_unix: u64) {
@@ -2658,6 +2685,19 @@ impl TopologyRun {
             },
             &policy,
         );
+        let next = match next {
+            crate::ladder::Next::Defer
+                if self.another_pool_can_serve(
+                    failure,
+                    &record,
+                    &plan.binding.agent,
+                    seams.plans,
+                ) =>
+            {
+                crate::ladder::Next::RetrySameRung { resume: false }
+            }
+            next => next,
+        };
         let question = match next {
             crate::ladder::Next::AskHuman(kind) => {
                 Some(self.park_question(site.key, attempts_on_rung, kind, failure, seams.ids)?)
@@ -2725,6 +2765,27 @@ impl TopologyRun {
             hooks,
         )?;
         Ok((closed, settled.spent_attempt))
+    }
+
+    fn another_pool_can_serve(
+        &self,
+        failure: &crate::ladder::AttemptFailure,
+        record: &AttemptRecord,
+        agent: &str,
+        plans: &dyn AttemptPlans,
+    ) -> bool {
+        if failure.kind != crate::ladder::FailureKind::RateLimited
+            || failure.origin != crate::ladder::FailureOrigin::Worker
+        {
+            return false;
+        }
+        let Some(refused) = &record.pool else {
+            return false;
+        };
+        plans
+            .pools_for(agent)
+            .iter()
+            .any(|pool| pool != refused && !self.exhausted_pools.contains_key(pool))
     }
 
     fn judged_tree(

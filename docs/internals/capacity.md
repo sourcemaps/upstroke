@@ -354,10 +354,13 @@ other failure, or none, names no pool, and so does an attempt that ran on
 no pool.
 
 `retire_signals` marks this pool exhausted. The schema-4 run's
-`back_off` reads the same pool from each deferred task's last
-`attempt_finished`, to find the reset it waits toward, so the two cannot
-disagree about which subscription refused. It is effect-free in
-`effects/wrappers.toml`.
+`back_off` reads the same pool from a deferred task's last
+`attempt_finished` when a reviewer was limited, to find the reset it waits
+toward, so the two cannot disagree about which subscription refused. For
+a worker's limit it reads every pool of the worker's agent instead
+(`TopologyRun::resets_awaited_by`): the task can run again on whichever of
+them resets first, and that need not be the one that refused last.
+`limited_pool` is effect-free in `effects/wrappers.toml`.
 
 ## `pub(crate) fn retire_served_pools(`
 

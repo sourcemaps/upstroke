@@ -1286,6 +1286,16 @@ impl ScaffoldAdapters {
         }
     }
 
+    pub(super) const fn rate_limiting_the_second_reviewer() -> Self {
+        Self {
+            primary: AnsweringAdapter::passing(AGENT),
+            second: AnsweringAdapter {
+                verdict: "429 Too Many Requests",
+                ..AnsweringAdapter::rate_limited(REVIEW_AGENT)
+            },
+        }
+    }
+
     pub(super) const fn new() -> Self {
         Self {
             primary: AnsweringAdapter::passing(AGENT),

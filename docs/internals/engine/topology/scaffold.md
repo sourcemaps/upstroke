@@ -631,6 +631,18 @@ The same two agents, with the implementer stopping to ask.
 
 The same two agents, with the implementer reporting a rate limit.
 
+## `impl ScaffoldAdapters` › `pub(super) const fn rate_limiting_the_second_reviewer() -> Self {`
+
+The same two agents, with the implementer served and the second agent
+reporting a rate limit. The second agent only reviews, as the second
+opinion of a run whose `WidePlans::reviewers` is 2, so this is a rate
+limit whose origin is the reviewer.
+
+Its answer is `429 Too Many Requests` and not the passing verdict.
+`run_review` reads a verdict out of the answer before it looks at the
+status, so a reviewer that reported a rate limit beside a verdict that
+parses would simply have passed.
+
 ## `fn scaffold_run_paths(fixture: &Fixture) -> crate::rundir::RunPaths {`
 
 The run directories a scaffold `Run` writes transcripts, settings and reviews to, with the

@@ -816,9 +816,9 @@ the same agent, and a reviewer's pool is its agent's first, so reviews stay on `
 
 `step_answered_by` with the serving adapters, repeated until a step settles an attempt of
 `key`, keeping each step. It panics after 64 steps. The steps before the settlement are whatever
-the run does first, which today is the sixteen slices of a wait toward the 05:30 reset. A test
-that uses this says nothing about whether that wait happens, so it holds on a run that waits
-and on one that does not.
+the run does first. Before a worker's limit failed over that was the sixteen slices of a wait
+toward the 05:30 reset, and since then it is nothing. A test that uses this says nothing about
+whether that wait happens, so it holds on a run that waits and on one that does not.
 
 ## `fn attempts_started(`
 
@@ -839,9 +839,11 @@ The witness for the pool a new attempt binds. `alpha`'s first generation is rate
 `claude-max-2`, each attempt 1 with no session to resume, and both under the same binding. The
 agent, model and effort did not change. Only the pool did.
 
-The steps between the two attempts are not asserted (`served_steps_until_settled`). Today the
-run waits out the 05:30 reset before it wakes the task, though `claude-max-2` could have
-served it at once.
+The steps between the two attempts are not asserted (`served_steps_until_settled`). When this
+test was written the run waited out the 05:30 reset before it woke the task, though
+`claude-max-2` could have served it at once. The limit now fails over, and
+`a_rate_limit_fails_over_to_the_next_pool_of_the_same_agent_in_a_fresh_session` asserts that
+nothing comes between the two attempts.
 
 On the code before `prepare_attempt` chose a pool the test fails on the pools: generation 1
 starts on `claude-max` again, the pool that had just refused generation 0, because the plan
@@ -866,6 +868,121 @@ is one step.
 
 On the code before the change the test fails on the retry's pool, `claude-max` where it expects
 `claude-max-2`: every attempt there, the retry included, bound the agent's first pool.
+
+## `fn last_settlement(`
+
+The settlement of `key`'s last `attempt_finished` in the log: `Retained`, or `Closed` with its
+transition.
+
+## `fn deferral_of(wide: &crate::engine::topology::scaffold::Wide, key: TaskKey) -> (TaskState, u32) {`
+
+The fold's state for `key` and the deferrals it has counted for it, the two things a failover
+must leave alone and a deferral must move.
+
+## `fn a_rate_limit_fails_over_to_the_next_pool_of_the_same_agent_in_a_fresh_session() {`
+
+The witness for the failover. `alpha`'s first generation is rate limited on `claude-max`, with
+`claude-max-2` held by nothing. The step answers `Settled` with nothing accepted and nothing
+spent. The task is not `Deferred` and its `defers` is still 0. Its `attempt_finished` closes
+the generation with the `Retry` transition. The log still holds the `pool_exhausted` for
+`claude-max`, with the 05:30 reset.
+
+The second step runs on a `RecordingSleeper` with the serving adapters. It settles generation 1
+accepted. The sleeper recorded no sleep and the log holds no `defer_wait_elapsed`, so nothing
+came between the limit and the attempt that replaced it. Generation 1's `attempt_started`
+names `claude-max-2`, resumes no session, and carries generation 0's binding.
+
+On the code before `settle_failure` failed over, the test fails where it reads the task's
+state: the limit deferred the task (`Deferred` where it expects any other state), and the run
+went on to wait until 05:32 with `claude-max-2` idle.
+
+## `const LIMIT_RESET_A_MINUTE_AGO: &str = "You've hit your 5-hour limit · resets 2:59am (UTC)";`
+
+Claude Code's five-hour limit naming a reset at 02:59 UTC. Read at `RunClock`'s 03:00, the
+nearest 02:59 is the one a minute earlier, so the pool is recorded exhausted with a reset
+already behind the clock.
+
+## `fn a_failover_never_returns_to_the_pool_that_refused_even_when_its_reset_reads_as_past() {`
+
+`claude-max` refuses generation 0 with `LIMIT_RESET_A_MINUTE_AGO`. The test first asserts that
+the recorded reset is `2026-11-11T02:59:00Z`. If the limit were read as any other instant, such
+as 02:59 the next morning, the test would not be about a past reset, and it stops there saying
+so.
+
+A reset behind the clock could look like a pool that is free again. It is not: the pool refused
+this attempt a moment ago. The limit fails over, and generation 1 binds `claude-max-2`. The
+failover asks only whether a signal holds a pool (`TopologyRun::another_pool_can_serve`), and
+`serving_pool` takes a pool no signal holds before any held pool whose reset has passed.
+
+Had generation 1 gone back to `claude-max`, it would have met the same limit. With
+`claude-max-2` still free, that limit would have failed over again, round after round, with no
+deferral to count them.
+
+On the code before the failover the test fails where it reads the task's state, `Deferred`.
+The pools it asserts last would have passed there: the task was deferred, backed off for the
+plain minute because the reset had passed, and woke onto `claude-max-2`.
+
+## `const SEVEN_AM_LIMIT: &str = "You've hit your 5-hour limit · resets 7am (UTC)";`
+
+The five-hour limit naming a 07:00 UTC reset, an hour and a half after `FIVE_HOUR_LIMIT`'s and
+still inside `interaction::RESET_WAIT_BOUND` of 03:00.
+
+## `fn with_every_pool_of_the_agent_exhausted_the_run_waits_for_the_earliest_reset_among_them() {`
+
+The witness for the reset a deferral waits on. Generation 0 is limited on `claude-max` with
+the 05:30 reset and fails over. Generation 1 is limited on `claude-max-2` with
+`SEVEN_AM_LIMIT`. Both of the agent's pools are then held, so the second limit defers the
+task: `Deferred`, with `defers` 1, and one `pool_exhausted` for each pool with its own reset.
+
+The run then backs off on a `RecordingSleeper` until a step answers `Waited`. The slices are at
+most ten minutes each and come to 9,120 seconds, from 03:00 to 05:32. That is two minutes past
+the reset of `claude-max`, the pool that comes back first, and not 07:02, two minutes past the
+reset of the pool that refused last. The log holds exactly one `defer_wait_elapsed`, of
+9,120,000 in round 1, and the one line the notifier was given names `claude-max` and 05:30.
+
+The notifier is a `WaitingLines` leaked for this test alone, since a run holds its notifiers as
+`&'static dyn Notifier` and `WAITING_LINES` belongs to the test above that fills it.
+
+Two earlier states of the code fail it differently. Before the failover, the second step is not
+a settlement: the first limit deferred the task, so that step slept the first slice of a wait
+toward 05:32 and answered `Waiting`. With the failover and `awaited_reset` as it was, reading
+only the pool the last attempt ran on, the task is deferred as asserted and the wait is 14,520
+seconds, to 07:02.
+
+## `fn a_rate_limit_with_no_other_pool_for_the_agent_still_defers() {`
+
+The pools are `claude-max` for the implementing agent and `copilot-pool` for `REVIEW_AGENT`,
+which no reviewer of this run uses. `copilot-pool` is held by nothing, and it is not a pool of
+the worker's agent, so it is no target for a failover. The limit on `claude-max` defers the
+task as it did before the failover existed: nothing spent, `Deferred` with `defers` 1, a
+`Deferred` transition, one `pool_exhausted` with the 05:30 reset, and a wait of 9,120 seconds
+recorded as one `defer_wait_elapsed`. Only one attempt started, on `claude-max`.
+
+This is also the test that the pool which refused is not counted among the pools that could
+take over. `exhausted_pools` does not hold `claude-max` when `settle_failure` decides, and a
+failover that counted it would have retried on it for ever.
+
+It passes on the code before the failover and after it.
+
+## `fn a_reviewers_rate_limit_still_defers() {`
+
+Only a worker's limit fails over. The run has two reviewers, the second on `REVIEW_AGENT`, and
+two pools for each agent. The adapters are
+`ScaffoldAdapters::rate_limiting_the_second_reviewer`, so the worker is served on `claude-max`
+and passes its gate and its first review, and the second reviewer is rate limited on
+`copilot-pool`. The settled failure is `RateLimited` with the origin `Reviewer`, and the one
+`pool_exhausted` is for `copilot-pool` with no reset, since only Claude Code's limit message is
+read for one.
+
+Both `claude-max-2` and `copilot-pool-2` are held by nothing, and the task is still `Deferred`
+with `defers` 1. The record's own pool is the worker's `claude-max`, which served. A failover
+that did not ask whose limit it was would have found `claude-max-2` free and retried, and the
+reviewer, which runs on its agent's first pool, would have been limited again on every round.
+
+The back-off that follows is the plain one (`assert_backs_off_as_before`): a reviewer's limit
+waits on the reviewer's pool alone, and `copilot-pool` has no reset recorded.
+
+It passes on the code before the failover and after it.
 
 ## `fn escalated_log(interrupted_first: bool) -> (TopologyFold, Vec<TopologyEvent>) {`
 

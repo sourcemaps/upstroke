@@ -2966,6 +2966,413 @@ fn a_retained_retry_resumes_on_the_pool_its_session_ran_on() {
     );
 }
 
+fn last_settlement(
+    wide: &crate::engine::topology::scaffold::Wide,
+    key: TaskKey,
+) -> Option<AttemptSettlement> {
+    wide.env
+        .durable_events()
+        .into_iter()
+        .rev()
+        .find_map(|event| match event.body {
+            TopologyEventBody::AttemptFinished { data } if data.key == key => Some(data.settlement),
+            _ => None,
+        })
+}
+
+fn deferral_of(wide: &crate::engine::topology::scaffold::Wide, key: TaskKey) -> (TaskState, u32) {
+    let task = wide.run.fold().task(key).expect("the task is in the fold");
+    (task.state, task.defers)
+}
+
+#[test]
+fn a_rate_limit_fails_over_to_the_next_pool_of_the_same_agent_in_a_fresh_session() {
+    use crate::engine::topology::scaffold::{ScaffoldAdapters, WideTask};
+
+    let mut wide = on_two_claude_max_pools(
+        "failover-next-pool",
+        &[WideTask::independent("alpha")],
+        &[(TaskKey(0), GenerationId(0), FIVE_HOUR_LIMIT)],
+        &[],
+    );
+    let mut hooks = wide.env.hooks();
+    let limited = step_answered_by(&mut wide, ScaffoldAdapters::rate_limiting(), &mut hooks);
+    assert_eq!(
+        limited,
+        Progress::Settled {
+            key: TaskKey(0),
+            accepted: false,
+            spent_attempt: false,
+        },
+        "generation 0 is rate limited, and an outage spends none of the rung's allowance"
+    );
+    let (state, defers) = deferral_of(&wide, TaskKey(0));
+    assert_ne!(
+        state,
+        TaskState::Deferred,
+        "`claude-max-2` is not held exhausted, so the limit on `claude-max` defers nothing"
+    );
+    assert_eq!(
+        defers, 0,
+        "a failover spends none of the task's `max_defers`"
+    );
+    let settlement = last_settlement(&wide, TaskKey(0));
+    assert!(
+        matches!(
+            settlement,
+            Some(AttemptSettlement::Closed {
+                transition: SettlementTransition::Retry,
+                ..
+            })
+        ),
+        "the generation closes for a retry in a fresh one: {settlement:?}"
+    );
+    assert_eq!(
+        pools_exhausted(&wide),
+        [signal("2026-11-11T05:30:00Z")],
+        "the pool that refused is still signalled exhausted, with its reset"
+    );
+
+    wide.env.adapters = std::sync::Arc::new(ScaffoldAdapters::new());
+    let sleeper = RecordingSleeper::default();
+    let served = {
+        let seams = RunSeams {
+            clock: &RunClock,
+            sleeper: &sleeper,
+            ..wide.env.seams()
+        };
+        wide.run.step(&seams, &mut hooks).expect("a step")
+    };
+    assert!(
+        matches!(
+            served,
+            Progress::Settled {
+                key: TaskKey(0),
+                accepted: true,
+                ..
+            }
+        ),
+        "the very next step runs generation 1, which is served and accepted: {served:?}"
+    );
+    assert_eq!(sleeper.slept(), [], "nothing was slept between the two");
+    assert_eq!(defer_waits(&wide), [], "and no wait was recorded");
+
+    let started = attempts_started(&wide, TaskKey(0));
+    let [first, second] = started.as_slice() else {
+        panic!("exactly two attempts started: {started:?}");
+    };
+    assert_eq!(
+        (
+            second.generation,
+            second.attempt,
+            second.pool.as_deref(),
+            second.resume_session.as_ref(),
+        ),
+        (
+            GenerationId(1),
+            AttemptNumber(1),
+            Some("claude-max-2"),
+            None
+        ),
+        "generation 1 starts on the agent's next pool, in a fresh session: {started:?}"
+    );
+    assert_eq!(
+        first.binding, second.binding,
+        "the pool moved and the binding did not: the same agent, model and effort on both"
+    );
+}
+
+const LIMIT_RESET_A_MINUTE_AGO: &str = "You've hit your 5-hour limit · resets 2:59am (UTC)";
+
+#[test]
+fn a_failover_never_returns_to_the_pool_that_refused_even_when_its_reset_reads_as_past() {
+    use crate::engine::topology::scaffold::{ScaffoldAdapters, WideTask};
+
+    let mut wide = on_two_claude_max_pools(
+        "failover-reset-reads-as-past",
+        &[WideTask::independent("alpha")],
+        &[(TaskKey(0), GenerationId(0), LIMIT_RESET_A_MINUTE_AGO)],
+        &[],
+    );
+    let mut hooks = wide.env.hooks();
+    let limited = step_answered_by(&mut wide, ScaffoldAdapters::rate_limiting(), &mut hooks);
+    assert!(
+        matches!(
+            limited,
+            Progress::Settled {
+                key: TaskKey(0),
+                accepted: false,
+                ..
+            }
+        ),
+        "generation 0 is rate limited: {limited:?}"
+    );
+    assert_eq!(
+        pools_exhausted(&wide),
+        [signal("2026-11-11T02:59:00Z")],
+        "this test needs the limit read as the 02:59 a minute behind the 03:00 clock, and it was \
+         read as another instant, so nothing below it says anything"
+    );
+    assert_ne!(
+        deferral_of(&wide, TaskKey(0)).0,
+        TaskState::Deferred,
+        "the limit fails over: `claude-max-2` is not held exhausted"
+    );
+
+    let served = step_answered_by(&mut wide, ScaffoldAdapters::new(), &mut hooks);
+    let started = attempts_started(&wide, TaskKey(0));
+    assert_eq!(
+        started
+            .iter()
+            .map(|attempt| (attempt.generation, attempt.pool.as_deref()))
+            .collect::<Vec<_>>(),
+        [
+            (GenerationId(0), Some("claude-max")),
+            (GenerationId(1), Some("claude-max-2")),
+        ],
+        "generation 1 binds `claude-max-2`, and not the `claude-max` that had just refused \
+         generation 0, though that pool's recorded reset is behind the clock: {served:?}"
+    );
+}
+
+const SEVEN_AM_LIMIT: &str = "You've hit your 5-hour limit · resets 7am (UTC)";
+
+#[test]
+fn with_every_pool_of_the_agent_exhausted_the_run_waits_for_the_earliest_reset_among_them() {
+    use crate::engine::topology::scaffold::{ScaffoldAdapters, WideTask};
+
+    let mut wide = on_two_claude_max_pools(
+        "failover-every-pool-exhausted",
+        &[WideTask::independent("alpha")],
+        &[
+            (TaskKey(0), GenerationId(0), FIVE_HOUR_LIMIT),
+            (TaskKey(0), GenerationId(1), SEVEN_AM_LIMIT),
+        ],
+        &[],
+    );
+    let mut hooks = wide.env.hooks();
+    let limited: Vec<Progress> = (0..2)
+        .map(|_| step_answered_by(&mut wide, ScaffoldAdapters::rate_limiting(), &mut hooks))
+        .collect();
+    assert!(
+        matches!(
+            limited.as_slice(),
+            [
+                Progress::Settled {
+                    key: TaskKey(0),
+                    accepted: false,
+                    ..
+                },
+                Progress::Settled {
+                    key: TaskKey(0),
+                    accepted: false,
+                    ..
+                },
+            ]
+        ),
+        "generation 0 is limited on `claude-max` and fails over, and generation 1 is limited on \
+         `claude-max-2` in the very next step: {limited:?}"
+    );
+    assert_eq!(
+        pools_exhausted(&wide),
+        [
+            signal("2026-11-11T05:30:00Z"),
+            (
+                "claude-max-2".to_owned(),
+                Some("2026-11-11T07:00:00Z".to_owned())
+            ),
+        ],
+        "each pool is signalled exhausted with the reset its own limit named"
+    );
+    assert_eq!(
+        deferral_of(&wide, TaskKey(0)),
+        (TaskState::Deferred, 1),
+        "with both of the agent's pools held exhausted, the second limit defers the task, once"
+    );
+
+    let lines: &'static WaitingLines =
+        Box::leak(Box::new(WaitingLines(std::sync::Mutex::new(Vec::new()))));
+    wide.run.notifiers = vec![lines];
+    let sleeper = RecordingSleeper::default();
+    let steps = stepped_until_waited(&mut wide, &RunClock, &sleeper, None, &mut hooks);
+
+    let slept = sleeper.slept();
+    assert!(
+        slept
+            .iter()
+            .all(|slice| *slice <= std::time::Duration::from_secs(600)),
+        "every slice is at most ten minutes: {slept:?}"
+    );
+    assert_eq!(
+        slept.iter().sum::<std::time::Duration>(),
+        std::time::Duration::from_secs(9_120),
+        "the run sleeps from 03:00:00 to 05:32:00, two minutes past `claude-max`'s 05:30 reset, \
+         and not to 07:02:00, two minutes past the reset of the `claude-max-2` that refused \
+         last: {slept:?}"
+    );
+    assert_eq!(
+        steps.last().map(|step| step.defer_waits.clone()),
+        Some(vec![(9_120_000, 1)]),
+        "exactly one `defer_wait_elapsed`, for the whole wait, in the first round: {steps:?}"
+    );
+    assert_eq!(
+        lines.lines(),
+        [crate::interaction::reset_wait_line(
+            "claude-max",
+            "2026-11-11T05:30:00Z",
+            std::time::Duration::from_secs(9_120),
+        )],
+        "the wait is announced for the pool whose reset it runs to"
+    );
+}
+
+#[test]
+fn a_rate_limit_with_no_other_pool_for_the_agent_still_defers() {
+    use crate::engine::topology::scaffold::{
+        AGENT, REVIEW_AGENT, ScaffoldAdapters, Wide, WidePlans, WideTask,
+    };
+
+    let tasks = [WideTask::independent("alpha")];
+    let mut wide = Wide::started_with(
+        "failover-no-other-pool",
+        &tasks,
+        1,
+        WidePlans {
+            pools: vec![
+                (AGENT, Some("claude-max".to_owned())),
+                (REVIEW_AGENT, Some("copilot-pool".to_owned())),
+            ],
+            ..WidePlans::default()
+        },
+        limited_runner(
+            &tasks,
+            &[(TaskKey(0), GenerationId(0), FIVE_HOUR_LIMIT)],
+            &[],
+        ),
+    );
+    let mut hooks = wide.env.hooks();
+    let limited = step_answered_by(&mut wide, ScaffoldAdapters::rate_limiting(), &mut hooks);
+    assert_eq!(
+        limited,
+        Progress::Settled {
+            key: TaskKey(0),
+            accepted: false,
+            spent_attempt: false,
+        }
+    );
+    assert_eq!(
+        deferral_of(&wide, TaskKey(0)),
+        (TaskState::Deferred, 1),
+        "`copilot-pool` is another agent's, so there is no pool to fail over to and the limit \
+         defers the task"
+    );
+    let settlement = last_settlement(&wide, TaskKey(0));
+    assert!(
+        matches!(
+            settlement,
+            Some(AttemptSettlement::Closed {
+                transition: SettlementTransition::Deferred { defers: 1, .. },
+                ..
+            })
+        ),
+        "{settlement:?}"
+    );
+    assert_eq!(pools_exhausted(&wide), [signal("2026-11-11T05:30:00Z")]);
+
+    let sleeper = RecordingSleeper::default();
+    let steps = stepped_until_waited(&mut wide, &RunClock, &sleeper, None, &mut hooks);
+    assert_eq!(
+        sleeper.slept().iter().sum::<std::time::Duration>(),
+        std::time::Duration::from_secs(9_120),
+        "the deferral waits to 05:32:00, two minutes past the reset of the agent's one pool"
+    );
+    assert_eq!(
+        steps.last().map(|step| step.defer_waits.clone()),
+        Some(vec![(9_120_000, 1)]),
+        "{steps:?}"
+    );
+    assert_eq!(
+        attempts_started(&wide, TaskKey(0))
+            .iter()
+            .map(|attempt| attempt.pool.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("claude-max")],
+        "nothing ran on another agent's pool"
+    );
+}
+
+#[test]
+fn a_reviewers_rate_limit_still_defers() {
+    use crate::engine::topology::scaffold::{
+        AGENT, REVIEW_AGENT, RecordingRunner, ScaffoldAdapters, Wide, WidePlans, WideTask,
+        wide_responder,
+    };
+
+    let tasks = [WideTask::independent("alpha")];
+    let mut wide = Wide::started_with(
+        "failover-reviewer-limit",
+        &tasks,
+        1,
+        WidePlans {
+            reviewers: 2,
+            pools: vec![
+                (AGENT, Some("claude-max".to_owned())),
+                (AGENT, Some("claude-max-2".to_owned())),
+                (REVIEW_AGENT, Some("copilot-pool".to_owned())),
+                (REVIEW_AGENT, Some("copilot-pool-2".to_owned())),
+            ],
+            ..WidePlans::default()
+        },
+        RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+    );
+    let mut hooks = wide.env.hooks();
+    let limited = step_answered_by(
+        &mut wide,
+        ScaffoldAdapters::rate_limiting_the_second_reviewer(),
+        &mut hooks,
+    );
+    assert_eq!(
+        limited,
+        Progress::Settled {
+            key: TaskKey(0),
+            accepted: false,
+            spent_attempt: false,
+        }
+    );
+    let failure = wide
+        .env
+        .durable_events()
+        .into_iter()
+        .find_map(|event| match event.body {
+            TopologyEventBody::AttemptFinished { data } => data.record.failure,
+            _ => None,
+        })
+        .expect("the attempt settled with a failure");
+    assert_eq!(
+        (failure.kind, failure.origin),
+        (
+            crate::ladder::FailureKind::RateLimited,
+            crate::ladder::FailureOrigin::Reviewer
+        ),
+        "the worker was served, and its second reviewer was rate limited"
+    );
+    assert_eq!(
+        pools_exhausted(&wide),
+        [("copilot-pool".to_owned(), None)],
+        "the reviewer's pool is signalled, with no reset: only Claude Code's is read"
+    );
+    assert_eq!(
+        deferral_of(&wide, TaskKey(0)),
+        (TaskState::Deferred, 1),
+        "a reviewer's limit defers the task, though neither `claude-max-2` nor `copilot-pool-2` \
+         is held exhausted: only a worker's limit fails over"
+    );
+
+    let sleeper = RecordingSleeper::default();
+    let steps = stepped_until_waited(&mut wide, &RunClock, &sleeper, None, &mut hooks);
+    assert_backs_off_as_before("reviewer", &steps, &sleeper);
+}
+
 fn escalated_log(interrupted_first: bool) -> (TopologyFold, Vec<TopologyEvent>) {
     use crate::engine::topology::settle::tests::{
         ALEPH, apply, attempt_started, dispatch, ev, finished, settle_into, started,
