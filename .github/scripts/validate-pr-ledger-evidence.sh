@@ -101,21 +101,29 @@ for ((index = header_index + 2; index < ${#lines[@]}; index++)); do
       ;;
     integrated) ;;
   esac
-  location_key="$reviewed_sha:$path"
-  if [[ -z "${location_lines[$location_key]:-}" ]]; then
-    if ! git cat-file -e "$location_key" 2>/dev/null; then
-      location_lines[$location_key]=missing
-    else
-      location_lines[$location_key]="$(git show "$location_key" | awk 'END { print NR + 0 }')"
+  # A path of exactly `pr.md` is the pull request's body, which the review
+  # driver hands the reviewer as `pr.md` and which the audit reads, on a `fixed`
+  # row, as `body-fixed:<id>`. The body is in no tree and has changed since the
+  # review, so its lines are not the reviewed ones: no tree lookup and no
+  # line-count check. The reviewed SHA above still had to resolve and be
+  # integrated, and the guard below is checked as for any row.
+  if [[ "$path" != 'pr.md' ]]; then
+    location_key="$reviewed_sha:$path"
+    if [[ -z "${location_lines[$location_key]:-}" ]]; then
+      if ! git cat-file -e "$location_key" 2>/dev/null; then
+        location_lines[$location_key]=missing
+      else
+        location_lines[$location_key]="$(git show "$location_key" | awk 'END { print NR + 0 }')"
+      fi
     fi
-  fi
-  if [[ "${location_lines[$location_key]}" == missing ]]; then
-    error "$id location does not exist at its reviewed SHA: $reviewed_sha / $path"
-    continue
-  fi
-  line_count="${location_lines[$location_key]}"
-  if (( line_number > line_count )); then
-    error "$id location line $line_number exceeds $path at $reviewed_sha ($line_count lines)"
+    if [[ "${location_lines[$location_key]}" == missing ]]; then
+      error "$id location does not exist at its reviewed SHA: $reviewed_sha / $path"
+      continue
+    fi
+    line_count="${location_lines[$location_key]}"
+    if (( line_number > line_count )); then
+      error "$id location line $line_number exceeds $path at $reviewed_sha ($line_count lines)"
+    fi
   fi
 
   # Backticks identify concrete tracked tests/scripts/guards. Prose is allowed

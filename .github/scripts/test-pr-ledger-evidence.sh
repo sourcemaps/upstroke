@@ -59,4 +59,18 @@ expect_fail 'missing location path' "${body/src\/example.rs/src\/missing.rs}"
 expect_fail 'location beyond end of file' "${body/src\/example.rs:2/src\/example.rs:99}"
 expect_fail 'stale renamed regression' "${body/regression_guard_exists/old_regression_name}"
 
+# The review driver hands the reviewer the body as `pr.md`, which is in no tree:
+# a row located there skips the tree lookup and line count, and nothing else.
+in_body="${body/src\/example.rs:2/pr.md:12}"
+expect_pass 'finding located in the body as pr.md' "$in_body"
+expect_fail 'body location with line zero' "${body/src\/example.rs:2/pr.md:0}"
+expect_fail 'body location at a review-lane commit not integrated' \
+  "${in_body/$root_sha/$unrelated_sha}"
+expect_fail 'body location at an unresolvable reviewed SHA' \
+  "${in_body/$root_sha/0000000000000000000000000000000000000000}"
+expect_fail 'body location with a stale renamed regression' \
+  "${in_body/regression_guard_exists/old_regression_name}"
+expect_fail 'pr.md under a directory still needs its file' "${body/src\/example.rs:2/docs/pr.md:12}"
+expect_fail 'pr.md with a suffix still needs its file' "${body/src\/example.rs:2/pr.mdx:12}"
+
 echo 'PR ledger evidence fixtures passed'
