@@ -6330,7 +6330,7 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
 
     let runner = ContainerRunner::new(
         real_policy(&image_id),
-        identity.clone(),
+        identity,
         &repo_dir,
         fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
