@@ -4,7 +4,7 @@ severity: P2
 disposition: deferred
 category: correctness
 pr: 439
-reviewed_sha: f16944ee62862a5a86835dcf73c7b8be4a7fe8b3
+reviewed_sha: 6513c22d24f8404b6877a6da578deaff19aa7224
 location: .github/workflows/ci.yml:787
 provenance: pre_existing
 first_bad: not traced
@@ -129,7 +129,8 @@ Established by reading the step at 6513c22d and at f16944ee, the removed fixture
 ## Why it is deferred
 
 - The sum credits a harness with passes it did not report whenever a helper's summary lands in that
-  harness's output, and that needs no early exit. In #439's round four, both passes on 449fcfb1 ran
+  harness's output as a line that begins `test result: ok.` with a positive pass count, and that
+  needs no early exit. In #439's round four, both passes on 449fcfb1 ran
   a completed two-test harness whose completed one-test helper printed its own summary: the
   expression summed 2 and 1 to 3 and met a floor of 3 (`PR439-FLOOR-DEFERRAL-EXIT-PRECONDITION`).
   Cases 1, 2, 5 and 6 above are the ones that also need the step's own harness to exit zero before
