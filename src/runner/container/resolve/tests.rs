@@ -2136,6 +2136,10 @@ fn real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock()
     let adapters = RecordingAdapters::default();
     {
         let _lease = crate::rundir::WorktreeLock::acquire(&repo).expect("the test's lease");
+        // This asserts the machine's own runtime's refusal, so it must not meet the unarmed double.
+        let _armed = crate::engine::topology::entry::container_runtime::arm(
+            &crate::runner::container::observed::Journal::default(),
+        );
         let error =
             crate::engine::run_with(&opts, &adapters).expect_err("an absent image refuses the run");
         let UpstrokeError::Refused { message } = &error else {
