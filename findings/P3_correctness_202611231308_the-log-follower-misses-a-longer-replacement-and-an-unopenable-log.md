@@ -48,6 +48,10 @@ every event.
 
 ## What the change that takes this up should do
 
-- Detect a replacement by identity (inode or a first-line digest) as well as by length.
+- Detect a replacement by the file's identity (on Unix its device and inode, on Windows its volume serial number
+  and file index) as well as by its length. A digest of the first line is not enough: a longer replacement that
+  keeps the first record and changes the records after it, up to the old offset, passes both a first-line digest
+  and the length test. An atomic rename gives the replacement a new identity; a rewrite in place keeps it, and
+  only a digest of the whole prefix read so far, checked before reading on, catches that case.
 - Report an open failure other than `NotFound`.
 - Read through `read_file_bounded` or a bounded read.
