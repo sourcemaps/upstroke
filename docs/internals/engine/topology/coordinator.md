@@ -3318,7 +3318,7 @@ The external-prune follow-up (F) — `PR329-AN-EXTERNAL-PRUNE-DELETES-AN-ENGINE-
 
 ## `mod tests` › `fn f_attempt_run(`
 
-One task's run at width 1 (`step`, the caller's hooks) or 3 (`run_concurrently`, pipeline hooks from `f_pipeline_hooks`), with a test policy and an optional act at a site's phase.
+One task's run at width 1 (`step`, the caller's hooks) or 3 (`run_concurrently`, pipeline hooks from `f_pipeline_hooks`), with a test policy and an optional act at a site's phase. `configure` adjusts the started run and hands that act back before either width installs its hook, so the act owns what it takes from the run: T-C1-P3's act owns the execution root, and no cell or lock stands between the run and the act.
 
 ## `mod tests` › `struct FPipelineEffects {`
 

@@ -25157,15 +25157,14 @@ git cat-file -e 'HEAD^{tree}'
         tag: &str,
         width: u32,
         policy: FPolicy,
-        hooks_at: Option<(FSite, FPhase, FSharedAct)>,
-        configure: impl FnOnce(&mut Wide),
+        configure: impl FnOnce(&mut Wide) -> Option<(FSite, FPhase, FSharedAct)>,
         responder: Option<crate::engine::topology::scaffold::Responder>,
     ) -> (Wide, Result<Progress, UpstrokeError>) {
         let tasks = f_one_task();
         let runner = RecordingRunner::new()
             .answering(responder.unwrap_or_else(|| wide_responder(&tasks, &[])));
         let mut wide = Wide::started_with(tag, &tasks, width, WidePlans::default(), runner);
-        configure(&mut wide);
+        let hooks_at = configure(&mut wide);
         let result = if width == 1 {
             let mut hooks = FHooks::over(&wide);
             if let Some((site, phase, act)) = hooks_at {
@@ -25287,14 +25286,8 @@ git cat-file -e 'HEAD^{tree}'
             let case = format!("width {width}");
             cases.push(f_bounded_case(format!("f-c1-ap {case}"), move || {
                 let policy = FPolicy::acting("tasks", f_unstaging(true));
-                let (wide, result) = f_attempt_run(
-                    &format!("f-c1-ap-w{width}"),
-                    width,
-                    policy,
-                    None,
-                    |_| {},
-                    None,
-                );
+                let (wide, result) =
+                    f_attempt_run(&format!("f-c1-ap-w{width}"), width, policy, |_| None, None);
                 let outcome = match result {
                     Err(UpstrokeError::RegistryRefused { message })
                         if message.contains("the attempt's review-input read")
@@ -25322,8 +25315,7 @@ git cat-file -e 'HEAD^{tree}'
                     &format!("f-c1-ap-control-w{width}"),
                     width,
                     policy,
-                    None,
-                    |_| {},
+                    |_| None,
                     None,
                 );
                 let progress = result.unwrap_or_else(|error| panic!("width {width}: {error}"));
@@ -25378,45 +25370,21 @@ git cat-file -e 'HEAD^{tree}'
                     let tag = format!("f-c1-p3-w{width}-{name}-{erroring}");
                     let policy = FPolicy::acting("tasks", Box::new(|_| {}));
                     let calls = Arc::clone(&policy.calls);
-                    let root_cell = Arc::new(std::sync::Mutex::new(None::<PathBuf>));
-                    let act: FSharedAct = {
-                        let root_cell = Arc::clone(&root_cell);
-                        let once = std::sync::OnceLock::<FSharedAct>::new();
-                        Arc::new(move || {
-                            let act = once.get_or_init(|| {
-                                let root = root_cell
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .clone()
-                                    .expect("the root is set before the run");
-                                f_once_in_the_task_slot(root, name)
-                            });
-                            act();
-                        })
-                    };
-                    let configure = {
-                        let root_cell = Arc::clone(&root_cell);
-                        move |wide: &mut Wide| {
-                            *root_cell
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                Some(wide.env.fixture.manager.execution_root().to_path_buf());
-                            if erroring {
-                                wide.env.adapters = Arc::new(
-                                    crate::engine::topology::scaffold::ScaffoldAdapters::erroring(),
-                                );
-                            }
+                    let configure = move |wide: &mut Wide| {
+                        let root = wide.env.fixture.manager.execution_root().to_path_buf();
+                        if erroring {
+                            wide.env.adapters = Arc::new(
+                                crate::engine::topology::scaffold::ScaffoldAdapters::erroring(),
+                            );
                         }
+                        Some((
+                            F_WRITE_TREE,
+                            FPhase::After,
+                            f_once_in_the_task_slot(root, name),
+                        ))
                     };
                     let responder = (!erroring).then(f_no_change_responder);
-                    let (wide, result) = f_attempt_run(
-                        &tag,
-                        width,
-                        policy,
-                        Some((F_WRITE_TREE, FPhase::After, act)),
-                        configure,
-                        responder,
-                    );
+                    let (wide, result) = f_attempt_run(&tag, width, policy, configure, responder);
                     let outcome = match result {
                         Err(UpstrokeError::RegistryRefused { message })
                             if message.contains("the attempt's assessed failure")
@@ -25446,11 +25414,11 @@ git cat-file -e 'HEAD^{tree}'
                     &format!("f-c1-p3-control-w{width}"),
                     width,
                     FPolicy::acting("tasks", Box::new(|_| {})),
-                    None,
                     |wide| {
                         wide.env.adapters = Arc::new(
                             crate::engine::topology::scaffold::ScaffoldAdapters::erroring(),
                         );
+                        None
                     },
                     None,
                 );
