@@ -22,7 +22,7 @@ A root floored above mid keeps its own floor.
 
 ## `fn an_empty_tier_intersection_registers_a_human_binding_ladder_with_the_allowed_agents() {` › `let allowed = vec!["claude-code".to_owned(), "copilot".to_owned()];`
 
-R10: a root whose every rung is below mid has no tier the repair may
+A root whose every rung is below mid has no tier the repair may
 run at. The frozen payload records exactly that — no tier, no rung, no
 ceiling, the raised floor — and offers the run's allowed agents to the
 person who must name a binding, never the sub-floor rungs it excluded.

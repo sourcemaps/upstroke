@@ -504,7 +504,7 @@ The input classification is `classify::unjudgeable_diff` — a review diff
 no reviewer can judge (too large, opaque) — and the review-input policy's
 answer for the proposed tree, read in the staging worktree. Either stands
 in for the gates and reviewers as the judge's prior failure, and the
-sequence parks the candidate `HumanRequired` (R4). Without it the real
+sequence parks the candidate `HumanRequired`. Without it the real
 refusal escaped from `review::materialize_prompt` as an error, and a policy
 that refused the tree still published. The attempt path's `diff_failure`
 also checks a Test task's provenance; that is a judgement of the candidate
@@ -2363,7 +2363,7 @@ Test-provenance rule: a diff no reviewer can judge — too large, or
 opaque — and the review-input policy's answer for the proposed tree,
 read in the staging worktree. Either stands in for the gates and
 reviewers as the prior failure, and the sequence parks the candidate for
-a person (R4): a Fix task cannot be asked to edit code without code
+a person: a Fix task cannot be asked to edit code without code
 evidence, and waiting cannot make the same diff fit.
 
 ## `pub fn verification_body(` › `super::dispatch::read_in_whole_checkout(`
