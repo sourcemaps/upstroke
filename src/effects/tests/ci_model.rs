@@ -37,8 +37,11 @@ pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;
 
 pub(super) const WINDOWS_SHARD_WITNESS: &str = r#"$rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()
 if ($rustc -notmatch '^rustc 1\.97\.1 ' -or $path_rustc -notmatch '^rustc 1\.97\.1 ' -or $cargo -notmatch '^cargo 1\.97\.1 ') { throw "the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow" }
-$out = Join-Path $env:RUNNER_TEMP 'suite-stdout.log'; $err = Join-Path $env:RUNNER_TEMP 'suite-stderr.log'
-$suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- ${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode
+$out = Join-Path $env:RUNNER_TEMP 'suite-stdout.log'; $err = Join-Path $env:RUNNER_TEMP 'suite-stderr.log'; $built = Join-Path $env:RUNNER_TEMP 'suite-build.json'
+$build = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features --no-run --message-format=json-render-diagnostics' -NoNewWindow -PassThru -RedirectStandardOutput $built -RedirectStandardError $err; $null = $build.Handle; $build.WaitForExit(); $code = $build.ExitCode
+if ($code -ne 0) { Get-Content $err; exit $code }
+$harnesses = @(Get-Content $built | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -ceq 'compiler-artifact' -and $_.profile.test -and $_.executable } | ForEach-Object { $_.executable }); if ($harnesses.Count -eq 0) { throw "Cargo built no test harness, so this shard would run nothing" }
+$env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput "$out.part" -RedirectStandardError "$err.part"; $null = $suite.Handle; $suite.WaitForExit(); Get-Content "$out.part" | Add-Content $out; Get-Content "$err.part" | Add-Content $err; $code = $suite.ExitCode; if ($code -ne 0) { break } }
 try { Get-Content $err; $log = Get-Content $out; $log; $left = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'upstroke%'"); foreach ($p in $left) { "left running after the suite: pid $($p.ProcessId): $($p.CommandLine)"; Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } }
 catch { if ($code -ne 0) { "reading the suite's output or listing the processes it left failed: $_" } else { throw } }
 if ($code -ne 0) { exit $code }
