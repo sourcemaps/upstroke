@@ -3245,11 +3245,15 @@ A printed frame alone is never acceptance.
 
 ## `fn container_capability_record() {`
 
-The one ignored, cfg-free observation test. CI's observation step selects it
-by its exact name immediately after the native host acceptance capture, in
-`test-linux` and `test-macos` (once in each of ubuntu-latest's five shards and of macos-latest's twelve)
-and in `test-windows-hosted`, once in each of its twenty-two shards on
-`windows-latest`. It does not call `docker_gate` and is not in
+The one ignored, cfg-free observation test. CI's separate observation step selects it
+by its exact name immediately after the native host acceptance capture: once in each of
+`test-linux`'s 7 category legs on `ubuntu-latest`, `test-macos`'s 9 on `macos-latest`, and
+`test-windows-hosted`'s 20 on `windows-latest`. The categories are `kill-path`, `coordinator`,
+`engine`, `workspace`, `runner`, `unit` and `self-checks`, with platform partitions generated
+from `TEST_CATEGORIES` in `src/effects/tests/ci_model.rs`. Check names are
+`test (<runner>, <category> [k of n] (<subcategories>))`, with `k of n` only for a split category.
+The `upstroke-ci` aggregate requires every leg and the lint and MSRV jobs (`MAINTAINING.md`
+step 3). This test does not call `docker_gate` and is not in
 `DOCKER_GATED_TESTS`. Its body has no platform cfg and no early return.
 
 Every capability class is a valid observation, and the test passes after

@@ -170,7 +170,8 @@ layout is made, and why:
   needs a privilege a junction does not. A junction is a name-surrogate reparse point, so std calls it
   a symbolic link, `canonicalize` follows it, and the manager pins it as it pins any reparse point.
 - **The scripts are batch shims** (`f_hosted_shim`), as `npm` installs an agent's command-line program
-  there. The host runner resolves one through `PATHEXT`, and `cmd` finds the gate's the same way.
+  there. The host runner resolves one through `PATHEXT`, and `cmd` finds the gate's `gate --check`
+  the same way.
   Each runs this test binary's `hosted_linked_registry_role_child`, which does what the script does.
 - **The child runs through `LinkedChild`** (`f_hosted_isolated`). `run_test_isolated` is Unix's,
   since it starts its child in a process group of its own. The parent asserts the same of the child:
@@ -187,6 +188,31 @@ T-ENV-TOPO's C4 row, on Unix and on Windows.
 ## `fn a_hosted_run_under_a_linked_registry_and_an_inherited_relative_common_dir_at_equal_depth_completes()`
 
 T-ENV-TOPO's C5 row, on Unix and on Windows.
+
+## `fn f_hosted_shim(role: &str) -> String {`
+
+A Windows stand-in for one of the role scripts above, as a batch shim.
+It sets the role (`%~1`, its first argument, for the agents, or `gate`)
+and the task (`%~2`), runs this test binary's
+`hosted_linked_registry_role_child`, and exits as that child exits.
+
+## `fn f_hosted_isolated(`
+
+The Windows counterpart of `run_test_isolated`, which is Unix's: it
+starts its child in a process group of its own. T-ENV-TOPO's parent runs
+its child here through the fixture's `LinkedChild`, which starts it as
+`run_test_isolated` does: this test binary, `--exact --ignored
+--nocapture --test-threads=1`, with `vars` set. Its stderr goes to
+`stderr`. A child that ends within `bound` is answered for. One still
+running then is killed and reported with no status, as
+`run_test_isolated` reports a child it killed. Its output is every line
+it wrote, read until its output closes, or until ten seconds pass with
+no line.
+
+## `struct FHostedEnded {`
+
+How [`f_hosted_isolated`]'s child ended, as `run_test_isolated`'s
+`Isolated` reports it.
 
 ## `fn a_hosted_review_with_no_request_under_c4_is_deferred_and_the_run_completes() {`
 

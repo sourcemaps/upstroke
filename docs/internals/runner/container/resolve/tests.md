@@ -676,7 +676,7 @@ the config, and the private root is a separate scratch tree outside the
 checkout, so nothing a run publishes under it can make the checkout dirty.
 That this refused run publishes nothing — no exclusion, no include, under
 either root — is
-`engine::tests::a_fresh_schema_4_run_that_loses_the_worktree_lease_publishes_no_exclusion_and_no_include`'s
+`engine::tests::topology_admission::a_fresh_schema_4_run_that_loses_the_worktree_lease_publishes_no_exclusion_and_no_include`'s
 to show; this control shows only the refusal's precedence.
 
 ## `fn real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock() {`

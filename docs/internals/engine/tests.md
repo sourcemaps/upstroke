@@ -1267,10 +1267,14 @@ With these rules each kind of damage is detectable:
 ## `fn host_acceptance_record() {`
 
 G7's native HOST acceptance record (root direction `087fea89`), the host half of R21's per-platform
-run ids. CI selects it by its exact name, after the suite, in `test-linux` and `test-macos` (Linux and macOS,
-where each of Linux's five shards and macOS's twelve runs the capture after its own share of the
-suite) and in `test-windows-hosted`, once in each of its twenty-two shards on `windows-latest`, after
-that shard's own share of the suite:
+run ids. CI selects it by its exact name after each category leg's share of the suite: once in
+each of `test-linux`'s 7 legs on `ubuntu-latest`, `test-macos`'s 9 on `macos-latest`, and
+`test-windows-hosted`'s 20 on `windows-latest`. The categories are `kill-path`, `coordinator`,
+`engine`, `workspace`, `runner`, `unit` and `self-checks`; the ordered `TEST_CATEGORIES` registry
+in `src/effects/tests/ci_model.rs` generates their platform partitions. Check names are
+`test (<runner>, <category> [k of n] (<subcategories>))`, with `k of n` only for a split category.
+The `upstroke-ci` aggregate requires every leg and the lint and MSRV jobs (`MAINTAINING.md`
+step 3). The capture remains a separate step running the one ignored test:
 
 ```text
 cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture

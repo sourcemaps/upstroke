@@ -1333,9 +1333,6 @@ fn f_hosted_linked_registry(sequence: &str, child: &str, completes: bool) {
         )
     };
     drop(run);
-    // Canonical as the manager spells paths, so the paths this resolves
-    // compare with those the manager derived: on Windows `fs::canonicalize`
-    // alone adds the verbatim prefix the manager strips.
     let root = crate::workspace_manager::fixture::canonical(&env.fixture.root);
     let base = crate::workspace_manager::fixture::canonical(&env.fixture.base);
     let common = env.fixture.manager.common_git_dir().to_path_buf();
@@ -1407,10 +1404,6 @@ fn f_hosted_linked_registry(sequence: &str, child: &str, completes: bool) {
         crate::workspace_manager::fixture::write_file(&path, script.as_bytes());
         crate::workspace_manager::fixture::set_mode(&path, 0o755);
     }
-    // On Windows each role is a batch shim, as `npm` installs an agent's
-    // command-line program there: the host runner resolves it through
-    // `PATHEXT`, and `cmd` finds the gate's `gate --check` the same way.
-    // Each runs this binary's stand-in for the script (`f_hosted_shim`).
     #[cfg(windows)]
     for (name, role) in [
         (crate::engine::topology::scaffold::AGENT, "%~1"),
@@ -1538,10 +1531,6 @@ fn a_hosted_run_under_a_linked_registry_and_an_inherited_relative_common_dir_at_
     f_hosted_linked_registry("C5", "hosted_linked_registry_child", true);
 }
 
-/// A Windows stand-in for one of the role scripts above, as a batch shim.
-/// It sets the role (`%~1`, its first argument, for the agents, or `gate`)
-/// and the task (`%~2`), runs this test binary's
-/// `hosted_linked_registry_role_child`, and exits as that child exits.
 #[cfg(windows)]
 fn f_hosted_shim(role: &str) -> String {
     let exe = std::env::current_exe().expect("this test binary");
@@ -1555,16 +1544,6 @@ fn f_hosted_shim(role: &str) -> String {
     )
 }
 
-/// The Windows counterpart of `run_test_isolated`, which is Unix's: it
-/// starts its child in a process group of its own. T-ENV-TOPO's parent runs
-/// its child here through the fixture's `LinkedChild`, which starts it as
-/// `run_test_isolated` does: this test binary, `--exact --ignored
-/// --nocapture --test-threads=1`, with `vars` set. Its stderr goes to
-/// `stderr`. A child that ends within `bound` is answered for. One still
-/// running then is killed and reported with no status, as
-/// `run_test_isolated` reports a child it killed. Its output is every line
-/// it wrote, read until its output closes, or until ten seconds pass with
-/// no line.
 #[cfg(windows)]
 fn f_hosted_isolated(
     test: &str,
@@ -1590,8 +1569,6 @@ fn f_hosted_isolated(
     }
 }
 
-/// How [`f_hosted_isolated`]'s child ended, as `run_test_isolated`'s
-/// `Isolated` reports it.
 #[cfg(windows)]
 struct FHostedEnded {
     status: Option<std::process::ExitStatus>,

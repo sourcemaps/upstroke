@@ -111,7 +111,7 @@ PR12-REG7-PRELOCK-WRITES, PR12-N4-PRELOCK-PUBLICATION, one defect). Since
 repair10 the proof comes first, and the include still follows the exclusion,
 so neither publication precedes the locks or the owner and commit proof. The
 guard is
-`engine::tests::a_schema_4_resume_that_loses_the_worktree_lease_restores_no_exclusion_and_writes_no_include`.
+`engine::tests::topology_admission::a_schema_4_resume_that_loses_the_worktree_lease_restores_no_exclusion_and_writes_no_include`.
 
 The refusal off the run branch names `git --no-replace-objects -c
 core.useReplaceRefs=false status`: both controls, because on Git 2.41 a

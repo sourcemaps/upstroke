@@ -9,7 +9,7 @@ this process was started in: `HostEnvironment::from_process()` is
 production's own read of it, and the v0.1 workspace's Git children inherit
 it. There is no seam to filter either at, so the environment is prepared
 instead —
-[`without_ambient_replacement_controls`](../../../src/workspace_manager/fixture.rs)
+[`without_ambient_replacement_controls`](../../../../src/workspace_manager/fixture.rs)
 states what it takes away and why, and
 `assert_replacement_controls_pinned` refuses in the child if any of it
 survived.

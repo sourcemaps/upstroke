@@ -2,6 +2,79 @@
 
 Extended notes for [`src/engine/tests/topology_execution.rs`](../../../../src/engine/tests/topology_execution.rs).
 
+## Module
+
+The allowlist-placement marker stays in source above the governed lint allowance;
+the effects census requires it there.
+
+## `fn the_topology_stubs_edit_appends_one_line_per_run_under_the_native_shell() {`
+
+The stub's edit is a real append under the shell `shell_spec` picks on this
+platform, run by the production `HostRunner`: each run adds one line, so a
+task whose base already holds an earlier task's output still leaves a diff
+of its own. A second task's empty diff on the Windows guest (CI run
+41529099549) is what an edit that left the file as it was looks like. Only
+a Windows host runs the edit under `cmd`, so only there does this
+discriminate between the spellings.
+
+## `fn the_topology_stub_completes_only_a_worker_that_exited_cleanly() {`
+
+The stub reads a worker's end as a real adapter does: only a clean exit
+completes, a timeout is a timeout, and any other end is an agent error, so
+a failed edit is reported with its own exit and stderr, not as an empty
+diff. This holds and discriminates on every platform.
+
+## `fn overlap_observing_worker(markers: &Path) -> String {`
+
+A worker that notes, for about five seconds, whether another stub worker is
+running beside it, then writes a file of its own and leaves. `overlap.*` in
+`markers` is the evidence two workers ran at once. Each attempt writes a
+different file, so two candidates never conflict at the merge.
+
+Five seconds, not one: in V139's full suite, beside a guest VM, two
+dispatches at `max_parallel = 2` started more than a second apart, and the
+premise that two workers ran at once failed, while the test alone passed
+(V140). A longer look makes the premise robust to load, and it gives the
+bounded arms (`max_per_agent = 1`, a one-slot pool) longer in which a
+forbidden overlap would be seen, so their zero-overlap assertions are only
+stronger for it.
+
+## `fn fresh_overlap(tag: &str, extra: &str, pools: Option<&str>) -> usize {`
+
+A fresh run at `max_parallel = 2` over two independent tasks, under `[engine]`
+`extra`: whether two workers overlapped.
+
+## `fn resumed_overlap(tag: &str, extra: &str) -> usize {`
+
+A schema-4 run whose two tasks both park on a question, resumed with both
+answers delivered under today's `[engine]` `extra`: whether the resumed
+workers overlapped. The answers are written where the run's own answer
+source polls for them before every selection, so both tasks are ready
+together when the resumed loop starts.
+
+## `fn a_schema_4_run_publishes_its_records_in_order_and_records_one_runner() {`
+
+P12-W1's rest and P12-W5. Through `engine::run_with`: the owner record was
+published before the first probe (P3b before P4); its runner is the one
+`run_started(4)` records, byte for byte; the commit record names the digest of
+the committed first line; the log begins with `run_started` and ends with
+`run_finished`; the integration ref holds the last merge; and `report.json` is
+the projection of the committed log.
+
+## `fn at_width_one_the_step_loop_and_the_concurrent_driver_project_alike() {`
+
+P12-W14 (D4). At width 1 the production composition through the step loop
+(an adapter source that cannot be shared) and through `run_concurrently` (one
+that can) give the same canonical projection of the same plan.
+
+## `fn a_schema_4_run_ended_by_a_signal_mid_attempt_resumes_and_settles_the_attempt() {`
+
+P12-W2 and P12-W16 (D6): a schema-4 run whose process dies by SIGKILL,
+SIGTERM or SIGINT inside an attempt leaves a log that ends mid-attempt; the
+resume settles that attempt as interrupted, appends `run_resumed`, and
+continues to the end. No graceful drain is claimed: the signal ends the
+command.
+
 ## `enum SignalFault {`
 
 How [`signal_mid_attempt`] is made to fail, for the tests of its own cleanup. Each
@@ -11,6 +84,11 @@ of either would be (J8, PR12 regression review #5). `DeliveryNeverExits` makes t
 command that delivers the signal one that never exits: a stub standing where `kill`
 stands, which records its pid and then sleeps for ten minutes (J15, regression
 review 2, finding 4). `None` injects nothing.
+
+## `fn worker_pids(repo: &Path) -> Vec<u32> {`
+
+The pids the signal helper's workers wrote, one a line. Each leads a process group of its
+own: the process funnel puts every agent it starts in one.
 
 ## `fn stalled_delivery_pid(repo: &Path) -> PathBuf {`
 
@@ -66,6 +144,16 @@ whose cost is unknown and whose model is the one recorded by the
 only the attempts that completed, with no warning, and printed the run's known
 spend, `$0.04`, as its whole total.
 
+## `fn the_signal_tests_helper_is_settled_when_its_readiness_or_its_signal_fails() {`
+
+J8, PR12 regression review #5: the signal test owns its helper from the spawn, so neither a
+readiness that fails nor a signal that cannot be delivered leaves the helper, or the worker
+it started, running. The reviewer's witness was a `kill` that exited 1: the parent failed
+at its assertion, and seven of the helper's processes outlived it. Each fault is injected
+into the driver once the helper's worker runs. The driver fails as the test would, and
+then the helper has been reaped, the worker's group is gone, and nothing holds the run,
+each within its bound.
+
 ## `fn the_signal_tests_helper_is_settled_when_the_command_delivering_its_signal_never_exits() {`
 
 J15 (regression review 2, finding 4), the reviewer's guard: the signal's delivery
@@ -80,14 +168,6 @@ test does not end: measured once, it was still running past libtest's sixty-seco
 notice, and the deadline put on it from outside (a session of its own under
 `timeout`, 120 seconds) killed it; nothing it started outlived the session, and
 the scratch tree its unwinding would have reclaimed was removed by hand.
-
-## `fn settled_attempts(events: &[serde_json::Value]) -> usize {`
-
-How many attempts the log settles: `attempt_finished` for each one that did not
-succeed, `candidate_prepared` for each one that did, and `attempt_interrupted`
-for each one whose coordinator did not see it end. Since J12 the schema-4 report
-keeps the last kind too, so the tests that compare the report's attempt rows
-with this count stay a comparison with every settlement.
 
 ## `fn a_schema_4_question_is_announced_before_its_sibling_is_released() {`
 
@@ -113,6 +193,16 @@ sibling's start; under the coordinator the two run together.
 At the reviewed head nothing was announced: with the announcement removed from
 `RunEmitter::emit`, the first cell fails at its 90-second bound with an empty
 stderr.
+
+## `fn a_schema_4_status_reads_the_committed_prefix_and_leaves_the_log_as_it_found_it() {`
+
+PR12 S10: the read commands over a schema-4 log (D1, D3, D10).
+
+P12-W12. `status` on a schema-4 run reads the committed prefix only: its
+projection equals the barrier's replay and the run's own `report.json`; with
+a writer holding the run and a torn tail at the end of the log, it reports
+both, names the runner identity, and leaves the log's bytes and mtime as it
+found them; `--follow` prints the run's events and stops once it finished.
 
 ## `fn a_schema_4_follow_prints_one_line_per_event_and_no_raw_control_whatever_the_plan_or_the_record_holds()`
 
@@ -144,8 +234,8 @@ case runs to completion and the test fails; with the exclusion removed from
 
 A coordinator that died just after appending an event leaves exactly the committed prefix that
 ends with it, because the log only grows at its end. This cuts a finished run's log back to that
-prefix after the first matching line. The run is released before the cut, so `status` reads it
-as interrupted, not running.
+prefix after the first committed line whose event is `kind` and satisfies `matches`. The run is
+released before the cut, so `status` reads it as interrupted, not running.
 
 ## `fn upstroke_status(repo: &Path, run_id: &str) -> String {`
 
@@ -193,17 +283,18 @@ The ledger and settlement mutations above fail it too.
 
 L4 (regression review 3, finding 4). A real schema-4 run, through `run_with`, completes in a
 repository that has no `.upstroke` exclusion before it (the premise is asserted). Its public
-directory holds the run's log and report. Afterwards `git status` lists nothing, and an ordinary
-`git add -A` stages nothing (`git diff --cached --name-only` is empty). With the exclusion removed
-from `coordinator::refuse_dirty_tree`, it fails on `?? .upstroke/`.
+directory holds the run's log, frozen plan, report and locks. Afterwards `git status` lists nothing,
+and an ordinary `git add -A` stages nothing (`git diff --cached --name-only` is empty). With the
+exclusion removed from `coordinator::refuse_dirty_tree`, it fails on `?? .upstroke/`.
 
 ## `fn a_schema_4_resume_restores_a_missing_run_exclusion() {`
 
 L4, the resume. A schema-4 run parks on its one question, the answer is recorded, and the
 exclusion its fresh run made is deleted. The premise is asserted: `git status` now lists
-`.upstroke/`. The resume, through `resume_with`, completes the run. Afterwards the exclusion is
-back and `git status` lists nothing. With the schema-4 branch's `ensure_run_exclusions` removed
-from `resume_harness`, it fails on "the resume made the exclusion again".
+`.upstroke/`. The resume, through `resume_with`, completes the run and restores the exclusion, as
+the sequential resume does. Afterwards `git status` lists nothing. With the schema-4 branch's
+`ensure_run_exclusions` removed from `resume_harness`, it fails on "the resume made the exclusion
+again".
 
 ## `fn a_budget_stopped_schema_4_resume_recreates_its_pruned_execution_root_where_it_recorded_it() {`
 
@@ -214,6 +305,32 @@ reads the recorded root absent. Resumed with a larger budget under the same Git 
 run is admitted although its root does not exist — the binding compares paths and requires no
 existence — and recovery recreates the root, saying so ("the execution root was pruned when the run
 last ended and has been recreated"), with no other namespace made under the private root.
+
+## `fn settled_attempts(events: &[serde_json::Value]) -> usize {`
+
+How many attempts the log settles: `attempt_finished` for each one that did not
+succeed, `candidate_prepared` for each one that did, and `attempt_interrupted`
+for each one whose coordinator did not see it end. Since J12 the schema-4 report
+keeps the last kind too, so the tests that compare the report's attempt rows
+with this count stay a comparison with every settlement.
+
+## `fn display_of(projected: &crate::engine::topology::report::TopologyReport, key: u64) -> String {`
+
+The display id finalize's projection gives a task key.
+
+## `fn a_halted_schema_4_run_projects_where_it_halted_and_its_outcome() {`
+
+S9, a halted run. A task whose gate fails on its one attempt reaches the end of
+its ladder, and the run asks before failing it: it parks on the task's
+question (V109 found this, against the first draft's premise of a run that
+halts at once). The operator gives the task up through the public `answer
+--decline`, and under the default `on_task_failure = halt` the resume halts.
+The `RunReport` that `engine::resume_with` returns projects what the fold
+says: `outcome()` is `Halted`, `halted_at` names the task the log's
+`run_finished` names, the task behind it is skipped, and nothing claims a
+budget stop. A fresh observation of the log and finalize's `report.json` say
+the same. `main.rs` turns this outcome into its exit status; the command-line
+scenario's case E runs that.
 
 ## `fn blocked_closure_plan() -> String {`
 
@@ -246,3 +363,94 @@ reports them blocked: that event, and nothing else, is what blocks them.
 The controls. A task behind one parked on an unanswered question is `queued`: a question is not a
 failure. And the same failing chain under the default `on_task_failure = halt` ends `Halted` at
 `t1`, with `t2` and `t3` `skipped (run halted)`: a halted run keeps skipping what it did not reach.
+
+## `fn a_schema_4_run_stopped_at_its_budget_projects_the_stop_and_its_outcome() {`
+
+S9, a budget stop. A run budget the first task's spend crosses stops the run
+before the next attempt. The `RunReport` projects the stop the log records:
+`outcome()` is `BudgetExceeded`, and `budget_stop` carries the log's
+`budget_exceeded` budget, limit and spend, and the task it stopped at, by its
+display id. Nothing claims a halt, and a fresh observation of the log and
+finalize's `report.json` say the same. `main.rs`'s exit status 3 is the
+command-line scenario's case F.
+
+## `fn a_task_budget_stop_projects_the_task_it_names() {`
+
+S9, a task-budget stop. `[budgets] task_usd` refuses a task's retry once the
+task's own spend reaches it, and the log's `budget_exceeded` names that
+task's key. The `RunReport` projects the stop to the task's display id. The
+run-wide stop above, refused at integration, names no task and projects to
+an empty one; both semantics stand side by side.
+
+The gate fails the first candidate that carries the stub's output, once,
+so the task's first attempt is spent and its retry is what the task budget
+refuses.
+
+## `fn a_fresh_run_records_the_case_policy_and_a_resume_never_changes_it() {`
+
+P12-W11 (D7). A public fresh run records the case-fold resolver's answer in
+`run_started(4)`'s `path_policy`, and a resume never changes it, even where
+the resolver would now answer differently. The managed repository's
+`core.ignorecase` changes between each run's creation and its resume, and a
+fresh run made after each change shows what the resolver answers then.
+
+The namespace is observed the way the resolver observes it (one name, looked
+up in the other case, beside the private root). Where it folds, every answer
+is `true`, so only "a resume never changes it" can be shown there.
+
+On a case-sensitive namespace, the run that recorded `true` resumes over a
+root that does not fold. The resume continues on the record and warns (D7's
+resume side), while the run that recorded `false` resumes without a word.
+
+## `fn a_schema_4_run_integrates_where_git_has_no_committer_identity() {`
+
+FINDINGS2_3, the committer-identity parity check (root's checkpoint-3
+disposition). At `b9d15bdb` the legacy engine asked the operator for no
+identity: every commit it put on a run's branch was `commit-tree` with
+`upstroke`'s (`Workspace::commit_tree_with_upstroke_identity`). The schema-4
+integration's proposal cherry-pick took the committer from the operator's
+configuration, so a repository without one stopped there (the CLI
+scenario's case C at `ad513bdf`). That was an activation regression, and the
+cherry-pick now carries the engine's committer identity.
+
+The child runs with every ambient Git control taken away. In it, the
+repository's own identity is removed and `user.useConfigOnly` is set, so Git
+can find no committer identity at all, which is checked first. Two
+independent tasks at width 2 make the second merge a stale candidate's
+cherry-pick, which is checked too.
+
+## `const THREE_INDEPENDENT_TASKS: &str`
+
+Three tasks in flight from one base. The two in slots `k0` and `k1` both
+create `shared.txt` with different contents, and the one in `k2` writes a file
+of its own: whichever merges first, a later candidate is stale and clean (a
+merge verification) and another conflicts (a merge rejection, which spawns a
+merge-repair task).
+
+## `fn a_schema_4_export_keeps_todays_rows_and_joins_a_repair_task_to_the_registry() {`
+
+P12-W18. `export-decisions` over a schema-4 run with a merge-repair task:
+one row per attempt, in today's columns, the repair task's attempts joined to
+the frozen registry by its display id, and no verification or merge event as
+a row. Each row is settled as the log settles its attempt: one that
+succeeded, by `candidate_prepared`, is `passed`, with its finish and cost.
+
+## `fn a_schema_4_report_counts_every_integration_review_once() {`
+
+J3, `PR12-REPORT-OMITS-INTEGRATION-REVIEW-SPEND` (both reviews). Three tasks in flight from
+one base: a later candidate is stale and clean, so its integration verification runs a
+review the run's spend ledger charges. At the reviewed head the CLI report collected
+attempt records only and its total missed that charge ($0.10 against $0.11 recorded; the
+second witness, $0.0400 against $0.0500). The report now carries those passes on the
+candidate's task, once, and its total, and the tasks' own totals, are the ledger's, with no
+mismatch warning.
+
+## `fn a_schema_4_resume_runs_the_recorded_gates_and_names_how_todays_differ() {`
+
+J7, PR12 regression review #4: a schema-4 resume runs the gates its run recorded and says
+how today's config differs, as `resume_runs_the_gates_the_run_recorded_not_todays` pins for
+the sequential engine (DESIGN §17). At the reviewed head the resume restored the recorded
+gates without comparing them, so an edited gate passed unremarked. Today's config here edits
+one gate's command and another's timeout, renames a third, and changes the shell: the
+warning names every edit, and the recorded gates, not today's failing command, decide the
+run.
