@@ -971,7 +971,7 @@ pub fn report(
         match adapter.probe(&runner).and_then(|caps| {
             adapter
                 .discover(&runner, &caps)
-                .map(|discovery| (caps.version.clone(), discovery))
+                .map(move |discovery| (caps.version, discovery))
         }) {
             Ok((version, discovery)) => {
                 let missing = crate::catalog::missing_from(&pool.agent, &discovery.models);
@@ -1005,7 +1005,7 @@ pub fn report(
         pools: config.pools,
         estimates,
         agents,
-        strategy: config.strategy.mode.clone(),
+        strategy: config.strategy.mode,
         scope,
         gathered,
         warnings,
