@@ -1322,7 +1322,7 @@ began and nothing has settled yet (`start_attached`, `settle_delivery`,
 began is the one its collection or removal settles, whichever clone does it.
 
 `unresolved_questions` holds, by container name, every process a bounded
-question about that container (`answer_within`, `unanswered`) started and could
+question about that container (`read_outcome`, `unanswered`) started and could
 not establish gone (`hold_unresolved`, root's PR12-J6-OBSERVATION-FATE-DROPPED).
 Shared by every clone in the same way, never cleared, and read by every
 settlement of that container (`settle_client_of`).
@@ -1365,7 +1365,7 @@ disagree.
 
 Run one `docker` subcommand and capture its stdout, bounded by the runtime's
 own bound (`own_bound`, [`QUESTION_BOUND`]) and read as every bounded question
-is read (`answer_within`).
+is read (`read_outcome`, through `answer_within`).
 
 `target` is what the call log names — the container, image or volume the
 operation is about, rather than the subcommand, so the trace of a real
@@ -1387,15 +1387,16 @@ as for any release that could not finish.
 ## `impl DockerCli` › `fn exec_streams(`
 
 The same bounded call, keeping **both** streams, for `docker logs`, and saying
-whether the funnel ended it at its output limit. A limited answer is not a
-failure: the collection keeps what was read and reports it limited
+whether its capture was cut at the funnel's output limit. A limited answer
+is not a failure: the collection keeps what was read and reports it limited
 (`ContainerExecution::output_limited`), as the runner's own bound did before
 K2, so a gate whose output overran the limit still fails as one. Otherwise an
 answer that ended before it answered fails (`unfinished`), a nonzero exit is
 classified (`classify_docker_failure`), and a question its supervisor did not
-answer keeps that supervisor's fate (`unanswered`). The funnel captures at
-most its own limit of each stream, so a stream that reached it ends the
-question, and the other stream is what had been read by then.
+answer keeps that supervisor's fate (`unanswered`). The funnel ends a question
+at its output limit only when it sees a capture cut before the question exits,
+the funnel's collection of the streams sets the flag, and a limited answer is
+returned whatever its exit.
 
 `PR6A-DOCKERCLI-MERGES-STDERR-INTO-STDOUT`: [`Self::exec`] returns only
 stdout and drops the child's stderr on success, so every container
@@ -1457,12 +1458,13 @@ cancellation ended names that end.
 
 ## `impl DockerCli` › `fn answer_within(`
 
-What one bounded question answered, read with its supervisor's fate kept
-(PR12-J6-OBSERVATION-FATE-DROPPED), whichever bound it was asked under:
+What one question `exec` asks under the runtime's own bound answered, read
+with its supervisor's fate kept (PR12-J6-OBSERVATION-FATE-DROPPED). Its stop
+answers false, and its outcomes are `read_outcome`'s:
 - a question its supervisor did not answer is read by `unanswered`;
-- a question its bound or a cancellation ended, which the funnel killed and
-  reaped, an answer longer than the runner reads, or a nonzero exit: `Failed`,
-  a nonzero exit through `classify_docker_failure`.
+- a question its bound ended, which the funnel killed and reaped, an answer
+  longer than the runner reads, or a nonzero exit: `Failed`, a nonzero exit
+  through `classify_docker_failure`.
 
 `answer_within` reads its outcome as that of a question whose stop never fired
 (`QuestionStop::NeverFired`): `exec` asks with a stop that answers false.
@@ -1478,9 +1480,11 @@ invocation's cancellation only when the predicate was asked and answered true,
 and the process funnel property under `unfinished` is what makes such an
 answer the question's end. The record is local to the call, so it is this one
 question's. `exec_within` gives it a question run under the process funnel
-(`question`), and
+(`question`);
 `tests::an_unanswered_docker_question_names_its_cancellation_only_when_its_stop_fired`
-gives it stand-ins that ask the stop or do not, with no `docker` at all.
+gives it stand-ins that ask the stop or do not, with no `docker` at all; and
+`tests::an_unanswered_docker_question_asked_through_observe_names_its_cancellation`
+asks a question through `observe` under an invocation's bound.
 
 ## `impl DockerCli` › `fn read_outcome(`
 
@@ -1553,7 +1557,7 @@ The path, given that `create` passed `--interactive`:
   So does a question of the wait or of the diagnostic whose process could not
   be established gone: `await_started` reports such an observation as itself,
   even at the deadline or on a cancellation, and the settlement reads the
-  fact `answer_within` held;
+  fact `unanswered` held;
 - once the container has started, the client is kept, owned, by name, until
   its collection or its removal settles it.
 
@@ -1571,7 +1575,7 @@ diagnostic that stalls ends where the invocation does and adds nothing to the
 reason. It is best-effort by design: its answer only enriches a failure that
 is already decided, so its error is dropped (`.ok()`), and what that could
 hide is kept instead: a question whose process could not be established gone
-is held under the container (`answer_within`, `hold_unresolved`) and makes
+is held under the container (`unanswered`, `hold_unresolved`) and makes
 the settlement unresolved. Until J13 the question took a fresh `CLIENT_GRACE`
 from the moment it was asked: a 200 ms invocation took 1.64 s against a stub
 diagnostic that slept 1.5 s (the reviewer's stub witness).
@@ -2134,8 +2138,8 @@ given.
 
 Both streams, separately. `docker logs` writes the container's stdout
 to its own stdout and the container's stderr to its own stderr
-(measured, docker 29.7.2) — see [`Self::exec_streams`]. Whether the funnel
-ended `docker logs` at its output limit is carried as
+(measured, docker 29.7.2) — see [`Self::exec_streams`]. Whether the funnel's
+capture of `docker logs` was cut at its output limit is carried as
 `ContainerExecution::output_limited` (K2): the funnel keeps at most its limit
 of each stream, so the runner's own truncation (`exec::bounded`) could no
 longer see that a stream was cut, and a gate's verdict depends on it.
