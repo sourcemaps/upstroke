@@ -237,7 +237,9 @@ fn after_a_quota_window(after: &str) -> Option<&str> {
     let after_limit = after_a_whole_limit(window_end)?;
     match after.strip_suffix(window_end)? {
         "session" | "weekly" => Some(after_limit),
-        name if !name.is_empty() && when_it_resets(after_limit).is_some() => Some(after_limit),
+        "opus" | "sonnet" | "haiku" | "fable" if when_it_resets(after_limit).is_some() => {
+            Some(after_limit)
+        }
         _ => None,
     }
 }
@@ -712,6 +714,44 @@ mod tests {
     }
 
     #[test]
+    fn each_claude_model_name_with_a_reset_signals() {
+        for text in [
+            "You've hit your Opus limit · resets 3pm (UTC)",
+            "You've hit your Sonnet limit · resets 3pm (UTC)",
+            "You've hit your Haiku limit · resets Nov 14, 9am (UTC)",
+            "You've hit your Fable limit · resets Nov 14, 9am (UTC)",
+            "you've hit your SONNET limit · resets 3pm (UTC)",
+            "you've hit your haiku limit · resets 3pm (UTC)",
+        ] {
+            assert!(looks_rate_limited(text), "should signal: {text}");
+        }
+    }
+
+    #[test]
+    fn a_context_token_or_request_limit_with_a_reset_does_not_signal() {
+        for text in [
+            "You've hit your context limit · resets after compaction",
+            "You've hit your context limit · resets 9am (UTC)",
+            "You've hit your token limit · resets 9am (UTC)",
+            "You've hit your request limit · resets Nov 14, 9am (UTC)",
+        ] {
+            assert!(!looks_rate_limited(text), "should not signal: {text}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_not_one_of_claudes_four_with_a_reset_does_not_signal() {
+        for text in [
+            "You've hit your Codex limit · resets 9am (UTC)",
+            "You've hit your Copilot limit · resets 9am (UTC)",
+            "You've hit your Opuses limit · resets 9am (UTC)",
+            "You've hit your Fables limit · resets 9am (UTC)",
+        ] {
+            assert!(!looks_rate_limited(text), "should not signal: {text}");
+        }
+    }
+
+    #[test]
     fn a_hit_your_token_limit_message_without_a_reset_does_not_signal() {
         for text in [
             "You've hit your token limit",
@@ -729,8 +769,12 @@ mod tests {
 
     #[test]
     fn a_named_limit_whose_next_word_is_not_resets_does_not_signal() {
-        let text = "You've hit your token limit; the cache resets 9am (UTC)";
-        assert!(!looks_rate_limited(text), "should not signal: {text}");
+        for text in [
+            "You've hit your token limit; the cache resets 9am (UTC)",
+            "You've hit your Fable limit; the cache resets 9am (UTC)",
+        ] {
+            assert!(!looks_rate_limited(text), "should not signal: {text}");
+        }
     }
 
     #[test]

@@ -313,10 +313,12 @@ lower case, contains "hit your " followed immediately by a quota window and
 then " limit" as a whole word (the boundary is set out in the next section).
 There are three windows that signal on their own: a number of hours, written
 as one or more ASCII digits and then "-hour" ("5-hour"); "session"; and
-"weekly". A fourth form signals only with a reset: any other name of one
-word of ASCII letters, such as a model's ("Fable", "Opus"), when the next
-word after "limit" is "resets" ("hit your Fable limit · resets Nov 14, 9am
-(UTC)"). Every occurrence of "hit your " is checked, not only the first, so
+"weekly". A fourth form signals only with a reset: one of the names of
+Claude's model families, "Opus", "Sonnet", "Haiku" or "Fable", when the
+next word after "limit" is "resets" ("hit your Fable limit · resets Nov 14,
+9am (UTC)"). Like the rest of the rule, the names are compared in lower
+case, so "OPUS" and "opus" count as well. Every occurrence of "hit your " is
+checked, not only the first, so
 an ordinary "the patch hit your branch" earlier in the text does not hide a
 limit message after it. "hit your usage limit" needs no window: "usage limit"
 is one of the twelve phrases.
@@ -324,9 +326,10 @@ is one of the twelve phrases.
 The rule is narrow on purpose. A rate-limit signal is ground truth about
 capacity (§13): the ladder does not count the attempt, defers it, and after
 three deferrals asks a human. So "You've hit your context-window limit",
-"hit your rate of change limit", "hit your token limit" with no reset after
-it and a bare "hit your limit" do not signal. They are task failures, to be
-retried or escalated like any other.
+"hit your rate of change limit", "hit your token limit", "hit your context
+limit · resets after compaction", "hit your request limit · resets 9am
+(UTC)" and a bare "hit your limit" do not signal. They are task failures, to
+be retried or escalated like any other.
 
 The rule splits the already lower-cased text on "hit your " and reads each
 piece with `trim_start_matches`, `strip_prefix`, `strip_suffix` and
@@ -363,10 +366,11 @@ What follows " limit", when `after`, the lower-cased text after a
 is read one of two ways:
 
 - If it starts with ASCII digits, the window is those digits and "-hour".
-- Otherwise the window is the run of ASCII letters it starts with, which
-  must not be empty. "session" and "weekly" signal on their own. Any other
-  word, a model name such as "fable" or "opus", signals only if
-  `when_it_resets` finds a reset in what follows the limit.
+- Otherwise the window is the run of ASCII letters it starts with.
+  "session" and "weekly" signal on their own. "opus", "sonnet", "haiku" and
+  "fable", Claude's model names, signal only if `when_it_resets` finds a
+  reset in what follows the limit. Any other word, and an empty run, gives
+  `None`.
 
 Either way the window must be followed by " limit" as a whole word, which
 `after_a_whole_limit` checks. The window is one word: "context window" and
@@ -389,12 +393,31 @@ printed it was read as `AgentError`, the coordinator never recorded
 `pool_exhausted`, and the ladder kept spending attempts against an exhausted
 pool.
 
-A name signals only with a reset because, unlike "session" and "weekly", it
-is not a known window. "token" and "context" are names too, and "You've hit
-your token limit" with nothing after it is about the prompt, not the pool.
-The reset is what makes it a quota: the message says when the allowance comes
-back. "session", "weekly" and the hours window are unchanged, and still
-signal with or without a reset.
+A model name signals only with a reset because, unlike "session" and
+"weekly", it is not a window: a message that only names a model says what
+was spent, and the reset is what says the allowance comes back. "session",
+"weekly" and the hours window are unchanged, and still signal with or
+without a reset.
+
+The names are a closed list: "opus", "sonnet", "haiku" and "fable", and
+nothing else. When the model form was first added it took any one word of
+ASCII letters before " limit", so long as a reset followed. A round-three
+review found that too wide. This matcher is shared by every agent, not only
+Claude Code, and a reset alone does not make a limit a quota: a Copilot or
+Codex message `You've hit your context limit · resets after compaction` read
+as a rate limit, so the coordinator recorded `pool_exhausted` for a pool that
+was not, and the ladder deferred the task three times and asked a human,
+where it should have retried or escalated. "context", "token" and "request"
+limits are about the prompt or the call, and waiting fixes none of them.
+
+The list is closed, rather than open with a list of words to refuse, because
+the mistakes are not alike. A model limit message with a name not in the
+list is read as `AgentError` and spends an attempt, the safer mistake set out
+above. A word wrongly let in tells the capacity engine that an untouched pool
+is exhausted. And the words that are not model names cannot be listed, while
+the model names can: they are the names of Claude's model families, the only
+models whose own allowance Claude Code reports in this form. A new family
+name has to be added here by hand, with a test, when it is first seen.
 
 ## `fn after_a_whole_limit(window_end: &str) -> Option<&str> {`
 
@@ -823,23 +846,49 @@ existed this test failed, and an attempt that printed the message was an
 ## `mod tests` › `fn a_hit_your_opus_limit_message_with_a_reset_signals() {`
 
 The same form with another model's name and a time-only reset. It has not
-been observed. It witnesses that the rule accepts any one-word name and not
-"fable" alone: a rule that listed the observed name would fail this test.
+been observed. It witnesses that the rule accepts more than "fable": a rule
+that listed only the observed name would fail this test.
+
+## `mod tests` › `fn each_claude_model_name_with_a_reset_signals() {`
+
+Each of the four names, "Opus", "Sonnet", "Haiku" and "Fable", followed by a
+limit and a reset, with time-only and dated resets, and two of them in
+another case ("SONNET", "haiku"). None of them but Fable has been observed.
+It witnesses the whole list: drop a name from it, or compare the names case
+included, and this test fails.
+
+## `mod tests` › `fn a_context_token_or_request_limit_with_a_reset_does_not_signal() {`
+
+The round-three defect. "hit your context limit · resets after compaction"
+is the text the review gave, a Copilot or Codex message about the context,
+not the pool; the others are "context", "token" and "request" limits with a
+reset that does parse. Each is one word of ASCII letters and the next word
+after "limit" is "resets", so the rule this replaced, which took any such
+word, signalled on all four. The name must be one of Claude's four, so none
+signals. A rule that took any one-word name with a reset fails this test.
+
+## `mod tests` › `fn a_name_that_is_not_one_of_claudes_four_with_a_reset_does_not_signal() {`
+
+Names close to the list that are not on it: other agents' names, "Codex" and
+"Copilot", and the plurals "Opuses" and "Fables". The name is compared whole,
+so none signals. A rule that took any name, or one that asked only whether a
+name started with one of the four, fails this test.
 
 ## `mod tests` › `fn a_hit_your_token_limit_message_without_a_reset_does_not_signal() {`
 
 "hit your token limit" and "hit your context limit", the first with nothing
 after it and the second with a semicolon and advice. Both are about the
-prompt, not the pool. "token" and "context" are one-word names, but neither
-text says when anything resets, so neither signals. A rule that took a name
-without a reset would fail this test.
+prompt, not the pool, and neither "token" nor "context" is a model name, so
+neither signals. It was written when any one-word name signalled with a
+reset, to pin that a name without one did not; the test above now pins that
+these names do not signal with a reset either.
 
 ## `mod tests` › `fn a_model_named_limit_without_a_reset_does_not_signal() {`
 
 The observed Fable message with its reset cut off. A model's name is not
-enough on its own: the rule cannot tell "Fable" from "token", so it is the
-reset that makes the message a quota. It witnesses that the reset is required
-for every name, model names included.
+enough on its own: it says what was spent, and it is the reset that makes
+the message a quota. It witnesses that the reset is required for the model
+names, which "session", "weekly" and the hours window do not need.
 
 ## `mod tests` › `fn a_named_limit_whose_next_word_is_not_resets_does_not_signal() {`
 
@@ -847,6 +896,12 @@ for every name, model names included.
 The reset has to follow the limit, as in the observed message, not merely
 appear later in the text. A rule that looked for "resets" anywhere after the
 limit would fail this test.
+
+The "token" text was the only case when any one-word name could signal.
+Since only Claude's four names can, "token" no longer signals with any
+reset, so that text cannot tell one reset rule from another. The "Fable"
+text, a model name with the same "; the cache resets" after it, is the case
+that still does.
 
 ## `mod tests` › `fn a_named_limiter_with_a_reset_does_not_signal() {`
 
@@ -861,7 +916,9 @@ Three names that are not one word of ASCII letters, each followed by a
 limit and a reset: "context window", "context-window" and "Fable4". The name
 stops at the space, the hyphen and the digit, and what follows is not
 " limit", so none signals. A rule that took everything up to " limit" as the
-name would fail this test.
+name would fail this test. Now that the name must be one of Claude's four,
+"context" is refused whatever follows it, so "Fable4", which starts with a
+name on the list, is the case that pins where the name ends.
 
 ## `mod tests` › `const NOV_11_2026: u64 = 1_794_355_200;`
 
