@@ -21,6 +21,9 @@ queue, capacity-driven routing, more adapters) is in progress on `master` and un
 Linux. A default run on `master` also needs the Codex CLI: its review plan names an alternative
 reviewer from another model family, which the run probes before it commits anything, unless
 `[routing] review = { cross_family = false }` ([design/17](design/17_design_configuration_reference.md), "Which CLIs a schema-4 run needs").
+On Windows every supervised command is assigned to a kill-on-close Job Object before its primary
+thread runs, so its ordinary descendants are terminated after a direct-child exit, a timeout or
+abrupt conductor death.
 
 ## Quick start
 | Command | What it does |
@@ -72,6 +75,10 @@ cmd = "cargo test"
 - **Ground truth is the diff, not the transcript.**
 - **Narrow permissions; reviewers are read-only.**
 - **Independent review, with an explicit fallback** ([design/11](design/11_design_verification_ladder.md)).
+  Where a task runs on the model that would review it, the review is rebound to another model
+  family; if that alternative cannot be probed, the run warns and falls back to the
+  frozen same-model reviewer rather than claiming independence. A configured blast-radius
+  second opinion is stricter: it needs both families, and both must pass.
 - **An empty diff can never pass.**
 - **Estimates are never optimistic.**
 
