@@ -363,10 +363,10 @@ pub fn plan_for(
         alternative,
         second_opinion,
     };
-    if cfg.review_cross_family
-        && let Some(warning) = resolved.self_review_warning(plan, chains, tier)
-    {
-        warnings.push(warning);
+    if cfg.review_cross_family {
+        if let Some(warning) = resolved.self_review_warning(plan, chains, tier) {
+            warnings.push(warning);
+        }
     }
     Ok(resolved)
 }
