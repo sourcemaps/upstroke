@@ -74,6 +74,27 @@ fn a_bad_reply_is_refused_with_its_reason() {
 }
 
 #[test]
+fn a_give_up_option_in_its_own_words_is_refused() {
+    let give_up = VALID.replace("\"choice\": 1", "\"choice\": 2");
+    for words in ["abandon", "skip"] {
+        let asked = question(&[RETRY, words]);
+        assert_eq!(
+            crate::interaction::answer_for_option(&asked, 2),
+            Some(Answer::Answered {
+                text: words.to_owned()
+            }),
+            "{words}: option 2 reaches the arm that reads its own words"
+        );
+        let refused = check_reply(&asked, &reply(&give_up)).expect_err("refused");
+        assert!(refused.contains("gives up"), "{words}: {refused}");
+        assert!(
+            check_reply(&asked, &reply(VALID)).is_ok(),
+            "{words}: option 1 is accepted"
+        );
+    }
+}
+
+#[test]
 fn an_input_is_cut_on_a_character_boundary() {
     let text = "é".repeat(INPUT_BOUND);
     let (kept, cut) = bounded(&text);
