@@ -826,7 +826,7 @@ No pool named for that agent means no subscription to mark. The
 signal is still in the log on the attempt record; inventing a pool id
 to hang it on would put a fact about nothing into the estimator.
 
-## `impl Run<'_>` › `let reset_at = reset_at_from_limit_message(&failure.reason, util::unix_seconds_now());`
+## `impl Run<'_>` › `let reset_at = if agent == claude::ADAPTER_ID {`
 
 The reset time the limit message gave, where it gave one.
 `agent::reset_at_from_limit_message` reads the failure's text for Claude
@@ -836,11 +836,23 @@ it returns `None` for any text without a reset in exactly that form,
 including one in a zone other than UTC. Now is `util::unix_seconds_now`,
 the same clock read the same way as the event's own `ts`.
 
+Only Claude Code's text is read. The agent is the one that failed — the
+implementer's for a worker's refusal, the last reviewer's for a reviewer's —
+compared with `claude::ADAPTER_ID`, the adapter's own id, so a renamed
+adapter cannot leave a second spelling behind. Every other agent's
+`reset_at` is `None` without a parse. The parser only knows Claude Code's
+shape, but that shape is loose enough to match words another vendor might
+print: a Copilot refusal reading `premium request allowance exhausted;
+resets Dec 1, 12am (UTC)` parses, and nothing says Copilot means a UTC
+midnight on that date by it. Recording that would put a guess into the log
+as the subscription's own reset; `another_agents_rate_limit_naming_a_reset_records_none_on_pool_exhausted`
+in `engine::tests` holds it out.
+
 It is recorded, not acted on. §13 wants a retry-at-reset timer here, and
 there is none: the ladder still defers a rate-limited attempt and
 `DEFAULT_MAX_DEFERS` is still the bound, whatever the reset says. What the
 time changes is what the estimate reports, a reset time instead of
-"unknown". A reset in any other shape, from Codex or Copilot or from a
+"unknown". A reset from Codex or Copilot, in whatever shape, or in a
 wording Claude Code has not been seen to print, stays `None`, as every reset
 was before.
 

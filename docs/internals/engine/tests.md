@@ -5182,3 +5182,14 @@ exhausted until the weekly reset. Before the engine remembered each pool's recor
 second refusal wrote nothing, and the estimate kept a 05:30 that had already passed. The test above,
 where the same reset is named twice, and `one_outage_records_one_signal_however_many_deferrals_it_causes`,
 where no reset is named, still write one signal each.
+
+## `fn another_agents_rate_limit_naming_a_reset_records_none_on_pool_exhausted() {`
+
+The reset is read only from Claude Code's text. The small tier is pinned to `copilot`, the pools
+file names only `copilot-window`, and the Copilot fake refuses once with `premium request allowance
+exhausted; resets Dec 1, 12am (UTC)` before it edits; Claude Code reviews. The test first checks
+that `agent::reset_at_from_limit_message` does parse that text on its own, so the only thing that
+can keep the reset out is the engine's check of the agent. The one `pool_exhausted` names
+`copilot-window` and `copilot` and carries the text in its detail, and its `reset_at` is `None`.
+Before the engine compared the agent with `claude::ADAPTER_ID`, it recorded the nearest 1 December
+at 00:00 UTC there: a reset read from another vendor's words on the strength of Claude Code's.

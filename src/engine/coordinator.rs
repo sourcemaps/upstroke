@@ -10,7 +10,7 @@ use std::fs;
 use std::time::Duration;
 
 use crate::agent::proc::NoHooks;
-use crate::agent::{AdapterSource, BuiltinAdapters, Caps, reset_at_from_limit_message};
+use crate::agent::{AdapterSource, BuiltinAdapters, Caps, claude, reset_at_from_limit_message};
 use crate::capacity;
 use crate::config::{self, OnTaskFailure};
 use crate::error::UpstrokeError;
@@ -1055,7 +1055,11 @@ impl Run<'_> {
             FailureOrigin::Worker => (pool_option(&implementer.pool), implementer.agent.clone()),
         };
         let Some(pool) = pool else { return Ok(()) };
-        let reset_at = reset_at_from_limit_message(&failure.reason, util::unix_seconds_now());
+        let reset_at = if agent == claude::ADAPTER_ID {
+            reset_at_from_limit_message(&failure.reason, util::unix_seconds_now())
+        } else {
+            None
+        };
         let already_recorded = self
             .exhausted_pools
             .get(&pool)

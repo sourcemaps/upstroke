@@ -565,7 +565,7 @@ no locale. The clock is read by [`unix_seconds_now`], below.
 Now, as whole seconds since 1970-01-01 UTC. The one place this module reads
 the clock: [`rfc3339_utc_now`] formats what it returns, and the coordinator
 passes it to `agent::reset_at_from_limit_message` when it records a
-`pool_exhausted` event, so the reset time is placed against the same clock,
+Claude Code `pool_exhausted` event, so the reset time is placed against the same clock,
 read the same way, as the event's `ts`.
 
 A clock that cannot read (`SystemTime` before the epoch) yields the epoch

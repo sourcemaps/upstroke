@@ -8285,6 +8285,62 @@ fn a_different_later_reset_writes_one_more_pool_exhausted() {
 }
 
 #[test]
+fn another_agents_rate_limit_naming_a_reset_records_none_on_pool_exhausted() {
+    const COPILOT_RESET: &str = "premium request allowance exhausted; resets Dec 1, 12am (UTC)";
+    assert!(
+        crate::agent::reset_at_from_limit_message(COPILOT_RESET, crate::util::unix_seconds_now())
+            .is_some(),
+        "the text alone parses, so only the agent can be what keeps its reset out"
+    );
+    let (_tree, repo) = temp_engine_repo("poolexhaustedotheragent");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some(
+            "[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n\n\
+             [[pins]]\ntier = \"small\"\nagent = \"copilot\"\nmodel = \"gpt-5-mini\"\n",
+        ),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    opts.pools_path = Some(pools_file(
+        &repo,
+        "[pools.copilot-window]\nkind = \"subscription-window\"\nagent = \"copilot\"\n\
+         sources = [\"signals\"]\n",
+    ));
+    let mut source = cross_vendor(
+        vec![Effect::EditFile],
+        vec![ReviewBehavior::Pass],
+        vec![ReviewBehavior::Pass],
+    );
+    let copilot = source.copilot.as_mut().expect("this source has a copilot");
+    copilot.effects = vec![Effect::RateLimited, Effect::EditFile];
+    copilot.worker_rate_limit = COPILOT_RESET;
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let events = events_of(&repo, &report.run_id);
+    let signals: Vec<&events::PoolExhausted> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signals.len(), 1, "{signals:?}");
+    assert_eq!(signals[0].pool, "copilot-window");
+    assert_eq!(signals[0].agent, "copilot");
+    assert!(
+        signals[0].detail.contains("resets Dec 1, 12am (UTC)"),
+        "{signals:?}"
+    );
+    assert_eq!(
+        signals[0].reset_at, None,
+        "only Claude Code's wording is read for a reset: {signals:?}"
+    );
+}
+
+#[test]
 fn reviewer_rate_limit_retires_recovered_implementer_pool_live() {
     let (_tree, repo) = temp_engine_repo("reviewerlimitretiresworker");
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));

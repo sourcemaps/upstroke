@@ -425,7 +425,9 @@ match, rather than being skipped as punctuation.
 
 When a usage limit says it lifts, read from the limit message itself, as an
 RFC 3339 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`). The coordinator records it as
-`reset_at` on the `pool_exhausted` event.
+`reset_at` on the `pool_exhausted` event, and calls this only when the agent
+that failed is Claude Code: the shape below is Claude Code's, and another
+vendor's text that happens to fit it is not a reset this knows how to read.
 
 Two messages carry one. Both were printed by Claude Code on the build machine:
 
