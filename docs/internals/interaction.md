@@ -406,6 +406,13 @@ a run with many open questions cannot multiply its own deadline.
 
 An answer that lands during the wait is picked up.
 
+## `mod tests` › `struct CountingSleeper(std::cell::Cell<usize>);`
+
+Counts the sleeps `resolve` takes, so a test can read how long it waited. The count is a `Cell`:
+each sleeper lives on its test's stack, `resolve` calls `sleep` synchronously through
+`&dyn Sleeper`, and the same test reads `count()`, so the state has one owner and no lock guards
+it. Nothing shares a count between two handles, so the sleeper is not `Clone`.
+
 ## `mod tests` › `struct ArrivingSleeper {`
 
 Stands in for an operator running `upstroke answer` mid-wait.

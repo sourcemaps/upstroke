@@ -784,20 +784,18 @@ mod tests {
         );
     }
 
-    #[derive(Default, Clone)]
-    struct CountingSleeper(std::sync::Arc<Mutex<usize>>);
+    #[derive(Default)]
+    struct CountingSleeper(std::cell::Cell<usize>);
 
     impl CountingSleeper {
         fn count(&self) -> usize {
-            self.0.lock().map(|c| *c).unwrap_or(0)
+            self.0.get()
         }
     }
 
     impl Sleeper for CountingSleeper {
         fn sleep(&self, _duration: Duration) {
-            if let Ok(mut count) = self.0.lock() {
-                *count += 1;
-            }
+            self.0.set(self.0.get() + 1);
         }
     }
 
