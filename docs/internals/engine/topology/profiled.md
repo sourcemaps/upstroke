@@ -53,11 +53,14 @@ where a refusal can be reported before any agent CLI is started: a fresh run
 refuses in `prepare_fresh`, before its lease, and a resume in its pre-flight,
 under its locks. The profile must be an absolute path and an existing
 directory. The agent's capability probe then runs under the profile, through
-this wrapper. Its sign-in check (`claude auth status --json` for Claude Code)
-runs next, on a fresh run and on a resume, under each account the agent's
-pools use: each profile a pool names, and the agent's default account when a
-pool names none or the agent has no pool (`preflight.md`, `Account::of_agent`,
-`refuse_signed_out`). A signed-out account refuses the run before it starts or
+this wrapper. Its sign-in check
+(`claude --setting-sources "" auth status --json` for Claude Code) runs next,
+on a fresh run and on a resume, under each account the agent's pools use: each
+profile a pool names, and the agent's default account when a pool names none
+or the agent has no pool (`preflight.md`, `Account::of_agent`,
+`refuse_signed_out`). The check asks with no user, project or local settings
+loaded, as a worker loads none, so a credential that only a settings file
+supplies (an `apiKeyHelper`, say) does not count. A signed-out account refuses the run before it starts or
 resumes; a CLI that cannot say passes. It does not expand
 `~/`: the configuration has no helper for that (the only home lookup is
 `util::user_upstroke_dir`, which finds the home but does not rewrite paths),

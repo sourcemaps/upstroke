@@ -83,13 +83,16 @@ its creation begins, so nothing of the run exists, and a resume at its
 pre-flight. What pre-flight checks of a profile is that it is an absolute
 path and an existing directory (besides the host runner, Claude Code and no
 `CLAUDE_CODE_OAUTH_TOKEN`). The agent's capability probe then runs under the
-profile. For Claude Code alone, its sign-in check (`claude auth status --json`)
-runs next, on a fresh run and on a resume, once under each account Claude
-Code's pools use, in file order: each profile they name, and the default
-account when any of them names none or Claude Code has no pool
-(`Account::of_agent`). It stops at the first account that is signed out or
-whose check fails to answer, and that account refuses the run before it starts
-or resumes; a CLI that cannot say passes. An agent whose pools use more than
+profile. For Claude Code alone, its sign-in check
+(`claude --setting-sources "" auth status --json`) runs next, on a fresh run
+and on a resume, once under each account Claude Code's pools use, in file
+order: each profile they name, and the default account when any of them names
+none or Claude Code has no pool (`Account::of_agent`). It stops at the first
+account that is signed out or whose check fails to answer, and that account
+refuses the run before it starts or resumes; a CLI that cannot say passes. The
+check asks with no user, project or local settings loaded, as a worker loads
+none, so a credential that only a settings file supplies (an `apiKeyHelper`,
+say) does not count. An agent whose pools use more than
 sixteen distinct accounts (`MAX_ACCOUNTS_PER_AGENT`) is refused before its
 sign-in is checked. Other agents' sign-in is not checked at pre-flight
 (`SIGN_IN_CHECKED`), so a signed-out Codex fails at its first attempt
