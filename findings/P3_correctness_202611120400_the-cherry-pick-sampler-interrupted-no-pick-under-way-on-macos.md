@@ -49,7 +49,8 @@ In the timeline, one run outlived its kill, which failed at 18.64ms with *"Opera
 (os error 1)"*, and one run completed in 19.872667ms; the other fourteen were killed.
 
 **Rate.** This failure appeared in **1 of the 62** `test (macos-latest)` jobs that completed among
-the 86 CI runs created on 2026-11-11 UTC (50 succeeded, 12 failed, 24 were cancelled).
+the 86 CI runs created on 2026-11-11 UTC (50 succeeded, 12 failed, 24 were cancelled). A second
+sighting, on Linux, is recorded below.
 
 **Why this is its own row.** The nearest relative is the open finding
 `findings/P2_correctness_202609131201_the-recover-sampler-cold-probe-sibling.md`, which records a
@@ -61,6 +62,42 @@ with that finding named as its nearest relative and not as its parent.
 **The cause is not established.** What the record shows is that every kill landed either before the
 child began writing or after it had finished, on a machine where the pick took about twenty
 milliseconds.
+
+## A second sighting, on Linux, 2026-11-22
+
+The same test failed on the same assertion, `killed_while_writing >= 1`, on a GitHub-hosted
+`ubuntu-latest` runner:
+
+| run | job | platform | date | pull request | head |
+|---|---|---|---|---|---|
+| `45058469607` (`merge_group`) | `137318868062` | `test (ubuntu-latest, 1 of 2)` | 2026-11-22, 19:02:40Z | #404 | `810f525f` |
+
+- **Log.** `evidence/job-45058469607-137318868062.log`, SHA-256
+  `744665897fbb5a35982d91700ad0fcfd3b653085728a115a8f36f0c400ac006c`.
+- **Line 1774:**
+
+      test engine::topology::recover::tests::sampled_cherry_pick_child_kills_every_residue_classified_and_recovered ... FAILED
+
+- **Line 1971:** the panic at `src/engine/topology/recover/tests.rs:11861:5`, the same
+  `killed_while_writing >= 1` assertion (line 11861 at the tested commit).
+- **Line 1972:** `none of the 6 kills in 16 spawns landed while the pick was writing`; the probe
+  measured **2.205111ms**, and the ladder followed **10 completions**.
+- **What the sixteen spawns observed:** **three** were killed before they had begun (`None`, exit by
+  signal 9); **three** were killed after publishing their commit (`After`, signal 9); **ten**
+  completed (exit 0), each recorded as having "outran the kill".
+- **The kills' timeline, as the payload prints it:** kills were aimed between 245.012µs and
+  2.076647ms; the kills that returned did so between 386.375µs and 3.811152ms; ten of sixteen
+  children exited before their kill returned, between 2.215365ms and 3.821434ms.
+- **Line 1978:** `test result: FAILED. 1418 passed; 1 failed; 86 ignored`. It was the job's only
+  failure. #404 changes only `findings/`.
+- **The same tree passed.** Merge-queue run `45061116652` tested `e215c508` and merge-queue run
+  `45064602211` tested `2c516b64`, both with the tree of `810f525f` (`c5b41056`); in both,
+  `test (ubuntu-latest, 1 of 2)` succeeded. `45064602211` merged #404.
+
+**Established.** The same assertion failed on a hosted Linux runner, where the probe measured about
+2.2 ms against the first sighting's 19.4 ms on macOS, and the same tree passed twice after.
+
+The file's name and title say macOS; this sighting is on Linux.
 
 ## What the change that takes this up should do
 
