@@ -2440,7 +2440,7 @@ variable is set, compiles it again with it, and turns the feature on where
 that compiles. Each also has Cargo run it again whenever the variable
 changes. Under the variable the three, and every harness built over them,
 are built otherwise than the `test` job's legs and a user's machine build
-them, from a tree nobody changed, on these ten legs alone. That is read
+them, from a tree nobody changed, on these fourteen legs alone. That is read
 from the three build scripts at the versions `Cargo.lock` held on
 2026-11-21; no build here was made with the variable set.
 
@@ -2495,7 +2495,7 @@ selection is, is the exact line's to hold
 
 The times are the one thing this step does that nothing downstream judges.
 Without them every leg runs its shard, clears its floor and is green; what
-is lost is the record a later change is to pack the legs from, on all ten
+is lost is the record a later change is to pack the legs from, on all fourteen
 at once, and no check would fail to say so. Measured by one edit in
 [`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`], the
 two arguments removed; in the workflow alone,

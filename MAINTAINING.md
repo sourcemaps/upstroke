@@ -14,7 +14,7 @@ source, documentation, workflows, release machinery and this file.
    pushing.
 3. **Run the ten-command baseline** (`CODING_STANDARDS.md` §2) before every push, then wait for
    the two required contexts: `upstroke-ci` (formatting, Clippy on three platforms, the Linux and macOS
-   test matrix, the Windows suite in `test-windows-hosted` -- ten shards on `windows-latest`, on
+   test matrix, the Windows suite in `test-windows-hosted` -- fourteen shards on `windows-latest`, on
    every pull request, push and merge-queue entry -- the MSRV matrix, the six
    Bash gates) and `upstroke-pr-policy` (title, body sections, ledger). A
    branch behind `master` is not updated by hand to merge once the ruleset carries the merge
@@ -23,12 +23,13 @@ source, documentation, workflows, release machinery and this file.
    Until the ruleset carries the queue, the up-to-date requirement stands: a branch behind
    `master` is updated first and waits again, and the audit reports it as `behind-master`.
 
-   **The Windows suite runs in ten shards**, `test (windows-latest, k of 10)`, the legs of
+   **The Windows suite runs in fourteen shards**, `test (windows-latest, k of 14)`, the legs of
    `test-windows-hosted`. Each shard installs and asserts the pinned compiler, `1.97.1`, runs
    the suite step with its shard's test-name filter, and holds a share of the Windows suite's
    passing-test floor of 1700; the shares sum to it. A test runs in exactly one shard: each
-   shard skips the filters of the shards before it, and the last takes what no filter names.
-   `upstroke-ci` requires the job, which passes only when all ten shards do. From 2026-09-01
+   shard runs the tests whose names contain any of its filters and none of the filters of the
+   shards before it, and the last takes what no filter names.
+   `upstroke-ci` requires the job, which passes only when all fourteen shards do. From 2026-09-01
    to 2026-11-20 the suite ran on an ephemeral self-hosted guest unless the run was sent to
    `windows-latest`: the merge queue's entries ran there from 2026-09-16 until its October
    timeouts, and from 2026-11-12 a `pick-windows-home` job could send any run to
@@ -52,22 +53,22 @@ source, documentation, workflows, release machinery and this file.
    were divided again on 2026-11-20, from that run: each test's sequential Linux duration
    scaled so that the leg it ran in sums to that leg's measured harness, blended half and half
    with a uniform per-test model, and the filters chosen by a search for the slowest leg. The
-   ten shards are now `engine::topology::coordinator::tests::a_p`,
-   `engine::topology::coordinator::tests::a_r`, the rest of
-   `engine::topology::coordinator::tests::a_`, the rest of `engine::topology::coordinator::`,
-   `engine::topology::recover::`, `engine::tests::a`, `runner::`, `workspace_manager::`, the
-   rest of `engine::tests::`, and everything else. The five macOS legs are
-   `engine::topology::coordinator::tests::a_`, the rest of `engine::topology::`, the rest of
-   `engine::`, `runner::`, and everything else. The slowest shard was predicted at about 14.4
-   minutes and the slowest macOS leg at about 11.8. Run 44736631711 measured both re-splits for
-   the first time: the slowest Windows leg took 18.1 minutes and the slowest macOS leg 16.0.
+   slowest shard was predicted at about 14.4 minutes and the slowest macOS leg at about 11.8.
+   Run 44736631711 measured both re-splits for the first time: the slowest Windows leg took
+   18.1 minutes and the slowest macOS leg 16.0.
    In a Windows leg's log, the result line of each test the leg runs now ends with its time on
    the hosted runner (`test <name> ... ok <0.123s>`, libtest's `--report-time`); an ignored test
    is not run, and its line carries no time. libtest writes the time apart
    from the result, so a child a test starts on the harness's console can write between them
    and move the time to the next line; the `mklink` that `link_dir` in `src/rundir/tests.rs`
    starts was one, and `link_dir` now captures its output. The packing of tests into legs is to
-   be weighed by those times in a later change.
+   be weighed by those times in a later change. On 2026-11-22 the tests were packed into
+   fourteen Windows shards and five macOS legs by the per-test Windows times of CI run
+   45045067738, scaled for macOS by each macOS leg's measured ratio to Windows: whole modules,
+   split by name prefix only where a module exceeded a leg's budget, each leg but the last
+   named by several filters, which are in `ci.yml`. Each Windows job was predicted at about 521
+   to 542 seconds and each macOS leg at about 568 to 608, and the two Linux legs were left as
+   they were.
    Single tests set a floor under every Windows leg: a leg takes no less than its longest test
    plus the job's fixed minutes. In CI run 45045067738 the longest single Windows tests were
    `engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect`

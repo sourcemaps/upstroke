@@ -374,9 +374,9 @@ to its own row.
 
 These legs hold no count of passing tests to a floor, where each Windows
 shard does, and the fifth check is what stands in for one here. A shard's
-floor refuses a leg whose filter matched almost nothing; in this job such a
-leg is green, and the tests its filter no longer matches are run by a later
-leg, since every later leg only skips that filter. That holds while every
+floor refuses a leg whose filters matched almost nothing; in this job such a
+leg is green, and the tests its filters no longer match are run by a later
+leg, since every later leg only skips those filters. That holds while every
 leg's arguments are its runner's table's, which is this equality.
 
 Measured, `MUT-TEST-MATRIX-EXCLUDED`, `MUT-CI-TEST-MATRIX-NARROWED`,
@@ -462,7 +462,7 @@ The runner is [`TEST_WINDOWS_PLATFORM`], as a scalar, under
 `test-windows-hosted-runner`: the suite runs on GitHub's runner on every
 event. A label set names a self-hosted machine, and an expression a runner
 this contract cannot read. Measured, `MUT-TEST-WINDOWS-HOSTED-ON-THE-GUEST`:
-the ten legs put on the labels of the guest deleted on 2026-11-20, which no
+the fourteen legs put on the labels of the guest deleted on 2026-11-20, which no
 runner carries, so that every leg queues for a machine that does not exist.
 
 The timeout is exactly [`TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES`], an integer,
@@ -614,7 +614,7 @@ is refused for that, by a throw that says so.
 `MUT-TEST-WINDOWS-HOSTED-HARNESS-TIMES-DROPPED` starts the harnesses
 without `-Z unstable-options --report-time`. Every leg runs its shard,
 clears its floor and is green, and no log carries a test's time: the times
-the step exists to record are lost on all ten legs, and no exit code or
+the step exists to record are lost on all fourteen legs, and no exit code or
 floor shows it.
 
 `MUT-TEST-WINDOWS-HOSTED-LOOP-PASSES-A-FAILED-HARNESS` takes the loop's

@@ -55,8 +55,8 @@ The `test` job's suite step, character for character: [`TEST_COMMAND`], then
 matrix ([`TEST_LEGS`]) before bash reads the line. What follows `--` goes to
 libtest in every harness `--all-targets` builds.
 
-- On every leg, Linux or macOS, the value is the shard's filter, if it has
-  one, and a `--skip` for each filter of the legs before it on the same
+- On every leg, Linux or macOS, the value is the shard's filters, if it has
+  any, and a `--skip` for each filter of the legs before it on the same
   runner. Without the selection each of the seven legs runs its platform's
   whole suite.
 - Until the Linux suite was divided its one leg's value was the empty
@@ -228,7 +228,7 @@ passes on the other compiler, but only in a run the other four have already
 failed. So no green run of the leg that runs those four has spawned a
 fixture compiler other than the one Cargo built with. By
 [`WINDOWS_SHARD_FILTERS`] that is the last leg, the one with no filter: the
-five fixtures' paths contain none of the nine. That bound is the fixtures',
+five fixtures' paths contain none of the table's 73 filters. That bound is the fixtures',
 not the questions', and it rests on those four tests running on a Windows
 leg, which nothing here pins by name: the floors count tests, not which
 ones.
@@ -275,7 +275,7 @@ and its environment were inputs no reviewer of a diff could check. It stays
 now that the suite runs on GitHub's runners, because a `[workspace]`
 selection reaches them the same way, and this is each leg
 saying that it ran what it claims to have run. A leg's floor also refuses
-what the whole suite's could not see: a shard whose filter matched almost
+what the whole suite's could not see: a shard whose filters matched almost
 nothing.
 Measured, `MUT-TEST-WINDOWS-HOSTED-FLOOR-DROPPED` and
 `MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED`.
@@ -321,7 +321,7 @@ Between the compiler check and the count is the suite itself, lines 3 to
    harness is started in turn with `${{ matrix.tests }}` and then
    `-Z unstable-options --report-time` as its one quoted argument list, its
    two streams sent to two `.part` files beside the suite's, and waited on
-   as the build is. The selection is the leg's filter, if it has one, and a
+   as the build is. The selection is the leg's filters, if it has any, and a
    `--skip` for each filter of the legs before it; without it every leg
    runs the whole suite. `$code` keeps each harness's exit as soon as it
    has ended, and only then are the two files appended to the suite's, each
@@ -1459,7 +1459,7 @@ The fields [`TEST_WINDOWS_HOSTED_JOB`] declares: the same five as the `test`
 job, each pinned by value as well. `name` is held to
 [`TEST_WINDOWS_HOSTED_NAME`], `runs-on` to [`TEST_WINDOWS_PLATFORM`] and
 `timeout-minutes` to [`TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES`]. `strategy`
-carries the ten legs and is required, not admitted: without it the job is
+carries the fourteen legs and is required, not admitted: without it the job is
 one leg whose `matrix` expressions are empty. Its contents are pinned whole
 by `windows_shard_matrix_complaints` in `super::workflow`.
 
