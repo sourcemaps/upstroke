@@ -8,37 +8,24 @@ as it is in the source, so the heading is the grep string that finds the code.
 
 ## `#![allow(`
 
-Allowlist placement: the **funnel section** of `effects/allowlist.toml`, which
-carries this file's own review clause. This is the extracted test module of
-the Process funnel in `src/runner/host.rs` -- the region that lived inline
-there, under that file's own inner allow of these same three lints, moved out
-unchanged. The set of calls permitted here is unchanged by the move: the
-fixtures build and tear down scratch trees, mark programs executable, and
-spawn real child processes, exactly as they did inline. What moved is where
-the permission is stated, not what it permits.
+Allowlist placement: the **funnel section** of `effects/allowlist.toml`, whose entry for this file
+carries its review clause. This is the Process funnel's test module, out of line from
+`src/runner/host.rs`: the fixtures build and tear down scratch trees, mark programs executable and
+spawn real child processes.
 
-`PR6-LANEF-004`: it states that level **of its own** rather than inheriting
-one. A lint level is scoped by the MODULE TREE and not by the file, so an
-out-of-line child of a funnel is covered by the parent's allow unless it says
-otherwise, and the funnel's child-module census requires each child to say so.
-All three are needed here and each was measured at extraction; the counts are
-in the review clause.
-`decisions.effect_site_inventory.mechanism` (2).
+It states the level **of its own**. A lint level is scoped by the module tree, not the file, so an
+out-of-line child of a funnel would otherwise inherit the parent's allow silently, and the funnel's
+child-module census (`runner::container::tests::every_child_module_of_the_container_funnel_states_its_own_lint_level`)
+refuses a child that does not state its own. All three lints are needed; the counts are in the
+review clause. `decisions.effect_site_inventory.mechanism` (2).
 
 ## `use std::time::Duration;`
 
-The split moved `SHELL_PROBE_TIMEOUT` -- the parent's one use of `Duration` --
-into `super::probe`, so the parent's import list no longer carries the type
-and `use super::*` no longer supplies it here. Named directly rather than
-kept as a re-export the parent does not need. No test is renamed, no
-assertion changes and no body moves; this line is the whole of what the
-extraction owes this file.
+`src/runner/host.rs` does not import `Duration`, so `use super::*` does not supply it here.
 
 ## `fn os(value: &str) -> OsString {`
 
------------------------------------------------------------------------
-helpers
------------------------------------------------------------------------
+The helpers start here.
 
 ## `fn gate_invocation() -> InvocationId {`
 
@@ -46,29 +33,26 @@ A gate identity, for the tests whose subject is not the identity.
 
 ## `fn shell_probe_invocation() -> InvocationId {`
 
-The pre-flight shell probe's identity: the packet's third form, target
-`Shell`.
+The pre-flight shell probe's identity: the probe form, target `Shell`.
 
 ## `fn worker_invocation() -> InvocationId {`
 
-One attempt's worker identity — the packet's first form, role `worker`.
+One attempt's worker identity: the attempt form, role `worker`.
 
 ## `fn review_invocation() -> InvocationId {`
 
-One review pass's identity — the same form, role `review_pass0`.
+One review pass's identity: the same form, role `review_pass0`.
 
 ## `fn fixture_agent() -> AgentId {`
 
-The agent a worker or a reviewer is bound to.
-
-`ExecutionRole::all` names the same adapter for its agent-probe target,
-so the grid's three slotted roles all carry a real, shipped id — which
-is what `host-v1` looks up a credential location by.
+The agent a worker or a reviewer is bound to. `ExecutionRole::all` names the same adapter for its
+agent-probe target, so the grid's three slotted roles carry a real, shipped id, which is what
+`host-v1` looks a credential location up by.
 
 ## `fn synthetic_base() -> Vec<(OsString, OsString)> {`
 
-A base written by the test rather than read from the machine, so a
-composition fixture asserts the same thing on every developer box.
+A base written by the test rather than read from the machine, so a composition fixture asserts the
+same thing on every machine.
 
 ## `fn native() -> ShellKind {`
 
@@ -76,109 +60,80 @@ The shell every platform has, invoked exactly as `gates` invokes it.
 
 ## `fn new_resolves_the_same_record_as_resolve_host() {`
 
------------------------------------------------------------------------
-policy
------------------------------------------------------------------------
+The policy tests start here.
 
 ## `fn environment_composition_fixtures() {`
 
------------------------------------------------------------------------
-environment composition fixtures  (proof test: "environment composition
-fixtures")
------------------------------------------------------------------------
+The environment composition fixtures (proof test: "environment composition fixtures") start here.
 
 ## `fn environment_composition_fixtures()` › `struct Fixture {`
 
-Every fixture is (role, agent, overlay, what the composition must
-say). The expected values are written from DESIGN.md:258-264, not
-read back out of `compose`.
+Every fixture is (role, agent, overlay, what the composition must say). The expected values are
+written from `design/08_design_trait_surface.md:65-71`, not read back out of `compose`.
 
 ## `fn environment_composition_fixtures()` › `("CLAUDE_CONFIG_DIR", None),`
 
-The base carries all three; a gate is repository code
-and receives none of them.
+The base carries all three; a gate is repository code and receives none of them.
 
 ## `fn environment_composition_fixtures()` › `("CODEX_HOME", None),`
 
-A claude-code worker is not told where codex's or
-copilot's credentials live.
+A claude-code worker is not told where codex's or copilot's credentials live.
 
 ## `fn environment_composition_fixtures()` › `("PATH", Some("/usr/bin:/bin")),`
 
-A reviewer runs an agent CLI, so it is supplied the
-unscoped values too.
+A reviewer runs an agent CLI, so it is supplied the unscoped values too.
 
 ## `fn environment_composition_fixtures()` › `("CLAUDE_CONFIG_DIR", None),`
 
-The host knows no credential location for this agent, so
-it supplies none — and the base's three do not leak in
-its place.
+The host knows no credential location for this agent, so it supplies none, and the base's three do
+not leak in its place.
 
 ## `fn environment_composition_fixtures()` › `let roles: BTreeSet<String> = fixtures.iter().map(|f| f.role.label()).collect();`
 
-Fixture hostility as distinct-value counts, not as a comment.
+Fixture hostility as distinct-value counts.
 
 ## `fn environment_composition_fixtures()` › `let mut seen: Vec<&OsString> = Vec::new();`
 
-One variable, one entry: a duplicated key is an environment
-whose meaning depends on which end the child's runtime reads.
+One variable, one entry: a duplicated key is an environment whose meaning depends on which end the
+child's runtime reads.
 
 ## `fn every_composed_environment_disables_replacement_objects() {`
 
-Every role composes the replacement isolation, from any base and under
-any overlay (PR #130, pass 3's P1).
+Every role composes the replacement isolation, from any base and under any overlay.
 
-`HostRunner::run` clears the ambient environment and installs exactly
-what `compose` returns, so a pair that is not composed there reaches no
-child. The base carries a value of its own and one of the two overlays
-restates the key, because the pair is upserted *after* the overlay
-precisely so that neither can decide it: an exact snapshot is measured
-against the objects the repository holds (`design/15`, "What an exact
-snapshot is exact against"), and that is not a property an adapter gets
-a vote on.
-
-Witnessed failing with the upsert removed from `compose`
-(`Some("whatever-the-operator-exported")` -- the base's own value
-surviving, since this key is deliberately not a reserved one that gets
-stripped) and with it moved above the overlay loop (`Some("0")`).
+`HostRunner::run` clears the ambient environment and installs exactly what `compose` returns, so a
+pair not composed there reaches no child. The base carries a value of its own and one overlay
+restates the key, because the pair is upserted *after* the overlay so that neither can decide it:
+an exact snapshot is measured against the objects the repository holds (`design/15`, "What an
+exact snapshot is exact against"), and an adapter gets no vote on that. The key is not a reserved
+one, so without the upsert the base's own value would survive.
 
 ## `fn the_v1_conductors_environment_confines_the_recorded_graph_to_its_repository() {`
 
-The v0.1 conductor's environment keeps the recorded graph to the repository the
-run manages. It replaces `the_v1_conductors_environment_disables_replacement_objects`,
-which pinned the process-wide variable: round 4 of #326 moved the v0.1 runner off
-it, because a variable reaches every repository a role touches, and on Git 2.41
-it loses to a configured `true`.
+The v0.1 conductor's environment confines the recorded graph to the repository the run manages,
+through includes rather than the process-wide `GIT_NO_REPLACE_OBJECTS`: a variable reaches every
+repository a role touches, and on Git 2.41 it loses to a configured `true`.
 
-It asserts four things. The constructor reads `ObjectGraph::RecordedIn` with the
-repository it was given. Over every role, both name rules and five sources of
-`GIT_CONFIG_PARAMETERS` — none, empty, the base's `true`, an overlay's, and both
-— the composed value is the inherited one, a space, and the two includes, or the
-includes alone: never before an inherited entry, never with a leading space, and
-one variable however the base spelled its name. `GIT_NO_REPLACE_OBJECTS` is never
-composed, and an operator who exports it keeps their own value. And the
-constructor's own environment, over this process's base, ends with the includes.
+It asserts four things. The constructor reads `ObjectGraph::RecordedIn` with the repository it was
+given. Over every role, both name rules and five sources of `GIT_CONFIG_PARAMETERS` (none, empty,
+the base's `true`, an overlay's, and both), the composed value is the inherited one, a space and the
+two includes, or the includes alone: never before an inherited entry, never with a leading space,
+and one variable however the base spelled its name. `GIT_NO_REPLACE_OBJECTS` is never composed, and
+an operator who exports it keeps their own value. And the constructor's own environment, over this
+process's base, ends with the includes.
 
-Witnessed failing with the includes placed before the inherited entries, and with
-the constructor back on `ObjectGraph::Recorded`.
-
-Its repository is a real directory under a scratch tree (`managed_repository`):
-since #326 round 5 the scope asks each directory on the path whether it folds
-case, and a path that is not there is refused. Since round 6 it also asks the
-common directory, through the `refs` every common directory holds, so the
-fixture creates `refs` too.
+Its repository is a real directory under a scratch tree (`managed_repository`), because the scope
+asks each directory on the path whether it folds case and refuses a path that is not there. It also
+asks the common directory, through the `refs` every common directory holds, so the fixture creates
+`refs` too.
 
 ## `fn the_includes_refuse_a_common_directory_git_cannot_read_in_a_key() {`
 
-A newline in the path and a relative directory or include are refused before
-any directory is asked anything, and a common directory that is not there is
-refused because the scope cannot ask it whether it folds case. Unix-only,
-because a Unix absolute path is not absolute on Windows.
-
-Until #326 round 5 this test also pinned the entries byte for byte, for a path
-that did not exist. The entries now depend on what each directory on the path
-answers, so `src/runner/host/environment.rs`'s inline tests pin them, supplying
-the answers, and the Windows twin that stood beside this test moved there too.
+A newline in the path and a relative directory or include are refused before any directory is
+asked anything, and a common directory that is not there is refused because the scope cannot ask it
+whether it folds case. Unix-only, because a Unix absolute path is not absolute on Windows. The
+entries themselves depend on what each directory on the path answers, so
+`src/runner/host/environment.rs`'s inline tests pin them, supplying the answers.
 
 ## `fn the_windows_rule_spells_a_path_as_git_for_windows_does() {`
 
@@ -190,164 +145,122 @@ on Windows and `Posix` everywhere else, macOS included.
 
 ## `fn a_v1_role_never_starts_without_the_include_that_confines_its_recorded_graph() {`
 
-`HostRunner::run` under `RecordedIn` refuses a gate while the include is missing,
-holds `true`, or is empty, as `ProcessFate::NeverStarted` naming the file, and
-runs it once the file holds the exact bytes. Its common directory is created
-first, with the `refs` every common directory holds, because the scope asks
-each directory on the path, and the common directory itself through `refs`,
-whether it folds case.
+`HostRunner::run` under `RecordedIn` refuses a gate while the include is missing, holds `true`, or
+is empty, as `ProcessFate::NeverStarted` naming the file, and runs it once the file holds the exact
+bytes. Its common directory is created first, with `refs`, because the scope asks each directory on
+the path, and the common directory itself through `refs`, whether it folds case.
 
 ## `fn a_repository_whose_path_differs_from_the_managed_one_only_in_case_keeps_its_replacements() {`
 
-The negative witness for #326 round 5's blocking finding: the v0.1 include must
-not reach a repository whose path differs from the managed one only in case.
-The work is `v1_case_sibling_helper`'s, in a child whose environment
-`run_replacement_witness_child` has cleared of every ambient replacement
-control.
-
-Against `49243a24`, with this witness alone added, it failed on this box (exit
-101): under `PosixFoldingCase`, macOS's rule then, the gate in `Repo` read
-`recorded` from `repo`, which had installed a replacement, and with the rule
-list narrowed to `Windows` the same assertion failed under that rule. Both
-used `gitdir/i:`; `Posix`, which ran first, passed.
-
-Round 6 extended its capitals check to the linked worktree's Git directory
-(`read_case_siblings`). Against `c453705f`, with those 24 lines alone added and
-`TMPDIR` on a case-folding ext4 mount, it failed with Git 2.43.0 and with Git
-2.41.0 (exit 101): under `Posix` the gate read `replacing` through
-`…/Repo/.git/WORKTREES/Repo-linked`. With that spelling removed, the
-all-capitals one failed the same way, and with the rule list narrowed to
-`Windows` the `WORKTREES` spelling did. On ext4, which keeps case, the check
-does not run, so only a folding temporary directory can show it.
+The negative witness: the v0.1 include must not reach a repository whose path differs from the
+managed one only in case. The work is `v1_case_sibling_helper`'s, in a child whose environment
+`run_replacement_witness_child` has cleared of every ambient replacement control. On a filesystem
+that keeps case the folding checks do not run, so only a case-folding temporary directory exercises
+them.
 
 ## `fn case_git(dir: &Path, args: &[&str]) -> String {`
 
-The witness's own Git, in its own process rather than through the runner, with
-an identity and without auto-maintenance, so no background process outlives a
-commit in the scratch tree.
+The witness's own Git, in its own process rather than through the runner, with an identity and
+without auto-maintenance, so no background process outlives a commit in the scratch tree.
 
 ## `fn replaced_repository(repo: &Path) -> String {`
 
-A repository whose committed blob `recorded` is replaced by `replacing`, checked
-live outside any run before anything is measured; it returns the blob's id.
+A repository whose committed blob `recorded` is replaced by `replacing`, checked live outside any
+run before anything is measured; it returns the blob's id.
 
 ## `fn read_case_siblings(dir: &Path, include: &Path) -> bool {`
 
-One layout: `Repo` managed, and beside it `repo` and `rEPO`, the second being
-the spelling the scope itself looks up. When the directory keeps case they are
-repositories of their own with their own replacements; when it folds they are
-`Repo`, and creating them finds it there. For every rule this platform's Git
-reads (both on Unix; on Windows only `Windows`, since the `Posix` rule keeps a
-Windows path's backslashes and Git for Windows spells its Git directory with
-forward slashes), a scope over `Repo`'s canonical
-common directory and `HostRunner::for_legacy_workspace` run gates that read:
+One layout: `Repo` managed, and beside it `repo` and `rEPO`, the second being the spelling the scope
+itself looks up. When the directory keeps case they are repositories of their own with their own
+replacements; when it folds they are `Repo`, and creating them finds it there. For every rule this
+platform's Git reads (both on Unix; on Windows only `Windows`, since the `Posix` rule keeps a Windows
+path's backslashes and Git for Windows spells its Git directory with forward slashes), a scope over
+`Repo`'s canonical common directory and `HostRunner::for_legacy_workspace` run gates that read:
 
 - `Repo` and its linked worktree: `recorded`;
-- each sibling, from `Repo` and from the sibling itself: `replacing` when it is
-  a repository of its own, `recorded` when it is `Repo`;
-- when the directory folds, `Repo` through a Git directory named `REPO/.GIT`
-  under the layout's directory spelled in capitals: `recorded`. Given with
-  `--git-dir`, that spelling reaches Git's condition as spelled on Linux, whose
-  realpath does not look the case up; reached with `-C`, Git named the
-  repository in its stored case, as `pwd -P` does (both measured on a
-  case-folding ext4 mount), which is why the `-C` reads alone could not tell a
+- each sibling, from `Repo` and from the sibling itself: `replacing` when it is a repository of its
+  own, `recorded` when it is `Repo`;
+- when the directory folds, `Repo` through a Git directory named `REPO/.GIT` under the layout's
+  directory spelled in capitals: `recorded`. Given with `--git-dir`, that spelling reaches Git's
+  condition as spelled on Linux, whose realpath does not look the case up; reached with `-C`, Git
+  names the repository in its stored case, as `pwd -P` does, so the `-C` reads alone cannot tell a
   scope that never folds from one that does;
-- when the directory folds, `Repo`'s linked worktree through its Git
-  directory given with `--git-dir`, spelled as Git stores it, with
-  `worktrees` alone in capitals, and with every component the test controls
-  in capitals: `recorded`. The linked worktree's name under `worktrees` is
-  taken from Git (`rev-parse --absolute-git-dir`), not assumed. Until #326
-  round 6 nothing read a linked worktree's Git directory in another case, and
-  the scope matched `worktrees` as a literal.
+- when the directory folds, `Repo`'s linked worktree through its Git directory given with
+  `--git-dir`, spelled as Git stores it, with `worktrees` alone in capitals, and with every component
+  the test controls in capitals: `recorded`. The linked worktree's name under `worktrees` is taken
+  from Git (`rev-parse --absolute-git-dir`), not assumed, so a scope that matched `worktrees` as a
+  literal fails here.
 
 It returns whether the directory kept case.
 
 ## `fn v1_case_sibling_helper() {`
 
-Runs `read_case_siblings` in the temporary directory, and on Windows again in a
-directory `fsutil file setCaseSensitiveInfo` makes case-sensitive, inside the
-folding temporary directory. It prints which halves ran, in lines beginning
-`v1-case-sibling:`, so a CI log shows it.
+Runs `read_case_siblings` in the temporary directory, and on Windows again in a directory `fsutil
+file setCaseSensitiveInfo` makes case-sensitive inside the folding temporary directory. It prints
+which halves ran, in lines beginning `v1-case-sibling:`, so a CI log shows it.
 
-Where the leg declares `UPSTROKE_TEST_TEMP_FOLDS_CASE=1` (macOS and Windows) the
-temporary directory must fold, or the declaration and the filesystem disagree;
-elsewhere its behaviour is observed, not required, as
-`the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does` treats
-the same declaration. So the case-sensitive half runs where the temporary
-directory keeps case, as on this box, and on Windows wherever `fsutil`
-succeeds; macOS runs the folding half only, since case sensitivity there is a
-property of a whole volume. A Windows machine where `fsutil` fails prints that
-and runs the folding half.
+Where the leg declares `UPSTROKE_TEST_TEMP_FOLDS_CASE=1` (macOS and Windows) the temporary directory
+must fold, or the declaration and the filesystem disagree; elsewhere its behaviour is observed, not
+required, as `the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does` treats the
+same declaration. So the case-sensitive half runs where the temporary directory keeps case, and on
+Windows wherever `fsutil` succeeds; macOS runs the folding half only, since case sensitivity there
+is a property of a whole volume. A Windows machine where `fsutil` fails prints that and runs the
+folding half.
 
 ## `fn a_reserved_key_the_base_does_not_carry_is_not_supplied()` › `let environment =`
 
-"set but empty" and "unset" are different environments, and CLIs
-read them differently.
+"Set but empty" and "unset" are different environments, and CLIs read them differently.
 
 ## `fn a_reserved_key_in_the_overlay_is_a_preflight_error() {`
 
-The refusal is `expected_failures_refusals[0]`: "reserved env conflict
--> pre-flight error".
+The refusal is `expected_failures_refusals[0]`: "reserved env conflict -> pre-flight error".
 
 ## `fn a_reserved_key_in_the_overlay_is_a_preflight_error()` › `let expected_reserved = [`
 
-Written out from DESIGN.md §8's runner contract for role-scoped HOME, PATH,
-and credential locations. The capacity module's credential-profile
-documentation, `src/capacity.rs` and its notes pointer where present, names
-`COPILOT_HOME` and `CLAUDE_CONFIG_DIR`. The third adapter fixture names
-`CODEX_HOME`. The expected table does not read `reserved_keys()`.
+Written out from the runner contract for role-scoped `HOME`, `PATH` and credential locations
+(`design/26_design_merge_queue_protocol.md:457-459` names the three credential-location variables),
+not read from `reserved_keys()`.
 
 ## `fn a_reserved_key_is_refused_at_every_position_in_the_overlay() {`
 
-Refused **wherever it sits in the overlay**.
-
-Every reserved-key fixture in this suite hands `compose` a one-pair
-overlay, so the conflicting pair is always `overlay.first()` — and a
-scan that stopped after the first pair is indistinguishable from a full
-one given those inputs. An adapter's overlay is not one pair:
-`invariants_introduced[0]` says "reserved keys refused pre-flight",
-which is a claim quantified over the whole vector.
-
-The grid is the positions a conflict can occupy in an overlay of four:
+Refused **wherever it sits in the overlay**. The other reserved-key fixtures hand `compose` a
+one-pair overlay, so the conflict is always `overlay.first()`, and a scan that stopped after the
+first pair would pass them. `invariants_introduced[0]`, "reserved keys refused pre-flight", is a
+claim over the whole vector, so the grid puts the conflict at every position of an overlay of four:
 first, two interior, and last.
 
 ## `fn a_reserved_key_is_refused_at_every_position_in_the_overlay() {` › `let harmless: Vec<(String, String)> = HARMLESS`
 
-The control: four harmless pairs compose, so a refusal below is
-the reserved key and not the shape of the overlay.
+The control: four harmless pairs compose, so a refusal below is the reserved key and not the shape
+of the overlay.
 
 ## `fn a_reserved_key_is_refused_at_every_position_in_the_overlay() {` › `assert_eq!(refusals, 6 * 4 * KeyCase::ALL.len());`
 
-Six keys x four positions x two key cases, counted so a grid that
-quietly stopped traversing fails here rather than passing smaller.
+Six keys × four positions × two key cases, counted so a grid that stopped traversing fails rather
+than passing smaller.
 
 ## `fn an_overlay_that_restates_a_reserved_key_with_the_runners_own_value_is_still_refused() {`
 
-Refused by **key**, whatever the value — including the runner's own.
-
-`invariants_introduced[0]` is "reserved keys refused pre-flight" and
-`expected_failures_refusals[0]` is "reserved env conflict -> pre-flight
-error naming the key". Neither says "unless the adapter agrees with the
-runner today": an overlay allowed to restate `PATH` because the value
-happens to match is an overlay that has taken ownership of the key, and
-it breaks silently the day the runner's value changes. Every other
-reserved-key fixture supplies a *different* value (`/tmp/hijacked`,
-`/nowhere`, `C:\hijack`), so equality is the one case they cannot see.
+Refused by **key**, whatever the value, including the runner's own. Neither
+`invariants_introduced[0]` nor `expected_failures_refusals[0]` ("reserved env conflict -> pre-flight
+error naming the key") excepts an overlay that agrees with the runner: one allowed to restate `PATH`
+because the value matches has taken ownership of the key, and breaks silently when the runner's
+value changes. Every other reserved-key fixture supplies a *different* value, so equality is the
+one case they cannot see.
 
 ## `fn windows_treats_reserved_keys_case_insensitively_and_unix_does_not() {` › `let overlay = vec![("Path".to_owned(), "C:\\hijack".to_owned())];`
 
-The platform axis is a value here, not a `cfg!`. Both arms are
-reached on every host, so a Linux cell proves the Windows rule.
+The platform axis is a value here, not a `cfg!`, so both arms run on every host and a Linux run
+proves the Windows rule.
 
 ## `fn windows_treats_reserved_keys_case_insensitively_and_unix_does_not() {` › `let composed = insensitive`
 
-And the same-key rule is what decides an upsert, not only a refusal.
+The same-key rule also decides an upsert, not only a refusal.
 
 ## `fn probe_and_execution_compose_the_same_environment() {`
 
-DESIGN.md:263: "Probe and execution compose the same base, mounts,
-reserved values, and overlay, so pre-flight certifies the environment
-that will actually spend."
+`design/08_design_trait_surface.md:69-71`: "Probe and execution compose the same base, mounts,
+reserved values, and overlay, so pre-flight certifies the environment that will actually spend."
 
 ## `fn environment_dump_helper() {`
 
@@ -355,33 +268,20 @@ Prints this process's whole environment between two markers.
 
 ## `fn dumped_environment(runner: &HostRunner, request: &RunnerRequest) -> Vec<String> {`
 
-One run of the dump helper, as the environment its child actually
-carried.
+One run of the dump helper, as the environment its child actually carried.
 
 ## `fn a_probe_child_and_an_execution_child_of_one_adapter_carry_the_same_environment() {`
 
-A probe child and an execution child of one adapter, held side by side.
-
-DESIGN.md:263 — "Probe and execution compose the same base, mounts,
-reserved values, and overlay, so pre-flight certifies the environment
-that will actually spend." Every probe fixture in this suite probes one
-agent in isolation and asserts only that the probe succeeded, and the
-one composition comparison compares two *maps* rather than two children
-— so the probe's base and the probe's overlay could each be replaced on
-the way to the process and nothing would notice.
-
-Two children, one adapter, one runner, at the same time. The probe half
-is built by production (`agent::probe_request`), not by this test, so a
-substitution made there is inside the comparison. The two sentinels
-exist because equality between two empty environments is also equality:
-one comes only from the base, the other only from the overlay, and both
-must arrive.
+The same passage (`design/08_design_trait_surface.md:69-71`) over two real children of one adapter
+and one runner, rather than two composed maps, so a base or overlay replaced on the way to the
+process is seen. The probe half is built by production (`agent::probe_request`), so a substitution
+made there is inside the comparison. Two sentinels, because two empty environments are also equal:
+one comes only from the base, the other only from the overlay, and both must arrive.
 
 ## `fn a_probe_child_and_an_execution_child_of_one_adapter_carry_the_same_environment() {` › `let execution = crate::runner::worker_request(`
 
-The worker half comes from production's builder, so the request this
-compares against the probe is the request an attempt sends: the
-bound agent and the worker identity, not a hand-written pair.
+The worker half comes from production's builder, so it is the request an attempt sends: the bound
+agent and the worker identity.
 
 ## `fn dump_command(overlay: &[(&str, &str)]) -> CommandSpec {`
 
@@ -393,14 +293,14 @@ The `GIT_COMMON_DIR` entries of the environment a real child of `runner` dumped 
 
 ## `fn the_host_runner_reports_the_common_dir_its_child_is_started_with() {`
 
-T-HOST-REPORT, the integration correction's report (F): `HostRunner::composed_common_dir` is the
-value the child is started with. It is checked against a real child's dumped environment, over a
-custom `HostEnvironment` with an overlay rather than `HostRunner::new` alone:
+`HostRunner::composed_common_dir` is the value the child is started with. It is checked against a
+real child's dumped environment, over a custom `HostEnvironment` with an overlay rather than
+`HostRunner::new` alone:
 
 - a base value;
 - an overlay's value over the base's;
 - none anywhere, `Absent`;
-- a relative value, which a gate does not receive as it is (option (C)'s work-tree context, in
+- a relative value, which a gate does not receive as it is (the work-tree context, in
   `child_environment`). With the run's repository held, by `ObjectGraph::RecordedIn` over
   `managed_repository`, the report and the child's value are both that repository's common
   directory. With none held, the report is `Unknown` and the same composition refuses the run
@@ -422,90 +322,60 @@ On Unix, two more rows:
 
 ## `fn every_credential_supplied_role_composes_one_environment_per_binding() {`
 
-The same claim, over **every** role production binds to an agent and
-**every** shipped binding — in the children, not in a map.
+The same claim over **every** role production binds to an agent and **every** shipped binding, in
+the children rather than in a map (`design/08_design_trait_surface.md:65-71`: each runner "supplies
+role-scoped `HOME`, `PATH`, and credential locations", and probe and execution compose the same
+environment).
 
-DESIGN.md:258-264: "each supplies role-scoped `HOME`, `PATH`, and
-credential locations", and "Probe and execution compose the **same**
-base, mounts, reserved values, and overlay, so pre-flight certifies the
-environment that will actually spend."
-
-The test above holds one pair — `Probe(Agent(claude-code))` against
-`Implement` — and `supplies_credentials` names **three** roles. So a
-forwarding site that dropped the binding for `Review` alone left every
-child-level comparison green: direct `compose` tests bypass the
-forwarding site entirely, the actual-child parity compares Probe with
-Implement, the credential-child test compares Gate with Implement, and
-the Review cells of the role grid never look at their environment
-(`PR5-CORRECTNESS-009`). The domain is therefore taken from
-`ExecutionRole::all()` and filtered by `supplies_credentials`, so a role
-added later is covered or fails here.
-
-Three sentinels rather than equality alone, because two identical
-*absences* are also equal: one value that can only have come from the
-base, one that can only have come from the overlay, and the credential
-location, which can only have come from the **binding** — which is the
-one the finding is about, and the one a stripped binding removes.
+The test above holds one pair, `Probe(Agent(claude-code))` against `Implement`, and
+`supplies_credentials` names three roles; no other child-level test looks at `Review`'s environment.
+So the domain is `ExecutionRole::all()` filtered by `supplies_credentials`, and a role added later
+is covered or fails here. Three sentinels rather than equality alone, because two identical
+absences are also equal: one value only the base can supply, one only the overlay can, and the
+credential location, which only the **binding** can, and which a dropped binding removes.
 
 ## `fn every_credential_supplied_role_composes_one_environment_per_binding() {` › `for (_, key) in CREDENTIAL_LOCATIONS {`
 
-A credential location already in the base, which is the failure
-sequence's own starting state: composition strips reserved keys, and
-only the agent binding can put the value back.
+A credential location already in the base: composition strips reserved keys, so only the agent
+binding can put the value back.
 
 ## `fn every_credential_supplied_role_composes_one_environment_per_binding() {` › `assert!(`
 
-The binding's own contribution. `key` is a reserved key, so a
-child carrying it carries a value composition put there —
-and a role whose binding was dropped on the way to `compose`
-carries nothing under this name at all.
+The binding's own contribution. `key` is reserved, so a child carrying it carries a value
+composition put there, and a role whose binding was dropped on the way to `compose` carries nothing
+under this name.
 
 ## `fn the_reserved_values_every_role_gets_are_the_host_boundarys_own() {`
 
-What `host-v1` supplies for `HOME`, `PATH` and `USERPROFILE`, asserted
-from the passages that decide it.
+What `host-v1` supplies for `HOME`, `PATH` and `USERPROFILE`, asserted from the passages that decide
+it rather than as a count of distinct values. `design/08_design_trait_surface.md:67` names three
+things role-scoped (`HOME`, `PATH` and credential locations) and `host-v1` scopes only the last;
+that reading is recorded as `PR4-DESIGN-ROLE-SCOPED-ENV`. A count such as "`PATH` took one value
+across the five roles" is a claim no passage makes and would fail the plainest reading of :67, so
+the test states three claims, one per passage:
 
-DESIGN.md:260 names three things role-scoped — `HOME`, `PATH`, and
-credential locations — and `host-v1` scopes one of them. That is a
-boundary, so it is asserted here from the sentences that draw it and
-not as a count of distinct values. The difference is the whole point of
-this test's shape: the form it replaces asserted "`PATH` took exactly
-**one** value across the five roles", a claim no passage makes, which
-would fail the container runner and which made *implementing*
-DESIGN.md:260's plainest reading a test failure. A repair round that
-encodes a narrower boundary as the expected result is the shape this
-project fears most, and a count cannot tell the two apart.
-
-Three claims, one per passage:
-
-* **Every role is supplied every one of the three keys the base
-  carries.** DESIGN.md:260 says the runner *supplies* them; a role
-  handed none at all satisfies any count of distinct values.
-* **The roles the packet pairs are supplied identical reserved sets.**
-  DESIGN.md:263 ("probe and execution compose the same base, mounts,
-  reserved values, and overlay") over `probe(<agent>)`, `implement`,
-  `review`; `decisions/2026-08-12-…:331-333` ("gate-shell/program
-  availability is checked inside the same boundary") over
-  `probe(shell)` and `gate`.
-* **The value is the host boundary's own.** `decisions/2026-08-12-…:321`
-  — "the host base starts from the Upstroke process environment". The
-  expected values are read out of the base vector *this fixture wrote*,
-  never out of [`HostEnvironment::lookup`]: `reserved_values` calls
+* **Every role is supplied each of the three keys the base carries.** The runner *supplies* them; a
+  role handed none satisfies any count of distinct values.
+* **The roles a passage pairs are supplied identical reserved sets.**
+  `design/08_design_trait_surface.md:69-71` ("probe and execution compose the same base, mounts,
+  reserved values, and overlay") over `probe(<agent>)`, `implement` and `review`;
+  `design/26_design_merge_queue_protocol.md:470-473` ("gate-shell/program availability is checked
+  inside the same boundary") over `probe(shell)` and `gate`.
+* **The value is the host boundary's own.** `design/26_design_merge_queue_protocol.md:441-442`: "the
+  host base starts from the Upstroke process environment". The expected values are read out of the
+  base vector this fixture wrote, never out of [`HostEnvironment::lookup`]: `reserved_values` calls
   `lookup` too, and a function used as its own oracle asserts nothing.
 
-What this test could get wrong: the two groups could stop covering the
-five roles — a role dropped from both would be unasserted while every
-remaining assertion passed — so their union is compared against
-`ExecutionRole::all()` as a set, and not merely counted.
+The two groups' union is compared against `ExecutionRole::all()` as a set, so a role dropped from
+both cannot go unasserted.
 
 ## `fn the_reserved_values_every_role_gets_are_the_host_boundarys_own() {` › `let agent = AgentId::new(claude::ADAPTER_ID);`
 
-The agent `ExecutionRole::all()` names, so the groups below can be
-compared against it as sets rather than by length alone.
+The agent `ExecutionRole::all()` names, so the groups below can be compared against it as sets.
 
 ## `fn the_reserved_values_every_role_gets_are_the_host_boundarys_own() {` › `let from_the_boundary = ["PATH", "HOME", "USERPROFILE"];`
 
-Written here, not read from RESERVED_ALWAYS: the set is the claim.
+Written here, not read from `RESERVED_ALWAYS`: the set is the claim.
 
 ## `fn the_reserved_values_every_role_gets_are_the_host_boundarys_own() {` › `let in_the_base = |key: &str| -> OsString {`
 
@@ -513,51 +383,34 @@ The independent oracle: the base this fixture wrote.
 
 ## `fn the_reserved_values_every_role_gets_are_the_host_boundarys_own() {` › `let certified: &[(&str, Vec<ExecutionRole>)] = &[`
 
-The roles each passage holds together, and the passage, so a failure
-names the sentence that was broken.
+The roles each passage holds together, and the passage, so a failure names the sentence broken.
 
 ## `fn credential_locations_are_role_scoped() {`
 
-The half `host-v1` **does** scope: credential locations.
-
-The expected split is written from what each role executes — a worker, a
-review and an agent probe run an agent CLI; a gate is repository code
-and the shell probe is a shell — and not computed from
-`supplies_credentials` or from `is_slotted`.
+The half `host-v1` **does** scope: credential locations. The expected split is written from what
+each role executes (a worker, a review and an agent probe run an agent CLI; a gate is repository
+code and the shell probe is a shell), not computed from `supplies_credentials` or `is_slotted`.
 
 ## `fn compose_gives_a_child_the_credential_location_of_its_own_agent_and_no_other() {`
 
-The same split, asserted about the **environment the child receives**
-rather than about the list the runner assembled.
+The same split, asserted about the **environment the child receives** (`compose`) rather than the
+list the runner supplies (`reserved_values`): a `compose` that copied the whole base first would
+hand a gate the coordinator's `CODEX_HOME` whatever `supplies_credentials` said.
 
-`reserved_values` is what the runner *supplies*; `compose` is what the
-process *gets*, and until this test the two were only related by
-inspection: `compose` cloned the whole Upstroke base first, so a
-`CODEX_HOME` in the coordinator's own environment reached a gate
-whatever `supplies_credentials` said. DESIGN.md:258-264 scopes the
-credential location by role, and the role a variable is scoped to is
-the one the process runs under.
-
-The grid crosses every role with every agent — including the one the
-host knows no location for — under both name rules, and the expected
-value of each of the three credential keys is written from the rule
-("the bound agent's location, and only for a role that runs an agent
-CLI"), not read from `supplies_credentials` or `reserved_values`.
+The grid crosses every role with every agent, including one the host knows no location for, under
+both name rules. The expected value of each credential key is written from the rule ("the bound
+agent's location, and only for a role that runs an agent CLI"), not read from `supplies_credentials`
+or `reserved_values`.
 
 ## `fn compose_gives_a_child_the_credential_location_of_its_own_agent_and_no_other() {` › `let runs_an_agent_cli = |role: &ExecutionRole| match role {`
 
-Written from what each role executes, exactly as
-`credential_locations_are_role_scoped` writes it.
+Written from what each role executes, as `credential_locations_are_role_scoped` writes it.
 
 ## `fn compose_gives_a_child_the_credential_location_of_its_own_agent_and_no_other() {` › `for (key, expected) in [`
 
-And the keys that come from the host boundary itself are
-still there, for every role: DESIGN.md:262 names HOME
-and PATH beside the credential locations, and `host-v1`
-supplies the boundary's own value of each to all five
-roles (see
-`the_reserved_values_every_role_gets_are_the_host_boundarys_own`
-for the passages that decide that).
+The host boundary's own keys are still there for every role: `host-v1` supplies the boundary's
+value of `HOME` and `PATH` to all five roles (see
+`the_reserved_values_every_role_gets_are_the_host_boundarys_own`).
 
 ## `fn compose_gives_a_child_the_credential_location_of_its_own_agent_and_no_other() {` › `for (key, expected) in [("LANG", "C.UTF-8"), ("UPSTROKE_RUN", "01ABCDEF")] {`
 
@@ -565,168 +418,117 @@ Nothing else was dropped on the way through.
 
 ## `fn compose_gives_a_child_the_credential_location_of_its_own_agent_and_no_other() {` › `assert_eq!(supplied_count + denied_count, 2 * 5 * 5 * 3);`
 
-Hostility as counts: 2 rules x 5 roles x 5 agents x 3 keys = 150
-decisions, and both answers really occur.
+Hostility as counts: 2 rules × 5 roles × 5 agents × 3 keys = 150 decisions, and both answers occur.
 
 ## `const BASE_WITNESS: &[(&str, &str)] = &[`
 
-The composed base **is** the Upstroke process environment, entry for
-entry.
+The variables the subprocess witness below inherits, and their values. The values are awkward (a
+non-ASCII character, an `=`, and the encoding's own separator), so a collector that split or
+filtered on any of them loses the entry.
 
-DESIGN.md:258-259: "`CommandSpec.env` overlays a runner-owned base
-rather than replacing it. The host runner starts from the Upstroke
-environment". `run` calls `env_clear()` before installing the composed
-block, so anything `from_process` fails to collect is not merely
-unscoped — it is *gone* from every child, and nothing else in the suite
-would notice. That includes the entries only one platform has: Windows'
-`=C:`-style per-drive working directories are yielded by `vars_os`
-(Rust 1.85 keeps keys beginning with `=`), and this asserts they
-survive collection on the platform that has them rather than assuming
-it.
-The variables the subprocess witness below inherits, and their values.
-
-Values are deliberately awkward — a non-ASCII character, an `=`, and
-the encoding's own separator — so a collector that split or filtered on
-any of them loses the entry.
-
-The second name is not decoration. `PR4-CORRECTNESS-006`'s surviving
-mutation drops exactly that key inside `from_process`, and a filter
-keyed on a name **no test process carries** removes nothing: it is
-inert, and no oracle can observe an inert edit. Setting the name here is
-what makes it a variable that exists and can therefore be lost. The
-entry-for-entry equality below is the general statement; this is the
-named guard for the one mutation that motivated it.
+The second name, a drive-working-directory sentinel, exists so that a filter dropping that key
+inside `from_process` has something to drop: a filter keyed on a name no test process carries is
+inert and no oracle can observe it. The entry-for-entry equality is the general statement; this is
+the named guard.
 
 ## `fn base_witness_helper() {`
 
 The child half of [`the_base_of_a_process_environment_is_the_process_environment`].
 
-A subprocess rather than `set_var`: the suite is multi-threaded and
-mutating this process's environment while another test reads it is the
-race `std::env::set_var` is `unsafe` for. The same shape
-`proc::tests::sigchld_reaper_host_helper` uses, for the same reason.
+A subprocess rather than `set_var`: the suite is multi-threaded, and mutating this process's
+environment while another test reads it is the race `std::env::set_var` is `unsafe` for. The same
+shape `proc::tests::sigchld_reaper_host_helper` uses, for the same reason.
 
 ## `fn base_witness_helper()` › `let expected: Vec<(OsString, OsString)> = std::env::vars_os().collect();`
 
-The general statement, made where the environment is *known* to
-carry awkward entries rather than wherever the machine left it: any
-entry `from_process` drops, filters or reorders shows up here,
-whatever it is named.
+The general statement, made where the environment is known to carry awkward entries: any entry
+`from_process` drops, filters or reorders shows up here, whatever it is named.
 
 ## `fn base_witness_helper()` › `let composed = base`
 
-And each injected entry reaches a composed child environment, for a
-role that is handed nothing else.
+And each injected entry reaches a composed child environment, for a role handed nothing else.
 
 ## `fn the_base_of_a_process_environment_is_the_process_environment() {`
 
-The composed base **is** the Upstroke process environment, entry for
-entry.
+The composed base **is** the Upstroke process environment, entry for entry
+(`design/08_design_trait_surface.md:65-66`: "`CommandSpec.env` overlays a runner-owned base rather
+than replacing it. The host runner starts from the Upstroke environment"). `run` calls `env_clear()`
+before installing the composed block, so anything `from_process` fails to collect is gone from
+every child, and every composition fixture supplies its own base through `with_base`, so none of
+them would notice.
 
-DESIGN.md:258-259: "`CommandSpec.env` overlays a runner-owned base
-rather than replacing it. The host runner starts from the Upstroke
-environment". `run` calls `env_clear()` before installing the composed
-block, so anything `from_process` fails to collect is not merely
-unscoped — it is *gone* from every child, and until this test nothing
-in the suite would notice: every composition fixture supplies its own
-base through `with_base`.
-
-Two halves, because one alone is not enough. The equality is over
-whatever this machine happens to carry — on Windows that includes the
-`=C:`-style per-drive working directories, which Rust 1.85's `vars_os`
-deliberately yields. The subprocess adds an entry chosen to be
-awkward, so the equality is not satisfied merely by an environment with
-nothing interesting in it.
+Two halves. The equality is over whatever this machine carries, which on Windows includes the
+`=C:`-style per-drive working directories `vars_os` yields. The subprocess adds awkward entries, so
+the equality is not satisfied merely by an environment with nothing interesting in it.
 
 ## `fn the_base_of_a_process_environment_is_the_process_environment() {` › `"runner::host::tests::base_witness_helper",`
 
-The **full path**. `--exact` matches the whole test name, so a
-bare `base_witness_helper` filters all 932 tests out and the
-child exits 0 having run nothing — a subprocess witness that
-witnesses nothing, and a green one.
+The **full path**. `--exact` matches the whole test name, so a bare `base_witness_helper` filters
+every test out and the child exits 0 having run nothing.
 
 ## `fn the_base_of_a_process_environment_is_the_process_environment() {` › `assert!(`
 
-Assert the **count**, never a bare `ok`: `ok. 0 passed` is what a
-filter that matched nothing prints, and it is indistinguishable from
-success at the exit code.
+Assert the **count**, never a bare `ok`: `ok. 0 passed` is what a filter that matched nothing
+prints, and the exit code cannot tell it from success.
 
 ## `fn the_credential_location_is_the_bound_agents_and_no_others_value() {` › `for (agent, key, expected) in [`
 
-An independent table maps each adapter id to its config-directory variable.
-The capacity module's credential-profile documentation, `src/capacity.rs`
-and its notes pointer where present, supplies `COPILOT_HOME` and
-`CLAUDE_CONFIG_DIR`. The Codex fixture separately names `CODEX_HOME`.
+An independent table maps each adapter id to its credential-location variable, written out here
+rather than read from the code under test.
 
 ## `fn handed_config_dirs(environment: &[String]) -> Vec<&str> {`
 
-Every value a dumped child environment carries under `CLAUDE_CONFIG_DIR`,
-in order. A list rather than the first match, so a child handed the key
-twice — once from the profile and once from the base — fails the
-comparisons below instead of passing on whichever entry came first.
+Every value a dumped child environment carries under `CLAUDE_CONFIG_DIR`, in order. A list rather
+than the first match, so a child handed the key twice (from the profile and from the base) fails
+the comparisons below instead of passing on whichever entry came first.
 
 ## `fn a_worker_request_with_a_profile_hands_its_agent_that_directory_as_claude_config_dir() {`
 
-A worker request carrying a credential profile hands its agent that
-directory as its credential location, and not the coordinator's.
+A worker request carrying a credential profile hands its agent that directory as its credential
+location, and not the coordinator's.
 
-Asserted on the **child's environment** (`environment_dump_helper`
-through `HostRunner::run`), not on `reserved_values` or `compose`: the
-profile has to travel from the request through `child_environment` to
-the spawned process, and a runner that composed it correctly but read
-the request's fields in the wrong place would pass a composition-level
-test. The request is production's `worker_request` with
-`with_credential_profile` added, so the shape is the one a caller sends.
+Asserted on the **child's environment** (`environment_dump_helper` through `HostRunner::run`), not
+on `reserved_values` or `compose`: the profile has to travel from the request through
+`child_environment` to the spawned process, and a runner that composed it correctly but read the
+request's fields in the wrong place would pass a composition-level test. The request is
+production's `worker_request` with `with_credential_profile` added.
 
-The base is `synthetic_base`, which carries the coordinator's own
-`CLAUDE_CONFIG_DIR` (`/home/upstroke/.claude`), so "not the coordinator's
-value" is a claim about a value that was there to leak: the child carries
-exactly one `CLAUDE_CONFIG_DIR`, the profile, and the coordinator's
-directory appears nowhere in its environment. The profile is a scratch
-directory of its own, apart from the workspace, so no other entry can
+The base is `synthetic_base`, which carries the coordinator's own `CLAUDE_CONFIG_DIR`
+(`/home/upstroke/.claude`), so there is a value to leak: the child carries exactly one
+`CLAUDE_CONFIG_DIR`, the profile, and the coordinator's directory appears nowhere in its
+environment. The profile is a scratch directory apart from the workspace, so no other entry can
 contain its path by accident.
 
 ## `fn the_same_worker_request_with_no_profile_hands_its_agent_the_coordinators_claude_config_dir() {`
 
-The control, and today's behaviour: the same worker request with no
-profile hands its agent the coordinator's own value, exactly once. It
-also pins that production's `worker_request` carries no profile, which
-is what makes `None` the behaviour every existing request keeps.
-Without this test, a runner that dropped `CLAUDE_CONFIG_DIR` whenever
-the base's value was involved would pass the test above.
+The control: the same worker request with no profile hands its agent the coordinator's own value,
+exactly once. It also pins that production's `worker_request` carries no profile. Without it, a
+runner that dropped `CLAUDE_CONFIG_DIR` whenever the base's value was involved would pass the test
+above.
 
 ## `fn a_gate_request_carrying_a_profile_hands_its_child_no_credential_location() {`
 
-A gate, which `supplies_credentials` does not cover, carrying a profile
-is handed neither the profile nor any credential location.
+A gate, which `supplies_credentials` does not cover, carrying a profile is handed neither the
+profile nor any credential location.
 
-Two shapes, because the gate production builds names no agent and so
-has no credential-location key to supply a profile under at all — a
-runner that ignored the role and keyed only on the agent would pass it.
-The second shape binds the claude agent to the gate (the
-`hostile_bindings` shape the container suite uses), so the role check
-is the only thing standing between the profile and the child. For each,
-the child received the base (`LANG`) — so the absences are not those of
-an empty environment — and none of the three credential keys, and no
-entry contains the profile's path.
+Two shapes. The gate production builds names no agent, so a runner that ignored the role and keyed
+only on the agent would pass it; the second binds the claude agent to the gate (the
+`hostile_bindings` shape the container suite uses), so the role check is all that stands between the
+profile and the child. For each, the child received the base (`LANG`), so the absences are not
+those of an empty environment, and none of the three credential keys, and no entry contains the
+profile's path.
 
 ## `struct ParityFixture {`
 
------------------------------------------------------------------------
-supervision parity  (proof test: "supervision parity tests")
------------------------------------------------------------------------
+The supervision parity fixtures (proof test: "supervision parity tests") start here.
 
 ## `struct ParityFixture` › `floor: Option<Duration>,`
 
-The shortest this child can possibly have taken, as a fact about the
-child rather than about the machine that runs it: a sleeper cannot
-finish before it has slept, and a child killed for exceeding its
-timeout ran at least that long. `None` where the fixture finishes as
-fast as the machine can run it and no floor is stateable.
-
-This is the lower half of the duration pin. The upper half is wall
-clock the test measures around each call, and neither is the
-runner's own arithmetic.
+The shortest this child can have taken, as a fact about the child rather than the machine: a
+sleeper cannot finish before it has slept, and a child killed for exceeding its timeout ran at least
+that long. `None` where the fixture finishes as fast as the machine runs it. This is the lower half
+of the duration pin; the upper half is wall clock the test measures around each call. Neither is
+the runner's own arithmetic.
 
 ## `fn parity_fixtures() -> Vec<ParityFixture>` › `script: "echo problem 1>&2",`
 
@@ -734,132 +536,90 @@ runner's own arithmetic.
 
 ## `fn parity_fixtures() -> Vec<ParityFixture>` › `name: "a quoted argument survives the spec",`
 
-The regression test for `build_command`'s `cmd.exe` rule:
-std would re-quote this tail as `\"quoted arg\"`, which
-cmd.exe does not un-escape, so the child would print
-something else entirely. On Unix nothing special happens and
+`build_command`'s `cmd.exe` rule: std would re-quote this tail as `\"quoted arg\"`, which `cmd.exe`
+does not un-escape, so the child would print something else. On Unix nothing special happens and
 the fixture still has to agree.
 
 ## `fn parity_fixtures() -> Vec<ParityFixture>` › `name: "a sleeping child is measured, not the timeout",`
 
-The fixture that pins duration **from below** without naming
-the timeout. Every other fixture finishes as fast as the
-machine can run it, so a duration reported too *large* is
-caught by the elapsed bound while one reported too *small* is
-caught by nothing: `> 0` admits a nanosecond.
-
-A sleeping child gives the test a floor it can state in
-advance and that holds on any machine — a loaded one only
-makes the interval wider, never narrower. One second nominal,
-asserted at half, because `ping -n 2` is "two pings a second
-apart" rather than a sleep of exactly a second.
+Pins duration **from below** without naming the timeout. Every other fixture finishes as fast as
+the machine can run it, so a duration reported too small would be caught by nothing: `> 0` admits a
+nanosecond. A sleeping child gives a floor that holds on any machine, since load only widens the
+interval. One second nominal, asserted at half, because `ping -n 2` is "two pings a second apart"
+rather than a sleep of exactly a second.
 
 ## `fn parity_fixtures() -> Vec<ParityFixture>` › `"ping -n 2 127.0.0.1 > NUL"`
 
-`cmd` has no `sleep`; this is the shape the timeout
-fixture below already relies on.
+`cmd` has no `sleep`; the timeout fixture below relies on the same shape.
 
 ## `fn parity_fixtures() -> Vec<ParityFixture>` › `floor: Some(Duration::from_millis(400)),`
 
-The timeout, written again rather than read from the field
-beside it: a child killed for exceeding its timeout ran at
-least that long, and the two values are the same number for
-that reason rather than by construction.
+The timeout, written again rather than read from the field beside it: a child killed for exceeding
+its timeout ran at least that long, which is why the two values are the same number.
 
 ## `fn supervision_parity_tests()` › `let direct_started = std::time::Instant::now();`
 
-Wall clock around the call, measured by the test. It is an upper
-bound on any honest `duration` *by construction*: the funnel
-starts its own clock after this instant and stops it before the
-drain, so `duration <= elapsed` holds however slow or loaded the
-machine is. See the duration assertions below.
+Wall clock around the call, measured by the test. It bounds any honest `duration` from above by
+construction: the funnel starts its own clock after this instant and stops it before the drain, so
+`duration <= elapsed` holds however loaded the machine is.
 
 ## `fn supervision_parity_tests()` › `assert_eq!(actual.stdout, expected.stdout, "{}: stdout", fixture.name);`
 
-Byte for byte, including the line endings. Both sides run the
-same script through the same recorded shell on the same machine,
-so there is nothing legitimate for a normalization to absorb —
-and normalizing *both* sides is how a runner that rewrote CRLF to
-LF would have gone unnoticed on the only platform that produces
-CRLF at all. `invariants_preserved[0]` says output capture is
-unchanged, and rewriting it is a change.
+Byte for byte, line endings included. Both sides run the same script through the same recorded
+shell on the same machine, so there is nothing legitimate for a normalization to absorb, and
+normalizing both sides would hide a runner that rewrote CRLF to LF on the one platform that
+produces CRLF. `invariants_preserved[0]` says output capture is unchanged.
 
 ## `fn supervision_parity_tests()` › `for (what, measured, bound) in [`
 
-Duration is part of the record an attempt keeps
-(`Outcome.duration`), so "supervision unchanged" includes
-measuring **this child** rather than reporting some other true
-fact. Not compared to the other supervisor's duration for
-equality: two runs of one script take two times, and asserting
-they match would be asserting the machine is idle.
+Duration is part of the record an attempt keeps (`Outcome.duration`), so "supervision unchanged"
+includes measuring **this child**. It is not compared for equality with the other supervisor's
+duration, because two runs of one script take two times. It is pinned from both sides instead,
+against two oracles that are not the runner's arithmetic: the wall clock the test measured around
+the call (an upper bound by construction), and `fixture.floor` where the fixture has one.
 
-Pinned from both sides instead, against two oracles that are not
-the runner's own arithmetic:
-
-* above, wall clock the *test* measured around the call — an
-  upper bound by construction; and
-* `fixture.floor`, the child's own behaviour, where the fixture
-  has one to state.
-
-Positivity alone is what let `.map(|mut output| { output.duration
-= request.timeout; output })` survive a whole review round
-(`PR4-CONF-013`): every ordinary fixture has a 30s timeout and
-reports `> 0` under it, and the timeout fixture reports exactly
-its timeout, which its own floor admits. The elapsed bound is
-what that mutation cannot satisfy — a child that echoes and exits
+Positivity alone would admit a runner that reported `request.timeout` as the duration: every
+ordinary fixture has a 30s timeout, and the timeout fixture reports exactly its timeout, which its
+own floor admits. The elapsed bound is what that cannot satisfy, since a child that echoes and exits
 has not taken thirty seconds.
 
 ## `fn supervision_parity_tests()` › `assert!(codes.len() >= 3, "distinct exit codes: {codes:?}");`
 
-Hostility as counts: a parity suite whose fixtures all produce the
-same output proves that two functions agree about nothing.
+Hostility as counts: a parity suite whose fixtures all produce the same output proves that two
+functions agree about nothing.
 
 ## `fn supervision_parity_tests()` › `assert_eq!(`
 
-And the duration pin is counted rather than hoped for: two fixtures
-state a floor, one from a sleep and one from a timeout kill. A grid
-that lost them would still assert `> 0` on every row and read green.
+The duration pin is counted: two fixtures state a floor, one from a sleep and one from a timeout
+kill. A grid that lost them would still assert `> 0` on every row.
 
 ## `const TRANSPARENT_STDOUT: &[&str] = &[`
 
------------------------------------------------------------------------
-output transparency  (`invariants_preserved[0]`: "output capture …
-unchanged")
------------------------------------------------------------------------
+The output transparency tests (`invariants_preserved[0]`: "output capture … unchanged") start here.
 
 ## `const TRANSPARENT_STDOUT: &[&str] = &[`
 
-What the transparency shim prints on stdout: JSON Lines, because that is
-the shape whose *first* lines carry the meaning — a Codex transcript's
-`thread.started` (the session) and its `item.completed` (the verdict)
+What the transparency shim prints on stdout: JSON Lines, the shape whose *first* lines carry the
+meaning. A Codex transcript's `thread.started` (the session) and `item.completed` (the verdict)
 both precede the final `turn.completed`.
 
 ## `const TRANSPARENT_STDERR: &[&str] = &["tracing line one", "tracing line two"];`
 
-And on stderr, which is captured by the same funnel and is where a Codex
-run puts its tracing log.
+And on stderr, captured by the same funnel, where a Codex run puts its tracing log.
 
 ## `fn transparency_shim(dir: &Path, name: &str) -> String {`
 
-A launcher that ignores its arguments and prints
-[`TRANSPARENT_STDOUT`] and [`TRANSPARENT_STDERR`].
+A launcher that ignores its arguments and prints [`TRANSPARENT_STDOUT`] and [`TRANSPARENT_STDERR`].
+Not [`forwarding_shim`], whose child is this test binary with whatever `libtest` prints: here the
+test chooses the child's output, so what the child produced and what the runner returned can be
+compared.
 
-Not [`forwarding_shim`]: that one forwards to this test binary, whose
-`libtest` output is what it is. This child's output is chosen by the
-test, so "what the child produced" and "what the runner returned" are
-two things that can be compared.
+Every payload byte is `echo`-safe in both dialects: JSON carries none of `&`, `<`, `>`, `|`, `^`,
+and `cmd`'s `echo` prints a `"` literally.
 
-Every payload byte is `echo`-safe in both dialects — JSON carries none
-of `&`, `<`, `>`, `|`, `^`, and a `"` is printed literally by `cmd`'s
-`echo`.
-
-**The redirection goes first on Windows.** `cmd`'s `echo` prints
-*everything* between the command and the redirection operator, so
-`echo foo 1>&2` emits `foo` followed by a **trailing space** — measured
-on the guest, where the first run of this grid failed with
-`["tracing line one "]` against `["tracing line one"]`. `1>&2 echo foo`
-has no such gap. A test that trimmed instead would have stopped being
-able to see a runner that trimmed.
+**The redirection goes first on Windows.** `cmd`'s `echo` prints everything between the command and
+the redirection operator, so `echo foo 1>&2` emits `foo` and a trailing space; `1>&2 echo foo` does
+not. A test that trimmed instead could not see a runner that trimmed.
 
 ## `fn captured_lines(stream: &str) -> Vec<String> {`
 
@@ -867,54 +627,43 @@ A captured stream as lines, with the platform's terminator folded away.
 
 ## `fn transparency_run(agent: &str, resume: Option<&str>) -> crate::agent::TaskRun {`
 
-One `TaskRun`, so each adapter's own `build_args` can be asked what
-production's argument vector for it is.
+One `TaskRun`, so each adapter's own `build_args` can be asked for production's argument vector.
 
 ## `fn the_runner_returns_the_childs_whole_output_for_every_production_request_shape() {`
 
-`HostRunner::run` hands back **the child's whole output**, for every
-request shape production sends.
+`HostRunner::run` hands back **the child's whole output** for every request shape production sends
+(`invariants_preserved[0]`: "process supervision, timeout, **output capture**, adapter parsing
+unchanged"). A runner that kept only the last stdout line for, say, a codex `exec` review would lose
+the session and the verdict, so the review would be re-asked and could end as `ReviewFailed`.
 
-`invariants_preserved[0]` is "process supervision, timeout, **output
-capture**, adapter parsing unchanged", and `PR5-CORRECTNESS-012` is a
-runner that keeps only the last stdout line when the role is
-`Implement`/`Review`, the agent is `codex` and the first argument is
-`exec` — after which a successful review loses its session and its
-verdict and is re-asked, and can end as `ReviewFailed`.
+Three axes, varied independently, because a suppression can key on any of them:
 
-Three axes, varied independently, because a suppression can key on any
-of them and the existing grids hold two of them fixed:
+* **role**, built by production's own builder;
+* **agent binding**, all three shipped ids;
+* **the argument vector**, each adapter's real one from its own `pub fn build_args`, so `exec`, `-p`
+  and the bare-prompt form all appear. The other grids in this file send `["--exact",
+  NO_SUCH_TEST]`, where an `args[0]`-keyed suppression has nowhere to fail.
 
-* **role** — built by production's own builder, never by this fixture;
-* **agent binding** — all three shipped ids, not one;
-* **the argument vector** — each adapter's real one, from its own `pub
-  fn build_args`, so `exec`, `-p` and the bare-prompt form all appear.
-  *Every* existing grid in this file sends `["--exact", NO_SUCH_TEST]`,
-  which is why an `args[0]`-keyed edit had nowhere to fail. That is
-  `PR4-CONF-006`'s class one field further over, and this is the field.
-
-The resumed shape is carried too: `codex exec resume <id>` moves the
-subcommand's position, so a check on `args[0]` and one on "is this an
-exec" are different predicates.
+The resumed shape is carried too: `codex exec resume <id>` moves the subcommand's position, so a
+check on `args[0]` and one on "is this an exec" are different predicates.
 
 ## `fn the_runner_returns_the_childs_whole_output_for_every_production_request_shape() {` › `for adapter in crate::agent::ADAPTERS {`
 
-The probe role too: pre-flight reads a CLI's own answer, and a
-truncated one is a capability read wrong rather than lost work.
+The probe role too: pre-flight reads a CLI's own answer, and a truncated one is a capability read
+wrong.
 
 ## `fn the_runner_returns_the_childs_whole_output_for_every_production_request_shape() {` › `let script = if cfg!(windows) {`
 
-And the unbound role, whose program is the recorded shell rather than
-a located CLI — the other half of the program-shape partition.
+And the unbound role, whose program is the recorded shell rather than an agent CLI: the other half
+of the program-shape partition.
 
 ## `fn the_runner_returns_the_childs_whole_output_for_every_production_request_shape() {` › `TRANSPARENT_STDERR`
 
-Redirection first, for the trailing-space reason on
-`transparency_shim`.
+Redirection first, for the trailing-space reason on `transparency_shim`.
 
 ## `fn the_runner_returns_the_childs_whole_output_for_every_production_request_shape() {` › `assert_eq!(`
 
-Hostility as counts, not prose.
+Hostility as counts.
 
 ## `fn build_args_for(id: &str, resume: Option<&str>) -> Vec<String> {`
 
@@ -922,52 +671,39 @@ Each adapter's production argument vector, from the adapter itself.
 
 ## `fn assert_transparent(cell: &str, output: &ProcessOutput) {`
 
-Every line the child wrote came back, in order, on the stream it was
-written to.
+Every line the child wrote came back, in order, on the stream it was written to.
 
 ## `fn assert_transparent(cell: &str, output: &ProcessOutput)` › `assert!(`
 
-Named separately, because "the last line survived" is the assertion a
-truncating runner would still pass.
+Named separately, because "the last line survived" is the assertion a truncating runner would still
+pass.
 
 ## `fn the_runner_bounds_output_at_the_same_allowance_the_direct_funnel_does() {`
 
-The bounded capture allowance is the same one on both public funnel
-entries, and it is the real one.
+The bounded capture allowance is the same on the direct funnel entry and through `HostRunner`, and
+it is the real one. `HostRunner` reaches the funnel through `proc::run_with_timeout_classified`, and
+the proc tests drive the private `run_with_timeout_and_limit` with limits of their own, so only a
+test like this one sees the production constant. It drives that constant through both paths with a
+child that writes far past it.
 
-`invariants_preserved[0]`: "process supervision, timeout, output
-capture and adapter parsing unchanged". `HostRunner` reaches the funnel
-only through `run_with_timeout_hooked`, so a limit passed there and
-nowhere else is a limit no parity fixture sees: every existing
-output-limit test calls the private `run_with_timeout_and_limit` with a
-64 KiB test value. This one drives the *real* constant through both
-public entries with a child that never stops writing.
-
-The expected bound is written here (16 MiB per stream) rather than read
-from `proc`, so raising the constant to `usize::MAX` — or to anything
-else — fails here rather than agreeing with itself.
+The expected bound is written here (16 MiB per stream) rather than read from `proc`, so changing the
+constant fails here rather than agreeing with itself.
 
 ## `fn the_runner_bounds_output_at_the_same_allowance_the_direct_funnel_does() {` › `const EXPECTED_LIMIT: usize = 16 * 1024 * 1024;`
 
-`proc::OUTPUT_LIMIT_BYTES`, transcribed. Per stream.
+`proc`'s `OUTPUT_LIMIT_BYTES`, transcribed. Per stream.
 
 ## `fn the_runner_bounds_output_at_the_same_allowance_the_direct_funnel_does() {` › `const HELPER_BUDGET: usize = 64 * 1024 * 1024;`
 
-How much the helper writes before exiting, as a decimal byte count.
-
-Four times the allowance, and **finite**. A funnel that bounds
-correctly kills the child while it is blocked on a full pipe, far
-short of this, so the passing case is unchanged. A funnel that does
-not bound captures 64 MiB and the child exits 0 — which fails
-`output_limited` below by name, instead of running the parent out
-of memory and taking the whole test binary with it. A budget set
-*below* `EXPECTED_LIMIT` would fail this test's own
-`output_limited` assertion, so it cannot drift silently.
+How much the helper writes before exiting, as a decimal byte count: four times the allowance, and
+**finite**. A funnel that bounds kills the child while it is blocked on a full pipe, far short of
+this. A funnel that does not bound captures 64 MiB and the child exits 0, which fails
+`output_limited` below by name instead of running the parent out of memory. The `const` assertion
+keeps the budget above `EXPECTED_LIMIT`.
 
 ## `fn the_runner_bounds_output_at_the_same_allowance_the_direct_funnel_does() {` › `let mut direct = Command::new(&exe);`
 
-(a) The direct entry point, which is what the legacy engine used
-before this slice.
+(a) The direct funnel entry.
 
 ## `fn the_runner_bounds_output_at_the_same_allowance_the_direct_funnel_does() {` › `let workspace = scratch("output-limit");`
 
@@ -975,189 +711,144 @@ before this slice.
 
 ## `fn the_runner_bounds_output_at_the_same_allowance_the_direct_funnel_does() {` › `env: vec![(`
 
-Not a reserved key: the helper reads it to decide it is the
-helper rather than an ordinary test run, and to size its
-output.
+Not a reserved key: the helper reads it to know it is the helper rather than an ordinary test run,
+and to size its output.
 
 ## `fn the_runner_bounds_output_at_the_same_allowance_the_direct_funnel_does() {` › `assert!(`
 
-And it really did have to *reach* the allowance: a limit of zero
-would also satisfy the bound above.
+And it had to *reach* the allowance: a limit of zero would also satisfy the bound above.
 
 ## `fn the_runner_executes_in_the_requested_workspace()` › `let template = shell.command("echo here > marker.txt");`
 
-A relative redirect target resolves against the child's cwd in both
-shells, which is the point of the fixture.
+A relative redirect target resolves against the child's cwd in both shells, which is the point of
+the fixture.
 
 ## `fn a_gate_child_is_told_where_no_agents_credentials_live() {`
 
-The role scoping is in the child's own environment block, not only in
-the vector the runner assembled.
-
-A gate is repository-controlled code — "the one thing on the host that
-no agent permission surface bounds" — and DESIGN.md:262 scopes the
-credential location by role. This runs a real process under a base that
-carries all three locations and asks the child what it received.
+The role scoping is in the child's own environment block, not only in the vector the runner
+assembled. A gate is repository-controlled code, which no agent permission surface bounds, and the
+credential location is scoped by role (`design/26_design_merge_queue_protocol.md:462-463`: "A gate
+or shell probe gets none of the three"). This runs a real process under a base that carries all
+three locations and asks the child what it received.
 
 ## `fn a_gate_child_is_told_where_no_agents_credentials_live()` › `let runner = HostRunner::new().with_environment(HostEnvironment::with_base(`
 
-A base that carries every credential location, so "absent from the
-child" cannot be an artefact of this machine.
+A base that carries every credential location, so "absent from the child" cannot be an artefact of
+this machine.
 
 ## `fn a_gate_child_is_told_where_no_agents_credentials_live()` › `.filter(|(name, _)| !KeyCase::current().same_key(name, OsStr::new("PATH")))`
 
-The shell must still be findable, so the real PATH wins over
-the synthetic one.
+The shell must still be findable, so the real `PATH` wins over the synthetic one.
 
 ## `fn a_gate_child_is_told_where_no_agents_credentials_live()` › `for value in [`
 
-Windows `echo` prints the literal `%VAR%` when the variable is unset;
-`sh` prints nothing. Both are "not set to a credential directory",
-and neither is the value the base carries.
+Windows `echo` prints the literal `%VAR%` when the variable is unset; `sh` prints nothing. Both mean
+"not set to a credential directory", and neither is the value the base carries.
 
 ## `fn a_gate_child_is_told_where_no_agents_credentials_live()` › `let worker = runner`
 
-The same base, the role that runs codex's CLI: its own location
-arrives and the other two still do not. Without this half the
-assertion above would be satisfied by supplying nothing at all.
+The same base, the role that runs codex's CLI: its own location arrives and the other two still do
+not. Without this half the assertion above would be satisfied by supplying nothing at all.
 
 ## `struct StubRunner(Box<dyn Fn() -> Result<ProcessOutput, UpstrokeError> + Send + Sync>);`
 
------------------------------------------------------------------------
-the shell probe
------------------------------------------------------------------------
+The shell probe tests start here.
 
 ## `struct StubRunner(Box<dyn Fn() -> Result<ProcessOutput, UpstrokeError> + Send + Sync>);`
 
-A runner that never spawns, so the probe's *classification* of a
-failure can be tested on a machine where every `ShellKind` happens to
-be installed.
+A runner that never spawns, so the probe's *classification* of a failure can be tested on a machine
+where every `ShellKind` is installed.
 
 ## `fn a_shell_probe_that_did_not_exit_zero_is_a_preflight_error_however_it_failed() {`
 
-Every way a `ProcessOutput` can say the probe did not succeed.
-
-`expected_failures_refusals[3]` is "a failing shell probe -> returned
-pre-flight error to the caller", and the funnel has three independent
-ways to report one: the exit code, `timed_out`, and `output_limited`.
-Two of them can arrive **with** `code: Some(0)` — the limit is observed
-during the final drain, and a signal-killed child reports `code: None`
-with `timed_out: false` — so a probe that reads only one field
-certifies a shell that did not run `exit 0`.
-
-The grid is written from those three fields rather than from
-`run_shell_probe`'s branches, so a field it stops reading fails here.
+Every way a `ProcessOutput` can say the probe did not succeed. `expected_failures_refusals[3]` is "a
+failing shell probe -> returned pre-flight error to the caller", and the funnel reports failure
+three independent ways: the exit code, `timed_out` and `output_limited`. An output-limited run can
+still carry `code: Some(0)`, because the limit is observed during the final drain, and a
+signal-killed child reports `code: None` with `timed_out: false`, so a probe that reads only one
+field certifies a shell that did not run `exit 0`. The grid is written from the three fields rather
+than from `run_shell_probe`'s branches, so a field it stops reading fails here.
 
 ## `fn a_shell_probe_that_did_not_exit_zero_is_a_preflight_error_however_it_failed() {` › `name: "killed, with no exit code and no timeout",`
 
-Killed by a signal, or by anything else that leaves no exit
-code: `None` is not `Some(0)` and must not be read as one.
+Killed by a signal, or anything else that leaves no exit code: `None` is not `Some(0)`.
 
 ## `fn a_shell_probe_that_did_not_exit_zero_is_a_preflight_error_however_it_failed() {` › `name: "output-limited after exiting zero",`
 
-The bounded-output contract terminated the owned tree; the
-funnel can still report the code the leader exited with,
-because the limit is observed during the final drain.
+The bounded-output contract terminated the owned tree; the funnel can still report the code the
+leader exited with, because the limit is observed during the final drain.
 
 ## `const MISSING_SHELL: ShellKind = ShellKind::Pwsh;`
 
-The recorded shell the missing-shell case probes for.
-
-`pwsh` rather than one of the other four because it is the one
-[`ShellKind`] that is **not** reachable from any directory the child's
-program search consults once `PATH` has been replaced: `cmd` is in the
-Windows system directory always, `powershell` is in a subdirectory of it
-that is on every Windows `PATH`, `sh` and `bash` are `/bin` programs on
-Unix and Git-for-Windows programs on the runners. PowerShell 7 installs
-outside all of those on every platform — and the helper asserts that,
-rather than assuming it.
+The recorded shell the missing-shell case probes for. `pwsh` because it is the one [`ShellKind`] not
+reachable from any directory a program search consults once `PATH` is replaced: `cmd` is always in
+the Windows system directory, `powershell` is in a subdirectory of it on every Windows `PATH`, and
+`sh` and `bash` are `/bin` programs on Unix and Git-for-Windows programs on the runners. PowerShell 7
+installs outside all of those, and the helper asserts that rather than assuming it.
 
 ## `const MISSING_SHELL_MARKER: &str = "UPSTROKE_MISSING_SHELL_PROBE";`
 
-Set by the parent test on the helper it spawns, so the helper is inert
-when `cargo test -- --ignored` runs it directly.
+Set by the parent test on the helper it spawns, so the helper is inert when `cargo test --
+--ignored` runs it directly.
 
 ## `const MISSING_SHELL_OK: &str = "<<MISSING-SHELL-REFUSED";`
 
-Printed by the helper after it has asserted, so the parent can tell "the
-helper ran and refused" from "the helper never ran".
+Printed by the helper after it has asserted, so the parent can tell "the helper ran and refused"
+from "the helper never ran".
 
 ## `fn windows_program_search_dirs() -> Vec<PathBuf> {`
 
-The directories a child's program search consults **besides** `PATH`,
-on the platform that has any.
-
-std resolves a bare Windows program name against the child `PATH`, the
-application directory, the system directory, the Windows directory and
-then the **parent's** `PATH` (`library/std/src/sys/.../windows/process.rs`,
-`search_paths`). The helper controls both `PATH`s by construction; these
-three it can only *check*, which is what makes the check the premise.
+The directories std's search for a bare Windows program name consults **besides** `PATH`: the
+application directory, the system directory and the Windows directory (std's Windows
+`search_paths`). The helper controls `PATH` by construction; these it can only *check*, which makes
+the check a premise.
 
 ## `fn shell_probe_missing_shell_helper() {`
 
 The missing-shell half of
-[`host_shell_probe_succeeds_with_recorded_shell_and_fails_when_shell_missing`],
-in a child process because one of the two `PATH`s that decide the answer
-belongs to the **process**, not to the request.
+[`host_shell_probe_succeeds_with_recorded_shell_and_fails_when_shell_missing`], in a child process
+because the `PATH` that decides the answer belongs to the **process**: `HostRunner::new()` composes
+from this process's environment, and an in-process test cannot rewrite its own `PATH` without racing
+every other test in the binary. So the absence is constructed in a child whose entire `PATH` is one
+directory this suite created and asserts is empty.
 
-The previous version of this case hid `pwsh.exe` by composing a base
-environment with `PATH` removed and ran in-process. Windows CI proved
-that oracle invalid — `CreateProcess` also searches the *parent's*
-`PATH`, so an emptied child `PATH` hides nothing the runner itself can
-see, and the guest passed only because that machine had no `pwsh` at
-all. A process cannot rewrite its own `PATH` for one test without racing
-every other test in the binary, so the absence is constructed where it
-can be: in a child whose entire `PATH` is one directory this suite
-created and asserts is empty.
-
-Everything here is a **premise check followed by the claim**. If the
-construction ever stops constructing the absence — a `PATH` that is not
-the empty directory, a directory that is not empty, a `pwsh.exe` that
-has appeared in one of the three directories the search reaches
-regardless — this fails on the premise and says which one, rather than
-passing for the wrong reason.
+Everything here is a **premise check followed by the claim**. If the construction stops
+constructing the absence (a `PATH` that is not the empty directory, a directory that is not empty,
+a `pwsh.exe` in one of the directories searched regardless), this fails on the premise and says
+which, rather than passing for the wrong reason.
 
 ## `fn shell_probe_missing_shell_helper()` › `let path = std::env::var_os("PATH").expect("the parent supplies a PATH");`
 
-Premise 1: this process's `PATH` is exactly one directory, and that
-directory is empty. On Unix this is the whole search — `execvp`
-consults `PATH` and nothing else, and an *absent* `PATH` would be
-worse than a controlled one, because then `execvp` falls back to the
-confstr default `/bin:/usr/bin`, where the CI image really does ship
-`/usr/bin/pwsh`.
+Premise 1: this process's `PATH` is exactly one directory, and it is empty. A controlled `PATH`
+rather than an absent one, because without `PATH` `execvp` falls back to the confstr default
+`/bin:/usr/bin`, where an image may ship `/usr/bin/pwsh`.
 
 ## `fn shell_probe_missing_shell_helper()` › `for dir in windows_program_search_dirs() {`
 
-Premise 2: the directories Windows searches whatever `PATH` says do
-not hold this shell either.
+Premise 2: the directories Windows searches whatever `PATH` says do not hold this shell either.
 
 ## `fn shell_probe_missing_shell_helper()` › `let workspace = scratch("missing-shell");`
 
-Premise 3: the workspace **exists**. The three conditions the
-contract's proof test composes are an existing workspace, an absent
-shell and `HostRunner::shell_probe`; a probe that failed because its
-directory was missing would prove the first of them false and test
-something else. `HostRunner::run` hands every child an absolute
-`current_dir`, so this is the difference between "the shell is not
-there" and "the directory is not there".
+Premise 3: the workspace **exists**. The proof test composes an existing workspace, an absent shell
+and `HostRunner::shell_probe`; a probe that failed because its directory was missing would test
+something else. `HostRunner::run` gives every child an absolute `current_dir`, so this separates
+"the shell is not there" from "the directory is not there".
 
 ## `fn shell_probe_missing_shell_helper()` › `let error = HostRunner::new()`
 
-The claim. `HostRunner::new()` composes from *this* process's
-environment, so the child inherits the same one-empty-directory
-`PATH` — production's own composition, not a substituted one.
+The claim. `HostRunner::new()` composes from this process's environment, so the child gets the same
+one-empty-directory `PATH`: production's own composition. The refusal must be the spawn failure,
+not an exit code; a `pwsh` that ran and exited non-zero would mean the machine has one after all.
 
 ## `fn host_shell_probe_succeeds_with_recorded_shell_and_fails_when_shell_missing() {`
 
 `decisions.pr_sequence[5].slice_contract.proof_tests[8]`, by name.
 
-The contract names one test for the whole shell probe and it composes
-three things: the **recorded shell** succeeding, a shell that is
-**missing** failing, and both going through
-[`HostRunner::shell_probe`] — the `RunnerPreflight` entry point — rather
-than through the free [`run_shell_probe`] or through `Runner::run`.
-Decomposing it into separately-tested layers loses exactly that
-composition: with the missing-shell case gone, a `shell_probe` body of
+The contract names one test for the whole shell probe, composing three things: the **recorded
+shell** succeeding, a **missing** shell failing, and both going through [`HostRunner::shell_probe`]
+(the `RunnerPreflight` entry point) rather than the free [`run_shell_probe`] or `Runner::run`.
+Separately-tested layers lose that composition: without the missing-shell case, a `shell_probe` body
+of
 
 ```text
 match run_shell_probe(self, shell, workspace.to_path_buf(), invocation) {
@@ -1166,62 +857,47 @@ match run_shell_probe(self, shell, workspace.to_path_buf(), invocation) {
 }
 ```
 
-survives every remaining case — (a) succeeds, (c) has no workspace, (d)
-does not use the method, and (e) does not spawn.
+survives every remaining case: (a) succeeds, (c) has no workspace, (d) does not use the method, and
+(e) does not spawn.
 
 ## `fn host_shell_probe_succeeds_with_recorded_shell_and_fails_when_shell_missing() {` › `runner`
 
-(a) The recorded shell, actually spawned. `gates::shell_available`
-is a PATH check; this is a spawn, which is the only thing that
-establishes availability (packet finding F-43 / V14-VERIFY-004).
+(a) The recorded shell, actually spawned. `gates::shell_available` is a `PATH` check; only a spawn
+establishes availability.
 
 ## `fn host_shell_probe_succeeds_with_recorded_shell_and_fails_when_shell_missing() {` › `let empty_path_dir = scratch("empty-path");`
 
-(b) A recorded shell that is **missing**, with the workspace that
-(a) just used still in place, through the same method — the
-contract's own composition. It runs in a child because the absence
-has to be constructed out of both `PATH`s and one of them is the
-process's; see [`shell_probe_missing_shell_helper`], which holds the
-assertions.
+(b) A **missing** recorded shell, with (a)'s workspace still in place, through the same method. It
+runs in a child because the absence has to be constructed out of the process's `PATH`; see
+[`shell_probe_missing_shell_helper`], which holds the assertions. The parent requires `1 passed`,
+so a filter that matched nothing fails.
 
 ## `fn host_shell_probe_succeeds_with_recorded_shell_and_fails_when_shell_missing() {` › `let absent = workspace.join(format!("absent-{}", crate::ulid::ulid()));`
 
-(c) and (d): the other two ways the host can fail to complete a
-probe, neither of which is a claim about what happens to be
-installed. Both fail because of something this test constructs and
-then checks, so they fail identically on a machine with every shell
-in existence installed.
+(c) and (d): the other two ways the host can fail to complete a probe. Both fail because of
+something this test constructs and then checks, so they fail identically on a machine with every
+shell installed.
 
 ## `fn host_shell_probe_succeeds_with_recorded_shell_and_fails_when_shell_missing() {` › `let absent = workspace.join(format!("absent-{}", crate::ulid::ulid()));`
 
-(c) The recorded shell, asked to run in a directory that is not
-there. `HostRunner::run` gives every child an absolute
-`current_dir`, and starting a process in a directory that does not
-exist is refused by the kernel everywhere this crate runs: `chdir`
-answers `ENOENT` on Unix — whether std reaches it through `fork` or
-through `posix_spawn_file_actions_addchdir_np` — and
-`CreateProcessW` fails with `ERROR_DIRECTORY` on Windows. Both
-surface as `Err` from `Command::spawn`, which is the same production
-path an absent shell binary takes, and the caller must be handed a
-pre-flight error naming the shell rather than an `Ok`.
+(c) The recorded shell, asked to run in a directory that is not there. `HostRunner::run` gives every
+child an absolute `current_dir`, and starting a process in a missing directory is refused
+everywhere this crate runs: `chdir` answers `ENOENT` on Unix (whether std reaches it through `fork`
+or `posix_spawn_file_actions_addchdir_np`), and `CreateProcessW` fails with `ERROR_DIRECTORY` on
+Windows. Both surface as `Err` from `Command::spawn`, and the caller must get a pre-flight error
+naming the shell rather than an `Ok`.
 
 ## `fn host_shell_probe_succeeds_with_recorded_shell_and_fails_when_shell_missing() {` › `let mut request = shell_probe_request(native(), workspace.clone(), shell_probe_invocation());`
 
-(d) The missing-program fault at the `Runner::run` layer, expressed
-so that no installed program can satisfy it: an absolute path inside
-the directory (c) just established does not exist. It contains a path
-separator, so it is looked up verbatim — neither `execvp`'s `PATH`
-walk nor std's Windows search of the system directories and the
-parent `PATH` is consulted for a name like this one, and there is
-nothing at the name. (b) is the same fault one layer up, through the
-method and against the recorded shell, which is what the contract
-names; this one pins the layer beneath it.
+(d) The missing-program fault at the `Runner::run` layer, expressed so that no installed program can
+satisfy it: an absolute path inside the directory (c) established does not exist. It contains a
+path separator, so it is taken verbatim; no `PATH` search is made for it. (b) is the same fault one
+layer up, through the method and against the recorded shell; this pins the layer beneath.
 
 ## `fn host_shell_probe_succeeds_with_recorded_shell_and_fails_when_shell_missing() {` › `let refusing = StubRunner(Box::new(|| Ok(stub_output(Some(127), false))));`
 
-(e) A shell that runs and refuses, and one that hangs. Both are
-pre-flight errors and neither is a `ProcessOutput` the caller has to
-interpret.
+(e) A shell that runs and refuses, one that hangs, and one whose spawn fails. Each is a pre-flight
+error, and none is a `ProcessOutput` the caller has to interpret.
 
 ## `fn the_shell_probe_spells_every_shell_the_way_gates_do() {`
 
@@ -1230,9 +906,7 @@ certifies the invocation the gates will use.
 
 ## `const WINDOWS_POINTS: &[SubEffectPoint] = &[`
 
------------------------------------------------------------------------
-containment sub-effect hook points (ST-07 subset)
------------------------------------------------------------------------
+The containment sub-effect hook point tests (ST-07 subset) start here.
 
 ## `const WINDOWS_POINTS: &[SubEffectPoint] = &[`
 
@@ -1245,8 +919,8 @@ The eight points and the host each belongs to, transcribed from
 
 ## `fn observed_points(runner_hooks: HarnessHooks) -> BTreeSet<SubEffectPoint> {`
 
-Run one trivial command through the runner and report which containment
-points its funnel reached.
+Runs one trivial command through the runner and reports which containment points its funnel
+reached.
 
 ## `struct OrderedHooks(Arc<Mutex<Vec<SubEffectPoint>>>);`
 
@@ -1258,67 +932,50 @@ The containment points of one spawn, in order.
 
 ## `fn the_containment_points_of_a_spawn_fire_in_the_packets_order() {`
 
-The points fire in the packet's own order, and each label sits at the
-coordinate it names.
-
-`containment_sub_effects` lists them as a sequence — "Windows:
-Spawn.AmbientJobJoined …, Spawn.CreatedSuspended …,
-Spawn.PrivateJobAssigned, Spawn.Resumed …; Unix: Spawn.ReaperStarted …,
-Spawn.PreExecPgidAndRegister …, Spawn.Exec, Spawn.Registered" — and the
-order is the whole content of two of them: `PrivateJobAssigned`
-promises the child is *still suspended* and `Resumed` promises it is
-not. A set-valued observation cannot tell those two apart, so swapping
-the two labels in production would leave the ST-07 evidence claiming a
-pre-resume coordinate for a hook that fires after the child can execute.
-
-The expected sequence is transcribed from that sentence, not read back
+The points fire in the packet's order, so each label sits at the coordinate it names.
+`containment_sub_effects` lists them as a sequence (quoted on `WINDOWS_POINTS`), and the order is
+the whole content of two of them: `PrivateJobAssigned` promises the child is *still suspended* and
+`Resumed` promises it is not. A set cannot tell those apart, so swapping the two labels in
+production would leave the ST-07 evidence claiming a pre-resume coordinate for a hook that fires
+after the child can execute. The expected sequence is transcribed from the packet, not read back
 from the funnel.
 
 ## `fn the_containment_points_of_a_spawn_fire_in_the_packets_order() {` › `vec![`
 
-`AmbientJobJoined` is a write-command startup step rather than a
-per-spawn one, so a spawn reaches the other three.
+`AmbientJobJoined` is a write-command startup step rather than a per-spawn one, so a spawn reaches
+the other three.
 
 ## `fn the_containment_points_of_a_spawn_fire_in_the_packets_order() {` › `assert_eq!(`
 
-Each point once: a point consulted twice at one spawn would make the
-sequence above ambiguous about which coordinate it names.
+Each point once: a point consulted twice in one spawn would make the sequence ambiguous about which
+coordinate it names.
 
 ## `fn windows_containment_points_execute_and_unix_points_do_not() {` › `for point in &[`
 
-`AmbientJobJoined` is a write-command startup step, not a per-spawn
-one, so it is not reached by running a command; it is exercised by
-`windows_ambient_job_unavailable_refuses_before_effects` and by the
-coordinator-death tests.
+`AmbientJobJoined` is a write-command startup step, so running a command does not reach it; it is
+exercised by `windows_ambient_job_unavailable_refuses_before_effects` and by the coordinator-death
+tests.
 
 ## `fn the_two_points_whose_operation_is_not_parent_side_are_named_and_counted() {`
 
-Where each containment point's **operation** happens, and where its
-**injection** is controlled. Transcribed from
-`decisions.effect_site_inventory.containment_sub_effects`, which
-annotates the coordinate of exactly one point ("Spawn.PreExecPgidAndRegister
-(in the child before exec)") and one other as parent-side
-("Spawn.Registered (parent-side registration)").
+Where each containment point's **operation** happens, and where its **injection** is controlled.
+Transcribed from `decisions.effect_site_inventory.containment_sub_effects`, which annotates one
+point's coordinate ("Spawn.PreExecPgidAndRegister (in the child before exec)") and one other as
+parent-side ("Spawn.Registered (parent-side registration)").
 
-Two of the eight perform their operation outside the parent, and both
-are injected in the parent. That is not a coordinate the implementation
-chose for convenience:
+Two of the eight operate outside the parent, and both are injected in the parent, for two reasons:
 
-* their only declared mode is `Kill`, a **coordinator** death, and a
-  coordinator is the parent — a kill inside the forked child would end
-  the fork, not the coordinator, and the packet's claim for these points
-  ("a coordinator kill after any of these leaves a group the reaper
-  settles while holding R28") needs a group that exists;
-* an observer cannot run between `fork` and `exec` at all: only
-  async-signal-safe calls are permitted there and every real observer
-  locks and allocates.
+* their only declared mode is `Kill`, a **coordinator** death, and the coordinator is the parent. A
+  kill inside the forked child would end the fork, not the coordinator, and the packet's claim for
+  these points ("a coordinator kill after any of these leaves a group the reaper settles while
+  holding R28") needs a group that exists;
+* an observer cannot run between `fork` and `exec` at all: only async-signal-safe calls are
+  permitted there, and every real observer locks and allocates.
 
-The packet contemplates both: "ST-07 evidence executes each point on its
-platform (these are parent-side **or** pre-exec points the harness
-controls)", and `InjectionMode` is documented as "how a fault is
-introduced at a **parent-side** sub-effect point". The boundary is
-counted here so it cannot grow: a third point that stops executing at
-its own coordinate fails this test.
+The packet allows both ("ST-07 evidence executes each point on its platform (these are parent-side
+**or** pre-exec points the harness controls)"), and `InjectionMode` is "how a fault is introduced at
+a **parent-side** sub-effect point". The count is asserted so the boundary cannot grow: a third
+point that stops executing in the parent fails this test.
 
 ## `enum Coordinate` › `Parent,`
 
@@ -1338,111 +995,80 @@ In the child, at `exec` itself.
 
 ## `fn the_two_points_whose_operation_is_not_parent_side_are_named_and_counted() {` › `for point in &elsewhere {`
 
-The reason, asserted rather than described: both declare `Kill`
-alone, and `Kill` is a coordinator death. The expected modes are the
-packet's own split — "Kill is universal … error-return is narrower …
-Windows' AmbientJobJoined has one".
+The reason, asserted: both declare `Kill` alone, and `Kill` is a coordinator death. The expected
+modes are the packet's split: "Kill is universal … error-return is narrower … Windows'
+AmbientJobJoined has one".
 
 ## `fn containment_points() -> Vec<SubEffectPoint> {`
 
------------------------------------------------------------------------
-the containment points, observed at runtime on **every** role
------------------------------------------------------------------------
+The containment points, observed at runtime on **every** role, start here.
 
 ## `fn containment_points() -> Vec<SubEffectPoint> {`
 
-**Every** containment point this host declares, read out of the frozen
-inventory rather than transcribed from it.
-
-`SPAWN_SITE.sub_effects()` is `Process.Spawn`'s own list and
-`SubEffectPoint::platform()` is the point's own host, both in the frozen
-`topology::effects` inventory — `sites.rs` and `vocab.rs` respectively since
-that module was split into per-concern children — so a point added to the
-site later is in this domain the moment it exists. That is not tidiness: the hand-written
-Windows list this replaced named `CreatedSuspended`, `PrivateJobAssigned`
-and `Resumed` and silently omitted `AmbientJobJoined`, so the kill grid
-iterated three of the four points the platform has and six guest runs
-reported covering a point none of them had executed (`PR5-RD-002`). A
-domain that can omit a point is a domain whose coverage claim is a
-coincidence.
+**Every** containment point this host declares, read out of the frozen inventory rather than
+transcribed from it. `SPAWN_SITE.sub_effects()` is `Process.Spawn`'s own list
+(`src/topology/effects/sites.rs`) and `SubEffectPoint::platform()` is each point's host
+(`src/topology/effects/vocab.rs`), so a point added to the site is in this domain the moment it
+exists. A hand-written list can omit a point, and a grid over it then claims coverage of a point
+it never executed.
 
 ## `fn per_spawn_points() -> Vec<SubEffectPoint> {`
 
-The containment points one **spawn** reaches on this platform: every
-point of [`containment_points`] that is not a startup step.
+The containment points one **spawn** reaches on this platform: every point of
+[`containment_points`] that is not a startup step.
 
-`AmbientJobJoined` is a write-command *startup* step rather than a
-per-spawn one — it is reached by [`HostRunner::start_write_command`],
-not by running a command. It is role-free by construction (the ambient
-job is a property of the process, established once before anything can
-spawn) and is witnessed for error-return by
-`windows_ambient_job_unavailable_refuses_before_effects` and for kill by
-`a_kill_armed_at_any_containment_point_actually_kills`, which iterates
-the *whole* domain rather than this subset.
+`AmbientJobJoined` is a write-command *startup* step, reached by
+[`HostRunner::start_write_command`] rather than by running a command. It is role-free by
+construction (the ambient job is a property of the process, established once before anything can
+spawn), and is witnessed for error-return by `windows_ambient_job_unavailable_refuses_before_effects`
+and for kill by `a_kill_armed_at_any_containment_point_actually_kills`, which iterates the *whole*
+domain rather than this subset.
 
 ## `const STARTUP_POINTS: &[SubEffectPoint] = &[SubEffectPoint::AmbientJobJoined];`
 
-The containment points a write command reaches at **startup**, before it
-has spawned anything.
+The containment points a write command reaches at **startup**, before it has spawned anything.
 
 ## `fn the_startup_and_per_spawn_domains_partition_this_platforms_points() {`
 
-The two domains partition the platform's points, and neither is empty.
-
-The partition is the property that makes `per_spawn_points` safe to
-derive by subtraction: a point added to `Process.Spawn` later lands in
-one of the two by construction, and cannot land in neither. Asserted
-against `containment_points`, which is itself derived from the frozen
-inventory, so the only way to lose a point from both is to delete it
-from the `topology::effects` inventory (`vocab.rs` holds the points since
-that module was split).
+The two domains partition the platform's four points: the startup domain is `AmbientJobJoined` on
+Windows and empty on Unix. The partition is what makes `per_spawn_points` safe to derive by
+subtraction: a point added to `Process.Spawn` lands in one of the two by construction, never in
+neither. It is asserted against `containment_points`, itself derived from the inventory, so the
+only way to lose a point from both is to delete it from `src/topology/effects/vocab.rs`.
 
 ## `fn the_startup_and_per_spawn_domains_partition_this_platforms_points() {` › `let expected: &[SubEffectPoint] = if cfg!(windows) {`
 
-Derived, not transcribed: the domain agrees with the packet's own
-platform split for this host.
+Derived, not transcribed: the domain agrees with the packet's platform split for this host.
 
 ## `fn shell_command() -> CommandSpec {`
 
-The child of a role whose production program is **the recorded shell**:
-the gate (`gates::ShellGate::check` sends `ShellKind::spec`) and the
-shell probe ([`shell_probe_request`] sends the same). Built by
-[`ShellKind::spec`] rather than round-tripped through a `Command`, so
-the program string is the one [`shell_probe_request`] itself carries.
-
-No overlay and no stdin, because that is what production's two shell
-specs carry: `gates::ShellKind::spec` writes `env: Vec::new(), stdin:
-Vec::new()` and `gates` asserts it ("a gate carries no overlay and no
-stdin").
+The child of a role whose production program is **the recorded shell**: the gate
+(`gates::ShellGate::check` sends `ShellKind::spec`) and the shell probe ([`shell_probe_request`]
+sends the same). Built by [`ShellKind::spec`] rather than round-tripped through a `Command`, so the
+program string is the one [`shell_probe_request`] carries. No overlay and no stdin, because
+`gates::ShellKind::spec` writes `env: Vec::new(), stdin: Vec::new()` and `gates` asserts it.
 
 ## `const NO_SUCH_TEST: &str = "upstroke_pr4_role_grid_matches_no_test";`
 
-A filter that matches no test in this binary, so the child below runs
-nothing and exits 0.
+A filter that matches no test in this binary, so the child below runs nothing and exits 0.
 
 ## `fn agent_cli_command(stdin: &[u8]) -> CommandSpec {`
 
-The child of a role whose production program is **an agent CLI**: the
-worker, the reviewer and the agent probe, all of which execute the
-located binary `bin::Invocation::spec` names and never a shell.
+The child of a role whose production program is **an agent CLI**: the worker, the reviewer and the
+agent probe, which run the CLI `bin::Invocation::spec` names and never a shell. Production names the
+CLI by its bare name and `HostRunner::run` resolves it on the composed `PATH` to an absolute path;
+this test binary, at its absolute path, stands in for that resolved program, and with a filter that
+matches nothing it runs no test and exits 0.
 
-This test binary is that program. It is the one executable this suite
-knows exists on both platforms at an absolute path, which is the shape
-`bin::locate` produces, and with a filter that matches nothing it runs
-no test and exits 0.
-
-**Why the grid may not run one child for every role.** `HostRunner::run`
-chooses the observer it hands the funnel, and a grid whose every child
-was the recorded shell left
+**Why the grid may not run one child for every role.** `HostRunner::run` chooses the observer it
+hands the funnel, so a grid whose every child was the recorded shell would leave
 
 ```text
 let selected = if is_a_shell(&request.command.program) { hooks } else { &mut NoHooks };
 ```
 
-green while every real worker, reviewer and agent probe — the three
-roles that execute a CLI — ran with no containment hooks and no fault
-injection. Same defect, same shape, one field over from the stdin one
-below.
+green while every real worker, reviewer and agent probe ran with no containment hooks and no fault
+injection.
 
 ## `fn this_test_binary() -> String {`
 
@@ -1450,86 +1076,70 @@ This test binary's own path, as the `String` a [`CommandSpec`] carries.
 
 ## `fn agent_cli_command_at(program: &str, stdin: &[u8]) -> CommandSpec {`
 
-[`agent_cli_command`] against an arbitrary launcher for this binary, so
-the *program shape* can vary while everything else stays production's.
+[`agent_cli_command`] against an arbitrary launcher for this binary, so the *program shape* can
+vary while everything else stays production's.
 
 ## `struct ProgramShape {`
 
-One shape a production `CommandSpec.program` can take on this platform.
+One shape the program the runner spawns can take on this platform.
 
 ## `struct ProgramShape` › `what: &'static str,`
 
-What production produces it.
+Where the shape comes from in production.
 
 ## `struct ProgramShape` › `reports: bool,`
 
-Whether the child ends up being this test binary, so its `libtest`
-report is readable on stdout. False for the recorded shell, which
-answers `exit 0` and prints nothing.
+Whether the child ends up being this test binary, so its `libtest` report is readable on stdout.
+False for the recorded shell, which answers `exit 0` and prints nothing.
 
 ## `fn forwarding_shim(dir: &Path, name: &str) -> String {`
 
-Write a launcher into `dir` that forwards its arguments and its stdin to
-this test binary, and return its absolute path.
-
-The two spellings are the two an installer actually produces: on Windows
-npm writes a `.cmd` (or `.bat`) batch shim beside the package, and on
-Unix it writes an extensionless script with a shebang. Neither is a
-native executable, and `CreateProcessW`/`execve` reach both only through
-an interpreter — which is precisely why a runner that treats them as a
-different kind of program is a defect this suite has to be able to see.
+Writes a launcher into `dir` that forwards its arguments and its stdin to this test binary, and
+returns its absolute path. The two spellings are the two an installer produces: on Windows npm
+writes a `.cmd` (or `.bat`) batch shim, and on Unix an extensionless shebang script. Neither is a
+native executable, and `CreateProcessW`/`execve` reach both only through an interpreter, which is
+why a runner that treated them as a different kind of program is a defect this suite must see.
 
 ## `fn forwarding_shim(dir: &Path, name: &str) -> String` › `format!("@echo off\r\n\"{exe}\" %*\r\n")`
 
-`@echo off` so the batch text itself does not reach stdout, and
-the target quoted because its own path may contain a space.
+`@echo off` so the batch text does not reach stdout, and the target quoted because its path may
+contain a space.
 
 ## `const A_DIRECTORY_WITH_A_SPACE: &str = "John Smith";`
 
-A directory name with a space in it, which is what makes the path it
-contains one std must quote. `bin.rs`'s own fixture is the production
-value this transcribes: `C:\Users\John Smith\npm\copilot.cmd`.
+A directory name with a space, which makes the path one std must quote. It transcribes the
+production-shaped value in `src/agent/bin.rs`'s own tests: `C:\Users\John Smith\npm\copilot.cmd`.
 
 ## `fn program_shapes(root: &Path, stdin: &[u8]) -> Vec<ProgramShape> {`
 
-Every **program shape** production can hand the runner on this platform,
-materialised under `root`.
+Every **program shape** the runner can be asked to spawn on this platform, materialised under
+`root`. There are two producers of `CommandSpec.program`: `bin::Invocation::spec`, which carries an
+agent CLI's bare name, and `gates::ShellKind::spec`, which carries the recorded shell's bare name.
+`HostRunner::run` resolves an agent CLI's name on the composed `PATH`, where the installation
+decides what it finds: a native executable, a batch shim (`.cmd` or `.bat`, which is what
+npm-installed `claude`, `codex` and `copilot` are on Windows), or on Unix a shebang script. The
+fixture hands the runner those resolved shapes as absolute paths, plus the shell's bare name.
 
-The list is derived from what actually reaches `CommandSpec.program` in
-this crate, not from intuition. There are two producers —
-`bin::Invocation::spec`, which carries the absolute path
-`agent::bin::locate` resolved, and `gates::ShellKind::spec`, which
-carries the recorded shell's **bare name** — and the first of them can
-carry three different kinds of file, because `locate` accepts whatever
-the installation is: a native executable, a batch shim, or (on Unix) a
-shebang script. `bin::locate`'s own candidate list names `.cmd`
-explicitly, and npm-installed agent CLIs on Windows *are*
-`claude.cmd`, `codex.cmd`, `copilot.cmd`.
-
-Two axes, varied independently, because a suppression can key on either:
-the **kind of file** (native / batch / script / bare name) and whether
-the **path needs quoting** (a directory with a space in it).
+Two axes, varied independently, because a suppression can key on either: the **kind of file**
+(native / batch / script / bare name) and whether the **path needs quoting** (a directory with a
+space in it).
 
 ## `const WORKER_STDIN: &str = "## Task one\n\nthe materialized worker prompt, delivered on \`
 
-What production writes to a **worker's** stdin: the materialized task
-prompt, which `engine::attempt::run_attempt` puts on the spec with
-`.stdin(cx.adapter.stdin_payload(&task_run).as_bytes().to_vec())`.
-
-Non-empty, and that is the whole point of it being here — see
-[`agent_cli_command`] and the grid below.
+What production writes to a **worker's** stdin: the materialized task prompt
+(`AgentAdapter::stdin_payload`, put on the spec by `WorkerAssembly::command` in
+`src/engine/assembly.rs`). Non-empty, which is the point; see [`agent_cli_command`] and the grid
+below.
 
 ## `const REVIEW_STDIN: &str = "review the candidate diff and answer with the structured \`
 
-What production writes to a **reviewer's** stdin, from the same seam at
-`review::run_review`. A different payload from the worker's, so the grid
-carries two distinct non-empty ones rather than one repeated.
+What production writes to a **reviewer's** stdin, from the same seam in `review::run_review`. A
+different payload from the worker's, so the grid carries two distinct non-empty ones.
 
 ## `const AGENT_PROBE_TIMEOUT: Duration = Duration::from_secs(60);`
 
-Every adapter's `PROBE_TIMEOUT`, transcribed: `claude.rs`, `copilot.rs`
-and `codex.rs` each declare `const PROBE_TIMEOUT: Duration =
-Duration::from_secs(60)`, private to their own module.
+Every adapter's `PROBE_TIMEOUT`, transcribed: `claude.rs`, `copilot.rs` and `codex.rs` each declare
+`const PROBE_TIMEOUT: Duration = Duration::from_secs(60)`, private to their own module.
 
 ## `fn production_request(`
 
@@ -1550,77 +1160,51 @@ them:
 * `Review` — [`crate::runner::review_request`], which
   `review::run_review` calls.
 
-This is the repair for a real hole, not tidiness. The three in-attempt
-roles used to be hand-built here with `agent: None` and a *gate*
-identity, while production sends `agent: Some(<the adapter>)` and a
-worker/review identity. A `HostRunner::run` that selected [`NoHooks`]
-for `role in {Implement, Review}` **and** `agent.is_some()` — the
-production shape, and only it — therefore ran every real worker and
-reviewer with no containment hooks and no fault injection while the
-whole suite stayed green.
+**The builders are only half of it.** A builder fixes the role, the binding and the identity
+(production sends `agent: Some(<the adapter>)` and a worker or review identity for the in-attempt
+agent roles); everything it is *handed* (program, arguments, overlay, stdin payload, timeout) is
+still this fixture's choice, and each is a field `HostRunner::run` could key an observer selection
+on. So each gets production's own value for that role rather than one constant shared by all five:
 
-**The builders are only half of it.** A builder fixes the role, the
-binding and the identity; everything it is *handed* — the program, the
-arguments, the overlay, the stdin payload and the timeout — is still
-this fixture's choice, and each of those is a field `HostRunner::run`
-can key an observer selection on. So each is given production's own
-value for that role rather than one convenient constant shared by all
-five:
-
-* **program and args** — [`agent_cli_command`] for the three roles that
-  execute a located CLI, [`shell_command`] for the two that execute the
-  recorded shell;
-* **stdin** — the adapter's prompt for the worker and the reviewer
-  (`AgentAdapter::stdin_payload`, delivered at
-  `engine::attempt::run_attempt` and `review::run_review`), empty for
-  the gate and both probes, which is what their specs carry;
-* **env** — empty for all five, because that *is* production's only
-  value: `ShellKind::spec` and `bin::Invocation::spec` are the only two
-  spec constructors this crate has and both write `env: Vec::new()`,
-  and no call site adds an overlay entry (asserted by
-  `runner::contract::tests::every_production_command_spec_payload_is_classified`);
-* **timeout** — each role's own production default, five distinct
-  values.
+* **program and args**: [`agent_cli_command`] for the three roles that run an agent CLI,
+  [`shell_command`] for the two that run the recorded shell;
+* **stdin**: the adapter's prompt for the worker and the reviewer (`AgentAdapter::stdin_payload`,
+  put on the spec by `WorkerAssembly::command` and `review::run_review`), empty for the gate and
+  both probes, which is what their specs carry;
+* **env**: empty for all five, because that is production's only value: `ShellKind::spec` and
+  `bin::Invocation::spec` both write `env: Vec::new()`, and no call site adds an overlay entry
+  (asserted by `runner::contract::tests::every_production_command_spec_payload_is_classified`);
+* **timeout**: each role's own production default, five distinct values.
 
 ## `agent_cli_command(b""),`
 
-A probe asks a CLI about itself: an agent binary, and no
-prompt on stdin.
+A probe asks a CLI about itself: an agent binary, and no prompt on stdin.
 
 ## `fn run_in_role(`
 
-Start one child in `role`, through the entry point production uses for
-that role, and wait for it.
-
-`Probe(Shell)` goes through [`HostRunner::shell_probe`] rather than
-through `run` directly, because that entry point is what pre-flight
-calls and it adds the probe's own refusals; it builds its request with
-[`shell_probe_request`], which is the value [`production_request`]
-returns for that role. Every other role is [`production_request`]
-executed through `run`, which is exactly how production sends it.
+Starts one child in `role`, through the entry point production uses for that role, and waits for
+it. `Probe(Shell)` goes through [`HostRunner::shell_probe`], the entry point pre-flight calls, which
+adds the probe's own refusals and builds its request with [`shell_probe_request`], the value
+[`production_request`] returns for that role. Every other role is [`production_request`] executed
+through `run`.
 
 ## `struct RoleWitness {`
 
 Everything one spawn's containment observers can see, for one role.
 
-`point` delegates to [`HarnessHooks`] — the production wiring onto
-PR3's [`HookHarness`] — so the evidence lands where ST-07 reads it, and
-records the order beside it, because a set cannot tell
-`PrivateJobAssigned` (the child is still suspended) from `Resumed` (it
-is not). `child_created` is the funnel's other observation, and on Unix
-it asks the kernel whether the containment *operation* happened for
-this role rather than only its hook — as a `GroupObservation`, so the
-look carries whether the child had already exited, what `getpgid`
-answered and, on macOS, what the exited record answered. The grid's
-children are short-lived and the look comes after `spawn` returns, so
-the exited case is ordinary here, and it is the case the standing macOS
-red was (`W2-MACOS-HOST-CONTAINMENT-ROLE-GROUP-FINGERPRINT`).
+`point` delegates to [`HarnessHooks`], the production wiring onto [`HookHarness`], so the evidence
+lands where ST-07 reads it, and records the order beside it, because a set cannot tell
+`PrivateJobAssigned` (the child is still suspended) from `Resumed` (it is not). `child_created` is
+the funnel's other observation: on Unix it asks the kernel whether the containment *operation*
+happened for this role rather than only its hook, as a `GroupObservation`, so the look carries
+whether the child had already exited, what `getpgid` answered and, on macOS, what the exited record
+answered. The grid's children are short-lived and the look comes after `spawn` returns, so the
+exited case is ordinary here (`W2-MACOS-HOST-CONTAINMENT-ROLE-GROUP-FINGERPRINT`).
 
 ## `fn group_leadership(observations: &[proc::GroupObservation]) -> (Vec<bool>, String) {`
 
-The decisions and the rendered records side by side, so an assertion
-compares the former and prints the latter. The role grid also prints
-the records once the assertion passes; see its Unix assertion below.
+The decisions and the rendered records side by side, so an assertion compares the former and prints
+the latter. The role grid also prints the records once the assertion passes.
 
 ## `impl RoleWitness` › `fn handle(&self) -> Self {`
 
@@ -1628,35 +1212,20 @@ A second handle on the same recordings, for the runner to own.
 
 ## `fn the_role_grid_sends_the_shapes_production_sends() {`
 
-The grid's fixtures vary every independently meaningful field
-independently, and the counts say so.
+The grid's fixtures vary every independently meaningful field independently, and the counts say
+so: a grid that moved two fields together would prove only that *some* combination reaches the
+funnel.
 
-The standing guard in `reviews/FINDINGS.md`: "fixtures must vary every
-independently meaningful field independently; assert hostility as
-distinct-value **counts**, not prose." A grid that moved two fields
-together would prove only that *some* combination reaches the funnel.
+The field list is taken from the type. Of [`RunnerRequest`]'s fields and its `command`'s, this
+asserts nine: role, agent binding, invocation identity, workspace, timeout, and the spec's program,
+args, env and stdin. It does not vary `credential_profile` or the spec's `settings_file`. Each
+asserted field is one an observer suppression in `HostRunner::run` could key on (an empty stdin,
+the program, the timeout), so each must take production's values here.
 
-**The field list is taken from the type, not from intuition**, because
-three repairs in a row swept the fields their author thought of and the
-next confirmation found the one nobody listed. [`RunnerRequest`] has six
-fields and its `command` has four, so this asserts all nine that can
-vary: role, agent binding, invocation identity, workspace, timeout, and
-the spec's program, args, env and stdin.
-
-Two of them used to be constants here (`agent: None`, a gate identity),
-which is precisely the shape production never sends. Three more were:
-every request carried `stdin: Vec::new()` while production's worker and
-reviewer always carry a prompt, every request ran the recorded shell
-while production's three agent-bound roles always run a CLI, and every
-request carried `SHELL_PROBE_TIMEOUT` while production gives each role
-its own. Each of those left a one-line observer suppression in
-`HostRunner::run` — keyed on `stdin.is_empty()`, on the program, or on
-the timeout — passing this whole file.
-
-Nothing asserted below is read back out of the fixture: the bindings are
-R3's own predicate, the payload split is `AgentAdapter::stdin_payload`'s
-rule, the program split is "a bound process runs its agent's CLI", and
-the timeouts are production's own public constants.
+Nothing asserted is read back out of the fixture: the bindings are R3's predicate (`is_slotted`),
+the payload split is `AgentAdapter::stdin_payload`'s rule, the program split is "a bound process
+runs its agent's CLI", and the timeouts are production's own constants, with the adapters' private
+probe timeout transcribed as `AGENT_PROBE_TIMEOUT`.
 
 ## `fn the_role_grid_sends_the_shapes_production_sends()` › `let labels: BTreeSet<String> = requests.iter().map(|r| r.role.label()).collect();`
 
@@ -1664,133 +1233,104 @@ Field 1: the role. Five distinct values, one per member.
 
 ## `fn the_role_grid_sends_the_shapes_production_sends()` › `let bound = requests.iter().filter(|r| r.agent.is_some()).count();`
 
-Field 2: the agent binding. Three bound, two not — and *which* three
-is R3's rule, not this fixture's.
+Field 2: the agent binding. Three bound, two not, and *which* three is R3's rule, not this
+fixture's.
 
 ## `fn the_role_grid_sends_the_shapes_production_sends()` › `let ids: BTreeSet<String> = requests.iter().map(|r| r.invocation.render()).collect();`
 
-Field 3: the identity. Five distinct renderings, and the form
-follows the role: the two probes carry probe identities, the three
-in-attempt roles carry attempt identities with three distinct role
+Field 3: the identity. Five distinct renderings, and the form follows the role: the two probes
+carry probe identities, the three in-attempt roles attempt identities with three distinct role
 tokens.
 
 ## `fn the_role_grid_sends_the_shapes_production_sends()` › `let paired: BTreeSet<(String, bool, String)> = requests`
 
-And the pairing, so no two fields can be swapped without notice.
+And the pairing, so no two fields can be swapped unnoticed.
 
 ## `fn the_role_grid_sends_the_shapes_production_sends()` › `let carrying_a_payload: BTreeSet<String> = requests`
 
-Field 4: the stdin payload. `AgentAdapter::stdin_payload` is
-delivered by `engine::attempt::run_attempt` and `review::run_review`
-and by nothing else, so exactly the worker and the reviewer carry
-bytes; a gate's spec carries none (`gates::ShellKind::spec`, and
-`gates` asserts it), and neither probe does.
+Field 4: the stdin payload. `AgentAdapter::stdin_payload` is put on a spec only for the worker
+(`WorkerAssembly::command`) and the reviewer (`review::run_review`), so exactly those two carry
+bytes; a gate's spec carries none (`gates::ShellKind::spec`), and neither probe does.
 
 ## `fn the_role_grid_sends_the_shapes_production_sends()` › `let shell_program = native().spec(SHELL_PROBE_COMMAND).program;`
 
-Field 5: the program (and with it the args). Production's two
-spec constructors are `gates::ShellKind::spec` — the recorded shell —
-and `bin::Invocation::spec` — a located agent binary at an absolute
-path; which one a role gets is decided by whether it runs an agent
-CLI.
+Field 5: the program, and with it the args. Production's two spec constructors are
+`gates::ShellKind::spec` (the recorded shell) and `bin::Invocation::spec` (an agent CLI); which one
+a role gets is decided by whether it runs an agent CLI.
 
 ## `fn the_role_grid_sends_the_shapes_production_sends()` › `for request in &requests {`
 
-The program and the binding do move together, and that is
-production's rule rather than this fixture's shortcut — a bound
-process is one that executes its agent's CLI, an unbound one executes
-the recorded shell. Asserted, so a fixture that broke the
-correspondence would have to say why.
+The program and the binding move together by production's rule, not as this fixture's shortcut: a
+bound process runs its agent's CLI, an unbound one the recorded shell. Asserted, so a fixture that
+broke the correspondence would have to say why.
 
 ## `fn the_role_grid_sends_the_shapes_production_sends()` › `assert_ne!(`
 
-The payload split is *not* the binding split, so the two cannot be
-mistaken for one field: the agent probe is bound and runs a CLI and
-still carries no prompt.
+The payload split is *not* the binding split, so the two cannot be mistaken for one field: the
+agent probe is bound and runs a CLI and still carries no prompt.
 
 ## `fn the_role_grid_sends_the_shapes_production_sends()` › `let timeouts: BTreeSet<(String, Duration)> = requests`
 
-Field 6: the timeout. Each role's own production default — five
-constants, five distinct values, none of them this fixture's.
+Field 6: the timeout. Each role's own production default: five values, all distinct, none of them
+this fixture's choice.
 
 ## `fn the_role_grid_sends_the_shapes_production_sends()` › `assert!(`
 
-Field 7: the overlay. Empty everywhere, because that is production's
-only value — both spec constructors write `env: Vec::new()` and no
-call site adds an entry
-(`runner::contract::tests::every_production_command_spec_payload_is_classified`
-is the tripwire for a call site that starts to). Stated as an
-assertion rather than left to silence: the day production carries an
-overlay, this row has to become a varying dimension like the four
-above, and this is what says so.
+Field 7: the overlay. Empty everywhere, because that is production's only value: both spec
+constructors write `env: Vec::new()` and no call site adds an entry
+(`runner::contract::tests::every_production_command_spec_payload_is_classified` is the tripwire).
+Stated as an assertion so that the day production carries an overlay, this row has to become a
+varying dimension.
 
 ## `fn the_role_grid_sends_the_shapes_production_sends()` › `let workspaces: BTreeSet<&Path> = requests.iter().map(|r| r.workspace.as_path()).collect();`
 
-Field 8: the workspace. Two distinct values, and which is which is
-production's: a probe has no workspace of its own and runs in the
-coordinator's directory (`agent::probe_workspace`), everything else
-runs in the run's worktree.
+Field 8: the workspace. Two distinct values, and which is which is production's: the agent probe
+runs in the coordinator's directory (`agent::probe_request` chooses `agent::probe_workspace`), and
+every other role, the shell probe included, runs in the workspace it is given. Every workspace is
+absolute, because `HostRunner::run` clears the environment and a drive-relative path would resolve
+against nothing.
 
 ## `fn every_production_invocation_identity_reaches_the_containment_points() {`
 
-The **identity** dimension, over the whole space production builds —
-not the five the role grid happens to carry.
+The **identity** dimension, over the whole space production builds rather than the five the role
+grid carries (`worker`, `gate0`, `review_pass0`, and the two probes at ordinal 0). Every identity
+is a value `HostRunner::run` could key an observer selection on. Enumerated from `AttemptRole`'s
+variants and the call sites that build them:
 
-The role grid carries one identity per role, so five, and each is the
-first of its kind: `worker`, `gate0`, `review_pass0`, and the two probes
-at ordinal 0. Production builds more than that, and every one of them is
-a value `HostRunner::run` could key an observer selection on exactly the
-way `PR4-CONF-006`'s mutation keyed on an empty stdin. Enumerated from
-`AttemptRole`'s own variants and from the call sites that build them:
+* `AttemptRole::ReviewReask(n)`: `review::run_review`'s re-ask, a second reviewer process inside one
+  pass, which the five-role grid has no slot for;
+* non-zero role indices: gates are numbered by position (`Gate(index)`) and review passes by pass
+  (`ReviewPass(pass)`), so the grid's `0` is the first of several;
+* non-zero probe ordinals: each adapter fixes one per pre-flight step (claude's `probe_ordinal`:
+  version 0, help 1, auth status 2).
 
-* `AttemptRole::ReviewReask(n)` — `review::run_review`'s re-ask, a
-  second reviewer process inside one pass and the one attempt role the
-  five-role grid has no slot for;
-* non-zero role indices — `engine::attempt` numbers gates by position
-  (`Gate(index)`) and review passes by pass (`ReviewPass(pass)`), so the
-  grid's `0` is the first of several, not the only one;
-* non-zero probe ordinals — each adapter fixes one per pre-flight step
-  (`claude::probe_ordinal`: version 0, help 1, auth status 2).
-
-Two shapes are deliberately absent because production does not build
-them. `InvocationId::Sequence` has no production call site in this slice
-— integration transactions are a later PR — and the `Attempt` form's own
-`ordinal` is always 0, because `engine::attempt::AttemptCx::invocation`
-says why: "nothing inside one attempt runs a given role twice".
+The `Attempt` form's own `ordinal` is always 0 in production (`engine::attempt::AttemptCx::invocation`
+passes 0), so the test does not vary it.
 
 ## `fn every_production_invocation_identity_reaches_the_containment_points() {` › `let grid: BTreeSet<String> = ExecutionRole::all()`
 
-Every identity here renders differently from every identity the role
-grid sends, or this test would be re-proving the grid.
+Every identity here renders differently from every identity the role grid sends, or this test would
+re-prove the grid.
 
 ## `fn every_shipped_agent_binding_reaches_the_containment_points() {`
 
-The **agent binding** dimension, over every shipped adapter rather than
-the one the role grid names.
+The **agent binding** dimension, over every shipped adapter rather than the one the role grid
+names. `ExecutionRole::all` and `fixture_agent` bind only `claude-code`, so the rest of the
+containment grid runs on one of the three shipped ids. `host-v1` already branches on `agent`
+(`HostEnvironment::compose` gives each agent its own credential location), so `if request.agent ==
+Some(AgentId::new("copilot")) { NoHooks }` would run a third of real runs unobserved and leave the
+five-role grid green.
 
-`ExecutionRole::all` binds `claude-code` to its agent-probe target and
-`fixture_agent` binds the same id to the worker and the reviewer, so the
-whole containment grid runs on one of the three ids this crate ships.
-`agent` is a field of every request and `host-v1` already branches on it
-(`HostEnvironment::compose` gives each agent its own credential
-location), so `if request.agent == Some(AgentId::new("copilot")) {
-NoHooks }` is a suppression that runs one third of every real run
-unobserved and leaves the five-role grid green.
-
-The roster is [`CREDENTIAL_LOCATIONS`]' own, not a list written here, so
-a fourth adapter has to appear in this test the moment `host-v1` learns
-where its credentials live.
+The roster is [`CREDENTIAL_LOCATIONS`]' own, so a fourth adapter appears in this test the moment
+`host-v1` learns where its credentials live.
 
 ## `fn every_production_program_shape_reaches_the_containment_points() {`
 
-The **program shape** dimension, over every shape production can hand
-the runner rather than the one the role grid happens to carry.
-
-Every agent role in the five-role grid runs `std::env::current_exe()` —
-a native `.exe` on Windows — and the only `.cmd` this suite ever
-executes is `agent::bin::tests::a_batch_shim_runs_and_receives_its_argument`,
-which calls `build_command(&spec).output()` and so bypasses `HostRunner`
-and its hooks entirely. That left
+The **program shape** dimension, over every shape the runner can be asked to spawn rather than the
+one the role grid carries. Every agent role in the five-role grid runs `std::env::current_exe()`, a
+native `.exe` on Windows, and `agent::bin::tests::a_batch_shim_runs_and_receives_its_argument` runs
+its `.cmd` with `build_command(&spec).output()`, bypassing `HostRunner` and its hooks. Without this
+test,
 
 ```text
 let mut no_hooks = NoHooks;
@@ -1799,16 +1339,11 @@ let mut no_hooks = NoHooks;
    } else { &mut **hooks }
 ```
 
-green across the whole suite while **every real Windows agent CLI** ran
-with no containment observation and no fault injection — because
-npm-installed agent CLIs on Windows are exactly `claude.cmd`,
-`codex.cmd` and `copilot.cmd`. That is the production shape, not an
-exotic one, and repair round 6 named this mutation in its own report and
-neither repaired it nor carried it to `reviews/FINDINGS.md`.
+would stay green while every npm-installed Windows agent CLI (`claude.cmd`, `codex.cmd`,
+`copilot.cmd`) ran with no containment observation and no fault injection.
 
-Same two claims as every other axis in this file — the points are
-reached, and the observer's answer is honoured — so a shape that is
-merely *observed* and not *injectable* fails here too.
+The same two claims as every other axis in this file, that the points are reached and that the
+observer's answer is honoured, so a shape that is *observed* but not *injectable* fails too.
 
 ## `fn every_production_program_shape_reaches_the_containment_points() {` › `assert_eq!(`
 
@@ -1816,8 +1351,8 @@ The axes, as counts, so the list cannot shrink in silence.
 
 ## `fn every_production_program_shape_reaches_the_containment_points() {` › `let mut injections = 0_usize;`
 
-And the observer's answer is honoured for every shape, at every
-point — observation and injection are two claims.
+And the observer's answer is honoured for every shape, at every point: observation and injection
+are two claims.
 
 ## `fn the_cli_roles_of_the_grid_run_a_shim_shaped_program_through_the_funnel() {`
 
