@@ -8473,6 +8473,10 @@ fn single_quoted_for_sh(text: &OsStr) -> Vec<u8> {
 
 #[cfg(unix)]
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "quarantined on macOS: G7-CI-MACOS-HOOK-COMMIT-FLAKE"
+)]
 fn a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -8643,6 +8647,37 @@ fn a_hook_started_commit_failure_names_the_signal_a_child_ended_itself_by() {
         hook_commit_signal(&output),
         ", ended by signal 15",
         "{output:?}"
+    );
+}
+
+#[test]
+fn a_hook_started_commit_test_is_quarantined_on_macos_only_until_its_finding_is_repaired() {
+    let source = include_str!("tests.rs");
+    let signature = concat!(
+        "fn a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it",
+        "() {"
+    );
+    let lines: Vec<&str> = source.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| *line == signature)
+        .expect("the hook-commit test is defined in this file");
+    let start = lines[..at]
+        .iter()
+        .rposition(|line| line.trim().is_empty())
+        .map_or(0, |blank| blank + 1);
+    assert_eq!(
+        lines[start..at],
+        [
+            "#[cfg(unix)]",
+            "#[test]",
+            "#[cfg_attr(",
+            "    target_os = \"macos\",",
+            "    ignore = \"quarantined on macOS: G7-CI-MACOS-HOOK-COMMIT-FLAKE\"",
+            ")]",
+        ],
+        "the hook-commit test runs on every Unix but macOS, and is ignored there only, naming \
+         its finding"
     );
 }
 

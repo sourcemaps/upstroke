@@ -93,3 +93,12 @@ What would settle it is the number of the signal that ends the commit. The hypot
 `SIGHUP`. A change made beside this one makes the test's failure message carry that number.
 
 Nothing is repaired by this section.
+
+## Quarantine on macOS, 2026-11-11
+
+From this change the test is quarantined on macOS, on the owner's decision of 2026-11-11: it
+carries `#[cfg_attr(target_os = "macos", ignore = "quarantined on macOS: G7-CI-MACOS-HOOK-COMMIT-FLAKE")]`,
+and nothing else in it changes. It still runs on Linux and every other Unix, and can be run on
+macOS on purpose with `--ignored`. The macOS test job therefore no longer witnesses this failure.
+The quarantine does not repair or close this finding; lifting it, by removing that attribute, is
+part of what the repair must do.

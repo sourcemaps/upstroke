@@ -3550,6 +3550,17 @@ when it reaps the child. The leading explanation of the macOS red predicts one
 particular signal, and the number confirms or refutes it. The rest of this test
 is unchanged: how the commit is launched, its control flow and its assertions.
 
+**Quarantined on macOS.** Since 2026-11-11, on the owner's decision of that
+day, the test carries
+`#[cfg_attr(target_os = "macos", ignore = "quarantined on macOS: G7-CI-MACOS-HOOK-COMMIT-FLAKE")]`.
+It had failed in the macOS test job six times that day, on changes that touch
+nothing near it, and the finding's leading explanation puts the defect in the
+supervising code, not in the test. Nothing else in the test changed. It still
+runs, with both cases, on Linux and every other Unix, and can still be run on
+macOS on purpose with `--ignored`; the macOS job no longer witnesses the
+failure. The quarantine ends with the repair of
+`G7-CI-MACOS-HOOK-COMMIT-FLAKE`, which removes the attribute.
+
 ## `fn hook_commit_signal(output: &proc::ProcessOutput) -> String {`
 
 The clause the test above adds to its `the commit failed` message. It is empty
@@ -3569,6 +3580,18 @@ the clause reads `, ended by signal 15`. It lives here rather than in
 `src/agent/proc.rs` so that its name falls under the quick gate's filter,
 `runner::host::tests::a_hook_started`, and
 `cargo test --all-features --lib runner::host::tests::a_hook_started` runs it.
+
+## `fn a_hook_started_commit_test_is_quarantined_on_macos_only_until_its_finding_is_repaired() {`
+
+The witness for the macOS quarantine of
+`a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it`,
+on the owner's decision of 2026-11-11. It reads this file's own source and
+requires the attribute block above that test's signature to be exactly
+`#[cfg(unix)]`, `#[test]` and the `cfg_attr` that ignores it on macOS alone,
+naming `G7-CI-MACOS-HOOK-COMMIT-FLAKE`. So the test cannot be ignored on
+another platform, or everywhere, without this failing. It runs on every
+platform and falls under the quick gate's filter. The repair of the finding
+removes the quarantine and this test with it.
 
 ## `const HOOK_COMMIT_TRACE_HEAD: u64 = 64 * 1024;`
 
