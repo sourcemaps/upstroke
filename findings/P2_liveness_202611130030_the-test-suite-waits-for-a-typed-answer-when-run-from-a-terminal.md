@@ -11,25 +11,36 @@ first_bad:
 guard: the change that keeps every engine test from choosing the terminal answer source, by giving the tests an interaction mode or answer source that never reads the process's standard input, with a witness that runs a test which parks a question under a pseudo-terminal and requires it to finish
 ---
 
-# The test suite waits for a typed answer when its standard input is a terminal
+# The test suite waits for a typed answer when an engine test parks a question and standard input is a terminal
 
 ## Failure sequence
 
-`cargo test` is started with a terminal as its standard input (from a shell, or from a `tmux` pane):
+`cargo test` is started with a terminal as its standard input (from a shell, or from a `tmux` pane), and an
+engine test parks a question:
 
     `cargo test` passes its own standard input to the test binary
-    -> an engine test resumes a run through the helper `resume_options` (src/engine/tests.rs:832), which leaves
-       `interaction` unset
-    -> the run and resume paths take `opts.interaction.unwrap_or(analysis.config.interaction_mode)`
-       (src/engine/preflight.rs:276, src/engine/topology/entry.rs:223 and :550), so the test resume runs in the
-       configuration's mode
-    -> `src/engine/resume.rs` (:736) and `src/engine/coordinator.rs` (:242) call `answers_for`
-       (src/interaction.rs:442) with that mode
-    -> the mode is interactive and the process's standard input is a terminal, so `answers_for` returns
-       `TerminalAnswers` (:451)
-    -> the test parks a question; `TerminalAnswers::resolve` (:304) prints it and blocks in `read_line` on the
-       test process's own standard input until a line or end of input arrives
-    -> nobody types, and the library's tests stop
+    -> a_zero_gate_schema_4_resume_probes_its_recorded_shell_when_todays_config_names_an_unavailable_one first
+       makes a fresh schema-4 run, `run_with(&topology_options(&repo), …)` (src/engine/tests.rs:21588);
+       `topology_options` (src/engine/tests.rs:17782) is built on `options()` (src/engine/tests.rs:781), which
+       leaves `interaction` unset
+    -> `prepare_fresh` takes `opts.interaction.unwrap_or(analysis.config.interaction_mode)`
+       (src/engine/topology/entry.rs:223); `temp_engine_repo` writes no `upstroke.toml`, so the mode is the
+       default, `OnBlock`, which is interactive
+    -> `drive` calls `answers_for` (src/interaction.rs:442) at src/engine/topology/entry.rs:872; the process's
+       standard input is a terminal, so it returns `TerminalAnswers` (src/interaction.rs:451)
+    -> the stub parks a question on t1 and t2 depends on t1, so `select` returns `HardBlock`
+       (src/engine/topology/select.rs:388) -> `hard_block` resolves it (src/engine/topology/run.rs:565) ->
+       `DeliveredFirst::resolve` finds no delivered answer and asks the attended source
+       (src/engine/topology/entry.rs:989) -> `TerminalAnswers::resolve` (src/interaction.rs:304) prints the
+       question and blocks in `read_line` on the test process's own standard input until a line or end of input
+       arrives
+    -> nobody types, and the library's tests stop; the test's resume, `resume_options`
+       (src/engine/tests.rs:21604), is never reached
+
+The legacy schema 1-3 paths' calls to `answers_for`, `src/engine/resume.rs` (:736) and
+`src/engine/coordinator.rs` (:242), are not what this test reaches: each of those paths opens its log with
+`EventSite::LegacyOpenLog` (resume.rs:743, coordinator.rs:248), and `resume_harness` sends a schema-4 resume to
+`engine::topology::entry` instead (src/engine/resume.rs:50-57).
 
 **Observed** on the build machine on 2026-11-12 and 2026-11-13, in two baselines of pull request #376 at
 `1ea3aa31` started from a `tmux` pane. Each time `cargo test --all-targets --all-features` reported 731 of 3961
@@ -59,8 +70,11 @@ At `master` `2b16cec2`, with the library's test binary built:
 
 ## What the change that takes this up should do
 
-Make the engine tests never choose the terminal answer source: set, in the test helpers — `resume_options` and
-the run options' equivalent — an interaction mode or an answer source that never reads standard input, rather
-than changing what a user's interactive run does. Add a witness that runs a question-parking test under a
-pseudo-terminal and requires it to finish. The change must not weaken what `TerminalAnswers` does for a real
+Make the engine tests never choose the terminal answer source: set, in both test helpers — `options()`
+(src/engine/tests.rs:781, which `topology_options` builds on) for runs, and `resume_options`
+(src/engine/tests.rs:832) for resumes — an interaction mode or an answer source that never reads standard
+input, rather than changing what a user's interactive run does. Setting only `resume_options` leaves the cited
+test hanging in its fresh run. Add a witness that runs a question-parking test under a pseudo-terminal and
+requires it to finish: the cited test's fresh run, `run_with(&topology_options(&repo), …)`, must finish (and
+park) under a pseudo-terminal. The change must not weaken what `TerminalAnswers` does for a real
 interactive run.
