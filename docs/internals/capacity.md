@@ -468,7 +468,7 @@ every run in scope by `capacity::machine::gather`, which is how `upstroke
 capacity` and `validate` reach them.
 
 `exhausted` is exactly `exhausted_pools_of(events)`, the map a resumed
-`TopologyRun`'s capacity client starts from (`client::BuiltinClient::replay`),
+`TopologyRun`'s capacity client starts from (`client::builtin_capacity_client_from_log`),
 so the report and the run cannot disagree about
 which pools a log holds exhausted.
 
@@ -527,7 +527,7 @@ It is effect-free in `effects/wrappers.toml`.
 
 The same memory as `observe(..).exhausted`, read from a schema-4 log. A
 resumed `TopologyRun`'s capacity client starts from it
-(`client::BuiltinClient::replay`), as the legacy resume starts its
+(`client::builtin_capacity_client_from_log`), as the legacy resume starts its
 `exhausted_pools` from `observe`. Without it the resumed run forgets every
 signal its log holds, and the next refusal naming the same reset writes a
 second `pool_exhausted`. `observe` reads `Event`, not `TopologyEvent`, so
@@ -696,7 +696,7 @@ The legacy coordinator keeps its own copy for now. Its code is left as
 it is. The schema-4 run calls this one from `settle_failure`, and appends
 the answer before the attempt's `attempt_finished`. The map it is given
 outlives the process: a resumed run's capacity client rebuilds it from its
-log with `exhausted_pools_of` (`client::BuiltinClient::replay`).
+log with `exhausted_pools_of` (`client::builtin_capacity_client_from_log`).
 
 It is effect-free in `effects/wrappers.toml`. The census gate asks for a
 row for every externally reachable function of this module.

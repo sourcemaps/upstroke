@@ -3646,10 +3646,6 @@ impl TimeSource for ResumedAt {
 }
 
 impl TopologyRun {
-    /// The pools the run's log holds exhausted, with each spent reset dropped: what
-    /// [`CapacityClient::grant`] gives `serving_pool`. Read from
-    /// [`BuiltinClient::replay`] of the run's own log, the client `resumed` starts from,
-    /// since the run's client is a `dyn CapacityClient` and the map is the built-in's.
     fn held_unspent(&self) -> BTreeMap<String, Option<String>> {
         test_support::replayed_held_unspent(&self.handle.events)
     }

@@ -676,7 +676,7 @@ The same defect at the level of the run. The pool's recorded reset is replaced w
 On the code before the repair the run instead waited toward 01:02 on 3 March, in slices of
 600 seconds six times and then 120, 3,720 seconds where the plain back-off sleeps 60.
 
-The test sets `BuiltinClient`'s `exhausted_pools` directly. It does not resume from a log that holds the reset,
+The test installs a client holding that reset (`test_support::holding`). It does not resume from a log that holds the reset,
 because a resume wakes the deferred task and runs it again before any back-off. A resumed run
 reaches `back_off` only after a second limit, and that limit records its own reset over the one
 under test. Either way, `BuiltinClient`'s `exhausted_pools` is what `back_off` reads.
@@ -779,8 +779,8 @@ records only its own minute: on the code before the repair, the one `defer_wait_
 
 ## `fn the_serving_pool_is_the_first_in_file_order_no_signal_holds_exhausted() {`
 
-The rule `capacity::client::serving_pool` applies, case by case, over the candidates `a`, `b` and `c` in that
-order. The clock is `RunClock`'s 03:00 UTC on 11 November 2026.
+The rule `capacity::client::serving_pool` applies, reached through `test_support::serving_pool`, case by
+case, over the candidates `a`, `b` and `c` in that order. The clock is `RunClock`'s 03:00 UTC on 11 November 2026.
 
 | Held | Answer |
 |---|---|
@@ -856,7 +856,7 @@ Generation 0 never reaches its gate, because its worker is rate limited. Generat
 attempt runs on `claude-max-2` and fails the gate. That is an ordinary failure with a session, so
 the generation is retained and its second attempt resumes the session.
 
-Before the retry the test takes `claude-max` out of `BuiltinClient`'s `exhausted_pools`, as a review that pool
+Before the retry the test installs a client with `claude-max` out of its map (`test_support::replayed_releasing`), as a review that pool
 served for another task would. `claude-max` is then first in file order and held by nothing, so
 `capacity::client::serving_pool` would choose it. The retry still records `claude-max-2`, with a `resume_session`,
 because `retry_request` takes the retained attempt's own pool. A session lives under its pool's
@@ -1072,6 +1072,14 @@ by `capacity::client::spent_resets` against the 03:01 it names.
 
 A clock that stays at the reading it is given: the instant the next process resumes at, and
 so the `ts` of the refusal it settles.
+
+## `impl TopologyRun` › `fn held_unspent(&self) -> BTreeMap<String, Option<String>> {`
+
+The pools the run's log holds exhausted, with each spent reset dropped: what
+`CapacityClient::grant` gives `serving_pool`. Read through `test_support::replayed_held_unspent`
+from a built-in client replayed from the run's own log, the client `resumed` starts from
+(`builtin_capacity_client_from_log`), since the run's client is a `dyn CapacityClient` and the
+map is the built-in's.
 
 ## `fn refused_again_on_resume(`
 

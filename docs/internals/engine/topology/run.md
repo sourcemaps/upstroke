@@ -756,8 +756,8 @@ The pool an attempt already announced was announced on: a retry's, as its
 `attempt_started` recorded it. `prepare_attempt` plans an announced attempt
 on this pool and chooses none of its own, so the plan and the event it
 follows name one pool. A dispatch carries `None` here, which says nothing
-about its pool: it is not announced yet, and `prepare_attempt` chooses its
-pool with [`capacity::client::serving_pool`].
+about its pool: it is not announced yet, and `prepare_attempt` takes the
+pool the run's capacity client grants (`CapacityClient::grant`).
 
 ## `struct RunAs` › `resume_session: Option<SessionId>,`
 
@@ -1141,10 +1141,10 @@ the log by the same step the live loop applies.
 closed by that field, authorised as Class C in
 `decisions/2026-08-26-durable-retry-feedback.md`.
 
-## `pub struct TopologyRun` › `capacity: Box<dyn CapacityClient>,`
+## `pub struct TopologyRun` › `capacity_client: Box<dyn CapacityClient>,`
 
-The run's capacity client, built once at resume (the `let capacity` section
-of `resumed`, below), which holds the pools the run's signals hold
+The run's capacity client, built once at resume (the `let capacity_client =`
+section of `resumed`, below), which holds the pools the run's signals hold
 exhausted. A pool is *held exhausted*, and that is all the word means, when a
 signal put it there (`CapacityClient::held`) and no attempt it served has
 taken it out (`CapacityClient::served`).
@@ -1176,11 +1176,12 @@ Read before the handle moves into the struct below it.
 run tells the next worker what the attempts before the crash failed
 on rather than handing it attempt 1's prompt.
 
-## `pub fn resumed(handle: RunHandle, inputs: FrozenInputs, ceiling: Ceiling) -> Self {` › `let capacity = Box::new(BuiltinClient::replay(&handle.events));`
+## `pub fn resumed(handle: RunHandle, inputs: FrozenInputs, ceiling: Ceiling) -> Self {` › `let capacity_client =`
 
 **The one place the run builds its client, from the log's exhausted
 pools.** The legacy resume starts its `exhausted_pools` from
-`capacity::observe`. `BuiltinClient::replay` holds the same memory read
+`capacity::observe`. `capacity::client::builtin_capacity_client_from_log`
+gives the built-in client, holding the same memory read
 from a schema-4 log: each pool a `pool_exhausted` recorded,
 at its reset, minus those a later settled or promoted attempt proved
 serving. Built empty, a resumed run wrote `pool_exhausted` again for a
@@ -1896,7 +1897,7 @@ retained tree. It took them for one call, `seams.plans.pool_for`, which the
 `attempt_finished` ([`last_settled_record`]), which for a retained generation
 is the settlement that retained it. A retry resumes that attempt's session,
 and a session lives under its pool's credential directory, so the retry stays
-on the pool the session ran on. It does not ask [`capacity::client::serving_pool`]. A pool
+on the pool the session ran on. It does not ask the capacity client (`CapacityClient::grant`). A pool
 earlier in file order may have come back since the attempt started, and
 choosing it would hand a session to credentials that never held it.
 
@@ -2264,8 +2265,8 @@ pool that no signal holds exhausted ([`Self::another_pool_can_serve`]), that
 wait buys nothing, because the pool could serve the task now. So the
 deferral becomes `Next::RetrySameRung { resume: false }`, and `settle_failed`
 closes the generation with the `Retry` transition. The next dispatch is the
-first attempt of a fresh generation, and [`capacity::client::serving_pool`] gives it the first
-pool no signal holds, which is one of the pools found here: the pool that
+first attempt of a fresh generation, and the built-in client grants it the first
+pool no signal holds (`CapacityClient::grant`), which is one of the pools found here: the pool that
 refused is held by then, signalled a few lines below.
 
 `resume` is false because a session lives under its pool's credential
@@ -2359,6 +2360,12 @@ for it.
 the log, and applying the event as it will be read back is what makes
 a live run and a replay of its own log one computation rather than two
 that agree by inspection (§15, "one fold, not two").
+
+## `fn settle_failure(` › `let (pool, reset_at) = (exhausted.pool.clone(), exhausted.reset_at.clone());`
+
+`exhausted` moves into the `emit` that writes its `pool_exhausted`, and the
+pool is held (`CapacityClient::held`) only after that record is written, so
+its pool and reset are copied out first.
 
 ## `fn unix_seconds(clock: &dyn TimeSource) -> u64 {`
 
