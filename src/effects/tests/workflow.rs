@@ -3505,6 +3505,63 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         refused_as: "test-windows-hosted-capture-step-env",
     },
     WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-CAPTURE-STEP-DELETED",
+        escape: "the shards' capture step is gone, its name, env and run. Every leg witnesses its \
+                 suite, reports success and leaves no Windows host acceptance record, and no \
+                 other job of this workflow makes one.",
+        job: Some("test-windows-hosted"),
+        anchor: r##"      - name: Capture the native host acceptance record
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
+        run: |
+          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | Tee-Object -Variable capture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not ($capture -ccontains 'test engine::tests::host_acceptance_record ... ok') -or -not ($capture -cmatch '^test result: ok\. 1 passed; 0 failed; 0 ignored; ')) { throw "the capture did not run exactly the one host acceptance test to a pass" }
+          $f = @($capture | Where-Object { $_ -cmatch '^UPSTROKE-HOST-ACCEPTANCE-RECORD ' } | ForEach-Object { ,($_ -split ' ') })
+          $ok = $f.Count -ge 3 -and $f[0].Count -eq 7 -and $f[-1].Count -eq 7 -and $f[0][1] -ceq 'v1' -and $f[0][2] -ceq 'BEGIN' -and $f[-1][1] -ceq 'v1' -and $f[-1][2] -ceq 'END' -and ($f[0][3..6] -join ' ') -ceq ($f[-1][3..6] -join ' ') -and $f[0][4] -ceq "$($f.Count - 2)"
+          for ($k = 1; $ok -and $k -lt $f.Count - 1; $k++) { $ok = $f[$k].Count -eq 5 -and $f[$k][1] -ceq 'v1' -and $f[$k][2] -ceq $f[0][3] -and $f[$k][3] -ceq "$k" -and $f[$k][4].Length -eq $(if ($k -lt $f.Count - 2) { 192 } else { 2 * ([long]$f[0][5] - ([long]$f[0][4] - 1) * 96) }) }
+          if (-not $ok) { throw "the host acceptance record is missing or its framing is incomplete" }
+"##,
+        replacement: "",
+        refused_as: "test-windows-hosted-capture-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-CAPTURE-EXIT-SWALLOWED",
+        escape: "the shards' capture no longer ends on Cargo's exit. A failing test or a Cargo \
+                 that never built the harness ends the step on the checks after it, which name a \
+                 missing pass line and not Cargo's failure; and where Cargo failed and still \
+                 printed the pass line and a frame, no line of the script fails the step, which \
+                 is left to the exit GitHub documents appending from `$LASTEXITCODE`",
+        job: Some("test-windows-hosted"),
+        anchor: "          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n\
+                 \x20         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
+        replacement: "          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n",
+        refused_as: "test-windows-hosted-capture-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-CHECKOUT-TWICE",
+        escape: "a second input-free checkout immediately above the shards' capture. By the \
+                 action's documented `clean: true` default it cleans the workspace, the ignored \
+                 `target` among it, and checks the tree out again, so the capture builds and runs \
+                 a harness the witness never counted, while the first checkout still matches",
+        job: Some("test-windows-hosted"),
+        anchor: "      - name: Capture the native host acceptance record\n",
+        replacement: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\
+                      \x20     - name: Capture the native host acceptance record\n",
+        refused_as: "test-windows-hosted-checkout",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-CHECKOUT-NOT-FIRST",
+        escape: "a pinned cache step above the shards' checkout, which is no longer step 0. The \
+                 step runs before the candidate is in the workspace, against an empty one or one \
+                 another action prepared, and the checkout after it still matches its pin",
+        job: Some("test-windows-hosted"),
+        anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
+        replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
+                      \x20     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
+        refused_as: "test-windows-hosted-checkout",
+    },
+    WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-CAPABILITY-STEP-DELETED",
         escape: "the shards' observation step is gone (omitted). Every leg witnesses its suite \
                  and captures the host record, reports success and leaves no Windows container \

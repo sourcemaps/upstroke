@@ -2108,13 +2108,20 @@ on conforming input is one nobody has seen refuse anything -- the rule this
 file states in its own header and the reason `PR5-C-DOCTEST-FIXTURES-NEVER-RAN`
 exists.
 
-The ledger is 138 rows. It was 195 until 2026-11-20, when the guest's
+The ledger is 142 rows. It was 195 until 2026-11-20, when the guest's
 Windows job and the job that picked the suite's home were removed from the
 workflow. The rows written for either, and for the rule that ran exactly
 one of two Windows suite jobs, went with them, and ten were written for what
 those rows had measured and the hosted shards' rows did not: eight named
 `MUT-TEST-WINDOWS-HOSTED-*`, `MUT-JOB-PERMISSIONS-ON-THE-HOSTED-SHARDS` and
-`MUT-AGGREGATE-ACCEPTS-THE-HOSTED-SHARDS-SKIPPED`. The test asserts no
+`MUT-AGGREGATE-ACCEPTS-THE-HOSTED-SHARDS-SKIPPED`. That left 138, and on
+2026-11-21 four more were written for two things the guest's rows had
+measured and no row of the 138 did. Nothing deleted or edited the shards'
+capture: `MUT-TEST-WINDOWS-HOSTED-CAPTURE-STEP-DELETED` and
+`MUT-TEST-WINDOWS-HOSTED-CAPTURE-EXIT-SWALLOWED`. Nothing reached the
+`checkout_complaints` guard that a job checks out exactly once, at step 0,
+whose deletion left all 138 green: `MUT-TEST-WINDOWS-HOSTED-CHECKOUT-TWICE`
+and `MUT-TEST-WINDOWS-HOSTED-CHECKOUT-NOT-FIRST`. The test asserts no
 count. It requires every row to change the document and to be refused under
 the code the row names, and no two rows to share a name; a row taken out of
 the ledger is a claim nothing measures, and that is the diff's to show.

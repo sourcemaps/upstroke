@@ -793,12 +793,27 @@ Measured, in the `test` job:
 
 Measured, on the Windows shards:
 
+- `MUT-TEST-WINDOWS-HOSTED-CAPTURE-STEP-DELETED`
+- `MUT-TEST-WINDOWS-HOSTED-CAPTURE-EXIT-SWALLOWED`
 - `MUT-TEST-WINDOWS-HOSTED-CAPTURE-SEPARATED-FROM-THE-WITNESS`
+- `MUT-TEST-WINDOWS-HOSTED-CHECKOUT-TWICE`
 
-That row is the position guard, a pinned cache step between the witness and
-the capture. The rows that deleted the Windows capture or edited its script
-mutated the guest's job and went with it on 2026-11-20; no row deletes or
-edits the shards' capture.
+The rows that deleted the Windows capture or edited its script mutated the
+guest's job and went with it on 2026-11-20, and from then until 2026-11-21 no
+row deleted or edited the shards' capture. The first two rows restore that,
+each refused as `test-windows-hosted-capture-command`: the step deleted,
+its name, `env:` and `run:`, and the capture's
+`if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }` line removed. That line
+also stands in the capability step, so the second row's anchor is the line
+together with the capture's `cargo test` line before it, and its
+replacement keeps the `cargo test` line. The other edits, a moved filter,
+`--ignored` dropped, the zero-test refusal or the frame check removed, are
+measured on the `test` job's capture alone.
+
+The last two measure the position guard: a pinned cache step, and a second
+input-free checkout, between the witness and the capture. The checkout is
+refused here and by [`checkout_complaints`], and its row is measured under
+that function's code.
 
 A field on the capture beyond the admitted set — `if:` or
 `continue-on-error:` — is refused as `unexpected-step-field`
@@ -898,10 +913,25 @@ checkouts it finds, and the position the toolchain check asserts for an
 install is only meaningful if the checkout is the step before it. Both were
 measured on the guest's job, by rows that went with it on 2026-11-20: a
 cache step above the checkout, on a job that installed nothing and so had no
-install whose position would refuse it, and a second checkout later. No row
-measures either now. Every job left that checks out installs a toolchain at
-step 1, so a step above the checkout is refused there as well as here; a
-second checkout is refused by this pin alone.
+install whose position would refuse it, and a second checkout later. On
+2026-11-21 a frontier pass found that no row reached this guard: deleting
+it left all 138 rows green. Two rows on the hosted shards measure it now,
+each refused as `test-windows-hosted-checkout`:
+
+- `MUT-TEST-WINDOWS-HOSTED-CHECKOUT-NOT-FIRST`, the pinned cache step above
+  the checkout, which then checks out at `[1]`;
+- `MUT-TEST-WINDOWS-HOSTED-CHECKOUT-TWICE`, a second input-free checkout
+  immediately above the capture, at `[0, 4]`.
+
+Each was measured against a control the same day: with the guard disabled,
+neither row was refused under this code, since neither checkout has inputs
+and nothing else in this function speaks. Both were still refused under
+other codes. The step above the checkout also moves the install off step 1
+(`test-windows-hosted-toolchain`) and is a cache step
+(`test-windows-hosted-cache`); every job left that checks out installs a
+toolchain at step 1, so a step above any of their checkouts is refused by
+that position as well. The second checkout stands between the witness and
+the capture (`test-windows-hosted-capture-command`).
 
 `actions/checkout` with no inputs checks out the event's own ref: for a
 pull request, the candidate merged onto its base. Any input -- `ref:`,

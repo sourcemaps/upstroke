@@ -479,12 +479,16 @@ acted on refuses nothing.
 
 No PowerShell runs on the build box, so this script's execution is the
 shards' evidence, on every run, and not a local one. Measured in the oracle:
-`MUT-TEST-WINDOWS-HOSTED-CAPTURE-SEPARATED-FROM-THE-WITNESS`, and the step's
-case-fold map by `MUT-TEST-WINDOWS-HOSTED-CAPTURE-CASEFOLD-DROPPED`. The rows
-that edited this script's own lines mutated the guest's job and went with it
-on 2026-11-20. On the shards an edited capture is an unpinned script, the
-refusal `MUT-TEST-WINDOWS-HOSTED-RUN-RETARGETED` measures on the identity
-step, and the edits themselves are measured on the `test` job's capture
+`MUT-TEST-WINDOWS-HOSTED-CAPTURE-STEP-DELETED`,
+`MUT-TEST-WINDOWS-HOSTED-CAPTURE-EXIT-SWALLOWED` (the `$LASTEXITCODE` line
+removed), `MUT-TEST-WINDOWS-HOSTED-CAPTURE-SEPARATED-FROM-THE-WITNESS`, and
+the step's case-fold map by `MUT-TEST-WINDOWS-HOSTED-CAPTURE-CASEFOLD-DROPPED`.
+The rows that edited this script's own lines mutated the guest's job and went
+with it on 2026-11-20. Since 2026-11-21 the first two rows above measure the
+step deleted and its exit line removed on the shards. Any other edit makes
+the capture an unpinned script, the refusal
+`MUT-TEST-WINDOWS-HOSTED-RUN-RETARGETED` measures on the identity step, and
+those edits are measured on the `test` job's capture
 ([`HOST_ACCEPTANCE_CAPTURE`]).
 
 ## `pub(super) const CAPABILITY_OBSERVATION: &str = r#"set -eo pipefail`
