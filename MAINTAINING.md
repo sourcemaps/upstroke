@@ -57,12 +57,33 @@ source, documentation, workflows, release machinery and this file.
    five), against the guest's 13 for the whole. The five were measured on 2026-11-19 (run
    44614925593): their test harnesses took 1201, 508, 976, 564 and 860 seconds and the slowest
    job took 24.3 minutes, about 3.6 minutes of every leg being fixed. A run's slowest leg sets
-   its wall clock, so the ten shards divide the suite by that measured time. Their slowest leg
-   is predicted at about 13 to 16 minutes, and the ten were not timed before they landed: the
-   CI run of the pull request that landed them is their first measurement. Each shard runs
-   under a 40-minute limit. In the 2026-11-15 run one whole-suite job failed a kill-timing
-   test, and one shard did not end after its tests had passed; a leftover test process is
-   inferred to have held its output. Neither followed a change.
+   its wall clock, so that day the suite was divided into ten shards by that measured time,
+   their slowest leg predicted at about 13 to 16 minutes. Run 44667503206 measured the ten for
+   the first time, and with them the Linux and macOS legs of the `test` matrix, divided by
+   measured time as well: the slowest Windows leg took 18.6 minutes against the 13 to 16
+   predicted, the slowest of the five macOS legs 15.8 against 14 to 15, and the slower of the
+   two Linux legs 8.2 against 8 to 9. The Linux split stands. The Windows and macOS suites
+   were divided again on 2026-11-20, from that run: each test's sequential Linux duration
+   scaled so that the leg it ran in sums to that leg's measured harness, blended half and half
+   with a uniform per-test model, and the filters chosen by a search for the slowest leg. The
+   ten shards are now `engine::topology::coordinator::tests::a_p`,
+   `engine::topology::coordinator::tests::a_r`, the rest of
+   `engine::topology::coordinator::tests::a_`, the rest of `engine::topology::coordinator::`,
+   `engine::topology::recover::`, `engine::tests::a`, `runner::`, `workspace_manager::`, the
+   rest of `engine::tests::`, and everything else. The five macOS legs are
+   `engine::topology::coordinator::tests::a_`, the rest of `engine::topology::`, the rest of
+   `engine::`, `runner::`, and everything else. The slowest shard is predicted at about 14.4
+   minutes and the slowest macOS leg at about 11.8, and neither re-split was timed before it
+   landed: the CI run of the pull request that landed them is their first measurement. Single
+   tests set the floor under the Windows prediction: a leg takes no less than its longest test
+   and the fixed minutes, and two tests are each estimated at about 9 minutes of their leg's
+   harness, neither changed by the re-split:
+   `engine::topology::recover::tests::a_kill_at_every_cell_of_a_complete_finalization_converges_on_the_next_resume`
+   and
+   `workspace_manager::tests::r_o2_a_cross_kind_scrub_stopped_at_any_phase_converges_with_no_instance_registered`.
+   Each shard runs under a 40-minute limit. In the 2026-11-15 run one whole-suite job failed a
+   kill-timing test, and one shard did not end after its tests had passed; a leftover test
+   process is inferred to have held its output. Neither followed a change.
 
    The two homes share the compiler and the suite, and the floor in sum. What still differs is the runner:
    GitHub's image against the curated guest's, their filesystems and temporary directories,
