@@ -895,14 +895,15 @@ it alone exceeds a leg's budget. The fourteen were not timed before they
 landed: the CI run of the pull request that landed them is their first
 measurement.
 
-Single tests set the floor under that prediction. A leg takes no less than
-its longest test and the fixed minutes, and two tests are each estimated at
-about 9 minutes of their leg's harness:
+Single tests set a floor under every leg. A leg takes no less than its
+longest test plus the job's fixed minutes, and in that run the two longest
+single tests were:
 
-- `engine::topology::recover::tests::a_kill_at_every_cell_of_a_complete_finalization_converges_on_the_next_resume`;
-- `workspace_manager::tests::r_o2_a_cross_kind_scrub_stopped_at_any_phase_converges_with_no_instance_registered`.
+- `engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect`, 249.8 s;
+- `engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect`, 244.5 s.
 
-The re-split changes neither test.
+Under the packing, every leg's prediction, about 9 minutes a job, is above
+that floor.
 
 The aggregate reads the fourteen legs through one result,
 `needs.test-windows-hosted.result`, as it reads the `test` and `msrv`

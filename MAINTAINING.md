@@ -68,12 +68,13 @@ source, documentation, workflows, release machinery and this file.
    and move the time to the next line; the `mklink` that `link_dir` in `src/rundir/tests.rs`
    starts was one, and `link_dir` now captures its output. The packing of tests into legs is to
    be weighed by those times in a later change.
-   Single tests set the floor under the Windows prediction: a leg takes no less than its longest test
-   and the fixed minutes, and two tests are each estimated at about 9 minutes of their leg's
-   harness, neither changed by the re-split:
-   `engine::topology::recover::tests::a_kill_at_every_cell_of_a_complete_finalization_converges_on_the_next_resume`
-   and
-   `workspace_manager::tests::r_o2_a_cross_kind_scrub_stopped_at_any_phase_converges_with_no_instance_registered`.
+   Single tests set a floor under every Windows leg: a leg takes no less than its longest test
+   plus the job's fixed minutes. In CI run 45045067738 the longest single Windows tests were
+   `engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect`
+   (249.8 s) and
+   `engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect`
+   (244.5 s). Under the packing, every Windows leg's prediction, about 9 minutes a job, is above
+   that floor.
    Each shard runs under a 40-minute limit. In the 2026-11-15 run one whole-suite job failed a
    kill-timing test, and one shard did not end after its tests had passed; a leftover test
    process is inferred to have held its output. Neither followed a change.

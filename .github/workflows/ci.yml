@@ -338,13 +338,14 @@ jobs:
   # before it landed: the CI run of the pull request that landed it is its
   # first measurement.
   #
-  # Single tests set the floor under that prediction: a leg takes no less
-  # than its longest test and the fixed minutes. Two tests are each
-  # estimated at about 9 minutes of their leg's harness, and the re-split
-  # changes neither:
-  # `engine::topology::recover::tests::a_kill_at_every_cell_of_a_complete_finalization_converges_on_the_next_resume`
-  # and
-  # `workspace_manager::tests::r_o2_a_cross_kind_scrub_stopped_at_any_phase_converges_with_no_instance_registered`.
+  # Single tests set a floor under every leg: a leg takes no less than its
+  # longest test plus the job's fixed minutes. In that run the longest
+  # single tests were
+  # `engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect`,
+  # 249.8 s, and
+  # `engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect`,
+  # 244.5 s. Under the packing every leg's prediction, about 9 minutes a
+  # job, is above that floor.
   #
   # The shard rule: a leg runs the tests whose names contain any of its
   # filters and none of the filters of the legs before it, each of those a
