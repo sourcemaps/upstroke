@@ -610,8 +610,11 @@ gh variable get UPSTROKE_IMMUTABLE_RELEASES_REQUIRED \
   --repo sourcemaps/upstroke
 ```
 
-Fork pull requests are provisional: their checks are candidate-controlled, so the whole diff
-including workflow edits is reviewed before merge. Do not add another same-repository writer
+Outside contributions are not accepted at present ([`CONTRIBUTING.md`](CONTRIBUTING.md)): a pull
+request from a fork is closed without review. The workflow-approval setting above stays as defence
+in depth, not because fork pull requests are expected. If outside contributions reopen, a fork pull
+request is provisional: its checks are candidate-controlled, so the whole diff including workflow
+edits is reviewed before merge. Do not add another same-repository writer
 without revisiting this section. Required approving reviews stay at zero because an author cannot
 approve their own pull request; if a machine account ever opens pull requests,
 `require_code_owner_review` with the owner as code owner restores an exact-head sign-off. Any future
