@@ -1629,6 +1629,7 @@ pub(crate) mod container_runtime {
     use std::marker::PhantomData;
     use std::panic::Location;
     use std::sync::MutexGuard;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::runner::container::exec::RunIdentity;
     use crate::runner::container::observed::Journal;
@@ -1638,7 +1639,6 @@ pub(crate) mod container_runtime {
     };
     use crate::runner::container::{CoveredCreate, CoveredStart, DockerCli};
 
-    /// What the unarmed inspection runtime answers to every question.
     pub(crate) const UNARMED: &str = "the unarmed test-mode seam \
                                       `engine::topology::entry::container_runtime` asks no \
                                       container runtime";
@@ -1688,15 +1688,22 @@ pub(crate) mod container_runtime {
         )))
     }
 
-    /// The unarmed inspection runtime: no runtime is asked, and every question is
-    /// answered as an absent runtime answers it.
     struct AbsentRuntime;
 
+    // Counts process-wide, never reset: only a test alone in its own process may assert on it.
+    static UNARMED_ANSWERS: AtomicUsize = AtomicUsize::new(0);
+
     fn absent(operation: RuntimeOp) -> RuntimeError {
+        UNARMED_ANSWERS.fetch_add(1, Ordering::SeqCst);
         RuntimeError::Unreachable {
             operation,
             detail: UNARMED.to_owned(),
         }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn unarmed_answers() -> usize {
+        UNARMED_ANSWERS.load(Ordering::SeqCst)
     }
 
     impl ContainerRuntime for AbsentRuntime {

@@ -29557,6 +29557,11 @@ fn inherited_common_dir_mount_child() {
             && resumed.contains("nothing was published, locked or written"),
         "the resume: {resumed}"
     );
+    assert_eq!(
+        crate::engine::topology::entry::container_runtime::unarmed_answers(),
+        0,
+        "a thread of the child's process asked the unarmed absent-runtime double a question"
+    );
     let refusals =
         std::env::var_os(INHERITED_COMMON_REFUSALS).expect("the parent names the refusals' file");
     fs::write(refusals, format!("{said}\n{resumed}\n")).expect("the refusals recorded");
@@ -29669,6 +29674,11 @@ fn recorded_target_resume_child() {
     );
     let refused = resume_with(&resume_options(&repo, &run_id), &source)
         .expect_err("a resume refuses the recorded target");
+    assert_eq!(
+        crate::engine::topology::entry::container_runtime::unarmed_answers(),
+        0,
+        "a thread of the child's process asked the unarmed absent-runtime double a question"
+    );
     let refusal =
         std::env::var_os(RECORDED_TARGET_REFUSAL).expect("the parent names the refusal's file");
     fs::write(refusal, refused.to_string()).expect("the refusal recorded");
