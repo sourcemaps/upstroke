@@ -9605,11 +9605,7 @@ fn children_of(pid: &str) -> Result<Vec<libc::pid_t>, String> {
     .map_err(|error| format!("{}: {error}", task_dir.display()))
 }
 
-/// The rule of [`children_of`], over `list_tasks`, which lists a process's task
-/// ids, `read_children`, which reads one task's children list,
-/// `running_normally`, which says whether a task is still running normally:
-/// neither ending nor gone, and `pause`, which waits the time it is given
-/// between a discarded pass and the next.
+/// The rule of [`children_of`], with its readers passed in; the notes describe each.
 #[cfg(target_os = "linux")]
 fn children_in_passes<T: Ord + std::fmt::Debug>(
     mut list_tasks: impl FnMut() -> std::io::Result<BTreeSet<T>>,
