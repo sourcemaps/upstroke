@@ -7048,6 +7048,44 @@ credit_orphan="$(printf 'an unrelated history\n' \
   || { echo 'could not build the commit-credit orphan' >&2; exit 1; }
 credit_fail_closed 'two commits with no merge base' "$credit_target" "$credit_orphan"
 
+# Criss-crossed histories: two merge bases, and both are the target's. A and C are siblings on
+# the target side, each crediting Claude; the target merges A then C, the head merges C then A,
+# so `git merge-base --all` names A and C, neither an ancestor of the other. Excluding only the
+# first would put the other, a target-side commit, in front of the check, and the pass below would
+# be a refusal of history the pull request does not own.
+crisscross_message=$'chore: a target-side commit\n\nClaude-Session: https://claude.ai/code/session_crisscross'
+crisscross_base="$(plain_commit "$credit_base" 'the criss-cross base')" \
+  || { echo 'could not build the criss-cross base' >&2; exit 1; }
+crisscross_a="$(plain_commit "$crisscross_base" "${crisscross_message/chore: /chore: A, }")" \
+  || { echo 'could not build the criss-cross commit A' >&2; exit 1; }
+crisscross_c="$(plain_commit "$crisscross_base" "${crisscross_message/chore: /chore: C, }")" \
+  || { echo 'could not build the criss-cross commit C' >&2; exit 1; }
+git -C "$credit_repo" checkout -q --detach "$crisscross_a"
+git -C "$credit_repo" merge -q --no-ff "$crisscross_c" -m 'the criss-cross target: merge A, then C'
+crisscross_target="$(git -C "$credit_repo" rev-parse HEAD)"
+git -C "$credit_repo" checkout -q --detach "$crisscross_c"
+git -C "$credit_repo" merge -q --no-ff "$crisscross_a" -m 'the criss-cross head: merge C, then A'
+crisscross_merge="$(git -C "$credit_repo" rev-parse HEAD)"
+crisscross_head="$(plain_commit "$crisscross_merge" 'feat: a plain change on the criss-cross head')" || exit 1
+
+# The cases below assert, in order: the fixture is criss-crossed (two merge bases, A and C), or
+# every case after it proves nothing about two merge bases; the gate passes with the pull request's
+# own two commits counted; and a head commit crediting Claude is refused, named alone.
+crisscross_bases="$(git -C "$credit_repo" merge-base --all "$crisscross_target" "$crisscross_head" | sort)" \
+  || { echo 'commit credit: git merge-base --all failed on the criss-cross fixture' >&2; exit 1; }
+if [[ "$crisscross_bases" != "$(printf '%s\n' "$crisscross_a" "$crisscross_c" | sort)" ]]; then
+  echo "commit credit: the criss-cross fixture is not criss-crossed: git merge-base --all named [$crisscross_bases], and exactly A ($crisscross_a) and C ($crisscross_c) were expected" >&2
+  exit 1
+fi
+
+credit_pass 'criss-crossed histories, both merge bases crediting Claude: only the head-side merge and the plain commit are judged' \
+  "$crisscross_head" 2 "$crisscross_target"
+c="$(plain_commit "$crisscross_merge" $'feat: a change on the criss-cross head\n\nCo-Authored-By: Claude <noreply@anthropic.com>')" || exit 1
+# credit_refuse judges against $credit_target; the prefix assignment holds for that one call only.
+credit_target="$crisscross_target" \
+  credit_refuse 'criss-crossed histories: the head commit crediting Claude is named, and neither merge base' \
+  "$c" "$c:claude-co-author"
+
 echo 'commit-credit fixtures passed'
 
 echo 'listing-construction fixtures passed'
