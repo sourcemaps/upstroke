@@ -6,7 +6,7 @@
   past the reset Claude Code reported, if that is at most 5 h 15 min away, instead of three short
   back-offs and a question; it prints what it is waiting for and records the wait as one deferral.
 - A schema-4 run now records `pool_exhausted` when a usage limit stops an attempt, with the reset
-  Claude Code reported, as a resumed older run already did; nothing schedules on it yet. A schema-4
+  Claude Code reported, as a resumed older run already did. A schema-4
   run appends it before the attempt's settlement, so a known reset is not lost when the run stops
   between the two.
 - `upstroke answer` now refuses a second answer to a question that already has one published,
