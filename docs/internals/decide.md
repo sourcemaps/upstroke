@@ -150,7 +150,17 @@ no agent was asked:
 
 The rendered report, and the ids of the questions whose reply was refused (or that were refused
 before asking). `outcome` makes the command an error when any was refused; the CLI prints the
-report first, so every question's line is shown before the command fails.
+report first, so every question's line is shown before the command fails. The error's list of ids
+is passed through `util::terminal::one_line`, as the report's lines are.
+
+The report is built one whole line at a time with `util::terminal::TerminalLines`, the builder
+`status` uses. What the agent wrote (guidance, confidence, reasons, citations, and a refusal's
+reason, which can quote the adapter's reading of the output), the run's question and option text,
+and the file names `Ledger` reads back are data inside a line: a line break in them is a space and
+any other control character is shown escaped, so none can start a report line of its own, clear
+the screen or move the cursor (`agent_text_is_rendered_inside_its_own_line_with_its_controls_made_visible`,
+`a_decide_report_shows_agent_text_as_data_and_the_proposal_keeps_it_as_written`). The saved
+proposal keeps the text exactly as the agent wrote it.
 
 ## `pub fn proposals_dir(repo_root: &Path, run_id: &str) -> PathBuf {`
 
@@ -249,6 +259,13 @@ the run directory is not the one first seen, so no reservation, settings file, r
 proposal is ever published into a replacement (`the_proposals_directory_keeps_its_identity_through_publication`).
 A reservation made before a replacement stays where it was made.
 
+`reference` is how a saved proposal names a file it generated, its raw output: the path from the
+repository root, `.upstroke/proposals/<run-id>/<id>.<n>.out`, with `/` between the components on
+every platform. Every component is a plain name (`plain_id` admits the run and the question), so
+the reference names the same file wherever the repository is checked out and on whichever system
+reads it; an absolute path would name the checkout that wrote it, in that system's spelling
+(`a_saved_proposal_names_its_raw_output_wherever_the_repository_is_moved`).
+
 ## `struct Ledger {`
 
 The run's accounting, read from the proposals directory on every reservation:
@@ -289,10 +306,19 @@ Without an id, every open question in the order raised (`Observed::raised_questi
 the open question of that exact id or of an unambiguous prefix within the run; a question the
 run's log has settled is refused in `upstroke answer`'s words.
 
-## `fn raised_by(event: &TopologyEvent) -> &'static str {`
+## `enum RaisedBy {`
 
-The worker, a reviewer or integration, read from the event that opened the question. Where a
-reviewer or integration raised it, the prompt says that they judged it a person's decision.
+Who raised a question, read from the event that opened it (`RaisedBy::of`), and the prompt's
+`raised by:` line. Only an attempt that settled parked on a `NeedsHuman` failure of worker origin
+is the worker's: the worker itself asked for a person. Every other question the coordinator
+raised, and the prompt says so and that the worker did not ask it: a parked attempt whose failure
+came from a reviewer's verdict, or whose ladder or deferrals ran out, or whose review input was
+too large or opaque; `question_raised`, which the coordinator writes to approve a spend onto the
+frontier rung; a spawned or repaired task's admission question; and a parked integration
+verification. The failure section of the prompt still names a reviewer where one asked
+(`a_question_is_labelled_by_whether_the_worker_or_the_coordinator_raised_it`). An open question
+always has an opening event in the log the fold read; if none were found, the line says the
+raiser is unknown rather than guessing.
 
 ## `fn check_reply(question: &Question, text: &str) -> Result<Value, String> {`
 
@@ -301,6 +327,18 @@ a person's answer. A choice outside the options, a choice `interaction::answer_f
 to a decline (or whose text `interaction::interpret` reads as one), and `null` where the question
 has options are refused (`a_bad_reply_is_refused_with_its_reason`,
 `each_bad_reply_is_refused_saved_and_fails_the_command_after_the_others`).
+
+## `fn fenced_json(text: &str) -> Result<&str, String> {`
+
+Fences are read as whole lines, as Markdown reads them: outside a block, a line that is ```` ``` ````
+and an info string with no backtick in it opens one, and inside, a line that is ```` ``` ```` alone
+closes it, each with nothing beside it but whitespace and a carriage return. So a fence the JSON
+mentions in a string never opens or closes anything (a JSON string holds no raw line break, so it
+is never a line of its own), a line that merely starts with inline code opens nothing, and a block
+of any other info string is passed over whole, a ```` ```json ```` line inside it included. A
+`json` block left open is refused; another block left open runs to the end of the reply. The
+prompt asks for the two fences on lines of their own
+(`a_fence_mentioned_in_the_guidance_is_text_and_only_a_whole_line_is_a_fence`).
 
 ## `fn create_durably(path: &Path, bytes: &[u8]) -> std::io::Result<()> {`
 

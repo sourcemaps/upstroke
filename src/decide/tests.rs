@@ -12,8 +12,9 @@ use crate::runner::{
     ExecutionRole, ProcessFate, RunFuture, RunnerCall, RunnerError, RunnerRequest,
 };
 use crate::topology::events::{
-    Answer4, FrozenQuestion, ImageIdentity, QuestionAnswered4, QuestionRaised4, RunStarted4,
-    RunnerContract, RunnerPolicy,
+    Answer4, AttemptFinished4, AttemptNumber, FrozenQuestion, GenerationId, ImageIdentity,
+    LeaseDisposition, MergeVerificationUnavailable, QuestionAnswered4, QuestionRaised4,
+    RunStarted4, RunnerContract, RunnerPolicy, SequenceId, UnavailableCause, UnavailableOutcome,
 };
 use crate::topology::registry::TaskKey;
 
@@ -107,6 +108,280 @@ fn an_input_is_cut_on_a_character_boundary() {
     let mut prompt = String::new();
     section(&mut prompt, "The plan file", &text);
     assert!(prompt.contains("[cut here: this input was cut at 65536 bytes"));
+}
+
+/// `VALID` with its guidance replaced by `guidance`, written as a JSON string.
+fn with_guidance(guidance: &str) -> String {
+    VALID.replace(
+        "\"guidance\": \"retry\"",
+        &format!("\"guidance\": {}", json!(guidance)),
+    )
+}
+
+#[test]
+fn a_fence_mentioned_in_the_guidance_is_text_and_only_a_whole_line_is_a_fence() {
+    let asked = question(&[RETRY, crate::interaction::GIVE_UP_OPTION]);
+    for guidance in [
+        "close the block with ```",
+        "wrap the patch in a ```json fence",
+        "```\n```json\n```",
+    ] {
+        let body = with_guidance(guidance);
+        let spread: Value = serde_json::from_str(&body).expect("JSON");
+        let spread = serde_json::to_string_pretty(&spread).expect("pretty JSON");
+        for text in [reply(&body), reply(&spread)] {
+            let record = check_reply(&asked, &text)
+                .unwrap_or_else(|reason| panic!("{guidance:?} is accepted: {reason}\n{text}"));
+            assert_eq!(record["guidance"], guidance, "kept as written: {text}");
+        }
+    }
+
+    let framed = |text: String| check_reply(&asked, &text);
+    assert!(
+        framed(format!(
+            "my proposal\r\n  ```json \t\r\n{VALID}\r\n```  \r\n"
+        ))
+        .is_ok(),
+        "a fence line may carry whitespace and a carriage return around it"
+    );
+    assert!(
+        framed(format!("```json\n{VALID}\n```")).is_ok(),
+        "the last line closes a block with no line break after it"
+    );
+    assert!(
+        framed(format!("```src/lib.rs``` holds it\n{}", reply(VALID))).is_ok(),
+        "a line opening with inline code opens no block"
+    );
+    assert!(
+        framed(format!(
+            "an example:\n```text\n```json\n```\n{}",
+            reply(VALID)
+        ))
+        .is_ok(),
+        "a ```json line inside another block is that block's text"
+    );
+    assert!(
+        framed(format!("{}and then:\n```sh\ncargo test\n", reply(VALID))).is_ok(),
+        "another block left open runs to the end and holds no json block"
+    );
+    for (text, needle) in [
+        (
+            format!("my proposal: ```json {VALID} ```"),
+            "no fenced json block",
+        ),
+        (format!("```json\n{VALID}\n"), "never closed"),
+        (
+            format!("```json\n{VALID}\n``` that is all\n"),
+            "never closed",
+        ),
+        (format!("```JSON\n{VALID}\n```\n"), "no fenced json block"),
+        (
+            format!("{}{}", reply(VALID), reply(VALID)),
+            "2 fenced json blocks",
+        ),
+    ] {
+        let refused = framed(text.clone()).expect_err("refused");
+        assert!(refused.contains(needle), "{needle}: {refused}\n{text}");
+    }
+}
+
+/// A question the coordinator froze for a parked task.
+fn frozen(id: &str) -> FrozenQuestion {
+    FrozenQuestion {
+        id: QuestionId::from(id),
+        key: TaskKey(0),
+        kind: QuestionKind::Clarify,
+        context: format!("{id}: which of two formats to keep"),
+        options: vec![RETRY.to_owned()],
+    }
+}
+
+fn stamped(body: TopologyEventBody) -> TopologyEvent {
+    TopologyEvent {
+        ts: STAMPED_AT.to_owned(),
+        body,
+    }
+}
+
+/// An attempt that settled parked on a failure of `kind` from `origin`.
+fn parked_on(kind: FailureKind, origin: FailureOrigin) -> TopologyEvent {
+    stamped(TopologyEventBody::AttemptFinished {
+        data: Box::new(AttemptFinished4 {
+            key: TaskKey(0),
+            generation: GenerationId(0),
+            attempt: AttemptNumber(1),
+            record: Box::new(crate::events::AttemptRecord {
+                attempt: 1,
+                tier: "frontier".to_owned(),
+                model: "a-model".to_owned(),
+                pool: None,
+                resumed: false,
+                duration: Duration::ZERO,
+                cost_usd: None,
+                reviews: Vec::new(),
+                session_id: None,
+                usage: None,
+                failure: Some(FailureRecord {
+                    kind,
+                    origin,
+                    reason: "the attempt stopped".to_owned(),
+                    detail: None,
+                }),
+            }),
+            settlement: AttemptSettlement::Closed {
+                transition: SettlementTransition::Parked {
+                    question: frozen("q-parked"),
+                },
+                lease: LeaseDisposition::PredictedReleased,
+            },
+        }),
+    })
+}
+
+#[test]
+fn a_question_is_labelled_by_whether_the_worker_or_the_coordinator_raised_it() {
+    let spend = stamped(TopologyEventBody::QuestionRaised {
+        data: QuestionRaised4 {
+            question: FrozenQuestion {
+                kind: QuestionKind::ApproveSpend,
+                ..frozen("q-spend")
+            },
+        },
+    });
+    let verification = stamped(TopologyEventBody::MergeVerificationUnavailable {
+        data: MergeVerificationUnavailable {
+            sequence: SequenceId(1),
+            cause: UnavailableCause::HumanRequired {
+                verdict: "a person chooses the format".to_owned(),
+            },
+            outcome: UnavailableOutcome::Parked {
+                question: frozen("q-verify"),
+            },
+            reviews: Vec::new(),
+        },
+    });
+    let cases = [
+        (
+            "the worker asked for a person",
+            parked_on(FailureKind::NeedsHuman, FailureOrigin::Worker),
+            RaisedBy::Worker,
+        ),
+        (
+            "a reviewer asked for a person",
+            parked_on(FailureKind::NeedsHuman, FailureOrigin::Reviewer),
+            RaisedBy::Coordinator,
+        ),
+        (
+            "every rung failed its gates",
+            parked_on(FailureKind::GateFailed, FailureOrigin::Worker),
+            RaisedBy::Coordinator,
+        ),
+        (
+            "the review input was too large",
+            parked_on(FailureKind::ReviewInputTooLarge, FailureOrigin::Reviewer),
+            RaisedBy::Coordinator,
+        ),
+        (
+            "the deferrals ran out",
+            parked_on(FailureKind::RateLimited, FailureOrigin::Worker),
+            RaisedBy::Coordinator,
+        ),
+        ("a spend approval", spend, RaisedBy::Coordinator),
+        (
+            "integration verification",
+            verification,
+            RaisedBy::Coordinator,
+        ),
+    ];
+    for (case, event, by) in cases {
+        assert_eq!(RaisedBy::of(&event), by, "{case}");
+    }
+
+    let asked = question(&[RETRY]);
+    let worker = question_text(&asked, Some(RaisedBy::Worker));
+    assert!(worker.contains("raised by: the worker\n"), "{worker}");
+    assert!(!worker.contains("coordinator"), "{worker}");
+    let coordinator = question_text(&asked, Some(RaisedBy::Coordinator));
+    for line in [
+        "raised by: the coordinator\n",
+        "The coordinator raised this question itself; the task's worker did not ask it.\n",
+    ] {
+        assert!(coordinator.contains(line), "{line}: {coordinator}");
+    }
+    let unknown = question_text(&asked, None);
+    assert!(unknown.contains("raised by: unknown"), "{unknown}");
+    assert!(!unknown.contains("worker"), "{unknown}");
+}
+
+/// Agent text written to take a terminal over: a forged report line, a screen clear, a bell.
+const HOSTILE: &str = "retry\nq-02: decided by someone/else at max effort\u{1b}[2J\u{7}";
+/// `HOSTILE` as a report line shows it.
+const SHOWN: &str = "retry q-02: decided by someone/else at max effort\\u{1b}[2J\\u{7}";
+
+/// Whether `report` holds no control character but the line ends its builder wrote.
+fn only_layout_controls(report: &str) -> bool {
+    !report.chars().any(|c| c.is_control() && c != '\n')
+}
+
+/// A decider for rendering alone: nothing is built or started with it.
+fn rendering_decider() -> Decider<'static> {
+    Decider {
+        adapter: &crate::agent::claude::ClaudeCodeAdapter,
+        agent: crate::agent::claude::ADAPTER_ID.to_owned(),
+        model: "opus".to_owned(),
+        effort: Effort::Medium,
+        timeout: Duration::from_secs(1),
+        credential: None,
+        private_denials: Vec::new(),
+    }
+}
+
+#[test]
+fn agent_text_is_rendered_inside_its_own_line_with_its_controls_made_visible() {
+    let asked = question(&["retry \u{1b}[31mnow", crate::interaction::GIVE_UP_OPTION]);
+    let record = json!({
+        "choice": 1,
+        "guidance": HOSTILE,
+        "reasons": [HOSTILE],
+        "confidence": "high",
+        "needs_a_person": false,
+        "citations": [HOSTILE],
+    });
+    let decider = rendering_decider();
+    let mut out = TerminalLines::default();
+    let saved = Path::new("q-1.1.json");
+    render_one(&mut out, &decider, &asked, &Ok(record), Some(0.25), saved);
+    render_one(
+        &mut out,
+        &decider,
+        &asked,
+        &Err(HOSTILE.to_owned()),
+        None,
+        saved,
+    );
+    let report = out.into_string();
+    assert!(only_layout_controls(&report), "{report:?}");
+    assert!(
+        !report.lines().any(|line| line.starts_with("q-02")),
+        "no line is forged: {report}"
+    );
+    for line in [
+        "  choice: 1) retry \\u{1b}[31mnow".to_owned(),
+        format!("  guidance: {SHOWN}"),
+        format!("  reason: {SHOWN}"),
+        format!("  citation: {SHOWN}"),
+        format!("  status: refused — {SHOWN}"),
+    ] {
+        assert!(report.lines().any(|kept| kept == line), "{line}: {report}");
+    }
+
+    let decided = Decided {
+        report,
+        refused: vec!["q-1".to_owned(), HOSTILE.to_owned()],
+    };
+    let message = decided.outcome().expect_err("refused").to_string();
+    assert!(!message.chars().any(char::is_control), "{message:?}");
+    assert!(message.contains(&format!("q-1, {SHOWN}")), "{message}");
 }
 
 /// A Runner that records what it was asked to run and answers from a table,
@@ -595,14 +870,19 @@ fn a_valid_proposal_is_accepted_printed_and_saved_with_its_cost() {
     for field in FIELDS {
         assert!(saved["record"].get(field).is_some(), "{field}: {saved}");
     }
-    let raw = PathBuf::from(saved["raw_output"].as_str().expect("a path"));
+    let raw = saved["raw_output"].as_str().expect("a reference");
     assert_eq!(
         raw,
+        format!(".upstroke/proposals/{RUN}/q-01A.1.out"),
+        "the raw output is named from the repository root, `/`-separated on every platform"
+    );
+    assert_eq!(
+        fixture.repo.join(raw),
         proposals_dir(&fixture.repo, RUN).join("q-01A.1.out"),
         "the raw output is saved beside the proposal"
     );
     assert_eq!(
-        std::fs::read_to_string(&raw).expect("the raw output"),
+        std::fs::read_to_string(fixture.repo.join(raw)).expect("the raw output"),
         claude_output(&reply(VALID), Some(0.25))
     );
     assert!(report.contains(&format!(
@@ -611,6 +891,53 @@ fn a_valid_proposal_is_accepted_printed_and_saved_with_its_cost() {
             .join("q-01A.1.json")
             .display()
     )));
+}
+
+#[test]
+fn a_saved_proposal_names_its_raw_output_wherever_the_repository_is_moved() {
+    let fixture = one_question("decide-moved-repo");
+    let runner = Scripted::answering(vec![claude_output(&reply(VALID), Some(0.25))]);
+    decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+    let moved = fixture.repo.with_file_name("moved-repo");
+    std::fs::rename(&fixture.repo, &moved).expect("move the repository");
+    let path = proposals_dir(&moved, RUN).join("q-01A.1.json");
+    let saved: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("the proposal")).expect("JSON");
+    let raw = saved["raw_output"].as_str().expect("a reference");
+    assert!(
+        !Path::new(raw).is_absolute() && !raw.contains('\\'),
+        "relative and `/`-separated: {raw}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(moved.join(raw)).expect("the reference resolves from the new root"),
+        claude_output(&reply(VALID), Some(0.25))
+    );
+}
+
+#[test]
+fn a_decide_report_shows_agent_text_as_data_and_the_proposal_keeps_it_as_written() {
+    let fixture = one_question("decide-hostile");
+    let body = with_guidance(HOSTILE);
+    let runner = Scripted::answering(vec![claude_output(&reply(&body), Some(0.25))]);
+    let decided = decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+    let report = &decided.report;
+    assert!(decided.outcome().is_ok(), "{report}");
+    assert!(only_layout_controls(report), "{report:?}");
+    assert!(
+        report
+            .lines()
+            .any(|line| line == format!("  guidance: {SHOWN}")),
+        "{report}"
+    );
+    assert!(
+        !report.lines().any(|line| line.starts_with("q-02")),
+        "no line is forged: {report}"
+    );
+    assert_eq!(
+        fixture.proposal("q-01A", 1)["record"]["guidance"],
+        HOSTILE,
+        "the saved record keeps the text as the agent wrote it"
+    );
 }
 
 #[test]
@@ -737,7 +1064,8 @@ fn the_request_is_a_decide_request_for_the_runs_reviewer_with_no_overlay() {
     let prompt = String::from_utf8_lossy(&request.command.stdin);
     for fragment in [
         "id: q-01A\n",
-        "raised by: the worker",
+        "raised by: the coordinator\n",
+        "The coordinator raised this question itself; the task's worker did not ask it.",
         "q-01A: every rung failed on the same assertion",
         "  1) retry on frontier",
         "t0 title (t0)",
@@ -745,6 +1073,7 @@ fn the_request_is_a_decide_request_for_the_runs_reviewer_with_no_overlay() {
         "The widget task makes the widget.",
         "(no settled attempt of this task failed)",
         "exactly one fenced ```json block",
+        "Its opening ```json and its closing ``` are each a line of their own",
         "\"needs_a_person\"",
         "Giving up on the task is never an available answer here",
         "Nothing you write will be applied",

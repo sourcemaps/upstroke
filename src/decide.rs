@@ -17,17 +17,22 @@ use crate::agent::{AdapterSource, AgentAdapter, TaskRun, claude};
 use crate::capacity::Pool;
 use crate::engine::topology::observe::{self, Observed, OpenAsked};
 use crate::error::UpstrokeError;
+use crate::events::FailureRecord;
 use crate::ir::{Answer, Question, WorkerProfile};
+use crate::ladder::{FailureKind, FailureOrigin};
 use crate::runner::invocation::InvocationId;
 use crate::runner::{AgentId, CommandSpec, Runner};
 use crate::topology::events::{
     AttemptSettlement, RunStarted4, RunnerKind, SettlementTransition, TopologyEvent,
     TopologyEventBody,
 };
+use crate::util::terminal::{TerminalLines, one_line};
 
 pub const INPUT_BOUND: usize = 64 * 1024;
 pub const MAX_PROPOSALS_PER_QUESTION: u32 = 2;
 pub const DEFAULT_MAX_COST_USD: f64 = 5.0;
+/// The repository's own directory, which the proposals directory is under.
+const UPSTROKE_DIR: &str = ".upstroke";
 const PROPOSALS_DIR: &str = "proposals";
 /// The start of a reservation's file name, `reservation-<sequence>.json`. A plain question id
 /// holds no `.`, so no proposal, raw output or settings file is ever spelled this way.
@@ -194,11 +199,11 @@ impl Decided {
             return Ok(());
         }
         Err(UpstrokeError::Refused {
-            message: format!(
+            message: one_line(format!(
                 "{} repl(ies) were refused ({}); each is saved with its reason",
                 self.refused.len(),
                 self.refused.join(", ")
-            ),
+            )),
         })
     }
 }
@@ -218,7 +223,10 @@ fn refused(message: String) -> UpstrokeError {
 }
 
 pub fn proposals_dir(repo_root: &Path, run_id: &str) -> PathBuf {
-    repo_root.join(".upstroke").join(PROPOSALS_DIR).join(run_id)
+    repo_root
+        .join(UPSTROKE_DIR)
+        .join(PROPOSALS_DIR)
+        .join(run_id)
 }
 
 pub fn decide(
@@ -284,27 +292,28 @@ fn propose(
     let plan_text = read_bounded(&opts.repo_root.join(&started.plan_path));
     let mut proposals = ProposalsDir::open(&opts.repo_root, &opts.run_id)?;
 
-    let mut out = String::new();
+    // Every line of the report is pushed whole through the terminal line builder: the agent's
+    // reply, the run's question text and the file names read back are data inside a line, so
+    // none of them can start a line of its own or reach the terminal as a control.
+    let mut out = TerminalLines::default();
     let mut refusals = Vec::new();
     let mut spent = 0.0_f64;
     let mut unknown_cost = Vec::new();
     for (index, asked) in questions.iter().enumerate() {
         let id = asked.question.id.as_str().to_owned();
         if asked.binds_an_agent {
-            let _ = writeln!(
-                out,
+            out.push(format_args!(
                 "{id}: skipped — it chooses which agent runs a task, and binding questions are \
                  left to a person; no agent was asked"
-            );
+            ));
             continue;
         }
         if !plain_id(&id) {
-            let _ = writeln!(
-                out,
+            out.push(format_args!(
                 "{id:?}: refused — its id is not a plain file-name component (1 to \
                  {MAX_ID_BYTES} ASCII letters, digits, `-` or `_`, and no device name), so no \
                  file is named after it; no agent was asked"
-            );
+            ));
             refusals.push(id.clone());
             continue;
         }
@@ -320,37 +329,34 @@ fn propose(
         let (call, reservation) = match reserve(&mut proposals, &decider, opts, &id, &prompt)? {
             Admission::Reserved { call, reservation } => (call, reservation),
             Admission::SlotsTaken => {
-                let _ = writeln!(
-                    out,
+                out.push(format_args!(
                     "{id}: refused — it already has {MAX_PROPOSALS_PER_QUESTION} reserved \
                      proposal slots under {}; no agent was asked",
                     proposals.path().display()
-                );
+                ));
                 refusals.push(id.clone());
                 continue;
             }
             Admission::AllowanceSpent { spent_usd } => {
-                let _ = writeln!(
-                    out,
+                out.push(format_args!(
                     "stopped: this run's decide calls have reserved or spent ${spent_usd:.4}, \
                      which reaches the --max-cost-usd allowance of ${:.4} for the run; left \
                      without a proposal: {}",
                     opts.max_cost_usd,
                     left().join(", ")
-                );
+                ));
                 break;
             }
             Admission::Ambiguous(reasons) => {
                 let left = left();
-                let _ = writeln!(
-                    out,
+                out.push(format_args!(
                     "stopped: this run's decide history under {} is ambiguous, so what is left \
                      of the --max-cost-usd allowance cannot be known and no call is started: {}; \
                      a person settles these files; left without a proposal: {}",
                     proposals.path().display(),
                     reasons.join("; "),
                     left.join(", ")
-                );
+                ));
                 refusals.extend(left);
                 break;
             }
@@ -377,7 +383,7 @@ fn propose(
                 verdict: &verdict,
                 cost_usd: asked_once.cost_usd,
                 reserved_usd: reservation.reserved_usd,
-                raw: &asked_once.raw_path,
+                raw_name: &asked_once.raw_name,
             },
         )?;
         render_one(
@@ -392,20 +398,18 @@ fn propose(
             refusals.push(id.clone());
         }
     }
-    let _ = writeln!(out, "total cost: ${spent:.4}");
+    out.push(format_args!("total cost: ${spent:.4}"));
     if !unknown_cost.is_empty() {
-        let _ = writeln!(
-            out,
+        out.push(format_args!(
             "cost unknown for: {} (the agent reported none, so the total is a floor)",
             unknown_cost.join(", ")
-        );
+        ));
     }
-    let _ = writeln!(
-        out,
+    out.push(format_args!(
         "nothing was answered: a person applies a proposal with `upstroke answer <question-id>`"
-    );
+    ));
     Ok(Decided {
-        report: out,
+        report: out.into_string(),
         refused: refusals,
     })
 }
@@ -551,23 +555,45 @@ fn chosen_questions(
     }
 }
 
-/// Who raised a question, read from the event that opened it.
-fn raised_by(event: &TopologyEvent) -> &'static str {
-    match &event.body {
-        TopologyEventBody::QuestionRaised { .. } => "the worker",
-        TopologyEventBody::AttemptFinished { data } => {
-            match (&data.settlement, &data.record.failure) {
-                (
+/// Who raised a question: the task's worker, or the coordinator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RaisedBy {
+    /// The worker asked for a person: its attempt settled parked on a `NeedsHuman` failure of
+    /// worker origin.
+    Worker,
+    /// The coordinator parked the task for a person: on a reviewer's verdict, once the task's
+    /// ladder or deferrals ran out, to approve a spend, at a task's admission, or when
+    /// integration verification could not finish.
+    Coordinator,
+}
+
+impl RaisedBy {
+    /// Read from the event that opened the question.
+    fn of(event: &TopologyEvent) -> Self {
+        let asked_by_worker = |failure: &FailureRecord| {
+            failure.kind == FailureKind::NeedsHuman && failure.origin == FailureOrigin::Worker
+        };
+        match &event.body {
+            TopologyEventBody::AttemptFinished { data }
+                if matches!(
+                    &data.settlement,
                     AttemptSettlement::Closed {
                         transition: SettlementTransition::Parked { .. },
                         ..
-                    },
-                    Some(failure),
-                ) if failure.origin == crate::ladder::FailureOrigin::Reviewer => "a reviewer",
-                _ => "the worker",
+                    }
+                ) && data.record.failure.as_ref().is_some_and(asked_by_worker) =>
+            {
+                Self::Worker
             }
+            _ => Self::Coordinator,
         }
-        _ => "integration",
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Worker => "the worker",
+            Self::Coordinator => "the coordinator",
+        }
     }
 }
 
@@ -607,11 +633,38 @@ fn section(prompt: &mut String, title: &str, text: &str) {
     prompt.push_str("\n\n");
 }
 
+/// The question as the prompt states it: its id, who raised it (`None` where no event of the
+/// run's log is found to have opened it), its context and its options.
+fn question_text(question: &Question, raised_by: Option<RaisedBy>) -> String {
+    let by = raised_by.map_or(
+        "unknown (no event of the run's log opened it)",
+        RaisedBy::label,
+    );
+    let mut text = format!(
+        "id: {}\nraised by: {by}\ncontext:\n{}\n",
+        question.id, question.context
+    );
+    if raised_by == Some(RaisedBy::Coordinator) {
+        text.push_str(
+            "The coordinator raised this question itself; the task's worker did not ask it.\n",
+        );
+    }
+    if question.options.is_empty() {
+        text.push_str("options: none (choice must be null)\n");
+    } else {
+        text.push_str("options:\n");
+        for (at, option) in question.options.iter().enumerate() {
+            let _ = writeln!(text, "  {}) {option}", at + 1);
+        }
+    }
+    text
+}
+
 fn build_prompt(observed: &Observed, asked: &OpenAsked, plan_text: &str) -> String {
     let question = &asked.question;
     let raised = observed.raised_questions();
     let opener = raised.iter().find(|(frozen, _)| frozen.id == question.id);
-    let by = opener.map_or("the worker", |(_, event)| raised_by(event));
+    let raised_by = opener.map(|(_, event)| RaisedBy::of(event));
     let key = opener.map(|(frozen, _)| frozen.key);
 
     let mut prompt = String::new();
@@ -621,25 +674,11 @@ fn build_prompt(observed: &Observed, asked: &OpenAsked, plan_text: &str) -> Stri
          you write will be applied; a person reads your proposal and decides. Giving up on the \
          task is never an available answer here.\n\n",
     );
-    let mut asked_text = format!(
-        "id: {}\nraised by: {by}\ncontext:\n{}\n",
-        question.id, question.context
+    section(
+        &mut prompt,
+        "The question",
+        &question_text(question, raised_by),
     );
-    if by != "the worker" {
-        let _ = writeln!(
-            asked_text,
-            "{by} judged this a person's decision rather than one it could make itself."
-        );
-    }
-    if question.options.is_empty() {
-        asked_text.push_str("options: none (choice must be null)\n");
-    } else {
-        asked_text.push_str("options:\n");
-        for (at, option) in question.options.iter().enumerate() {
-            let _ = writeln!(asked_text, "  {}) {option}", at + 1);
-        }
-    }
-    section(&mut prompt, "The question", &asked_text);
 
     let task = key
         .and_then(|key| observed.registry().and_then(|registry| registry.get(key)))
@@ -674,7 +713,8 @@ fn build_prompt(observed: &Observed, asked: &OpenAsked, plan_text: &str) -> Stri
 
     prompt.push_str(
         "## Your reply\n\nReply with exactly one fenced ```json block holding an object with \
-         these six fields and nothing else outside it that is fenced:\n\
+         these six fields and nothing else outside it that is fenced. Its opening ```json and \
+         its closing ``` are each a line of their own:\n\
          - \"choice\": the 1-based number of the option you propose, or null when the question \
          has no options\n\
          - \"guidance\": text a person would give the task\n\
@@ -736,7 +776,8 @@ fn earlier_answers(events: &[TopologyEvent], key: crate::topology::registry::Tas
 struct Asked {
     reply: Result<String, String>,
     cost_usd: Option<f64>,
-    raw_path: PathBuf,
+    /// The name of the raw output's file in the proposals directory.
+    raw_name: String,
 }
 
 /// One decide call, built and checked. Nothing of it is written yet.
@@ -1030,7 +1071,8 @@ fn ask(
     if let Some(credential) = &decider.credential {
         request = request.with_credential_profile(credential.clone());
     }
-    let raw_path = proposals.path().join(format!("{id}.{n}.out"));
+    let raw_name = format!("{id}.{n}.out");
+    let raw_path = proposals.path().join(&raw_name);
     let output = match runner.run_blocking(&request) {
         Ok(output) => output,
         Err(error) => {
@@ -1040,7 +1082,7 @@ fn ask(
             return Ok(Asked {
                 reply: Err(reason),
                 cost_usd: None,
-                raw_path,
+                raw_name,
             });
         }
     };
@@ -1050,32 +1092,57 @@ fn ask(
         Ok(outcome) => Asked {
             reply: Ok(outcome.detail.unwrap_or_default()),
             cost_usd: outcome.cost_usd,
-            raw_path,
+            raw_name,
         },
         Err(error) => Asked {
             reply: Err(format!(
                 "the adapter could not parse the agent's output: {error}"
             )),
             cost_usd: None,
-            raw_path,
+            raw_name,
         },
     })
 }
 
-/// The one fenced `json` block of `text`, or why there is not exactly one.
+/// A fence: with an info string after it, a line that opens a block; alone, one that closes it.
+const FENCE: &str = "```";
+/// The info string of the block a reply answers in.
+const REPLY_INFO: &str = "json";
+
+/// The one fenced `json` block of `text`, or why there is not exactly one. A fence is a whole
+/// line, with nothing beside it but whitespace (a `\r` included): outside a block, "```" and an
+/// info string holding no backtick open one, and inside, "```" alone closes it. A fence written
+/// within a line opens and closes nothing, so the JSON may mention one in a string (a JSON string
+/// holds no raw line break, so it is never a line of its own), and a block of any other info
+/// string is passed over whole, a "```json" line inside it included. A `json` block left open is
+/// refused; another block left open runs to the end of the reply, as Markdown reads it.
 fn fenced_json(text: &str) -> Result<&str, String> {
     let mut blocks = Vec::new();
-    let mut rest = text;
-    let mut offset = 0;
-    while let Some(at) = rest.find("```json") {
-        let start = offset + at + "```json".len();
-        let after = text.get(start..).unwrap_or_default();
-        let Some(end) = after.find("```") else {
-            return Err("a fenced json block is never closed".to_owned());
-        };
-        blocks.push(after.get(..end).unwrap_or_default());
-        offset = start + end + 3;
-        rest = text.get(offset..).unwrap_or_default();
+    // The block the walk is in, if any: whether it is `json`, and where its body starts.
+    let mut open: Option<(bool, usize)> = None;
+    let mut end = 0;
+    for line in text.split_inclusive('\n') {
+        let start = end;
+        end += line.len();
+        let bare = line.trim();
+        match open {
+            None => {
+                open = bare
+                    .strip_prefix(FENCE)
+                    .filter(|info| !info.contains('`'))
+                    .map(|info| (info.trim() == REPLY_INFO, end));
+            }
+            Some((json, body)) if bare == FENCE => {
+                if json {
+                    blocks.push(text.get(body..start).unwrap_or_default());
+                }
+                open = None;
+            }
+            Some(_) => {}
+        }
+    }
+    if matches!(open, Some((true, _))) {
+        return Err("a fenced json block is never closed".to_owned());
     }
     match blocks.as_slice() {
         [only] => Ok(only),
@@ -1262,6 +1329,8 @@ fn trusted_dir(path: &Path, repo_root: &Path) -> Result<Option<DirIdentity>, Str
 /// and the identity of the last once it exists.
 struct ProposalsDir {
     repo_root: PathBuf,
+    /// The run's id, which `open` admits only as a plain file-name component.
+    run_id: String,
     chain: [PathBuf; 3],
     identity: Option<DirIdentity>,
 }
@@ -1283,10 +1352,11 @@ impl ProposalsDir {
             )));
         }
         let leaf = proposals_dir(repo_root, run_id);
-        let middle = repo_root.join(".upstroke").join(PROPOSALS_DIR);
-        let top = repo_root.join(".upstroke");
+        let middle = repo_root.join(UPSTROKE_DIR).join(PROPOSALS_DIR);
+        let top = repo_root.join(UPSTROKE_DIR);
         let mut dir = Self {
             repo_root: repo_root.to_path_buf(),
+            run_id: run_id.to_owned(),
             chain: [top, middle, leaf],
             identity: None,
         };
@@ -1297,6 +1367,14 @@ impl ProposalsDir {
     fn path(&self) -> &Path {
         let [_, _, leaf] = &self.chain;
         leaf
+    }
+
+    /// How a saved record names the file `name` of the run's directory: its path from the
+    /// repository root, each component a plain name and `/` between them on every platform. It
+    /// names the same file wherever the repository is checked out and whichever system reads it,
+    /// where an absolute path would name the checkout that wrote it, in that system's spelling.
+    fn reference(&self, name: &str) -> String {
+        format!("{UPSTROKE_DIR}/{PROPOSALS_DIR}/{}/{name}", self.run_id)
     }
 
     fn trusted(&self, path: &Path) -> Result<Option<DirIdentity>, UpstrokeError> {
@@ -1689,7 +1767,8 @@ struct SaveRecord<'a> {
     verdict: &'a Result<Value, String>,
     cost_usd: Option<f64>,
     reserved_usd: f64,
-    raw: &'a Path,
+    /// The raw output's file name in the proposals directory.
+    raw_name: &'a str,
 }
 
 fn save(
@@ -1711,7 +1790,7 @@ fn save(
         "status": status,
         "cost_usd": record.cost_usd,
         "reserved_usd": record.reserved_usd,
-        "raw_output": record.raw.to_string_lossy(),
+        "raw_output": proposals.reference(record.raw_name),
     });
     if let Some(object) = document.as_object_mut() {
         object.insert(body.0.to_owned(), body.1);
@@ -1723,25 +1802,25 @@ fn save(
     Ok(path)
 }
 
+/// One question's lines of the report. The reply's fields, the refusal's reason and the option's
+/// text are each data inside a line `out` builds, so none can start a line or reach the terminal
+/// as a control; the saved record keeps them as they were.
 fn render_one(
-    out: &mut String,
+    out: &mut TerminalLines,
     decider: &Decider<'_>,
     question: &Question,
     verdict: &Result<Value, String>,
     cost_usd: Option<f64>,
     saved: &Path,
 ) {
-    let _ = writeln!(
-        out,
+    out.push(format_args!(
         "{}: decided by {}/{} at {} effort",
         question.id, decider.agent, decider.model, decider.effort
-    );
+    ));
     match verdict {
-        Err(reason) => {
-            let _ = writeln!(out, "  status: refused — {reason}");
-        }
+        Err(reason) => out.push(format_args!("  status: refused — {reason}")),
         Ok(record) => {
-            let _ = writeln!(out, "  status: accepted");
+            out.push(format_args!("  status: accepted"));
             let choice = record["choice"].as_u64().map_or_else(
                 || "none".to_owned(),
                 |number| {
@@ -1753,31 +1832,31 @@ fn render_one(
                     format!("{number}) {text}")
                 },
             );
-            let _ = writeln!(out, "  choice: {choice}");
-            let _ = writeln!(
-                out,
+            out.push(format_args!("  choice: {choice}"));
+            out.push(format_args!(
                 "  guidance: {}",
                 record["guidance"].as_str().unwrap_or("")
-            );
-            let _ = writeln!(
-                out,
+            ));
+            out.push(format_args!(
                 "  confidence: {}",
                 record["confidence"].as_str().unwrap_or("")
-            );
-            let _ = writeln!(out, "  needs a person: {}", record["needs_a_person"]);
+            ));
+            out.push(format_args!(
+                "  needs a person: {}",
+                record["needs_a_person"]
+            ));
             for (field, label) in [("reasons", "reason"), ("citations", "citation")] {
                 for item in record[field].as_array().into_iter().flatten() {
-                    let _ = writeln!(out, "  {label}: {}", item.as_str().unwrap_or(""));
+                    out.push(format_args!("  {label}: {}", item.as_str().unwrap_or("")));
                 }
             }
         }
     }
-    let _ = writeln!(
-        out,
+    out.push(format_args!(
         "  cost: {}",
         cost_usd.map_or_else(|| "unknown".to_owned(), |cost| format!("${cost:.4}"))
-    );
-    let _ = writeln!(out, "  saved: {}", saved.display());
+    ));
+    out.push(format_args!("  saved: {}", saved.display()));
 }
 
 #[cfg(test)]
