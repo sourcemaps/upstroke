@@ -39,9 +39,12 @@ is no daemon.
 
 **`capacity serve`, decided 2026-11-25 (not built).** The capacity handler (§13) will be a
 subcommand of the one binary, `upstroke capacity serve`, started explicitly by the operator, under
-the machine's own service manager if they choose; a run does not start it. Unlike the rest of
-`capacity`, it writes state, under `~/.upstroke/capacity/`, and listens on a local connection for
-runs, so it is classed with `run` and `resume` as a command that writes. Until it exists, the
+the machine's own service manager if they choose; a run does not start it. It runs until the
+operator stops it, keeps the handler's own state under `~/.upstroke/capacity/` and listens on a
+local connection for runs; so, unlike the rest of `capacity`, which is classed read-only, it is
+classed with `run` and `resume`. That class governs how a command's process and its children are
+contained, not whether it writes files: `capacity --refresh` already stores reports under
+`~/.upstroke/capacity/usage/`. Until it exists, the
 sentence above stands: there is no daemon.
 
 `--dry-run` executes everything except agents: parse, route, and print task → kind → chain (with source of each decision: config/annotation/override) → gates → pool + strategy effect, at zero spend. It exists from day one; it is both the config-iteration loop and the sales demo.
