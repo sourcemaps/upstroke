@@ -33,9 +33,14 @@ that boundary only (`SWEEP-CONFIG-PARSE-007`, closed by the sweep of
 (`SWEEP-CONFIG-PARSE-008`), by the same attribute on `RawStrategy` -- the
 rule `[[routing.overrides]]`, `[[pins]]`, `[routing.effort]` and the per-kind
 routing tables already followed. An unknown key there now refuses the load as
-an `UpstrokeError::Config` carrying the deserializer's own text, which names
-the key as written and the accepted `mode` and `spend_down_after`. Only a key
-is refused: an unrecognised `mode` value still warns and the load succeeds.
+an `UpstrokeError::Config` carrying the deserializer's own message, which names
+the key as written and the accepted `mode` and `spend_down_after`. That
+message reaches the operator through `read::toml_error_message`, as every
+refusal of a settings or pools file does: the line and column the error
+points at, then the message, and never the file's text, with any value the
+message quotes that is longer than 16 characters withheld (a key or schema
+name is kept up to 64). Only a key is refused: an unrecognised `mode` value
+still warns and the load succeeds.
 No forward-compatibility key is lost at the top level: nothing in the tree's
 fixtures, docs or examples writes a top-level key outside the seven.
 
@@ -63,10 +68,12 @@ witnessed against removing `#[serde(deny_unknown_fields)]` from
 refusal's text is the deserializer's, so what is asserted is what an operator
 needs from it -- the key as written and both accepted keys -- and that no
 warning stands in for it. Each name is matched inside the backticks serde
-quotes it in, because the TOML error also echoes the offending source line,
-where `spend_down_afer` appears whatever the error says about it. The capture
-is built in memory and goes through `load_captured`, as in the test above and
-for the same reason.
+quotes it in. The refusal used to echo the offending source line as well,
+where `spend_down_afer` appeared whatever the error said about it; it carries
+none of the file's text now (`read::toml_error_message`), and the backticks
+still keep the assertion about what serde says rather than about a substring
+that happens to occur. The capture is built in memory and goes through
+`load_captured`, as in the test above and for the same reason.
 
 ## `gates: Option<toml::Value>,`
 
@@ -762,7 +769,9 @@ interpreted. With one, three things happen in an order that is the design:
    repository file's path, since the repository's keys are the ones that
    win. A refusal there is passed through `layers::beneath`, which adds that
    a second file is applied, because the cause can be a key that file
-   supplied or the two together.
+   supplied or the two together. The merged table is no file's text, so a
+   refusal of its `try_into` has no line or column to give: it is serde's
+   message alone, through `read::toml_error_message` like every other.
 3. **Warnings are attributed, not duplicated.** The machine pass's warnings
    name the machine file. The merged pass raises the same ones again under
    the repository's path for every key that survived the merge; those are
@@ -786,6 +795,11 @@ body of [`load_captured_with`] until the machine level arrived, and is a
 function of its own so that the same interpretation can be run over the
 machine-level file alone and over the merge. It returns a [`Config`] with no
 pools and no machine directory; the caller fills both in.
+
+A `try_into` refusal of `[routing.effort]` or of a routing entry is serde's
+message passed through `read::toml_error_message` with no text, so it is the
+message alone: a `toml::Value` has dropped the spans that would place it, and
+the section the refusal names is what an operator finds it by.
 
 ## `if key == "review" {`
 

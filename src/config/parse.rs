@@ -13,7 +13,7 @@ use super::{
     DEFAULT_WAIT_ON_BLOCK, Duration, Effort, EngineLimits, EngineSettings, GateConfig,
     InteractionMode, InteractionSettings, OnTaskFailure, Path, RUNNER_KEYS, RawEngine, RawGate,
     RawInteraction, RawRunner, RunnerKind, RunnerMount, RunnerSelection, ShellKind, UpstrokeError,
-    check_budget,
+    check_budget, toml_error_message,
 };
 
 fn config_error(repo_path: &Path, message: String) -> UpstrokeError {
@@ -31,6 +31,7 @@ pub(super) fn read_runner(
         return Ok(RunnerSelection::host_default());
     };
     let runner: RawRunner = value.try_into().map_err(|e| {
+        let e = toml_error_message(&e, None);
         config_error(
             repo_path,
             format!(
@@ -216,6 +217,7 @@ pub(super) fn parse_budgets(
         return Ok(Budgets::default());
     };
     let budgets: Budgets = value.try_into().map_err(|e| {
+        let e = toml_error_message(&e, None);
         config_error(
             repo_path,
             format!(
@@ -250,6 +252,7 @@ pub(super) fn parse_capacity(
         return Ok(Scope::default());
     };
     let capacity: RawCapacity = value.try_into().map_err(|e| {
+        let e = toml_error_message(&e, None);
         config_error(
             repo_path,
             format!(
@@ -322,6 +325,7 @@ pub(super) fn parse_gates(
         let g: RawGate = match entry.try_into() {
             Ok(g) => g,
             Err(e) => {
+                let e = toml_error_message(&e, None);
                 let problem = format!(
                     "[[gates]] entry {n}: {e} (each entry takes `name`, `cmd`, and an optional \
                      `timeout_secs` integer)"
@@ -496,6 +500,7 @@ pub(super) fn parse_engine(
         });
     };
     let engine: RawEngine = value.try_into().map_err(|e| {
+        let e = toml_error_message(&e, None);
         config_error(
             repo_path,
             format!(
@@ -645,6 +650,7 @@ pub(super) fn parse_interaction(
         });
     };
     let interaction: RawInteraction = value.try_into().map_err(|e| {
+        let e = toml_error_message(&e, None);
         config_error(
             repo_path,
             format!(
@@ -657,6 +663,7 @@ pub(super) fn parse_interaction(
     let ask_before = match interaction.ask_before {
         None => AskBefore::default(),
         Some(value) => value.try_into().map_err(|e| {
+            let e = toml_error_message(&e, None);
             config_error(
                 repo_path,
                 format!(
