@@ -140,6 +140,6 @@ grant (Apache-2.0 §6): use "upstroke" to refer to this project, not to present 
 as the original.
 
 Outside contributions are not being accepted at present; [CONTRIBUTING.md](CONTRIBUTING.md) says
-why, and carries the CLA that sending a contribution accepts, whether it arrives as a pull request
-or in an issue. Bug reports and questions are welcome as issues. Rust changes follow the
-[coding standards](CODING_STANDARDS.md), and the design lives in [DESIGN.md](DESIGN.md).
+why, and carries the workflow and the Contributor Licence Agreement. Bug reports and questions are
+welcome as issues. Rust changes follow the [coding standards](CODING_STANDARDS.md), and the design
+lives in [DESIGN.md](DESIGN.md).
