@@ -580,6 +580,9 @@ is the open question in §9. On top of whatever that lane requires:
 one-pass stopping rule is suspended for sweep lanes by owner ruling; it still governs ordinary
 feature work.
 
+A fix confined to the pull request's own text, on `MAINTAINING.md` step 5's terms, is not a repair
+round and needs no further pass here either.
+
 ---
 
 ## 8. Merging
@@ -852,3 +855,78 @@ pull request body rather than discovering it later.
   has only ever been exercised by its own fixtures is not yet a gate, and grammar is not the lane
   question above. Landing #251 and watching it
   refuse one real branch is owed before the sweep leans on it.
+
+---
+
+## 10. A finding that records a red
+
+**This section governs the record of a test that failed in CI, or in a build machine's baseline,
+where the change under test does not explain the failure.** That means a new finding, and every
+section added to an open one (a sighting, a fingerprint). It does not rewrite what a file's earlier
+sections say. It stops governing a finding once a reproduction or a measurement establishes the
+cause. That evidence is then recorded as established, and the remedy may be written.
+
+**The record gives:**
+
+1. **The failure sequence**, as the log and the test's source show it, ending at the assertion
+   that failed.
+2. **What the test asserts**, by `path:line` at the commit that ran.
+3. **The sighting:**
+   - the run, job, platform, date and pull request;
+   - the commit the job checked out, which for a `pull_request` run is GitHub's merge commit, not
+     the head;
+   - the job log, by its path and the SHA-256 of the log as GitHub's API serves it
+     (`actions/jobs/<id>/logs`) with ANSI escape sequences removed, never a copy made with
+     `gh run view --log`;
+   - each fact, by its line in that log.
+4. **The same tree's passes.** A run is the same tree only when the commit it checked out has the
+   failing run's tree. Otherwise the record says what differed, for example "the same branch tree,
+   merged into a later `master`".
+5. **What is established, and what is not**, each as a short statement of its own.
+6. **What the log does not show** that bears on the readings, one line each, where there is any.
+   These are facts about the log. The record does not claim that they would settle anything.
+7. **Each candidate reading in one sentence, marked *Inferred, not established***, followed by
+   "These readings are not exhaustive."
+8. **The rate**, only if counted: the population (the workflow, the window, which conclusions
+   count), the failing runs by id, and the total. Otherwise, "Not established: the rate."
+
+**The record does not give:**
+
+- a rule for deciding between the readings;
+- a cause or a reading stated as fact anywhere, including the title, the failure sequence and
+  `guard:`;
+- a remedy, a design or a proposal;
+- a claim that the red has another finding's cause, or shares a cause with it.
+
+**Two references to other findings are facts, not causes, and are allowed:**
+
+- A sighting is recorded in the open finding whose test, assertion and message it matches, and
+  says so. A recurrence is worth exactly its fingerprint (`MAINTAINING.md`, "When a pull request
+  may be looping").
+- One sentence may point at another finding by `id`, citing by line what that finding records. It
+  says nothing about a shared cause.
+
+**In a new finding, "What the change that takes this up should do" says only two things:** what
+that change must keep (the assertion, with no retry, skip or weaker assertion), and what it must
+make observable. `guard:` names that change. Diagnosis and design belong to that change, which can
+run what this record could only read.
+
+**The pull request's body** names each record by `id` and says what it adds. It does not restate
+the records' counts, rates or readings, so a repair to a record cannot leave the body stale.
+
+**Review of a `findings/` pull request that records reds is one round of passes. There is no
+second round.** Besides checking each fact against the logs and the source, each pass names any
+open finding that records the same test, the same assertion, or the same error on the same
+platform. The repair:
+
+- corrects each fact a pass disputes, and re-checks it against its source: the log line, the
+  hash, the commit;
+- deletes, and does not reword, each sentence a pass finds to be a reading stated as fact, a rule,
+  a remedy or a cause;
+- adds any reading a pass names, as one sentence marked *Inferred, not established*;
+- adds a pointer, under the rule above, for each finding a pass names;
+- adds nothing else.
+
+The repair gets a word-diff read, recorded in the body. It keeps the review under `MAINTAINING.md`
+step 5's rule for a push confined to the ledger. A P2 or worse that such a repair cannot settle
+goes to a ruling.
