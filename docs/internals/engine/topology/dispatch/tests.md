@@ -483,7 +483,8 @@ finished.
 winguest lane with 30 kills in 32 spawns, ten `None` and twenty `After` with
 `MERGE_MSG` in place, none between: on Windows `git` on the `PATH` is Git for
 Windows' `cmd\git.exe`, a 46 KB launcher that starts the real
-`mingw64\bin\git.exe` as its own child and waits, so `Child::kill` ended
+`<MinGW prefix>\bin\git.exe` (`mingw64`, or `ucrt64` on newer images) as
+its own child and waits, so `Child::kill` ended
 the launcher and the pick either never began or ran to completion — no
 sampled kill had ever interrupted git on that lane. `KillableGitChild::spawn`
 now runs the real binary, resolved once through `git --exec-path`
