@@ -51,7 +51,9 @@ The log is `evidence/job-shard__2-of-4__-132828860062.log` of that measurement.
   test executable was still alive after the step had ended.
 - The job's CPU reading was 24.8% busy on 4 processors; the three other shards of the run read
   75–91%.
-- The other three shards, and the three whole-suite jobs of the same run, ended normally.
+- The run had eight jobs, four shards and four whole-suite jobs. The other three shards and two of
+  the four whole-suite jobs passed; the other two whole-suite jobs each failed on one unrelated
+  test and then ended. None of the seven printed its results and then stayed running.
 
 ## What is and is not established
 
@@ -66,7 +68,7 @@ came. The low CPU reading fits a wait rather than work, and does not prove one.
 
 **Not established**: which test spawned the process, since the log does not record it; whether the
 helper was waiting on something or merely never told to exit; how often this happens, from one
-sighting in seven jobs of one run; and whether the guest's job, `test (winguest)`, can hang the same
+sighting in the eight jobs of one run; and whether the guest's job, `test (winguest)`, can hang the same
 way. The guest pipes the suite identically, but it has its own 20-minute job limit and no sighting
 there is recorded. No `src/` change is identified as the cause, hence `provenance: undetermined`.
 
