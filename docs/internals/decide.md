@@ -322,10 +322,13 @@ raiser is unknown rather than guessing.
 
 ## `fn check_reply(question: &Question, text: &str) -> Result<Value, String> {`
 
-Exactly one fenced `json` block, all six fields, their types, and a choice the run could apply as
-a person's answer. A choice outside the options, a choice `interaction::answer_for_option` maps
-to a decline (or whose text `interaction::interpret` reads as one), and `null` where the question
-has options are refused (`a_bad_reply_is_refused_with_its_reason`,
+Exactly one fenced block, every block counted whatever its info string, and that one a closed
+`json` block; all six fields, their types, and a choice the run could apply as a person's answer.
+A second block of any kind beside the proposal is refused
+(`a_reply_with_a_second_fenced_block_is_refused`). A choice outside the options, a choice
+`interaction::answer_for_option` maps to a decline (or whose text `interaction::interpret` reads
+as one), and `null` where the question has options are refused
+(`a_bad_reply_is_refused_with_its_reason`,
 `each_bad_reply_is_refused_saved_and_fails_the_command_after_the_others`).
 
 ## `fn fenced_json(text: &str) -> Result<&str, String> {`
@@ -335,10 +338,18 @@ and an info string with no backtick in it opens one, and inside, a line that is 
 closes it, each with nothing beside it but whitespace and a carriage return. So a fence the JSON
 mentions in a string never opens or closes anything (a JSON string holds no raw line break, so it
 is never a line of its own), a line that merely starts with inline code opens nothing, and a block
-of any other info string is passed over whole, a ```` ```json ```` line inside it included. A
-`json` block left open is refused; another block left open runs to the end of the reply. The
-prompt asks for the two fences on lines of their own
+is read whole, a ```` ```json ```` line inside it included. The prompt asks for the two fences on
+lines of their own
 (`a_fence_mentioned_in_the_guidance_is_text_and_only_a_whole_line_is_a_fence`).
+
+Every block is counted, whatever its info string (none included) and whether it is closed or left
+open, a block left open running to the end of the reply. A reply is accepted only when it holds
+exactly one block and that block is a closed `json` block, as the prompt asks for nothing fenced
+outside it; any other reply is refused, and the refusal says how many blocks it holds. A closed
+`text` block before or after the proposal, a block with no info string and a block left open
+after it each make two, and a `text` block quoting a ```` ```json ```` line is still one block
+(`a_reply_with_a_second_fenced_block_is_refused`). A lone `json` block left open, and a lone block
+of any other info string, are refused as such.
 
 ## `fn create_durably(path: &Path, bytes: &[u8]) -> std::io::Result<()> {`
 

@@ -1109,15 +1109,18 @@ const FENCE: &str = "```";
 /// The info string of the block a reply answers in.
 const REPLY_INFO: &str = "json";
 
-/// The one fenced `json` block of `text`, or why there is not exactly one. A fence is a whole
-/// line, with nothing beside it but whitespace (a `\r` included): outside a block, "```" and an
-/// info string holding no backtick open one, and inside, "```" alone closes it. A fence written
-/// within a line opens and closes nothing, so the JSON may mention one in a string (a JSON string
-/// holds no raw line break, so it is never a line of its own), and a block of any other info
-/// string is passed over whole, a "```json" line inside it included. A `json` block left open is
-/// refused; another block left open runs to the end of the reply, as Markdown reads it.
+/// The body of the one fenced block of `text` when that block is a closed `json` block, or why
+/// the reply is refused. A fence is a whole line, with nothing beside it but whitespace (a `\r`
+/// included): outside a block, "```" and an info string holding no backtick open one, and inside,
+/// "```" alone closes it. A fence written within a line opens and closes nothing, so the JSON may
+/// mention one in a string (a JSON string holds no raw line break, so it is never a line of its
+/// own), and a block is read whole, a "```json" line inside it included. Every block is counted,
+/// whatever its info string (none included) and whether it is closed or not: one left open runs
+/// to the end of the reply, as Markdown reads it. A reply is accepted only when it holds exactly
+/// one block and that block is a closed `json` block; a refusal says how many blocks it holds.
 fn fenced_json(text: &str) -> Result<&str, String> {
-    let mut blocks = Vec::new();
+    // Every block, in order: whether it is `json`, and its body once it is closed.
+    let mut blocks: Vec<(bool, Option<&str>)> = Vec::new();
     // The block the walk is in, if any: whether it is `json`, and where its body starts.
     let mut open: Option<(bool, usize)> = None;
     let mut end = 0;
@@ -1133,22 +1136,26 @@ fn fenced_json(text: &str) -> Result<&str, String> {
                     .map(|info| (info.trim() == REPLY_INFO, end));
             }
             Some((json, body)) if bare == FENCE => {
-                if json {
-                    blocks.push(text.get(body..start).unwrap_or_default());
-                }
+                blocks.push((json, Some(text.get(body..start).unwrap_or_default())));
                 open = None;
             }
             Some(_) => {}
         }
     }
-    if matches!(open, Some((true, _))) {
-        return Err("a fenced json block is never closed".to_owned());
+    if let Some((json, _)) = open {
+        blocks.push((json, None));
     }
     match blocks.as_slice() {
-        [only] => Ok(only),
-        [] => Err("the reply holds no fenced json block".to_owned()),
+        [(true, Some(body))] => Ok(body),
+        [(true, None)] => {
+            Err("the reply holds 1 fenced block, a json block that is never closed".to_owned())
+        }
+        [(false, _)] => {
+            Err("the reply holds 1 fenced block, and it is not a json block".to_owned())
+        }
+        [] => Err("the reply holds no fenced block; one json block is asked for".to_owned()),
         several => Err(format!(
-            "the reply holds {} fenced json blocks; exactly one is asked for",
+            "the reply holds {} fenced blocks; exactly one, a json block, is asked for",
             several.len()
         )),
     }

@@ -49,9 +49,9 @@ fn bad_replies() -> Vec<(String, &'static str)> {
         (reply(&missing), "`guidance` is missing"),
         (
             format!("{}{}", reply(VALID), reply(VALID)),
-            "2 fenced json blocks",
+            "2 fenced blocks",
         ),
-        (VALID.to_owned(), "no fenced json block"),
+        (VALID.to_owned(), "no fenced block"),
     ]
 }
 
@@ -152,36 +152,77 @@ fn a_fence_mentioned_in_the_guidance_is_text_and_only_a_whole_line_is_a_fence() 
         framed(format!("```src/lib.rs``` holds it\n{}", reply(VALID))).is_ok(),
         "a line opening with inline code opens no block"
     );
-    assert!(
-        framed(format!(
-            "an example:\n```text\n```json\n```\n{}",
-            reply(VALID)
-        ))
-        .is_ok(),
-        "a ```json line inside another block is that block's text"
-    );
-    assert!(
-        framed(format!("{}and then:\n```sh\ncargo test\n", reply(VALID))).is_ok(),
-        "another block left open runs to the end and holds no json block"
-    );
     for (text, needle) in [
         (
             format!("my proposal: ```json {VALID} ```"),
-            "no fenced json block",
+            "no fenced block",
         ),
         (format!("```json\n{VALID}\n"), "never closed"),
         (
             format!("```json\n{VALID}\n``` that is all\n"),
             "never closed",
         ),
-        (format!("```JSON\n{VALID}\n```\n"), "no fenced json block"),
+        (format!("```JSON\n{VALID}\n```\n"), "not a json block"),
         (
             format!("{}{}", reply(VALID), reply(VALID)),
-            "2 fenced json blocks",
+            "2 fenced blocks",
         ),
     ] {
         let refused = framed(text.clone()).expect_err("refused");
         assert!(refused.contains(needle), "{needle}: {refused}\n{text}");
+    }
+}
+
+#[test]
+fn a_reply_with_a_second_fenced_block_is_refused() {
+    let asked = question(&[RETRY, crate::interaction::GIVE_UP_OPTION]);
+    let proposal = format!("```json\n{VALID}\n```\n");
+    assert!(
+        check_reply(&asked, &proposal).is_ok(),
+        "the proposal alone is accepted"
+    );
+    for (text, count, why) in [
+        (
+            format!("{proposal}```text\nmy notes\n```\n"),
+            2,
+            "a closed text block after the proposal",
+        ),
+        (
+            format!("```text\nmy notes\n```\n{proposal}"),
+            2,
+            "a closed text block before the proposal",
+        ),
+        (
+            format!("{proposal}```\nsome output\n```\n"),
+            2,
+            "a block with no info string",
+        ),
+        (
+            format!("{proposal}```text\nmy notes\n"),
+            2,
+            "a block left open, which runs to the end of the reply",
+        ),
+        (
+            format!("```text\nmy notes\n```\n{proposal}```\nsome output\n```\n"),
+            3,
+            "a block before the proposal and one after it",
+        ),
+        (
+            format!("an example:\n```text\n```json\n```\n{}", reply(VALID)),
+            2,
+            "a ```json line inside another block is that block's text, and the block is counted",
+        ),
+        (
+            format!("{}and then:\n```sh\ncargo test\n", reply(VALID)),
+            2,
+            "another block left open runs to the end and is counted",
+        ),
+    ] {
+        let refused = check_reply(&asked, &text).expect_err(why);
+        assert!(
+            refused.contains(&format!("the reply holds {count} fenced blocks")),
+            "{why}: {refused}\n{text}"
+        );
     }
 }
 

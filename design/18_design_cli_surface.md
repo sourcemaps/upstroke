@@ -70,9 +70,11 @@ launchers. Before each call it durably reserves one of the question's two slots 
 left of the allowance, which the call is given as its own `--max-budget-usd`; an interrupted,
 failed or unpriced call keeps both, so a third call on a question is refused and a call is never
 re-asked. Once nothing is left no question is started, and the report names those left. A reply
-is accepted only as exactly one fenced `json` block, its fences whole lines, holding `choice`,
-`guidance`, `reasons`, `confidence`, `needs_a_person` and `citations`, whose `choice` is one of
-the question's options and never one that gives up, or `null` where there are none. Each reply,
+is accepted only when it holds exactly one fenced block, every block counted whatever its info
+string and whether closed or left open, and that block is a closed `json` block, its fences whole
+lines, holding `choice`, `guidance`, `reasons`, `confidence`, `needs_a_person` and `citations`,
+whose `choice` is one of the question's options and never one that gives up, or `null` where
+there are none. Each reply,
 accepted or refused, is saved as §15 lays out. The report gives each question's decider, status,
 choice and the reply's fields, cost and saved path, then the total cost, naming any reply that
 reported none, and ends saying nothing was answered. Agent text, question text and file names are
