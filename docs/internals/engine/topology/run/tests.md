@@ -475,6 +475,41 @@ work and when it comes back.
 The clock is the run's own seam, not the host's. The reset is read against `RunSeams::clock`,
 which also stamps every event, so the test can fix it and the expected reset is a constant.
 
+## `fn on_claude_max(`
+
+A `Wide` run of `tasks` on the pool `claude-max` at width 1. Its runner answers the way
+`wide_responder` does, except for the worker of each `(task, generation)` named in `limited`.
+That worker exits 1 with the given limit message on its stderr. Whether an attempt is rate
+limited is the adapters' call, not the runner's, so `step_answered_by` sets the adapters for
+each step. It reads every reset against `RunClock`, 03:00 UTC on 11 November 2026.
+
+## `fn a_second_rate_limit_naming_the_same_reset_writes_no_second_pool_exhausted() {`
+
+`TopologyRun` writes `pool_exhausted` once for each pool and reset, as the sequential engine
+does. A rate limit is an outage, so the ladder defers the task: its generation closes, the
+backoff wakes it, and it is dispatched again under the next generation. The second attempt hits
+the same five-hour limit, and the log keeps its single `pool_exhausted`.
+
+## `fn a_second_rate_limit_naming_a_different_reset_writes_one_more_pool_exhausted() {`
+
+The same deferral, with a second limit that names a different reset: the weekly one, at 17:00 UTC
+on 14 November. A pool still marked exhausted gets one more `pool_exhausted` when the reset
+moves, so the log holds both, in order.
+
+## `fn a_rate_limit_after_an_attempt_the_pool_served_writes_pool_exhausted_again() {`
+
+`alpha` is rate limited on `claude-max`. `beta` is then served on the same pool, accepted and
+merged, and the backoff wakes `alpha`, which hits the same limit again. That accepted attempt
+proves the pool was serving, so the run forgets the signal (`capacity::retire_served_pools`, on
+the promotion path). The second limit is therefore recorded again, even though it names the
+same reset.
+
+## `fn a_failure_that_is_not_rate_limited_writes_no_pool_exhausted() {`
+
+Neither failure is a rate limit, so neither writes `pool_exhausted`. One is an agent error whose
+stderr carries the five-hour limit message anyway. The other is a gate failure after the worker
+ran on the pool.
+
 ## `fn escalated_log(interrupted_first: bool) -> (TopologyFold, Vec<TopologyEvent>) {`
 
 A schema-4 log replayed into the settle fixture's fold, every event applied, so
