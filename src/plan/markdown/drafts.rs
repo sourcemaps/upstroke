@@ -17,13 +17,7 @@ pub(super) struct Draft {
     pub(super) body: String,
     pub(super) acceptance: Vec<String>,
     pub(super) hints: Vec<String>,
-    ann: Option<Annotation>,
-}
-
-impl Draft {
-    pub(super) fn annotation(&self) -> Annotation {
-        self.ann.clone().unwrap_or_default()
-    }
+    pub(super) annotation: Annotation,
 }
 
 pub(super) fn section_draft(raw: &str, section: &Section, warnings: &mut Vec<String>) -> Draft {
@@ -153,7 +147,7 @@ pub(super) fn section_draft(raw: &str, section: &Section, warnings: &mut Vec<Str
         .map(|c| c.trim().to_owned())
         .filter(|c| !c.is_empty())
         .collect();
-    draft.ann = sink.annotation;
+    draft.annotation = sink.annotation.unwrap_or_default();
     annotation_spans.sort_by_key(|s| s.start);
     draft.body = match strip_spans(slice, &annotation_spans) {
         Some(body) => body.trim().to_owned(),
@@ -235,7 +229,7 @@ pub(super) fn checklist_drafts(raw: &str, warnings: &mut Vec<String>) -> Vec<Dra
                     if let Some((mut draft, sink)) = current.take() {
                         draft.title = draft.title.trim().to_owned();
                         draft.body = draft.body.trim().to_owned();
-                        draft.ann = sink.annotation;
+                        draft.annotation = sink.annotation.unwrap_or_default();
                         if is_task_item && !draft.title.is_empty() {
                             drafts.push(draft);
                         }
