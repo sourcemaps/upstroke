@@ -4,7 +4,7 @@ severity: P3
 disposition: deferred
 category: correctness
 pr: TBD
-reviewed_sha: b73d347af70806578051ddd58a439c0db9269a7f
+reviewed_sha: fe2b9bc58af6c3eae0d0a9da64ac25a159db374f
 location: src/engine/topology/dispatch/tests.rs:1578
 provenance: undetermined
 first_bad:
@@ -41,7 +41,8 @@ failed.**
 |---|---|---|---|---|---|
 | `44975798003` (`pull_request`) | `137065317614`, `test (windows-latest, 10 of 10)` | a GitHub-hosted `windows-latest` runner | 2026-11-22 | #399 | `fe4bfa4e`, an empty commit on `144485c7` |
 
-Read from the raw job log (`evidence/job-137065317614.log`):
+Read from the raw job log (`evidence/job-137065317614.log`, SHA256
+`f1d33a829afe39a9952de72a8202683a9445054c9c81daaa7939feee9dd280b3`):
 
 - Line 1154: `test
   engine::topology::dispatch::tests::sampled_repair_materialization_child_kills_every_residue_classified_and_recovered

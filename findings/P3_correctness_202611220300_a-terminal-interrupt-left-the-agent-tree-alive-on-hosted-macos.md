@@ -54,7 +54,8 @@ marker was written. `helper.complete()` (`:2822`) runs before the assertion, so 
 |---|---|---|---|---|---|
 | `44968824584` (`pull_request`) | `137043863243`, `test (macos-latest, 5 of 5)` | a GitHub-hosted `macos-latest` runner | 2026-11-22 | #399 | `144485c7` |
 
-Read from the raw job log, `evidence/job-137043863243.log`:
+Read from the raw job log (`evidence/job-137043863243.log`, SHA256
+`0af2a1e08c691b0d0bcaf3a79fdb3439eb182c0df9d50b837a4ed35e96bf0167`):
 
 - Line 670: `test agent::proc::tests::terminal_interrupt_kills_the_isolated_tree ... FAILED`.
 - Line 2534: the panic, at `src/agent/proc/tests.rs:2823:5`, reads
