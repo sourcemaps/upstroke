@@ -2456,7 +2456,9 @@ There are two layouts, told apart by what is on disk and never by the
 toolchain's version:
 
 * **One `deps` directory.** This is Cargo's layout before 1.100.0: 1.97.1 on
-  the build box, and 1.99.1 on CI's runners until 2026-11-09. The test
+  the build box, and 1.99.1 on CI's runners until 2026-11-12, when the
+  hosted runners took up 1.100.0 (the date of its channel manifest;
+  2026-11-09 is only the compiler's commit date). The test
   executable, the library's `libupstroke-<hash>.rlib` and every dependency's
   artifacts share `<profile>/deps`. An rlib beside the executable selects
   this layout, and that directory is the only dependency directory.
