@@ -43,7 +43,9 @@ directory fsync that the pre-move open never performed is a new way for a legacy
 
 Allowlist placement: the **funnel section** of `effects/allowlist.toml`, which carries this
 module's review clause -- effects only inside site-taking APIs, no writable handle returned.
-`decisions.effect_site_inventory.mechanism` (2).
+The design packet's `decisions.effect_site_inventory.mechanism` (2), which is not in this
+repository, named this module in its funnel list; the allowlist entry's `packet` field records
+that, and its `review` clause is the rule that applies.
 
 ## `pub trait EventHooks {`
 
@@ -851,7 +853,8 @@ deriving state from the survivors would produce a confident wrong answer. That e
 
 ### Errors
 
-[`UpstrokeError::EventLog`] for a rewritten log; [`UpstrokeError::Io`] otherwise.
+[`UpstrokeError::EventLog`] for a rewritten log, and for a log that does not exist (the run never
+started, or its directory was removed); [`UpstrokeError::Io`] for any other read failure.
 
 ## `pub(crate) fn read_bytes(path: &Path) -> Result<Vec<u8>, UpstrokeError> {`
 
