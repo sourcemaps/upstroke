@@ -56,7 +56,13 @@ configuration that turned the reviewer off instead.
 
 The line says what the switch turned off and nothing wider: the *alternative*
 reviewer, the one that would stand in for the primary on tasks the primary's
-own family implemented, so the primary reviews those tasks itself. It does
+own model implemented, so the primary reviews those tasks itself. The scope is
+the exact binding, not the vendor family, because that is the rule
+`review::passes_for` applies: it swaps in the alternative only when the
+implementer equals the primary. A `claude-code/claude-sonnet-5` task under a
+`claude-code/claude-opus-5` primary keeps Opus whatever the switch says, so
+"its own family" would overstate what the switch reaches
+(`PR378-PREVIEW-EXACT-MODEL-SCOPE`). It does
 not say cross-family review is off, because that is false: a task
 implemented by another vendor (say `copilot/gpt-5-mini`) is still judged by a
 primary of a different family (`claude-code/claude-sonnet-5`), which is

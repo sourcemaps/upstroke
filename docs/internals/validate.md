@@ -482,10 +482,12 @@ would be chosen the moment the switch is unset, so "no cross-family
 reviewer exists in this build" would be false here: the line names the
 configuration that turned the alternative off, and nothing in the preview
 names Astra 6. Exact line, and it never says "cross-family review": the
-switch drops only the alternative for tasks Opus 5.5's own family
-implements, which Opus 5.5 then reviews itself; a task another vendor
-implemented is still reviewed across families
-(`PR378-PREVIEW-CROSS-FAMILY-FALSE-CLAIM`).
+switch drops only the alternative for tasks `claude-code/claude-opus-5-5`
+itself implemented, which Opus 5.5 then reviews itself; a task any other
+binding implemented — another vendor's, or another Claude model's — is
+still reviewed by Opus 5.5, as `passes_for` replaces the primary only for
+an implementer equal to it (`PR378-PREVIEW-CROSS-FAMILY-FALSE-CLAIM`,
+`PR378-PREVIEW-EXACT-MODEL-SCOPE`).
 
 ## `fn the_preview_says_cross_family_false_leaves_a_demanded_second_opinion_running() {`
 

@@ -51,7 +51,7 @@ pub(super) fn review_echo(plan: &ReviewPlan, cross_family: bool) -> String {
             ));
         }
         None if !cross_family => line.push_str(
-            " (the alternative reviewer for tasks its own family implements is turned off by \
+            " (the alternative reviewer for tasks its own model implemented is turned off by \
              [routing] review = { cross_family = false }, so it reviews those tasks itself)",
         ),
         None => line.push_str(" (no cross-family reviewer exists in this build)"),
