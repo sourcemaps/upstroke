@@ -7,6 +7,7 @@ pub mod capacity;
 pub mod catalog;
 pub mod config;
 pub mod connect;
+pub mod decide;
 pub mod effects;
 pub mod engine;
 pub mod error;

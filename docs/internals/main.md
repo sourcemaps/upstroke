@@ -240,6 +240,16 @@ do spawn agent CLIs to discover them — two commands, counted and asserted in
 children are outside INV-18's "the **coordinator's** ambient … Job Object",
 because neither command is a coordinator of a run.
 
+`decide` is the one write command that drives no run, and it is classified
+`Write` on purpose. It starts a full agent CLI (the run's primary reviewer, on
+a read-only profile) through the same `HostRunner` a run's review pass uses,
+and that agent's descendants have to be contained as `run`'s are: a decider
+that is killed or times out must not leave a process tree behind it, and the
+ambient job is how the Runner guarantees that. Joining the job costs nothing
+the command needs, and a containment failure refusing it before any agent
+starts is the behaviour wanted. It writes nothing into a run: its proposals go
+under `.upstroke/proposals/<run-id>/` (`docs/internals/decide.md`).
+
 ## `enum CommandClass` › `Write,`
 
 A topology write command: it drives a run and must contain its children.

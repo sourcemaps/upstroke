@@ -1854,6 +1854,25 @@ effect_free = [
 ]
 
 [[module]]
+path = "src/decide.rs"
+crate_path = "upstroke::decide"
+funnel = []
+# The decider. `decide` reads a schema-4 run, starts the run's primary review
+# agent read-only through the Runner once per open question, and creates the
+# proposal files under `.upstroke/proposals/<run-id>/`; it is denied by path, so
+# only the CLI, which states an allowance, reaches it.
+effectful = [
+    "decide",
+]
+effectful_unnameable = []
+effect_free = [
+    # Turns the refused replies' ids into a `Result`.
+    "outcome",
+    # Joins the repository root, `.upstroke/proposals` and a run id.
+    "proposals_dir",
+]
+
+[[module]]
 path = "src/export.rs"
 crate_path = "upstroke::export"
 funnel = []

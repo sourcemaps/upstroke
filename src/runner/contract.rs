@@ -2049,6 +2049,15 @@ pub(crate) mod tests {
 
         const EXPECTED: &[(&str, usize, usize, &str)] = &[
             (
+                "src/decide.rs",
+                1,
+                0,
+                "the decider's command: `upstroke decide` builds the run's \
+                 primary reviewer's command once per question, on the \
+                 read-only profile `review::profile_for` builds. The decide \
+                 role has no other assembler",
+            ),
+            (
                 "src/engine/assembly.rs",
                 1,
                 0,
@@ -2624,6 +2633,14 @@ fn charge_allowance(&mut self) {}
                  per Unix/Windows implementation. The two literal stdin fields \
                  construct Endpoints in Windows configure and Unix take; \
                  they hold native Writer endpoints, not CommandSpec payloads",
+            ),
+            (
+                "src/decide.rs",
+                1,
+                0,
+                0,
+                "the decider's prompt: `CommandSpec::stdin` from \
+                 `AgentAdapter::stdin_payload`, as a review pass carries it",
             ),
             (
                 "src/engine/assembly.rs",

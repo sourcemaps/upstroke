@@ -80,6 +80,18 @@ probes per attempt. A rewrite under the committed bytes, or a run that changed
 hands between the probes, retries; one that keeps doing so refuses rather than
 reporting a prefix it could not hold still.
 
+## `impl Observed` › `pub fn raised_questions(&self) -> Vec<(&FrozenQuestion, &TopologyEvent)> {`
+
+A read-only view over the committed events, for `upstroke decide`
+(`src/decide.rs`): each question the log opened, in the order raised, beside
+the event that opened it, found by `question_opened_by` exactly as
+`open_question_candidates` finds them. `open_questions` cannot give that order,
+because the fold keys its open questions by id, and only the opening event says
+who raised the question: the worker (`question_raised`, or an attempt parked on
+a worker's failure), a reviewer (an attempt parked on a reviewer's failure), or
+integration (a spawn, a merge repair or a verification that could not run). It
+writes nothing and no engine code calls it.
+
 ## `impl Observed` › `pub fn render(&self) -> Result<String, UpstrokeError> {`
 
 `TopologyReport::render` (which names the runner identity), then the

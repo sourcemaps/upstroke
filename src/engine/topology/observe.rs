@@ -199,6 +199,16 @@ impl Observed {
             )
     }
 
+    /// Each question the committed log opened, in the order raised, beside the event that
+    /// opened it. Read-only: a view over `events`.
+    #[must_use]
+    pub fn raised_questions(&self) -> Vec<(&FrozenQuestion, &TopologyEvent)> {
+        self.events
+            .iter()
+            .filter_map(|event| question_opened_by(event).map(|question| (question, event)))
+            .collect()
+    }
+
     #[must_use]
     pub fn open_questions(&self) -> Vec<OpenAsked> {
         self.fold

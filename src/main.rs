@@ -156,6 +156,22 @@ enum Command {
         #[arg(long)]
         decline: bool,
     },
+    #[command(
+        about = "Ask a run's primary reviewer to propose answers to its open questions; it proposes and never answers"
+    )]
+    Decide {
+        #[arg(help = "The run's exact id")]
+        run_id: String,
+        #[arg(
+            help = "One open question's id, or an unambiguous prefix within the run; omit for every open question"
+        )]
+        question_id: Option<String>,
+        #[arg(
+            help = "Stop starting questions once this command's invocations have cost this many dollars"
+        )]
+        #[arg(long, default_value_t = upstroke::decide::DEFAULT_MAX_COST_USD)]
+        max_cost_usd: f64,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -198,7 +214,9 @@ enum CommandClass {
 
 const fn command_class(command: &Command) -> CommandClass {
     match command {
-        Command::Run { .. } | Command::Resume { .. } => CommandClass::Write,
+        Command::Run { .. } | Command::Resume { .. } | Command::Decide { .. } => {
+            CommandClass::Write
+        }
         Command::Connect { .. }
         | Command::Capacity { .. }
         | Command::Validate { .. }
@@ -431,6 +449,28 @@ fn execute(command: Command, _contained: Contained) -> anyhow::Result<ExitCode> 
             }
             Ok(ExitCode::SUCCESS)
         }
+        Command::Decide {
+            run_id,
+            question_id,
+            max_cost_usd,
+        } => {
+            let repo_root = std::env::current_dir().context("resolving current directory")?;
+            let runner = upstroke::runner::host::HostRunner::new();
+            let decided = upstroke::decide::decide(
+                &upstroke::decide::DecideOptions {
+                    repo_root,
+                    run_id,
+                    question_id,
+                    max_cost_usd,
+                    pools_path: None,
+                },
+                &engine::BuiltinAdapters,
+                &runner,
+            )?;
+            print!("{}", decided.report);
+            decided.outcome()?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -509,6 +549,10 @@ mod tests {
                 "Export one settled run's local routing decisions to stdout",
             ),
             ("answer", "Answer a question a run is parked on (§12)"),
+            (
+                "decide",
+                "Ask a run's primary reviewer to propose answers to its open questions; it proposes and never answers",
+            ),
         ];
         for flag in ["-h", "--help"] {
             let root = rendered_cli_help(&["upstroke", flag]);
@@ -650,6 +694,11 @@ mod tests {
             &["upstroke", "answer", "q1", "--decline"],
             CommandClass::ReadOnly,
         ),
+        (
+            "decide",
+            &["upstroke", "decide", "01ABCDEF"],
+            CommandClass::Write,
+        ),
     ];
 
     const ABSENT_PLAN: &str = "/upstroke-pr4-no-such-plan-33f1a9/plan.md";
@@ -668,8 +717,8 @@ mod tests {
             declared, tabled,
             "the dispatch and this table name different commands"
         );
-        assert_eq!(declared.len(), 8, "eight subcommands");
-        assert_eq!(DISPATCH.len(), 8, "eight rows, one per subcommand");
+        assert_eq!(declared.len(), 9, "nine subcommands");
+        assert_eq!(DISPATCH.len(), 9, "nine rows, one per subcommand");
 
         for (name, argv, expected) in DISPATCH {
             let cli = Cli::try_parse_from(*argv)
@@ -688,8 +737,9 @@ mod tests {
             .collect();
         assert_eq!(
             writes,
-            vec!["run", "resume"],
-            "the census names the write commands: `every topology write command (run, resume)`"
+            vec!["run", "resume", "decide"],
+            "the census names the write commands: `every topology write command (run, resume)` \
+             and `decide`, which starts an agent CLI"
         );
         assert_eq!(
             DISPATCH
@@ -832,7 +882,7 @@ mod tests {
             vec!["upstroke", "run", "plan.md", "--dry-run"],
             CommandClass::Write,
         ));
-        assert_eq!(argvs.len(), 9, "eight subcommands and the dry-run preview");
+        assert_eq!(argvs.len(), 10, "nine subcommands and the dry-run preview");
 
         let mut joined = 0_usize;
         let mut skipped = 0_usize;
@@ -871,7 +921,10 @@ mod tests {
                 "{argv:?}: a failed join must stop exactly the write commands"
             );
         }
-        assert_eq!(joined, 3, "`run`, `resume`, and the dry-run preview");
+        assert_eq!(
+            joined, 4,
+            "`run`, `resume`, `decide`, and the dry-run preview"
+        );
         assert_eq!(skipped, 6, "the six read-only subcommands");
     }
 
