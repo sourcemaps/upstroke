@@ -62,6 +62,19 @@
 #                                under findings/ read READY instead of `no-file:<id>`, or one with
 #                                two read READY instead of `duplicate-file:<id>` -- an open finding
 #                                dropped from the queue findings/ is
+#   MUT-MULTI-ID-FILE-ACCEPTED   a finding file was counted for EACH id its frontmatter names, so two
+#                                unwitnessed P3s recorded `accepted-risk`, whose ids share one file,
+#                                each counted one file and read READY on one file for two open
+#                                findings (PR382-FILING-CARDINALITY-NOT-ENFORCED) instead of
+#                                NOT-READY, `multi-id-file:<id>` for each
+#   MUT-MULTI-ID-FILE-DEFERRED   the same file counted the same way under the `deferred` arm: two
+#                                deferred findings whose ids share one file read READY instead of
+#                                `multi-id-file:<id>` for each
+#   MUT-MULTI-ID-FILE-OVERREACH  the rule reached past a shared file: a frontmatter carrying one
+#                                `id:` line, or an `id:` line in prose below it, stopped counting as
+#                                one file, or two findings each filed in a file of its own stopped
+#                                reading as before -- or a file that could not be read hid behind a
+#                                `multi` answer instead of refusing the count
 #   MUT-LEDGER-SEVERITY-DROPPED  the `ledger` subcommand returned a row's id and disposition and not
 #                                its severity, so the audit had no row severity to hold the
 #                                review's against
@@ -7616,6 +7629,22 @@ expect MUT-FRONTMATTER-BY-SUBSTRING "$(has_id TARGET-ID "$tmp/no-front.md")" "0|
 # An input the redirection could not open is not a file that does not carry the id: nothing ran,
 # so there is no answer, and the status says so.
 expect MUT-FINDING-BLOB-OPEN-AS-MISS "$(has_id TARGET-ID "$tmp/no-such-finding-file.md" 2>/dev/null)" "1|"
+# ONE FILE IS ONE FINDING. A frontmatter naming two ids answers `2` for each of them -- not `1`,
+# which is a file for that id -- and still `0` for an id it does not name. The second `id:` line is
+# counted by its key, so one spelled without the space is a second id all the same, though it is
+# not the whole line this match reads as an id.
+printf -- '---\nid: SHARED-A\nid: SHARED-B\nseverity: P3\n---\n\nTwo findings, one file.\n' > "$tmp/two-ids.md"
+printf -- '---\nid: SHARED-A\nseverity: P3\nid:SHARED-B\n---\n\nBody.\n' > "$tmp/two-ids-unspaced.md"
+expect MUT-MULTI-ID-FILE-ACCEPTED "$(has_id SHARED-A "$tmp/two-ids.md")" "0|2"
+expect MUT-MULTI-ID-FILE-ACCEPTED "$(has_id SHARED-B "$tmp/two-ids.md")" "0|2"
+expect MUT-MULTI-ID-FILE-ACCEPTED "$(has_id SHARED-A "$tmp/two-ids-unspaced.md")" "0|2"
+expect MUT-MULTI-ID-FILE-OVERREACH "$(has_id NOT-NAMED "$tmp/two-ids.md")" "0|0"
+# and the block is still the frontmatter: an `id:` line in the prose below it is not a second id,
+# and a key that merely begins with `id` is not an `id:` line.
+expect MUT-MULTI-ID-FILE-OVERREACH "$(has_id OTHER-ID "$tmp/prose-id.md")" "0|1"
+printf -- '---\nid: ONE-ID\nids_cited: OTHER\nidentity: x\n---\n\nBody.\n' > "$tmp/id-like-keys.md"
+expect MUT-MULTI-ID-FILE-OVERREACH "$(has_id ONE-ID "$tmp/id-like-keys.md")" "0|1"
+expect MUT-MULTI-ID-FILE-OVERREACH "$(has_id TARGET-ID "$tmp/front-id.md")" "0|1"
 
 # --- counting the files that file a finding ------------------------------------------------------
 # The one place git is exercised here, in a repository built for it. This count decides whether a
@@ -7640,6 +7669,10 @@ printf -- '---\nid: E-LONG-LINE\n---\n\nBody.\n' > "$findings_repo/findings/e1.m
   head -c 262144 /dev/zero | tr '\0' 'x'
   printf -- '\n---\n\nBody.\n'
 } > "$findings_repo/findings/e2.md"
+# Two findings in one file, and a third id filed both alone and in that shared file: the shared
+# file is no file for any id it names, and it blocks each of them whatever else files it.
+printf -- '---\nid: M-SHARED-A\nid: M-SHARED-B\nid: M-ALSO-ALONE\n---\n\nBody.\n' > "$findings_repo/findings/m.md"
+printf -- '---\nid: M-ALSO-ALONE\n---\n\nBody.\n' > "$findings_repo/findings/m-alone.md"
 git -C "$findings_repo" add -A
 git -C "$findings_repo" -c user.email=t@example -c user.name=t commit -qm "file the findings"
 count_in_fixture() { (cd "$findings_repo" && finding_file_count "$1" HEAD); }
@@ -7648,6 +7681,9 @@ expect MUT-FINDING-FILE-COUNT "$(count_in_fixture B-OTHER)" 1          # the nam
 expect MUT-FINDING-FILE-COUNT "$(count_in_fixture C-TWICE)" 2          # two files is not one
 expect MUT-FINDING-FILE-COUNT "$(count_in_fixture D-PROSE-ONLY)" 0     # the id is not in frontmatter
 expect MUT-FINDING-FILE-COUNT "$(count_in_fixture NOT-FILED-ANYWHERE)" 0
+expect MUT-MULTI-ID-FILE-ACCEPTED "$(count_in_fixture M-SHARED-A)" multi    # one file, two findings
+expect MUT-MULTI-ID-FILE-ACCEPTED "$(count_in_fixture M-SHARED-B)" multi
+expect MUT-MULTI-ID-FILE-ACCEPTED "$(count_in_fixture M-ALSO-ALONE)" multi  # its own file does not clear it
 
 # THE LEDGER'S OLD PREFIX IS STILL COUNTED, BECAUSE THE TREEISH IS THE CALLER'S REVISION. The
 # ledger moved from reviews/findings/ to findings/ on 2026-09-12 (pull request #276) and
@@ -7755,6 +7791,28 @@ front_out="$(
   || error "MUT-FRONTMATTER-UPSTREAM-ERROR-AS-MISS: a read that died reported success"
 [[ -z "$front_out" ]] \
   || error "MUT-FRONTMATTER-UPSTREAM-ERROR-AS-MISS: a read that died printed an answer [$front_out]"
+# A SHARED FILE DOES NOT ANSWER FOR A FILE THAT COULD NOT BE READ. The first file names two ids and
+# the second's read dies: `multi` is a blocker too, but it is an answer about files that were read,
+# and printing it over a read that never finished is the count stopping short again. The count
+# refuses; it does not say `multi`.
+multi_dead_repo="$tmp/multi-dead-repo"
+mkdir -p "$multi_dead_repo/findings"
+git init -q "$multi_dead_repo"
+printf -- '---\nid: H-SHARED\nid: H-OTHER\n---\n\nBody.\n' > "$multi_dead_repo/findings/h1.md"
+printf -- '---\nid: H-SHARED\nnote: SECOND-FILE-MARKER\n---\n\nBody.\n' > "$multi_dead_repo/findings/h2.md"
+git -C "$multi_dead_repo" add -A
+git -C "$multi_dead_repo" -c user.email=t@example -c user.name=t commit -qm "a shared file and a second"
+expect MUT-MULTI-ID-FILE-OVERREACH "$( (cd "$multi_dead_repo" && finding_file_count H-SHARED HEAD) )" multi
+multi_dead_status=0
+got="$(
+  export REAL_AWK="$(command -v awk)" PATH="$awk_stub:$PATH"
+  hash -r
+  cd "$multi_dead_repo" && finding_file_count H-SHARED HEAD 2>/dev/null
+)" || multi_dead_status=$?
+((multi_dead_status != 0)) \
+  || error "MUT-MULTI-ID-FILE-OVERREACH: a count with a dead read in it succeeded, got [$got]"
+[[ -z "$got" ]] \
+  || error "MUT-MULTI-ID-FILE-OVERREACH: a count with a dead read in it printed an answer [$got]"
 
 # A BLOB THE CALLER COULD NOT OPEN is the same defect one layer out, and it does not need the
 # matcher to fail: `frontmatter_has_id "$id" < "$blob_file"` on a file bash cannot open is a
@@ -8414,6 +8472,78 @@ for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
     && error "MUT-LEDGER-HEADER-BY-CONTENT: an accepted, filed P3 named ID still blocked on [$accept_branch]: [$got]"
   contains "MUT-LEDGER-HEADER-BY-CONTENT [$accept_branch]" "$got" " READY "
   expect "MUT-LEDGER-HEADER-BY-CONTENT status [$accept_branch]" "${got%%|*}" 0
+done
+
+# --- one file is one finding, through main -----------------------------------------------------------
+# PR382-FILING-CARDINALITY-NOT-ENFORCED. A review reports two unwitnessed P3s and the author files
+# both ids in ONE file's frontmatter. Counted per id, each id had its one file, so neither the
+# `accepted-risk` arm nor the `deferred` arm added a blocker and the audit read READY on one file
+# for two open findings, though findings/README.md says one file per finding. A file naming two ids
+# is a file for neither, and a blocker for each, whichever arm reads it.
+#
+# The same review, ledgers and lanes on a head that files the two ids in two files of their own is
+# the control: READY, as before, in both arms -- so the NOT-READY above it is the shared file's
+# doing and not the review's, the rows' or the lane's.
+filed_head_with() {  # filed_head_with NAME=ID[,ID]...: a commit on the harness head, one file per NAME
+  local one name ids front blob listing="" findings_tree root_tree
+  for one in "$@"; do
+    name="${one%%=*}"; ids="${one#*=}"; front=""
+    # each ID on an `id:` line of its own, in the order given
+    while [[ -n "$ids" ]]; do
+      front+="id: ${ids%%,*}"$'\n'
+      if [[ "$ids" == *,* ]]; then ids="${ids#*,}"; else ids=""; fi
+    done
+    blob="$(printf -- '---\n%sseverity: P3\n---\n\nFiled, and still open.\n' "$front" \
+      | git -C "$enqueue_repo" hash-object -w --stdin)"
+    listing+="100644 blob $blob"$'\t'"$name"$'\n'
+  done
+  findings_tree="$(printf '%s' "$listing" | git -C "$enqueue_repo" mktree)"
+  root_tree="$(printf '040000 tree %s\tfindings\n' "$findings_tree" | git -C "$enqueue_repo" mktree)"
+  git -C "$enqueue_repo" -c user.email=t@example -c user.name=t \
+    commit-tree "$root_tree" -p "$enqueue_head" -m "file findings under findings/"
+}
+shared_head="$(filed_head_with shared-p3s.md=SHARED-P3-A,SHARED-P3-B)"
+split_head="$(filed_head_with shared-p3-a.md=SHARED-P3-A shared-p3-b.md=SHARED-P3-B)"
+# The heads are what they say, counted by the audit's own helper.
+for shared_id in SHARED-P3-A SHARED-P3-B; do
+  expect "MUT-MULTI-ID-FILE-ACCEPTED shared head [$shared_id]" \
+    "$(cd "$enqueue_repo" && finding_file_count "$shared_id" "$shared_head")" multi
+  expect "MUT-MULTI-ID-FILE-OVERREACH split head [$shared_id]" \
+    "$(cd "$enqueue_repo" && finding_file_count "$shared_id" "$split_head")" 1
+done
+shared_findings='{"id":"SHARED-P3-A","severity":"P3"},{"id":"SHARED-P3-B","severity":"P3"}'
+accept_review "$tmp/shared-p3s.md" "$shared_findings" "$shared_head"
+accept_review "$tmp/split-p3s.md" "$shared_findings" "$split_head"
+for shared_disposition in accepted-risk deferred; do
+  ledger_policy_body "$tmp/shared-$shared_disposition-rows.md" "$(
+    printf '## Review finding ledger\n\n'
+    ledger_table "SHARED-P3-A:P3:$shared_disposition" "SHARED-P3-B:P3:$shared_disposition")"
+  expect "MUT-MULTI-ID-FILE-OVERREACH $shared_disposition policy" \
+    "$(body_policy "$tmp/shared-$shared_disposition-rows.md")" pass
+done
+for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
+  for shared_disposition in accepted-risk deferred; do
+    if [[ "$shared_disposition" == accepted-risk ]]; then shared_case=MUT-MULTI-ID-FILE-ACCEPTED
+    else shared_case=MUT-MULTI-ID-FILE-DEFERRED; fi
+    # Both ids in one file: NOT-READY, and a blocker for each id the file names.
+    got="$(accept_run "$accept_branch" "$tmp/shared-p3s.md" \
+      "$tmp/shared-$shared_disposition-rows.md" "$shared_head")"
+    [[ "$got" == *" READY "* ]] \
+      && error "$shared_case: two findings filed in one file read READY on [$accept_branch]: [$got]"
+    contains "$shared_case [$accept_branch]" "$got" " NOT-READY "
+    contains "$shared_case [$accept_branch]" "$got" "multi-id-file:SHARED-P3-A"
+    contains "$shared_case [$accept_branch]" "$got" "multi-id-file:SHARED-P3-B"
+    [[ "$got" == *GH-UNSTUBBED* ]] \
+      && error "$shared_case: the audit made a call this case does not model: [$got]"
+    # Each in a file of its own: READY, exactly as one finding filed once is.
+    got="$(accept_run "$accept_branch" "$tmp/split-p3s.md" \
+      "$tmp/shared-$shared_disposition-rows.md" "$split_head")"
+    contains "MUT-MULTI-ID-FILE-OVERREACH $shared_disposition [$accept_branch]" "$got" " READY "
+    expect "MUT-MULTI-ID-FILE-OVERREACH $shared_disposition status [$accept_branch]" "${got%%|*}" 0
+    [[ "$got" == *multi-id-file* || "$got" == *no-file:* || "$got" == *NOT-READY* \
+       || "$got" == *GH-UNSTUBBED* ]] \
+      && error "MUT-MULTI-ID-FILE-OVERREACH: two findings filed separately blocked on [$accept_branch] ($shared_disposition): [$got]"
+  done
 done
 
 if ((failed)); then

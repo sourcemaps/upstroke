@@ -62,6 +62,10 @@ Input or state, then the step that goes wrong, then the wrong result. Concrete, 
 The fields are the columns of a body's ledger row, so a row and a file carry the same facts and
 neither is transcribed from the other by hand.
 
+**One `id:` line per file.** A file whose frontmatter names two ids is two findings in one file:
+`scripts/pr-ready-audit.sh` counts it as the file for neither, and blocks each id it names as
+`multi-id-file`, whether the finding is deferred or accepted.
+
 **An accepted P3 is filed, and accepted without a manual read.** A P3, in every lane, may be
 recorded as `accepted-risk`, by the owner's ruling of 2026-11-13. It is still open, so it is filed
 here like every other open finding, with `disposition: accepted-risk`; what the ruling changes is

@@ -90,7 +90,9 @@
 #   - no finding in that review has a severity the lane must fix
 #   - every allowed finding has a ledger row in the body whose disposition is deferred, with
 #     exactly one file under findings/ on the branch whose YAML frontmatter (the block
-#     between the opening --- and the next) carries `id: <the finding id>` -- or, when the
+#     between the opening --- and the next) carries `id: <the finding id>` as its only `id:`
+#     line (a file naming two ids is two findings in one file, and `multi-id-file` for each of
+#     them, in either arm) -- or, when the
 #     finding's severity is one `may_accept_for` answers for the lane (P3, in every lane, by the
 #     owner's ruling of 2026-11-13), whose disposition is accepted-risk, which needs that same
 #     one file (an accepted finding is still open, and findings/ is the whole of the open work)
@@ -278,9 +280,18 @@ read_parser_fields() {
 
 # frontmatter_has_id ID: reads a finding file on stdin and PRINTS `1` when its YAML frontmatter,
 # the block between the opening `---` on line 1 and the next `---`, carries the line `id: ID`
-# (README: the id lives in the frontmatter, not the name), and `0` when it does not. The same
+# (README: the id lives in the frontmatter, not the name) and no other `id:` line, `2` when it
+# carries `id: ID` beside another `id:` line, and `0` when it does not carry `id: ID`. The same
 # line in prose or a code block further down is not a frontmatter id. The id is a fixed string,
 # whole line.
+#
+# `2` IS NOT A KIND OF YES. One file per finding is the rule (findings/README.md), and a file
+# whose frontmatter names two ids is two findings in one file: counted as a file for each, two
+# accepted or deferred P3s read READY on one file between them, and the queue findings/ is held
+# one entry short. An `id:` line is one whose key is `id` -- the line begins `id`, then any
+# spaces or tabs, then `:` -- whatever follows, because the question is how many ids the block
+# names and not whether each is spelled as this match spells one: `id: A` beside `id:B` is still
+# two, though `B` is never the whole line `id: B`.
 #
 # THE ANSWER IS WHAT IT PRINTS AND THE STATUS IS ONLY EVER FAILURE, because the caller opens the
 # file and the caller's open can fail. `cmd < file` on a file bash cannot open returns 1 WITH THE
@@ -303,20 +314,33 @@ frontmatter_has_id() {
   # a whole-line string comparison, as `grep -xF` was: no character of the id means anything.
   #
   # `answered` guards the END block, which `exit` runs on its way out: without it the early exits
-  # would print their answer and then print it again.
+  # would print their answer and then print it again. `ids` counts the block's `id:` lines, the
+  # matching one included, so the answer is `2` exactly when this id is one of several. The class
+  # `[ \t]` is two named characters and not a range, so no locale decides what it holds.
   FRONTMATTER_ID="id: $1" awk '
     NR == 1     { if ($0 != "---") { print 0; answered = 1; exit 0 }   # no opening fence, no frontmatter
                   next }
-    $0 == "---" { print (found ? 1 : 0); answered = 1; exit 0 }        # the block ends here
+    $0 == "---" { print (found ? (ids > 1 ? 2 : 1) : 0); answered = 1; exit 0 }   # the block ends here
+    /^id[ \t]*:/ { ids++ }
     $0 == ENVIRON["FRONTMATTER_ID"] { found = 1 }
-    END         { if (!answered) print (found ? 1 : 0) }
+    END         { if (!answered) print (found ? (ids > 1 ? 2 : 1) : 0) }
   '
 }
 
 # finding_file_count ID TREEISH: how many files under the finding ledger in TREEISH carry `id: ID`
-# in their YAML frontmatter. A non-zero status means the listing, or one of the files it named,
-# could not be read -- which is not a count of zero. This rule wants exactly one file, so a read
-# that quietly does not count can turn two files into one as easily as one into none.
+# in their YAML frontmatter as its only `id:` line -- or `multi`, and no count, when any file
+# there carries `id: ID` beside another `id:` line. A non-zero status means the listing, or one of
+# the files it named, could not be read -- which is not a count of zero. This rule wants exactly
+# one file, so a read that quietly does not count can turn two files into one as easily as one
+# into none.
+#
+# A FILE IS ONE FINDING, so a file naming two ids is not a file for either of them, and it is a
+# blocker for every id it names whichever ledger arm asks. Counted per id as it used to be, two
+# P3s filed in ONE file each counted 1: the `accepted-risk` arm and the `deferred` arm alike added
+# no blocker, and the audit read READY on one file for two open findings
+# (PR382-FILING-CARDINALITY-NOT-ENFORCED). `multi` is printed only once every candidate has been
+# read, so a file the read could not finish still refuses the count rather than being hidden
+# behind it.
 #
 # The candidates are the tree's own paths, from `git ls-tree`, and every one of them is read.
 # `git grep` cannot supply them: it answers with the files it managed to search, and a blob it
@@ -335,11 +359,11 @@ frontmatter_has_id() {
 # `validate-pr-branch.sh` against the same defect, from the same source: what git records, never
 # what a checkout materialised or what a name suggests.
 #
-# Each file then gets exactly one of three answers: it carries the id, it does not, or it could
-# not be read. `frontmatter_has_id` PRINTS the first two and keeps its status for the third, so
-# that a blob bash could not open for it -- a redirection that fails returns 1 without running
-# the command -- cannot answer in its place. Anything but a printed `0` or `1`, status included,
-# refuses the count rather than being folded into "no".
+# Each file then gets exactly one of four answers: it carries the id alone, it carries the id
+# among others, it does not, or it could not be read. `frontmatter_has_id` PRINTS the first three
+# and keeps its status for the fourth, so that a blob bash could not open for it -- a redirection
+# that fails returns 1 without running the command -- cannot answer in its place. Anything but a
+# printed `0`, `1` or `2`, status included, refuses the count rather than being folded into "no".
 #
 # A LIST THAT ENDED IS NOT A LIST THAT WAS READ, which is the same rule one level up. `read`
 # returns non-zero at end of input AND on a failed read, the loop below ends on either, and what
@@ -356,7 +380,7 @@ frontmatter_has_id() {
 # zero for every finding, on a tree that holds the file. The gate builds a small repository and
 # counts in it, because that is the mistake a shape rule does not catch.
 finding_file_count() {
-  local id="$1" treeish="$2" cand_file blob_file status=0 n=0 entry cand answer complete=0
+  local id="$1" treeish="$2" cand_file blob_file status=0 n=0 multi=0 entry cand answer complete=0
   cand_file="$(mktemp)"
   blob_file="$(mktemp)"
   # BOTH LEDGER PREFIXES, BECAUSE TREEISH IS THE CALLER'S REVISION AND NOT THIS CHECKOUT. The
@@ -395,13 +419,14 @@ finding_file_count() {
     if ((status != 0)); then rm -f "$cand_file" "$blob_file"; return 1; fi
     case "$answer" in
       1) n=$((n + 1)) ;;
+      2) multi=1 ;;                                      # this id among others: no file for it
       0) ;;                                              # read to the end and did not match
-      *) rm -f "$cand_file" "$blob_file"; return 1 ;;     # neither answer is not an answer
+      *) rm -f "$cand_file" "$blob_file"; return 1 ;;     # none of the answers is not an answer
     esac
   done < "$cand_file"
   ((complete)) || { rm -f "$cand_file" "$blob_file"; return 1; }
   rm -f "$cand_file" "$blob_file"
-  printf '%s' "$n"
+  if ((multi)); then printf 'multi'; else printf '%s' "$n"; fi
 }
 
 # audit_state MOVED: sets `state` from the `blockers` collected for this pull request and from how
@@ -1210,6 +1235,7 @@ audit_one() {
         case "$nfiles" in
           1) ;;
           0) blockers+=("no-file:$id") ;;
+          multi) blockers+=("multi-id-file:$id") ;;   # a file naming this id and another is no file for either
           *) blockers+=("duplicate-file:$id") ;;
         esac ;;
       accepted-risk)
@@ -1223,10 +1249,11 @@ audit_one() {
         #     there is nothing for the owner to rule on until the row says what the review said.
         #   - THAT SEVERITY IS ONE `may_accept_for` ANSWERS FOR THIS LANE. Any other severity
         #     recorded as accepted-risk is still the owner's call, not the audit's.
-        #   - EXACTLY ONE FILE UNDER findings/ AT THE HEAD CARRIES THE ID, by the same count and
-        #     with the same blockers as a deferred finding. An accepted finding is still open, and
-        #     findings/ is the whole of the outstanding work: the release and integration
-        #     re-triage reads it, and a finding the row alone recorded dropped out of that queue.
+        #   - EXACTLY ONE FILE UNDER findings/ AT THE HEAD CARRIES THE ID, AND NO OTHER, by the same
+        #     count and with the same blockers as a deferred finding. An accepted finding is still
+        #     open, and findings/ is the whole of the outstanding work: the release and integration
+        #     re-triage reads it, and a finding the row alone recorded dropped out of that queue --
+        #     as did the second of two accepted P3s filed in one file between them.
         if [[ "$row_severity" != "$sev" ]]; then
           blockers+=("severity-mismatch:$id")
         elif [[ " $may_accept " != *" $sev "* ]]; then
@@ -1237,6 +1264,7 @@ audit_one() {
           case "$nfiles" in
             1) ;;
             0) blockers+=("no-file:$id") ;;
+            multi) blockers+=("multi-id-file:$id") ;;
             *) blockers+=("duplicate-file:$id") ;;
           esac
         fi ;;
