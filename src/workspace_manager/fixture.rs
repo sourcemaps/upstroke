@@ -3468,12 +3468,16 @@ impl KillableGitChild {
     /// exits on its own, and say which the parent saw: `Some` with how long
     /// it ran, as the parent saw it, if a poll found it gone before the
     /// parent read the aim passed; `None` if none did — and then **the kill
-    /// has been attempted**, straight after the last poll, which found the
-    /// child running, and [`Self::fired`] says when the attempt returned.
-    /// That poll came before the clock read that found the aim passed — by
-    /// however long the parent took between the two, descheduled or not —
-    /// so it fell at a time this does not claim is the aim: `None` says the
-    /// child was running at the last poll, not that it was running at the
+    /// has been attempted**, straight after the last poll, which did not
+    /// find the child gone, and [`Self::fired`] says when the attempt
+    /// returned. Not finding it gone is all that poll observed: its
+    /// `try_wait` answered either that the child was still running or with
+    /// an error — `ECHILD`, say, if another reaper had collected it — and
+    /// [`Self::exited`] answers `None` to both alike. That poll came before
+    /// the clock read that found the aim passed — by however long the
+    /// parent took between the two, descheduled or not — so it fell at a
+    /// time this does not claim is the aim: `None` says the last poll did
+    /// not find the child gone, not that the child was running then, at the
     /// aim or at the kill.
     ///
     /// Polled, never slept through. `sleep(aim)` then `kill` reports nothing
@@ -3481,8 +3485,8 @@ impl KillableGitChild {
     /// host the kill is late by the wake-up and the sampler cannot tell a
     /// child it missed from one it never aimed inside. Here [`Self::exited`]
     /// is asked once a millisecond while the aim is far and continuously
-    /// once it is within [`Self::SPIN_WITHIN`], each poll that finds the
-    /// child running is followed by a read of the clock, and when that read
+    /// once it is within [`Self::SPIN_WITHIN`], each poll that does not find
+    /// the child gone is followed by a read of the clock, and when that read
     /// finds the aim passed the kill is attempted at once, with no return to
     /// the caller between that poll and the kill. What remains is the
     /// platform's: between that poll's `try_wait` and the kill's own system
