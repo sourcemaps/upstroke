@@ -1607,7 +1607,8 @@ today, and no `return` in it but the one that returns an error when the bundle n
 commit.
 
 Red with `let _ = written.sync_all();` in `write_copy`, as `ErrorNotPropagated` for
-`written.sync_all()`: the review found that the order-only pin this replaces passed it, the text
+`written.sync_all()`: the review found that an earlier, order-only version of this pin on this
+branch passed it, the text
 it required still there once and in order. Red with the parent's sync deleted (`sync_parent(copy)`
 replaced by `Ok(())`), as `NotOnce` for `sync_parent(copy)`, found 0 times. Green with each
 restored. With the return rule taken out of `check_copy_barrier`, the early-success fixture is
@@ -1616,9 +1617,10 @@ rule restored.
 
 What it refuses, then: a step missing, repeated, out of order, inside a block, or with its error
 not handed back; and any way out of the body before the parent's sync that is a `return` of
-anything but an error written as `Err(…)`, which is the only way the body itself can report a copy
-it has not synced. An early `?` or `return Err(…)` leaves without reporting a copy, which leaves
-the barrier whole.
+anything but an error written as `Err(…)`, which is the way the pin refuses for the body to report
+a copy it has not synced by leaving early. An early `?` or `return Err(…)` leaves without
+reporting a copy, which leaves the barrier whole. A body that keeps every step's text but syncs a
+different file than it renames is not refused; the list below says how.
 
 What it cannot see. It reads source: it does not run the calls, replay a crash, or know what a
 successful fsync means on a disk. It finds a `return` by its keyword in the blanked text, so a
@@ -1629,7 +1631,17 @@ where the directory entry's durability is reasoned. Nor does it see the whole `c
 moving after the revert in `discard_held`, where a crash after the revert could find the only copy
 of what the discard removed not yet durable. A step moved into a helper, or handing its error back
 in another shape than today's (a bare `?;` with no `map_err`, or `sync_parent(copy)?;` before an
-`Ok(())`), fails it, and whoever moves one changes the pin with it.
+`Ok(())`), fails it, and whoever moves one changes the pin with it. It matches whitespace-free
+text, so a plain assignment, with no `let`, to a variable named `letwritten`
+(`letwritten = OpenOptions::new()…;`) reads as `let written = …` once whitespace is removed and
+stands in for the first step, while a `let` binding of another name is refused:
+`let rewritten = …` as `NotOnce`, `let letwritten = …` as `ErrorNotPropagated`. A body that opens
+the partial into `letwritten` and then syncs a `written` bound to another file passes, renaming
+the unsynced partial into place; so does a body that binds `written` again to another file between
+the open and the sync. It counts braces, not other delimiters, and does not expand macros, so a
+macro whose input is the barrier's statements passes: `stringify!` around the first three steps
+is accepted. The pin catches an accidental removal or reordering of the barrier's steps, not a
+body written to mislead it.
 
 ## `const COPY_BARRIER: [&str; 4] = [`
 
@@ -1679,12 +1691,6 @@ too, though it leaves only the closure. The last step being the body's tail is w
 rule: no return can follow it, so any that the check lets through leaves before the barrier
 completes, and leaves with an error. `Ok(())` when every step and the return rule hold; otherwise
 the first breach, the steps' before the return rule's.
-
-What it does not see: it matches whitespace-free text, so a binding of another identifier ending in
-`written`, as `letwritten = …` reads as `let written = …`, can stand in for `let written`, and a
-body that opens the partial into that other name and syncs a `written` bound to another file
-passes, renaming the unsynced partial into place. The pin catches an accidental removal or
-reordering of the barrier's steps, not a body written to mislead it.
 
 ## `struct InheritedSelection {`
 
