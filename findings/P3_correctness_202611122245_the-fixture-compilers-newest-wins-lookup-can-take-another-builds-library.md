@@ -21,12 +21,17 @@ newest `libupstroke-*.rlib` among the package's unit directories, `debug/build/u
 
 A build directory can hold two builds of the library. On the operator's build machine, build slot 1 held two 1.100.0
 units, `build/upstroke/73049cf421cb3c54/` and `build/upstroke/3d5016eed0999272/`, whose fingerprints differ in
-`profile` and in a dependency, as the outputs of a `build --all-targets` and a `test --all-targets` would.
+`profile` and in a dependency. Round six's frontier review read the slot's fingerprints and found that the units differ
+in dev-dependency features: the `hashbrown` unit `24b95b784ae1890b` has the `default-hasher` feature, which only the
+dev-dependency path `yaml-rust2` -> `hashlink` turns on, while `3d5016eed0999272` is built on the featureless
+`hashbrown` unit `ee164fb1d6d90d92` (through `indexmap` `07911642e4f6f5ed`). A build with no test target, such as a
+plain `cargo build` or `cargo run`, next to a test build produces that split; `build --all-targets` and
+`test --all-targets` both build test targets, so both turn dev-dependency features on and cannot.
 
 Reasoned, not run:
 
     checkout X runs `cargo test --all-targets` in a shared slot
-    -> checkout Y then runs `cargo build --all-targets` in the same slot
+    -> checkout Y then runs `cargo build` in the same slot
     -> X runs its tests again without changing its source, so its test unit is fresh and not rebuilt
     -> the lookup returns Y's newer library
     -> X's fixtures compile against Y's code
