@@ -62,25 +62,26 @@ catch { if ($code -ne 0) { "reading the suite's output or listing the processes 
 if ($code -ne 0) { exit $code }
 if ($left.Count -gt 0) { throw "$($left.Count) test process(es) outlived the suite, listed above: a test leaves a process running, which would hold this step open" }
 $passed = 0
-if ($harnessLogs.Count -ne $harnesses.Count) { throw "missing output from a top-level test harness" }
+if ($harnesses.Count -eq 0 -or $harnessLogs.Count -ne $harnesses.Count) { throw "missing output from a top-level test harness" }
 foreach ($harnessLog in $harnessLogs) {
-  $depth = 0; $complete = $false; $harnessPassed = $null; $expected = $null
+  $expected = $null; $result = $null; $ambiguous = $false
   foreach ($line in $harnessLog.Lines) {
     if ($line -cmatch '(?:^|\s)running ([0-9]+) tests?$') {
-      if ($complete) { throw "extra test run in $($harnessLog.Harness)" }
-      if ($depth -eq 0) { $expected = [int]$Matches[1] }
-      $depth++
-    } elseif ($line -cmatch '(?:^|\s)test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured; [0-9]+ filtered out; finished in [0-9]+\.[0-9]+s$') {
-      if ($depth -le 0) { throw "test result without a start in $($harnessLog.Harness)" }
-      $depth--
-      if ($depth -eq 0) {
-        if ($Matches[1] -cne 'ok' -or [int]$Matches[3] -ne 0 -or ([int]$Matches[2] + [int]$Matches[3] + [int]$Matches[4] + [int]$Matches[5]) -ne $expected) { throw "inconsistent top-level test result in $($harnessLog.Harness)" }
-        $harnessPassed = [int]$Matches[2]; $complete = $true
+      if ($null -eq $expected) { $expected = [long]$Matches[1] }
+      elseif ([long]$Matches[1] -eq $expected) { $ambiguous = $true }
+      $result = $null
+    } elseif ($line -cmatch '(?:^|\s)test result:') {
+      if ($null -eq $expected) { throw "test result without a start in $($harnessLog.Harness)" }
+      $result = $null
+      if ($line -cmatch '(?:^|\s)test result: (ok|FAILED)\. ([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored; ([0-9]+) measured; [0-9]+ filtered out; finished in [0-9]+\.[0-9]+s$') {
+        $result = @{ Status = $Matches[1]; Passed = [long]$Matches[2]; Failed = [long]$Matches[3]; Total = ([long]$Matches[2] + [long]$Matches[3] + [long]$Matches[4] + [long]$Matches[5]) }
       }
     }
   }
-  if (-not $complete -or $depth -ne 0) { throw "missing or incomplete top-level test result in $($harnessLog.Harness)" }
-  $passed += $harnessPassed
+  if ($null -eq $expected -or $null -eq $result) { throw "missing or incomplete top-level test result in $($harnessLog.Harness)" }
+  if ($ambiguous) { throw "a helper announced the same test total as the top-level harness in $($harnessLog.Harness): mixed stdout cannot establish completion" }
+  if ($result.Status -cne 'ok' -or $result.Failed -ne 0 -or $result.Total -ne $expected) { throw "inconsistent top-level test result in $($harnessLog.Harness)" }
+  $passed += $result.Passed
 }
 if ($passed -lt ${{ matrix.floor }}) { throw "shard ${{ matrix.shard }} reported $passed passing tests, below its floor of ${{ matrix.floor }}: Cargo compiled the harnesses and executed almost none of this shard's tests" }
 "shard ${{ matrix.shard }} reported $passed passing tests; its floor is ${{ matrix.floor }}"

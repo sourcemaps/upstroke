@@ -198,7 +198,8 @@ harnesses and runs none; each harness that build reported, started as a
 process over the leg's selection, asked for every test's time and waited on;
 their output read from files, the test processes they left running, the
 suite's exit status, a count of what libtest reported held to the leg's
-floor, and the count printed. Fourteen lines. The three `matrix` expressions
+floor, and the count printed. The first eleven lines run and clean up the
+suite; the counter follows. The three `matrix` expressions
 are text here, as they are in `ci.yml`; GitHub replaces each with the leg's
 value from the table the job's matrix carries before PowerShell reads the
 script.
@@ -552,24 +553,47 @@ one, as no pin here bounds a hostile candidate (above).
 After the suite, the count starts on line 12 and has three stages:
 
 1. Require one retained output for every compiled executable. Within each
-   output, track libtest's running/result pairs. Nested helper results close
-   nested runs and contribute no passes; only the completed outer result
-   contributes. Require its passed, failed, ignored and measured total to
-   match the outer start, with status `ok` and zero failures. A complete
-   zero-test harness contributes zero. Missing output, an unclosed run, a
-   truncated result, a result without a start or a second outer run fails.
+   output, take the first libtest start and the last complete suite summary.
+   Do not pair every nested start: a helper can exit without a summary while
+   the parent completes. Require the final summary's passed, failed, ignored
+   and measured total to match the first start, with status `ok` and zero
+   failures; only its passed count contributes. A complete zero-test harness
+   contributes zero. No harnesses, missing output, either boundary missing,
+   a result before the first start, a start after the last result, a final
+   truncated result or an inconsistent total fails. Each start or result
+   marker clears the current result; only a complete summary sets it again.
+   A nested start announcing the same total as the first start fails closed.
 2. Refuse a sum below `${{ matrix.floor }}`. The message names the shard
    and its floor.
 3. Print the sum, shard and floor, so a later floor change has a measurement.
 
-The previous count summed every success summary in the merged output,
-including helper processes. The acceptance reference for Windows engine 4
+An earlier count summed every success summary in the merged output,
+including helper processes. Its replacement paired every start with a
+result, but the recorded unit library harness starts three helpers and
+reports only two helper summaries before its complete outer summary; the
+runner library harness starts two helpers and reports only one helper
+summary. These are separate executable logs, not successive top-level runs
+in a shared log. The boundary count gives unit 14 + 1527 + 0 = 1541 passes
+and runner 0 + 0 + 409 = 409 passes. The acceptance reference for Windows engine 4
 is 99 top-level passes plus nine helper passes: its floor input is 99,
 not 108. The native Windows fixture in `super` exercises this count from
-the workflow with multiple executable outputs, nested helpers and a zero
+the workflow with those recorded boundaries, nested helpers and a zero
 harness, plus incomplete inputs. It starts no selected suite a second time.
 The count still follows output display, survivor cleanup and the failing
 harness's exit, so a counting refusal cannot replace that exit code.
+
+Mixed stdout carries no process identity. First and last boundaries plus
+balanced totals are completion evidence, not proof of the writer of each
+line. In particular, an outer five-test start followed by a five-test helper
+start and its complete five-test summary is indistinguishable from an outer
+completion if the missing summary's provenance is assumed. The existing
+incomplete fixture stays rejected: any nested start with the outer total
+fails closed, including a completed equal-size helper. Supporting that case
+would require separate corroboration of completion. Individual timed test
+records (`test <name> ... ok <0.123s>`) are not suite summaries and do not
+supply that corroboration. Unobserved or forged helper output is outside
+what these mixed lines can establish; the executable's actual exit status
+and the operator's archived invocation boundaries remain separate evidence.
 
 The floor is not in this text. It reaches the script from the matrix, so
 the equality over the script holds that the floor check reads `matrix.floor` and

@@ -6093,7 +6093,7 @@ fn the_windows_floor_counts_top_level_harnesses_and_requires_complete_results() 
     )
     .expect("Windows job");
     let script = steps_of(job)
-        .into_iter()
+        .iter()
         .filter_map(|step| scalar(step, "run"))
         .find(|script| script.contains("$passed = 0\n"))
         .expect("Windows suite count");
@@ -6114,15 +6114,63 @@ $nested = @{ Harness = 'lib.exe'; Lines = @(
   'test result: ok. 94 passed; 0 failed; 2 ignored; 0 measured; 25 filtered out; finished in 1.23s', ''
 ) }
 $binary = @{ Harness = 'bin.exe'; Lines = @('running 5 tests', 'test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.01s') }
+$unit = @(
+  @{ Harness = 'cli.exe'; Lines = @(
+    'running 15 tests',
+    'test result: ok. 14 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.02s'
+  ) },
+  @{ Harness = 'lib.exe'; Lines = @(
+    'running 1546 tests',
+    'running 1 test',
+    'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3923 filtered out; finished in 0.00s',
+    'running 1 test',
+    'running 1 test',
+    'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3923 filtered out; finished in 2.24s',
+    'test result: ok. 1527 passed; 0 failed; 19 ignored; 0 measured; 2378 filtered out; finished in 18.96s'
+  ) },
+  @{ Harness = 'bin.exe'; Lines = @(
+    'running 0 tests',
+    'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s'
+  ) }
+)
+$runner = @(
+  @{ Harness = 'bin.exe'; Lines = @(
+    'running 0 tests',
+    'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s'
+  ) },
+  @{ Harness = 'cli.exe'; Lines = @(
+    'running 0 tests',
+    'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s'
+  ) },
+  @{ Harness = 'lib.exe'; Lines = @(
+    'running 421 tests',
+    'running 1 test',
+    'running 1 test',
+    'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3923 filtered out; finished in 3.53s',
+    'test result: ok. 409 passed; 0 failed; 12 ignored; 0 measured; 3503 filtered out; finished in 99.20s'
+  ) }
+)
 $cases = @(
   @{ Name = '99 top-level passes and nine helper passes'; Logs = @($nested, $binary, $zero); Harnesses = 3; Passed = 99 },
+  @{ Name = 'recorded unit suite'; Logs = $unit; Harnesses = 3; Passed = 1541 },
+  @{ Name = 'recorded runner suite'; Logs = $runner; Harnesses = 3; Passed = 409 },
   @{ Name = 'genuine zero'; Logs = @($zero); Harnesses = 1; Passed = 0 },
+  @{ Name = 'no harnesses'; Logs = @(); Harnesses = 0; Passed = $null },
   @{ Name = 'missing output'; Logs = @(@{ Harness = 'missing.exe'; Lines = @() }); Harnesses = 1; Passed = $null },
   @{ Name = 'missing harness'; Logs = @($binary); Harnesses = 2; Passed = $null },
   @{ Name = 'unfinished zero'; Logs = @(@{ Harness = 'zero.exe'; Lines = @('running 0 tests') }); Harnesses = 1; Passed = $null },
   @{ Name = 'helper result without outer result'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 5 tests') + $binary.Lines }); Harnesses = 1; Passed = $null },
+  @{ Name = 'outer five with only a child one result'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 5 tests', 'running 1 test', 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s') }); Harnesses = 1; Passed = $null },
+  @{ Name = 'zero helper without outer result'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 0 tests') + $zero.Lines }); Harnesses = 1; Passed = $null },
+  @{ Name = 'start after final result'; Logs = @(@{ Harness = 'partial.exe'; Lines = $binary.Lines + @('running 1 test') }); Harnesses = 1; Passed = $null },
+  @{ Name = 'zero start after final result'; Logs = @(@{ Harness = 'partial.exe'; Lines = $zero.Lines + @('running 0 tests') }); Harnesses = 1; Passed = $null },
   @{ Name = 'truncated result'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 0 tests', 'test result: ok. 0 passed') }); Harnesses = 1; Passed = $null },
+  @{ Name = 'truncated result after a complete result'; Logs = @(@{ Harness = 'partial.exe'; Lines = $binary.Lines + @('test result: ok. 5 passed') }); Harnesses = 1; Passed = $null },
   @{ Name = 'result without start'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s') }); Harnesses = 1; Passed = $null },
+  @{ Name = 'result before first start'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s') + $binary.Lines }); Harnesses = 1; Passed = $null },
+  @{ Name = 'timed test record without suite summary'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 1 test', 'test parent ... ok <0.030s>') }); Harnesses = 1; Passed = $null },
+  @{ Name = 'failed summary'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 1 test', 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s') }); Harnesses = 1; Passed = $null },
+  @{ Name = 'failed test in ok summary'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 1 test', 'test result: ok. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s') }); Harnesses = 1; Passed = $null },
   @{ Name = 'inconsistent total'; Logs = @(@{ Harness = 'partial.exe'; Lines = @('running 1 test', 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s') }); Harnesses = 1; Passed = $null }
 )
 foreach ($case in $cases) {

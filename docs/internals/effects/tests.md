@@ -2862,9 +2862,28 @@ and two ignores, five passes, and zero tests. The first contains two nested
 helper runs with four and five passes. The floor input must be 99, excluding
 the nine helper passes, matching the reviewed engine 4 acceptance reference.
 
-Invalid inputs cover missing output, a missing executable's output, an
-unfinished zero-test run, helpers completing without their outer result,
-a truncated result, a result without a start, and a mismatched total.
+The recorded unit and runner fixtures retain separate CLI, library and
+binary executable logs, with their start and summary lines in recorded
+order. Unit contributes 14 + 1527 + 0 = 1541 passes; runner contributes
+0 + 0 + 409 = 409. Their library logs contain helper starts without matching
+helper summaries, so requiring every nested start to close rejects completed
+outer harnesses. The counter uses each log's first start and last complete
+suite summary instead, requiring balanced totals and successful completion.
+
+Invalid inputs cover no harnesses, missing output, a missing executable's
+output, an unfinished zero-test run, helpers completing without their outer
+result (outer five/child one and the retained outer five/child five case),
+a zero helper without an outer result, a truncated final result including
+one after a complete summary, a result without or before the first start,
+a start after the final result, an unsuccessful result, and a mismatched
+total. A timed individual test record cannot substitute for a suite summary.
+Mixed stdout cannot attribute a matching summary to a parent when a helper
+announces the same test total. The retained equal-size incomplete fixture
+therefore fails closed; all nested equal-size starts are conservatively
+refused, even if their summaries appear complete. These fixtures establish
+the boundary counter's behavior, not process provenance or replay of the
+full archived runs. Actual executable exit handling is unchanged.
+
 An isolated completed zero-test harness returns zero. The fixture executes
 in a private scratch directory under the process runner's 120-second bound
 and process-tree cleanup, without a PowerShell profile or interactive input.
