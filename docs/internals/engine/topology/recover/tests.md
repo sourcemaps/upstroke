@@ -3829,7 +3829,7 @@ made without crossing a resume passes with the terminal empty.
 
 ## `fn an_unjudgeable_proposal_parks_the_candidate_for_a_person() {` › `let fixture = Fixture::two_tasks("input-rejected");`
 
-R4: a review input that cannot be judged is HumanRequired, not a code
+A review input that cannot be judged is HumanRequired, not a code
 rejection and not a publication. The review-input policy refuses the
 proposed tree before any reviewer runs.
 
@@ -3840,7 +3840,7 @@ must be charged there, live and on replay of the terminal's record.
 
 ## `fn a_verification_park_answer_is_ingested_and_the_candidate_re_verifies() {`
 
-R13: the loop ingests an answer to a verification-park question —
+The loop ingests an answer to a verification-park question —
 Answered returns the candidate to the queue, and the next step integrates
 it. The repair-admission half of PR8's version of this test, a refusal,
 became
