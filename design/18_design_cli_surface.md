@@ -64,7 +64,9 @@ its admission refuses it: a run recorded on the container runner, since the call
 host; a run whose pools the credential pre-flight of its resume refuses; a reviewer whose adapter
 cannot guarantee all of cost reporting in dollars, a dollar ceiling per call, no web access and
 the run's private directory being unreadable (Claude Code alone claims them; Copilot and Codex
-report no dollar cost); a `--max-cost-usd` that is not a positive number; a private directory no
+report no dollar cost); a `--max-cost-usd` that is not a positive number; a private directory
+that is not a real directory or, on Unix, is not the user's own and closed to group and other
+(§15: the claim relies on it); a private directory no
 permission rule can name exactly; and a reviewer that fails the pre-flight a run makes of each
 recorded agent (its CLI probed, and every account its pools configure signed in). Whether a
 person has answered the question is read again immediately before the call. A claim admits
@@ -76,12 +78,14 @@ and no flag besides the call's own, and settings that allow `Read`, `Glob` and `
 deny `WebFetch`, `WebSearch`, and reads of `.upstroke/**` and of the run's private directory. The
 plan file goes into the prompt only when its bytes hash to the plan the run recorded, and the call
 starts in the checkout the command was run in, its environment composed for that checkout. A run
-is decided once: immediately before its call the command claims it by creating its proposals
-directory exclusively (§15), and a run whose directory exists, complete, partial, of an older
-format or anything else at that name, is refused, never adopted, with nothing written and no
-agent asked; the claim is never removed, after a failure or an interruption included. That
-directory is the run's one spending claim: a later decide of the run, of the same question or
-another, or one started beside it that loses the `create_dir`, is refused. `--max-cost-usd`
+is decided once: immediately before its call the command claims it by creating `decide/` in the
+run's private directory exclusively (§15), and a run whose claim exists, complete, partial or
+anything else at that name, is refused, never adopted, with nothing written and no agent asked;
+the claim is never removed, after a failure or an interruption included. That directory is the
+run's one spending claim, and every copy of the checkout shares it, since each records the same
+private directory: a later decide of the run, of the same question or another, from this copy or
+any other, or one started beside it that loses the `create_dir`, is refused. Each file is
+written immediately after the check that admits it (§15). `--max-cost-usd`
 (default 5) is the run's dollar allowance, and the one call's own `--max-budget-usd`, whole:
 nothing is subtracted from it. Only a clean, successful and priced call (exit 0 within its
 limits, an outcome the adapter reads as completed, a cost of $0 or more) is settled, at its
@@ -92,9 +96,10 @@ block or a run within a line alike (the block's own closing line is the block's)
 `choice`, `guidance`, `reasons`, `confidence`, `needs_a_person` and `citations`, whose `choice` is
 one of the question's options and never one that gives up, or `null` where there are none, and
 whose `guidance` is never one `upstroke answer --text` would read as declining. The reply,
-accepted or refused, is saved as §15 lays out. The report gives the question's decider, status,
-choice and the reply's fields, cost (`unknown` for a call that did not settle) and saved path,
-then the directory that claims the run, and ends saying nothing was answered. Agent text,
+accepted or refused, is saved as §15 lays out, in `proposal.json` in the claim, whose path the
+report names for the person who applies it with `upstroke answer`. The report gives the question's
+decider, status, choice and the reply's fields, cost (`unknown` for a call that did not settle)
+and saved path, then the directory that claims the run, and ends saying nothing was answered. Agent text,
 question text, file names and every refusal are data inside a line, sanitized as `status`
 sanitizes them. The command exits non-zero, after the whole report, when the reply was refused,
 saying its reason is saved in the proposal; a write that fails after the claim fails the command

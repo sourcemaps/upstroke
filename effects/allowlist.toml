@@ -857,35 +857,39 @@ Runner. It is not the engine: no \
 engine module names it, and it never answers -- it calls no `write_answer`, no \
 `AnswerSource` and no coordinator. \
 WHAT IT NEEDS THE ALLOWANCE FOR, counted on the library target on Linux: \
-`clippy::disallowed_methods`, 8 production sites -- `std::fs::create_dir` 2, \
-one in `ensure_dir` (`.upstroke` or `.upstroke/proposals` where missing, one \
-level at a time, so no link is created through) and one in `claim` (the run's \
-own directory, created exclusively: the claim); on Unix \
-`std::fs::set_permissions` 1, in `make_owner_only`, narrowing a directory it \
-has just created to its owner; `util::fsync_dir` 1, in `sync_parent`, the \
-parent of each directory of the chain whoever created it; and, in the private \
-`create_durably` that every settings file, raw output and proposal goes \
-through, `std::fs::File::create_new` 1, `std::io::Write::write_all` 1, \
+`clippy::disallowed_methods`, 6 production sites -- `std::fs::create_dir` 1, \
+in `Claim::take` (the claim, `decide/` in the run's private directory, created \
+exclusively with no mode of its own: no mode is set or changed anywhere in \
+the module); `util::fsync_dir` 1, also in `Claim::take`, the private directory \
+once the claim is created in it; and, in the private `create_durably` that \
+every settings file, raw output and proposal goes through (by way of \
+`Claim::write`, which checks the claim immediately before each file), \
+`std::fs::File::create_new` 1, `std::io::Write::write_all` 1, \
 `util::fsync_file` 1 and `util::fsync_dir` 1. `admit`'s \
-`std::fs::canonicalize` and the `symlink_metadata` and `metadata` reads of \
-the chain's directories are not denied; nothing lists or reads the proposals \
-directory. `rundir::RunLock::acquire`, the run's own lock, is the engine's \
-facility and not denied. The test region adds 70 more, counted the same way \
-with `--all-targets` on Linux (78 in all, re-measured on 2026-11-27 when the \
-command was narrowed to one question): `std::fs::create_dir_all` \
-9 and `std::fs::write` 11, which build the fixture repository's plan file, pools \
+`std::fs::canonicalize`, the `symlink_metadata` reads of the private \
+directory and the claim, and `libc::geteuid` (listed as no effect in \
+`effects/wrappers.toml`) are not denied; nothing lists or reads the claim. \
+`rundir::RunLock::acquire`, the run's own lock, is the engine's facility and \
+not denied. The test region adds 78 more, counted the same way with \
+`--all-targets` on Linux (84 in all, re-measured on 2026-11-27 when the claim \
+moved into the run's private directory): `std::fs::create_dir_all` 9 and \
+`std::fs::write` 10, which build the fixture repository's plan file, pools \
 files (one naming a profile whose path carries control characters), credential \
-profile directory, private directory, a schema-3 run, an \
-earlier claim of the run with its files, a directory of another mode or \
-elsewhere, stray files, the run's answers directory and a plan file edited \
-after the run started (the schema-4 run is written through the event \
-funnel); `interaction::write_answer` 1, a person's answer the run has not yet \
-read; `std::fs::rename` 1, moving the whole fixture repository to show a \
-proposal's raw-output reference still names its file; `std::fs::create_dir` \
-1, an earlier claim; on Unix, `std::fs::set_permissions` 1, which gives the \
-fixture's `.upstroke` the common umask's mode and each chain directory the mode \
-a case needs, and `std::os::unix::fs::symlink` 2, a link at the run's name and \
-at `.upstroke/proposals`; and 44 calls of the module's own denied entry point, \
+profile directory, private directory, a schema-3 run, an earlier claim of the \
+run with its files, a file at the claim's name, directories elsewhere, a \
+directory an older decide left in the checkout, a copy of the checkout's \
+directories, stray files, the run's answers directory and a plan file edited \
+after the run started (the schema-4 run is written through the event funnel); \
+`interaction::write_answer` 1, a person's answer the run has not yet read; \
+`std::fs::create_dir` 2, an earlier claim and a directory made the plain way \
+to compare the claim's mode with; `std::fs::copy` 1, the files of a copied \
+checkout; `std::fs::remove_dir_all` 1, a claim removed to show that the claim \
+alone refuses a second command; on Unix, `std::fs::set_permissions` 1, which \
+gives the fixture's private directory, or a directory left in the checkout, \
+the mode a case needs, `std::fs::rename` 2, moving the private directory or \
+the claim aside for a link, and `std::os::unix::fs::symlink` 3, a link at the \
+claim's name, at the private directory's and, while the call is in flight, at \
+the claim's again; and 48 calls of the module's own denied entry point, \
 `decide`. \
 `clippy::disallowed_types` and `clippy::disallowed_macros` are FORBIDDEN in this \
 file: it names no `std::process::Command` or `OpenOptions` and prints nothing. \
@@ -904,28 +908,36 @@ has refused a run recorded on the container runner, a run \
 whose pools the credential pre-flight refuses, a reviewer whose adapter does \
 not claim every guarantee (cost reporting, a per-call dollar ceiling, no web \
 access, the run's private directory unreadable; only Claude Code claims them), \
-a `--max-cost-usd` that is not a positive number and a private directory no \
-permission rule can name; nothing but those probes is started before the \
+a `--max-cost-usd` that is not a positive number, a private directory that is \
+not a real directory or, on Unix, not the user's own and closed to group and \
+other, and a private directory no permission rule can name; nothing but those \
+probes is started before the \
 answers directory has been read (`interaction::read_answer`, which writes \
 nothing) and the pre-flight has passed, the answers directory is read again \
 immediately before the claim and the call, and no call before `prepare` has \
 refused a command that carries an environment overlay, is not the recorded \
 reviewer's model and effort, or does not keep each guarantee as built. \
-CONTAINMENT. Every file is written under `<repo>/.upstroke/proposals/<run-id>/`, \
-which the run's one call claims by creating it exclusively, immediately \
-before that call: anything already at the name refuses the command with \
-nothing written and no agent asked, and the directory is never removed, so a \
-run is asked once. The chain is real directories (no link, no reparse point; \
-on Unix the repository owner's, `.upstroke` writable by no other user, and \
-`proposals` and `<run-id>` created owner-only and open to no other user), \
-checked before anything is created under each, with each one's parent synced \
-whoever created it. The run id is a plain component, checked before any path \
-is built from it, and the exact name of an existing run directory; the question \
-id is matched byte for byte against the run's open questions and written into a \
-file name only when it is a plain component. Nothing is written under a run's \
-public or private directory or an answers directory (the run lock's own files, \
-which `RunLock::acquire` opens, are created only where the run's engine never \
-created them), no file is overwritten \
+CONTAINMENT. Every file is written in the run's claim, `decide/` in the run's \
+private directory (the one its `run_started` records, which every copy of the \
+checkout names, so the copies share the claim), which the run's one call \
+claims by creating it exclusively, immediately before that call: anything \
+already at the name refuses the command with nothing written and no agent \
+asked, and the claim is never removed, so a run is asked once. The claim is \
+created with a plain `create_dir` and no mode is changed afterwards, so it \
+relies on its parent: the private directory must be a real directory (no \
+link, no reparse point) and, on Unix, belong to the user decide runs as and \
+grant group and other nothing, checked at admission, immediately before the \
+claim and immediately before each file is written, with the claim still a \
+real directory of that user; on Windows std reads no owner or access list, \
+and only the directory check is made. The private directory is synced once the \
+claim is created in it. The run id is a plain component, checked before any \
+path is built from it, and the exact name of an existing run directory; the \
+question id is matched byte for byte against the run's open questions and \
+becomes no file name: the claim's three names are fixed. Nothing is written \
+under a run's public directory or an answers directory, or in its private \
+directory outside the claim (the run lock's own files, which \
+`RunLock::acquire` opens, are created only where the run's engine never \
+created them), nothing is written in the checkout, no file is overwritten \
 (every file, the call's settings file included, is `create_new`), and nothing \
 is deleted. \
 HANDLES: no item returns a `File`, an `OpenOptions` or a `Command`. \

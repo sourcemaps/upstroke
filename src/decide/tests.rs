@@ -953,34 +953,44 @@ impl Fixture {
         }
     }
 
-    fn proposals_written(&self) -> bool {
-        proposals_dir(&self.repo, RUN).exists()
+    /// The run's claim directory, in its private directory.
+    fn claim(&self) -> PathBuf {
+        self.private.join(CLAIM_DIR)
+    }
+
+    /// Whether anything stands at the claim's name: whether the run was claimed.
+    fn claimed(&self) -> bool {
+        std::fs::symlink_metadata(self.claim()).is_ok()
     }
 
     fn public(&self) -> PathBuf {
         crate::rundir::public_dir(&self.repo, RUN)
     }
 
+    /// The run's one proposal, which must be question `id`'s.
     fn proposal(&self, id: &str) -> Value {
-        let path = proposals_dir(&self.repo, RUN).join(format!("{id}.json"));
+        let path = self.claim().join(PROPOSAL_FILE);
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-        serde_json::from_str(&text).expect("a proposal is JSON")
+        let saved: Value = serde_json::from_str(&text).expect("a proposal is JSON");
+        assert_eq!(saved["question_id"], id, "the run's one proposal: {saved}");
+        saved
     }
 
+    /// Whether the run's one proposal is saved and is question `id`'s.
     fn has_proposal(&self, id: &str) -> bool {
-        proposals_dir(&self.repo, RUN)
-            .join(format!("{id}.json"))
-            .exists()
+        std::fs::read_to_string(self.claim().join(PROPOSAL_FILE))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .is_some_and(|saved| saved["question_id"] == id)
     }
 
-    /// `.upstroke/proposals`, created owner-only as an earlier decide of another run, another
-    /// caller, would have left it.
-    fn proposals_parent(&self) -> PathBuf {
-        let parent = self.repo.join(".upstroke").join("proposals");
-        std::fs::create_dir_all(&parent).expect("the proposals directory");
-        set_mode(&parent, 0o700);
-        parent
+    /// The names of the files in the run's claim, sorted.
+    fn claim_files(&self) -> Vec<String> {
+        snapshot(&self.claim())
+            .keys()
+            .filter_map(|path| path.file_name()?.to_str().map(str::to_owned))
+            .collect()
     }
 }
 
@@ -1045,6 +1055,8 @@ fn fixture_with(tag: &str, tasks: usize, setup: Setup, write: impl FnOnce(&mut L
     )
     .expect("the pools file");
     std::fs::create_dir_all(&private).expect("the private directory");
+    // Closed to group and other, as decide requires of it, whatever this process's umask is.
+    set_mode(&private, 0o700);
     std::fs::write(private.join("transcript.txt"), "a transcript\n").expect("a transcript");
 
     let plan = plan(tasks);
@@ -1054,8 +1066,6 @@ fn fixture_with(tag: &str, tasks: usize, setup: Setup, write: impl FnOnce(&mut L
     let public = crate::rundir::public_dir(&repo, RUN);
     let hooks = &mut crate::rundir::NoHooks;
     crate::rundir::create_public_dir(&public, hooks).expect("the run's public directory");
-    // `.upstroke` as a run leaves it under the common umask, whatever this process's own is.
-    set_mode(&repo.join(".upstroke"), 0o755);
     crate::rundir::write_plan(&public, &plan_bytes, hooks).expect("the frozen plan");
     let path = public.join(crate::rundir::EVENT_LOG);
     let log = crate::events::EventLog::open(
@@ -1167,54 +1177,28 @@ fn a_valid_proposal_is_accepted_printed_and_saved_with_its_cost() {
     for field in FIELDS {
         assert!(saved["record"].get(field).is_some(), "{field}: {saved}");
     }
-    let raw = saved["raw_output"].as_str().expect("a reference");
     assert_eq!(
-        raw,
-        format!(".upstroke/proposals/{RUN}/q-01A.out"),
-        "the raw output is named from the repository root, `/`-separated on every platform"
+        saved["raw_output"], RAW_FILE,
+        "the raw output is named by its fixed name, beside the proposal"
     );
     assert_eq!(
-        fixture.repo.join(raw),
-        proposals_dir(&fixture.repo, RUN).join("q-01A.out"),
-        "the raw output is saved beside the proposal"
-    );
-    assert_eq!(
-        std::fs::read_to_string(fixture.repo.join(raw)).expect("the raw output"),
+        std::fs::read_to_string(fixture.claim().join(RAW_FILE)).expect("the raw output"),
         claude_output(&reply(VALID), Some(0.25))
     );
     assert!(report.contains(&format!(
         "saved: {}",
-        proposals_dir(&fixture.repo, RUN)
-            .join("q-01A.json")
-            .display()
+        fixture.claim().join(PROPOSAL_FILE).display()
     )));
     assert!(
         report.contains(&format!(
             "claimed: {}; decide asks a run once",
-            proposals_dir(&fixture.repo, RUN).display()
+            fixture.claim().display()
         )),
         "{report}"
     );
-}
-
-#[test]
-fn a_saved_proposal_names_its_raw_output_wherever_the_repository_is_moved() {
-    let fixture = one_question("decide-moved-repo");
-    let runner = Scripted::answering(vec![claude_output(&reply(VALID), Some(0.25))]);
-    decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
-    let moved = fixture.repo.with_file_name("moved-repo");
-    std::fs::rename(&fixture.repo, &moved).expect("move the repository");
-    let path = proposals_dir(&moved, RUN).join("q-01A.json");
-    let saved: Value =
-        serde_json::from_str(&std::fs::read_to_string(&path).expect("the proposal")).expect("JSON");
-    let raw = saved["raw_output"].as_str().expect("a reference");
     assert!(
-        !Path::new(raw).is_absolute() && !raw.contains('\\'),
-        "relative and `/`-separated: {raw}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(moved.join(raw)).expect("the reference resolves from the new root"),
-        claude_output(&reply(VALID), Some(0.25))
+        !fixture.repo.join(".upstroke").join("proposals").exists(),
+        "nothing is written in the checkout"
     );
 }
 
@@ -1309,10 +1293,7 @@ fn the_request_is_a_decide_request_for_the_runs_reviewer_with_no_overlay() {
         .settings_file
         .as_ref()
         .expect("the read-only profile's settings file");
-    assert_eq!(
-        settings,
-        &proposals_dir(&fixture.repo, RUN).join("q-01A.settings.json")
-    );
+    assert_eq!(settings, &fixture.claim().join(SETTINGS_FILE));
     let written: Value =
         serde_json::from_str(&std::fs::read_to_string(settings).expect("the settings file"))
             .expect("JSON");
@@ -1413,7 +1394,7 @@ fn a_binding_question_is_refused_and_no_request_is_made_for_it() {
         "{message}"
     );
     assert!(
-        !fixture.repo.join(".upstroke").join("proposals").exists(),
+        !fixture.claimed(),
         "with no call to make, the run is not claimed and nothing is created"
     );
 }
@@ -1457,7 +1438,7 @@ fn runs_and_questions_that_cannot_be_decided_are_refused_before_any_request() {
         );
     }
     assert!(
-        !settled.proposals_written(),
+        !settled.claimed(),
         "nothing was claimed for a question the run does not have open"
     );
 
@@ -1479,18 +1460,29 @@ fn runs_and_questions_that_cannot_be_decided_are_refused_before_any_request() {
     assert!(message.contains("is a schema 1-3 run"), "{message}");
 }
 
+/// A decide writes nothing in the run but its claim: every other file of the run's public and
+/// private directories is as it was, the claim holds the three fixed names and nothing else, and
+/// the checkout holds nothing new.
 #[test]
 fn a_decide_leaves_every_file_of_the_run_as_it_was_and_writes_no_answer() {
     let fixture = one_question("decide-untouched");
     let public_before = snapshot(&fixture.public());
     let private_before = snapshot(&fixture.private);
+    let checkout_before = snapshot(&fixture.repo);
     assert!(!public_before.is_empty() && !private_before.is_empty());
 
     let runner = Scripted::answering(vec![claude_output(&reply(VALID), Some(0.25))]);
     decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
 
     assert_eq!(snapshot(&fixture.public()), public_before);
-    assert_eq!(snapshot(&fixture.private), private_before);
+    let mut private_after = snapshot(&fixture.private);
+    private_after.retain(|path, _| !path.starts_with(fixture.claim()));
+    assert_eq!(private_after, private_before, "only the claim is new");
+    assert_eq!(
+        fixture.claim_files(),
+        [PROPOSAL_FILE, RAW_FILE, SETTINGS_FILE]
+    );
+    assert_eq!(snapshot(&fixture.repo), checkout_before, "the checkout");
     let observed = observe::observe(&fixture.repo, RUN)
         .expect("readable")
         .expect("schema 4");
@@ -1585,31 +1577,38 @@ fn a_decimal_allowance_buys_one_call_and_no_remainder_starts_another() {
     }
 }
 
-/// Lays an earlier claim of the run down under an owner-only `.upstroke/proposals`: the run's
-/// directory, holding `files`.
+/// Lays an earlier claim of the run down in its private directory: the claim directory, holding
+/// `files`.
 fn earlier_claim(fixture: &Fixture, files: &[(&str, &str)]) -> PathBuf {
-    let dir = proposals_dir(&fixture.repo, RUN);
-    fixture.proposals_parent();
+    let dir = fixture.claim();
     std::fs::create_dir(&dir).expect("an earlier claim");
-    set_mode(&dir, 0o700);
     for (name, text) in files {
         std::fs::write(dir.join(name), text).expect("an earlier file");
     }
     dir
 }
 
-/// Asserts that `decide` was refused as a run claimed already, with no call and nothing under
-/// `.upstroke/proposals` written or changed, and returns the refusal's words.
+/// Asserts that `decide` was refused as a run claimed already, with no call and nothing in the
+/// run's private directory written or changed, and returns the refusal's words.
 fn refused_as_claimed(fixture: &Fixture, case: &str) -> String {
-    let parent = fixture.repo.join(".upstroke").join("proposals");
-    let before = snapshot(&parent);
+    refused_as_claimed_with(fixture, &fixture.options(), case)
+}
+
+/// [`refused_as_claimed`], for a decide run with `options`: from another copy of the checkout,
+/// for one.
+fn refused_as_claimed_with(fixture: &Fixture, options: &DecideOptions, case: &str) -> String {
+    let before = snapshot(&fixture.private);
     let runner = Acting::priced(0.25);
-    let message = decide(&fixture.options(), &BuiltinAdapters, &runner)
+    let message = decide(options, &BuiltinAdapters, &runner)
         .map(|decided| decided.report)
         .expect_err(case)
         .to_string();
     assert!(runner.seen().is_empty(), "{case}: no agent was asked");
-    assert_eq!(snapshot(&parent), before, "{case}: nothing was written");
+    assert_eq!(
+        snapshot(&fixture.private),
+        before,
+        "{case}: nothing was written"
+    );
     assert!(
         message.contains(&format!("run `{RUN}` was claimed already"))
             && message.contains(NOTHING_DONE),
@@ -1618,38 +1617,28 @@ fn refused_as_claimed(fixture: &Fixture, case: &str) -> String {
     message
 }
 
-/// Directory: the run's directory is created exclusively, and whatever already stands at its
-/// name (an empty directory, an older format's history, a partial or a complete earlier run, a
+/// Directory: the claim is created exclusively, and whatever already stands at its name (an
+/// empty directory, as an interrupted claim leaves it, a partial or a complete earlier claim, a
 /// file or a link) means no write and no call.
 #[test]
-fn a_run_whose_directory_exists_is_not_asked_and_nothing_is_written() {
+fn a_run_whose_claim_exists_is_not_asked_and_nothing_is_written() {
     // The control: the same run with nothing at the name is claimed and asked once.
     let control = one_question("decide-unclaimed");
     let runner = Acting::priced(0.25);
     decide(&control.options(), &BuiltinAdapters, &runner).expect("decided");
     assert_eq!(runner.seen().len(), 1);
-    assert!(proposals_dir(&control.repo, RUN).is_dir());
+    assert!(control.claim().is_dir());
 
-    let older = r#"{"sequence": 1, "question_id": "q-01A", "slot": 1, "reserved_usd": 5.0}"#;
     let completed = r#"{"question_id": "q-01A", "status": "accepted", "cost_usd": 0.25}"#;
-    let cases: [(&str, &[(&str, &str)]); 4] = [
+    let cases: [(&str, &[(&str, &str)]); 3] = [
         ("an empty directory", &[]),
+        ("a partial claim", &[(SETTINGS_FILE, "{}")]),
         (
-            "an older format's history",
+            "a complete claim",
             &[
-                ("reservation-1.json", older),
-                ("q-01A.1-decide.json", "{}"),
-                ("q-01A.1.out", "raw"),
-                ("q-01A.1.json", completed),
-            ],
-        ),
-        ("a partial run", &[("q-01A.settings.json", "{}")]),
-        (
-            "a complete run",
-            &[
-                ("q-01A.settings.json", "{}"),
-                ("q-01A.out", "raw"),
-                ("q-01A.json", completed),
+                (SETTINGS_FILE, "{}"),
+                (RAW_FILE, "raw"),
+                (PROPOSAL_FILE, completed),
             ],
         ),
     ];
@@ -1660,17 +1649,15 @@ fn a_run_whose_directory_exists_is_not_asked_and_nothing_is_written() {
     }
 
     let filed = one_question("decide-claimed-file");
-    let parent = filed.proposals_parent();
-    std::fs::write(parent.join(RUN), "not a directory").expect("a file at the name");
+    std::fs::write(filed.claim(), "not a directory").expect("a file at the name");
     refused_as_claimed(&filed, "a file at the name");
 
     #[cfg(unix)]
     {
         let linked = one_question("decide-claimed-link");
-        let parent = linked.proposals_parent();
         let elsewhere = linked.repo.join("elsewhere");
         std::fs::create_dir_all(&elsewhere).expect("a directory elsewhere");
-        std::os::unix::fs::symlink(&elsewhere, parent.join(RUN)).expect("a link");
+        std::os::unix::fs::symlink(&elsewhere, linked.claim()).expect("a link");
         refused_as_claimed(&linked, "a link at the name");
         assert!(
             snapshot(&elsewhere).is_empty(),
@@ -1679,34 +1666,48 @@ fn a_run_whose_directory_exists_is_not_asked_and_nothing_is_written() {
     }
 }
 
-/// Directory and interruption: the run is claimed owner-only immediately before its first call,
-/// and the claim stays after the call is interrupted, so a later decide asks nothing.
+/// Directory and interruption: the run is claimed in its private directory immediately before
+/// its first call, with the mode a plain `create_dir` gives it and no other, and the claim stays
+/// after the call is interrupted, so a later decide asks nothing.
 #[test]
-fn the_run_is_claimed_owner_only_before_its_first_call_and_the_claim_outlives_an_interruption() {
+fn the_run_is_claimed_in_its_private_directory_before_its_first_call_and_the_claim_outlives_an_interruption()
+ {
     let fixture = one_question("decide-claim");
-    let repo = fixture.repo.clone();
+    let claim = fixture.claim();
+    let private = fixture.private.clone();
     let runner = Acting::new(move |_| {
-        let dir = proposals_dir(&repo, RUN);
-        let names: Vec<String> = snapshot(&dir)
+        let names: Vec<String> = snapshot(&claim)
             .keys()
             .filter_map(|path| path.file_name())
             .map(|name| name.to_string_lossy().into_owned())
             .collect();
         assert_eq!(
             names,
-            ["q-01A.settings.json"],
+            [SETTINGS_FILE],
             "claimed, and holding only the call's settings, while the call is in flight"
         );
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt as _;
-            let owner = std::fs::metadata(&repo).expect("the repository").uid();
-            for made in [dir.clone(), repo.join(".upstroke").join("proposals")] {
-                let metadata = std::fs::symlink_metadata(&made).expect("created");
-                assert!(metadata.file_type().is_dir(), "{}", made.display());
-                assert_eq!(metadata.uid(), owner, "{}", made.display());
-                assert_eq!(metadata.mode() & 0o777, 0o700, "{}", made.display());
-            }
+            // A directory made the plain way beside it, now, under this process's umask.
+            let plain = private.with_file_name("plain");
+            std::fs::create_dir(&plain).expect("a plain directory");
+            let mode = |path: &Path| {
+                let metadata = std::fs::symlink_metadata(path).expect("there");
+                assert!(metadata.file_type().is_dir(), "{}", path.display());
+                metadata.mode() & 0o777
+            };
+            assert_eq!(
+                mode(&claim),
+                mode(&plain),
+                "the claim keeps the mode create_dir gave it"
+            );
+            assert_eq!(mode(&private), 0o700, "its parent's mode is unchanged");
+            let owner = std::fs::symlink_metadata(&plain).expect("there").uid();
+            assert_eq!(
+                std::fs::symlink_metadata(&claim).expect("there").uid(),
+                owner
+            );
         }
         Ok(exited(claude_output(&reply(VALID), Some(0.25))))
     });
@@ -1722,81 +1723,157 @@ fn the_run_is_claimed_owner_only_before_its_first_call_and_the_claim_outlives_an
         decide(&options, &BuiltinAdapters, &runner)
     }));
     assert!(unwound.is_err(), "the launcher died mid-call");
-    let dir = proposals_dir(&interrupted.repo, RUN);
-    assert!(dir.join("q-b.settings.json").exists(), "the claim stays");
-    assert!(!dir.join("q-b.out").exists() && !interrupted.has_proposal("q-b"));
+    assert_eq!(
+        interrupted.claim_files(),
+        [SETTINGS_FILE],
+        "the claim stays"
+    );
     refused_as_claimed(&interrupted, "an interrupted run");
 }
 
-/// Directory durability: each directory's parent is synced whoever created it, the run's own
-/// `.upstroke` and another caller's `.upstroke/proposals` included. A parent that cannot be
-/// synced ends the command before any call, and the run is claimed only if its own directory
-/// was created.
+/// Durability: the private directory is synced once the claim is created in it, so the claim is
+/// durable before the call. If it cannot be synced, the run is claimed, the claim stays, and no
+/// agent is asked.
 #[test]
-fn each_parent_is_synced_whoever_created_it() {
-    // The control: another caller's owner-only `.upstroke/proposals`, nothing armed.
-    let control = one_question("decide-synced-control");
-    control.proposals_parent();
+fn the_private_directory_is_synced_once_the_claim_is_created_in_it() {
+    let fixture = one_question("decide-synced");
     let runner = Acting::priced(0.25);
-    decide(&control.options(), &BuiltinAdapters, &runner).expect("decided");
-    assert_eq!(runner.seen().len(), 1);
+    let message = {
+        let _fault = crate::util::fail_barriers_at(&fixture.private);
+        decide(&fixture.options(), &BuiltinAdapters, &runner)
+            .map(|decided| decided.report)
+            .expect_err("the private directory cannot be synced")
+            .to_string()
+    };
+    assert!(runner.seen().is_empty(), "no agent was asked: {message}");
+    assert!(
+        message.contains(&format!("run `{RUN}` is claimed"))
+            && message.contains("could not be synced")
+            && message.contains("no agent was asked"),
+        "{message}"
+    );
+    assert!(
+        fixture.claimed() && fixture.claim_files().is_empty(),
+        "{message}"
+    );
+    refused_as_claimed(&fixture, "a claim whose parent could not be synced");
+}
 
-    for (at, (synced, claimed)) in [
-        (
-            "the repository root, which holds the run's `.upstroke`",
-            false,
-        ),
-        (
-            "`.upstroke`, which holds another caller's `proposals`",
-            false,
-        ),
-        (
-            "`.upstroke/proposals`, which holds the run's directory",
-            true,
-        ),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let fixture = one_question(&format!("decide-synced-{at}"));
-        let parent = fixture.proposals_parent();
-        let target = match at {
-            0 => fixture.repo.clone(),
-            1 => fixture.repo.join(".upstroke"),
-            _ => parent.clone(),
-        };
-        let runner = Acting::priced(0.25);
-        let message = {
-            let _fault = crate::util::fail_barriers_at(&target);
-            decide(&fixture.options(), &BuiltinAdapters, &runner)
-                .map(|decided| decided.report)
-                .expect_err(synced)
-                .to_string()
-        };
-        assert!(runner.seen().is_empty(), "{synced}: no agent was asked");
-        assert!(
-            message.contains("could not be synced") && message.contains("no agent was asked"),
-            "{synced}: {message}"
-        );
-        assert_eq!(
-            proposals_dir(&fixture.repo, RUN).exists(),
-            claimed,
-            "{synced}: {message}"
-        );
-        if claimed {
-            assert!(
-                message.contains(&format!("run `{RUN}` is claimed")),
-                "{message}"
-            );
-            refused_as_claimed(&fixture, "a claim whose parent could not be synced");
-        } else {
-            assert!(message.contains("the run was not claimed"), "{message}");
-            let runner = Acting::priced(0.25);
-            decide(&fixture.options(), &BuiltinAdapters, &runner)
-                .expect("once the parent syncs, the run is claimed");
-            assert_eq!(runner.seen().len(), 1, "{synced}");
+/// Copies the checkout at `from` to `to`, whole: the run's log, its public directory and the
+/// rest, as copying a checkout before its first decision does. The run's private directory is
+/// outside the checkout, and the copy's log names the same one.
+fn copy_checkout(from: &Path, to: &Path) {
+    let mut pending = vec![from.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let relative = dir.strip_prefix(from).expect("under the checkout");
+        std::fs::create_dir_all(to.join(relative)).expect("a directory of the copy");
+        for entry in std::fs::read_dir(&dir).expect("read a directory").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path.strip_prefix(from).expect("under the checkout");
+                std::fs::copy(&path, to.join(relative)).expect("a file of the copy");
+            }
         }
     }
+}
+
+/// `PR435-COPIED-RUN-DOUBLE-SPEND`: a checkout copied before its first decision carries the same
+/// run, events, private directory and owner record. Each copy has a run lock of its own, but
+/// the claim is in the run's private directory, which both name, so the second decide, from either
+/// copy, finds it and is refused: the run's allowance is spent once.
+#[test]
+fn copied_checkout_shares_the_run_allowance() {
+    let fixture = one_question("decide-copied");
+    let copy = fixture.repo.with_file_name("copy");
+    copy_checkout(&fixture.repo, &copy);
+    let from_copy = DecideOptions {
+        repo_root: copy.clone(),
+        ..fixture.options()
+    };
+
+    let runner = Acting::priced(5.0);
+    let decided = decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+    assert!(decided.outcome().is_ok(), "{}", decided.report);
+    assert_eq!(ceilings(&runner.seen()), [Some("5".to_owned())]);
+    refused_as_claimed_with(&fixture, &from_copy, "the copy, after the original");
+    refused_as_claimed(&fixture, "the original, again");
+    assert!(
+        !copy.join(".upstroke").join("proposals").exists()
+            && !fixture.repo.join(".upstroke").join("proposals").exists(),
+        "neither copy holds a claim of its own"
+    );
+}
+
+/// The exclusive `create_dir` is the claim, and nothing else is: while the first command's call
+/// is in flight, its proposal not yet written and its run lock held in the original's public
+/// directory only, a decide from the copy, which takes the copy's own lock, finds the claim and
+/// is refused before anything is written or asked. With the claim directory removed, as nothing
+/// but a test does, the same decide from the copy is asked.
+#[test]
+fn the_exclusive_create_dir_is_what_makes_a_second_command_find_the_claim() {
+    let fixture = one_question("decide-raced");
+    let copy = fixture.repo.with_file_name("copy");
+    copy_checkout(&fixture.repo, &copy);
+    let from_copy = DecideOptions {
+        repo_root: copy.clone(),
+        ..fixture.options()
+    };
+    let second = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let runner = Acting::new({
+        let second = std::sync::Arc::clone(&second);
+        let from_copy = DecideOptions {
+            repo_root: copy.clone(),
+            ..fixture.options()
+        };
+        move |_| {
+            let inner = Acting::priced(0.25);
+            let refused = decide(&from_copy, &BuiltinAdapters, &inner)
+                .map(|decided| decided.report)
+                .map_err(|error| error.to_string());
+            lock(&second).push((refused, inner.seen().len()));
+            Ok(exited(claude_output(&reply(VALID), Some(0.25))))
+        }
+    });
+    let decided = decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+    assert!(decided.outcome().is_ok(), "{}", decided.report);
+    let attempts = lock(&second).clone();
+    let [(Err(message), 0)] = attempts.as_slice() else {
+        panic!("one second command, refused with no call: {attempts:?}");
+    };
+    assert!(
+        message.contains(&format!("run `{RUN}` was claimed already"))
+            && message.contains(NOTHING_DONE),
+        "{message}"
+    );
+
+    // The same second command, with nothing at the claim's name, is admitted and asked.
+    std::fs::remove_dir_all(fixture.claim()).expect("the claim, removed");
+    let runner = Acting::priced(0.25);
+    let decided = decide(&from_copy, &BuiltinAdapters, &runner).expect("decided");
+    assert!(decided.outcome().is_ok(), "{}", decided.report);
+    assert_eq!(runner.seen().len(), 1);
+}
+
+/// `PR435-CLAIM-MODE-AT-CREATION`: no directory decide creates is narrowed after it is created,
+/// and none is shared between runs or checkouts. A `.upstroke/proposals` an interrupted decide
+/// of the old layout left open in the checkout stops nothing: no later decide reads it.
+#[cfg(unix)]
+#[test]
+fn a_directory_left_open_in_the_checkout_stops_no_decide() {
+    let fixture = one_question("decide-left-open");
+    let left = fixture.repo.join(".upstroke").join("proposals");
+    std::fs::create_dir_all(&left).expect("a directory an interrupted decide left");
+    set_mode(&left, 0o755);
+    let runner = Acting::priced(0.25);
+    let decided = decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+    assert!(decided.outcome().is_ok(), "{}", decided.report);
+    assert_eq!(runner.seen().len(), 1);
+    assert!(
+        snapshot(&left).is_empty(),
+        "nothing is written in the checkout"
+    );
 }
 
 /// The value the request's command gives `flag`, if it carries it with one.
@@ -1820,10 +1897,7 @@ fn refused_before_anything(
         .expect_err(case)
         .to_string();
     assert!(runner.seen().is_empty(), "{case}: no agent was asked");
-    assert!(
-        !fixture.proposals_written(),
-        "{case}: nothing was written under the proposals directory"
-    );
+    assert!(!fixture.claimed(), "{case}: the run was not claimed");
     message
 }
 
@@ -2304,9 +2378,7 @@ fn only_a_clean_successful_priced_call_settles_and_any_other_is_saved_refused() 
             "{case}: {saved}"
         );
         assert!(
-            proposals_dir(&fixture.repo, RUN)
-                .join("q-01A.out")
-                .is_file(),
+            fixture.claim().join(RAW_FILE).is_file(),
             "{case}: the raw output, or the failure, is saved"
         );
         let report = &decided.report;
@@ -2318,7 +2390,7 @@ fn only_a_clean_successful_priced_call_settles_and_any_other_is_saved_refused() 
         );
         for line in [
             "  cost: unknown".to_owned(),
-            format!("claimed: {}", proposals_dir(&fixture.repo, RUN).display()),
+            format!("claimed: {}", fixture.claim().display()),
         ] {
             assert!(report.contains(&line), "{case}: {line}: {report}");
         }
@@ -2337,11 +2409,11 @@ fn only_a_clean_successful_priced_call_settles_and_any_other_is_saved_refused() 
 #[test]
 fn a_taken_name_is_never_replaced_and_fails_the_command() {
     let fixture = one_question("decide-taken");
-    let dir = proposals_dir(&fixture.repo, RUN);
+    let dir = fixture.claim();
     let runner = Acting::new({
         let dir = dir.clone();
         move |_| {
-            std::fs::write(dir.join("q-01A.out"), "someone else's bytes").expect("a stray file");
+            std::fs::write(dir.join(RAW_FILE), "someone else's bytes").expect("a stray file");
             Ok(exited(claude_output(&reply(VALID), Some(0.25))))
         }
     });
@@ -2351,13 +2423,13 @@ fn a_taken_name_is_never_replaced_and_fails_the_command() {
         .to_string();
     assert_eq!(runner.seen().len(), 1, "{message}");
     assert_eq!(
-        std::fs::read_to_string(dir.join("q-01A.out")).expect("the stray file"),
+        std::fs::read_to_string(dir.join(RAW_FILE)).expect("the stray file"),
         "someone else's bytes"
     );
     assert!(!fixture.has_proposal("q-01A"));
     assert!(
         message.contains("no proposal for question q-01A was saved")
-            && message.contains("q-01A.out")
+            && message.contains(RAW_FILE)
             && message.contains("the run stays claimed"),
         "{message}"
     );
@@ -2372,7 +2444,7 @@ fn a_taken_name_is_never_replaced_and_fails_the_command() {
 }
 
 #[test]
-fn an_untrusted_proposals_directory_or_a_question_id_that_is_not_plain_is_refused() {
+fn a_run_id_is_a_plain_file_name_component_or_no_path_is_built_from_it() {
     for id in ["q-01A", "Q_1", "a"] {
         assert!(plain_id(id), "{id}");
     }
@@ -2382,104 +2454,153 @@ fn an_untrusted_proposals_directory_or_a_question_id_that_is_not_plain_is_refuse
     ] {
         assert!(!plain_id(id), "{id}");
     }
-
-    let dotted = fixture("decide-dotted", 1, reviewer(), |log| log.raise("q.01A", 0));
-    let message = refused_before_anything(&dotted, &dotted.options(), &BuiltinAdapters, "dotted");
-    assert!(
-        message.contains("question \"q.01A\"'s id is not a plain file-name component")
-            && message.contains(NOTHING_DONE)
-            && !message.contains("saved"),
-        "the refusal names no record it did not write: {message}"
-    );
-
-    let filed = one_question("decide-filed");
-    let proposals = filed.repo.join(".upstroke").join("proposals");
-    std::fs::write(&proposals, "not a directory").expect("a file at the name");
-    let message = refused_before_anything(&filed, &filed.options(), &BuiltinAdapters, "a file");
-    assert!(
-        message.contains("is not one decide can trust") && message.contains("is not a directory"),
-        "{message}"
-    );
-    assert!(message.contains("the run was not claimed"), "{message}");
-
-    #[cfg(unix)]
-    {
-        let linked = one_question("decide-linked");
-        let elsewhere = linked.repo.join("elsewhere");
-        std::fs::create_dir_all(&elsewhere).expect("a directory elsewhere");
-        set_mode(&elsewhere, 0o700);
-        std::os::unix::fs::symlink(&elsewhere, linked.repo.join(".upstroke").join("proposals"))
-            .expect("a link");
-        let message =
-            refused_before_anything(&linked, &linked.options(), &BuiltinAdapters, "a link");
-        assert!(message.contains("is not a directory"), "{message}");
-        assert!(
-            snapshot(&elsewhere).is_empty(),
-            "nothing was written through the link"
-        );
-    }
 }
 
-/// Directory: on Unix every directory of the chain belongs to the repository's owner, no other
-/// user may write any of them, and the two decide creates are open to no other user at all.
-/// Each mode a run or a person could leave is checked against the same fixture.
+/// `PR435-CASE-INSENSITIVE-PROPOSAL-NAMES`: no question id becomes a file name. A run's one claim
+/// holds the same three fixed names whichever question it was spent on, so two ids that differ
+/// only by case, or an id that is no plain file-name component, name no file at all.
+#[test]
+fn no_question_id_becomes_a_file_name() {
+    let dotted = fixture("decide-dotted", 1, reviewer(), |log| log.raise("q.01A", 0));
+    let runner = Acting::priced(0.25);
+    let decided = decide(&dotted.options(), &BuiltinAdapters, &runner).expect("decided");
+    assert!(decided.outcome().is_ok(), "{}", decided.report);
+    assert_eq!(asked_about(&runner.seen()), ["q.01A"]);
+    assert_eq!(dotted.proposal("q.01A")["status"], "accepted");
+    assert_eq!(
+        dotted.claim_files(),
+        [PROPOSAL_FILE, RAW_FILE, SETTINGS_FILE]
+    );
+}
+
+/// The operator's condition on the claim: it is created in the run's private directory with no
+/// mode of its own, so decide first checks that directory: a real directory that, on Unix,
+/// belongs to the user decide runs as and grants group and other nothing. Each mode below is the
+/// fixture's private directory's own; any bit for group or other refuses the run before anything
+/// is written, probed or asked.
 #[cfg(unix)]
 #[test]
-fn the_chain_is_the_owners_and_closed_to_every_other_user() {
-    let proposals = |fixture: &Fixture| fixture.repo.join(".upstroke").join("proposals");
-    let upstroke = |fixture: &Fixture| fixture.repo.join(".upstroke");
-    type Chosen = fn(&Fixture) -> PathBuf;
-    let cases: [(Chosen, u32, Option<&str>); 7] = [
-        (proposals, 0o700, None),
+fn a_private_directory_open_to_another_user_is_refused_before_anything() {
+    for (at, (mode, open)) in [
+        (0o700, false),
+        (0o750, true),
+        (0o710, true),
+        (0o705, true),
+        (0o701, true),
+        (0o755, true),
+        (0o777, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let fixture = one_question(&format!("decide-private-mode-{at}"));
+        set_mode(&fixture.private, mode);
+        let before = snapshot(&fixture.private);
+        let runner = Acting::priced(0.25);
+        let decided = decide(&fixture.options(), &BuiltinAdapters, &runner);
+        let case = format!("the private directory at {mode:03o}");
+        if !open {
+            let decided = decided.unwrap_or_else(|error| panic!("{case}: {error}"));
+            assert!(decided.outcome().is_ok(), "{case}: {}", decided.report);
+            assert_eq!(runner.seen().len(), 1, "{case}");
+            continue;
+        }
+        let message = decided
+            .map(|decided| decided.report)
+            .expect_err(&case)
+            .to_string();
+        assert!(
+            message.contains(&format!(
+                "run `{RUN}`'s private directory is not one decide keeps its claim in"
+            )) && message.contains(&format!(
+                "is open to its group or to other users (mode {mode:03o})"
+            )) && message.contains(NOTHING_DONE),
+            "{case}: {message}"
+        );
+        assert!(
+            runner.seen().is_empty() && runner.probes().is_empty(),
+            "{case}: nothing was probed or asked"
+        );
+        assert!(!fixture.claimed(), "{case}: the run was not claimed");
+        assert_eq!(
+            snapshot(&fixture.private),
+            before,
+            "{case}: nothing was written"
+        );
+    }
+
+    // A link at the private directory's recorded path, to a directory closed to every other user,
+    // is no private directory of the run's.
+    let linked = one_question("decide-private-link");
+    let elsewhere = linked.private.with_file_name("elsewhere");
+    std::fs::rename(&linked.private, &elsewhere).expect("the private directory, moved");
+    std::os::unix::fs::symlink(&elsewhere, &linked.private).expect("a link in its place");
+    let message = refused_before_anything(&linked, &linked.options(), &BuiltinAdapters, "a link");
+    assert!(
+        message.contains("is not a directory (a link or a file stands at its name)"),
+        "{message}"
+    );
+    assert!(
+        !elsewhere.join(CLAIM_DIR).exists(),
+        "nothing was created through the link"
+    );
+}
+
+/// `PR435-PUBLICATION-USES-STALE-CHAIN`: every file is written immediately after the check that
+/// admits it, and the raw output's and the proposal's checks are made once the reviewer has
+/// returned. A claim replaced by a link, or a private directory opened to its group, while the
+/// call is in flight is seen, and nothing is written into it; the run stays claimed.
+#[cfg(unix)]
+#[test]
+fn a_claim_changed_while_the_reviewer_runs_is_not_written_into() {
+    type Change = fn(&Path, &Path);
+    let cases: [(&str, Change, &str); 2] = [
         (
-            proposals,
-            0o777,
-            Some("open to a user other than its owner (mode 777)"),
+            "the claim replaced by a link",
+            |claim, elsewhere| {
+                std::fs::rename(claim, claim.with_file_name("moved")).expect("moved");
+                std::os::unix::fs::symlink(elsewhere, claim).expect("a link in its place");
+            },
+            "is not a directory (a link or a file stands at its name)",
         ),
         (
-            proposals,
-            0o770,
-            Some("open to a user other than its owner (mode 770)"),
-        ),
-        (
-            proposals,
-            0o755,
-            Some("open to a user other than its owner (mode 755)"),
-        ),
-        (upstroke, 0o755, None),
-        (
-            upstroke,
-            0o775,
-            Some("writable by a user other than its owner (mode 775)"),
-        ),
-        (
-            upstroke,
-            0o757,
-            Some("writable by a user other than its owner (mode 757)"),
+            "the private directory opened to its group",
+            |claim, _| set_mode(claim.parent().expect("the private directory"), 0o750),
+            "is open to its group or to other users (mode 750)",
         ),
     ];
-    for (at, (chosen, mode, refusal)) in cases.into_iter().enumerate() {
-        let fixture = one_question(&format!("decide-mode-{at}"));
-        let dir = chosen(&fixture);
-        std::fs::create_dir_all(&dir).expect("the directory");
-        set_mode(&dir, mode);
-        let case = format!("{} at {mode:03o}", dir.display());
-        match refusal {
-            None => {
-                let runner = Acting::priced(0.25);
-                decide(&fixture.options(), &BuiltinAdapters, &runner)
-                    .unwrap_or_else(|error| panic!("{case}: {error}"));
-                assert_eq!(runner.seen().len(), 1, "{case}");
+    for (at, (case, change, needle)) in cases.into_iter().enumerate() {
+        let fixture = one_question(&format!("decide-changed-{at}"));
+        let elsewhere = fixture.repo.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("a directory elsewhere");
+        let runner = Acting::new({
+            let claim = fixture.claim();
+            let elsewhere = elsewhere.clone();
+            move |_| {
+                change(&claim, &elsewhere);
+                Ok(exited(claude_output(&reply(VALID), Some(0.25))))
             }
-            Some(needle) => {
-                let message =
-                    refused_before_anything(&fixture, &fixture.options(), &BuiltinAdapters, &case);
-                assert!(
-                    message.contains("is not one decide can trust") && message.contains(needle),
-                    "{case}: {message}"
-                );
-            }
-        }
+        });
+        let message = decide(&fixture.options(), &BuiltinAdapters, &runner)
+            .map(|decided| decided.report)
+            .expect_err(case)
+            .to_string();
+        assert_eq!(runner.seen().len(), 1, "{case}: {message}");
+        assert!(
+            message.contains("no proposal for question q-01A was saved")
+                && message.contains(&format!("{RAW_FILE}` was not written"))
+                && message.contains(needle)
+                && message.contains("the run stays claimed"),
+            "{case}: {message}"
+        );
+        assert!(snapshot(&elsewhere).is_empty(), "{case}: nothing elsewhere");
+        let written: Vec<PathBuf> = snapshot(&fixture.private).into_keys().collect();
+        assert!(
+            written
+                .iter()
+                .all(|path| !path.ends_with(RAW_FILE) && !path.ends_with(PROPOSAL_FILE)),
+            "{case}: {written:?}"
+        );
     }
 }
 
@@ -2728,7 +2849,7 @@ fn a_driven_run_is_refused_before_anything_is_written_probed_or_asked() {
     );
     assert!(message.contains(NOTHING_DONE), "{message}");
     assert!(runner.seen().is_empty() && runner.probes().is_empty());
-    assert!(!fixture.proposals_written());
+    assert!(!fixture.claimed());
 
     // The control: the same run, once nothing drives it, is asked.
     drop(held);
@@ -2786,7 +2907,7 @@ fn a_question_a_person_has_answered_is_refused_and_never_asked() {
             runner.seen().is_empty() && runner.probes().is_empty(),
             "nothing to ask, so nothing is probed or asked"
         );
-        assert!(!fixture.proposals_written(), "the run is not claimed");
+        assert!(!fixture.claimed(), "the run is not claimed");
 
         // The control: the run's other, unanswered question is asked.
         let decided = decide(&fixture.asking("q-a"), &BuiltinAdapters, &runner).expect("decided");
@@ -2856,7 +2977,7 @@ fn an_answer_published_after_admission_is_seen_before_the_call() {
         "{message}"
     );
     assert!(
-        !fixture.proposals_written(),
+        !fixture.claimed(),
         "the run is not claimed, so it can still be decided: {message}"
     );
 }
@@ -2926,7 +3047,7 @@ fn the_recorded_reviewer_passes_the_runs_own_preflight_before_anything_is_writte
         );
         assert!(!runner.probes().is_empty(), "{case}: the CLI was probed");
         assert!(runner.seen().is_empty(), "{case}: no agent was asked");
-        assert!(!fixture.proposals_written(), "{case}: nothing was written");
+        assert!(!fixture.claimed(), "{case}: nothing was written");
     }
 }
 
@@ -3017,7 +3138,7 @@ fn every_refusal_is_one_line_whatever_the_reviewer_answered() {
         assert!(is_one_line(&message), "{case}: {message:?}");
         assert!(message.contains(needle), "{case}: {message}");
         assert!(runner.seen().is_empty(), "{case}: no agent was asked");
-        assert!(!fixture.proposals_written(), "{case}: nothing was written");
+        assert!(!fixture.claimed(), "{case}: nothing was written");
     }
 
     // A refusal the credential pre-flight builds itself, naming the pools file's profile.
@@ -3140,19 +3261,14 @@ fn the_exit_report_names_only_the_record_this_command_wrote() {
             if refused { "refused" } else { "accepted" },
             "{case}"
         );
-        let written: Vec<String> = snapshot(&proposals_dir(&fixture.repo, RUN))
-            .keys()
-            .filter_map(|path| path.file_name()?.to_str()?.strip_suffix(".json"))
-            .filter(|name| !name.ends_with(".settings"))
-            .map(str::to_owned)
-            .collect();
-        assert_eq!(written, ["q-c"], "{case}: the one proposal on disk");
+        assert_eq!(
+            fixture.claim_files(),
+            [PROPOSAL_FILE, RAW_FILE, SETTINGS_FILE],
+            "{case}: the one proposal on disk"
+        );
         assert!(
             report.lines().any(|line| line
-                == format!(
-                    "  saved: {}",
-                    proposals_dir(&fixture.repo, RUN).join("q-c.json").display()
-                )),
+                == format!("  saved: {}", fixture.claim().join(PROPOSAL_FILE).display())),
             "{case}: {report}"
         );
 
@@ -3210,7 +3326,10 @@ fn a_resume_cannot_take_the_run_while_decide_holds_it() {
 }
 
 /// `PR435-CASE-FOLDED-QUESTION-SELECTION`: two open questions whose ids differ only by case. The
-/// question asked, and the run's one claim spent, is the one named byte for byte.
+/// question asked, and the run's one claim spent, is the one named byte for byte. The claim's
+/// file names are fixed, so neither id names a file and the two cannot collide on a filesystem
+/// that folds case (`PR435-CASE-INSENSITIVE-PROPOSAL-NAMES`); a decide of the other is refused as
+/// the run claimed already, with nothing written.
 #[test]
 fn the_exact_question_is_asked_when_ids_differ_by_case() {
     let fixture = fixture("decide-case", 2, reviewer(), |log| {
@@ -3223,15 +3342,12 @@ fn the_exact_question_is_asked_when_ids_differ_by_case() {
     assert_eq!(asked_about(&runner.seen()), ["q-a"]);
     assert_eq!(decided.question, "q-a");
     assert_eq!(fixture.proposal("q-a")["question_id"], "q-a");
-    let written: Vec<String> = snapshot(&proposals_dir(&fixture.repo, RUN))
-        .keys()
-        .filter_map(|path| path.file_name()?.to_str().map(str::to_owned))
-        .collect();
     assert_eq!(
-        written,
-        ["q-a.json", "q-a.out", "q-a.settings.json"],
-        "nothing is written for q-A"
+        fixture.claim_files(),
+        [PROPOSAL_FILE, RAW_FILE, SETTINGS_FILE],
+        "no file is named after either id"
     );
+    refused_as_claimed_with(&fixture, &fixture.asking("q-A"), "the other id");
 }
 
 /// `PR435-RUN-ID-VALIDATED-AFTER-LOOKUP`: a run id is checked as one before any path is built
@@ -3276,7 +3392,7 @@ fn a_run_id_that_is_not_one_is_refused_before_any_path_is_built() {
         before,
         "the archived run is as it was"
     );
-    assert!(!fixture.proposals_written() && !archived.proposals_written());
+    assert!(!fixture.claimed() && !archived.claimed());
 }
 
 /// `PR435-INTERRUPTED-RUN-CLAIM`: a run with an open question and another runnable task, its lock
@@ -3307,7 +3423,7 @@ fn an_interrupted_run_with_an_open_question_is_refused_before_anything() {
         "{message}"
     );
     assert!(runner.seen().is_empty() && runner.probes().is_empty());
-    assert!(!fixture.proposals_written(), "the run's claim is not spent");
+    assert!(!fixture.claimed(), "the run's claim is not spent");
 
     // The control: the same question, its run ended parked, is asked.
     let parked = one_question("decide-parked-run");

@@ -30,11 +30,19 @@ use crate::util::terminal::{TerminalLines, one_line};
 
 pub const INPUT_BOUND: usize = 64 * 1024;
 pub const DEFAULT_MAX_COST_USD: f64 = 5.0;
-/// The repository's own directory, which the proposals directory is under.
-const UPSTROKE_DIR: &str = ".upstroke";
-const PROPOSALS_DIR: &str = "proposals";
-/// The longest run or question id this command builds a path from.
+/// The longest run id this command builds a path from.
 const MAX_ID_BYTES: usize = 128;
+/// The run's claim: the directory a decide of the run creates, exclusively, in the run's private
+/// directory, which every copy of the checkout records and so shares. Its name and the names of
+/// the three files in it are fixed, so no question id, and nothing else a run recorded, becomes a
+/// file name.
+const CLAIM_DIR: &str = "decide";
+/// The call's permission settings, which its `--settings` names.
+const SETTINGS_FILE: &str = "settings.json";
+/// The agent's raw output, or why its process failed.
+const RAW_FILE: &str = "raw.out";
+/// The proposal: accepted with its record, or refused with its reason.
+const PROPOSAL_FILE: &str = "proposal.json";
 
 pub struct DecideOptions {
     pub repo_root: PathBuf,
@@ -235,13 +243,6 @@ fn one_lined(error: UpstrokeError) -> UpstrokeError {
     }
 }
 
-pub fn proposals_dir(repo_root: &Path, run_id: &str) -> PathBuf {
-    repo_root
-        .join(UPSTROKE_DIR)
-        .join(PROPOSALS_DIR)
-        .join(run_id)
-}
-
 pub fn decide(
     opts: &DecideOptions,
     adapters: &dyn AdapterSource,
@@ -312,13 +313,6 @@ fn propose(
              person; {NOTHING_DONE}"
         )));
     }
-    if !plain_id(id) {
-        return Err(refused(format!(
-            "question {id:?}'s id is not a plain file-name component (1 to {MAX_ID_BYTES} ASCII \
-             letters, digits, `-` or `_`, and no device name), so no file is named after it; \
-             {NOTHING_DONE}"
-        )));
-    }
     let Some(started) = observed.started() else {
         return Err(refused(format!(
             "run `{}` has no schema-4 run_started, so it cannot be read as one",
@@ -377,40 +371,40 @@ fn propose(
         },
     )?;
     let plan_text = recorded_plan(&opts.repo_root.join(&started.plan_path), &started.plan_hash);
-    let dir = proposals_dir(&opts.repo_root, &opts.run_id);
-    let names = Names::of(&dir, id);
+    let claim = Claim::of(&observed.paths().private);
     let prompt = build_prompt(observed, asked, &plan_text);
     let call = prepare(
         &decider,
         &opts.repo_root,
-        &names.settings,
+        &claim.file(SETTINGS_FILE),
         &prompt,
         opts.max_cost_usd,
     )?;
     // Read again immediately before the run is claimed and its one call started: a person may
     // have answered while the pre-flight ran, and an answered question is never asked.
     unanswered(&answers, asked)?;
-    claim(&opts.repo_root, &opts.run_id, &dir)?;
+    claim.take(&opts.run_id)?;
     let claimed = |error: UpstrokeError| {
         refused(format!(
             "no proposal for question {id} was saved: {error}; the run stays claimed (`{}`), so a \
              later decide of it writes nothing and asks no agent",
-            dir.display()
+            claim.dir.display()
         ))
     };
-    let returned = ask(&decider, runner, call, &names).map_err(claimed)?;
+    let returned = ask(&decider, runner, call, &claim).map_err(claimed)?;
     let verdict = match &returned {
         Returned::Settled { reply, .. } => check_reply(&asked.question, reply),
         Returned::Unsettled { reason, .. } => Err(reason.clone()),
     };
     let record = SaveRecord {
         run_id: &opts.run_id,
+        question_id: id,
         decider: &decider,
         verdict: &verdict,
         returned: &returned,
         ceiling_usd: opts.max_cost_usd,
     };
-    save(&names, &record).map_err(claimed)?;
+    save(&claim, &record).map_err(claimed)?;
 
     // Every line of the report is pushed whole through the terminal line builder: the agent's
     // reply, the run's question text and the file names are data inside a line, so none of them
@@ -422,12 +416,12 @@ fn propose(
         &asked.question,
         &verdict,
         returned.settled_usd(),
-        &names.proposal,
+        &claim.file(PROPOSAL_FILE),
     );
     out.push(format_args!(
         "claimed: {}; decide asks a run once, so a later decide of this run writes nothing and \
          asks no agent",
-        dir.display()
+        claim.dir.display()
     ));
     out.push(format_args!(
         "nothing was answered: a person applies a proposal with `upstroke answer <question-id>`"
@@ -442,8 +436,9 @@ fn propose(
 const NOTHING_DONE: &str = "nothing was written and no agent was asked";
 
 /// Refuses a run whose recorded reviewer environment a decide call cannot keep its promises in,
-/// before anything is written or any agent asked. Returns the deny rules that keep the run's
-/// private directory unreadable. The run is held under its own lock already (`decide`).
+/// or whose private directory `closed_private_dir` does not admit, before anything is written or
+/// any agent asked. Returns the deny rules that keep the run's private directory unreadable. The
+/// run is held under its own lock already (`decide`).
 fn admit(
     opts: &DecideOptions,
     started: &RunStarted4,
@@ -488,6 +483,8 @@ fn admit(
             opts.max_cost_usd
         )));
     }
+    closed_private_dir(Path::new(&started.private_dir))
+        .map_err(|reason| untrusted_private(run, &reason))?;
     private_denials(&started.private_dir)
         .map_err(|reason| refused(format!("run `{run}`: {reason}; {NOTHING_DONE}")))
 }
@@ -1167,19 +1164,24 @@ const CALL_ORDINAL: u32 = 1;
 /// Runner, saves its raw output new, and reads what it returned. A Runner error is a returned
 /// outcome too, saved in place of the raw output, and never settles. The call is taken whole:
 /// its command and workspace move into the request, so what starts is what `prepare` checked.
+/// Each file is written through `Claim::write`, immediately after the check that admits it: the
+/// raw output's check is made once the call has returned, never before it.
 fn ask(
     decider: &Decider<'_>,
     runner: &dyn Runner,
     call: Call,
-    names: &Names,
+    claim: &Claim,
 ) -> Result<Returned, UpstrokeError> {
     let Call {
         task_run,
         command,
         settings,
     } = call;
-    if let Some(settings_path) = &task_run.settings_path {
-        write_new(settings_path, &pretty(&settings, settings_path)?)?;
+    if task_run.settings_path.is_some() {
+        claim.write(
+            SETTINGS_FILE,
+            &pretty(&settings, &claim.file(SETTINGS_FILE))?,
+        )?;
     }
     let mut request = crate::runner::decide_request(
         command,
@@ -1197,14 +1199,14 @@ fn ask(
         Ok(output) => output,
         Err(error) => {
             let reason = format!("the agent process failed: {}", UpstrokeError::from(error));
-            write_new(&names.raw, reason.as_bytes())?;
+            claim.write(RAW_FILE, reason.as_bytes())?;
             return Ok(Returned::Unsettled {
                 reason,
                 cost_usd: None,
             });
         }
     };
-    write_new(&names.raw, output.stdout.as_bytes())?;
+    claim.write(RAW_FILE, output.stdout.as_bytes())?;
     Ok(settle(decider.adapter, &output))
 }
 
@@ -1388,9 +1390,9 @@ fn check_reply(question: &Question, text: &str) -> Result<Value, String> {
     Ok(record)
 }
 
-/// Whether `id` is a plain file-name component on every platform this command runs on: 1 to
-/// `MAX_ID_BYTES` ASCII letters, digits, `-` or `_` (so no separator, no `.`, no `..`), and not
-/// a Windows device name.
+/// Whether `id`, a run id, is a plain file-name component on every platform this command runs
+/// on: 1 to `MAX_ID_BYTES` ASCII letters, digits, `-` or `_` (so no separator, no `.`, no `..`),
+/// and not a Windows device name.
 fn plain_id(id: &str) -> bool {
     let upper = id.to_ascii_uppercase();
     let device = ["CON", "PRN", "AUX", "NUL"].contains(&upper.as_str())
@@ -1408,203 +1410,160 @@ fn plain_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
-/// What a directory of the proposals chain must keep from every user but its owner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Privacy {
-    /// No other user may write it, so none can add, rename or replace what is in it:
-    /// `.upstroke`, which the run created and whose other contents other commands read.
-    Closed,
-    /// No other user may read, write or enter it: `.upstroke/proposals` and the run's own
-    /// directory, which decide creates owner-only.
-    OwnerOnly,
-}
-
-/// Unix: the directory belongs to the repository root's owner, and its mode grants no other
-/// user what `privacy` withholds.
-#[cfg(unix)]
-fn owned_and_private(
-    metadata: &std::fs::Metadata,
-    repo_root: &Path,
-    privacy: Privacy,
-) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt as _;
-    let owner = std::fs::metadata(repo_root)
-        .map_err(|error| format!("cannot be checked against the repository's owner: {error}"))?
-        .uid();
-    if metadata.uid() != owner {
-        return Err(format!(
-            "belongs to uid {}, not to the repository's owner (uid {owner})",
-            metadata.uid()
-        ));
-    }
-    let mode = metadata.mode() & 0o777;
-    let (withheld, granted) = match privacy {
-        Privacy::Closed => (0o022, "writable by a user other than its owner"),
-        Privacy::OwnerOnly => (0o077, "open to a user other than its owner"),
-    };
-    if mode & withheld != 0 {
-        return Err(format!("is {granted} (mode {mode:03o})"));
-    }
-    Ok(())
-}
-
-/// Windows: the directory is no reparse point (a junction or a directory symlink). std reads
-/// no owner or access list there, so those are the ones the repository's own directory passes
-/// down.
-#[cfg(windows)]
-fn owned_and_private(
-    metadata: &std::fs::Metadata,
-    _repo_root: &Path,
-    _privacy: Privacy,
-) -> Result<(), String> {
-    use std::os::windows::fs::MetadataExt as _;
-    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err("is a reparse point".to_owned());
-    }
-    Ok(())
-}
-
-/// Whether the directory at `path` is one decide writes under: a real directory, read without
-/// following a link, that `owned_and_private` admits at `privacy`.
-fn trusted_dir(path: &Path, repo_root: &Path, privacy: Privacy) -> Result<(), String> {
+/// Reads `path` without following a link, and admits it only as a real directory: no link and no
+/// file stands at its name, nor on Windows a reparse point (a junction or a directory symlink).
+fn real_dir(path: &Path) -> Result<std::fs::Metadata, String> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| format!("`{}` cannot be read: {error}", path.display()))?;
-    if !metadata.file_type().is_dir() {
+    if !metadata.file_type().is_dir() || reparse_point(&metadata) {
         return Err(format!(
             "`{}` is not a directory (a link or a file stands at its name)",
             path.display()
         ));
     }
-    owned_and_private(&metadata, repo_root, privacy)
-        .map_err(|reason| format!("`{}` {reason}", path.display()))
+    Ok(metadata)
 }
 
-/// Unix: narrows a directory decide has just created to its owner. Elsewhere, nothing.
+#[cfg(windows)]
+fn reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// Unix: the directory belongs to the user this command runs as (its effective uid, the owner of
+/// every file it creates) and, when `closed`, its mode grants group and other nothing: no read,
+/// write or search bit.
 #[cfg(unix)]
-fn make_owner_only(dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-}
-
-#[cfg(not(unix))]
-fn make_owner_only(_dir: &Path) -> std::io::Result<()> {
+fn this_users(metadata: &std::fs::Metadata, closed: bool) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    // SAFETY: `geteuid` takes no arguments, reads no memory of this process's, and always
+    // succeeds (POSIX.1-2008); it only reports the calling process's effective user id.
+    let user = unsafe { libc::geteuid() };
+    if metadata.uid() != user {
+        return Err(format!(
+            "belongs to uid {}, not to the user decide runs as (uid {user})",
+            metadata.uid()
+        ));
+    }
+    let mode = metadata.mode() & 0o777;
+    if closed && mode & 0o077 != 0 {
+        return Err(format!(
+            "is open to its group or to other users (mode {mode:03o})"
+        ));
+    }
     Ok(())
 }
 
-/// Syncs the directory that holds `dir`, so the entry naming `dir` is durable.
-fn sync_parent(dir: &Path) -> Result<(), String> {
-    match dir.parent() {
-        Some(parent) => crate::util::fsync_dir(parent)
-            .map_err(|error| format!("`{}` could not be synced: {error}", parent.display())),
-        None => Ok(()),
-    }
+/// Elsewhere std reads no owner and no mode, and nothing is checked beyond `real_dir`: the
+/// directory's access is whatever the system gave it.
+#[cfg(not(unix))]
+fn this_users(_metadata: &std::fs::Metadata, _closed: bool) -> Result<(), String> {
+    Ok(())
 }
 
-/// A refusal before the run's directory is created.
-fn unclaimed(reason: &str) -> UpstrokeError {
+/// The run's private directory as decide relies on it to keep its claim from every other user: a
+/// real directory (`real_dir`) that, on Unix, belongs to the user this command runs as and is
+/// closed to group and other (`this_users`). The claim directory is created in it with a plain
+/// `create_dir`, and no mode is changed afterwards, so this directory's mode is all that keeps the
+/// claim, and the files in it, from another user.
+fn closed_private_dir(private: &Path) -> Result<(), String> {
+    let metadata = real_dir(private)?;
+    this_users(&metadata, true).map_err(|reason| format!("`{}` {reason}", private.display()))
+}
+
+/// A refusal of a run whose private directory `closed_private_dir` does not admit.
+fn untrusted_private(run_id: &str, reason: &str) -> UpstrokeError {
     refused(format!(
-        "the proposals directory is not one decide can trust or make durable: {reason}; the run \
-         was not claimed, and no agent was asked"
+        "run `{run_id}`'s private directory is not one decide keeps its claim in: {reason}; the \
+         claim is created in it with no mode of its own, so that directory alone keeps it from \
+         every other user; {NOTHING_DONE}"
     ))
 }
 
-/// Makes sure `dir`, a directory above the run's, is there and trusted at `privacy`: creates it
-/// owner-only if it is missing, checks it whoever created it, and syncs its parent whoever
-/// created it, so its entry is durable before anything is created under it.
-fn ensure_dir(repo_root: &Path, dir: &Path, privacy: Privacy) -> Result<(), UpstrokeError> {
-    match std::fs::create_dir(dir) {
-        Ok(()) => make_owner_only(dir).map_err(|error| {
-            unclaimed(&format!(
-                "`{}` was created but could not be made private: {error}",
-                dir.display()
-            ))
-        })?,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => {
-            return Err(unclaimed(&format!(
-                "`{}` could not be created: {error}",
-                dir.display()
-            )));
-        }
-    }
-    trusted_dir(dir, repo_root, privacy).map_err(|reason| unclaimed(&reason))?;
-    sync_parent(dir).map_err(|reason| unclaimed(&reason))
+/// The run's claim: the directory `CLAIM_DIR` in the run's private directory, which the engine
+/// created for the run and recorded in its `run_started`, so every copy of the checkout names the
+/// same one.
+struct Claim {
+    private: PathBuf,
+    dir: PathBuf,
 }
 
-/// Claims the run, once, immediately before its one call: `.upstroke` and
-/// `.upstroke/proposals` are made sure of (`ensure_dir`), and then the run's own directory `dir`
-/// is created exclusively. Whatever stands at its name already, an earlier decide's directory
-/// complete, partial or of an older format, or anything else, refuses the command with nothing
-/// written. Once created the directory is never removed: a failure after that leaves the claim
-/// in place, so the run is not asked again.
-fn claim(repo_root: &Path, run_id: &str, dir: &Path) -> Result<(), UpstrokeError> {
-    let top = repo_root.join(UPSTROKE_DIR);
-    ensure_dir(repo_root, &top, Privacy::Closed)?;
-    ensure_dir(repo_root, &top.join(PROPOSALS_DIR), Privacy::OwnerOnly)?;
-    match std::fs::create_dir(dir) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(refused(format!(
-                "run `{run_id}` was claimed already: `{}` exists, and decide asks a run once, by \
-                 creating that directory, so an earlier decide's directory (complete, partial or \
-                 of an older format) or anything else at that name ends this one; \
-                 {NOTHING_DONE}",
-                dir.display()
-            )));
-        }
-        Err(error) => {
-            return Err(unclaimed(&format!(
-                "`{}` could not be created: {error}",
-                dir.display()
-            )));
+impl Claim {
+    fn of(private: &Path) -> Self {
+        Self {
+            private: private.to_path_buf(),
+            dir: private.join(CLAIM_DIR),
         }
     }
-    make_owner_only(dir)
-        .map_err(|error| format!("it could not be made private: {error}"))
-        .and_then(|()| trusted_dir(dir, repo_root, Privacy::OwnerOnly))
-        .and_then(|()| sync_parent(dir))
-        .map_err(|reason| {
+
+    /// The claim's file `name`: `SETTINGS_FILE`, `RAW_FILE` or `PROPOSAL_FILE`.
+    fn file(&self, name: &str) -> PathBuf {
+        self.dir.join(name)
+    }
+
+    /// Claims the run, once, immediately before its one call: the run's private directory is
+    /// checked (`closed_private_dir`), and immediately after it the claim directory is created in
+    /// it, exclusively, with a plain `create_dir` whose mode is never changed. Whatever stands at
+    /// its name already, an earlier decide's claim from this copy of the checkout or another
+    /// (complete, partial or interrupted) or anything else, refuses the command with nothing
+    /// written. The private directory is then synced, so the claim is durable before the call.
+    /// Once created the claim is never removed: a failure after that leaves it in place, so the
+    /// run is not asked again.
+    fn take(&self, run_id: &str) -> Result<(), UpstrokeError> {
+        closed_private_dir(&self.private).map_err(|reason| untrusted_private(run_id, &reason))?;
+        match std::fs::create_dir(&self.dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(refused(format!(
+                    "run `{run_id}` was claimed already: `{}` exists, and decide asks a run once, \
+                     by creating that directory in the run's private directory, which every copy \
+                     of the checkout shares, so an earlier decide's claim (complete, partial or \
+                     interrupted, from any copy) or anything else at that name ends this one; \
+                     {NOTHING_DONE}",
+                    self.dir.display()
+                )));
+            }
+            Err(error) => {
+                return Err(refused(format!(
+                    "run `{run_id}`'s claim `{}` could not be created: {error}; the run was not \
+                     claimed; {NOTHING_DONE}",
+                    self.dir.display()
+                )));
+            }
+        }
+        crate::util::fsync_dir(&self.private).map_err(|error| {
             refused(format!(
                 "run `{run_id}` is claimed: `{}` was created, and it stays, so a later decide of \
-                 the run writes nothing and asks no agent; but {reason}, so no agent was asked",
-                dir.display()
+                 the run writes nothing and asks no agent; but `{}` could not be synced \
+                 ({error}), so no agent was asked",
+                self.dir.display(),
+                self.private.display()
             ))
         })
-}
+    }
 
-/// How a saved record names the file `name` of run `run_id`'s directory: its path from the
-/// repository root, each component a plain name and `/` between them on every platform. It
-/// names the same file wherever the repository is checked out and whichever system reads it,
-/// where an absolute path would name the checkout that wrote it, in that system's spelling.
-fn reference(run_id: &str, name: &str) -> String {
-    format!("{UPSTROKE_DIR}/{PROPOSALS_DIR}/{run_id}/{name}")
-}
+    /// The check that admits a write under the claim, made immediately before each one: the
+    /// run's private directory still passes `closed_private_dir`, and the claim is still a real
+    /// directory of the user this command runs as. A claim or a private directory changed while
+    /// the reviewer ran is seen here, and nothing is written into it.
+    fn admits(&self) -> Result<(), String> {
+        closed_private_dir(&self.private)?;
+        let metadata = real_dir(&self.dir)?;
+        this_users(&metadata, false).map_err(|reason| format!("`{}` {reason}", self.dir.display()))
+    }
 
-/// The files one question's call creates in the run's directory, each named after the question's
-/// plain id. An id holds no `.`, so the three suffixes keep every question's files apart.
-struct Names {
-    /// The question's id.
-    id: String,
-    /// `<id>.settings.json`: the call's permission settings.
-    settings: PathBuf,
-    /// `<id>.out`: the agent's raw output, or why its process failed.
-    raw: PathBuf,
-    raw_name: String,
-    /// `<id>.json`: the proposal.
-    proposal: PathBuf,
-}
-
-impl Names {
-    fn of(dir: &Path, id: &str) -> Self {
-        let raw_name = format!("{id}.out");
-        Self {
-            id: id.to_owned(),
-            settings: dir.join(format!("{id}.settings.json")),
-            raw: dir.join(&raw_name),
-            raw_name,
-            proposal: dir.join(format!("{id}.json")),
-        }
+    /// Creates the claim's file `name` new, immediately after `admits` admits it.
+    fn write(&self, name: &str, bytes: &[u8]) -> Result<(), UpstrokeError> {
+        let path = self.file(name);
+        self.admits()
+            .map_err(|reason| refused(format!("`{}` was not written: {reason}", path.display())))?;
+        write_new(&path, bytes)
     }
 }
 
@@ -1637,6 +1596,8 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), UpstrokeError> {
 
 struct SaveRecord<'a> {
     run_id: &'a str,
+    /// The question asked: recorded inside the proposal, and in no file name.
+    question_id: &'a str,
     decider: &'a Decider<'a>,
     verdict: &'a Result<Value, String>,
     returned: &'a Returned,
@@ -1644,15 +1605,17 @@ struct SaveRecord<'a> {
     ceiling_usd: f64,
 }
 
-/// Creates the question's proposal new: accepted with its record, or refused with its reason.
-fn save(names: &Names, record: &SaveRecord<'_>) -> Result<(), UpstrokeError> {
+/// Creates the run's one proposal new, through `Claim::write`: accepted with its record, or
+/// refused with its reason. Its `raw_output` is the raw output's fixed name, beside it in the
+/// claim, which names that file wherever the private directory is.
+fn save(claim: &Claim, record: &SaveRecord<'_>) -> Result<(), UpstrokeError> {
     let (status, body) = match record.verdict {
         Ok(parsed) => ("accepted", ("record", parsed.clone())),
         Err(reason) => ("refused", ("reason", Value::String(reason.clone()))),
     };
     let mut document = json!({
         "run_id": record.run_id,
-        "question_id": names.id,
+        "question_id": record.question_id,
         "agent": record.decider.agent,
         "model": record.decider.model,
         "effort": record.decider.effort,
@@ -1660,13 +1623,13 @@ fn save(names: &Names, record: &SaveRecord<'_>) -> Result<(), UpstrokeError> {
         "cost_usd": record.returned.reported_usd(),
         "settled": record.returned.settled_usd().is_some(),
         "ceiling_usd": record.ceiling_usd,
-        "raw_output": reference(record.run_id, &names.raw_name),
+        "raw_output": RAW_FILE,
     });
     if let Some(object) = document.as_object_mut() {
         object.insert(body.0.to_owned(), body.1);
     }
-    let bytes = pretty(&document, &names.proposal)?;
-    write_new(&names.proposal, &bytes)
+    let bytes = pretty(&document, &claim.file(PROPOSAL_FILE))?;
+    claim.write(PROPOSAL_FILE, &bytes)
 }
 
 /// One question's lines of the report. The reply's fields, the refusal's reason and the option's

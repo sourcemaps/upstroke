@@ -2,8 +2,8 @@
 
 [`src/decide.rs`](../../src/decide.rs) is `upstroke decide <run-id> <question-id>`: it asks a
 parked run's recorded primary reviewer to propose an answer to one open question, saves the reply
-under `.upstroke/proposals/<run-id>/`, and answers nothing. A person applies a proposal with
-`upstroke answer`.
+in its claim of the run, `decide/` in the run's private directory, and answers nothing. A person
+applies a proposal with `upstroke answer`; the report names the proposal's path.
 
 One invocation decides exactly one question of one run, with one call. The question id is
 required and matched exactly, byte for byte: no case is folded and no prefix matched
@@ -15,14 +15,20 @@ run a coordinator holds. Under the lock it requires the run to be parked as the 
 reports it (`parked`), and it reads whether the question has an answer at admission and again
 immediately before the call (`unanswered`).
 
-A run is decided once. The command claims it by creating `.upstroke/proposals/<run-id>/`
-exclusively, immediately before its call, and never reads that directory or removes it: a run
-whose directory exists, from a complete, partial or older decide or anything else, is refused,
-never adopted, with nothing written and no agent asked (`claim`), as a fresh run's execution root
-is (`workspace_manager::FreshExecutionRoot`). That directory is the run's one spending claim:
-the one call decide makes for the run is made by the command that created it, so a later decide,
-of the same question or another, or one started beside it that loses the `create_dir`, spends
-nothing. The call is capped at `--max-cost-usd`, the run's allowance, whole; nothing is
+A run is decided once. The command claims it by creating `decide/` (`CLAIM_DIR`) in the run's
+private directory exclusively, immediately before its call, and never reads that directory or
+removes it: a run whose claim exists, complete, partial or interrupted, or anything else at that
+name, is refused, never adopted, with nothing written and no agent asked (`Claim::take`). The
+private directory is the one `run_started` records, outside the checkout, so every copy of the
+checkout names the same one and shares the claim: each copy has a run lock of its own, and it is
+the claim that a second command from either copy finds
+(`copied_checkout_shares_the_run_allowance`,
+`the_exclusive_create_dir_is_what_makes_a_second_command_find_the_claim`). That directory is the
+run's one spending claim: the one call decide makes for the run is made by the command that
+created it, so a later decide, of the same question or another, from any copy, or one started
+beside it that loses the `create_dir`, spends nothing. The claim holds three files whose names
+are fixed (`SETTINGS_FILE`, `RAW_FILE`, `PROPOSAL_FILE`), so no question id becomes a file name
+(`no_question_id_becomes_a_file_name`). The call is capped at `--max-cost-usd`, the run's allowance, whole; nothing is
 subtracted from it and no other call follows, so there is no remainder to compute. Only a clean,
 successful, priced call is settled, at its price (`settle`); any other outcome is saved as
 refused, and a refused proposal makes the command exit non-zero (`Decided::outcome`).
@@ -43,12 +49,13 @@ agent is asked, in these steps:
   another holder has (a coordinator, a resume, another decide, or a reaper still cleaning up),
   a run that is not schema 4, a run the fold does not report parked (`parked`), and a question
   id that names no open question exactly (`chosen_question`).
-- `propose` refuses a question that binds an agent and a question id that is not a plain
-  component.
+- `propose` refuses a question that binds an agent. A question id is never a file name, so it
+  is not checked as one.
 - `admit` refuses a run recorded on the container runner, a run whose pools the credential
   pre-flight a resume runs (`preflight::refuse_unusable_profiles`) refuses, a reviewer whose
-  adapter does not claim every `Guarantee`, a `--max-cost-usd` that is not a positive number,
-  and a private directory no permission rule can name exactly.
+  adapter does not claim every `Guarantee`, a `--max-cost-usd` that is not a positive number, a
+  private directory `closed_private_dir` does not admit (the claim relies on it), and a private
+  directory no permission rule can name exactly.
 - `unanswered` reads the question's answer file (`interaction::read_answer`), so a question a
   person has answered already is refused and never asked.
 - The recorded reviewer passes the pre-flight a run makes of each recorded agent
@@ -76,9 +83,10 @@ it was given before (`a_decide_call_adds_only_its_own_flags_to_an_ordinary_revie
 What this module never does, and the reasons:
 
 - It never answers. It calls no `interaction::write_answer`, no `AnswerSource` and no
-  coordinator, and writes nothing under a run's public or private directory or an answers
-  directory; the run lock it takes is `RunLock`'s own, whose files the run's engine created
-  already (`a_decide_leaves_every_file_of_the_run_as_it_was_and_writes_no_answer`). A proposal
+  coordinator, and writes nothing under a run's public directory or an answers directory, and
+  nothing in its private directory but its claim; the run lock it takes is `RunLock`'s own, whose
+  files the run's engine created already
+  (`a_decide_leaves_every_file_of_the_run_as_it_was_and_writes_no_answer`). A proposal
   is advice for a person; applying it stays `upstroke answer`'s job, which checks the reply
   against the run as it is when the person applies it.
 - No engine code calls it, and only the CLI names it
@@ -105,7 +113,8 @@ input keeps a long input from crowding out the others.
 ## `pub const DEFAULT_MAX_COST_USD: f64 = 5.0;`
 
 The default of `--max-cost-usd`: the dollar allowance of the run. A run is decided by one command
-(`claim`) with one call, so the allowance is that call's own `--max-budget-usd` (`call_args`),
+(`Claim::take`), from whichever copy of the checkout, with one call, so the allowance is that
+call's own `--max-budget-usd` (`call_args`),
 whole, checked on the command as built (`kept`), and the adapter itself stops the call at the
 allowance rather than after it. A clean, successful, priced call is recorded at its price, above
 its ceiling included (`the_one_call_is_capped_at_the_allowance_and_counted_at_its_price`). No
@@ -184,7 +193,11 @@ else holds never reaches it: `decide` could not take the lock.
 3. An adapter that does not claim every `Guarantee`, naming the ones it lacks.
 4. A `--max-cost-usd` that is zero, negative, infinite or not a number, which could be no call's
    ceiling (`a_cap_that_is_not_a_positive_number_of_dollars_is_refused_before_anything`).
-5. A private directory `private_denials` cannot name
+5. A private directory `closed_private_dir` does not admit: not a real directory, or on Unix
+   not the user's own or open to group or other. The claim relies on that directory's mode, so
+   it is checked here, before the pre-flight probes, and again before the claim and each write
+   (`a_private_directory_open_to_another_user_is_refused_before_anything`).
+6. A private directory `private_denials` cannot name
    (`a_private_directory_that_cannot_be_spelled_in_a_rule_is_refused_before_anything`).
 
 ## `pub struct Decided {`
@@ -218,10 +231,6 @@ profile) through the same function (`one_lined`). A refusal quotes a run's or a 
 path, an error, or what the reviewer's CLI printed when a probe failed; none of them can start a
 line of its own or reach the terminal as a control, as the report's lines cannot
 (`every_refusal_is_one_line_whatever_the_reviewer_answered`).
-
-## `pub fn proposals_dir(repo_root: &Path, run_id: &str) -> PathBuf {`
-
-`<repo>/.upstroke/proposals/<run-id>`. The name `proposals` appears in production code only here.
 
 ## `pub fn decide(`
 
@@ -257,22 +266,23 @@ complete, halted or over its budget is refused as well.
 One invocation through `runner::decide_request`, with `InvocationId::Decide { ordinal: 1 }`
 (`CALL_ORDINAL`), the adapter's built command with its stdin payload and settings file, and no
 environment overlay (`the_request_is_a_decide_request_for_the_runs_reviewer_with_no_overlay`). A
-question that binds an agent, and one whose id is not a plain component (`plain_id`), are refused
-first. `admit` runs after the pools file is read. `unanswered` then refuses a question a person
+question that binds an agent is refused first; its id is never checked as a file name, since none
+is named after it. `admit` runs after the pools file is read. `unanswered` then refuses a question a person
 has answered, with nothing probed or claimed
 (`a_question_a_person_has_answered_is_refused_and_never_asked`). The recorded reviewer's
 pre-flight runs (`preflight::certify_agent`) and refuses a CLI that cannot be probed or an account
 that is signed out
 (`the_recorded_reviewer_passes_the_runs_own_preflight_before_anything_is_written_or_asked`). The
 call is built and checked by `prepare`, with the allowance as its ceiling, before anything is
-written. `unanswered` reads the answer file again, immediately before `claim` claims the run and
-`ask` writes and starts the call, so an answer published during admission is seen and no paid
-call is made (`an_answer_published_after_admission_is_seen_before_the_call`).
+written. `unanswered` reads the answer file again, immediately before `Claim::take` claims the
+run and `ask` writes and starts the call, so an answer published during admission is seen and no
+paid call is made (`an_answer_published_after_admission_is_seen_before_the_call`).
 
 Until the claim, every refusal is the command's error, with nothing written and no agent asked.
 After it, a call that returns an outcome that does not settle is saved as refused, and a file that
-cannot be written fails the command naming the question, with no proposal saved
-(`a_taken_name_is_never_replaced_and_fails_the_command`). The claim stays in every case. The
+cannot be written, or that `Claim::admits` no longer admits, fails the command naming the
+question, with no proposal saved (`a_taken_name_is_never_replaced_and_fails_the_command`,
+`a_claim_changed_while_the_reviewer_runs_is_not_written_into`). The claim stays in every case. The
 credential profile is the first pool of the reviewer's agent (`capacity::pool_for`), as a review
 pass of the run would use; the timeout is the run's recorded review pass timeout, or the review
 default. Split from `decide` so a test can hand it a binding question.
@@ -289,8 +299,8 @@ nothing, and refuses the call unless the built command carries no environment ov
 overlay's keys and never their values), carries exactly the recorded reviewer's `--model` and the
 run's recorded review effort as `--effort` (another model, another effort or none is refused, and
 the refusal names the recorded pair), and `kept` holds for every `Guarantee`. The settings
-path is `<id>.settings.json` beside the proposal (`Names`). The call is prepared before the run
-is claimed, so its refusal leaves nothing written
+path is the claim's `settings.json` (`SETTINGS_FILE`), beside the proposal. The call is prepared
+before the run is claimed, so its refusal leaves nothing written
 (`a_mocked_adapter_whose_command_breaks_a_promise_is_refused_before_anything`).
 
 ## `struct Built<'a> {`
@@ -343,85 +353,84 @@ Writes the call's settings file new, starts the command's one call through the R
 new, and reads what it returned with `settle`. It takes the `Call` by value: the command and
 workspace `prepare` checked move into the request, uncopied. A Runner error (the process could not be started,
 was cancelled, or ended in a way the Runner reports as an error) is a returned outcome too: its
-words are saved in place of the raw output, and it does not settle. A launcher killed mid-call
-returns nothing, and leaves the claim and the settings file in place; the run's lock is given
-back as the stack unwinds, or by the OS when the process dies
-(`the_run_is_claimed_owner_only_before_its_first_call_and_the_claim_outlives_an_interruption`).
+words are saved in place of the raw output, and it does not settle. Both files go through
+`Claim::write`, so each is written immediately after the check that admits it: the raw output's
+check is made once the call has returned, not before the call, so no reviewer call sits between a
+check and its write. A launcher killed mid-call returns nothing, and leaves the claim and the
+settings file in place; the run's lock is given back as the stack unwinds, or by the OS when the
+process dies
+(`the_run_is_claimed_in_its_private_directory_before_its_first_call_and_the_claim_outlives_an_interruption`).
 
 ## `fn plain_id(id: &str) -> bool {`
 
-A question id is written into a file name only when it is 1 to `MAX_ID_BYTES` ASCII letters,
-digits, `-` or `_` and no Windows device name (`CON`, `NUL`, `COM1`, ...): no separator, no `.`,
-no `..`. Without a `.` in an id, `<id>.json`, `<id>.out` and `<id>.settings.json` name one
-question's files exactly, and no question's file is spelled like another's. The run id is held to
-the same rule first of all, before any path is built from it: the run's public directory, its
-lock and its proposals directory are each named after it. Ids the engine mints are `q-<ulid>`
-(`an_untrusted_proposals_directory_or_a_question_id_that_is_not_plain_is_refused`).
+A run id is admitted only when it is 1 to `MAX_ID_BYTES` ASCII letters, digits, `-` or `_` and
+no Windows device name (`CON`, `NUL`, `COM1`, ...): no separator, no `.`, no `..`. It is checked
+first of all, before any path is built from it: the run's public directory and its lock are named
+after it (`a_run_id_is_a_plain_file_name_component_or_no_path_is_built_from_it`). A question id is
+not checked: no file is named after it.
 
-## `enum Privacy {`
+## `fn real_dir(path: &Path) -> Result<std::fs::Metadata, String> {`
 
-What a directory of the chain keeps from every user but its owner. `Closed` is `.upstroke`: the
-run created it with the umask's mode, other commands read the run's public half under it, and
-decide neither creates nor changes it, so it requires only that no other user can write it, and
-so none can add, rename or replace `proposals`. `OwnerOnly` is `.upstroke/proposals` and the run's
-own directory, which decide creates with mode `0700` on Unix (`make_owner_only`) and which no other
-user may read, write or enter, so nobody else can read a proposal or put a file where one is to be
-created. Both levels are checked on Unix only, and only there does decide narrow a directory it
-creates (`trusted_dir`).
+A directory decide relies on is read without following a link and must be a directory: a symlink
+or a file at the name is refused, and on Windows so is a junction or any other reparse point,
+because `reparse_point` reads the raw `FILE_ATTRIBUTE_REPARSE_POINT`, set for every reparse point
+whatever its tag.
 
-## `fn trusted_dir(path: &Path, repo_root: &Path, privacy: Privacy) -> Result<(), String> {`
+## `fn this_users(metadata: &std::fs::Metadata, closed: bool) -> Result<(), String> {`
 
-Each directory of the chain is read without following a link and must be a directory, so the
-chain carries no symlink or reparse point and no regular file: a symlink or a file at the name is
-refused, and on Windows so is a junction or any other reparse point, because `owned_and_private`
-reads the raw `FILE_ATTRIBUTE_REPARSE_POINT`, set for every reparse point whatever its tag, the
-attribute `workspace_manager`'s chain walk reads (`containment::is_reparse_point`). On Unix it must
-also belong to the repository root's owner and grant no other user what its `Privacy` withholds
-(`the_chain_is_the_owners_and_closed_to_every_other_user`), so the path from the repository to
-every file decide creates is the owner's alone and nothing needs pinning while the command runs.
-std reads no owner or access list on Windows, so there neither is checked and `make_owner_only`
-narrows nothing: the chain carries the access list the repository's own directory passes down,
-and decide keeps another user out of it on Windows only as far as that list does.
+On Unix the directory must belong to the user decide runs as, its effective uid (`geteuid`, which
+`effects/wrappers.toml` lists as no effect), which owns every file decide creates; when `closed`,
+its mode must grant group and other nothing, no bit of `077`. Elsewhere std reads no owner and no
+mode, and this checks nothing: on Windows only `real_dir`'s check is made, and a directory keeps
+whatever access list the system gave it.
 
-## `fn ensure_dir(repo_root: &Path, dir: &Path, privacy: Privacy) -> Result<(), UpstrokeError> {`
+## `fn closed_private_dir(private: &Path) -> Result<(), String> {`
 
-`.upstroke` and `.upstroke/proposals`, one level at a time with `create_dir` (never
-`create_dir_all`, which would create through a link): created where missing, owner-only on Unix,
-then checked and their parent synced whoever created them, the run, another caller or this one, so
-each directory's entry is durable before anything is created under it
-(`each_parent_is_synced_whoever_created_it`). A failure here leaves the run unclaimed.
+The claim relies on its parent's mode. `Claim::take` creates the claim directory with a plain
+`create_dir`, at whatever mode the umask gives it, and no mode is changed afterwards, so what keeps
+the claim and its files from every other user is the run's private directory alone. This is the
+check of that directory: `real_dir`, then `this_users` closed. `admit` makes it before the
+pre-flight probes, `Claim::take` immediately before the `create_dir`, and `Claim::admits` before
+each file is written (`a_private_directory_open_to_another_user_is_refused_before_anything`). The
+engine creates the private directory at the umask's mode (`rundir::create_private_dir`), so under
+a umask such as `022` decide refuses the run until a person closes the directory.
 
-## `fn claim(repo_root: &Path, run_id: &str, dir: &Path) -> Result<(), UpstrokeError> {`
+## `struct Claim {`
 
-The run's one claim, made immediately before its call: `ensure_dir` for the two
-directories above, then `create_dir` of `.upstroke/proposals/<run-id>`, which is exclusive.
-Whatever stands at the name already is refused, never adopted, and refuses the command with
-nothing written and no agent asked: an earlier decide's directory, complete, partial or of an
-older format, an empty one, a file or a link
-(`a_run_whose_directory_exists_is_not_asked_and_nothing_is_written`). Of two commands started
-beside each other, the one whose `create_dir` loses is refused the same way. Nothing in the
-directory is read: its existence is the whole answer, so a person settles what is there and
-nothing is inferred from it. The new directory is made owner-only on Unix, checked, and its parent
-synced;
-a failure there still leaves it in place, and the run claimed. The directory is never removed,
-after a failure or an interruption, so a run is asked once, about one question.
+The run's claim: `decide/` (`CLAIM_DIR`) in the run's private directory, the one `run_started`
+recorded, which every copy of the checkout names. The claim holds three fixed names,
+`settings.json`, `raw.out` and `proposal.json`; with one proposal per run no question id becomes a
+file name, so ids that differ only by case cannot collide on a filesystem that folds case
+(`no_question_id_becomes_a_file_name`,
+`the_exact_question_is_asked_when_ids_differ_by_case`).
 
-## `fn reference(run_id: &str, name: &str) -> String {`
+`take` is the run's one claim, made immediately before its call: `closed_private_dir`, then
+`create_dir` of the claim, which is exclusive. Whatever stands at the name already is refused,
+never adopted, and refuses the command with nothing written and no agent asked: an earlier
+decide's claim, complete, partial or interrupted, an empty one, a file or a link
+(`a_run_whose_claim_exists_is_not_asked_and_nothing_is_written`). Of two commands started beside
+each other, from one copy of the checkout or two, the one whose `create_dir` loses is refused the
+same way (`the_exclusive_create_dir_is_what_makes_a_second_command_find_the_claim`). Nothing in
+the claim is read: its existence is the whole answer. The private directory is then synced, so the
+claim is durable before the call
+(`the_private_directory_is_synced_once_the_claim_is_created_in_it`); a failure there still leaves
+the claim in place, and the run claimed. The claim is never removed, after a failure or an
+interruption, so a run is asked once, about one question. No directory is created in the checkout,
+so a directory an older decide left there stops nothing
+(`a_directory_left_open_in_the_checkout_stops_no_decide`).
 
-How a saved proposal names a file it generated, its raw output: the path from the repository
-root, `.upstroke/proposals/<run-id>/<id>.out`, with `/` between the components on every platform.
-Every component is a plain name (`plain_id` admits the run and the question), so the reference
-names the same file wherever the repository is checked out and on whichever system reads it; an
-absolute path would name the checkout that wrote it, in that system's spelling
-(`a_saved_proposal_names_its_raw_output_wherever_the_repository_is_moved`).
+`admits` is the check that admits each write: `closed_private_dir` again, and the claim still a
+real directory of the user decide runs as (its own mode is not checked). `write` makes it
+immediately before it creates the file, so a claim replaced by a link, or a private directory
+opened to its group, while the reviewer ran is seen and nothing is written into it
+(`a_claim_changed_while_the_reviewer_runs_is_not_written_into`).
 
-## `struct Names {`
+## `fn save(claim: &Claim, record: &SaveRecord<'_>) -> Result<(), UpstrokeError> {`
 
-One question's three files in the run's directory: `<id>.settings.json`, the call's permission
-settings; `<id>.out`, its raw output or the Runner's error; `<id>.json`, the proposal, which
-records the run, the question, the decider, `status` with its `record` or `reason`, the
-`cost_usd` reported, whether the call `settled`, its `ceiling_usd` and the `raw_output`
-reference.
+The run's one proposal, `proposal.json`, created through `Claim::write`. It records the run, the
+question, the decider, `status` with its `record` or `reason`, the `cost_usd` reported, whether
+the call `settled`, its `ceiling_usd`, and `raw_output`, the raw output's fixed name `raw.out`,
+beside it in the claim, which names that file wherever the private directory is.
 
 ## `fn unanswered(answers: &Path, asked: &OpenAsked) -> Result<(), UpstrokeError> {`
 

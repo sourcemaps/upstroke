@@ -1858,11 +1858,11 @@ path = "src/decide.rs"
 crate_path = "upstroke::decide"
 funnel = []
 # The decider. `decide` reads a parked schema-4 run under the run's own lock,
-# claims it once by creating `.upstroke/proposals/<run-id>/` exclusively, starts
-# the run's primary review agent read-only through the Runner once, for the one
-# open question it is named, and creates, each new, the settings, raw output and
-# proposal files there; it is denied by path, so only the CLI, which states an
-# allowance, reaches it.
+# claims it once by creating `decide/` exclusively in the run's private
+# directory, starts the run's primary review agent read-only through the Runner
+# once, for the one open question it is named, and creates, each new, the
+# settings, raw output and proposal files there; it is denied by path, so only
+# the CLI, which states an allowance, reaches it.
 effectful = [
     "decide",
 ]
@@ -1870,8 +1870,6 @@ effectful_unnameable = []
 effect_free = [
     # Turns whether the one saved proposal was refused into a `Result`.
     "outcome",
-    # Joins the repository root, `.upstroke/proposals` and a run id.
-    "proposals_dir",
 ]
 
 [[module]]

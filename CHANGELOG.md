@@ -6,18 +6,21 @@
   read-only, to propose an answer to one open question, named by its exact id, byte for byte (a
   question that chooses an agent is refused), checks the reply (one fenced `json` block and no
   three backticks or tildes on any line outside it, an offered option, guidance that never gives
-  up), prints it and saves it under `.upstroke/proposals/<run-id>/`, naming its raw output by a
-  path from the repository root; a refused reply makes it exit non-zero after the report, whose
+  up), prints it and saves it in its claim of the run, `decide/` in the run's private directory,
+  as `proposal.json` beside the raw output; a refused reply makes it exit non-zero after the report, whose
   exit says the reason is saved in the proposal. Its refusals are one line each. It writes no
   answer and replaces no file. The run id is checked as a plain id before any path is built from
   it. The command holds the run's own lock, the one `resume` takes, from before the run is read
   until the proposal is written or the command fails, so no resume starts while it asks and
   nothing is asked of a run a coordinator holds; it asks only about a run whose log records it
   parked, and refuses an interrupted one. A run is decided once: immediately before its one call
-  the command claims the run by creating its proposals directory exclusively (owner-only on Unix;
-  on Windows it carries the repository directory's access list), and a run whose directory exists
-  is refused with nothing written; the claim stays after a failure or an interruption, and no
-  other decide of the run spends anything. The call is capped at the run's `--max-cost-usd`
+  the command claims the run by creating `decide/` exclusively in the run's private directory,
+  which every copy of the checkout shares, and a run whose claim exists is refused with nothing
+  written; the claim stays after a failure or an interruption, and no other decide of the run,
+  from any copy, spends anything. The claim has no mode of its own, so on Unix the private
+  directory must be the user's own and closed to group and other, or the run is refused before
+  anything is written or asked; each file is written immediately after that check is made again.
+  The call is capped at the run's `--max-cost-usd`
   allowance (default 5), and only a clean, successful, priced call is settled, at its price; any
   other outcome is saved as refused. It asks only a Claude Code reviewer of a host run, whose
   pools pass the credential pre-flight a resume would run and whose CLI passes the probe and
