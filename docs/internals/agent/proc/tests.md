@@ -671,6 +671,17 @@ can hold the group and end the fork through it. Nothing the reaper
 reads depends on the coordinator's group: it watches its command pipe
 and `getppid()`.
 
+## `fn the_reaper_settles_its_group_on_reparenting_without_waiting_for_pipe_eof()` › `.map(ChildGuard::new)`
+
+The coordinator is a `ChildGuard`'s from its spawn, so a failure before
+the test collects it (reading the holder's or the agent's pid, either
+join, the first assertion) ends it by its own pid and collects it. The
+holds are declared after the guard, so a hold already joined is
+released first, its group signal before the coordinator's reap. The
+pipe holder is the coordinator's child, not this test's: a failure that
+reaps the coordinator before its group is held leaves nothing here that
+can end the holder, which then ends with its own `sleep`.
+
 ## `fn the_reaper_settles_its_group_on_reparenting_without_waiting_for_pipe_eof()` › `let holders = GroupHold::join(coordinator_group, || {`
 
 Two holds, joined while the coordinator still runs, before it is
@@ -1113,6 +1124,17 @@ Only through `PATH`: the scratch directory first, the
 inherited entries after it so the stub's own `sleep` still
 resolves.
 
+## `fn reaper_container_cells` › `.map(ChildGuard::new)`
+
+The coordinator is a `ChildGuard`'s from its spawn. Every step until the
+cell collects it can fail: reading the agent's and the reaper's pids,
+the join's member spawn, each assertion before the coordinator is
+killed. A failure at any of them unwinds through the guard, which ends
+the coordinator by its own pid and collects it, after the hold's
+release where a hold exists. The agent and the reaper are the
+coordinator's children, not this test's, so no guard can own them, and
+nothing here signals them.
+
 ## `fn reaper_container_cells` › `coordinator.wait().expect("reap the coordinator");`
 
 The live half: the coordinator settles its invocation and
@@ -1256,7 +1278,7 @@ Whether no process of the group `pgid` exists: `kill(-pgid, 0)`
 answering `ESRCH`, and nothing else. A group the caller may not signal
 (`EPERM`) still exists, and no other answer is read as an end.
 
-## `fn group_member(pgid: i32) -> Child {`
+## `fn group_member(pgid: i32) -> ChildGuard {`
 
 A shell blocked reading its stdin, spawned into the process group
 `pgid` (`process_group`; `0` makes it the leader of a group of its own),
@@ -1264,9 +1286,17 @@ with its stdin piped from this test, so it runs until the test closes
 that pipe or a signal ends it. It is the member of a `GroupHold`, and
 the agent, the other member, the leader and the unrelated group's leader
 of the seven tests that drive a `GroupHold` against groups the test
-owns. A spawn that cannot join the group (`setpgid` refused, as for a
-group that does not exist in this session) fails the test where it is
-called.
+owns, and of the setups `children_spawned_before_a_failing_spawn_helper`
+makes fail. A spawn that cannot join the group (`setpgid` refused, as
+for a group that does not exist in this session) fails the test where
+it is called, and so does a spawn refused for any other reason,
+`EMFILE` included.
+
+The shell comes back inside a `ChildGuard`, made in the spawn's own
+statement, so no caller holds it as a bare `Child` for a single
+statement: whatever fails after the spawn, the caller's next spawn
+included, unwinds through the guard, which ends the shell by its own
+pid and collects it.
 
 ## `const MEMBER_END_BOUND: Duration = Duration::from_secs(10);`
 
@@ -1287,8 +1317,9 @@ when the signal is sent; SIGKILL ends it even while a group stop has
 suspended it, where an end of file would wait for it to run. Past the
 bound the answer is an error naming the pid, and the child stays the
 test's unreaped child, so its number is not issued again while the test
-process lives. It is how a `GroupHold` ends its member, and how the
-controls end and collect a process they end themselves.
+process lives. It is how a `GroupHold` ends its member, how the
+controls end and collect a process they end themselves, and how a
+`ChildGuard` ends a child it still owns.
 
 ## `fn close_and_collect(child: &mut Child) -> Result<std::process::ExitStatus, String> {`
 
@@ -1299,6 +1330,57 @@ by the end of file this sends. A child that has not exited by the bound
 is ended by `end_and_collect` and the answer is an error saying so, so
 the control fails with every child collected rather than waiting
 without a bound or reading a status this function caused.
+
+## `struct ChildGuard {`
+
+The owner of a child these fixtures and controls spawn, from the
+statement that spawns it until the test collects it or hands it on. The
+fixtures and the controls spawn their children one after another, and a
+`Child` that a failure drops neither ends nor collects its process. So a
+spawn that failed after an earlier one, the join's member in a dying
+container cell or a control's second shell, left every child spawned
+before it running or unreaped: the review forced the join's member spawn
+to fail with a real `EMFILE`, the panic came before any `GroupHold`
+existed, and after the unwind the cell's coordinator was still running.
+A hold's drop cannot cover a failure that comes before the hold exists,
+and the controls' `catch_unwind` begins after their spawns.
+
+`group_member` returns its shell in one, and every other spawn of these
+fixtures and controls puts its child in one in the spawn's own statement
+(`.map(ChildGuard::new)`): the coordinator of each container cell and of
+the reparenting test, the drain control's group leader, and the agent
+that leaves its group. The guard dereferences to its `Child`, so the
+bodies use and collect their children as before. `hand_on` consumes the
+guard, so a guard that can still be dereferenced always holds its child.
+On every path that reaches its end, a body has collected every child
+itself, and the guard acts only on a path that did not.
+
+## `impl ChildGuard` › `fn hand_on(mut self) -> Child {`
+
+Gives the child to a later owner, and the guard ends nothing: the child
+is that owner's to end. `GroupHold::join` hands its member to the hold
+once the join is held, so the release ends it, after its signal to the
+group, as before.
+
+## `impl Drop for ChildGuard` › `fn drop(&mut self) {`
+
+A child the guard still owns is ended and collected here, by
+`end_and_collect`: SIGKILL to the child's own pid, then collected within
+`MEMBER_END_BOUND`. Nothing is sent to a group's number. `try_wait`
+first says whether anything is left to do: a child the test has already
+collected answers with its saved status, so the guard neither signals
+nor waits on a pid it no longer owns, and a child that has exited
+unreaped is collected by that same call. A state that cannot be read
+sends nothing. A child not collected within the bound fails the test
+here, or, while another failure is already unwinding, is written to
+stderr instead, as a hold's drop does.
+
+The order the existing code gives a group signal and a reap is kept. In
+every body the guards are declared before any hold on a group their
+children belong to, so a failure that unwinds past both drops the hold
+first: its group signal comes before the guard's reap, as in the hold's
+own release. Before a hold exists, as when the join's own spawn is the
+one that fails, nothing is sent to any group, as on a refused join.
 
 ## `struct GroupHold {`
 
@@ -1360,6 +1442,15 @@ fails there, its message saying how the member ended. The join's
 first shape ended the member by closing its stdin and waited for it
 without a bound, so a member a group stop had suspended could not read
 the end of file and the failure was never reported (`PR340-R3-1`).
+
+The member is a `ChildGuard`'s from its spawn until the join is held,
+and the guard then hands it on to the hold (`hand_on`), so only the
+hold's release ends it from there. A `held_throughout` that panics, as
+the refused-join control's own assertion can, unwinds through the
+guard, which ends and collects the member by its own pid and sends
+nothing to the group's number, as the refusal does. A member spawn that
+fails panics before any hold exists, and whatever the caller spawned
+before the join is ended and collected by the caller's own guards.
 
 ## `impl GroupHold` › `fn release(&mut self) -> Result<std::process::ExitStatus, String> {`
 
@@ -1517,6 +1608,14 @@ A drain that signalled the group on its failing path, as the first
 shape did, ends the child by that signal before its stdin is closed,
 and the status says so.
 
+## `fn a_reaper_group_drain_fails_at_its_bound_without_signalling_the_group()` › `.map(ChildGuard::new)`
+
+The member is a `ChildGuard`'s from its spawn, so a failure before the
+test waits for it ends it by its own pid and collects it. On the path
+that reaches that wait the test collects the member itself, so the
+status the assertion reads is still the one the member's own end
+produced.
+
 ## `fn an_agent_seen_gone_still_has_its_held_group_killed_even_when_its_hold_member_has_exited() {`
 
 The catching control for `PR340-R4-1` with the hold's member exited,
@@ -1671,6 +1770,65 @@ issued again; staging the last would take a pid reuse, so that order is
 held by inspection: the release's group signal comes before its
 member's reap, and nothing else in the cleanup signals the group. Every
 process the test signals is a child of its own, unreaped until the end.
+
+## `fn a_process_holding_the_agents_pid_outside_its_held_group_is_never_signalled()` › `.map(ChildGuard::new)`
+
+The agent is a `ChildGuard`'s from its spawn, as `elsewhere` and `other`
+are through `group_member`: a failure before the test collects it, the
+next spawn or the join included, ends it by its own pid, whichever group
+it is in by then, and collects it. Before the hold exists nothing else
+is sent; after, the hold's release comes first.
+
+## `fn with_no_descriptor_to_spare<T>(step: impl FnOnce() -> T) -> T {`
+
+Runs `step` with `RLIMIT_NOFILE`'s soft limit at zero, so every
+descriptor `step` asks for is refused with `EMFILE` while the ones
+already open stay usable, and restores the limit before a panic from
+`step` unwinds any further: the cleanup that unwind runs, the guards'
+included, runs under the limit the process had. The hard limit is never
+touched, so the restore asks for nothing the process did not already
+have. The limit is the whole process's, so only an isolated child calls
+this.
+
+## `fn children_spawned_before_a_failing_spawn_helper() {`
+
+The isolated half of the regression test for `ChildGuard`. It runs two
+of the controls' setups under `catch_unwind`, each with one spawn made
+to fail part-way through by a real `EMFILE`
+(`with_no_descriptor_to_spare`): the second shell, after the agent,
+where `an_agent_seen_gone_still_has_its_held_group_killed` left its
+first shell unreaped; and the member spawn inside `GroupHold::join`,
+after both shells, where the review's `EMFILE` left a container cell's
+coordinator running before any hold existed. The panic it catches is
+identified: its message must be `group_member`'s own refusal for the
+group the setup made, with `EMFILE`'s text, so a setup that failed for
+another reason, or did not fail, fails here instead. Then every child
+spawned before the failure must no longer be this process's child:
+`observe_child_group(pid).exited_before` must be `Err(ECHILD)`, where a
+child still running answers `Ok(false)` and an exited, unreaped one
+`Ok(true)`. Only this process can reap its child, so `ECHILD` is a
+child that ended and was collected. It prints how many children it
+found ended and collected.
+
+Without `UPSTROKE_SPAWN_FAILS_PART_WAY` it returns at once, so a run of
+the ignored tests inside a shared test process never lowers that
+process's limit.
+
+## `fn children_spawned_before_a_failing_spawn_are_ended_and_collected() {`
+
+The regression test for `ChildGuard`. It runs the helper above in a
+process of its own (`run_test_isolated`), because the limit the helper
+lowers is the whole process's, and requires the helper to have passed
+and to report all three children ended and collected, so a helper that
+never ran its setups cannot pass it.
+
+MEASURED, because a test that passes is not evidence that it detects.
+With the body of `ChildGuard`'s `Drop` emptied, this test failed and
+every other test of this module passed: the helper's first setup met a
+real `EMFILE` ("spawn a member into process group …: Too many open
+files (os error 24)"), and the shell it had spawned before that was
+still running after the unwind, `exited_before` answering `Ok(false)`
+where `Err(ECHILD)` is required. With the body restored, it passes.
 
 ## `const READINESS_ROLE: &str = "UPSTROKE_READINESS_ROLE";`
 

@@ -1562,6 +1562,7 @@ fn the_reaper_settles_its_group_on_reparenting_without_waiting_for_pipe_eof() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
+        .map(ChildGuard::new)
         .expect("spawn a disposable coordinator");
     let holder = read_pid(&ready, Duration::from_secs(20));
     let agent_pid = read_pid(&agent, Duration::from_secs(20));
@@ -3413,7 +3414,10 @@ fn reaper_container_cells(
         if !coordinator_dies {
             coordinator.env("UPSTROKE_REAPER_CONTAINERS_CLEAN_EXIT", "1");
         }
-        let mut coordinator = coordinator.spawn().expect("spawn a disposable coordinator");
+        let mut coordinator = coordinator
+            .spawn()
+            .map(ChildGuard::new)
+            .expect("spawn a disposable coordinator");
 
         let agent_pid = read_pid(&agent_path, Duration::from_secs(30));
         let reaper_pid = read_pid(&reaper_path, Duration::from_secs(30));
@@ -3552,7 +3556,7 @@ fn drain_reaper_group(
 }
 
 #[cfg(unix)]
-fn group_member(pgid: i32) -> Child {
+fn group_member(pgid: i32) -> ChildGuard {
     use std::os::unix::process::CommandExt as _;
 
     Command::new("/bin/sh")
@@ -3562,6 +3566,7 @@ fn group_member(pgid: i32) -> Child {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
+        .map(ChildGuard::new)
         .unwrap_or_else(|error| panic!("spawn a member into process group {pgid}: {error}"))
 }
 
@@ -3597,6 +3602,71 @@ fn close_and_collect(child: &mut Child) -> Result<std::process::ExitStatus, Stri
 }
 
 #[cfg(unix)]
+struct ChildGuard {
+    child: Option<Child>,
+}
+
+#[cfg(unix)]
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn hand_on(mut self) -> Child {
+        self.child
+            .take()
+            .expect("a guard owns its child until it hands it on")
+    }
+}
+
+#[cfg(unix)]
+impl Deref for ChildGuard {
+    type Target = Child;
+
+    fn deref(&self) -> &Child {
+        self.child
+            .as_ref()
+            .expect("a guard owns its child until it hands it on")
+    }
+}
+
+#[cfg(unix)]
+impl DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Child {
+        self.child
+            .as_mut()
+            .expect("a guard owns its child until it hands it on")
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        let pid = child.id();
+        let failure = match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => match end_and_collect(&mut child) {
+                Ok(_) => return,
+                Err(reason) => reason,
+            },
+            Err(error) => format!(
+                "whether pid {pid}, a child of this test's own, had been collected could not be \
+                 read ({error}), so nothing was sent to it"
+            ),
+        };
+        let failure = format!("the guard of a child spawned by this test: {failure}");
+        if thread::panicking() {
+            eprintln!("{failure}");
+        } else {
+            panic!("{failure}");
+        }
+    }
+}
+
+#[cfg(unix)]
 struct GroupHold {
     member: Child,
     pgid: i32,
@@ -3619,7 +3689,7 @@ impl GroupHold {
             );
         }
         Self {
-            member,
+            member: member.hand_on(),
             pgid,
             released: false,
         }
@@ -3760,6 +3830,7 @@ fn a_reaper_group_drain_fails_at_its_bound_without_signalling_the_group() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
+        .map(ChildGuard::new)
         .expect("spawn a group leader this test owns");
     let pgid = i32::try_from(member.id()).expect("a pid fits an i32");
     let mut announced = 0_u32;
@@ -4098,6 +4169,7 @@ fn a_process_holding_the_agents_pid_outside_its_held_group_is_never_signalled() 
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
+        .map(ChildGuard::new)
         .expect("spawn an agent leading a group of its own");
     let group = i32::try_from(agent.id()).expect("a pid fits an i32");
     let mut other = group_member(group);
@@ -4161,6 +4233,132 @@ fn a_process_holding_the_agents_pid_outside_its_held_group_is_never_signalled() 
         None,
         "the leader of the group the agent moved into ended by {elsewhere_status}: the cleanup \
          signalled a group it did not hold"
+    );
+}
+
+#[cfg(unix)]
+fn with_no_descriptor_to_spare<T>(step: impl FnOnce() -> T) -> T {
+    let mut ceiling = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `getrlimit` writes one `rlimit` through a pointer that outlives
+    // the call.
+    let read = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut ceiling) };
+    assert_eq!(
+        read,
+        0,
+        "reading RLIMIT_NOFILE: {}",
+        std::io::Error::last_os_error()
+    );
+    let none_to_spare = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: ceiling.rlim_max,
+    };
+    // SAFETY: `setrlimit` reads one `rlimit` through a pointer that outlives
+    // the call. A soft limit of zero refuses every new descriptor with
+    // `EMFILE` and leaves the open ones as they are.
+    let lowered = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &none_to_spare) };
+    assert_eq!(
+        lowered,
+        0,
+        "lowering RLIMIT_NOFILE to zero: {}",
+        std::io::Error::last_os_error()
+    );
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(step));
+    // SAFETY: as above; the hard limit was never changed, so the soft limit
+    // it allowed before is allowed again.
+    let restored = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &ceiling) };
+    assert_eq!(
+        restored,
+        0,
+        "restoring RLIMIT_NOFILE: {}",
+        std::io::Error::last_os_error()
+    );
+    outcome.unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn children_spawned_before_a_failing_spawn_helper() {
+    fn fails_part_way(setup: &str, run: impl FnOnce(&mut Vec<u32>)) -> usize {
+        let mut spawned = Vec::new();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&mut spawned)));
+        let Err(payload) = unwound else {
+            panic!("{setup}: the spawn given no descriptor to spare succeeded, so nothing failed");
+        };
+        let Some(&group) = spawned.first() else {
+            panic!("{setup}: nothing was spawned before the spawn that failed");
+        };
+        let refusal = format!(
+            "spawn a member into process group {group}: {}",
+            std::io::Error::from_raw_os_error(libc::EMFILE)
+        );
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&'static str>().copied());
+        assert_eq!(
+            message,
+            Some(refusal.as_str()),
+            "{setup}: the setup left through some other panic, so what it left behind is not \
+             the refused spawn's"
+        );
+        for &pid in &spawned {
+            let after = observe_child_group(pid);
+            assert_eq!(
+                after.exited_before,
+                Err(libc::ECHILD),
+                "{setup}: pid {pid}, spawned before the spawn that failed, is still this \
+                 process's child, running or exited and unreaped, after the failure unwound: \
+                 {after}"
+            );
+        }
+        spawned.len()
+    }
+
+    if std::env::var_os("UPSTROKE_SPAWN_FAILS_PART_WAY").is_none() {
+        return;
+    }
+    let before_the_second_shell = fails_part_way("the controls' second shell", |spawned| {
+        let agent = group_member(0);
+        spawned.push(agent.id());
+        let group = i32::try_from(agent.id()).expect("a pid fits an i32");
+        let _other = with_no_descriptor_to_spare(|| group_member(group));
+    });
+    let before_the_join = fails_part_way("a join after the controls' two shells", |spawned| {
+        let mut agent = group_member(0);
+        let group = i32::try_from(agent.id()).expect("a pid fits an i32");
+        let other = group_member(group);
+        spawned.extend([agent.id(), other.id()]);
+        let _hold = with_no_descriptor_to_spare(|| {
+            GroupHold::join(group, || matches!(agent.try_wait(), Ok(None)))
+        });
+    });
+    println!(
+        "ended and collected {} children spawned before a refused spawn",
+        before_the_second_shell + before_the_join
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn children_spawned_before_a_failing_spawn_are_ended_and_collected() {
+    let ended = super::test_support::run_test_isolated(
+        "agent::proc::tests::children_spawned_before_a_failing_spawn_helper",
+        &[("UPSTROKE_SPAWN_FAILS_PART_WAY", std::ffi::OsStr::new("1"))],
+        Duration::from_secs(60),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()),
+        "the isolated setups ended: {ended}"
+    );
+    assert!(
+        ended
+            .stdout
+            .contains("ended and collected 3 children spawned before a refused spawn"),
+        "the isolated helper ran both setups to their end: {ended}"
     );
 }
 
