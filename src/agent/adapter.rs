@@ -235,7 +235,8 @@ fn after_a_quota_window(after: &str) -> Option<&str> {
     }
     let window_end = after.trim_start_matches(|character: char| character.is_ascii_lowercase());
     let after_limit = after_a_whole_limit(window_end)?;
-    match after.strip_suffix(window_end)? {
+    let window = after.get(..after.len().checked_sub(window_end.len())?)?;
+    match window {
         "session" | "weekly" => Some(after_limit),
         "opus" | "sonnet" | "haiku" | "fable" if when_it_resets(after_limit).is_some() => {
             Some(after_limit)
@@ -307,36 +308,58 @@ enum LimitsReset<'a> {
 fn the_limits_reset(text: &str) -> LimitsReset<'_> {
     let lower = text.to_ascii_lowercase();
     let mut found = LimitsReset::NoLimit;
-    for (at, needle) in lower.match_indices("hit your ") {
-        let Some(after_limit) = lower
-            .get(at + needle.len()..)
-            .and_then(after_a_quota_window)
-        else {
+    let mut line_start = 0;
+    let mut lines = text.split_inclusive('\n').peekable();
+    while let Some(line) = lines.next() {
+        let lower_from_line = lower.get(line_start..).unwrap_or_default();
+        line_start += line.len();
+        let mut after_the_last = None;
+        for after_limit in after_each_limit_on(without_its_ending(line), lower_from_line) {
+            if let Some(reset) = when_it_resets(after_limit) {
+                return LimitsReset::Reset(reset);
+            }
+            after_the_last = Some(after_limit);
+        }
+        let Some(after_the_last) = after_the_last else {
             continue;
         };
         found = LimitsReset::NoReset;
-        let Some(after_limit) = text
-            .len()
-            .checked_sub(after_limit.len())
-            .and_then(|limit_end| text.get(limit_end..))
-        else {
+        if carries_a_reset(after_the_last) {
             continue;
-        };
-        if let Some(reset) = the_reset_a_limit_gives(after_limit) {
+        }
+        if let Some(reset) = lines
+            .peek()
+            .copied()
+            .map(without_its_ending)
+            .and_then(|next_line| next_line.strip_prefix("resets "))
+        {
             return LimitsReset::Reset(reset);
         }
     }
     found
 }
 
-fn the_reset_a_limit_gives(after_limit: &str) -> Option<&str> {
-    let mut lines = after_limit.lines();
-    let rest_of_its_line = lines.next().unwrap_or_default();
-    match when_it_resets(rest_of_its_line) {
-        Some(reset) => Some(reset),
-        None if carries_a_reset(rest_of_its_line) => None,
-        None => lines.next()?.strip_prefix("resets "),
-    }
+fn after_each_limit_on<'text>(
+    line: &'text str,
+    lower_from_line: &str,
+) -> impl Iterator<Item = &'text str> {
+    lower_from_line
+        .get(..line.len())
+        .unwrap_or_default()
+        .match_indices("hit your ")
+        .filter_map(move |(at, needle)| {
+            let after_limit = lower_from_line
+                .get(at + needle.len()..)
+                .and_then(after_a_quota_window)?;
+            line.get(lower_from_line.len().checked_sub(after_limit.len())?..)
+        })
+}
+
+fn without_its_ending(line: &str) -> &str {
+    let Some(line) = line.strip_suffix('\n') else {
+        return line;
+    };
+    line.strip_suffix('\r').unwrap_or(line)
 }
 
 fn carries_a_reset(text: &str) -> bool {
@@ -1193,6 +1216,33 @@ mod tests {
         ] {
             assert_eq!(reset(text, NOV_11_2026), None, "{text:?}");
         }
+    }
+
+    // About 5 MB on one line. Read linearly, all four answers take under a
+    // second in a debug build; reading the rest of the line again at each of the
+    // 200,000 limits ran past the 30 seconds (measured) and would take hours. The
+    // reading runs on its own thread so the test fails at the bound, not after.
+    #[test]
+    fn a_line_of_many_limits_is_read_in_time_linear_in_its_length() {
+        let many = "hit your session limit x ".repeat(200_000);
+        let with_a_reset = format!("{many}hit your weekly limit · resets 5:30am (UTC)");
+        let (sender, answers) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let now = NOV_11_2026 + 3 * HOUR;
+            let _ = sender.send((
+                names_a_quota_limit(&many),
+                looks_rate_limited(&many),
+                reset(&many, now),
+                reset(&with_a_reset, now),
+            ));
+        });
+        let answered = answers
+            .recv_timeout(Duration::from_secs(30))
+            .expect("a 5 MB line of limits is read well inside 30 seconds");
+        assert_eq!(
+            answered,
+            (true, true, None, Some("2026-11-11T05:30:00Z".to_owned()))
+        );
     }
 
     #[test]

@@ -332,8 +332,8 @@ limit · resets after compaction", "hit your request limit · resets 9am
 be retried or escalated like any other.
 
 The rule splits the already lower-cased text on "hit your " and reads each
-piece with `trim_start_matches`, `strip_prefix`, `strip_suffix` and
-`starts_with`. Those return slices of the same string or `None`, so it
+piece with `trim_start_matches`, `strip_prefix`, `get` and `starts_with`.
+Those return slices of the same string or `None`, so it
 allocates nothing more, and nothing in it indexes or unwraps, so it cannot
 panic.
 
@@ -383,6 +383,11 @@ It is one function, rather than the body of `hits_a_quota_window`, so that
 else, when it looks for the reset that follows one. What it returns is a
 suffix of `after`, so a caller that knows where `after` ends knows where the
 limit ends.
+
+The window is `after` cut short by the length of what follows it, with
+`get`. It was `after` with that rest stripped by `strip_suffix`, which
+compares the whole rest byte by byte; from `the_limits_reset` the rest runs
+to the end of the text, so that cost the rest of the text at every limit.
 
 The model form was added after the pull request that reads resets from limit
 messages. Its parser test read the observed Fable message with
@@ -453,8 +458,7 @@ the word only, not for a reset that parses. A reset in another zone, which
 `reset_at_from_limit_message` refuses, still says the allowance comes back,
 so the message is still a rate limit; its `reset_at` is just unknown.
 "resets " with a space is the same word `reset_at_from_limit_message` looks
-for, and `the_reset_a_limit_gives` uses what this returns as the reset to
-read. It was `says_when_it_resets`, which returned only whether; it returns
+for, and `the_limits_reset` uses what this returns as the reset to read. It was `says_when_it_resets`, which returned only whether; it returns
 the rest so that both read one rule for which reset belongs to the limit.
 
 The gap test uses Unicode letters and digits, not ASCII ones, so that a word
@@ -586,11 +590,12 @@ limit with no reset of its own gives `None`, an unknown reset, which is the
 honest answer.
 
 It never panics, on any text and any `now_unix`. The text is read with
-`lines`, `match_indices`, `strip_prefix`, `starts_with`, `get` and
-`split_at_checked`, each of which returns a slice of the same string or
-`None`; the only indices come from `find` and `match_indices`, or are the
-text's length less that of a suffix of its lower-cased copy (with
-`checked_sub`), so they fall on character boundaries. The clock arithmetic is checked: a
+`split_inclusive`, `match_indices`, `strip_prefix`, `strip_suffix`,
+`starts_with`, `get` and `split_at_checked`, each of which returns a slice
+of the same string or `None`; the only indices come from `find`,
+`match_indices` and the lengths of the lines `split_inclusive` gives, or are
+a string's length less that of one of its suffixes (with `checked_sub`), so
+they fall on character boundaries. The clock arithmetic is checked: a
 `now_unix` past `i64::MAX`, or a candidate whose seconds would overflow,
 gives `None`. So does a nearest candidate before 1970, which has no unix
 time to format; only a clock read near the epoch can meet one.
@@ -612,14 +617,43 @@ in this text or another, may stand in for it.
 ## `fn the_limits_reset(text: &str) -> LimitsReset<'_> {`
 
 The reset of the first recognised limit that gives one. The text is
-lower-cased once, for `after_a_quota_window`, and every "hit your " in it is
-tried in order, so the limits are met line by line and left to right.
+lower-cased once, for `after_a_quota_window`, and walked line by line, the
+limits on each line (`after_each_limit_on`) taken left to right. Lines are
+those of `str::lines`, so a `\r\n` ending is a line ending too.
 `to_ascii_lowercase` changes only ASCII letters, byte for byte, so the two
 strings have the same length, with characters at the same offsets. The
 limit's end is found in the lower-cased text, where "Fable" reads as a
-window, and carried to the original by its distance from the end.
-`the_reset_a_limit_gives` then reads the original, so "resets " must be
-printed in lower case, as the rest of the grammar is matched exactly.
+window, and carried to the original line by its distance from the end. The
+reset is read from the original, so "resets " must be printed in lower case,
+as the rest of the grammar is matched exactly.
+
+On the limit's own line, the reset is `when_it_resets`'s: `resets` as the
+next word. Failing that, and only when nothing after the limit on its line
+is a `resets` at all (`carries_a_reset`), a `resets ` that begins the very
+next line, at its first character, is the limit's: the message wrapped after
+"limit", as in `You've hit your session limit` then `resets 5:30am (UTC)`.
+A line with another reset after the limit (`; the queue resets 5:30am
+(UTC)`) is about something else, and so is anything after it. A reset with a
+blank line, or any other line, between it and the limit is not the limit's
+either.
+
+The reading is linear in the text's length, because each limit has only its
+next word read, which ends before the next "hit your " begins, and the rest
+of a line is searched for a `resets` once, after the line's last limit,
+rather than once for every limit on it. That was finding
+`PR380-QUOTA-PHRASE-QUADRATIC-SCAN`: a CLI result of one line holding
+"hit your session limit x " 300,000 times, 7.5 MB, had the rest of its line
+read at each limit, over a terabyte per reading, and the coordinator reads a
+result after the agent's process timeout no longer bounds the run.
+
+Asking only the last limit on a line gives the answer asking each one did.
+What follows a later limit is a suffix of what follows an earlier one on the
+same line, and it begins with a character that is not a word character
+(`after_a_whole_limit`), so a `resets` that begins a word after the later
+limit begins one after the earlier limit too. So if any limit on the line
+has no `resets` after it, the last has none; and if a later limit's next
+word is `resets`, every earlier limit has a `resets` after it and could not
+have taken the next line's reset first.
 
 A limit that gives no reset makes the answer `NoReset` rather than
 `NoLimit`, and the walk goes on to the next limit, so `You've hit your
@@ -640,23 +674,25 @@ It was a walk over lines that returned the first line's reset or nothing,
 with `the_only_reset` behind it reading a text's sole `resets` wherever it
 was. Finding `PR380-UNRELATED-LONE-RESET-ATTRIBUTED` removed that fallback
 (see `reset_at_from_limit_message`), and the next-line case it had covered
-moved into `the_reset_a_limit_gives`.
+moved into `the_reset_a_limit_gives`, which read one limit's reset from the
+rest of the text after it. Finding `PR380-QUOTA-PHRASE-QUADRATIC-SCAN`
+folded it back into this walk, so that the rest of a line is read once.
 
-## `fn the_reset_a_limit_gives(after_limit: &str) -> Option<&str> {`
+## `fn after_each_limit_on<'text>(`
 
-What follows `resets ` in the reset a limit gives, `after_limit` being the
-original text from the end of the limit on. Lines are those of `str::lines`,
-so a `\r\n` ending is a line ending too.
+What follows each recognised limit on `line`, to the end of the line, in
+order. `lower_from_line` is the lower-cased text from the line's start to the
+end of the text, not only to the end of the line: `after_a_quota_window`
+reads the limit there, as `the_limits_reset` always gave it the rest of the
+text, so a model limit whose `resets` begins the next line ("hit your Fable
+limit" then "resets Nov 14, 9am (UTC)") is still a limit.
 
-On the limit's own line, the reset is `when_it_resets`'s: `resets` as the
-next word. Failing that, and only when nothing after the limit on its line
-is a `resets` at all (`carries_a_reset`), a `resets ` that begins the very
-next line, at its first character, is the limit's: the message wrapped after
-"limit", as in `You've hit your session limit` then `resets 5:30am (UTC)`.
-A line with another reset after the limit (`; the queue resets 5:30am
-(UTC)`) is about something else, and so is anything after it. A reset with a
-blank line, or any other line, between it and the limit is not the limit's
-either.
+## `fn without_its_ending(line: &str) -> &str {`
+
+A line of `split_inclusive('\n')` as `str::lines` would give it: without its
+`\n`, and without a `\r` just before that. `the_limits_reset` walks
+`split_inclusive` rather than `lines` because it needs each line's length
+with its ending, to know where the line starts in the lower-cased text.
 
 ## `fn carries_a_reset(text: &str) -> bool {`
 
