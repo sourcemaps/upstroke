@@ -52,7 +52,7 @@ at the review tier in this build, and
 `None`. Only the first is "no cross-family reviewer exists in this build".
 Saying it of the second is false — the same build resolves one the moment
 the switch is unset — so with the switch off the line names the
-configuration that turned the reviewer off instead.
+configuration that turned the alternative reviewer off instead.
 
 The line says what the switch turned off and nothing wider: the *alternative*
 reviewer, the one that would stand in for the primary on tasks the primary's
@@ -78,8 +78,8 @@ second opinions in the rows beneath it unexplained; the line says instead
 that the switch turned off the alternative, and that the second opinions
 still run on the agents it names (each distinct binding once) and still
 need them installed. With the switch off and no second opinion demanded,
-the line is the plain sentence above: the alternative for same-family tasks
-is off, and the primary reviews them itself.
+the line is the plain sentence above: the alternative for the tasks the
+primary's own model implemented is off, and the primary reviews them itself.
 
 ## `pub(super) fn capacity_echo(`
 
