@@ -112,6 +112,58 @@ is the job's only failure.
 - **Established:** the same assertion failed once more on hosted macOS, on a change confined to
   `findings/`, and passed on the same merge commit 31 minutes earlier.
 
+## A sighting on #439, 2026-11-26
+
+| run | job | date | branch | head |
+|---|---|---|---|---|
+| `45814313794` | `139890070568` | 2026-11-26T11:51:46Z | `ci/test-legs-named-by-category` | `f8d610f3` (checkout `88f6876`) |
+
+- **Run `45814313794`** (`pull_request`, #439 at `f8d610f3`), attempt 1, job `139890070568`,
+  `test (macos-latest, unit (agent-adapters, agent-proc, cli, config, model, plan, run-state, util))`,
+  on a GitHub-hosted `macos-latest` runner, image `macos-26-arm64` version `20261117.0516.1`
+  (log lines 17-18), 11:51:46Z to 11:57:41Z (the job's record; inside the leg's 30-minute limit,
+  `.github/workflows/ci.yml:266` at `88f6876`).
+- **The log.** `~/selfhost-findings-20261128b/evidence/job-45814313794-139890070568.log`,
+  ANSI-stripped SHA-256 `44375bbdb10d2f6016e5ef8d56cb1f31cd98d5c43e795712d5e76cfd6ba0589f`,
+  the bytes of the copy saved on 2026-11-26
+  (`~/selfhost-catshards-20261125/evidence/r76-ci-45814313794/139890070568.plain.log`; `cmp`).
+  Line 107:
+  `HEAD is now at 88f6876 Merge f8d610f378c3ab2f0f85fa575a36f74cd33cb46b into 552c039596a4a8a4ef3d5b4f514c46d206038311`,
+  GitHub's merge of `f8d610f3` into `master` `552c0395`. Line 692:
+  `test agent::proc::tests::kill_tree_settles_the_whole_unix_group_before_it_returns ... FAILED`,
+  the only test line in the log that reads `... FAILED`. Lines 2098-2099: the panic at
+  `src/agent/proc/tests.rs:1263:5`, *"kill_tree returned while a member of the child's process group
+  was still running and still holding its pipes: only the direct child was killed"*. Line 2105:
+  `test result: FAILED. 1629 passed; 1 failed; 31 ignored; 0 measured; 2602 filtered out; finished in 55.03s`.
+- **From the run's attempt-1 job list**, not the log
+  (`~/selfhost-findings-20261128b/evidence/job-records/run-45814313794-attempt-1-jobs.json`, SHA-256
+  `995771197d67613b3d5819140c0cd8933fa33e7ca2d6dc490889af5913986519`): 41 of the run's 43 jobs
+  succeeded, and the two failures were this job and the aggregate `upstroke-ci`
+  (job `139896770625`).
+- **What the test asserts, at `88f6876`:** `assert!(settled, …)` at `src/agent/proc/tests.rs:1263`,
+  in the test at line 1192, the assertion this file records. `src/agent/` at `88f6876` is
+  `552c0395`'s, and `git diff --name-only 552c0395 88f6876 -- src/agent/ src/topology/` prints
+  nothing.
+- **Same tree's pass.** Run `45822510547` (`pull_request`, the same branch at `1555832f`, an empty
+  commit on `f8d610f3` with its tree), attempt 1, job `139918209456`, the same leg, 12:44:55Z to
+  12:50:51Z, on image version `20261117.0516.1` (line 18), checked out `adf1ed8` (line 107:
+  `HEAD is now at adf1ed8 Merge 1555832f9a32f2b55fb57d9a86657b9fb31b0718 into 552c039596a4a8a4ef3d5b4f514c46d206038311`),
+  whose tree is `88f6876`'s (`db662546`). Line 677 logs the test `... ok`, and line 2094 reads
+  `test result: ok. 1630 passed; 0 failed; 31 ignored; 0 measured; 2602 filtered out; finished in 49.07s`.
+  Its log: `~/selfhost-findings-20261128b/evidence/job-45822510547-139918209456.log`, SHA-256
+  `683fc902b11a689455c9edbe39ab7fcc978631f8db48636d45f8473d3553fab6`, fetched for this record.
+  That run's attempt-1 job list
+  (`~/selfhost-findings-20261128b/evidence/job-records/run-45822510547-attempt-1-jobs.json`, SHA-256
+  `3c33a72d117550e350a6eec6913e7bbcce7551c9c9c8d26c2f263a0089084bde`) has two other failures,
+  `test (windows-latest, self-checks (census, effects))` (job `139918209376`) and `upstroke-ci`
+  (job `139925756965`), which its attempt 2 re-ran under ruling r80.
+- **Established:** the same assertion failed once more on hosted macOS, on a change with no file
+  under `src/agent/` or `src/topology/`, and the same tree passed it in run `45822510547`, on an
+  empty commit.
+- **Not established:** which process held the pipes' writer, or the errno of the last read
+  (ruling r78 step 6).
+- **Not established: the rate.**
+
 ## What the change that takes this up should do
 
 Read the settle predicate at `src/agent/proc/tests.rs:879` against what `kill_tree` actually
