@@ -459,25 +459,30 @@ pub(crate) mod test_support {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    /// The legacy writer of schemas 1–3, which reads the capacity module
-    /// directly and is the seam census's one named exception.
+    /// The two engine files rule one does not read: the legacy writer of
+    /// schemas 1–3, each of whose files writes `use crate::capacity;`.
+    ///
+    /// The exception is by file, so it covers everything in them, the
+    /// schema-4 dispatch at the head of each (`run_harness` in
+    /// `coordinator.rs`, `resume_harness` in `resume.rs`) included.
     const LEGACY_WRITER: [&str; 2] = ["src/engine/coordinator.rs", "src/engine/resume.rs"];
 
-    /// The `pub(crate)` constructor of the built-in client, the one way to
-    /// build one outside this file.
+    /// The word rule two counts: the `pub(crate)` constructor of the
+    /// built-in client, whose type is private to this file.
     const CONSTRUCTOR: &str = "builtin_capacity_client_from_log";
 
-    /// The production files that name [`CONSTRUCTOR`], each with how many
-    /// times: its definition here, and its one call, in `TopologyRun::resumed`.
+    /// The counts rule two accepts: each production file whose code names
+    /// [`CONSTRUCTOR`] as a word, with how many times. The definition here
+    /// names it once, and `TopologyRun::resumed` once.
     const CONSTRUCTOR_SITES: [(&str, usize); 2] = [
         ("src/capacity/client.rs", 1),
         ("src/engine/topology/run.rs", 1),
     ];
 
-    /// Production source files, by repository-relative path: every `.rs`
-    /// file under `src/`, read as the tracker's census reads them, less the
-    /// whole-file test modules the crate's own `#[cfg(test)] mod …;`
-    /// declarations name.
+    /// Production source files, each keyed by its path below the repository
+    /// root ([`key_of`]): every `.rs` file under `src/`, read as the
+    /// tracker's census reads them, less the whole-file test modules the
+    /// crate's own `#[cfg(test)] mod …;` declarations name.
     fn production_sources() -> Vec<(String, String)> {
         fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
             let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
@@ -503,16 +508,34 @@ mod tests {
             .into_iter()
             .filter(|path| !test_modules.contains(path))
             .map(|path| {
-                let relative = path
-                    .strip_prefix(root)
-                    .expect("a file under the root")
-                    .to_string_lossy()
-                    .replace('\\', "/");
+                let key = key_of(path.strip_prefix(root).expect("a file under the root"));
                 let source = std::fs::read_to_string(&path)
                     .unwrap_or_else(|error| panic!("{} reads: {error}", path.display()));
-                (relative, source)
+                (key, source)
             })
             .collect()
+    }
+
+    /// A file's key: `relative`, its path below the repository root, as its
+    /// components joined by `/`.
+    ///
+    /// Each component is taken whole and must be UTF-8: a `\` in a Unix file
+    /// name stays in its component, and a component that is not UTF-8
+    /// panics. No platform allows a `/` inside a component, so the `/`s of a
+    /// key are exactly the boundaries between its components.
+    fn key_of(relative: &Path) -> String {
+        relative
+            .components()
+            .map(|component| {
+                component.as_os_str().to_str().unwrap_or_else(|| {
+                    panic!(
+                        "`{}` has a path component that is not UTF-8",
+                        relative.display()
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+            .join("/")
     }
 
     fn is_identifier(character: char) -> bool {
@@ -534,39 +557,33 @@ mod tests {
             .collect()
     }
 
-    /// Whether `code`, with comments, literals and test-only items blanked,
-    /// writes `capacity` other than as `capacity::client`: rule one, the seam.
+    /// Rule one: whether `code` writes a word-bounded `capacity` that is not
+    /// followed, after optional whitespace, by `::` and then, after optional
+    /// whitespace, by a word-bounded `client`.
     ///
-    /// The census reads words, not paths. Each word-bounded `capacity` that
-    /// does not follow a `.` (after optional whitespace) must be followed,
-    /// after optional whitespace, by `::` and then, after optional
-    /// whitespace, by the word-bounded `client`; any other is a reach around
-    /// the seam. Nothing before the word is read, so `crate::capacity`,
-    /// `super::capacity` and `Root::capacity` after `use crate as Root;` are
-    /// read alike. A method or field after a `.` (`v.capacity()`,
-    /// `run.capacity`) is no segment of a path, and passes.
-    ///
-    /// Every other `capacity` fails, whether or not it names the module: a
-    /// rename (`use crate::{capacity as c};`), a bare import (`use
-    /// crate::capacity;`), a group (`use crate::capacity::{client, Pool};`,
-    /// and `use crate::capacity::{client, client::Pool};` too, though each of
-    /// its items is the client's), a type's associated function
+    /// `code` is a file's code with comments, literals and test-only items
+    /// blanked. Only what follows the word is read, never what is before it,
+    /// so a `capacity` after `crate::`, `super::`, `Root::`, `.` or `..` is
+    /// held to the same test. `crate::capacity::client::Pool` and
+    /// `Root::capacity::client::Pool` pass it. Each of these fails it,
+    /// whether or not it names the module: a path to another item
+    /// (`crate::capacity::pool_for`, `(..capacity::x()).end`), a rename (`use
+    /// crate::{capacity as c};`), a bare import (`use crate::capacity;`), a
+    /// group (`use crate::capacity::{client, Pool};`, and `use
+    /// crate::capacity::{client, client::Pool};` too), a method or field
+    /// after a `.` (`v.capacity()`, `run.capacity`), an associated function
     /// (`Vec::capacity(v)`, `Vec::<u8>::capacity(v)`) and a binding or field
-    /// declared `capacity`. Telling those apart would take a parser of Rust
-    /// paths; refusing them leaves one spelling, `capacity::client::<item>`,
-    /// written in full.
+    /// declared `capacity`.
     ///
-    /// A text census reads the words a file writes: a path a macro assembles
-    /// from pieces, or a re-export by a file outside the engine (`pub(crate)
-    /// use crate::capacity::pool_for as reach;` in `src/util.rs`, then
-    /// `crate::util::reach`), writes no `capacity` in the engine and passes
-    /// unseen.
+    /// Its limits: it reads words and resolves no path or name. Code that
+    /// writes no word-bounded `capacity` passes, whatever its paths resolve
+    /// to: a path a macro assembles from pieces, or a module alias or
+    /// re-export declared by a file outside the engine (`pub(crate) use
+    /// crate::capacity as cap;` in `src/util.rs`, then
+    /// `crate::util::cap::exhausted_pools_of`).
     fn reaches_capacity_around_the_seam(code: &str) -> bool {
         const NAME: &str = "capacity";
         word_occurrences(code, NAME).into_iter().any(|at| {
-            if code[..at].trim_end().ends_with('.') {
-                return false;
-            }
             let through_the_client = code[at + NAME.len()..]
                 .trim_start()
                 .strip_prefix("::")
@@ -577,8 +594,10 @@ mod tests {
         })
     }
 
-    /// The engine's production files, but the legacy writer's, each with its
-    /// production code: comments, literals and test-only items blanked.
+    /// The files rule one reads, each with its code: comments, literals and
+    /// test-only items blanked. A file is read when its key's first two
+    /// components are `src` and `engine` and it is not one of
+    /// [`LEGACY_WRITER`].
     fn engine_production_code(
         sources: &[(String, String)],
     ) -> impl Iterator<Item = (&str, String)> {
@@ -590,8 +609,8 @@ mod tests {
             .map(|(path, source)| (path.as_str(), crate::effects::production_code(source)))
     }
 
-    /// The engine's production files, but the legacy writer's, whose code
-    /// reaches the capacity module other than through `capacity::client`.
+    /// The files rule one reads ([`engine_production_code`]) whose code meets
+    /// [`reaches_capacity_around_the_seam`], in the order of `sources`.
     fn bypasses_the_seam(sources: &[(String, String)]) -> Vec<&str> {
         engine_production_code(sources)
             .filter(|(_, code)| reaches_capacity_around_the_seam(code))
@@ -606,7 +625,10 @@ mod tests {
     /// Every word counts, whatever is around it: a definition, a call, a
     /// call behind `impl CapacityClient + use<>`, a rename in a `use`, a
     /// function value. A file that builds a client through a wrapper counts
-    /// nothing, but the wrapper's own file counts its call.
+    /// nothing, and the wrapper's own file counts the word it writes.
+    ///
+    /// Its limit: it counts words, not calls. One naming bound to a local and
+    /// called twice counts once.
     fn constructor_sites(sources: &[(String, String)]) -> Vec<(&str, usize)> {
         sources
             .iter()
@@ -619,8 +641,8 @@ mod tests {
     }
 
     /// Rule two, the constructor: whether production code names
-    /// [`CONSTRUCTOR`] exactly at [`CONSTRUCTOR_SITES`], so the client the run
-    /// installs is the one built-in client there is.
+    /// [`CONSTRUCTOR`] exactly at [`CONSTRUCTOR_SITES`], file for file and
+    /// count for count ([`constructor_sites`]).
     fn only_the_run_builds_the_client(sources: &[(String, String)]) -> bool {
         constructor_sites(sources) == CONSTRUCTOR_SITES
     }
@@ -646,7 +668,7 @@ mod tests {
         let sources = production_sources();
         assert!(
             sources.len() > 150,
-            "only {} production source files were read; the census is measuring nothing",
+            "only {} production source files were read, where the census expects more than 150",
             sources.len()
         );
         for required in [
@@ -663,35 +685,32 @@ mod tests {
             sources
                 .iter()
                 .all(|(path, _)| path != "src/engine/topology/run/tests.rs"),
-            "the census reads test modules as production, where a test may build any client it \
-             likes"
+            "the census reads `src/engine/topology/run/tests.rs`, a whole-file test module, as \
+             production"
         );
         assert!(
             reaches_capacity_around_the_seam(&crate::effects::production_code(source_of(
                 &sources,
                 "src/engine/coordinator.rs"
             ))),
-            "`src/engine/coordinator.rs` no longer names the capacity module directly, so the \
-             legacy writer's exception exempts nothing and is to be removed"
+            "rule one refuses nothing in `src/engine/coordinator.rs`'s production code, so the \
+             legacy writer's exception exempts nothing there"
         );
         assert!(
             crate::effects::production_code(source_of(&sources, "src/engine/topology/run.rs"))
                 .contains("crate::capacity::client::"),
-            "the schema-4 run no longer asks capacity through `capacity::client`, so a census \
-             finding no bypass proves nothing about the seam"
+            "the production code of `src/engine/topology/run.rs` does not contain \
+             `crate::capacity::client::`"
         );
         assert_eq!(
             bypasses_the_seam(&sources),
             Vec::<&str>::new(),
-            "the schema-4 engine asks capacity only through `CapacityClient` \
-             (`crate::capacity::client`), so a second client can replace the built-in one; a \
-             file that names the capacity module any other way answers a capacity question \
-             the replacement never sees. The census reads words, so it accepts one spelling: \
-             `capacity::client::<item>`, written in full on every path, never grouped \
-             (`capacity::{{client, ..}}`) or renamed; a binding, field or associated function \
-             called `capacity` is refused with them, and a method or field is read only after a \
-             `.`. The legacy writer of schemas 1–3 ({LEGACY_WRITER:?}) is the one named \
-             exception"
+            "these files under `src/engine/`, the legacy writer of schemas 1–3 \
+             ({LEGACY_WRITER:?}) excepted, write a word-bounded `capacity` that is not followed \
+             by `::` and a word-bounded `client`, whitespace allowed around the `::`. Rule one \
+             reads no word before `capacity`, so it refuses every other `capacity`: a path to \
+             another item, a group (`capacity::{{client, ..}}`), a rename, and a binding, field, \
+             method or associated function called `capacity`, after a `.` or not"
         );
     }
 
@@ -700,14 +719,10 @@ mod tests {
         assert_eq!(
             constructor_sites(&production_sources()),
             CONSTRUCTOR_SITES,
-            "`{CONSTRUCTOR}` is the one way to build the built-in client outside \
-             `src/capacity/client.rs`, so production code names it twice: its definition there \
-             and its call in `TopologyRun::resumed` (`src/engine/topology/run.rs`). The run asks \
-             the client it installed (`self.capacity_client`), so a second client anywhere, \
-             another file's, a second one in the run, or one a wrapper builds, answers capacity \
-             questions an installed handler never sees. A file missing from the counts means \
-             the constructor was renamed or the run no longer calls it, and this census proves \
-             nothing until it names the one that builds the run's client"
+            "production code names `{CONSTRUCTOR}` as a word in other files, or other times, \
+             than rule two accepts: once in `src/capacity/client.rs`, its definition, and once \
+             in `src/engine/topology/run.rs`, in `TopologyRun::resumed`. Every word counts, \
+             whatever is around it; a file missing from the counts names it nowhere"
         );
     }
 
@@ -755,8 +770,21 @@ mod tests {
                 "fn f(capacity: Box<dyn CapacityClient>) -> Run {\n    \
                  Run { capacity_client: capacity }\n}\n",
             ),
-            // Accepted: the seam, a method or field after a `.`, prose, test
-            // code, a file outside the engine, and the legacy writer.
+            (
+                "src/engine/method.rs",
+                "fn f(v: &Vec<u8>) -> usize {\n    v.capacity() + v\n        .capacity()\n}\n",
+            ),
+            (
+                "src/engine/dotted.rs",
+                "fn f(run: &Run, other: &Run) -> bool {\n    \
+                 run.capacity.is_some() && other . capacity.is_some()\n}\n",
+            ),
+            (
+                "src/engine/range.rs",
+                "fn f() -> usize {\n    (..capacity::x()).end\n}\n",
+            ),
+            // Accepted: the seam, prose, test code, a file outside the engine,
+            // and the legacy writer.
             ("src/engine/seam.rs", "use crate::capacity::client::Pool;\n"),
             (
                 "src/engine/called.rs",
@@ -767,15 +795,6 @@ mod tests {
                 "src/engine/spaced.rs",
                 "fn f(agent: &str, pools: &[Pool]) -> Option<&Pool> {\n    \
                  crate::capacity\n        :: client::pool_for(agent, pools)\n}\n",
-            ),
-            (
-                "src/engine/method.rs",
-                "fn f(v: &Vec<u8>) -> usize {\n    v.capacity() + v\n        .capacity()\n}\n",
-            ),
-            (
-                "src/engine/dotted.rs",
-                "fn f(run: &Run, other: &Run) -> bool {\n    \
-                 run.capacity.is_some() && other . capacity.is_some()\n}\n",
             ),
             (
                 "src/engine/prose.rs",
@@ -816,8 +835,55 @@ mod tests {
                 "src/engine/turbofish.rs",
                 "src/engine/field.rs",
                 "src/engine/binding.rs",
+                "src/engine/method.rs",
+                "src/engine/dotted.rs",
+                "src/engine/range.rs",
             ]
         );
+
+        // A limit of rule one, accepted: a module alias declared by a file
+        // outside the engine. The engine file reaches a function the client
+        // does not re-export, and writes no `capacity`.
+        let aliased = planted(&[
+            ("src/util.rs", "pub(crate) use crate::capacity as cap;\n"),
+            (
+                "src/engine/realiased.rs",
+                "fn f(e: &[E]) -> Held {\n    crate::util::cap::exhausted_pools_of(e)\n}\n",
+            ),
+        ]);
+        assert_eq!(
+            bypasses_the_seam(&aliased),
+            Vec::<&str>::new(),
+            "a limit of rule one: it reads no file outside `src/engine/`, and an engine file \
+             that reaches the capacity module through a module alias declared there writes no \
+             `capacity`"
+        );
+    }
+
+    #[test]
+    fn the_census_keys_a_file_by_its_path_components() {
+        let run = ["src", "engine", "topology", "run.rs"]
+            .into_iter()
+            .collect::<PathBuf>();
+        assert_eq!(key_of(&run), "src/engine/topology/run.rs");
+        if cfg!(unix) {
+            // On Unix `\` is a character of a file name, so this is a file in
+            // `src/` named `engine\planted.rs`, not a file in `src/engine/`.
+            let named = Path::new("src").join("engine\\planted.rs");
+            assert_eq!(named.components().count(), 2);
+            let key = key_of(&named);
+            assert_eq!(key, "src/engine\\planted.rs");
+            let sources = vec![(
+                key,
+                "fn f() { let _ = crate::capacity::pool_for; }\n".to_owned(),
+            )];
+            assert_eq!(
+                bypasses_the_seam(&sources),
+                Vec::<&str>::new(),
+                "rule one read `src/engine\\planted.rs`, whose first two components are `src` \
+                 and `engine\\planted.rs`, as a file under `src/engine/`"
+            );
+        }
     }
 
     #[test]
@@ -863,6 +929,32 @@ mod tests {
         ]);
         assert_eq!(constructor_sites(&accepted), CONSTRUCTOR_SITES);
         assert!(only_the_run_builds_the_client(&accepted));
+
+        // A limit of rule two, accepted: one naming, bound to a local and
+        // called twice. The run builds two clients and names the constructor
+        // once.
+        let called_twice = planted(&[
+            (CLIENT, DEFINITION),
+            (
+                RUN,
+                "fn resumed(handle: H) -> TopologyRun {\n    \
+                 let build = crate::capacity::client::builtin_capacity_client_from_log;\n    \
+                 let capacity_client = build(&handle.events);\n    \
+                 let _second = build(&handle.events);\n    \
+                 TopologyRun { capacity_client }\n}\n",
+            ),
+        ]);
+        assert_eq!(
+            constructor_sites(&called_twice),
+            CONSTRUCTOR_SITES,
+            "a limit of rule two: it counts words, not calls, and one naming called twice is one \
+             word"
+        );
+        assert!(
+            only_the_run_builds_the_client(&called_twice),
+            "a limit of rule two: it counts words, not calls, and one naming called twice is one \
+             word"
+        );
 
         /// A refused case: what it plants, and the counts the census reads.
         type Refused<'a> = (&'a str, Vec<(String, String)>, Vec<(&'a str, usize)>);
