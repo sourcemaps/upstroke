@@ -124,10 +124,13 @@ hooks above it: no production caller can name it.
 
 ## `impl RunOptions` › `pub(super) fn profile_environment(&self) -> fn(&str) -> Option<std::ffi::OsString> {`
 
-Where `entry`'s `FreshLeased::run` reads the coordinator's environment for
-`preflight::refuse_unusable_profiles`: `preflight::coordinator_environment`,
-which is what a resume's `RunPreflight` reads by default, unless the test
-configuration set [`RunOptions`]'s `coordinator_environment`. The test half is
+The reader `entry`'s `prepare_fresh` hands
+`preflight::refuse_unusable_profiles`, before the lease:
+`preflight::coordinator_environment`, unless the test configuration set
+[`RunOptions`]'s `coordinator_environment`. Only a fresh run reads through it.
+A resume's `RunPreflight` holds its own reader, the same function by default,
+which its tests replace with `reading_environment`; nothing in `RunOptions`
+reaches a resume. The test half is
 a `#[cfg(test)]` statement in the body, as in [`RunOptions::writes_topology`],
 so the topology module that calls it carries no `#[cfg(test)]` of its own.
 
