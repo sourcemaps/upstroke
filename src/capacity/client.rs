@@ -332,3 +332,247 @@ mod test_support {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    /// The legacy writer of schemas 1–3, which reads the capacity module
+    /// directly and is the census's one named exception.
+    const LEGACY_WRITER: [&str; 2] = ["src/engine/coordinator.rs", "src/engine/resume.rs"];
+
+    /// Production source files, by repository-relative path: every `.rs`
+    /// file under `src/`, read as the tracker's census reads them, less the
+    /// whole-file test modules the crate's own `#[cfg(test)] mod …;`
+    /// declarations name.
+    fn production_sources() -> Vec<(String, String)> {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+                .unwrap_or_else(|error| panic!("{} lists: {error}", dir.display()))
+                .map(|entry| entry.expect("a directory entry").path())
+                .collect();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let source_root = root.join("src");
+        let mut files = Vec::new();
+        walk(&source_root, &mut files);
+        let test_modules =
+            crate::effects::census_domain::whole_file_test_modules(&source_root, &files, 13);
+        files
+            .into_iter()
+            .filter(|path| !test_modules.contains(path))
+            .map(|path| {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("a file under the root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let source = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("{} reads: {error}", path.display()));
+                (relative, source)
+            })
+            .collect()
+    }
+
+    fn is_identifier(character: char) -> bool {
+        character.is_alphanumeric() || character == '_'
+    }
+
+    fn bounded(character: Option<char>) -> bool {
+        character.is_none_or(|character| !is_identifier(character))
+    }
+
+    /// Whether the code before `at` is inside a `use` declaration: the last
+    /// word-bounded `use` before it has no `;` after it.
+    fn in_a_use_declaration(code: &str, at: usize) -> bool {
+        let head = &code[..at];
+        head.rmatch_indices("use")
+            .find(|(start, word)| {
+                bounded(head[..*start].chars().next_back())
+                    && bounded(head[start + word.len()..].chars().next())
+            })
+            .is_some_and(|(start, _)| !head[start..].contains(';'))
+    }
+
+    /// Whether `code`, with comments, literals and test-only items blanked,
+    /// names `capacity` as a path segment that does not go on to `::client`.
+    ///
+    /// An occurrence is a path segment when `::` joins it to the path before
+    /// or after it, or when a `use` declaration names it (`use
+    /// crate::{capacity as c};`). It is not one after a `.` (a method or field
+    /// such as `v.capacity()`), nor after a type's `::` (`Vec::capacity`,
+    /// `Vec::<u8>::capacity`): neither is the module. A binding or field
+    /// called `capacity` (`capacity: Box<dyn CapacityClient>`) is not joined
+    /// to a path and is not a segment either.
+    fn reaches_capacity_around_the_seam(code: &str) -> bool {
+        const NAME: &str = "capacity";
+        code.match_indices(NAME).any(|(at, _)| {
+            let raw_before = &code[..at];
+            let raw_after = &code[at + NAME.len()..];
+            if !bounded(raw_before.chars().next_back()) || !bounded(raw_after.chars().next()) {
+                return false;
+            }
+            let before = raw_before.trim_end();
+            let after = raw_after.trim_start();
+            if before.ends_with('.') {
+                return false;
+            }
+            let owner = before.strip_suffix("::").map(str::trim_end);
+            let owned_by_a_type = owner.is_some_and(|owner| {
+                owner.ends_with('>')
+                    || owner
+                        .rsplit(|character: char| !is_identifier(character))
+                        .next()
+                        .and_then(|segment| segment.chars().next())
+                        .is_some_and(char::is_uppercase)
+            });
+            if owned_by_a_type {
+                return false;
+            }
+            let segment =
+                owner.is_some() || after.starts_with("::") || in_a_use_declaration(code, at);
+            let through_the_client = after
+                .strip_prefix("::")
+                .map(str::trim_start)
+                .and_then(|rest| rest.strip_prefix("client"))
+                .is_some_and(|rest| bounded(rest.chars().next()));
+            segment && !through_the_client
+        })
+    }
+
+    /// The engine's production files, but the legacy writer's, whose code
+    /// reaches the capacity module other than through `capacity::client`.
+    fn bypasses_the_seam(sources: &[(String, String)]) -> Vec<&str> {
+        sources
+            .iter()
+            .filter(|(path, _)| {
+                path.starts_with("src/engine/") && !LEGACY_WRITER.contains(&path.as_str())
+            })
+            .filter(|(_, source)| {
+                reaches_capacity_around_the_seam(&crate::effects::production_code(source))
+            })
+            .map(|(path, _)| path.as_str())
+            .collect()
+    }
+
+    fn source_of<'a>(sources: &'a [(String, String)], wanted: &str) -> &'a str {
+        sources
+            .iter()
+            .find(|(path, _)| path == wanted)
+            .map(|(_, source)| source.as_str())
+            .unwrap_or_else(|| panic!("`{wanted}` is not in the census's domain"))
+    }
+
+    #[test]
+    fn only_the_seam_reaches_capacity_from_the_engine() {
+        let sources = production_sources();
+        assert!(
+            sources.len() > 150,
+            "only {} production source files were read; the census is measuring nothing",
+            sources.len()
+        );
+        for required in [
+            "src/engine/topology/run.rs",
+            "src/engine/assembly.rs",
+            "src/engine/coordinator.rs",
+        ] {
+            assert!(
+                sources.iter().any(|(path, _)| path == required),
+                "`{required}` is not in the census's domain"
+            );
+        }
+        assert!(
+            sources
+                .iter()
+                .all(|(path, _)| path != "src/engine/topology/run/tests.rs"),
+            "the census reads test modules as production, where a test may build any client it \
+             likes"
+        );
+        assert!(
+            reaches_capacity_around_the_seam(&crate::effects::production_code(source_of(
+                &sources,
+                "src/engine/coordinator.rs"
+            ))),
+            "`src/engine/coordinator.rs` no longer names the capacity module directly, so the \
+             legacy writer's exception exempts nothing and is to be removed"
+        );
+        assert!(
+            crate::effects::production_code(source_of(&sources, "src/engine/topology/run.rs"))
+                .contains("crate::capacity::client::"),
+            "the schema-4 run no longer asks capacity through `capacity::client`, so a census \
+             finding no bypass proves nothing about the seam"
+        );
+        assert_eq!(
+            bypasses_the_seam(&sources),
+            Vec::<&str>::new(),
+            "the schema-4 engine asks capacity only through `CapacityClient` \
+             (`crate::capacity::client`), so a second client can replace the built-in one; a \
+             file that names the capacity module any other way answers a capacity question \
+             the replacement never sees. The legacy writer of schemas 1–3 ({LEGACY_WRITER:?}) \
+             is the one named exception"
+        );
+    }
+
+    #[test]
+    fn the_capacity_census_sees_a_bypass_and_ignores_prose() {
+        let planted: Vec<(String, String)> = [
+            (
+                "src/engine/planted.rs",
+                "fn f() { let _ = crate::capacity::pool_for; }\n",
+            ),
+            ("src/engine/aliased.rs", "use crate::{capacity as c};\n"),
+            ("src/engine/bare.rs", "use crate::capacity;\n"),
+            (
+                "src/engine/grouped.rs",
+                "use crate::capacity::{client, Pool};\n",
+            ),
+            (
+                "src/engine/seam.rs",
+                "use crate::capacity::client::{CapacityClient, Pool};\n",
+            ),
+            (
+                "src/engine/prose.rs",
+                "// the capacity a pool has left\nconst S: &str = \"capacity\";\n\
+                 fn f(v: &Vec<u8>) -> usize { v.capacity() }\n",
+            ),
+            (
+                "src/engine/method.rs",
+                "fn f(v: &Vec<u8>) -> usize { Vec::capacity(v) + Vec::<u8>::capacity(v) }\n",
+            ),
+            (
+                "src/engine/binding.rs",
+                "struct Run { capacity: Box<dyn CapacityClient> }\n\
+                 fn f(capacity: Box<dyn CapacityClient>) -> Run { Run { capacity } }\n",
+            ),
+            (
+                "src/engine/tested.rs",
+                "fn f() {}\n#[cfg(test)]\nmod tests {\n    use crate::capacity::pool_for;\n}\n",
+            ),
+            (
+                "src/engine/coordinator.rs",
+                "fn f() { let _ = crate::capacity::observe; }\n",
+            ),
+            ("src/cli.rs", "use crate::capacity;\n"),
+        ]
+        .into_iter()
+        .map(|(path, source)| (path.to_owned(), source.to_owned()))
+        .collect();
+        assert_eq!(
+            bypasses_the_seam(&planted),
+            vec![
+                "src/engine/planted.rs",
+                "src/engine/aliased.rs",
+                "src/engine/bare.rs",
+                "src/engine/grouped.rs",
+            ]
+        );
+    }
+}
