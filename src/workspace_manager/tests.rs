@@ -18438,14 +18438,14 @@ fn commit_of(fixture: &Fixture, tree: &str) -> String {
 /// is not a wall time of the host. The add runs under the production deadline
 /// ([`PRODUCTION_REGISTRY_DEADLINE`]). A deadline bounds an access's waits and
 /// further attempts, not the runtime of an attempt or of its veto, and `took`
-/// times the whole add, with its two Git children: on hosted Windows this add,
-/// refused at once, took 3.39 s on 2026-11-20 and 532.4 ms on 2026-11-27, past
-/// the test build's 500 ms. Under the production deadline the wall bound on
-/// `took` is the deadline the add ran under, so it still tells a refusal at
-/// once from one at the deadline. Both accesses, the gate's list and the add's
-/// own, run on this test's thread, each attempt, veto and wait inline, and
-/// every wait goes through [`NoHooks`]'s `registry_pause`, which sleeps on the
-/// calling thread, so the thread-local count of slept waits
+/// times the whole add, with its two Git children: on hosted Windows this add
+/// took 3.39 s on 2026-11-20 and 532.4 ms on 2026-11-27, past the test build's
+/// 500 ms. Under the production deadline the wall bound on `took` is the
+/// deadline the add ran under: a pass rules out a refusal at that deadline, and
+/// a red says only that the whole add took that long. Both accesses, the gate's
+/// list and the add's own, run on this test's thread, each attempt, veto and
+/// wait inline, and every wait goes through [`NoHooks`]'s `registry_pause`,
+/// which sleeps on the calling thread, so the thread-local count of slept waits
 /// (`super::fixture::slept_pauses`) counts every wait of theirs that slept.
 ///
 /// **A guarantee this test no longer makes**
@@ -19773,8 +19773,8 @@ fn a_list_over_a_registration_another_process_left_whole_and_unlistable_refuses(
 /// whose tear stays, and whose oracle is the refusal at the deadline, keeps
 /// the test build's. A test whose oracle is a refusal at once, and not at the
 /// deadline, holds it as well, so that its wall bound is the deadline the
-/// access ran under and not the test build's 500 ms, which an add refused at
-/// once outlasted on hosted Windows
+/// access ran under and not the test build's 500 ms, which an add of such a
+/// test outlasted on hosted Windows
 /// (`CI-FLAKE-WINDOWS-ADD-REFUSAL-PAST-REGISTRY-DEADLINE`).
 const PRODUCTION_REGISTRY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
