@@ -758,6 +758,85 @@ mod tests {
     }
 
     #[test]
+    fn two_concurrent_answers_publish_exactly_one() {
+        const ROUNDS: usize = 256;
+        let tree = scratch("answer-concurrent");
+        let id = QuestionId::from("q-TEST");
+        let records = [
+            AnswerRecord::unattributed(Answer::Answered {
+                text: "from publisher A".to_owned(),
+            }),
+            AnswerRecord::unattributed(Answer::Answered {
+                text: "from publisher B".to_owned(),
+            }),
+        ];
+        let expected: Vec<Vec<u8>> = records
+            .iter()
+            .enumerate()
+            .map(|(which, record)| {
+                let alone = tree.path().join(format!("alone-{which}"));
+                std::fs::create_dir(&alone).expect("a directory to publish alone in");
+                assert_eq!(
+                    write_answer(&alone, &id, record).expect("publish alone"),
+                    AnswerPublication::Published
+                );
+                std::fs::read(answer_path(&alone, &id)).expect("the answer published alone")
+            })
+            .collect();
+        assert_ne!(
+            expected[0], expected[1],
+            "the two answers must be told apart by their bytes"
+        );
+
+        for round in 0..ROUNDS {
+            let dir = tree.path().join(format!("round-{round}"));
+            std::fs::create_dir(&dir).expect("the round's answers directory");
+            let barrier = std::sync::Barrier::new(records.len());
+            let outcomes: Vec<AnswerPublication> = std::thread::scope(|scope| {
+                let publishers: Vec<_> = records
+                    .iter()
+                    .map(|record| {
+                        let (barrier, dir, id) = (&barrier, &dir, &id);
+                        scope.spawn(move || {
+                            barrier.wait();
+                            write_answer(dir, id, record).expect("write")
+                        })
+                    })
+                    .collect();
+                publishers
+                    .into_iter()
+                    .map(|publisher| publisher.join().expect("the publisher thread"))
+                    .collect()
+            });
+
+            let published: Vec<usize> = outcomes
+                .iter()
+                .enumerate()
+                .filter(|(_, outcome)| **outcome == AnswerPublication::Published)
+                .map(|(which, _)| which)
+                .collect();
+            let already = outcomes
+                .iter()
+                .filter(|outcome| **outcome == AnswerPublication::AlreadyAnswered)
+                .count();
+            assert_eq!(published.len(), 1, "round {round}: {outcomes:?}");
+            assert_eq!(already, 1, "round {round}: {outcomes:?}");
+            assert_eq!(
+                std::fs::read(answer_path(&dir, &id)).expect("the retained answer"),
+                expected[published[0]],
+                "round {round}: the retained answer is the one told it published"
+            );
+            let mut left: Vec<String> = std::fs::read_dir(&dir)
+                .expect("list")
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            left.sort();
+            assert_eq!(left, ["q-TEST.json"], "round {round}");
+        }
+    }
+
+    #[test]
     fn a_detached_run_waits_for_an_answer_file_then_gives_up() {
         let tree = scratch("answer-wait");
         let dir = tree.path().to_path_buf();

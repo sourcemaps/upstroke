@@ -12676,6 +12676,94 @@ fn a_staged_partial_is_never_ingested_and_a_published_answer_survives_ingestion(
     );
 }
 
+/// Two publishers of one answer publish exactly one
+/// (`PR381-ANSWER-PUBLISH-RACE`).
+///
+/// The race, interleaved deterministically through the two funnels: A
+/// stages, B stages, A publishes, B publishes. Each publisher stages a file
+/// of its own, so B's staging cannot overwrite A's; publication is
+/// create-once, so B's cannot replace A's. Exactly one is told `Published`,
+/// the other `AlreadyAnswered`, the retained `<qid>.json` holds the bytes of
+/// the one told it published, and no staged file is left behind. A shared
+/// staging name fails at the second stage or leaves the wrong bytes; a
+/// replacing publication tells both they published and keeps B's bytes. The
+/// same race between two threads is `two_concurrent_answers_publish_exactly_one`
+/// in `src/interaction.rs`.
+#[test]
+fn two_publishers_of_one_answer_publish_exactly_one() {
+    use crate::interaction::AnswerPublication;
+
+    let tree = scratch("answer-publish-race");
+    let answers = tree.path().join("answers");
+    create_dir(&answers).expect("answers");
+
+    let a = stage_answer(
+        &answers,
+        "q-1",
+        &serde_json::json!({"text": "from publisher A"}),
+        &mut NoHooks,
+    )
+    .expect("A stages");
+    let b = stage_answer(
+        &answers,
+        "q-1",
+        &serde_json::json!({"text": "from publisher B"}),
+        &mut NoHooks,
+    )
+    .expect("B stages");
+    assert_ne!(
+        a.path(),
+        b.path(),
+        "each publisher stages a file of its own"
+    );
+    let a_bytes = fs::read(a.path()).expect("A's staged answer");
+    let b_bytes = fs::read(b.path()).expect("B's staged answer");
+    assert_ne!(
+        a_bytes, b_bytes,
+        "the two answers must be told apart by their bytes"
+    );
+
+    let a_outcome = publish_answer(a, &mut NoHooks).expect("A publishes");
+    let b_outcome = publish_answer(b, &mut NoHooks).expect("B publishes");
+    let outcomes = [(a_outcome, &a_bytes), (b_outcome, &b_bytes)];
+    let published: Vec<&Vec<u8>> = outcomes
+        .iter()
+        .filter(|(outcome, _)| *outcome == AnswerPublication::Published)
+        .map(|(_, bytes)| *bytes)
+        .collect();
+    assert_eq!(
+        published.len(),
+        1,
+        "exactly one is told it published: {a_outcome:?}, {b_outcome:?}"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|(outcome, _)| *outcome == AnswerPublication::AlreadyAnswered)
+            .count(),
+        1,
+        "and the other is told already answered: {a_outcome:?}, {b_outcome:?}"
+    );
+    assert_eq!(
+        (a_outcome, b_outcome),
+        (
+            AnswerPublication::Published,
+            AnswerPublication::AlreadyAnswered
+        ),
+        "create-once: the first to publish is the one published"
+    );
+    assert_eq!(
+        &fs::read(answers.join("q-1.json")).expect("the retained answer"),
+        published[0],
+        "the retained answer holds the bytes of the one told it published"
+    );
+    assert_eq!(
+        read_dir_names(&answers),
+        ["q-1.json"],
+        "no staged file is left behind"
+    );
+}
+
 /// Whatever an operator left at the old fixed staging name `report.json.tmp`
 /// — a hard link to a note outside the run directory, a symbolic link, a
 /// directory — is left exactly as found, and the report is published beside

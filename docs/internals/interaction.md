@@ -403,6 +403,22 @@ a prompt, but it gives up immediately.
 
 Nothing partial is left behind for the engine to trip over.
 
+## `fn two_concurrent_answers_publish_exactly_one() {`
+
+`PR381-ANSWER-PUBLISH-RACE`: two publishers of one answer, here two `write_answer` calls with
+distinct answers for one question in one answers directory, released together by a
+`std::sync::Barrier`. Each round asserts that exactly one is told `Published` and the other
+`AlreadyAnswered`, that the retained `<qid>.json` holds the bytes of the one told it published,
+and that the directory holds nothing but that file: no `.partial` is left behind. The expected
+bytes are taken from `write_answer` itself, each answer published alone into a directory of its
+own, and the test asserts the two differ, so the byte check can tell the winner from the loser.
+
+Which publisher wins is up to the scheduler, so the rounds repeat (256, each in a fresh
+directory) to make the race likely to be hit both ways while staying well under a second. A
+replacing publication fails here as two `Published` outcomes, or as a retained file that is the
+loser's. The deterministic interleaving of the same race (A stages, B stages, A publishes, B
+publishes) is `two_publishers_of_one_answer_publish_exactly_one` in `src/rundir/tests.rs`.
+
 ## `fn a_detached_run_waits_for_an_answer_file_then_gives_up()` › `let tree = scratch("answer-wait");`
 
 §19's "hard block (interactive)" for a run with no terminal: it
