@@ -1557,15 +1557,18 @@ the ending nobody wrote a use for, which is the shape the row's five
 sites had; a reader who means to throw one away still has to say so in
 the source, where review can see it.
 
-**The row's scope is the end of a helper, which is five sites and not
+**The row's scope is the end of a helper, which is four sites and not
 every `kill` in the module.** Its sibling row
-`PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` names them in its
+`PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` names five in its
 own words -- `Reaper::abandon` through `close_and_wait`, the `setpgid`
 failure in `spawn_reaper`, `Guard::abort_setup`, and the
 descriptor-configuration and READY failures in `spawn_guard` -- and
-cites this row for what they must report. All five are settled: three
-report through `HelperEnd`, and `spawn_reaper`'s parent-side
-`setpgid(pid, pid)` no longer exists to fail. That sibling row is
+cites this row for what they must report. `spawn_reaper`'s parent-side
+`setpgid(pid, pid)` no longer exists to fail, so four of the five
+remain, and all four report through `HelperEnd`: `Reaper::abandon` and
+`Guard::abort_setup` return one, and the descriptor-configuration and
+READY failures in `spawn_guard` reach one through `end_unready_guard`.
+That sibling row is
 settled too, on the four sites that still exist: `Reaper::abandon` and
 the three that reach `end_unready_guard` all take
 `wait_for_an_ended_helper`, and `close_and_wait`'s acknowledged exit is
