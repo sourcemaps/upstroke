@@ -335,6 +335,15 @@ mod locator_fault {
 /// authorise deleting a committed run's `events.jsonl` (`SWEEP-CLASSIFY-009`).
 /// A directory that does not exist still lists as empty, and so still answers
 /// bare.
+///
+/// **The staging file is a regular file named `.creating.tmp`, not the name
+/// alone** (`PR369-STAGED-NAME-NOT-A-FILE`). [`super::remove_unbound_husk`]
+/// removes the staged-marker shape with `remove_file`, which a directory of
+/// that name refuses (`EISDIR` on Linux) on every census, so a husk answered by
+/// its name alone could never be reclaimed while `status` said the next write
+/// command would reclaim it. The name is asked of `fs::symlink_metadata`, never
+/// followed: a directory, a link or anything else of that name, and a stat that
+/// fails, is content, and retained as [`RetainReason::MarkerlessWithContent`].
 fn unbound_shape(public: &Path) -> PrivateHalfOwnership {
     let names = match read_dir_names(public) {
         Ok(names) => names,
@@ -348,7 +357,11 @@ fn unbound_shape(public: &Path) -> PrivateHalfOwnership {
     };
     match names.as_slice() {
         [] => PrivateHalfOwnership::NothingBound(UnboundShape::Bare),
-        [only] if only == OsStr::new(MARKER_STAGED) => {
+        [only]
+            if only == OsStr::new(MARKER_STAGED)
+                && fs::symlink_metadata(public.join(MARKER_STAGED))
+                    .is_ok_and(|stat| stat.file_type().is_file()) =>
+        {
             PrivateHalfOwnership::NothingBound(UnboundShape::StagedMarkerOnly)
         }
         _ => PrivateHalfOwnership::Retained(RetainReason::MarkerlessWithContent),

@@ -4105,8 +4105,8 @@ fn a_public_husk_removal_that_fails_partway_leaves_the_marker_that_locates_it() 
     assert!(!public.exists(), "including the marker and the directory");
 }
 
-/// A public half whose only content is `.creating.tmp` is **removed**, not
-/// retained.
+/// A public half whose only content is a regular file named `.creating.tmp`
+/// is **removed**, not retained.
 ///
 /// The shape and the removal are each exercised and never composed. The
 /// grid's "staged marker only" case asserts `NothingBound(StagedMarkerOnly)`
@@ -4153,6 +4153,117 @@ fn probe_a_staged_marker_only_public_husk_is_removed() {
     fs::remove_file(retried.join(PLAN)).expect("the interrupted pass got this far");
     remove_public_husk(&retried, &mut NoHooks).expect("the retry converges");
     assert!(!retried.exists(), "the next census finishes the job");
+}
+
+/// A marker-less husk whose one entry is named `.creating.tmp` and is not a
+/// regular file, built from a published husk with its marker removed: `plant`
+/// puts that entry at the path it is given.
+fn husk_with_staged_name(tag: &str, plant: impl FnOnce(&BoundHusk, &Path)) -> BoundHusk {
+    let husk = BoundHusk::new(tag);
+    husk.publish();
+    let public = husk.public();
+    fs::remove_file(public.join(MARKER)).expect("remove marker");
+    plant(&husk, &public.join(MARKER_STAGED));
+    assert_eq!(
+        read_dir_names(&public).expect("the public directory lists"),
+        vec![OsString::from(MARKER_STAGED)],
+        "the husk's one entry has the staged marker's name"
+    );
+    husk
+}
+
+/// A directory named `.creating.tmp` is content, not the staged marker
+/// (`PR369-STAGED-NAME-NOT-A-FILE`), and is retained with what it holds.
+///
+/// `StagedMarkerOnly` is removed by `remove_file`, which a directory refuses
+/// (`EISDIR` on Linux) on every census, so a proof that answered it from the
+/// name alone planned a removal that could never succeed while `status` said
+/// the next write command would reclaim the husk. The base swept such a
+/// directory whole instead, deleting content no listing showed. The answer is
+/// neither: a marker-less husk carrying content.
+///
+/// A separate test rather than a `proof_cases` entry, for the reason
+/// `a_locator_beside_or_below_this_runs_private_half_cannot_authorize_deletion`
+/// gives: that grid asserts one distinct `RetainReason` per case, and its
+/// "marker-less husk carrying run-scoped content" case already answers
+/// `markerless-with-content`, so a second such case fails it (measured).
+#[test]
+fn a_directory_named_like_the_staged_marker_is_retained_as_content() {
+    type Fill = fn(&Path);
+    let cases: Vec<(&str, Fill)> = vec![
+        ("an empty directory", |_| {}),
+        ("a populated directory", |staged| {
+            write(
+                &staged.join(EVENT_LOG),
+                b"content no listing of the husk shows",
+            );
+            write(
+                &staged.join("nested").join("inside.txt"),
+                b"and deeper still",
+            );
+        }),
+    ];
+    for (index, (name, fill)) in cases.into_iter().enumerate() {
+        let husk = husk_with_staged_name(&format!("staged-name-dir{index}"), |_, staged| {
+            fs::create_dir(staged).expect("a directory named like the staged marker");
+            fill(staged);
+        });
+        let staged = husk.public().join(MARKER_STAGED);
+        let listed = read_dir_names(&staged).expect("the directory lists");
+        let before = snapshot_tree(&staged);
+
+        match husk.prove() {
+            PrivateHalfOwnership::Retained(reason) => {
+                assert_eq!(reason.kind(), "markerless-with-content", "{name}: {reason}");
+            }
+            other => panic!(
+                "{name}: a directory named `{MARKER_STAGED}` is content, not the staged \
+                     marker: {other:?}"
+            ),
+        }
+        assert!(staged.is_dir(), "{name}: the directory is left in place");
+        assert_eq!(
+            read_dir_names(&staged).expect("the directory still lists"),
+            listed,
+            "{name}: with every entry it held"
+        );
+        assert_eq!(
+            snapshot_tree(&staged),
+            before,
+            "{name}: and every byte of them"
+        );
+    }
+}
+
+/// A link named `.creating.tmp` is content too: the name is asked of
+/// `fs::symlink_metadata` and never followed, so a link — a POSIX symlink, or
+/// on Windows a junction — is neither the staged marker nor what it reaches.
+#[test]
+fn a_link_named_like_the_staged_marker_is_retained_as_content() {
+    let husk = husk_with_staged_name("staged-name-link", |husk, staged| {
+        let target = husk.root.join("reached-by-the-link");
+        write(&target.join("inside.txt"), b"content the link reaches");
+        link_dir(staged, &target);
+    });
+    let staged = husk.public().join(MARKER_STAGED);
+    let target = husk.root.join("reached-by-the-link");
+    let before = snapshot_tree(&target);
+
+    match husk.prove() {
+        PrivateHalfOwnership::Retained(reason) => {
+            assert_eq!(reason.kind(), "markerless-with-content", "{reason}");
+        }
+        other => panic!("a link named `{MARKER_STAGED}` is not the staged marker: {other:?}"),
+    }
+    assert!(
+        fs::symlink_metadata(&staged).is_ok(),
+        "the link is left in place"
+    );
+    assert_eq!(
+        snapshot_tree(&target),
+        before,
+        "and what it reaches is untouched"
+    );
 }
 
 /// A husk on disk in `shape`, built through the creation funnels and checked
