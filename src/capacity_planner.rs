@@ -1341,10 +1341,12 @@ pub struct Work {
     pub priorities: Priorities,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recommendation {
+    grant: GrantRef,
     generation: u64,
     at_unix: u64,
+    refill_unix: Option<u64>,
     decision: Option<Decision>,
 }
 
@@ -1536,18 +1538,24 @@ impl Ledger {
                 .position(|grant| self.setup.grant.names(grant)),
             InventoryEvidence::Unknown => None,
         };
-        let decision = plan(&input)
-            .into_iter()
-            .next()
-            .and_then(|planned| match planned.grants {
-                Grants::Decided(decisions) => {
-                    position.and_then(|index| decisions.get(index).copied())
-                }
-                Grants::Unknown(_) | Grants::KnownEmpty => None,
-            });
+        let planned = plan(&input).into_iter().next();
+        let refill_unix = planned
+            .iter()
+            .flat_map(|planned| &planned.windows)
+            .filter_map(|(_, state)| match state {
+                WindowState::Known(forecast) => Some(forecast.refill_unix),
+                WindowState::Unknown(_) => None,
+            })
+            .min();
+        let decision = planned.and_then(|planned| match planned.grants {
+            Grants::Decided(decisions) => position.and_then(|index| decisions.get(index).copied()),
+            Grants::Unknown(_) | Grants::KnownEmpty => None,
+        });
         Recommendation {
+            grant: self.setup.grant.clone(),
             generation: self.generation,
             at_unix: self.now_unix,
+            refill_unix,
             decision,
         }
     }
@@ -1624,7 +1632,7 @@ impl Ledger {
     }
 
     fn claim(&mut self, request: RequestId, grant: &GrantRef, basis: Recommendation) -> Transition {
-        if *grant != self.setup.grant {
+        if *grant != self.setup.grant || basis.grant != self.setup.grant {
             return Transition::Refused(Refusal::WrongGrant);
         }
         let resets_left = match self.state {
@@ -1638,6 +1646,9 @@ impl Ledger {
         };
         if basis.generation != self.generation
             || self.now_unix.saturating_sub(basis.at_unix) > self.setup.stale_after_secs
+            || basis
+                .refill_unix
+                .is_some_and(|refill| refill <= self.now_unix)
         {
             return Transition::Refused(Refusal::StaleBasis);
         }
@@ -3246,7 +3257,7 @@ mod tests {
                     account: AccountId("other".to_owned()),
                     ..grant_ref(GrantKind::Weekly, 240 * HOUR)
                 },
-                basis: loser_basis,
+                basis: loser_basis.clone(),
             };
             assert_eq!(
                 ledger.apply(NOW + MIN, other_account),
@@ -3329,8 +3340,8 @@ mod tests {
             for (step, event) in (1_u64..).zip(&order) {
                 let now = NOW + step * MIN;
                 let event = match event {
-                    0 => weekly_claim(ALPHA, basis),
-                    1 => weekly_claim(BETA, basis),
+                    0 => weekly_claim(ALPHA, basis.clone()),
+                    1 => weekly_claim(BETA, basis.clone()),
                     2 => reply(ClaimId(1), Reply::Accepted),
                     3 => reply(ClaimId(1), Reply::Unknown),
                     _ => {
@@ -3922,7 +3933,7 @@ mod tests {
         let basis = all_three.recommend(&job);
         assert_eq!(basis.decision(), Some(Decision::Unknown(Undecided::Effect)));
         assert_eq!(
-            all_three.apply(NOW + MIN, weekly_claim(ALPHA, basis)),
+            all_three.apply(NOW + MIN, weekly_claim(ALPHA, basis.clone())),
             Transition::Refused(Refusal::NotRecommended(basis.decision()))
         );
         assert_eq!(
@@ -3939,7 +3950,7 @@ mod tests {
             })
         );
         assert_eq!(
-            short_and_weekly.apply(NOW + MIN, weekly_claim(ALPHA, basis)),
+            short_and_weekly.apply(NOW + MIN, weekly_claim(ALPHA, basis.clone())),
             Transition::Refused(Refusal::NotRecommended(basis.decision()))
         );
 
@@ -3977,7 +3988,7 @@ mod tests {
             Some(Decision::Defer { until_unix: until })
         );
         assert_eq!(
-            ledger.apply(NOW + MIN, weekly_claim(ALPHA, early)),
+            ledger.apply(NOW + MIN, weekly_claim(ALPHA, early.clone())),
             Transition::Refused(Refusal::NotRecommended(early.decision()))
         );
         let after = until + MIN;
@@ -4081,7 +4092,7 @@ mod tests {
         assert_eq!(
             ledger.apply(
                 NOW + MIN,
-                claim_of(ALPHA, GrantKind::Full, 48 * HOUR, basis)
+                claim_of(ALPHA, GrantKind::Full, 48 * HOUR, basis.clone())
             ),
             Transition::Refused(Refusal::NotRecommended(basis.decision()))
         );
@@ -4114,7 +4125,7 @@ mod tests {
         assert_eq!(
             ledger.apply(
                 NOW + MIN,
-                claim_of(ALPHA, GrantKind::Fable, 48 * HOUR, basis)
+                claim_of(ALPHA, GrantKind::Fable, 48 * HOUR, basis.clone())
             ),
             Transition::Refused(Refusal::NotRecommended(basis.decision()))
         );
@@ -4540,5 +4551,137 @@ mod tests {
             insufficient(WindowId::Session, 0.0)
         );
         assert_eq!(ledger.permits().len(), 1);
+    }
+
+    #[test]
+    fn recommendation_is_bound_to_the_account_and_grant() {
+        let job = work(&one_job(4.0));
+        let mut first = claude_ledger(GrantKind::Weekly, 240 * HOUR, exhausted_weekly());
+        let other = AccountId("other".to_owned());
+        let readings = exhausted_weekly()
+            .into_iter()
+            .map(|reading| Reading {
+                account: other.clone(),
+                ..reading
+            })
+            .collect();
+        let empty = GrantRef {
+            account: other,
+            ..grant_ref(GrantKind::Weekly, 240 * HOUR)
+        };
+        let mut second = Ledger::new(
+            Setup {
+                grant: empty.clone(),
+                provider: Provider::Claude,
+                coverage: None,
+                stale_after_secs: HOUR,
+            },
+            NOW,
+            Snapshot {
+                readings,
+                inventory: weekly_count(NOW, 0),
+            },
+        );
+        assert_eq!(
+            second.grant_state(),
+            GrantState::Banked {
+                resets_left: Some(0)
+            }
+        );
+        let foreign = first.recommend(&job);
+        let own = second.recommend(&job);
+        assert_eq!(foreign.decision(), Some(Decision::Redeem));
+        let not_redeemable = Some(Decision::LetExpire(ExpireReason::NotRedeemable));
+        assert_eq!(own.decision(), not_redeemable);
+        assert_eq!(foreign.generation(), own.generation());
+        assert_eq!(
+            second.apply(
+                NOW + MIN,
+                Event::Claim {
+                    request: ALPHA,
+                    grant: empty.clone(),
+                    basis: foreign,
+                }
+            ),
+            Transition::Refused(Refusal::WrongGrant)
+        );
+        assert_eq!(
+            second.apply(
+                NOW + MIN,
+                Event::Claim {
+                    request: ALPHA,
+                    grant: empty,
+                    basis: own,
+                }
+            ),
+            Transition::Refused(Refusal::NotRecommended(not_redeemable))
+        );
+        assert!(second.claims().is_empty());
+        assert_eq!(
+            second.grant_state(),
+            GrantState::Banked {
+                resets_left: Some(0)
+            }
+        );
+        let mut session = claude_ledger(GrantKind::Session, 48 * HOUR, exhausted_weekly());
+        assert_eq!(session.generation(), first.generation());
+        assert_eq!(
+            session.apply(
+                NOW + MIN,
+                claim_of(BETA, GrantKind::Session, 48 * HOUR, first.recommend(&job))
+            ),
+            Transition::Refused(Refusal::WrongGrant)
+        );
+        assert!(session.claims().is_empty());
+        let claim = claimed(first.apply(NOW + MIN, weekly_claim(ALPHA, first.recommend(&job))));
+        assert_eq!(first.claims(), &[(claim, ALPHA)]);
+    }
+
+    #[test]
+    fn recommendation_cannot_survive_a_natural_refill() {
+        let job = work(&one_job(4.0));
+        let mut readings = burning(WindowId::Weekly, 100.0, 2.0, 2 * MIN);
+        readings.extend(burning(WindowId::Session, 10.0, 10.0, 4 * HOUR));
+        let mut ledger = claude_ledger(GrantKind::Weekly, 240 * HOUR, readings);
+        let cached = ledger.recommend(&job);
+        assert_eq!(cached.decision(), Some(Decision::Redeem));
+        let mut ahead = ledger.clone();
+        assert!(matches!(
+            ahead.apply(
+                NOW + 2 * MIN - 1,
+                weekly_claim(BETA, ledger.recommend(&job))
+            ),
+            Transition::Claimed(_)
+        ));
+        let mut at_refill = ledger.clone();
+        assert_eq!(
+            at_refill.apply(NOW + 2 * MIN, weekly_claim(BETA, ledger.recommend(&job))),
+            Transition::Refused(Refusal::StaleBasis)
+        );
+        let later = NOW + 2 * MIN + 1;
+        assert_eq!(ledger.apply(later, Event::Tick), Transition::Ticked);
+        assert_eq!(ledger.generation(), cached.generation());
+        let refilled = Some(Decision::Unknown(Undecided::Window(
+            WindowId::Weekly,
+            WindowUnknown::Refilled,
+        )));
+        let fresh = ledger.recommend(&job);
+        assert_eq!(fresh.decision(), refilled);
+        assert_eq!(
+            ledger.apply(later, weekly_claim(ALPHA, fresh)),
+            Transition::Refused(Refusal::NotRecommended(refilled))
+        );
+        assert_eq!(
+            ledger.apply(later, weekly_claim(ALPHA, cached)),
+            Transition::Refused(Refusal::StaleBasis)
+        );
+        assert!(ledger.claims().is_empty());
+        assert_eq!(
+            ledger.grant_state(),
+            GrantState::Banked {
+                resets_left: Some(1)
+            }
+        );
+        assert_eq!(ledger.usable(WindowId::Weekly), Err(Blocked::Refilled));
     }
 }

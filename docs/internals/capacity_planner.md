@@ -363,17 +363,23 @@ Builds an `Input` from the ledger's readings and inventory at its own clock, wit
 `Setup::coverage` as the account's `Account::coverage`, and calls `plan`, the same planner as
 above, unchanged. The forecast and the claim therefore narrow the grant's effect by the same
 covered allowances. The `Recommendation` carries the planner's decision for this
-grant (`None` when the inventory is unknown or does not list it) and the generation and second it
-was read at. It changes nothing: two requests that ask at the same generation get equal
-recommendations, and the ledger is untouched. Its fields are private, so code outside the module
-cannot forge one.
+grant (`None` when the inventory is unknown or does not list it), the grant it was read for
+(`Setup::grant`), the generation and second it was read at, and the earliest refill among the
+windows the planner forecast: the first second at which the planner, given the same state, would
+read one of them as `Refilled`. It changes nothing: two requests that ask at the same generation
+get equal recommendations, and the ledger is untouched. Its fields are private, so code outside
+the module cannot forge one.
 
 ### `impl Ledger` › `fn claim(&mut self, request: RequestId, grant: &GrantRef, basis: Recommendation) -> Transition {`
 
-The only way to reserve the grant. Checks, in order: the request names this grant
-(`WrongGrant`); the grant is `Banked` (otherwise `Held { by }`, `Spent`, `Expired` or `Absent`);
-the basis is of the current generation and no older than the freshness bound (`StaleBasis`); the
-basis says `Redeem` (`NotRecommended`, carrying what it did say). The first claim to pass is
+The only way to reserve the grant. Checks, in order: the request and its basis both name this
+grant (`WrongGrant`), so a recommendation read for another account or another grant authorises
+nothing here, even at the same generation and second; the grant is `Banked` (otherwise
+`Held { by }`, `Spent`, `Expired` or `Absent`); the basis is of the current generation, no older
+than the freshness bound, and the earliest refill it recorded has not been reached (`StaleBasis`:
+the clock alone advances no generation, yet once a window it forecast refills, a fresh
+recommendation no longer reads that window as it did); the basis says `Redeem`
+(`NotRecommended`, carrying what it did say). The first claim to pass is
 registered (`claims`), the grant becomes `Reserved`, and the generation advances, so the other
 request's basis, read from the same state, can no longer pass even where the grant to be held is
 released again. In either order exactly one of two claims from one reading is registered.
@@ -530,6 +536,8 @@ All are synthetic (`Source::Fixture` or the planner fixtures above) and timed fr
 | weekly at 0% and session under `max`; a session reading under `pro`; another under `max`; then the weekly at 20% under `max` | the weekly is `PlanChanged` after each change; once read again it serves 80, and a 100% draw is refused |
 | weekly at 0%; a 100% permit released; the weekly read at 30% in the release second, then at 60% a minute later | after the release the weekly is still 0 and a second 100% draw is refused; a second release is `UnknownPermit`; the 30% reading keeps the draw debited; the 60% one lifts it and serves 40 |
 | weekly at 100% and session at 70% | a `1e-9` draw on the weekly is refused twice at 0; the session serves 30 plus that tolerance, then refuses the same dust at 0 |
+| `exhausted_weekly()` with a weekly grant on `operator` (one reset) and on `other` (count 0), and a session grant on `operator`, all at one generation and second | `operator`'s `Redeem` is `WrongGrant` on `other`'s grant and on the session grant; `other`'s own `LetExpire(NotRedeemable)` is `NotRecommended`; neither registers a claim, while `operator`'s own weekly claim does |
+| weekly 100% (2%/h) refilling in 2 min, session 10% (4 h), weekly grant, 4 h job | `Redeem`; that basis claims a second before the refill, and is `StaleBasis` at the refill and a second after it, with the generation unchanged, where a fresh one is `Unknown(Window(Weekly, Refilled))`; nothing is claimed and the weekly is `Refilled` |
 
 A planner test pins the history rule above: weekly readings under `max` two hours apart, with a
 session reading under `pro` between them, are two segments (`First`, `PlanChange`) and the weekly
