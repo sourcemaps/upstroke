@@ -1046,8 +1046,11 @@ impl Run<'_> {
         let Some(pool) = pool else { return Ok(()) };
         let reset_at = if agent == claude::ADAPTER_ID {
             let now = util::unix_seconds_now();
-            std::iter::once(failure.reason.as_str())
-                .chain(failure.limit_message.as_deref())
+            failure
+                .limit_message
+                .as_deref()
+                .into_iter()
+                .chain(std::iter::once(failure.reason.as_str()))
                 .find_map(|text| reset_at_from_limit_message(text, now))
         } else {
             None

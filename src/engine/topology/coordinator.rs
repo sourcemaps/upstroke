@@ -25654,6 +25654,7 @@ git cat-file -e 'HEAD^{tree}'
                     FAnswer::Unavailable => crate::review::ReviewResult::Unavailable {
                         status: crate::ir::OutcomeStatus::AgentError,
                         detail: "the stub reviewer is unavailable".to_owned(),
+                        limit_message: None,
                     },
                     FAnswer::Pass | FAnswer::MiscountedPass => {
                         crate::review::ReviewResult::Judged(crate::ir::Verdict {

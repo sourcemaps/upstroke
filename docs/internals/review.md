@@ -403,6 +403,15 @@ NOT a rejection of the change: the engine has to tell "the code is wrong"
 apart from "the judge was unavailable", or a rate-limited pool reads as a
 failed task and the retry ladder punishes the implementer for it.
 
+## `pub enum ReviewResult` › `limit_message: Option<String>,`
+
+The reviewer's stderr, when the reviewer was rate-limited and that stderr is
+what signalled the limit; `None` on every other unavailable result.
+`engine::attempt::review_failure` hands it to the failure as
+`AttemptFailure::limit_message`, the same in-memory field a worker's stderr
+rides on, so the coordinator can read the reviewer's reset from it
+(`PR380-REVIEWER-STDERR-RESET-DROPPED`). Nothing stores it.
+
 ## `pub struct ReviewOutcome` › `pub invocations: u32,`
 
 How many agent invocations it took (2 means the re-ask was needed).
@@ -500,6 +509,20 @@ answered and then crashed still told us something.
 
 The reviewer never ran properly: re-asking an exhausted pool or a
 hung process just spends again for the same result.
+
+## `let limit_message = (outcome.status == OutcomeStatus::RateLimited`
+
+Claude Code can exit 1 with a JSON result unrelated to the limit, such as
+`request failed`, and print the limit with its reset on stderr.
+`claude::parse_output` classifies the review `RateLimited` from that stderr,
+but the detail it keeps is the JSON result, so the detail alone loses the
+reset. The stderr is kept when the status is `RateLimited` and the stderr
+itself signals the limit, the rule `engine::attempt::evaluate_outcome`
+applies to a worker's: stderr that signals nothing did not classify the
+review, and the text that did is already in the detail. Before, only the
+status and the detail were kept, and a reviewer whose limit was on stderr
+recorded its pool exhausted with no reset
+(`PR380-REVIEWER-STDERR-RESET-DROPPED`).
 
 ## `Ok(ReviewOutcome {`
 

@@ -142,10 +142,26 @@ saying `worker_rate_limit`.
 
 A limit Claude Code printed on stderr beside an unrelated JSON result. When
 set, a worker's `Effect::RateLimited` runs a real process that prints
-[`CLAUDE_REQUEST_FAILED`] on stdout and this text on stderr and exits 1, and
+`worker_limit_result` on stdout and this text on stderr and exits 1, and
 `parse` hands that output to the real `ClaudeCodeAdapter::parse`, so
 `claude::parse_output` decides the outcome and its detail. Both constructors
 leave it `None`, and then the scripted detail above is used, as before.
+
+## `worker_limit_result: &'static str,`
+
+The JSON result that stdout carries beside `worker_limit_on_stderr`, and
+only then. Both constructors set it to [`CLAUDE_REQUEST_FAILED`], whose
+result names no reset; [`CLAUDE_UNRELATED_RESET`] is the one whose result
+names a reset that is not the limit's.
+
+## `review_limit_on_stderr: Option<&'static str>,`
+
+`worker_limit_on_stderr` for a reviewer. When set, a review whose script says
+`ReviewBehavior::RateLimited` runs a real process that prints
+[`CLAUDE_REVIEW_REQUEST_FAILED`] on stdout and this text on stderr and exits
+1, and `parse` hands that output to the real `ClaudeCodeAdapter::parse`.
+Both constructors leave it `None`, and then a rate-limited review reports the
+scripted `5-hour limit reached` detail, as before.
 
 ## `const FIVE_HOUR_LIMIT_REACHED: &str = "5-hour limit reached";`
 
@@ -156,6 +172,18 @@ The older Claude Code wording, which names no reset.
 A Claude Code JSON result that failed for a reason the result does not
 name: `request failed`, with `is_error` set. Nothing in it signals a rate
 limit, so any limit has to come from stderr.
+
+## `const CLAUDE_UNRELATED_RESET: &str = r#"{"type":"result","is_error":true,"result":"MCP cache resets 9am (UTC)","session_id":"s-limit"}"#;`
+
+A failed result that signals no rate limit but names a reset of its own:
+`MCP cache resets 9am (UTC)`. It has no `hit your … limit` line, so read on
+its own its only `resets` is taken, and it is 09:00, not the limit's.
+
+## `const CLAUDE_REVIEW_REQUEST_FAILED: &str = r#"{"type":"result","is_error":true,"result":"request failed","session_id":"fake-review-session","fake":"UPSTROKE-FAKE-REVIEW"}"#;`
+
+[`CLAUDE_REQUEST_FAILED`] for a reviewer. The extra `fake` field holds
+[`REVIEW_MARKER`], which is how `parse` knows a review's output; the real
+parser ignores a field it does not read.
 
 ## `const REVIEW_MARKER: &str = "UPSTROKE-FAKE-REVIEW";`
 
@@ -239,6 +267,14 @@ which is exactly how a detached terminal behaves.
 
 Shared with the production path so tests exercise the same shell
 invocation (including its Windows quoting) rather than a parallel one.
+
+## `fn limit_on_stderr_spec(result: &str, limit: &str) -> CommandSpec {`
+
+The process `worker_limit_on_stderr` and `review_limit_on_stderr` both run:
+a JSON result on stdout, a limit on stderr, a failing exit. One spelling for
+both, so the worker's and the reviewer's limit reach `claude::parse_output`
+the same way, and the comment in it says why the spelling is the one both
+shells share.
 
 ## `fn temp_engine_repo(tag: &str) -> (ScratchTree, PathBuf) {` › `git_in(&dir, &["config", "maintenance.auto", "false"]);`
 
@@ -5184,6 +5220,28 @@ rate-limited `attempt_finished` still reads `pool rate-limited: request failed`,
 `pool_exhausted` carries that same reason as its detail, as before. Its `reset_at` ends
 `T05:30:00Z`. Before the failure carried the stderr, the reset was read from the reason alone and
 was `None`.
+
+## `fn a_limit_on_stderr_outranks_an_unrelated_reset_in_the_result_on_pool_exhausted() {`
+
+`PR380-UNRELATED-REASON-RESET-PREEMPTS-LIMIT`. The run above, with the JSON result
+`CLAUDE_UNRELATED_RESET` (`MCP cache resets 9am (UTC)`) through `worker_limit_result`. The test
+first checks that the reason, `pool rate-limited: MCP cache resets 9am (UTC)`, parses on its own to
+a `T09:00:00Z` reset, so reading it first is what would record the wrong time. The rate-limited
+`attempt_finished` still reads that reason and the one `pool_exhausted` carries it as its detail,
+but its `reset_at` ends `T05:30:00Z`: the limit on stderr is read before the reason. When the
+reason was read first, its lone `resets` won and the pool was recorded as back at 09:00.
+
+## `fn a_reviewers_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_pool_exhausted() {`
+
+`PR380-REVIEWER-STDERR-RESET-DROPPED`, the reviewer's side of the test two above. The worker edits,
+and the Claude Code reviewer is refused once and then passes. With `review_limit_on_stderr` set,
+the refused review prints `CLAUDE_REVIEW_REQUEST_FAILED`, a JSON result reading `request failed`,
+on stdout, `You've hit your 5-hour limit - resets 5:30am (UTC)` on stderr, and exits 1, and the
+real `ClaudeCodeAdapter::parse` classifies it. The first attempt's failure is `RateLimited`, from
+the reviewer, with the reason `reviewer unavailable: request failed`, and the one `pool_exhausted`
+names `claude-max` and `claude-code`, carries that reason as its detail, and has a `reset_at` ending
+`T05:30:00Z`. Before `run_review` kept the stderr, the reviewer's result held only its status and
+detail, and the reset was `None`.
 
 ## `fn a_rate_limited_failure_carries_a_limit_from_stderr_without_changing_its_reason() {`
 

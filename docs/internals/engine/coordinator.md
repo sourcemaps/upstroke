@@ -840,8 +840,8 @@ to hang it on would put a fact about nothing into the estimator.
 ## `impl Run<'_>` › `let reset_at = if agent == claude::ADAPTER_ID {`
 
 The reset time the limit message gave, where it gave one.
-`agent::reset_at_from_limit_message` reads the failure's reason, and then its
-`limit_message` (below), for Claude
+`agent::reset_at_from_limit_message` reads the failure's `limit_message`
+(below), and then its reason, for Claude
 Code's `· resets 5:30am (UTC)` or `· resets Nov 14, 9am (UTC)`, completes
 the missing date or year against now, and returns the time as RFC 3339 UTC;
 it returns `None` for any text without a reset in exactly that form,
@@ -868,24 +868,42 @@ time changes is what the estimate reports, a reset time instead of
 wording Claude Code has not been seen to print, stays `None`, as every reset
 was before.
 
-## `impl Run<'_>` › `.chain(failure.limit_message.as_deref())`
+## `impl Run<'_>` › `.chain(std::iter::once(failure.reason.as_str()))`
 
-The reason first, then the stderr that signalled the limit, and the first
-that names a reset wins (`PR380-RESET-SIGNAL-CHANNEL-DROPPED`). Claude Code
-can exit 1 with a JSON result that has nothing to do with the limit, such as
-`request failed`, and print `You've hit your 5-hour limit · resets 5:30am
-(UTC)` on stderr. `claude::parse_output` reads the limit from stderr and
-classifies the attempt `RateLimited`, but the detail it keeps is the JSON
-result, so the reason is `pool rate-limited: request failed`. Parsing only
-the reason recorded that outage with no reset. `evaluate_outcome` now hands
-the stderr over as the failure's `limit_message`, and it is read here only
-when the reason names no reset, so a reset that was read before is still
-read from the same text. The event's `detail` is still the reason; the
-stderr is not stored anywhere new.
+The limit's own text first, then the reason, and the first that names a
+reset wins. Claude Code can exit 1 with a JSON result that has nothing to do
+with the limit, such as `request failed`, and print `You've hit your 5-hour
+limit · resets 5:30am (UTC)` on stderr. `claude::parse_output` reads the
+limit from stderr and classifies the attempt `RateLimited`, but the detail
+it keeps is the JSON result, so the reason is `pool rate-limited: request
+failed`. Parsing only the reason recorded that outage with no reset
+(`PR380-RESET-SIGNAL-CHANNEL-DROPPED`), so `evaluate_outcome` hands the
+stderr over as the failure's `limit_message`.
 
-A reviewer's rate limit carries no `limit_message`: `review_failure` builds
-its failure from `ReviewResult::Unavailable`'s detail, which holds no
-stderr, so a reviewer whose limit was only on stderr still records `None`.
+That stderr was first read only when the reason named no reset, and the
+reason can name one that is not the limit's
+(`PR380-UNRELATED-REASON-RESET-PREEMPTS-LIMIT`). A JSON result `MCP cache
+resets 9am (UTC)` beside the five-hour limit on stderr made the reason
+`pool rate-limited: MCP cache resets 9am (UTC)`; it has no `hit your … limit`
+line, so the parser fell back to the reason's only `resets` and recorded
+09:00 for a pool that came back at 05:30. The stderr is carried only when it
+is what signalled the limit, so it is read first, and the reason only when
+there is no carried text or that text names no reset. A failure with no
+`limit_message` reads exactly what it read before, and so does one whose
+stderr signalled the limit without naming a reset. The event's `detail` is
+still the reason; the stderr is not stored anywhere new.
+
+A reviewer's failure carries the same `limit_message`
+(`PR380-REVIEWER-STDERR-RESET-DROPPED`): `run_review` keeps a rate-limited
+reviewer's stderr on `ReviewResult::Unavailable` when that stderr signalled
+the limit, and `review_failure` hands it to the failure as
+`evaluate_outcome` does for a worker. Before, the reviewer's result held only
+its status and parsed detail, so a reviewer whose limit was only on stderr
+recorded `None`. The two cases are
+`a_limit_on_stderr_outranks_an_unrelated_reset_in_the_result_on_pool_exhausted`
+and
+`a_reviewers_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_pool_exhausted`
+in `engine::tests`.
 
 ## `impl Run<'_>` › `.is_some_and(|recorded| reset_at.is_none() || *recorded == reset_at);`
 

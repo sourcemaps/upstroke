@@ -283,7 +283,7 @@ answer from a process that ran — and the schema-4 integration reads it to
 attribute the outage as `invariants[22]` (INV-23) requires. The legacy ladder
 never reads it, so the reviewer-unavailable mapping it sees is unchanged.
 
-## `pub(super) fn review_failure(` › `review::ReviewResult::Unavailable { status, detail } => {`
+## `pub(super) fn review_failure(` › `review::ReviewResult::Unavailable {`
 
 The judge could not run. That is an environment problem, not a
 rejection of the code: it is attributed to the reviewer so the
@@ -294,6 +294,15 @@ unavailable review is an unavailable review, and that vocabulary is
 serialized and frozen. What differs is the durable *outage* the schema-4
 integration persists for it, so the fact travels beside the kind rather than
 inside it: see `engine::topology::integrate::infrastructure`.
+
+## `pub(super) fn review_failure(` › `let failure = match limit_message {`
+
+A rate-limited reviewer's stderr, when `review::run_review` kept it because
+it signalled the limit, rides on the failure as `limit_message`, as a
+worker's does from `evaluate_outcome` below, so `record_pool_exhausted` can
+read the reviewer's reset from it (`PR380-REVIEWER-STDERR-RESET-DROPPED`).
+The reason is the result's detail, as it was, and like the worker's the text
+is in memory only.
 
 ## `pub(super) fn review_failure(` › `if verdict.needs_human {`
 
@@ -365,11 +374,14 @@ the text that showed the limit. Claude Code can put an unrelated JSON result
 (`request failed`) in the detail and the limit on stderr, and
 `claude::parse_output` classifies from either. When stderr signals the
 limit, it rides on the failure as `limit_message`, so the coordinator's
-`record_pool_exhausted` can read the reset from it
-(`PR380-RESET-SIGNAL-CHANNEL-DROPPED`). Stderr that does not signal the
-limit is not carried: some other text classified the attempt, and that text
-is already in the reason. Nothing else reads the field, so the kind, reason,
-feedback and every stored record are what they were.
+`record_pool_exhausted` can read the reset from it, before the reason
+(`PR380-RESET-SIGNAL-CHANNEL-DROPPED`,
+`PR380-UNRELATED-REASON-RESET-PREEMPTS-LIMIT`). Stderr that does not signal
+the limit is not carried: some other text classified the attempt, and that
+text is already in the reason. Nothing else reads the field, so the kind,
+reason, feedback and every stored record are what they were. A reviewer's
+stderr is kept by the same rule in `review::run_review` and carried by
+`review_failure` above.
 
 ## `pub(super) fn worker_question(detail: Option<&str>) -> Option<String> {`
 

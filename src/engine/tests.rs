@@ -97,6 +97,10 @@ struct FakeAdapter {
     worker_rate_limits: Vec<&'static str>,
 
     worker_limit_on_stderr: Option<&'static str>,
+
+    worker_limit_result: &'static str,
+
+    review_limit_on_stderr: Option<&'static str>,
     calls: Mutex<Calls>,
     role_probe: Option<RoleProbe>,
 }
@@ -105,6 +109,10 @@ const FIVE_HOUR_LIMIT_REACHED: &str = "5-hour limit reached";
 
 const CLAUDE_REQUEST_FAILED: &str =
     r#"{"type":"result","is_error":true,"result":"request failed","session_id":"s-limit"}"#;
+
+const CLAUDE_UNRELATED_RESET: &str = r#"{"type":"result","is_error":true,"result":"MCP cache resets 9am (UTC)","session_id":"s-limit"}"#;
+
+const CLAUDE_REVIEW_REQUEST_FAILED: &str = r#"{"type":"result","is_error":true,"result":"request failed","session_id":"fake-review-session","fake":"UPSTROKE-FAKE-REVIEW"}"#;
 
 #[derive(Default)]
 struct Calls {
@@ -135,6 +143,8 @@ impl FakeAdapter {
             worker_rate_limit: FIVE_HOUR_LIMIT_REACHED,
             worker_rate_limits: Vec::new(),
             worker_limit_on_stderr: None,
+            worker_limit_result: CLAUDE_REQUEST_FAILED,
+            review_limit_on_stderr: None,
             calls: Mutex::new(Calls::default()),
             role_probe: None,
         }
@@ -150,6 +160,8 @@ impl FakeAdapter {
             worker_rate_limit: FIVE_HOUR_LIMIT_REACHED,
             worker_rate_limits: Vec::new(),
             worker_limit_on_stderr: None,
+            worker_limit_result: CLAUDE_REQUEST_FAILED,
+            review_limit_on_stderr: None,
             calls: Mutex::new(Calls::default()),
             role_probe: None,
         }
@@ -346,6 +358,11 @@ impl AgentAdapter for FakeAdapter {
             if let Some(probe) = &self.role_probe {
                 return Ok(probe.reviewer.clone());
             }
+            if let (ReviewBehavior::RateLimited, Some(limit)) =
+                (behavior, self.review_limit_on_stderr)
+            {
+                return Ok(limit_on_stderr_spec(CLAUDE_REVIEW_REQUEST_FAILED, limit));
+            }
             return Ok(shell_spec(&format!("echo {REVIEW_MARKER}")));
         }
         let index = {
@@ -435,20 +452,7 @@ impl AgentAdapter for FakeAdapter {
             scripted(&self.effects, index, Effect::EditFile),
             self.worker_limit_on_stderr,
         ) {
-            // The JSON result on stdout, the limit on stderr, then a failing
-            // exit, spelled with what both shells `shell_spec` picks share:
-            // `echo`, `>&2` and `&&`. The `printf '…'; …` spelling this
-            // replaces was `sh`'s alone, and under `cmd /C` the missing
-            // `printf` made the attempt an agent error that parked the task.
-            // There is no blank before `>&2` or `&&`, so `cmd` writes no
-            // trailing one; its CRLF line ends change neither the JSON nor
-            // the reset the parser reads. `echo_operand` says why each text
-            // is still quoted per shell.
-            return Ok(shell_spec(&format!(
-                "echo {}&& echo {}>&2&& exit 1",
-                echo_operand(CLAUDE_REQUEST_FAILED),
-                echo_operand(limit)
-            )));
+            return Ok(limit_on_stderr_spec(self.worker_limit_result, limit));
         }
         Ok(shell_spec("exit 0"))
     }
@@ -475,6 +479,9 @@ impl AgentAdapter for FakeAdapter {
                 index
             };
             let behavior = scripted(&self.reviews, index, ReviewBehavior::Pass);
+            if behavior == ReviewBehavior::RateLimited && self.review_limit_on_stderr.is_some() {
+                return crate::agent::claude::ClaudeCodeAdapter.parse(out);
+            }
             if behavior == ReviewBehavior::RateLimited {
                 return Ok(fake_outcome(
                     OutcomeStatus::RateLimited,
@@ -657,6 +664,23 @@ impl RecordingSleeper {
 
 fn shell_spec(script: &str) -> CommandSpec {
     crate::gates::ShellKind::native().spec(script)
+}
+
+fn limit_on_stderr_spec(result: &str, limit: &str) -> CommandSpec {
+    // The JSON result on stdout, the limit on stderr, then a failing
+    // exit, spelled with what both shells `shell_spec` picks share:
+    // `echo`, `>&2` and `&&`. The `printf '…'; …` spelling this
+    // replaces was `sh`'s alone, and under `cmd /C` the missing
+    // `printf` made the attempt an agent error that parked the task.
+    // There is no blank before `>&2` or `&&`, so `cmd` writes no
+    // trailing one; its CRLF line ends change neither the JSON nor
+    // the reset the parser reads. `echo_operand` says why each text
+    // is still quoted per shell.
+    shell_spec(&format!(
+        "echo {}&& echo {}>&2&& exit 1",
+        echo_operand(result),
+        echo_operand(limit)
+    ))
 }
 
 /// `text` as one operand of `echo` in the shell `shell_spec` picks, so that
@@ -3129,10 +3153,12 @@ fn a_contradictory_pass_fails_closed() {
 
 #[test]
 fn an_unavailable_reviewer_is_not_a_rejection() {
+    const LIMIT: &str = "You've hit your 5-hour limit · resets 5:30am (UTC)\n";
     let failure = review_failure(
         review::ReviewResult::Unavailable {
             status: OutcomeStatus::RateLimited,
             detail: "5-hour limit reached".to_owned(),
+            limit_message: None,
         },
         false,
     )
@@ -3141,11 +3167,31 @@ fn an_unavailable_reviewer_is_not_a_rejection() {
     assert_eq!(failure.origin, FailureOrigin::Reviewer);
     assert!(failure.is_outage(), "defers instead of blaming the worker");
     assert!(failure.reason.contains("reviewer unavailable"));
+    assert_eq!(failure.limit_message, None);
+
+    let failure = review_failure(
+        review::ReviewResult::Unavailable {
+            status: OutcomeStatus::RateLimited,
+            detail: "request failed".to_owned(),
+            limit_message: Some(LIMIT.to_owned()),
+        },
+        false,
+    )
+    .expect("still fails the attempt");
+    assert_eq!(failure.kind, FailureKind::RateLimited);
+    assert_eq!(failure.origin, FailureOrigin::Reviewer);
+    assert_eq!(failure.reason, "reviewer unavailable: request failed");
+    assert_eq!(
+        failure.limit_message.as_deref(),
+        Some(LIMIT),
+        "the reviewer's stderr limit rides on its failure as a worker's does"
+    );
 
     let failure = review_failure(
         review::ReviewResult::Unavailable {
             status: OutcomeStatus::Timeout,
             detail: String::new(),
+            limit_message: None,
         },
         false,
     )
@@ -3157,6 +3203,7 @@ fn an_unavailable_reviewer_is_not_a_rejection() {
         review::ReviewResult::Unavailable {
             status: OutcomeStatus::AgentError,
             detail: "spawn failed".to_owned(),
+            limit_message: None,
         },
         false,
     )
@@ -8270,6 +8317,131 @@ fn a_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_pool_exhaus
         .reset_at
         .as_deref()
         .expect("the limit on stderr named its reset");
+    assert!(reset_at.ends_with("T05:30:00Z"), "{reset_at}");
+    assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
+}
+
+#[test]
+fn a_limit_on_stderr_outranks_an_unrelated_reset_in_the_result_on_pool_exhausted() {
+    const REASON: &str = "pool rate-limited: MCP cache resets 9am (UTC)";
+    let alone = crate::agent::reset_at_from_limit_message(REASON, crate::util::unix_seconds_now())
+        .expect("the reason alone names a reset");
+    assert!(
+        alone.ends_with("T09:00:00Z"),
+        "read first, the reason's unrelated reset is the one recorded: {alone}"
+    );
+
+    let (_tree, repo) = temp_engine_repo("poolexhaustedstderroutranksreason");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    opts.pools_path = Some(pools_file(&repo, CLAUDE_POOL));
+    let mut source = source(
+        vec![Effect::RateLimited, Effect::EditFile],
+        vec![ReviewBehavior::Pass],
+    );
+    source.adapter.worker_limit_result = CLAUDE_UNRELATED_RESET;
+    source.adapter.worker_limit_on_stderr =
+        Some("You've hit your 5-hour limit - resets 5:30am (UTC)");
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let events = events_of(&repo, &report.run_id);
+    let reasons: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::AttemptFinished { data, .. } => data
+                .failure
+                .as_ref()
+                .filter(|f| f.kind == FailureKind::RateLimited)
+                .map(|f| f.reason.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        [REASON],
+        "stderr classified the attempt and the JSON result is still its reason"
+    );
+
+    let signals: Vec<&events::PoolExhausted> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signals.len(), 1, "{signals:?}");
+    assert_eq!(signals[0].pool, "claude-max");
+    assert_eq!(signals[0].detail, REASON, "{signals:?}");
+    let reset_at = signals[0]
+        .reset_at
+        .as_deref()
+        .expect("the limit on stderr named its reset");
+    assert!(
+        reset_at.ends_with("T05:30:00Z"),
+        "the limit's own reset, not the reason's 09:00: {reset_at}"
+    );
+    assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
+}
+
+#[test]
+fn a_reviewers_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_pool_exhausted() {
+    let (_tree, repo) = temp_engine_repo("poolexhaustedreviewerstderr");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    opts.pools_path = Some(pools_file(&repo, CLAUDE_POOL));
+    let mut source = source(
+        vec![Effect::EditFile],
+        vec![ReviewBehavior::RateLimited, ReviewBehavior::Pass],
+    );
+    // `-` for the real message's `·`, as in the worker's test above.
+    source.adapter.review_limit_on_stderr =
+        Some("You've hit your 5-hour limit - resets 5:30am (UTC)");
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let t1 = task(&report, "t1");
+    assert_eq!(t1.attempts.len(), 2, "{report:?}");
+    let refused = t1.attempts[0]
+        .failure
+        .as_ref()
+        .expect("the first attempt's reviewer was refused");
+    assert_eq!(refused.kind, FailureKind::RateLimited);
+    assert_eq!(refused.origin, FailureOrigin::Reviewer);
+    assert_eq!(
+        refused.reason, "reviewer unavailable: request failed",
+        "stderr classified the review and the JSON result is still its reason"
+    );
+
+    let events = events_of(&repo, &report.run_id);
+    let signals: Vec<&events::PoolExhausted> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signals.len(), 1, "{signals:?}");
+    assert_eq!(signals[0].pool, "claude-max");
+    assert_eq!(signals[0].agent, "claude-code");
+    assert_eq!(
+        signals[0].detail, "reviewer unavailable: request failed",
+        "{signals:?}"
+    );
+    let reset_at = signals[0]
+        .reset_at
+        .as_deref()
+        .expect("the reviewer's limit on stderr named its reset");
     assert!(reset_at.ends_with("T05:30:00Z"), "{reset_at}");
     assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
 }

@@ -321,7 +321,11 @@ pub(super) fn review_failure(
     never_started: bool,
 ) -> Option<AttemptFailure> {
     let verdict = match result {
-        review::ReviewResult::Unavailable { status, detail } => {
+        review::ReviewResult::Unavailable {
+            status,
+            detail,
+            limit_message,
+        } => {
             let kind = match status {
                 OutcomeStatus::RateLimited => FailureKind::RateLimited,
                 OutcomeStatus::Timeout => FailureKind::Timeout,
@@ -332,6 +336,10 @@ pub(super) fn review_failure(
                 format!("reviewer unavailable: {}", util::head(&detail, 400)),
             )
             .from_reviewer();
+            let failure = match limit_message {
+                Some(text) => failure.with_limit_message(text),
+                None => failure,
+            };
             return Some(if never_started {
                 failure.from_a_process_that_never_started()
             } else {

@@ -483,14 +483,19 @@ still counts one rule per observation.
 
 The text that signalled a rate limit, when it is not the text in `reason`.
 `engine::attempt::evaluate_outcome` sets it to a worker's stderr when that
-stderr signals the limit, and the coordinator's `record_pool_exhausted`
-reads a Claude Code reset from it when the reason names none
-(`PR380-RESET-SIGNAL-CHANNEL-DROPPED`). Like `never_started` it is in memory
-only: `FailureRecord` does not carry it, so no event changes shape, and the
-ladder does not read it.
+stderr signals the limit (`PR380-RESET-SIGNAL-CHANNEL-DROPPED`), and
+`engine::attempt::review_failure` to a reviewer's, which `review::run_review`
+keeps on `ReviewResult::Unavailable` under the same rule
+(`PR380-REVIEWER-STDERR-RESET-DROPPED`). The coordinator's
+`record_pool_exhausted` reads a Claude Code reset from it before the reason,
+and from the reason only when it names none, so an unrelated reset in the
+reason cannot stand in for the limit's
+(`PR380-UNRELATED-REASON-RESET-PREEMPTS-LIMIT`). Like `never_started` it is
+in memory only: `FailureRecord` does not carry it, so no event changes shape,
+and the ladder does not read it.
 
 ## `impl AttemptFailure {` › `pub fn with_limit_message(mut self, text: String) -> Self {`
 
 Attach the limit text. A builder for the same reason as
-`from_a_process_that_never_started`: the rate-limit arm keeps its one
-`AttemptFailure::new` call.
+`from_a_process_that_never_started`: the worker's rate-limit arm and the
+reviewer-unavailable arm each keep their one `AttemptFailure::new` call.
