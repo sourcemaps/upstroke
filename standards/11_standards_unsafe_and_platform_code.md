@@ -36,5 +36,5 @@ that evaluates it:
 
 A change that adds platform-gated code, tests or annotations names the leg that evaluates them.
 
-Enforced by: `unsafe_op_in_unsafe_fn` in `[lints]`; the three Clippy legs and the `test` and
-`msrv` matrices; the `cfg` census; review for safety proofs.
+Enforced by: `unsafe_op_in_unsafe_fn` in `[lints]`; the three Clippy legs and the `test-linux`,
+`test-macos`, `test-windows-hosted` and `msrv` matrices; the `cfg` census; review for safety proofs.

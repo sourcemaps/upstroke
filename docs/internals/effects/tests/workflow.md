@@ -1455,7 +1455,7 @@ sets. On today's document it is defence in depth -- `GATE_JOB_FIELDS`,
 `TEST_JOB_FIELDS`, `MSRV_JOB_FIELDS`, `AGGREGATE_JOB_FIELDS` and
 `STEP_FIELDS` already refuse an `env:` almost everywhere it could go. But the
 `msrv` leg had no field set at all until this change, the aggregate's step
-and the two suite-running steps are *allowed* an `env:`, and a job added
+and the three suite-running steps are *allowed* an `env:`, and a job added
 tomorrow has no field set until someone writes one. A rebinding anywhere is
 refused by this scan on its own, which is what
 `the_workflow_scope_rustflags_pin_refuses_weakening_and_every_override`
