@@ -1260,6 +1260,20 @@ impl GrantRef {
     fn names(&self, grant: &Grant) -> bool {
         grant.kind == self.kind && grant.ends_at_unix == Some(self.ends_at_unix)
     }
+
+    fn count_in(&self, grants: &[Grant]) -> Option<Option<u64>> {
+        let mut named = grants.iter().filter(|grant| self.names(grant)).peekable();
+        named.peek()?;
+        Some(named.try_fold(0_u64, |total, grant| {
+            grant.resets_left.and_then(|left| total.checked_add(left))
+        }))
+    }
+
+    fn undated_in(&self, grants: &[Grant]) -> bool {
+        grants
+            .iter()
+            .any(|grant| grant.kind == self.kind && grant.ends_at_unix.is_none())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1464,6 +1478,7 @@ pub struct Ledger {
     settle_after: Option<u64>,
     settled: Option<(u64, GrantState, GrantState)>,
     claims: Vec<(ClaimId, RequestId)>,
+    spends: Vec<ClaimId>,
     permits: BTreeMap<PermitId, Permit>,
     consumed: Vec<(u64, (WindowId, f64))>,
     issued: u32,
@@ -1486,6 +1501,7 @@ impl Ledger {
             settle_after: None,
             settled: None,
             claims: Vec::new(),
+            spends: Vec::new(),
             permits: BTreeMap::new(),
             consumed: Vec::new(),
             issued: 0,
@@ -1740,7 +1756,9 @@ impl Ledger {
                 }
                 Transition::Ignored(Ignored::Duplicate)
             }
-            GrantState::Banked { resets_left } if reply == Reply::Accepted => {
+            GrantState::Banked { resets_left }
+                if reply == Reply::Accepted && !self.spends.contains(&claim) =>
+            {
                 self.state = GrantState::Replied {
                     claim,
                     by: claimant,
@@ -1891,6 +1909,9 @@ impl Ledger {
                     .take()
                     .filter(|(second, _, after)| *second == at && *after == self.state)
                 {
+                    if let GrantState::Replied { claim, .. } = before {
+                        self.spends.retain(|spent| *spent != claim);
+                    }
                     self.state = before;
                 }
                 return Verdict::Conflicting;
@@ -1908,12 +1929,12 @@ impl Ledger {
             return;
         };
         let observed_at_unix = inventory.observed_at_unix;
-        let count = inventory
-            .grants
-            .iter()
-            .find(|grant| self.setup.grant.names(grant))
-            .map(|grant| grant.resets_left);
+        let grant = &self.setup.grant;
+        let count = grant.count_in(&inventory.grants);
+        let undated = grant.undated_in(&inventory.grants);
+        let ended = observed_at_unix >= grant.ends_at_unix;
         let before = self.state;
+        let mut spent = None;
         self.state = match self.state {
             GrantState::Absent | GrantState::Banked { .. } => count
                 .map_or(GrantState::Absent, |resets_left| GrantState::Banked {
@@ -1925,17 +1946,28 @@ impl Ledger {
                 reply,
                 at_unix,
                 resets_left,
-            } if observed_at_unix > at_unix => match count {
-                None => GrantState::Spent {
-                    claim,
-                    by,
-                    observed_at_unix,
-                },
-                Some(Some(after)) if resets_left.is_some_and(|before| after < before) => {
+            } if observed_at_unix > at_unix && !undated => match count {
+                None if ended => GrantState::Expired,
+                None => {
+                    spent = Some(claim);
                     GrantState::Spent {
                         claim,
                         by,
                         observed_at_unix,
+                    }
+                }
+                Some(Some(after)) if resets_left.is_some_and(|held| after < held) => {
+                    spent = Some(claim);
+                    if after == 0 {
+                        GrantState::Spent {
+                            claim,
+                            by,
+                            observed_at_unix,
+                        }
+                    } else {
+                        GrantState::Banked {
+                            resets_left: Some(after),
+                        }
                     }
                 }
                 Some(Some(after)) if resets_left == Some(after) && reply != Reply::Accepted => {
@@ -1947,6 +1979,7 @@ impl Ledger {
             },
             state => state,
         };
+        self.spends.extend(spent);
         self.settled = (matches!(before, GrantState::Replied { .. }) && before != self.state)
             .then_some((observed_at_unix, before, self.state));
     }
@@ -4865,6 +4898,194 @@ mod tests {
                 };
                 2
             ]
+        );
+    }
+
+    fn weekly_rows_ledger(rows: Vec<Grant>) -> Ledger {
+        Ledger::new(
+            Setup {
+                grant: grant_ref(GrantKind::Weekly, 240 * HOUR),
+                provider: Provider::Claude,
+                coverage: None,
+                stale_after_secs: HOUR,
+            },
+            NOW,
+            Snapshot {
+                readings: exhausted_weekly(),
+                inventory: inventory_at(NOW, rows),
+            },
+        )
+    }
+
+    #[test]
+    fn reordering_indistinguishable_inventory_entries_is_not_a_spend() {
+        let job = work(&one_job(4.0));
+        let rows = vec![
+            counted(GrantKind::Weekly, 240 * HOUR, 2),
+            counted(GrantKind::Weekly, 240 * HOUR, 1),
+        ];
+        let mut ledger = weekly_rows_ledger(rows.clone());
+        let first = claimed(ledger.apply(NOW + MIN, weekly_claim(ALPHA, ledger.recommend(&job))));
+        ledger.apply(NOW + 2 * MIN, reply(first, Reply::Refused));
+        let reordered = NOW + 3 * MIN;
+        let reversed: Vec<Grant> = rows.into_iter().rev().collect();
+        ledger.apply(
+            reordered,
+            observe(Vec::new(), inventory_at(reordered, reversed)),
+        );
+        assert_eq!(
+            ledger.grant_state(),
+            GrantState::Banked {
+                resets_left: Some(3)
+            }
+        );
+        let basis = ledger.recommend(&job);
+        assert_eq!(basis.decision(), Some(Decision::Redeem));
+        let second = claimed(ledger.apply(reordered, weekly_claim(BETA, basis)));
+        assert_eq!(ledger.claims(), &[(first, ALPHA), (second, BETA)]);
+    }
+
+    #[test]
+    fn a_grant_row_reported_without_its_expiry_is_not_proof_of_a_spend() {
+        let job = work(&one_job(4.0));
+        let mut ledger = claude_ledger(GrantKind::Weekly, 240 * HOUR, exhausted_weekly());
+        let first = claimed(ledger.apply(NOW + MIN, weekly_claim(ALPHA, ledger.recommend(&job))));
+        ledger.apply(NOW + 2 * MIN, reply(first, Reply::Refused));
+        let partial = NOW + 3 * MIN;
+        let undated = Grant {
+            ends_at_unix: None,
+            ..counted(GrantKind::Weekly, 240 * HOUR, 1)
+        };
+        ledger.apply(
+            partial,
+            observe(Vec::new(), inventory_at(partial, vec![undated])),
+        );
+        assert!(
+            matches!(
+                ledger.grant_state(),
+                GrantState::Replied {
+                    claim: held,
+                    by: ALPHA,
+                    reply: Reply::Refused,
+                    ..
+                } if held == first
+            ),
+            "{:?}",
+            ledger.grant_state()
+        );
+        assert_eq!(
+            ledger.apply(partial, weekly_claim(BETA, ledger.recommend(&job))),
+            Transition::Refused(Refusal::Held { by: ALPHA })
+        );
+        let complete = NOW + 4 * MIN;
+        ledger.apply(complete, observe(Vec::new(), weekly_count(complete, 1)));
+        assert_eq!(
+            ledger.grant_state(),
+            GrantState::Banked {
+                resets_left: Some(1)
+            }
+        );
+        let basis = ledger.recommend(&job);
+        assert_eq!(basis.decision(), Some(Decision::Redeem));
+        let second = claimed(ledger.apply(complete, weekly_claim(BETA, basis)));
+        assert_eq!(ledger.claims(), &[(first, ALPHA), (second, BETA)]);
+    }
+
+    #[test]
+    fn expiry_after_refusal_is_not_evidence_of_a_spend() {
+        let job = work(&one_job(4.0));
+        let mut ledger = claude_ledger(GrantKind::Weekly, 30 * MIN, exhausted_weekly());
+        let basis = ledger.recommend(&job);
+        assert_eq!(basis.decision(), Some(Decision::Redeem));
+        let claim = claimed(ledger.apply(
+            NOW + MIN,
+            claim_of(ALPHA, GrantKind::Weekly, 30 * MIN, basis),
+        ));
+        ledger.apply(NOW + 2 * MIN, reply(claim, Reply::Refused));
+        let after_end = NOW + 31 * MIN;
+        ledger.apply(
+            after_end,
+            observe(Vec::new(), inventory_at(after_end, Vec::new())),
+        );
+        assert_eq!(ledger.grant_state(), GrantState::Expired);
+        assert_eq!(
+            ledger.apply(
+                after_end,
+                claim_of(BETA, GrantKind::Weekly, 30 * MIN, ledger.recommend(&job))
+            ),
+            Transition::Refused(Refusal::Expired)
+        );
+        assert_eq!(ledger.claims(), &[(claim, ALPHA)]);
+    }
+
+    #[test]
+    fn a_second_observed_reset_in_the_same_inventory_row_can_be_claimed() {
+        let job = work(&one_job(4.0));
+        let mut ledger = weekly_rows_ledger(vec![counted(GrantKind::Weekly, 240 * HOUR, 2)]);
+        let first = claimed(ledger.apply(NOW + MIN, weekly_claim(ALPHA, ledger.recommend(&job))));
+        let mut undone = ledger.clone();
+        ledger.apply(NOW + 2 * MIN, reply(first, Reply::Accepted));
+        let restored = NOW + 3 * MIN;
+        ledger.apply(
+            restored,
+            observe(spent_weekly(restored), weekly_count(restored, 1)),
+        );
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(100.0));
+        assert_eq!(
+            ledger.apply(restored, reply(first, Reply::Accepted)),
+            Transition::Ignored(Ignored::Stale)
+        );
+        let exhausted = restored + 50 * HOUR;
+        let session_refill = Some(exhausted + 4 * HOUR);
+        ledger.apply(
+            exhausted,
+            observe(
+                vec![
+                    claude_at(WindowId::Weekly, exhausted, 100.0, Some(NOW + 72 * HOUR)),
+                    claude_at(WindowId::Session, exhausted - HOUR, 0.0, session_refill),
+                    claude_at(WindowId::Session, exhausted, 10.0, session_refill),
+                ],
+                weekly_count(exhausted, 1),
+            ),
+        );
+        let basis = ledger.recommend(&job);
+        assert_eq!(basis.decision(), Some(Decision::Redeem));
+        let second = claimed(ledger.apply(exhausted, weekly_claim(BETA, basis)));
+        assert_eq!(
+            ledger.grant_state(),
+            GrantState::Reserved {
+                claim: second,
+                by: BETA,
+                resets_left: Some(1)
+            }
+        );
+        ledger.apply(exhausted + MIN, reply(second, Reply::Accepted));
+        let spent_at = exhausted + 2 * MIN;
+        ledger.apply(spent_at, observe(Vec::new(), weekly_count(spent_at, 0)));
+        assert_eq!(
+            ledger.grant_state(),
+            GrantState::Spent {
+                claim: second,
+                by: BETA,
+                observed_at_unix: spent_at
+            }
+        );
+        assert_eq!(ledger.claims(), &[(first, ALPHA), (second, BETA)]);
+        undone.apply(NOW + 2 * MIN, reply(first, Reply::Unknown));
+        for count in [1, 2] {
+            undone.apply(restored, observe(Vec::new(), weekly_count(restored, count)));
+        }
+        let unchanged = restored + MIN;
+        undone.apply(unchanged, observe(Vec::new(), weekly_count(unchanged, 2)));
+        assert_eq!(
+            undone.grant_state(),
+            GrantState::Banked {
+                resets_left: Some(2)
+            }
+        );
+        assert_eq!(
+            undone.apply(unchanged, reply(first, Reply::Accepted)),
+            Transition::Replied
         );
     }
 }

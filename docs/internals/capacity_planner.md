@@ -338,8 +338,8 @@ Worked examples the tests pin:
 One simulated grant on one account, and the capacity permits issued to work on that account. The
 two are kept apart on purpose:
 
-- The **banked grant** (`GrantState`) is the account's: a voluntary reset that can be redeemed
-  once. Claiming it reserves the right to redeem it; it is never capacity.
+- The **banked grant** (`GrantState`) is the account's: voluntary resets, each of which can be
+  redeemed once. Claiming it reserves the right to redeem the next one; it is never capacity.
 - A **capacity permit** (`Permit`) is issued to a request for work, and draws percent from named
   windows (`Permit::draws`). It is allocated only from a balance a snapshot reported; a claim, a
   reply or a recommendation never issues one or enlarges what one may draw.
@@ -351,7 +351,8 @@ allowances (`Setup::coverage`). The initial `Snapshot` seeds the windows and inv
 The state is small and plain: the accepted readings (which `recommend` hands to `plan`), the
 latest accepted inventory, one `WindowView` per window with the plan its reading named, every plan
 the account's readings have named and the second each was read, the `GrantState` (with, when the
-latest inventory settled a `Replied` grant, its second and both states), the registered claims, the outstanding permits, the draws of returned permits that no newer reading has yet
+latest inventory settled a `Replied` grant, its second and both states), the registered claims,
+the claims whose redemption an inventory settled as spent, the outstanding permits, the draws of returned permits that no newer reading has yet
 covered (with the second each was returned) and a `generation` that every accepted change
 advances. Nothing is
 derived from the wall clock: `apply(now_unix, event)` moves the ledger's clock forward and refuses
@@ -363,7 +364,8 @@ Builds an `Input` from the ledger's readings and inventory at its own clock, wit
 `Setup::coverage` as the account's `Account::coverage`, and calls `plan`, the same planner as
 above, unchanged. The forecast and the claim therefore narrow the grant's effect by the same
 covered allowances. The `Recommendation` carries the planner's decision for this
-grant (`None` when the inventory is unknown or does not list it), the grant it was read for
+grant, read from the first inventory row that names it (`None` when the inventory is unknown or
+lists no such row), the grant it was read for
 (`Setup::grant`), the generation and second it was read at, and the earliest refill among the
 windows the planner forecast: the first second at which the planner, given the same state, would
 read one of them as `Refilled`. It changes nothing: two requests that ask at the same generation
@@ -404,9 +406,13 @@ all leave the grant held and the marked windows awaiting a re-read: no reply is 
 balance. A second reply to the same claim is `Ignored(Duplicate)`; it moves nothing, except that a
 later `Accepted` is remembered over a `Refused` or `Unknown` so that an unchanged count can no
 longer release the grant. A reply to a claim that no longer holds the grant is `Ignored(Stale)`,
-except an `Accepted` one while the grant is `Banked`: the grant was released after that claim, and
+except an `Accepted` one while the grant is `Banked` for a claim whose redemption no inventory has
+settled as spent: the grant was released after that claim, and
 the acknowledgment says its redemption went through, so the grant is held again by that claim, as
-`Replied` with `Accepted` at the acknowledgment's second, and the generation advances. No other
+`Replied` with `Accepted` at the acknowledgment's second, and the generation advances. A claim whose
+redemption was settled is never held again: once a fallen count has banked the resets left
+(`observe`, below), a repeated `Accepted` for it is `Ignored(Stale)` and those resets stay
+claimable. No other
 claim passes until an inventory observed after that second settles it, and after `Accepted` only a
 fallen count or an unlisted grant does. The windows are left as they are. A claim never registered
 is `Refused(UnknownClaim)`.
@@ -433,16 +439,25 @@ Otherwise the refill is `Refill::Unreported`.
 Every reading of the account observed by the ledger's clock is evidence of the plan it names,
 whatever its verdict, and is recorded with its second (see `usable` below).
 
-The inventory is judged the same way by its second. An adopted inventory settles the grant:
-`Banked` and `Absent` follow the count; a `Replied` grant settles only on an inventory observed
-after the reply's second, since one of that second may have been read before the claim or the
-reply. Then a fallen count, or a grant no longer listed, is `Spent` (once, for the claim that held
-it), and an unchanged count after a `Refused` or `Unknown` reply releases it to `Banked`. After
-`Accepted`, an unchanged count settles nothing. Two inventories of one second that disagree leave
+The inventory is judged the same way by its second. The grant's count is the total of the counts of
+every row that names it (its kind and use-by second), unknown when any of them is: rows that agree
+on both are indistinguishable, so their order, and how the reader splits the resets between them,
+move nothing. An adopted inventory settles the grant: `Banked` and `Absent` follow the count; a
+`Replied` grant settles only on an inventory observed after the reply's second, since one of that
+second may have been read before the claim or the reply, and only on one that lists no row of the
+grant's kind without a use-by second. Such a row may be the grant, so it is evidence neither that
+the grant is gone nor that it is unchanged, and the grant stays `Replied` until an inventory
+without one. Then a fallen count settles the claim's redemption: at zero the grant is `Spent`
+(once, for the claim that held it), and with resets left it is `Banked` with the count that is left,
+so a later claim may redeem the next one. A grant no longer listed is `Spent` too, unless the
+inventory was observed at or after the grant's use-by second: expiry then explains the absence
+whatever the reply said, so the grant is `Expired` and no claim is taken to have spent it. An
+unchanged count after a `Refused` or `Unknown` reply releases it to `Banked`. After `Accepted`, an
+unchanged count settles nothing. Two inventories of one second that disagree leave
 the inventory unknown, which the planner reports as no decision. Where the first of them settled a
-`Replied` grant and nothing has moved the grant since, the conflict undoes that settlement and the
-grant is `Replied` again, so the evidence of one second settles nothing in either order of arrival,
-and a later inventory decides.
+`Replied` grant and nothing has moved the grant since, the conflict undoes that settlement, and the
+spend it recorded, and the grant is `Replied` again, so the evidence of one second settles nothing
+in either order of arrival, and a later inventory decides.
 
 Settling the grant does not settle a window: a restored window stays at its pre-claim balance
 until a reading of its own, observed after the reply, is adopted. The two are independent, so a
@@ -485,7 +500,8 @@ A permit outlives the grant: expiry (below) removes no balance and no permit.
 
 When the clock reaches the grant's use-by second, a `Banked` or `Absent` grant becomes `Expired`,
 and a later inventory that still lists it does not revive it. A grant already claimed is left to
-its reply and snapshot, since the redemption may have been sent before the end. Window views and
+its reply and snapshot, since the redemption may have been sent before the end; a snapshot observed
+at or after the end that no longer lists it makes it `Expired` (`observe`, above). Window views and
 permits are untouched: expiry loses the chance to restore capacity, never existing quota.
 
 ### Driving it from handler code
@@ -531,6 +547,10 @@ All are synthetic (`Source::Fixture` or the planner fixtures above) and timed fr
 | `Unknown`, unchanged count, then a late `Accepted` before another claim | the release is undone: `Replied` with `Accepted` by the first claim, another claim `Held`, an unchanged count after it settles nothing, a fallen one is `Spent` by the first claim |
 | count captured in the second of the claim and its `Unknown` reply, delivered a second later | adopted, but the grant stays `Replied` and another claim is `Held`; a count read a second after the reply releases it |
 | `Refused`, then counts 0 and 1 of one second, in either order, then 1 a minute later | `Replied` and another claim `Held` after the conflicting pair; `Banked` with one reset in both orders |
+| a weekly grant listed as two rows of one use-by second, 2 and 1 resets; `Refused`, then the rows in reverse order | `Banked` with three resets, not `Spent`; a fresh `Redeem` claims |
+| `Refused`, then the weekly row with its use-by second omitted, then the complete row | `Replied` and another claim `Held`; then `Banked` with one reset, and a fresh `Redeem` claims |
+| weekly grant ending in 30 min; `Refused`, then an empty inventory read after the end | `Expired`, not `Spent`; another claim is `Expired` |
+| one weekly row of 2 resets; `Accepted`, then count 1 with the weekly restored; the same `Accepted` again; 50 h later the weekly exhausted with count 1; and, from the claim, `Unknown`, counts 1 and 2 of one second, then 2 | `Banked` with one reset and the repeated reply `Stale`; `Redeem` claims the remaining reset, whose count 0 is `Spent` by the second claim; the conflicting pair undoes the spend, so after the release a late `Accepted` holds the grant again |
 | Claude session grant | session clock `AwaitingReRead` then `Unreported` (the five-hour clock is unknown); weekly untouched; session 0 → 100 |
 | Claude weekly grant | weekly keeps `At(NOW + 72 h)` throughout; 0 → 100 only after the snapshot |
 | Claude Fable grant | Fable and session must be re-read; weekly keeps its boundary and shows the reported share (60 → 64) |
