@@ -5,7 +5,7 @@ disposition: deferred
 category: correctness
 pr: 330
 reviewed_sha: a9be94bc360b2e461a47c73e4d488d8a57599a15
-location: reviews/2026-10-02-pr11-follow-up-c-record.md:1202
+location: src/workspace.rs:78
 provenance: pre_existing
 first_bad: predates PR11: the frozen legacy engine's Git children have never disabled automatic maintenance; graded P3 at a9be94bc on a false prerequisite and regraded P1 by #330's design review round 2 (the record's §3.4)
 guard: follow-up D, before G6 — decision B (the owner's O8) unfreezes `src/workspace.rs` so that its one builder, `git_command`, gives every legacy Git child `-c maintenance.auto=false -c gc.auto=0 -c gc.autoDetach=false -c maintenance.autoDetach=false` (#331's record §3.8 and §2.5; #330's record §3.4); its grade is the owner's O10
@@ -13,7 +13,7 @@ guard: follow-up D, before G6 — decision B (the owner's O8) unfreezes `src/wor
 
 ## Failure sequence
 
-R-G2 of PR11 follow-up C's record (`reviews/2026-10-02-pr11-follow-up-c-record.md`, §3.4, with §4.10's corrections),
+R-G2 of PR11 follow-up C's record (`48f2af7a:reviews/2026-10-02-pr11-follow-up-c-record.md`, §3.4, with §4.10's corrections),
 reasoned by #330's design review round 2 (the design and concurrency lenses P1, the regression lens P2); none executed
 the deletion of a completed registration.
 

@@ -5,7 +5,7 @@ disposition: deferred
 category: correctness
 pr: 330
 reviewed_sha: a0464f432f3d93134360f5d5a88e60b653cd6fb4
-location: reviews/2026-10-02-pr11-follow-up-c-record.md:2041
+location: 48f2af7a:reviews/2026-10-02-pr11-follow-up-c-record.md:2041
 provenance: introduced_by_feature
 first_bad: a0464f432f3d93134360f5d5a88e60b653cd6fb4 (design round 3's FROZENTESTS repair for Q's resource rows)
 guard: only if the owner's decision O5 (#330's D2) selects Q, the quiescence path, instead of U: the round that builds Q binds the observation of R29 and R30 to the observed run and checkout, as the record's section 4.9 requires, before Q's accounting is relied on; while U is selected, as implemented on #330, neither row exists and this does not arise
@@ -16,7 +16,7 @@ guard: only if the owner's decision O5 (#330's D2) selects Q, the quiescence pat
 Reasoned by #330's design review round 3, concurrency lens, at `a0464f43`
 (`~/orch-pr11/reviews/review-330-d3-concurrency-a0464f43.review.md`, finding 8; the triage
 `~/orch-pr11/reviews/review-330-d3-triage.md`, FUC-D3-OBSERVE). It is a finding against Q's accounting rows R29 and R30
-(`reviews/2026-10-02-pr11-follow-up-c-record.md`, §2.7 and §3.5), which #330 does not build.
+(`48f2af7a:reviews/2026-10-02-pr11-follow-up-c-record.md`, §2.7 and §3.5), which #330 does not build.
 
 1. Round 3's FROZENTESTS repair has `ledger::observe` read R29 and R30 from "the checkout this process last held", a
    process-global selection, so that the frozen recovery tests' unchanged calls need no new field.

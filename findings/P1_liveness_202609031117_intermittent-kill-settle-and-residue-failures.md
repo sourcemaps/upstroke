@@ -5,7 +5,7 @@ disposition: deferred
 category: liveness
 pr: 
 reviewed_sha:
-location: reviews/2026-09-10-gate-G4.md:540
+location: 48f2af7a:reviews/2026-09-10-gate-G4.md:540
 provenance: pre_existing
 first_bad:
 guard: project owner, undirected
@@ -21,7 +21,7 @@ Owner, as the ledger records it: project owner, undirected.
 
 **What is established**: every member is intermittent — the identical commit produced both green and red runs, named per member; every member sits in a subprocess kill, settle or residue path; it spans all three CI platforms, so it is not one bad runner; and it is caused by no one packet — E, M1, M2, M3, M4, M5 and M6 have each shown a member, **and `master` has shown one three times**. **The macOS member predates W2's base commit** `1cbdccd` (2026-09-02T20:55Z) — its earliest sighting is 2026-09-01T11:32:42Z, 33.4 hours before the programme had a base (both stamps UTC) — which no packet-scoped reading survives. **It is not the C-004 repair**: M4's macOS failure at `c30aca0` predates that merge entirely, and a fix cannot cause a failure that happened before it landed. **On the count**: an earlier statement of this class said *five* fingerprints and counted a fifth macOS member that has since been withdrawn as an instance of the fixed row — the count here is derived from the members named above and nowhere else, which is the property that matters. **The lead, recorded as a hypothesis and asserted nowhere**: whether one launch-gate or reaper mechanism underlies members on three platforms is **untested**, and the evidence does not reach it. Repairing one member does not close this row. Full evidence and the two corrections that produced it: **§43**
 
-Appended to `reviews/FINDINGS.md` §2 by §43, the 2026-09-03 W1/W2 decomposition review, which recorded it as pre-existing: neither introduced nor activated by the diff in front of it. The row carried no severity label; **P1** here is this migration's judgement from the consequence described above, not the reviewer's own word.
+Appended to `48f2af7a:reviews/FINDINGS.md` §2 by §43, the 2026-09-03 W1/W2 decomposition review, which recorded it as pre-existing: neither introduced nor activated by the diff in front of it. The row carried no severity label; **P1** here is this migration's judgement from the consequence described above, not the reviewer's own word.
 
 ## The kill-sampler family — RELATED AND WITNESSED, and explicitly NOT members of this row
 
@@ -39,7 +39,7 @@ kill path — and are **not** members of it. They are recorded here because
 `location:` now points at the register that enumerates them, and a reader arriving there should know
 what is and is not claimed.
 
-**The register**, `reviews/2026-09-10-gate-G4.md:540`: *"`--skip sampled_` excludes six tests, counted
+**The register**, `48f2af7a:reviews/2026-09-10-gate-G4.md:540`: *"`--skip sampled_` excludes six tests, counted
 rather than assumed: the four kill samplers … The samplers are excluded for runtime and are run
 separately, five times each."*
 
