@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::capacity;
+use crate::capacity::client::drain_of;
 use crate::events::{self, AttemptRecord, Progress, RunState, TaskState};
 use crate::interaction::QuestionRecord;
 use crate::ir::{Plan, Question, Task, TaskId};
@@ -445,7 +445,7 @@ impl RunReport {
                  run's event log records; the log is the authority"
             ));
         }
-        let mut drain = capacity::drain_of(tasks.iter().flat_map(|task| task.attempts.iter()));
+        let mut drain = drain_of(tasks.iter().flat_map(|task| task.attempts.iter()));
         for review in integration.all() {
             if let Some(pool) = &review.pool {
                 let spend = drain.entry(pool.clone()).or_default();
@@ -606,7 +606,7 @@ pub(super) fn build_report(header: ReportHeader<'_>, plan: &Plan, state: &RunSta
         }
     }
     let total_cost_usd = total_of(&tasks);
-    let pool_drain = capacity::drain_of(state.progress.iter().flat_map(|p| p.records.iter()))
+    let pool_drain = drain_of(state.progress.iter().flat_map(|p| p.records.iter()))
         .into_iter()
         .map(|(pool, spend)| PoolDrainRow {
             pool,

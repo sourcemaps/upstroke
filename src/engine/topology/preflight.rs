@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use crate::agent::{AdapterSource, AgentAdapter, AuthState, Caps, ProcessOutput};
-use crate::capacity::Pool;
+use crate::capacity::client::Pool;
 use crate::error::UpstrokeError;
 use crate::gates::ShellKind;
 use crate::runner::container::resolve::RunnerPreflight;

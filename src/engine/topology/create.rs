@@ -129,7 +129,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::agent::{AdapterSource, Caps};
-use crate::capacity::Pool;
+use crate::capacity::client::Pool;
 use crate::error::UpstrokeError;
 use crate::events::log::{
     BarrierStep, EventLog, TopologyLine, establish_stable_prefix, first_line_digest,

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::capacity::{Pool, pool_for};
+use crate::capacity::client::{Pool, pool_for};
 use crate::runner::{
     CallParts, ExecutionRole, InvocationId, ProbeTarget, RunFuture, Runner, RunnerCall,
     RunnerRequest,

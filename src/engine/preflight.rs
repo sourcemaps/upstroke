@@ -11,7 +11,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::agent::Caps;
-use crate::capacity::Pool;
+use crate::capacity::client::Pool;
 use crate::config;
 use crate::error::UpstrokeError;
 use crate::events::{self, BindingSummary, ChainSummary, GateSummary};

@@ -145,7 +145,7 @@ pub struct FrozenPlans<'a> {
     pub adapters: &'a dyn AdapterSource,
     pub paths: &'a RunPaths,
     pub gates: &'a [crate::gates::ShellGate],
-    pub pools: &'a [crate::capacity::Pool],
+    pub pools: &'a [crate::capacity::client::Pool],
     pub caps: &'a [(String, crate::agent::Caps)],
     pub worker_timeout: Duration,
     pub decisions: &'a [String],
@@ -204,7 +204,7 @@ impl FrozenPlans<'_> {
 
 impl AttemptPlans for FrozenPlans<'_> {
     fn pool_for(&self, agent: &str) -> Option<String> {
-        crate::capacity::pool_for(agent, self.pools).map(|pool| pool.name.clone())
+        crate::capacity::client::pool_for(agent, self.pools).map(|pool| pool.name.clone())
     }
 
     fn pools_for(&self, agent: &str) -> Vec<String> {
@@ -317,7 +317,7 @@ pub struct SharedPlans {
     pub adapters: Arc<dyn AdapterSource + Send + Sync>,
     pub paths: RunPaths,
     pub gates: Vec<crate::gates::ShellGate>,
-    pub pools: Vec<crate::capacity::Pool>,
+    pub pools: Vec<crate::capacity::client::Pool>,
     pub caps: Vec<(String, crate::agent::Caps)>,
     pub worker_timeout: Duration,
     pub decisions: Vec<String>,

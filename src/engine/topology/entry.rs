@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::agent::Caps;
-use crate::capacity::Pool;
+use crate::capacity::client::Pool;
 use crate::config::{self, Budgets, EngineLimits, OnTaskFailure};
 use crate::engine::assembly::{FrozenPlans, SharedPlans};
 use crate::engine::attempt::{LegacyReviewInputPolicy, LegacyReviewPasses};
