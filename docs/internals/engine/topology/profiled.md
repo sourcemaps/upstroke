@@ -24,12 +24,16 @@ It is engine-side and private (`mod profiled;`, not `pub mod`) because it is
 an assembly detail of `entry`: nothing outside the topology engine builds a
 run's runner.
 
-**What it does not do.** It does not check that the directory exists or is
-usable; pre-flight does that, where a refusal can be reported before
-anything runs. It does not expand `~/`: the configuration has no helper for
-that (the only home lookup is `util::user_upstroke_dir`, which finds the
-home but does not rewrite paths), so the profile is the string written in
-`upstroke.toml`, used as a path.
+**What it does not do.** It does not check the profile. Pre-flight does,
+where a refusal can be reported before anything runs: the profile must be an
+absolute path and an existing directory. The agent's capability probe then
+runs under the profile, through this wrapper. Nothing checks sign-in, so a
+profile that is not signed in passes pre-flight and fails at its first
+attempt (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`). It does not expand `~/`: the
+configuration has no helper for that (the only home lookup is
+`util::user_upstroke_dir`, which finds the home but does not rewrite paths),
+so the profile is the string written in `upstroke.toml`, used as a path, and
+pre-flight refuses a `~/` one as relative.
 
 ## `pub(super) fn profiled(inner: Arc<dyn Runner>, pools: &[Pool]) -> Arc<dyn Runner> {`
 

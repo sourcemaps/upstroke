@@ -65,7 +65,12 @@ configured string used as a path, with no `~/` expansion. A profile the run
 cannot honour is refused before anything runs for it, by one function
 (`src/engine/topology/preflight.rs`) that both paths call: a fresh run before
 its creation begins, so nothing of the run exists, and a resume at its
-pre-flight. The legacy coordinator refuses any profiled pool.
+pre-flight. What pre-flight checks of a profile is that it is an absolute
+path and an existing directory (besides the host runner, Claude Code and no
+`CLAUDE_CODE_OAUTH_TOKEN`). The agent's capability probe then runs under the
+profile. Nothing checks sign-in, so a profile that is not signed in passes
+pre-flight and fails at its first attempt (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`).
+The legacy coordinator refuses any profiled pool.
 Nothing routes on a profile: the binder still binds each agent to one pool,
 because everything multi-profile actually buys (per-profile attribution,
 asymmetric reserve, rebind-instead-of-wait) is capacity-*driven* behaviour,
