@@ -1337,11 +1337,24 @@ pub(crate) enum Primitive {
 ///   the shipped host runner in terms: adapter deny rules are "defence in
 ///   depth, not an OS boundary", repository-controlled gates "execute
 ///   candidate build/test code as the Upstroke user", and untrusted input
-///   belongs on "a dedicated OS account or VM". Such a writer can already
-///   write wherever that user can, so redirecting a funnel's Git child adds
-///   no capability to it; under the container runner the same party is
-///   confined to its mounts and the authoritative common git dir is withheld
-///   from it (`runner::container`'s `Withheld::AuthoritativeGit`).
+///   belongs on "a dedicated OS account or VM". Under the host runner such a
+///   writer can already write wherever that user can, so redirecting a
+///   funnel's Git child adds no capability to it.
+/// * Under the container runner the same party is confined to its mounts,
+///   and the slot checkout is one of them — read-write for an implementer or
+///   a gate. What keeps it from the checkout's `.git` is not
+///   `Withheld::AuthoritativeGit`, which names the repository's own Git
+///   directories and the request's common git dir but not `<slot>/.git`; it
+///   is the mount set itself (`runner::container`'s
+///   `ContainerRunner::mounts`). The `.git` position inside the mounted
+///   checkout is a mount of its own, overlaid by the role view's gitfile, so
+///   Git in the container resolves the projected view and the host's pointer
+///   underneath is out of reach. Of the common git dir only `objects` is
+///   mounted, read-only: the view's `HEAD`, `config` and `index` are copies
+///   written for that container, and `commondir`, `worktrees` and
+///   `packed-refs` are not projected at all. No process the engine starts
+///   there can reach these paths, so the writers left are the engine user's
+///   own processes outside the engine, which the host-runner case covers.
 ///
 /// **What this is not.** Naming these paths does not close them, and it does
 /// not narrow the check-to-syscall window the nine walked roles leave either.
