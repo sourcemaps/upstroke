@@ -328,11 +328,11 @@ role-scoped `HOME`, `PATH`, and credential locations", and probe and execution c
 environment).
 
 The test above holds one pair, `Probe(Agent(claude-code))` against `Implement`, and
-`supplies_credentials` names three roles; no other child-level test looks at `Review`'s environment.
-So the domain is `ExecutionRole::all()` filtered by `supplies_credentials`, and a role added later
-is covered or fails here. Three sentinels rather than equality alone, because two identical
-absences are also equal: one value only the base can supply, one only the overlay can, and the
-credential location, which only the **binding** can, and which a dropped binding removes.
+`supplies_credentials` names three roles. So the domain is `ExecutionRole::all()` filtered by
+`supplies_credentials`, and a role added later is covered or fails here. Three sentinels rather
+than equality alone, because two identical absences are also equal: one value only the base can
+supply, one only the overlay can, and the credential location, which only the **binding** can, and
+which a dropped binding removes.
 
 ## `fn every_credential_supplied_role_composes_one_environment_per_binding() {` › `for (_, key) in CREDENTIAL_LOCATIONS {`
 
@@ -1378,11 +1378,10 @@ own count, which must be `0 passed`, and requires the child to have settled.
 
 Every role's spawn, not only the gate's, is observed at the containment points. The packet's
 `scope` sends probes, workers, gates and reviews through the runner's funnel with containment hook
-points, and `proof_tests[3]` asks for containment sub-effect hook tests (ST-07 subset). The other
-runtime observers in this file build gate requests, so a funnel that passed `NoHooks` for any other
-role would pass them all. The probes matter most: `decisions.workspace_candidates.run_creation`
-orders P4 `RunnerPreflight` before P6 `run_started`, so their spawns are the prefixes ST-07 evidence
-over `Process.Spawn` is read as covering.
+points, and `proof_tests[3]` asks for containment sub-effect hook tests (ST-07 subset). The probes
+matter most: `decisions.workspace_candidates.run_creation` orders P4 `RunnerPreflight` before P6
+`run_started`, so their spawns are the prefixes ST-07 evidence over `Process.Spawn` is read as
+covering.
 
 Three observations per role: the points reached, their order, and on Unix the kernel's answer that
 the containment operation ran for this child. A funnel that fired the hooks but skipped the
