@@ -2258,8 +2258,9 @@ is carried unchanged, and the stand-in defers to the ordinary command search und
 empty `bin` in it, and runs `slow_docker_start_child` under `run_test_isolated`, bounded at two
 minutes: this test binary again, selecting that one ignored test with `--exact`, `--ignored` and
 `--nocapture`, with a `PATH` that is the scratch `bin` and then this process's own, and told the
-scratch tree (`UPSTROKE_TEST_SLOW_START_SCRATCH`) and this process's original `PATH`
-(`UPSTROKE_TEST_SLOW_START_ORIGINAL_PATH`). `DockerCli` runs `docker` by name, so a stand-in
+scratch tree (`UPSTROKE_TEST_SLOW_START_SCRATCH`), this process's original `PATH`
+(`UPSTROKE_TEST_SLOW_START_ORIGINAL_PATH`) and the stand-in's mark, `delayed-starts` in the
+scratch tree (`UPSTROKE_TEST_SLOW_START_MARK`, an `OsStr` of a `PathBuf`). `DockerCli` runs `docker` by name, so a stand-in
 first on the child's `PATH` is the program every runtime question in it reaches, and only a
 child can be given a `PATH` of its own. The parent requires the child's success and libtest's
 `1 passed`, a misnamed helper running no test at all, and prints the child's output when either
@@ -2271,7 +2272,15 @@ five-second hold falls; the rest is the helper's repository and the container's 
 What it shows holds while the runner starts a container with `start` as `docker`'s first
 argument, as it does today (`docker start --attach --interactive` for an invocation with input):
 a start spelled any other way would pass through the stand-in unheld, and this test would no
-longer fail at three seconds.
+longer fail at three seconds. That case, and a hold that never happened, no longer pass
+silently: the helper fails when the stand-in left no mark of a delayed `start`.
+
+Two mutations were applied, observed and restored before the commit. With
+`ROOM_FOR_A_SLOW_CONTAINER_START` at three seconds this test failed, the helper's `expect`
+meeting the runner's refusal of `start` ("still created when the invocation's deadline passed").
+With the stand-in's `sleep` replaced by `false` it failed too, the helper's `expect` meeting the
+refusal of a `start` whose client "ended (exit code 1)": the stand-in's own failure, with
+`docker` never run.
 
 ## `fn slow_docker_start_child() {`
 
@@ -2279,11 +2288,23 @@ The isolated helper `real_docker_a_container_slow_to_start_still_reaches_its_tim
 Ignored, so libtest never runs it in its own process.
 
 It asserts, with `std::env::var_os`, that its parent set `UPSTROKE_TEST_SLOW_START_ORIGINAL_PATH`
-on it. Its first act, before it starts any process, is to write the
+on it, and takes the mark's path from `UPSTROKE_TEST_SLOW_START_MARK` the same way, into a
+`PathBuf`. Its first act, before it starts any process, is to write the
 stand-in `docker` into the `bin` its parent put first on its `PATH`, and make it executable: a
-`/bin/sh` script that sleeps five seconds when its first argument is `start` and then, whatever
-the arguments, replaces itself with `PATH="$UPSTROKE_TEST_SLOW_START_ORIGINAL_PATH" exec docker
-"$@"`. It runs `docker` by name under the parent's original `PATH`, so the system's own command
+`/bin/sh` script that, when its first argument is `start`, holds it `SLOW_START_HOLD_SECONDS`
+(five) seconds and then, whatever the arguments, replaces itself with
+`PATH="$UPSTROKE_TEST_SLOW_START_ORIGINAL_PATH" exec docker "$@"`.
+
+The hold reads `date +%s`, runs `sleep 5`, reads `date +%s` again, and appends the two times, one
+`start` to a line, to the file `$UPSTROKE_TEST_SLOW_START_MARK` names. If any of the four does not
+succeed, the script prints why on its standard error and exits 1 without running `docker`, so a
+hold that fails is a refused `start`, never a start that ran at once. `sleep` and `date` each run
+with `PATH=/bin:/usr/bin` for that one command, a fixed standard path where both are found on any
+Unix, and never under the inherited `PATH`, which need not hold them: the reviewed defect was a
+`PATH` with a working `docker` and no `sleep`, under which the hold failed unnoticed. `/bin/sh` has
+no waiting of its own (`read -t` is not POSIX and `dash` lacks it), so a fixed path for the one
+command is the means left that adds no path lookup to the test. The times are whole seconds, and
+their difference is at least five for any sleep of at least five seconds. It runs `docker` by name under the parent's original `PATH`, so the system's own command
 search picks the program exactly as it would with no stand-in, skipping a `docker` that is not
 executable as that search does; the test never decides which program that is. The script's
 text holds the variable's name and no path: the parent set the variable, as an `OsStr`, on this
@@ -2307,6 +2328,10 @@ through a `ContainerRunner` built as that test builds its own (the image `discov
 `real_policy`, `real_identity` over the scratch tree with the `slowstart` run id,
 `image_environment_of`, a `LeaveNoResidue` guard). The result must be an output, and one that
 timed out: a start the deadline overtakes is an error, which fails the `expect`.
+
+After the invocation, the helper reads the mark. A mark that is missing or empty fails with "no
+`docker start` was delayed": the timeout was reached without the slow start this test exists to
+hold. Every line must be two whole-second times, at least `SLOW_START_HOLD_SECONDS` apart.
 
 ## `fn every_gated_test_of_this_lane_is_counted() {`
 
