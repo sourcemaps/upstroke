@@ -83,14 +83,17 @@ its creation begins, so nothing of the run exists, and a resume at its
 pre-flight. What pre-flight checks of a profile is that it is an absolute
 path and an existing directory (besides the host runner, Claude Code and no
 `CLAUDE_CODE_OAUTH_TOKEN`). The agent's capability probe then runs under the
-profile. Its sign-in check (`claude auth status --json` for Claude Code) runs
-next, on a fresh run and on a resume, once under each account the agent's pools
-use, in file order: each profile they name, and the agent's default account
-when any of them names none or the agent has no pool. A signed-out account
-refuses the run before it starts or resumes, unless the agent's CLI also
-authenticates from environment variables its sign-in check cannot see (for
-Codex, `CODEX_API_KEY`, `OPENAI_API_KEY` and `CODEX_ACCESS_TOKEN`) and one of
-them is set to a non-empty value; a CLI that cannot say passes.
+profile. For Claude Code alone, its sign-in check (`claude auth status --json`)
+runs next, on a fresh run and on a resume, once under each account Claude
+Code's pools use, in file order: each profile they name, and the default
+account when any of them names none or Claude Code has no pool
+(`Account::of_agent`). It stops at the first account that is signed out or
+whose check fails to answer, and that account refuses the run before it starts
+or resumes; a CLI that cannot say passes. An agent whose pools use more than
+sixteen distinct accounts (`MAX_ACCOUNTS_PER_AGENT`) is refused before its
+sign-in is checked. Other agents' sign-in is not checked at pre-flight
+(`SIGN_IN_CHECKED`), so a signed-out Codex fails at its first attempt
+(`PR408-CODEX-SIGN-IN-NOT-PREFLIGHTED`).
 The legacy coordinator refuses any profiled pool.
 A rate limit moves a task between pools, and so between profiles. When a
 schema-4 worker's limit would defer its task and another pool of its agent is
