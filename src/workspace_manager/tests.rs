@@ -13598,15 +13598,61 @@ fn sampled_git_child_runs_the_program_it_is_given() {
     assert_eq!(command.get_program(), program.as_os_str());
 }
 
+/// The MSYS2 environment directories Git for Windows installs its real git
+/// under, any of which can be the `<prefix>` of `git --exec-path`.
+const MINGW_PREFIXES: [&str; 4] = ["mingw64", "ucrt64", "clangarm64", "mingw32"];
+
+/// Whether `program` is Git for Windows' real git, `<MinGW prefix>\bin\git.exe`,
+/// rather than a launcher. It splits on both `\` and `/` itself, not through
+/// [`Path`]'s separator, so a Windows path reads the same on every platform and
+/// the mixed separators `git --exec-path` leads to are accepted.
+fn is_mingw_real_git(program: &Path) -> bool {
+    let program = program.to_string_lossy();
+    let mut components = program.rsplit(['\\', '/']).filter(|part| !part.is_empty());
+    components.next() == Some("git.exe")
+        && components.next() == Some("bin")
+        && components.next().is_some_and(|prefix| {
+            MINGW_PREFIXES
+                .iter()
+                .any(|mingw| prefix.eq_ignore_ascii_case(mingw))
+        })
+}
+
+/// [`is_mingw_real_git`] accepts the real git under each MinGW prefix a run
+/// has printed, and refuses both Git for Windows launchers and `git` by name.
+#[test]
+fn sampled_git_real_git_check_accepts_mingw_prefixes_and_refuses_launchers() {
+    for real in [
+        r"C:\Program Files\Git\mingw64\bin\git.exe",
+        r"C:\Program Files\Git\ucrt64\bin\git.exe",
+        r"C:/Program Files/Git/ucrt64\bin\git.exe",
+    ] {
+        assert!(is_mingw_real_git(Path::new(real)), "{real} is the real git");
+    }
+    for launcher in [
+        r"C:\Program Files\Git\cmd\git.exe",
+        r"C:\Program Files\Git\bin\git.exe",
+        "git",
+    ] {
+        assert!(
+            !is_mingw_real_git(Path::new(launcher)),
+            "{launcher} is not the real git"
+        );
+    }
+}
+
 /// [`SampledChild::program`] is [`super::fixture::sampled_git`]'s: on
-/// Windows the real `mingw64\bin\git.exe`, and `git` by name elsewhere.
+/// Windows the real `<MinGW prefix>\bin\git.exe` (`mingw64`, or `ucrt64` on
+/// newer images), and `git` by name elsewhere.
 #[test]
 fn sampled_git_child_runs_the_resolved_real_git_on_windows() {
     let program = SampledChild::program();
     assert_eq!(program, super::fixture::sampled_git());
     if cfg!(windows) {
+        // The MinGW prefix varies by Git for Windows build (CI's hosted image used `ucrt64`);
+        // `cmd\git.exe` and the Git root's `bin\git.exe` are launchers and fail this check.
         assert!(
-            program.ends_with(Path::new("mingw64").join("bin").join("git.exe")),
+            is_mingw_real_git(program),
             "the census sampler runs {program:?}, not the real git"
         );
     } else {
@@ -14451,8 +14497,9 @@ struct SampledChild {
 impl SampledChild {
     /// The program the sampler runs: [`super::fixture::sampled_git`]'s
     /// `git`, as `fixture::KillableGitChild`'s is. On Windows that is the
-    /// real `mingw64\bin\git.exe` rather than Git for Windows' `cmd\git.exe`
-    /// launcher, whose kill would leave the real git running
+    /// real `<MinGW prefix>\bin\git.exe` (`mingw64`, or `ucrt64` on newer
+    /// images) rather than Git for Windows' `cmd\git.exe` launcher, whose
+    /// kill would leave the real git running
     /// (`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`); `git` by name everywhere else.
     ///
     /// It fails closed. `sampled_git` falls back to `git` when `git
@@ -14462,8 +14509,8 @@ impl SampledChild {
         let program = super::fixture::sampled_git();
         assert!(
             !cfg!(windows) || program != Path::new("git"),
-            "the census kill sampler needs Git for Windows' real mingw64\\bin\\git.exe, \
-             and `git --exec-path` did not lead to it: killing the cmd\\git.exe launcher \
+            "the census kill sampler needs Git for Windows' real <MinGW prefix>\\bin\\git.exe \
+             (mingw64, or ucrt64 on newer images), and `git --exec-path` did not lead to it: killing the cmd\\git.exe launcher \
              would leave the real git running (PR249-KILL-SAMPLER-WINDOWS-WRAPPER)"
         );
         program
