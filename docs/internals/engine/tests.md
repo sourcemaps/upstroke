@@ -3354,7 +3354,10 @@ pin and no copy exist; the checkout holds the three files byte for byte.
 `a_resume_over_a_filtered_output_refuses_saying_how_and_pins_it_once_the_attribute_is_gone`: the resume refuses as a
 resume refusal, not the bare Git error, naming the attempt, the filter, that nothing was discarded and what to do, and
 pins and copies nothing; the advice is then followed (the attribute file copied out and removed), the next resume
-completes, its kept pin holds the paid bytes, and its copy puts the pin back after `update-ref -d`.
+completes, its kept pin holds the paid bytes, and its copy puts the pin back after `update-ref -d`. The removal shown,
+here and in DF1R-1's test below, is for an untracked attribute file the worker wrote; a tracked `.gitattributes`
+deleted from the checkout still sets the filter, since `git check-attr` falls back to the index's copy, so a tracked one
+is edited to drop the attribute, not deleted.
 `no_engine_git_child_runs_the_filter_a_worker_attributes_its_output_to` (Unix, as the suite's other configured-command
 witnesses): a filter whose clean and smudge commands append to a marker, under a driver name of its own so that a
 filter configured outside the repository, such as Git LFS's, cannot stand in for it; `git hash-object` shows that Git
@@ -3377,7 +3380,27 @@ its copy puts the pin back. On Unix the filter's driver appends to a marker, wit
 control (`a_marking_filter`), and no Git child of the run or of any resume runs it; elsewhere no driver is configured,
 the refusal is the same and the marker is not checked. The words are checked last: the kept note, the refusal and the
 refusal after the move each name the attribute's removal after copying out anything to keep, and none offers to move
-the path out.
+the path out in any words: besides the withdrawn spelling, no word of them is a form of "move", nor "mv", "rename",
+"relocate" or "elsewhere", and none says "path out", "out of the checkout" or "out of this checkout" (F1R-3, so that a
+rewording such as "move the path out" is refused too).
+
+## `fn two_gated_tasks(repo: &Path) {`
+
+The tests of F1R-3 of the owner-session regression review of #331's F1 delta (`FUD-F1R-UNWITNESSEDARMS`): the arms of
+F1's claims that the four tests above leave unwitnessed. Each resume test has a listing that fails on the worker's
+filtered `paid.dat` and checks that the resume returns the listing's own error, the same as
+`Workspace::uncommitted_summary` returns for that checkout, rather than the one-attempt refusal, and that the checkout
+keeps the filtered output with no kept pin and no copy.
+`a_resume_with_no_attempt_in_flight_returns_the_failing_listings_own_error` cuts the filtered run's log before its
+`attempt_started`. `a_resume_with_two_attempts_in_flight_returns_the_failing_listings_own_error` seeds two independent
+tasks (`two_gated_tasks`), and since the legacy coordinator starts one attempt at a time, `a_second_attempt_in_flight`
+appends a copy of the run's one `attempt_started` naming the other task; it is red when the conversion's
+`let [attempt] =` becomes `let [attempt, ..] =`.
+`a_reviewed_candidate_whose_publication_and_kept_pin_fail_carries_no_advice` takes N2's moved-head arm and also plants
+a ref below the kept pin's name (`advance_the_branch_and_block_the_kept_pin_after_capture`), so that the publication
+refuses with `HEAD moved` and the kept pin fails too. No pin exists, the checkout keeps the output, and the kept note
+says the pin failed and carries none of N1's advice. It is red when `kept_on_error` appends the advice for a candidate
+as well.
 
 ## `fn a_legacy_run_under_an_inherited_selection_checks_its_review_input_at_the_selected_repository() {`
 
