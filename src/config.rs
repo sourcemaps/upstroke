@@ -160,6 +160,8 @@ struct RawKindRouting {
     timeout_secs: Option<u64>,
 
     enabled: Option<bool>,
+
+    cross_family: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -366,6 +368,8 @@ pub struct Config {
 
     pub review_enabled: bool,
 
+    pub review_cross_family: bool,
+
     pub review_pass_timeout: Duration,
 
     implementation_effort_override: Option<Effort>,
@@ -552,6 +556,7 @@ pub fn load_captured_with(
     let mut overrides = Vec::new();
     let mut review_tier: Option<Tier> = None;
     let mut review_enabled = true;
+    let mut review_cross_family = true;
     let mut review_pass_timeout = DEFAULT_REVIEW_PASS_TIMEOUT;
     let mut implementation_effort_override = None;
     let mut review_effort_override = None;
@@ -585,7 +590,8 @@ pub fn load_captured_with(
                         value.try_into().map_err(|e| UpstrokeError::Config {
                             path: repo_path.clone(),
                             message: format!(
-                                "routing entry `review`: {e} (expected `tier`, `timeout_secs`, or \
+                                "routing entry `review`: {e} (expected `tier`, `timeout_secs`, \
+                             `cross_family = false` to name no other-family reviewer, or \
                              `enabled = false` to run without review)"
                             ),
                         })?;
@@ -598,6 +604,7 @@ pub fn load_captured_with(
                         });
                     }
                     review_enabled = rr.enabled.unwrap_or(true);
+                    review_cross_family = rr.cross_family.unwrap_or(true);
                     review_tier = rr
                         .tier
                         .or_else(|| rr.chain.and_then(|c| c.first().copied()));
@@ -645,6 +652,14 @@ pub fn load_captured_with(
                     path: repo_path.clone(),
                     message: format!(
                         "[routing] `{key}`: enabled applies only to the `review` role"
+                    ),
+                });
+            }
+            if kr.cross_family.is_some() {
+                return Err(UpstrokeError::Config {
+                    path: repo_path.clone(),
+                    message: format!(
+                        "[routing] `{key}`: cross_family applies only to the `review` role"
                     ),
                 });
             }
@@ -797,6 +812,7 @@ pub fn load_captured_with(
         shell: engine.shell,
         review_tier,
         review_enabled,
+        review_cross_family,
         review_pass_timeout,
         implementation_effort_override,
         review_effort_override,
@@ -1310,6 +1326,65 @@ model = "claude-opus-4-8"
                 .to_string()
                 .contains("applies only to the `review` role"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn review_cross_family_defaults_on_parses_off_and_is_review_only() {
+        let mut warnings = Vec::new();
+        let off = scratch(
+            "crossfamilyoff.toml",
+            "[routing]\nreview = { cross_family = false }\n",
+        );
+        let cfg = load(Some(&off), &hermetic(), Some(&missing()), &mut warnings)
+            .expect("cross_family = false is accepted on review");
+        assert!(!cfg.review_cross_family);
+        assert!(cfg.review_enabled, "it narrows review, not disables it");
+
+        for (name, body) in [
+            (
+                "crossfamilyunset.toml",
+                "[routing]\nreview = { tier = \"frontier\" }\n",
+            ),
+            ("crossfamilynorouting.toml", "# nothing configured\n"),
+        ] {
+            let path = scratch(name, body);
+            let cfg =
+                load(Some(&path), &hermetic(), Some(&missing()), &mut warnings).expect("loads");
+            assert!(
+                cfg.review_cross_family,
+                "{name}: unset keeps today's rebind"
+            );
+        }
+
+        let task = scratch(
+            "taskcrossfamily.toml",
+            "[routing]\nfix = { chain = [\"frontier\"], cross_family = false }\n",
+        );
+        let error = load(Some(&task), &hermetic(), Some(&missing()), &mut warnings)
+            .expect_err("task routing must not silently ignore a review-only switch");
+        let message = error.to_string();
+        assert!(
+            message.contains("cross_family applies only to the `review` role"),
+            "{message}"
+        );
+        assert!(message.contains("`fix`"), "names the entry: {message}");
+
+        let misspelled = scratch(
+            "misspelledcrossfamily.toml",
+            "[routing]\nreview = { cross_familly = false }\n",
+        );
+        let error = load(
+            Some(&misspelled),
+            &hermetic(),
+            Some(&missing()),
+            &mut warnings,
+        )
+        .expect_err("an unknown review-routing key must not fall back to the rebind");
+        let message = error.to_string();
+        assert!(
+            message.contains("cross_family = false"),
+            "the hint names the accepted switch: {message}"
         );
     }
 

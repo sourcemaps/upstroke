@@ -223,6 +223,17 @@ task-kind entries below so a misplaced timeout is never ignored.
 §11.2 review, for plans where a frontier judgement per task costs more
 than the work it is judging.
 
+## `cross_family: Option<bool>,`
+
+`[routing] review = { cross_family = false }` — keep review, but name no
+other-family alternative for the tasks the primary reviewer's own model
+implemented (§11.3's opportunistic rebind). Before this key the only way
+to stop a run probing and needing the other family's CLI — say a Codex
+account out of capacity — was to turn review off entirely. Like
+`enabled`, it is accepted only on `review` and refused on a task-kind
+entry, so a misplaced switch is never silently ignored. A
+`second_opinion` override is an explicit request and is not affected.
+
 ## `#[derive(Debug, Default, Deserialize)]`
 
 `[pools.*]`, with each entry's byte offset kept.
@@ -535,6 +546,12 @@ default.
 ## `pub review_enabled: bool,`
 
 `[routing] review = { enabled = false }` opts out of review entirely.
+
+## `pub review_cross_family: bool,`
+
+`[routing] review = { cross_family = … }`, defaulting to `true` — today's
+rebind. `false` makes [`crate::review::plan_for`] name no alternative and
+warn once that the primary reviews its own model's work.
 
 ## `pub review_pass_timeout: Duration,`
 

@@ -302,10 +302,32 @@ at load), so this is belt-and-braces — but without a family there is no
 way to tell "different" from "same", and guessing is how a reviewer ends
 up quietly paired with itself.
 
-## `if let Some(warning) = resolved.self_review_warning(plan, chains, tier) {`
+## `let alternative = if cfg.review_cross_family {`
+
+`[routing] review = { cross_family = false }` names no alternative, which
+leaves the plan as [`ReviewPlan::drop_alternative`] would: `alternative`
+`None`, `alternative_available` `Some(false)`. Then
+[`ReviewPlan::agents`] — the set a schema-4 run probes before it commits
+anything — holds only the primary's agent (and any second opinion's).
+That is the point: when the other family's account is out of capacity,
+the operator can keep reviewing on one family rather than turning review
+off.
+
+The alternative is opportunistic, so switching it off is a warning and not
+a refusal. Exactly one warning is pushed, naming the primary: the
+catalog-miss warning is about choosing an alternative nobody wants here,
+and [`ReviewPlan::self_review_warning`] is skipped below because its
+remedy, installing the other family's CLI, does not apply to an operator who
+turned that reviewer off. The per-task `second_opinion` loop is not touched
+— an override's second opinion is an explicit request, still resolved
+from the primary's family and still refused when it cannot resolve.
+
+## `&& let Some(warning) = resolved.self_review_warning(plan, chains, tier)`
 
 The carried step-6 item, now visible: say when a task will be judged by
-the model that wrote it and nothing in this build can prevent it.
+the model that wrote it and nothing in this build can prevent it. Not
+said when the configuration turned the alternative off: the
+`cross_family = false` warning above already says it, once.
 
 ## `pub struct ReviewSubject<'a> {`
 

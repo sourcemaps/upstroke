@@ -68,7 +68,7 @@ from the repo's shape (`Cargo.toml`, `go.mod`, `package.json`) when unconfigured
 ```toml
 [routing]
 fix = { chain = ["small", "mid", "frontier"], attempts_per = 2 }
-review = { tier = "frontier", timeout_secs = 5400 }   # per pass; or { enabled = false }
+review = { tier = "frontier", timeout_secs = 5400 }   # per pass; cross_family = false: no other-family reviewer; or { enabled = false }
 
 [routing.effort]
 implementation = "xhigh"               # reasoning depth for every worker attempt
