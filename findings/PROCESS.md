@@ -559,7 +559,8 @@ Mechanics that are not optional, each of which has cost time:
 
 **Triaging a review.** *What a lane must fix before it may merge is `MAINTAINING.md`'s rule, not
 this one, and nothing here loosens it.* `MAINTAINING.md` sets a mandatory fix set per lane —
-the P3 findings lane is ready only on a `PASS`, the P1/P2 findings lane fixes P0–P2 and files P3,
+the P3 findings lane is ready with no P0–P2 and at most three unwitnessed P3s (a witnessed P3 is
+fixed), the P1/P2 findings lane fixes P0–P2 and files P3,
 feature and sweep work fixes P0–P1 and files P2 and P3 — and which of those a sweep branch selects
 is the open question in §9. On top of whatever that lane requires:
 
