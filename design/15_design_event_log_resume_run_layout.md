@@ -102,11 +102,11 @@ a plain `create_dir`, at whatever mode the process's umask gives it, and no mode
 is changed afterwards: what keeps it, and the files in it, from every other user
 is the private directory it is created in. So decide checks that directory at
 admission, before the reviewer's pre-flight, and again immediately before the
-claim and before each file is written, so no reviewer call sits between a check
-and the write it admits: it must be a real directory, read without following a
-link (a symlink, a file, or on Windows a reparse point at its name is refused),
-and on Unix it must belong to the user decide runs as (its effective uid) and
-grant group and other nothing (no bit of `077`). The claim must still be a real
+claim and before each file is written: it must be a real directory, read
+without following a link (a symlink, a file, or on Windows a reparse point at
+its name is refused), and on Unix it must belong to the user decide runs as
+(its effective uid) and grant group and other nothing (no bit of `077`). The
+claim must still be a real
 directory of that user before each file is written in it; its own mode is not
 checked. A run whose private directory fails at admission or at the claim is
 refused with nothing written and no agent asked; one that fails after the claim
@@ -117,6 +117,22 @@ run until a person closes the directory (`chmod 700`). On Windows std reads no
 owner and no access list, so only the directory check is made there: neither
 the private directory's owner nor its access list is checked, and it keeps the
 access the system gave it.
+
+**What the checks leave: the interval between a check and its create.** Each
+check reads a path, and the `create_dir` of the claim or the `create_new` of a
+file that it admits comes next and resolves the path again. Nothing runs
+between the two: no call, no read and no other write, and the raw output's and
+the proposal's checks are made once the reviewer's call has returned, so a
+change made while the call runs is seen and nothing is written into it. But the
+check and the create are two operations, and no handle on the directory is
+held from one to the other: a process that renames the private directory or
+the claim in that interval, and puts a link at its name, has the create follow
+the link. On Unix only the user decide runs as, or root, can rename the claim
+or anything else in the private directory, since the checks admit only a
+private directory of that user's closed to group and other; on Windows its
+access list is not checked. Whoever can write the private directory's parent
+can rename the directory itself, on any platform, and that parent is not
+checked (`PR435-CHECK-TO-CREATE-INTERVAL`).
 
 A proposal records the run, the question, the decider's agent, model and effort,
 `status` (`accepted` with the parsed `record`, or `refused` with a `reason`),

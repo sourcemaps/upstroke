@@ -55,17 +55,25 @@ agent is asked, in these steps:
 - `propose` refuses a question that binds an agent. A question id is never a file name, so it
   is not checked as one.
 - `admit` refuses a run recorded on the container runner, a run whose pools the credential
-  pre-flight a resume runs (`preflight::refuse_unusable_profiles`) refuses, a reviewer whose
+  pre-flight a run makes (`preflight::refuse_unusable_profiles`) refuses, a reviewer whose
   adapter does not claim every `Guarantee`, a `--max-cost-usd` that is not a positive number, a
   private directory `closed_private_dir` does not admit (the claim relies on it), and a private
-  directory no permission rule can name exactly.
+  directory no permission rule can name exactly. The pools it checks are the ones
+  `config::load_for_report` reads, the loader `upstroke capacity` reports with, not a resume's:
+  where the repository's or the machine's settings would refuse a run, it reads only their
+  `[routing.strategy]` and `[capacity]` beside the pools file, and `propose` drops the warning
+  that says so. So a malformed engine setting a resume's loader refuses does not refuse decide;
+  only those sections and the pools file failing to load does.
 - `unanswered` reads the question's answer file (`interaction::read_answer`), so a question a
   person has answered already is refused and never asked.
 - The recorded reviewer passes the pre-flight a run makes of each recorded agent
   (`preflight::certify_agent`, which `RunPreflight::certify` runs too): its CLI probed through
   the Runner behind the wrapper a resume installs over the runner its pre-flight probes through
   (`profiled::profiled_borrowing`, over `profiled`'s `Profiled`), so under the profile a resume
-  probes it under, and every account the pools file configures for its agent found signed in.
+  probes it under, and each account the pools file configures for its agent asked whether it is
+  signed in. Only an account reported signed out is refused: one whose CLI cannot say
+  (`AuthState::Unknown`) passes, as it passes a run's pre-flight, so the check is that no account
+  is known to be signed out, not that every one is known to be signed in.
 - `prepare` builds the command and refuses it unless it carries no environment overlay, its
   `--model` and `--effort` are exactly the recorded reviewer's, and `kept` finds every guarantee
   on the command and settings actually built. A claim is never enough on its own: the check
@@ -107,6 +115,11 @@ What this module never does, and the reasons:
   `a_driven_run_is_refused_before_anything_is_written_probed_or_asked`).
 
 Effects and their containment are stated in `effects/allowlist.toml`'s funnel row.
+
+The source carries this file's `Extended notes:` pointer and, of the comments
+`docs/internals/README.md` keeps at their site, the allowlist-placement marker above its
+`#![allow(clippy::disallowed_methods)]` and the `SAFETY:` obligation on `this_users`'s
+`libc::geteuid`. Every other comment of the module is here.
 
 ## `pub const INPUT_BOUND: usize = 64 * 1024;`
 
@@ -197,9 +210,11 @@ else holds never reaches it: `decide` could not take the lock.
 1. A run recorded on the container runner (`RunStarted4.runner.kind`). Decide starts its
    reviewer on this host only, which is not where that run's reviewers ran
    (`a_container_run_is_refused_before_anything_is_written_or_asked`).
-2. `preflight::refuse_unusable_profiles` over the pools file's pools and the recorded runner
-   policy, the credential check a resume of the run makes, in its words
+2. `preflight::refuse_unusable_profiles` over the pools `config::load_for_report` read and the
+   recorded runner policy, the credential check a run's pre-flight makes, in its words
    (`a_run_the_credential_preflight_refuses_is_refused_before_anything_is_written_or_asked`).
+   The check is a resume's; the pools it is handed are read as the capacity report reads them
+   (see `## Module`), so they can be read where a resume's loader refuses the settings.
 3. An adapter that does not claim every `Guarantee`, naming the ones it lacks.
 4. A `--max-cost-usd` that is zero, negative, infinite or not a number, which could be no call's
    ceiling (`a_cap_that_is_not_a_positive_number_of_dollars_is_refused_before_anything`).
@@ -268,11 +283,15 @@ holds the run, `observe` reads it as running; nothing here reads that flag.
 ## `fn parked(observed: &Observed, run: &str) -> Result<(), UpstrokeError> {`
 
 The run must be parked as the fold of its log reports it: `Observed::outcome`, the
-`run_finished` outcome the fold replayed, is `Parked`. An open question and a free lock are not
-that: a run interrupted with an open question and another runnable task has no recorded end,
-`status` calls it interrupted, and a resume would carry it on, so it is refused with nothing
-spent (`an_interrupted_run_with_an_open_question_is_refused_before_anything`). A run that ended
-complete, halted or over its budget is refused as well.
+`run_finished` outcome the fold replayed, is `Parked`. The fold keeps a `run_finished` outcome
+until a `run_resumed` clears it, so the run is parked when its log's last end records `parked` and
+no resume has begun since; a resume that began and was interrupted leaves no end. An open
+question and a free lock are not that: a run interrupted with an open question and another
+runnable task has no recorded end, `status` calls it interrupted, and a resume would carry it
+on, so it is refused with nothing spent
+(`an_interrupted_run_with_an_open_question_is_refused_before_anything`). A run that ended
+complete, halted or over its budget is refused as well. Each refusal names the end the log
+records, or that it records none.
 
 ## `fn propose(`
 
@@ -283,8 +302,9 @@ question that binds an agent is refused first; its id is never checked as a file
 is named after it. `admit` runs after the pools file is read. `unanswered` then refuses a question a person
 has answered, with nothing probed or claimed
 (`a_question_a_person_has_answered_is_refused_and_never_asked`). The recorded reviewer's
-pre-flight runs (`preflight::certify_agent`) and refuses a CLI that cannot be probed or an account
-that is signed out
+pre-flight runs (`preflight::certify_agent`) and refuses a CLI that cannot be probed, an account
+reported signed out, or a sign-in discovery that fails; an account whose sign-in its CLI cannot
+report passes
 (`the_recorded_reviewer_passes_the_runs_own_preflight_before_anything_is_written_or_asked`). The
 call is built and checked by `prepare`, with the allowance as its ceiling, before anything is
 written. `unanswered` reads the answer file again, immediately before `Claim::take` claims the
@@ -397,7 +417,9 @@ is refused with why; a settled call's reply is read by `check_reply`. A per-call
 one of the promises every decide call keeps (`Guarantee`), and a call that broke it is not
 accepted, so an overrun fails the command and is never reported as a success. A price at the
 ceiling is within it. A settled call above its ceiling stays settled, its price known and
-recorded (`a_last_call_above_its_ceiling_fails_the_command`).
+recorded (`a_last_call_above_its_ceiling_fails_the_command`). An unsettled call's reason is
+copied into the verdict, so the verdict owns its words and `returned` stays whole for the cost the
+proposal records.
 
 ## `fn ask(`
 
@@ -406,12 +428,15 @@ through the Runner as `CALL_ORDINAL`, and reads what it returned with `settle`, 
 with the bytes to save as its raw output (`Called`). It takes the `Call` by value: the command
 and workspace `prepare` checked move into the request, uncopied. A Runner error (the process could
 not be started, was cancelled, or ended in a way the Runner reports as an error) is a returned
-outcome too: its words stand in for the raw output, and it does not settle. Its one error is the
+outcome too: its words, copied, are both the raw output and the proposal's reason, and it does
+not settle. Its one error is the
 settings file's, before the call starts, so no agent was asked. The raw output used to be written
 here, and a write of it that failed lost what the call had returned; `propose` writes it now, and
-then the proposal, each through `Claim::write`, so each is written immediately after the check
-that admits it, and both checks are made once the call has returned: no reviewer call sits
-between a check and its write. A launcher killed mid-call returns nothing, and leaves the claim
+then the proposal, each through `Claim::write`, so each is created straight after the check that
+admits it, and both checks are made once the call has returned. The interval between a check and
+its create holds no call, read or other write, but it is still an interval: the check and the
+create are two operations on a path, and no handle is held across them (`Claim`, and design §15,
+`PR435-CHECK-TO-CREATE-INTERVAL`). A launcher killed mid-call returns nothing, and leaves the claim
 and the settings file in place; the run's lock is given back as the stack unwinds, or by the OS
 when the process dies
 (`the_run_is_claimed_in_its_private_directory_before_its_first_call_and_the_claim_outlives_an_interruption`).
@@ -480,12 +505,24 @@ immediately before it creates the file, so a claim replaced by a link, or a priv
 opened to its group, while the reviewer ran is seen and nothing is written into it
 (`a_claim_changed_while_the_reviewer_runs_is_not_written_into`).
 
+What the checks leave is the interval between each one and the create it admits: `take`'s
+`closed_private_dir` and its `create_dir`, and `admits` and `write_new`'s `File::create_new`.
+Nothing else runs in it, but each check reads a path with `symlink_metadata` and each create
+resolves the path again, with no handle held from one to the other, so a link put at the private
+directory's or the claim's name in that interval is followed by the create. On Unix only the
+user decide runs as, or root, can rename what is in a private directory the check admits; its
+parent is not checked, and whoever can write it can rename the private directory itself
+(`PR435-CHECK-TO-CREATE-INTERVAL`).
+
 ## `fn save(claim: &Claim, record: &SaveRecord<'_>) -> Result<(), UpstrokeError> {`
 
 The run's one proposal, `proposal.json`, created through `Claim::write`. It records the run, the
 question, the decider, `status` with its `record` or `reason`, the `cost_usd` reported, whether
 the call `settled`, its `ceiling_usd`, and `raw_output`, the raw output's fixed name `raw.out`,
-beside it in the claim, which names that file wherever the private directory is.
+beside it in the claim, which names that file wherever the private directory is. `SaveRecord`
+carries what it records: the question id, which is written inside the proposal and into no file
+name, and `ceiling_usd`, the call's own `--max-budget-usd`, the run's whole allowance for its one
+call.
 
 ## `fn unanswered(answers: &Path, asked: &OpenAsked) -> Result<(), UpstrokeError> {`
 
@@ -506,7 +543,16 @@ to the `normalized_plan_digest` the run recorded. No plan file of the checkout i
 file used to be forwarded when its bytes hashed to the run's `plan_hash`, but that hash,
 `ir::content_hash`, drops every `\r`, so a plan file given a paragraph break of two lone carriage
 returns hashed as the recorded plan and its edited bytes reached the reviewer; the read and its
-check are gone rather than guarded (`plan_with_an_added_paragraph_break_is_withheld`).
+check are gone rather than guarded (`plan_with_an_added_paragraph_break_is_withheld`). A plan
+file that differs from the recorded plan refuses nothing: its changed text is withheld, and the
+reviewer is still asked, with the task's text the run recorded. With the read gone there is no
+plan file read to bound either, which `PR435-PLAN-READ-BOUND` asked for.
+
+`question_text` writes the question as the prompt states it: its id, who raised it, its context
+and its options, numbered from 1, or a line saying it has none and the choice must be null.
+`bounded` and `section` cut each input to `INPUT_BOUND`. From the committed events,
+`last_failure` reads the newest settled attempt of the task that recorded a failure, and
+`earlier_answers` every answer the log records for the task, in order.
 
 ## `fn chosen_question(`
 
@@ -556,6 +602,16 @@ return, and a closing fence of its own must end it, on a line that is ```` ``` `
 inside the block is read as a fence, so the JSON may mention ```` ``` ```` or `~~~` in a string: a
 JSON string holds no raw line break, so no line of valid JSON is ```` ``` ```` alone
 (`a_fence_mentioned_inside_the_json_block_is_its_text_and_only_a_line_alone_closes_it`).
+
+`json_blocks` keeps, for the `json` block it is reading, its range and where the last of its text
+read so far ends, and gives each block it finishes as a `ParsedBlock` placed by `line_of`'s lines,
+counted from 1 with a line ending at each `\n`: `opened`, the line of its opening fence; `ended`,
+its last line, which is its closing fence's or, where the end of the reply or of a block around it
+ends it instead, the last line it holds; and `fenced_shut`, whether a closing fence of its own
+ends it, read as its last line coming after the line its text ends on. `fence_marker` finds three
+backticks (`FENCE`) or three tildes (`TILDE_FENCE`) anywhere in a line, and `no_fence_in`
+refuses the first line of a stretch outside the block that holds either, saying which side of
+the block it stands on. `REPLY_INFO` is the info string, `json`.
 
 The block used to be found by a walk over the reply's lines that trimmed each line before asking
 whether it was a fence. So a line indented four spaces, which Markdown reads as the text of an

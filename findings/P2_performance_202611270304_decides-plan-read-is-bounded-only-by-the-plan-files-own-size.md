@@ -8,8 +8,19 @@ reviewed_sha: 5ca9531f56e6eb0483bb43f6fb01e3672a0dab44
 location: src/decide.rs:613
 provenance: introduced_by_feature
 first_bad: introduced with `upstroke decide` on this branch (PR #435); the read is the same at 5ca9531f and after the round-two repair, where it is `recorded_plan` (src/decide.rs:800)
-guard: the next change to how `upstroke decide` reads the plan file (`recorded_plan` in src/decide.rs) or to `util::read_file_bounded`
+guard: the change that closes this finding: since 2026-11-27 `upstroke decide` reads no plan file (`recorded_plan` is gone from src/decide.rs), so nothing is left to bound
 ---
+
+## At this branch's head: the read is gone
+
+The narrowing of `upstroke decide` under the owner's decision of 2026-11-27 on item 52 removed
+the read this finding bounds, rather than bounding it. `recorded_plan` and its
+`util::read_file_bounded` call are gone from `src/decide.rs`: the prompt is built from the run's
+log and from the frozen plan `engine::topology::observe` reads and checks against the run's
+`normalized_plan_digest`, and no plan file of the checkout is opened. A plan file that differs
+from the recorded plan is withheld and the reviewer is still asked
+(`decide::tests::plan_with_an_added_paragraph_break_is_withheld`). So the sequence below no
+longer happens at the head; it is kept as it was found, and this file waits only to be closed.
 
 ## Failure sequence
 
@@ -63,10 +74,10 @@ either.
 
 ## What the change that takes this up should do
 
-- Bound the plan read by a fixed byte count of decide's own, independent of what the file says
-  about itself, and say in the prompt, as it already says of an edited plan, when the plan is
-  not forwarded because it is over that bound.
-- Keep the recorded-hash check whole: a plan is forwarded only when every one of its bytes was
-  read and hashes to the run's `plan_hash`, so the bound can only make decide forward less.
-- Make it observable with a test whose plan file is over the bound, asserting the prompt's
-  not-forwarded line, and a control at the bound that is forwarded.
+- Close this finding: with no plan file read, there is no read to bound, and
+  `plan_with_an_added_paragraph_break_is_withheld` holds that no byte of the checkout's plan file
+  reaches the reviewer.
+- Should a later change read a plan file again, bound that read by a fixed byte count of
+  decide's own, independent of what the file says about itself; forward a plan only when every
+  one of its bytes was read and is the plan the run recorded, so the bound can only make decide
+  forward less; and make it observable with a plan file over the bound beside a control at it.

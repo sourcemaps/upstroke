@@ -63,10 +63,10 @@ On Windows, Codex can review but not implement.
 
 `run` and `resume` exit `0` when the run is complete, `2` when it is parked on unanswered
 questions, `3` when it stopped at its budget (raise it and `resume`), and `1` when it halted or
-the command failed. A command-line usage error also exits `2`. `decide` exits `1` when it was
-refused or the reply was, after its report; it decides a run once, under the run's own lock, and
-runs only for a parked host run whose reviewer is Claude Code
-([design/18](design/18_design_cli_surface.md)).
+the command failed. A command-line usage error also exits `2`. `decide` exits `1` when it is
+refused or fails, and, after its report, when the reply was refused; it decides a run once, about
+one question, under the run's own lock, and runs only for a parked host run whose reviewer is
+Claude Code ([design/18](design/18_design_cli_surface.md)).
 
 A run has no budget unless you set `--budget` or `[budgets]`. A budget stops new work once the
 reported spend of finished work reaches it; work already started, and its reviews, can exceed it.

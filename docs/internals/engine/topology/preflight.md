@@ -488,9 +488,13 @@ one place the profile refusals are made, and both paths call it, as does
 So both paths refuse the same profiles in the same words. `upstroke decide`
 (`src/decide.rs`) is the one caller outside `engine`, which is why this is
 `pub(crate)`: before it writes anything or starts a recorded run's reviewer, it
-passes this function the pools file's pools, the run's recorded
-`RunStarted4.runner` and [`coordinator_environment`], so a run a resume would
-refuse here is refused there in the same words. Only the pools that
+passes this function the pools `config::load_for_report` read, the run's
+recorded `RunStarted4.runner` and [`coordinator_environment`], so a run a
+resume would refuse here is refused there in the same words. Those pools are
+read as `upstroke capacity` reads them, even where the settings beside them
+would refuse a resume before it reached this function, so a run a resume's
+loader refuses can still be checked here and admitted (`decide.md`). Only the
+pools that
 name a profile count (`ProfiledPool::of`). With none, it returns at once,
 reads no environment and leaves the run as it was before profiles existed.
 

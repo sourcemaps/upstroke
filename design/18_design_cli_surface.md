@@ -55,22 +55,31 @@ read-only, to propose an answer to the open question whose id is the one given, 
 byte (no case folding, no prefix). The run id is checked as a plain file-name component before
 any path is built from it. The command takes the run's own lock, the one `resume` takes, before
 the run is read, and holds it until the proposal is written or the command has failed, so no
-resume starts while it asks and nothing is asked of a run a coordinator holds. Nothing is written
-and no agent is asked when the run is unknown, held by something else, not schema 4, not parked
-as the fold of its log records it (an interrupted run with an open question is not parked), or
-records no primary reviewer; when the question is not open, chooses which agent runs a task (left
-to a person), or has an answer a person published already, whose answer the run applies; nor when
-its admission refuses it: a run recorded on the container runner, since the call starts on this
-host; a run whose pools the credential pre-flight of its resume refuses; a reviewer whose adapter
-cannot guarantee all of cost reporting in dollars, a dollar ceiling per call, no web access and
-the run's private directory being unreadable (Claude Code alone claims them; Copilot and Codex
-report no dollar cost); a `--max-cost-usd` that is not a positive number; a private directory
-that is not a real directory or, on Unix, is not the user's own and closed to group and other
-(§15: the claim relies on it); a private directory no
-permission rule can name exactly; and a reviewer that fails the pre-flight a run makes of each
-recorded agent (its CLI probed under the profile a resume's pre-flight probes it under, and every
-account its pools configure signed in). Whether a
-person has answered the question is read again immediately before the call. A claim admits
+resume starts while it asks and nothing is asked of a run a coordinator holds. It spends only on
+a parked run: one whose log's last end is a `run_finished` recording `parked`, with no
+`run_resumed` after it. Nothing is written and no agent is asked when the run is unknown, held by
+something else, not schema 4, or not parked so (a run interrupted while one task's question is
+open and another task is still runnable records no end, `status` reports it interrupted, and it
+is refused like a run that is still running or ended any other way), or records no primary
+reviewer; when the question is not open, chooses which agent runs a task (left to a person), or
+has an answer a person published already, whose answer the run applies; nor when its admission
+refuses it: a run recorded on the container runner, since the call starts on this host; a run
+whose pools the credential pre-flight refuses (each pool's credential profile, and a token in this
+process's environment that would override one, checked as a run's pre-flight checks them); a
+reviewer whose adapter cannot guarantee all of cost reporting in dollars, a dollar ceiling per
+call, no web access and the run's private directory being unreadable (Claude Code alone claims
+them; Copilot and Codex report no dollar cost); a `--max-cost-usd` that is not a positive number;
+a private directory that is not a real directory or, on Unix, is not the user's own and closed to
+group and other (§15: the claim relies on it); a private directory no permission rule can name
+exactly; and a reviewer that fails the pre-flight a run makes of each recorded agent: its CLI
+probed under the profile a resume's pre-flight probes it under, and refused when an account its
+pools configure is reported signed out. Neither pre-flight is stricter than a run's. The pools
+are read as `capacity` reads them: where the repository's or the machine's settings would refuse
+a run, only their `[routing.strategy]` and `[capacity]` are read beside the pools file and the
+rest is set aside unreported, so a setting a resume refuses does not refuse decide, which is
+refused only when those cannot be read. An account whose CLI cannot say whether it is signed in
+passes, as it passes a run's pre-flight. Whether a person has answered the question is read again
+immediately before the call. A claim admits
 nothing by itself: the call's command is checked as built, and is refused before it is written or
 started unless it carries no environment overlay, exactly the recorded reviewer's `--model` and
 the recorded review effort as `--effort`, `-p` with `--output-format json`, `--max-budget-usd` at
@@ -78,9 +87,10 @@ most the allowance, `--permission-mode dontAsk`, `--setting-sources ""`, `--stri
 and no flag besides the call's own, and settings that allow `Read`, `Glob` and `Grep` at most and
 deny `WebFetch`, `WebSearch`, and reads of `.upstroke/**` and of the run's private directory. The
 prompt is built from the run's own record alone, its log and its frozen plan, and no plan file of
-the checkout goes into it; the call starts in the checkout the command was run in, its environment
-composed for that checkout. Every refusal and configuration error the command prints is one line.
-A run
+the checkout goes into it: a plan file edited since the run started is not read, its changed text
+is withheld, and the reviewer is still asked, from the record. The call starts in the checkout the
+command was run in, its environment composed for that checkout. Every refusal and configuration
+error the command prints is one line. A run
 is decided once: immediately before its call the command claims it by creating `decide/` in the
 run's private directory exclusively (§15), and a run whose claim exists, complete, partial or
 anything else at that name, is refused, never adopted, with nothing written and no agent asked;
@@ -88,7 +98,8 @@ the claim is never removed, after a failure or an interruption included. That di
 run's one spending claim, and every copy of the checkout shares it, since each records the same
 private directory: a later decide of the run, of the same question or another, from this copy or
 any other, or one started beside it that loses the `create_dir`, is refused. Each file is
-written immediately after the check that admits it (§15). `--max-cost-usd`
+created straight after the check that admits it, with no call between them, though the check
+and the create are two operations on a path (§15 states what that leaves). `--max-cost-usd`
 (default 5) is the run's dollar allowance, and the one call's own `--max-budget-usd`, whole:
 nothing is subtracted from it. Only a clean, successful and priced call (exit 0 within its
 limits, an outcome the adapter reads as completed, a result that itself reports success,

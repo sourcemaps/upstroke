@@ -7,34 +7,36 @@
   question that chooses an agent is refused), checks the reply (one fenced `json` block and no
   three backticks or tildes on any line outside it, an offered option, guidance that never gives
   up), prints it and saves it in its claim of the run, `decide/` in the run's private directory,
-  as `proposal.json` beside the raw output; a refused reply makes it exit non-zero after the report, whose
-  exit says the reason is saved in the proposal. Its refusals and configuration errors are one
-  line each. It writes no
-  answer and replaces no file. The run id is checked as a plain id before any path is built from
-  it. The command holds the run's own lock, the one `resume` takes, from before the run is read
-  until the proposal is written or the command fails, so no resume starts while it asks and
-  nothing is asked of a run a coordinator holds; it asks only about a run whose log records it
-  parked, and refuses an interrupted one. A run is decided once: immediately before its one call
-  the command claims the run by creating `decide/` exclusively in the run's private directory,
-  which every copy of the checkout shares, and a run whose claim exists is refused with nothing
-  written; the claim stays after a failure or an interruption, and no other decide of the run,
-  from any copy, spends anything. The claim has no mode of its own, so on Unix the private
-  directory must be the user's own and closed to group and other, or the run is refused before
-  anything is written or asked; each file is written immediately after that check is made again.
-  The call is capped at the run's `--max-cost-usd`
+  as `proposal.json` beside the raw output; a refused reply makes it exit non-zero after the
+  report, whose exit says the reason is saved in the proposal. Its refusals and configuration
+  errors are one line each. It writes no answer and replaces no file. The run id is checked as a
+  plain id before any path is built from it. The command holds the run's own lock, the one
+  `resume` takes, from before the run is read until the proposal is written or the command fails,
+  so no resume starts while it asks and nothing is asked of a run a coordinator holds; it asks
+  only about a run whose log's last end records it parked, with no resume since, and refuses an
+  interrupted one. A run is decided once: immediately before its one call the command claims the
+  run by creating `decide/` exclusively in the run's private directory, which every copy of the
+  checkout shares, and a run whose claim exists is refused with nothing written; the claim stays
+  after a failure or an interruption, and no other decide of the run, from any copy, spends
+  anything. The claim has no mode of its own, so on Unix the private directory must be the user's
+  own and closed to group and other, or the run is refused before anything is written or asked;
+  each file is created straight after that check is made again, with no call between the two,
+  though they remain two operations on a path. The call is capped at the run's `--max-cost-usd`
   allowance (default 5), and only a clean, successful, priced call is settled, at its price: a
   result the reviewer marks as an error never settles. Any other outcome is saved as refused, and
   so is a call that reports more than its ceiling, which fails the command and says so. A write
   that fails after the call fails the command naming what the call cost, and is worded as a
-  write. It asks only a Claude Code reviewer of a host run, whose
-  pools pass the credential pre-flight a resume would run and whose CLI passes the probe and
-  sign-in checks a run makes of it, under the profile a resume probes it under, giving the call
-  the recorded model and review effort, the
-  allowance as its own `--max-budget-usd`, no web access, no read of the run's private directory
-  and no environment overlay, each checked on the command as built; any other run or command is
-  refused before anything is written or asked. A question a person has answered already, checked
-  at admission and again immediately before the call, is refused and never asked, and the prompt
-  holds only what the run recorded: no plan file of the checkout goes into it.
+  write. It asks only a Claude Code reviewer of a host run whose pools pass the credential
+  pre-flight a run makes, read as `upstroke capacity` reads them (so a setting a resume refuses
+  does not refuse decide), and whose CLI passes the probe and sign-in checks a run makes of it,
+  under the profile a resume probes it under: an account reported signed out is refused, and one
+  whose CLI cannot say passes, as it does for a run. It gives the call the recorded model and
+  review effort, the allowance as its own `--max-budget-usd`, no web access, no read of the run's
+  private directory and no environment overlay, each checked on the command as built; any other
+  run or command is refused before anything is written or asked. A question a person has answered
+  already, checked at admission and again immediately before the call, is refused and never
+  asked, and the prompt holds only what the run recorded: no plan file of the checkout goes into
+  it, so an edited one is withheld and the reviewer is still asked.
 - Capacity is now tracked for the machine rather than for a repository; `[capacity] scope = "repo"`
   or `upstroke capacity --scope repo` folds only this repository. Nothing routes on any of this yet.
   Only an attempt that passed, in a run of any schema, clears another run's rate limit on its pool,
