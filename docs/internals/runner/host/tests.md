@@ -3547,7 +3547,10 @@ also names the signal the commit ended by: `the commit failed, ended by signal
 N: ...`. It reads this through [`hook_commit_signal`] from
 `proc::test_support::last_reaped_signal`, which the funnel sets in test builds
 when it reaps the child. The leading explanation of the macOS red predicts one
-particular signal, and the number confirms or refutes it. The rest of this test
+particular signal. The number identifies the signal that ended the commit in
+one occurrence. It does not identify what sent that signal or why, since the
+same signal from another sender gives the same number. Establishing the sender
+and the cause would still need controlled variations. The rest of this test
 is unchanged: how the commit is launched, its control flow and its assertions.
 
 **Quarantined on macOS.** Since 2026-11-11, on the owner's decision of that

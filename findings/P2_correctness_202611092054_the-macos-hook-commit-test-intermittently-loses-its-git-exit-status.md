@@ -58,15 +58,18 @@ repair is included here, and the original failures are not regraded.
 
 ## Sightings and evidence, 2026-11-11
 
-The test failed in the macOS test job three times on 2026-11-11. Each failure was on a change that
+The test failed in the macOS test job six times on 2026-11-11. Each failure was on a change that
 touches nothing under `src/runner` or `src/agent`:
 
 - job 130375210731, run 42976030457, pull request #365;
 - job 130416735154, run 42988928017, the first merge-queue run of #365;
-- job 130469246954, pull request #367.
+- job 130469246954, run 43004727185, pull request #367;
+- run 43058994038, pull request #364, at `27ce7533`;
+- run 43059735704, pull request #363, at `5df9364c`;
+- run 43065890345, pull request #363, at `5bb6d4c2`.
 
-In the three jobs whose Git Trace2 dumps were read, the commit in the linked checkout ends 7 to
-10 milliseconds after its hook exits with code 0:
+The Git Trace2 timing was read for the first three only. In those three jobs, the commit in the
+linked checkout ends 7 to 10 milliseconds after its hook exits with code 0:
 
 | Hook `child_exit` | Last event of the commit |
 | --- | --- |
@@ -77,9 +80,15 @@ In the three jobs whose Git Trace2 dumps were read, the commit in the linked che
 None of the three traces has an `exit`, `atexit` or `signal` event. Every inner Git command the hook
 started exits 0. In the same runs the commit in the main checkout reaches `exit` code 0.
 
-By its code, the supervising funnel does not signal the group in this case: it kills the group only
-after the child is already reaped, or on a timeout, an output limit or a stop, and the failing
-output shows none of those.
+By its code, the supervising funnel does signal the group in this case, in this order. It first
+sees, without reaping the child, that the child has exited (`child_exited_unreaped`, which waits
+with `WNOWAIT`). It then runs `termination.finish()`, whose reaper sends `SIGKILL` to the group
+(`cleanup_reaper_group` in `src/agent/proc.rs`, near line 2915) and repeats it until no member is
+still running. Only then is the child reaped (`child.wait()`, near line 330) and, in test builds,
+its signal recorded. That `SIGKILL` cannot change the status of a child that has already exited.
+But the group is signalled, and any descendant of the commit still in it can be killed. The funnel
+also kills the group on a timeout, an output limit or a stop, and the failing output shows none of
+those.
 
 **Hypothesis, not established:** the commit's process group is hung up by the kernel under macOS's
 rule for an orphaned process group that holds a stopped member. Every supervised child's group
@@ -89,8 +98,16 @@ mechanism another open finding records,
 `findings/P2_correctness_202609281056_a-daemonizing-descendant-hangs-up-the-role-on-macos.md`. If
 it is right, the defect is in the supervising code and this test is a witness of it.
 
-What would settle it is the number of the signal that ends the commit. The hypothesis predicts 1,
-`SIGHUP`. A change made beside this one makes the test's failure message carry that number.
+The hypothesis predicts that the commit ends by signal 1, `SIGHUP`. A change made beside this one
+makes the test's failure message carry the number of the signal that ended the commit. That number
+does not settle the hypothesis. It establishes which signal ended the commit in the one occurrence
+it was read from. It does not establish who sent the signal or why: a `SIGHUP` from anything else
+gives the same number. Finding the sender and the cause would still need controlled variations.
+
+The owner decided on 2026-11-11 to quarantine this test on macOS (next section). For macOS only,
+until the repair, that decision supersedes the instruction above not to skip, weaken or
+automatically retry the assertion inside the test. It supersedes it for nothing else: on every
+other platform, and on macOS after the repair, that instruction stands as written.
 
 Nothing is repaired by this section.
 
