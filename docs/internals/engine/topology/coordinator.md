@@ -1977,14 +1977,31 @@ is appended per attempt and verification in flight at it, and `run_finished(Halt
 ST-17's budget stop under six seeds: after `budget_exceeded` nothing is admitted and nothing is
 cancelled, what was in flight settles naturally, and `run_finished(BudgetExceeded)` ends the log.
 
-## `mod interleaving` › `fn finalization_kill_matrix(halted: bool) {`
+## `mod interleaving` › `enum Parity {`
 
-ST-18 at width 3, one outcome per test —
-`a_concurrent_complete_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell`
-and its Halted twin — so libtest runs the two matrices side by side rather than one after the other. A
+Which part of a finalization kill matrix one test runs: the cells at the even indices of the list its
+reference run makes (`after_the_end`), or the cells at the odd ones. `first` is the part's first index,
+from which the matrix takes every second cell. `share_of` is how many cells of a list that long the
+part holds — the even part holds the one more when the count is odd — so the two parts' shares add up
+to the list. `name` is the part's word in the matrix's messages and in its export.
+
+## `mod interleaving` › `fn finalization_kill_matrix(halted: bool, parity: Parity) {`
+
+ST-18 at width 3, one outcome and one parity of its cells per test, so libtest runs the four parts
+side by side rather than one after another:
+
+- `a_concurrent_complete_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell_even_cells`
+- `a_concurrent_complete_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell_odd_cells`
+- `a_concurrent_halted_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell_even_cells`
+- `a_concurrent_halted_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell_odd_cells`
+
+Each part makes its own reference run. A
 Complete or a Halted run (seed 13 halts with two candidates queued) is finished once in this process,
-which lists the effect and run-directory cells its finalization consults after `run_finished`; then,
-for every cell, a child (`finalization_kill_child_at_width_three`) runs the same seed and dies by the
+which lists the effect and run-directory cells its finalization consults after `run_finished`, and
+every assertion on that run — its outcome, the state it settled to, at least six cells listed — is
+made in both parts of an outcome, whichever cells the part goes on to kill. Then,
+for every cell of the part (`Parity`: the cells at the even indices of that list, or at the odd ones),
+a child (`finalization_kill_child_at_width_three`) runs the same seed and dies by the
 kill at that cell, and this process adopts its directory and resumes it twice through the frozen
 recovery order. The first resume finalizes to the state the uninterrupted
 finalization left (report outcome, retained candidates, refs under the run namespace, worktrees, the
@@ -1992,6 +2009,21 @@ execution root); the second finds the report current, removes nothing and refuse
 appends, and planted answer files stay byte-identical. Every child's temporary directory is a guard the
 cell holds (`scaffold::child_temporary_of`, tag `tmp`, short for the Windows path budget), declared before
 the run it adopts, so the run is dropped first and the guard then reclaims what the child left.
+
+A cell keeps its index in the whole list wherever it is named: in the child's environment, in the
+handoff directory's tag, in the messages and in the export's `kills`. The seed fixes the list — every
+child must die where the reference run consulted its cell, which is asserted — so the two parts of an
+outcome list the same cells, and each ends by asserting that it killed its parity's share of them
+(`Parity::share_of`): between them the two kill every cell after `run_finished`, each once. The share
+is asserted and not a number, because the reference run's own assertion on the list is a floor of six;
+on Linux, when the parts were split, the Complete run listed twelve cells and the Halted run six, so
+the parts killed six and six, and three and three.
+A part's `seam/ST-18` export carries its own kills beside the length of the whole list
+(`cells_after_run_finished`) and which part it is (`part`).
+
+Until the parts were split, one test per outcome killed every cell, under these names without their
+`_even_cells` and `_odd_cells` suffixes; dated review records cite those names at the heads they
+measured.
 
 ## `mod tests` › `const REAPER_BOUND: Duration = Duration::from_secs(60);`
 
