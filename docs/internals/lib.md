@@ -32,8 +32,10 @@ ceiling — but nothing routes on any of it. Capacity-driven binding is v0.2.
 `capacity_planner` is the first, offline stage of §13's banked-grant
 planning. From readings, grant inventory, runnable demand and priorities
 that its caller supplies, it recommends redeeming, deferring or letting a
-reset grant expire. It reads, redeems and grants nothing, and nothing calls
-it yet.
+reset grant expire. Its `Ledger` simulates, from fixtures and a caller's
+clock, one grant's competing claims, reply and re-read beside the capacity
+permits issued to work. It reads, redeems and grants nothing, and nothing
+calls it yet.
 
 ## `#![forbid(non_local_definitions)]`
 

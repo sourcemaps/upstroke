@@ -1151,6 +1151,666 @@ fn whole_secs_up(value: f64) -> u64 {
     value.ceil() as u64
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RequestId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ClaimId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PermitId(pub u32);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantRef {
+    pub account: AccountId,
+    pub kind: GrantKind,
+    pub ends_at_unix: u64,
+}
+
+impl GrantRef {
+    fn names(&self, grant: &Grant) -> bool {
+        grant.kind == self.kind && grant.ends_at_unix == Some(self.ends_at_unix)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reply {
+    Accepted,
+    Refused,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantState {
+    Absent,
+    Banked {
+        resets_left: Option<u64>,
+    },
+    Reserved {
+        claim: ClaimId,
+        by: RequestId,
+        resets_left: Option<u64>,
+    },
+    Replied {
+        claim: ClaimId,
+        by: RequestId,
+        reply: Reply,
+        at_unix: u64,
+        resets_left: Option<u64>,
+    },
+    Spent {
+        claim: ClaimId,
+        by: RequestId,
+        observed_at_unix: u64,
+    },
+    Expired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refill {
+    At(u64),
+    Unreported,
+    AwaitingReRead,
+    Conflicting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowView {
+    pub used_percent: Option<f64>,
+    pub refill: Refill,
+    pub observed_at_unix: u64,
+    pub awaiting_re_read: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Blocked {
+    NoReading,
+    Conflicting,
+    Stale,
+    Refilled,
+    Insufficient { usable: f64 },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Permit {
+    pub request: RequestId,
+    pub draws: Vec<(WindowId, f64)>,
+    pub issued_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Snapshot {
+    pub readings: Vec<Reading>,
+    pub inventory: InventoryEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Work {
+    pub runs: Vec<Run>,
+    pub demand: Vec<Demand>,
+    pub priorities: Priorities,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Recommendation {
+    generation: u64,
+    at_unix: u64,
+    decision: Option<Decision>,
+}
+
+impl Recommendation {
+    #[must_use]
+    pub const fn decision(&self) -> Option<Decision> {
+        self.decision
+    }
+
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    Claim {
+        request: RequestId,
+        grant: GrantRef,
+        basis: Recommendation,
+    },
+    Reply {
+        claim: ClaimId,
+        reply: Reply,
+    },
+    Observe(Snapshot),
+    Permit {
+        request: RequestId,
+        draws: Vec<(WindowId, f64)>,
+    },
+    Release(PermitId),
+    Tick,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ignored {
+    Duplicate,
+    Stale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Refusal {
+    ClockBehind,
+    WrongGrant,
+    Held { by: RequestId },
+    Spent,
+    Expired,
+    Absent,
+    StaleBasis,
+    NotRecommended(Option<Decision>),
+    UnknownClaim,
+    InvalidDraw,
+    Blocked(WindowId, Blocked),
+    UnknownPermit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Observation {
+    pub adopted: usize,
+    pub repeated: usize,
+    pub delayed: usize,
+    pub conflicting: usize,
+    pub missing: usize,
+    pub rejected: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Transition {
+    Claimed(ClaimId),
+    Replied,
+    Observed(Observation),
+    Permitted(PermitId),
+    Released,
+    Ticked,
+    Ignored(Ignored),
+    Refused(Refusal),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Setup {
+    pub grant: GrantRef,
+    pub provider: Provider,
+    pub coverage: Option<BTreeMap<PlanId, BTreeSet<WindowId>>>,
+    pub stale_after_secs: u64,
+}
+
+enum Verdict {
+    Adopted,
+    Repeated,
+    Delayed,
+    Conflicting,
+    Missing,
+    Rejected,
+}
+
+#[derive(Debug, Clone)]
+pub struct Ledger {
+    setup: Setup,
+    now_unix: u64,
+    generation: u64,
+    readings: Vec<Reading>,
+    inventory: InventoryEvidence,
+    inventory_at: Option<u64>,
+    plan: Option<(u64, PlanId)>,
+    windows: BTreeMap<WindowId, WindowView>,
+    state: GrantState,
+    settle_after: Option<u64>,
+    claims: Vec<(ClaimId, RequestId)>,
+    permits: BTreeMap<PermitId, Permit>,
+    issued: u32,
+}
+
+impl Ledger {
+    #[must_use]
+    pub fn new(setup: Setup, now_unix: u64, initial: Snapshot) -> Self {
+        let mut ledger = Self {
+            setup,
+            now_unix,
+            generation: 0,
+            readings: Vec::new(),
+            inventory: InventoryEvidence::Unknown,
+            inventory_at: None,
+            plan: None,
+            windows: BTreeMap::new(),
+            state: GrantState::Absent,
+            settle_after: None,
+            claims: Vec::new(),
+            permits: BTreeMap::new(),
+            issued: 0,
+        };
+        ledger.observe(initial);
+        ledger.expire();
+        ledger
+    }
+
+    pub fn apply(&mut self, now_unix: u64, event: Event) -> Transition {
+        if now_unix < self.now_unix {
+            return Transition::Refused(Refusal::ClockBehind);
+        }
+        self.now_unix = now_unix;
+        self.expire();
+        let outcome = match event {
+            Event::Claim {
+                request,
+                grant,
+                basis,
+            } => self.claim(request, &grant, basis),
+            Event::Reply { claim, reply } => self.reply(claim, reply),
+            Event::Observe(snapshot) => Transition::Observed(self.observe(snapshot)),
+            Event::Permit { request, draws } => self.permit(request, draws),
+            Event::Release(permit) => match self.permits.remove(&permit) {
+                Some(_) => Transition::Released,
+                None => Transition::Refused(Refusal::UnknownPermit),
+            },
+            Event::Tick => Transition::Ticked,
+        };
+        self.expire();
+        outcome
+    }
+
+    #[must_use]
+    pub fn recommend(&self, work: &Work) -> Recommendation {
+        let input = Input {
+            now_unix: self.now_unix,
+            stale_after_secs: self.setup.stale_after_secs,
+            accounts: vec![Account {
+                id: self.setup.grant.account.clone(),
+                provider: self.setup.provider,
+                inventory: self.inventory.clone(),
+            }],
+            readings: self.readings.clone(),
+            runs: work.runs.clone(),
+            demand: work.demand.clone(),
+            priorities: work.priorities.clone(),
+        };
+        let position = match &self.inventory {
+            InventoryEvidence::Known(inventory) => inventory
+                .grants
+                .iter()
+                .position(|grant| self.setup.grant.names(grant)),
+            InventoryEvidence::Unknown => None,
+        };
+        let decision = plan(&input)
+            .into_iter()
+            .next()
+            .and_then(|planned| match planned.grants {
+                Grants::Decided(decisions) => {
+                    position.and_then(|index| decisions.get(index).copied())
+                }
+                Grants::Unknown(_) | Grants::KnownEmpty => None,
+            });
+        Recommendation {
+            generation: self.generation,
+            at_unix: self.now_unix,
+            decision,
+        }
+    }
+
+    pub fn usable(&self, window: WindowId) -> Result<f64, Blocked> {
+        let view = self.windows.get(&window).ok_or(Blocked::NoReading)?;
+        let used = view.used_percent.ok_or(Blocked::Conflicting)?;
+        if self.now_unix.saturating_sub(view.observed_at_unix) > self.setup.stale_after_secs {
+            return Err(Blocked::Stale);
+        }
+        if matches!(view.refill, Refill::At(at) if at <= self.now_unix) {
+            return Err(Blocked::Refilled);
+        }
+        let held: f64 = self
+            .permits
+            .values()
+            .flat_map(|permit| &permit.draws)
+            .filter(|(id, _)| *id == window)
+            .map(|(_, amount)| amount)
+            .sum();
+        Ok((FULL_PERCENT - used - held).max(0.0))
+    }
+
+    #[must_use]
+    pub const fn grant_state(&self) -> GrantState {
+        self.state
+    }
+
+    #[must_use]
+    pub fn claims(&self) -> &[(ClaimId, RequestId)] {
+        &self.claims
+    }
+
+    #[must_use]
+    pub const fn permits(&self) -> &BTreeMap<PermitId, Permit> {
+        &self.permits
+    }
+
+    #[must_use]
+    pub fn window(&self, window: WindowId) -> Option<&WindowView> {
+        self.windows.get(&window)
+    }
+
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn bump(&mut self) {
+        self.generation = self.generation.saturating_add(1);
+    }
+
+    fn next_id(&mut self) -> u32 {
+        self.issued = self.issued.saturating_add(1);
+        self.issued
+    }
+
+    fn expire(&mut self) {
+        if matches!(self.state, GrantState::Absent | GrantState::Banked { .. })
+            && self.now_unix >= self.setup.grant.ends_at_unix
+        {
+            self.state = GrantState::Expired;
+            self.bump();
+        }
+    }
+
+    fn claim(&mut self, request: RequestId, grant: &GrantRef, basis: Recommendation) -> Transition {
+        if *grant != self.setup.grant {
+            return Transition::Refused(Refusal::WrongGrant);
+        }
+        let resets_left = match self.state {
+            GrantState::Banked { resets_left } => resets_left,
+            GrantState::Reserved { by, .. } | GrantState::Replied { by, .. } => {
+                return Transition::Refused(Refusal::Held { by });
+            }
+            GrantState::Spent { .. } => return Transition::Refused(Refusal::Spent),
+            GrantState::Expired => return Transition::Refused(Refusal::Expired),
+            GrantState::Absent => return Transition::Refused(Refusal::Absent),
+        };
+        if basis.generation != self.generation
+            || self.now_unix.saturating_sub(basis.at_unix) > self.setup.stale_after_secs
+        {
+            return Transition::Refused(Refusal::StaleBasis);
+        }
+        if basis.decision != Some(Decision::Redeem) {
+            return Transition::Refused(Refusal::NotRecommended(basis.decision));
+        }
+        let claim = ClaimId(self.next_id());
+        self.claims.push((claim, request));
+        self.state = GrantState::Reserved {
+            claim,
+            by: request,
+            resets_left,
+        };
+        self.settle_after = None;
+        let touched: Vec<(WindowId, Schedule)> = self
+            .windows
+            .iter()
+            .filter_map(|(id, view)| self.touch(*id, view).map(|schedule| (*id, schedule)))
+            .collect();
+        for (id, schedule) in touched {
+            if let Some(view) = self.windows.get_mut(&id) {
+                view.awaiting_re_read = true;
+                if schedule == Schedule::MustReRead {
+                    view.refill = Refill::AwaitingReRead;
+                }
+            }
+        }
+        self.bump();
+        Transition::Claimed(claim)
+    }
+
+    fn touch(&self, window: WindowId, view: &WindowView) -> Option<Schedule> {
+        let restarts = match self.effect_on(window) {
+            Effect::Unchanged => false,
+            Effect::RestoresBelowFull => !view.used_percent.is_some_and(|used| used <= 0.0),
+            Effect::Restores | Effect::Unknown => true,
+        };
+        restarts.then(|| schedule_after_restore(self.setup.provider, window))
+    }
+
+    fn effect_on(&self, window: WindowId) -> Effect {
+        let rule = effect(self.setup.provider, self.setup.grant.kind, window);
+        let Some(coverage) = &self.setup.coverage else {
+            return rule;
+        };
+        match self.plan.as_ref().and_then(|(_, plan)| coverage.get(plan)) {
+            Some(covered) if covered.contains(&window) => rule,
+            Some(_) => Effect::Unchanged,
+            None => Effect::Unknown,
+        }
+    }
+
+    fn reply(&mut self, claim: ClaimId, reply: Reply) -> Transition {
+        if !self.claims.iter().any(|(id, _)| *id == claim) {
+            return Transition::Refused(Refusal::UnknownClaim);
+        }
+        match self.state {
+            GrantState::Reserved {
+                claim: held,
+                by,
+                resets_left,
+            } if held == claim => {
+                self.state = GrantState::Replied {
+                    claim,
+                    by,
+                    reply,
+                    at_unix: self.now_unix,
+                    resets_left,
+                };
+                self.settle_after = Some(self.now_unix);
+                self.bump();
+                Transition::Replied
+            }
+            GrantState::Replied {
+                claim: held,
+                by,
+                reply: first,
+                at_unix,
+                resets_left,
+            } if held == claim => {
+                if reply == Reply::Accepted && first != Reply::Accepted {
+                    self.state = GrantState::Replied {
+                        claim,
+                        by,
+                        reply,
+                        at_unix,
+                        resets_left,
+                    };
+                }
+                Transition::Ignored(Ignored::Duplicate)
+            }
+            _ => Transition::Ignored(Ignored::Stale),
+        }
+    }
+
+    fn observe(&mut self, snapshot: Snapshot) -> Observation {
+        let mut seen = Observation::default();
+        let mut readings = snapshot.readings;
+        readings.sort_by_key(|reading| reading.observed_at_unix);
+        let mut verdicts: Vec<Verdict> = readings
+            .into_iter()
+            .map(|reading| self.adopt(reading))
+            .collect();
+        verdicts.push(self.take_inventory(snapshot.inventory));
+        for verdict in verdicts {
+            let counter = match verdict {
+                Verdict::Adopted => &mut seen.adopted,
+                Verdict::Repeated => &mut seen.repeated,
+                Verdict::Delayed => &mut seen.delayed,
+                Verdict::Conflicting => &mut seen.conflicting,
+                Verdict::Missing => &mut seen.missing,
+                Verdict::Rejected => &mut seen.rejected,
+            };
+            *counter += 1;
+        }
+        if seen.adopted + seen.conflicting > 0 {
+            self.bump();
+        }
+        seen
+    }
+
+    fn adopt(&mut self, reading: Reading) -> Verdict {
+        if reading.account != self.setup.grant.account || reading.observed_at_unix > self.now_unix {
+            return Verdict::Rejected;
+        }
+        let Some(used) = reading.used_percent else {
+            return Verdict::Missing;
+        };
+        let at = reading.observed_at_unix;
+        if !(0.0..=FULL_PERCENT).contains(&used)
+            || reading.resets_at_unix.is_some_and(|resets| resets <= at)
+        {
+            return Verdict::Rejected;
+        }
+        let refill = reading
+            .resets_at_unix
+            .map_or(Refill::Unreported, Refill::At);
+        if let Some(view) = self.windows.get_mut(&reading.window) {
+            let too_early = self.settle_after.is_none_or(|after| at < after);
+            if at < view.observed_at_unix
+                || (view.awaiting_re_read && (too_early || at <= view.observed_at_unix))
+            {
+                return Verdict::Delayed;
+            }
+            if at == view.observed_at_unix {
+                if view.used_percent.map(f64::to_bits) == Some(used.to_bits())
+                    && view.refill == refill
+                {
+                    return Verdict::Repeated;
+                }
+                view.used_percent = None;
+                view.refill = Refill::Conflicting;
+                self.readings.push(reading);
+                return Verdict::Conflicting;
+            }
+        }
+        if let Some(plan) = &reading.plan {
+            if self.plan.as_ref().is_none_or(|(seen, _)| *seen <= at) {
+                self.plan = Some((at, plan.clone()));
+            }
+        }
+        self.windows.insert(
+            reading.window,
+            WindowView {
+                used_percent: Some(used),
+                refill,
+                observed_at_unix: at,
+                awaiting_re_read: false,
+            },
+        );
+        self.readings.push(reading);
+        Verdict::Adopted
+    }
+
+    fn take_inventory(&mut self, evidence: InventoryEvidence) -> Verdict {
+        let InventoryEvidence::Known(inventory) = evidence else {
+            return Verdict::Missing;
+        };
+        let at = inventory.observed_at_unix;
+        if at > self.now_unix {
+            return Verdict::Rejected;
+        }
+        match self.inventory_at {
+            Some(seen) if at < seen => return Verdict::Delayed,
+            Some(seen) if at == seen => {
+                if matches!(&self.inventory, InventoryEvidence::Known(held) if *held == inventory) {
+                    return Verdict::Repeated;
+                }
+                self.inventory = InventoryEvidence::Unknown;
+                return Verdict::Conflicting;
+            }
+            Some(_) | None => {}
+        }
+        self.inventory_at = Some(at);
+        self.inventory = InventoryEvidence::Known(inventory);
+        self.settle();
+        Verdict::Adopted
+    }
+
+    fn settle(&mut self) {
+        let InventoryEvidence::Known(inventory) = &self.inventory else {
+            return;
+        };
+        let observed_at_unix = inventory.observed_at_unix;
+        let count = inventory
+            .grants
+            .iter()
+            .find(|grant| self.setup.grant.names(grant))
+            .map(|grant| grant.resets_left);
+        self.state = match self.state {
+            GrantState::Absent | GrantState::Banked { .. } => count
+                .map_or(GrantState::Absent, |resets_left| GrantState::Banked {
+                    resets_left,
+                }),
+            GrantState::Replied {
+                claim,
+                by,
+                reply,
+                at_unix,
+                resets_left,
+            } if observed_at_unix >= at_unix => match count {
+                None => GrantState::Spent {
+                    claim,
+                    by,
+                    observed_at_unix,
+                },
+                Some(Some(after)) if resets_left.is_some_and(|before| after < before) => {
+                    GrantState::Spent {
+                        claim,
+                        by,
+                        observed_at_unix,
+                    }
+                }
+                Some(Some(after)) if resets_left == Some(after) && reply != Reply::Accepted => {
+                    GrantState::Banked {
+                        resets_left: Some(after),
+                    }
+                }
+                Some(_) => self.state,
+            },
+            state => state,
+        };
+    }
+
+    fn permit(&mut self, request: RequestId, draws: Vec<(WindowId, f64)>) -> Transition {
+        let mut needed: BTreeMap<WindowId, f64> = BTreeMap::new();
+        for (window, amount) in &draws {
+            if !(amount.is_finite() && *amount > 0.0) {
+                return Transition::Refused(Refusal::InvalidDraw);
+            }
+            *needed.entry(*window).or_insert(0.0) += amount;
+        }
+        if needed.is_empty() {
+            return Transition::Refused(Refusal::InvalidDraw);
+        }
+        for (window, amount) in needed {
+            match self.usable(window) {
+                Ok(usable) if usable + PERCENT_EPSILON >= amount => {}
+                Ok(usable) => {
+                    return Transition::Refused(Refusal::Blocked(
+                        window,
+                        Blocked::Insufficient { usable },
+                    ));
+                }
+                Err(blocked) => return Transition::Refused(Refusal::Blocked(window, blocked)),
+            }
+        }
+        let id = PermitId(self.next_id());
+        self.permits.insert(
+            id,
+            Permit {
+                request,
+                draws,
+                issued_at_unix: self.now_unix,
+            },
+        );
+        Transition::Permitted(id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2122,5 +2782,1087 @@ mod tests {
         reversed.readings.reverse();
         assert_eq!(plan(&scene), plan(&scene));
         assert_eq!(plan(&scene), plan(&reversed));
+    }
+
+    const MIN: u64 = 60;
+    const ALPHA: RequestId = RequestId(1);
+    const BETA: RequestId = RequestId(2);
+    const FABLE: WindowId = WindowId::Model(ModelLabel::Fable);
+
+    fn seen(
+        plan: &str,
+        window: WindowId,
+        observed_at_unix: u64,
+        used: f64,
+        resets_at_unix: Option<u64>,
+    ) -> Reading {
+        Reading {
+            account: operator(),
+            plan: Some(plan_id(plan)),
+            window,
+            observed_at_unix,
+            used_percent: Some(used),
+            resets_at_unix,
+            source: Source::Fixture,
+        }
+    }
+
+    fn claude_at(
+        window: WindowId,
+        observed_at_unix: u64,
+        used: f64,
+        resets: Option<u64>,
+    ) -> Reading {
+        seen("max", window, observed_at_unix, used, resets)
+    }
+
+    fn counted(kind: GrantKind, ends_in: u64, resets_left: u64) -> Grant {
+        Grant {
+            resets_left: Some(resets_left),
+            ..usable(kind, ends_in)
+        }
+    }
+
+    fn inventory_at(observed_at_unix: u64, grants: Vec<Grant>) -> InventoryEvidence {
+        InventoryEvidence::Known(Inventory {
+            observed_at_unix,
+            grants,
+            source: Source::Fixture,
+        })
+    }
+
+    fn work(items: &[(&str, u32, f64)]) -> Work {
+        let scene = input(Provider::Claude, Vec::new(), Vec::new(), items);
+        Work {
+            runs: scene.runs,
+            demand: scene.demand,
+            priorities: scene.priorities,
+        }
+    }
+
+    fn grant_ref(kind: GrantKind, ends_in: u64) -> GrantRef {
+        GrantRef {
+            account: operator(),
+            kind,
+            ends_at_unix: NOW + ends_in,
+        }
+    }
+
+    fn ledger(
+        provider: Provider,
+        coverage: Option<BTreeMap<PlanId, BTreeSet<WindowId>>>,
+        kind: GrantKind,
+        ends_in: u64,
+        readings: Vec<Reading>,
+    ) -> Ledger {
+        Ledger::new(
+            Setup {
+                grant: grant_ref(kind, ends_in),
+                provider,
+                coverage,
+                stale_after_secs: HOUR,
+            },
+            NOW,
+            Snapshot {
+                readings,
+                inventory: inventory(vec![usable(kind, ends_in)]),
+            },
+        )
+    }
+
+    fn claude_ledger(kind: GrantKind, ends_in: u64, readings: Vec<Reading>) -> Ledger {
+        ledger(Provider::Claude, None, kind, ends_in, readings)
+    }
+
+    fn codex_ledger(kind: GrantKind, ends_in: u64, readings: Vec<Reading>) -> Ledger {
+        ledger(
+            Provider::Codex,
+            Some(codex_covered_allowances()),
+            kind,
+            ends_in,
+            readings,
+        )
+    }
+
+    fn claim_of(request: RequestId, kind: GrantKind, ends_in: u64, basis: Recommendation) -> Event {
+        Event::Claim {
+            request,
+            grant: grant_ref(kind, ends_in),
+            basis,
+        }
+    }
+
+    fn weekly_claim(request: RequestId, basis: Recommendation) -> Event {
+        claim_of(request, GrantKind::Weekly, 240 * HOUR, basis)
+    }
+
+    fn reply(claim: ClaimId, reply: Reply) -> Event {
+        Event::Reply { claim, reply }
+    }
+
+    fn permit(request: RequestId, draws: &[(WindowId, f64)]) -> Event {
+        Event::Permit {
+            request,
+            draws: draws.to_vec(),
+        }
+    }
+
+    fn observe(readings: Vec<Reading>, inventory: InventoryEvidence) -> Event {
+        Event::Observe(Snapshot {
+            readings,
+            inventory,
+        })
+    }
+
+    fn claimed(transition: Transition) -> ClaimId {
+        match transition {
+            Transition::Claimed(claim) => claim,
+            other => panic!("expected a claim, got {other:?}"),
+        }
+    }
+
+    fn view(ledger: &Ledger, window: WindowId) -> WindowView {
+        *ledger.window(window).expect("the window has been observed")
+    }
+
+    fn clock(ledger: &Ledger, window: WindowId) -> (Refill, bool) {
+        let view = view(ledger, window);
+        (view.refill, view.awaiting_re_read)
+    }
+
+    fn insufficient(window: WindowId, usable: f64) -> Transition {
+        Transition::Refused(Refusal::Blocked(window, Blocked::Insufficient { usable }))
+    }
+
+    fn observed(observation: Observation) -> Transition {
+        Transition::Observed(observation)
+    }
+
+    /// Claude session window exhausted until 2 h; weekly at 30% and slow.
+    fn claude_session_exhausted() -> Vec<Reading> {
+        let mut readings = burning(WindowId::Session, 100.0, 25.0, 2 * HOUR);
+        readings.extend(burning(WindowId::Weekly, 30.0, 1.0, 72 * HOUR));
+        readings
+    }
+
+    /// Claude Fable model window exhausted until 50 h; session at 20% and weekly at 40%.
+    fn claude_fable_exhausted() -> Vec<Reading> {
+        let mut readings = burning(FABLE, 100.0, 10.0, 50 * HOUR);
+        readings.extend(burning(WindowId::Session, 20.0, 10.0, 3 * HOUR));
+        readings.extend(burning(WindowId::Weekly, 40.0, 1.0, 72 * HOUR));
+        readings
+    }
+
+    /// Weekly exhausted until 72 h and session exhausted until 2 h, with the Fable model window
+    /// exhausted until 30 h as well when asked.
+    fn crossed(with_fable: bool) -> Vec<Reading> {
+        let mut readings = burning(WindowId::Weekly, 100.0, 2.0, 72 * HOUR);
+        readings.extend(burning(WindowId::Session, 100.0, 25.0, 2 * HOUR));
+        if with_fable {
+            readings.extend(burning(FABLE, 100.0, 5.0, 30 * HOUR));
+        }
+        readings
+    }
+
+    /// The allowances a Codex banked reset covers, per plan. Synthetic: no Codex reader exists.
+    fn codex_covered_allowances() -> BTreeMap<PlanId, BTreeSet<WindowId>> {
+        BTreeMap::from([
+            (plan_id("plus"), BTreeSet::from([WindowId::Weekly])),
+            (
+                plan_id("pro"),
+                BTreeSet::from([WindowId::Session, WindowId::Weekly]),
+            ),
+        ])
+    }
+
+    fn on_plan(plan: &str, readings: Vec<Reading>) -> Vec<Reading> {
+        readings
+            .into_iter()
+            .map(|reading| Reading {
+                plan: Some(plan_id(plan)),
+                source: Source::Fixture,
+                ..reading
+            })
+            .collect()
+    }
+
+    /// Codex `pro`: the covered session allowance is spent until 3 h; the covered weekly
+    /// allowance is full and refills in 100 h.
+    fn codex_pro_session_spent() -> Vec<Reading> {
+        let mut readings = burning(WindowId::Session, 100.0, 25.0, 3 * HOUR);
+        readings.extend(burning(WindowId::Weekly, 0.0, 0.0, 100 * HOUR));
+        on_plan("pro", readings)
+    }
+
+    /// Codex `plus`: the covered weekly allowance is spent until 50 h; the session window, at
+    /// 30% and refilling in 2 h, is not covered on this plan.
+    fn codex_plus_weekly_spent() -> Vec<Reading> {
+        let mut readings = burning(WindowId::Weekly, 100.0, 2.0, 50 * HOUR);
+        readings.extend(burning(WindowId::Session, 30.0, 10.0, 2 * HOUR));
+        on_plan("plus", readings)
+    }
+
+    /// The weekly window read at 0% on its fixed boundary and the weekly grant's count at 0.
+    fn spent_weekly(at: u64) -> Vec<Reading> {
+        vec![claude_at(WindowId::Weekly, at, 0.0, Some(NOW + 72 * HOUR))]
+    }
+
+    fn weekly_count(at: u64, resets_left: u64) -> InventoryEvidence {
+        inventory_at(
+            at,
+            vec![counted(GrantKind::Weekly, 240 * HOUR, resets_left)],
+        )
+    }
+
+    fn orders(events: usize) -> Vec<Vec<usize>> {
+        let Some(last) = events.checked_sub(1) else {
+            return vec![Vec::new()];
+        };
+        let mut all = Vec::new();
+        for shorter in orders(last) {
+            for slot in 0..=shorter.len() {
+                let mut order = shorter.clone();
+                order.insert(slot, last);
+                all.push(order);
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn two_requests_from_one_reading_reserve_the_grant_once_in_either_order() {
+        let job = work(&one_job(4.0));
+        for (winner, loser) in [(ALPHA, BETA), (BETA, ALPHA)] {
+            let mut ledger = claude_ledger(GrantKind::Weekly, 240 * HOUR, exhausted_weekly());
+            let winner_basis = ledger.recommend(&job);
+            let loser_basis = ledger.recommend(&job);
+            assert_eq!(winner_basis, loser_basis);
+            assert_eq!(winner_basis.decision(), Some(Decision::Redeem));
+            let other_account = Event::Claim {
+                request: loser,
+                grant: GrantRef {
+                    account: AccountId("other".to_owned()),
+                    ..grant_ref(GrantKind::Weekly, 240 * HOUR)
+                },
+                basis: loser_basis,
+            };
+            assert_eq!(
+                ledger.apply(NOW + MIN, other_account),
+                Transition::Refused(Refusal::WrongGrant)
+            );
+            let claim = claimed(ledger.apply(NOW + MIN, weekly_claim(winner, winner_basis)));
+            assert_eq!(
+                ledger.apply(NOW + MIN, weekly_claim(loser, loser_basis)),
+                Transition::Refused(Refusal::Held { by: winner })
+            );
+            let again = ledger.recommend(&job);
+            assert_eq!(again.decision(), Some(Decision::Redeem));
+            assert_eq!(
+                ledger.apply(NOW + 2 * MIN, weekly_claim(loser, again)),
+                Transition::Refused(Refusal::Held { by: winner })
+            );
+            assert_eq!(
+                ledger.apply(NOW + 3 * MIN, reply(claim, Reply::Accepted)),
+                Transition::Replied
+            );
+            assert_eq!(
+                ledger.apply(NOW + 3 * MIN, reply(claim, Reply::Accepted)),
+                Transition::Ignored(Ignored::Duplicate)
+            );
+            assert_eq!(
+                ledger.apply(NOW + 3 * MIN, reply(ClaimId(99), Reply::Accepted)),
+                Transition::Refused(Refusal::UnknownClaim)
+            );
+            assert_eq!(ledger.usable(WindowId::Weekly), Ok(0.0));
+            let after = NOW + 4 * MIN;
+            let report = observe(spent_weekly(after), weekly_count(after, 0));
+            assert_eq!(
+                ledger.apply(after, report.clone()),
+                observed(Observation {
+                    adopted: 2,
+                    ..Observation::default()
+                })
+            );
+            let generation = ledger.generation();
+            assert_eq!(
+                ledger.apply(after, report),
+                observed(Observation {
+                    repeated: 2,
+                    ..Observation::default()
+                })
+            );
+            assert_eq!(ledger.generation(), generation);
+            assert_eq!(
+                ledger.grant_state(),
+                GrantState::Spent {
+                    claim,
+                    by: winner,
+                    observed_at_unix: after
+                }
+            );
+            assert_eq!(ledger.usable(WindowId::Weekly), Ok(100.0));
+            let late = ledger.recommend(&job);
+            assert_eq!(
+                late.decision(),
+                Some(Decision::LetExpire(ExpireReason::NotRedeemable))
+            );
+            assert_eq!(
+                ledger.apply(after, weekly_claim(loser, late)),
+                Transition::Refused(Refusal::Spent)
+            );
+            assert_eq!(ledger.claims(), &[(claim, winner)]);
+            assert!(ledger.permits().is_empty());
+        }
+    }
+
+    #[test]
+    fn every_interleaving_of_two_claims_their_replies_and_a_snapshot_uses_the_grant_at_most_once() {
+        let job = work(&one_job(4.0));
+        let all = orders(5);
+        assert_eq!(all.len(), 120);
+        for order in all {
+            let mut ledger = claude_ledger(GrantKind::Weekly, 240 * HOUR, exhausted_weekly());
+            let basis = ledger.recommend(&job);
+            let mut observed_at = NOW;
+            for (step, event) in (1_u64..).zip(&order) {
+                let now = NOW + step * MIN;
+                let event = match event {
+                    0 => weekly_claim(ALPHA, basis),
+                    1 => weekly_claim(BETA, basis),
+                    2 => reply(ClaimId(1), Reply::Accepted),
+                    3 => reply(ClaimId(1), Reply::Unknown),
+                    _ => {
+                        observed_at = now;
+                        observe(spent_weekly(now), weekly_count(now, 0))
+                    }
+                };
+                ledger.apply(now, event);
+            }
+            let at = |event: usize| {
+                order
+                    .iter()
+                    .position(|applied| *applied == event)
+                    .expect("every event is applied")
+            };
+            let first_claim = at(0).min(at(1));
+            let winner = if at(0) < at(1) { ALPHA } else { BETA };
+            let claimed = first_claim < at(4);
+            let replied = [at(2), at(3)]
+                .into_iter()
+                .filter(|position| *position > first_claim)
+                .min();
+            let spent = claimed && replied.is_some_and(|position| position < at(4));
+            let expected_claims = if claimed {
+                vec![(ClaimId(1), winner)]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(ledger.claims(), expected_claims.as_slice(), "{order:?}");
+            match ledger.grant_state() {
+                GrantState::Spent {
+                    claim,
+                    by,
+                    observed_at_unix,
+                } => {
+                    assert!(spent, "{order:?}");
+                    assert_eq!(
+                        (claim, by, observed_at_unix),
+                        (ClaimId(1), winner, observed_at)
+                    );
+                }
+                GrantState::Reserved { by, .. } | GrantState::Replied { by, .. } => {
+                    assert!(claimed && !spent, "{order:?}");
+                    assert_eq!(by, winner);
+                }
+                GrantState::Banked { resets_left } => {
+                    assert!(!claimed, "{order:?}");
+                    assert_eq!(resets_left, Some(0));
+                }
+                other => panic!("{order:?} left {other:?}"),
+            }
+            let pending = claimed && !spent;
+            assert_eq!(
+                ledger.usable(WindowId::Weekly),
+                Ok(if pending { 0.0 } else { 100.0 }),
+                "{order:?}"
+            );
+            assert_eq!(view(&ledger, WindowId::Weekly).awaiting_re_read, pending);
+            assert!(ledger.permits().is_empty());
+        }
+    }
+
+    #[test]
+    fn an_acknowledgment_alone_credits_nothing_and_never_releases_the_grant() {
+        let job = work(&one_job(4.0));
+        let mut ledger = claude_ledger(GrantKind::Weekly, 240 * HOUR, exhausted_weekly());
+        let basis = ledger.recommend(&job);
+        let claim = claimed(ledger.apply(NOW + MIN, weekly_claim(ALPHA, basis)));
+        ledger.apply(NOW + 2 * MIN, reply(claim, Reply::Accepted));
+        let weekly_work = [(WindowId::Session, 5.0), (WindowId::Weekly, 5.0)];
+        assert_eq!(
+            ledger.apply(NOW + 2 * MIN, permit(BETA, &weekly_work)),
+            insufficient(WindowId::Weekly, 0.0)
+        );
+        let after = NOW + 3 * MIN;
+        ledger.apply(
+            after,
+            observe(
+                vec![claude_at(
+                    WindowId::Session,
+                    after,
+                    11.0,
+                    Some(NOW + 4 * HOUR),
+                )],
+                weekly_count(after, 1),
+            ),
+        );
+        assert!(matches!(
+            ledger.grant_state(),
+            GrantState::Replied {
+                reply: Reply::Accepted,
+                by: ALPHA,
+                ..
+            }
+        ));
+        let again = ledger.recommend(&job);
+        assert_eq!(
+            ledger.apply(after, weekly_claim(BETA, again)),
+            Transition::Refused(Refusal::Held { by: ALPHA })
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Weekly),
+            (Refill::At(NOW + 72 * HOUR), true)
+        );
+        assert_eq!(
+            ledger.apply(after, permit(BETA, &weekly_work)),
+            insufficient(WindowId::Weekly, 0.0)
+        );
+        assert_eq!((ledger.claims().len(), ledger.permits().len()), (1, 0));
+    }
+
+    #[test]
+    fn a_failed_or_unknown_reply_releases_the_grant_only_on_an_observed_unchanged_count() {
+        let job = work(&one_job(4.0));
+        let mut ledger = claude_ledger(GrantKind::Weekly, 240 * HOUR, exhausted_weekly());
+        let basis = ledger.recommend(&job);
+        let first = claimed(ledger.apply(NOW + MIN, weekly_claim(ALPHA, basis)));
+        assert_eq!(
+            ledger.apply(NOW + 2 * MIN, reply(first, Reply::Refused)),
+            Transition::Replied
+        );
+        let basis = ledger.recommend(&job);
+        assert_eq!(
+            ledger.apply(NOW + 2 * MIN, weekly_claim(BETA, basis)),
+            Transition::Refused(Refusal::Held { by: ALPHA })
+        );
+        assert_eq!(
+            ledger.apply(
+                NOW + 3 * MIN,
+                observe(Vec::new(), weekly_count(NOW + MIN, 1))
+            ),
+            observed(Observation {
+                adopted: 1,
+                ..Observation::default()
+            })
+        );
+        assert!(matches!(
+            ledger.grant_state(),
+            GrantState::Replied { by: ALPHA, .. }
+        ));
+        let after = NOW + 4 * MIN;
+        ledger.apply(
+            after,
+            observe(
+                vec![
+                    claude_at(WindowId::Weekly, after, 100.0, Some(NOW + 72 * HOUR)),
+                    claude_at(WindowId::Session, after, 11.0, Some(NOW + 4 * HOUR)),
+                ],
+                weekly_count(after, 1),
+            ),
+        );
+        assert_eq!(
+            ledger.grant_state(),
+            GrantState::Banked {
+                resets_left: Some(1)
+            }
+        );
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(0.0));
+        assert_eq!(
+            ledger.apply(after, reply(first, Reply::Accepted)),
+            Transition::Ignored(Ignored::Stale)
+        );
+        let basis = ledger.recommend(&job);
+        assert_eq!(basis.decision(), Some(Decision::Redeem));
+        let second = claimed(ledger.apply(after + MIN, weekly_claim(BETA, basis)));
+        ledger.apply(after + 2 * MIN, reply(second, Reply::Unknown));
+        let spent_at = after + 3 * MIN;
+        ledger.apply(
+            spent_at,
+            observe(spent_weekly(spent_at), weekly_count(spent_at, 0)),
+        );
+        assert_eq!(
+            ledger.grant_state(),
+            GrantState::Spent {
+                claim: second,
+                by: BETA,
+                observed_at_unix: spent_at
+            }
+        );
+        assert_eq!(ledger.claims(), &[(first, ALPHA), (second, BETA)]);
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(100.0));
+    }
+
+    #[test]
+    fn a_claude_session_grant_restores_the_session_and_leaves_its_five_hour_clock_unknown() {
+        let mut ledger = claude_ledger(GrantKind::Session, 48 * HOUR, claude_session_exhausted());
+        let basis = ledger.recommend(&work(&one_job(3.0)));
+        assert_eq!(basis.decision(), Some(Decision::Redeem));
+        assert_eq!(ledger.usable(WindowId::Session), Ok(0.0));
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(70.0));
+        let claim = claimed(ledger.apply(
+            NOW + MIN,
+            claim_of(ALPHA, GrantKind::Session, 48 * HOUR, basis),
+        ));
+        assert_eq!(
+            clock(&ledger, WindowId::Session),
+            (Refill::AwaitingReRead, true)
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Weekly),
+            (Refill::At(NOW + 72 * HOUR), false)
+        );
+        ledger.apply(NOW + 2 * MIN, reply(claim, Reply::Accepted));
+        let job = [(WindowId::Session, 10.0), (WindowId::Weekly, 1.0)];
+        assert_eq!(
+            ledger.apply(NOW + 3 * MIN, permit(ALPHA, &job)),
+            insufficient(WindowId::Session, 0.0)
+        );
+        let after = NOW + 4 * MIN;
+        let report = observe(
+            vec![
+                claude_at(WindowId::Session, after, 0.0, None),
+                claude_at(WindowId::Weekly, after, 30.0, Some(NOW + 72 * HOUR)),
+            ],
+            inventory_at(after, vec![counted(GrantKind::Session, 48 * HOUR, 0)]),
+        );
+        assert_eq!(
+            ledger.apply(after, report),
+            observed(Observation {
+                adopted: 3,
+                ..Observation::default()
+            })
+        );
+        assert_eq!(
+            ledger.grant_state(),
+            GrantState::Spent {
+                claim,
+                by: ALPHA,
+                observed_at_unix: after
+            }
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Session),
+            (Refill::Unreported, false)
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Weekly),
+            (Refill::At(NOW + 72 * HOUR), false)
+        );
+        assert_eq!(ledger.usable(WindowId::Session), Ok(100.0));
+        assert!(matches!(
+            ledger.apply(after, permit(ALPHA, &job)),
+            Transition::Permitted(_)
+        ));
+        assert_eq!(ledger.usable(WindowId::Session), Ok(90.0));
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(69.0));
+        assert_eq!((ledger.claims().len(), ledger.permits().len()), (1, 1));
+    }
+
+    #[test]
+    fn a_claude_weekly_grant_keeps_the_fixed_weekly_boundary() {
+        let mut ledger = claude_ledger(GrantKind::Weekly, 240 * HOUR, exhausted_weekly());
+        let basis = ledger.recommend(&work(&one_job(4.0)));
+        assert_eq!(basis.decision(), Some(Decision::Redeem));
+        let claim = claimed(ledger.apply(NOW + MIN, weekly_claim(ALPHA, basis)));
+        assert_eq!(
+            clock(&ledger, WindowId::Weekly),
+            (Refill::At(NOW + 72 * HOUR), true)
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Session),
+            (Refill::At(NOW + 4 * HOUR), false)
+        );
+        ledger.apply(NOW + 2 * MIN, reply(claim, Reply::Accepted));
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(0.0));
+        let after = NOW + 3 * MIN;
+        let mut readings = spent_weekly(after);
+        readings.push(claude_at(
+            WindowId::Session,
+            after,
+            11.0,
+            Some(NOW + 4 * HOUR),
+        ));
+        ledger.apply(after, observe(readings, weekly_count(after, 0)));
+        assert!(matches!(
+            ledger.grant_state(),
+            GrantState::Spent { by: ALPHA, .. }
+        ));
+        assert_eq!(
+            clock(&ledger, WindowId::Weekly),
+            (Refill::At(NOW + 72 * HOUR), false)
+        );
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(100.0));
+        assert_eq!(ledger.usable(WindowId::Session), Ok(89.0));
+    }
+
+    #[test]
+    fn a_claude_fable_grant_restores_model_and_session_and_reads_back_the_weekly_share() {
+        let mut ledger = claude_ledger(GrantKind::Fable, 48 * HOUR, claude_fable_exhausted());
+        let basis = ledger.recommend(&work(&one_job(4.0)));
+        assert_eq!(basis.decision(), Some(Decision::Redeem));
+        let claim = claimed(ledger.apply(
+            NOW + MIN,
+            claim_of(ALPHA, GrantKind::Fable, 48 * HOUR, basis),
+        ));
+        let windows = [FABLE, WindowId::Session, WindowId::Weekly];
+        assert_eq!(
+            windows.map(|window| clock(&ledger, window)),
+            [
+                (Refill::AwaitingReRead, true),
+                (Refill::AwaitingReRead, true),
+                (Refill::At(NOW + 72 * HOUR), true),
+            ]
+        );
+        ledger.apply(NOW + 2 * MIN, reply(claim, Reply::Accepted));
+        assert_eq!(
+            windows.map(|window| ledger.usable(window)),
+            [Ok(0.0), Ok(80.0), Ok(60.0)]
+        );
+        let after = NOW + 3 * MIN;
+        let fable_refresh = after + 7 * 24 * HOUR;
+        ledger.apply(
+            after,
+            observe(
+                vec![
+                    claude_at(FABLE, after, 0.0, Some(fable_refresh)),
+                    claude_at(WindowId::Session, after, 0.0, None),
+                    claude_at(WindowId::Weekly, after, 36.0, Some(NOW + 72 * HOUR)),
+                ],
+                inventory_at(after, vec![counted(GrantKind::Fable, 48 * HOUR, 0)]),
+            ),
+        );
+        assert!(matches!(
+            ledger.grant_state(),
+            GrantState::Spent { by: ALPHA, .. }
+        ));
+        assert_eq!(
+            windows.map(|window| clock(&ledger, window)),
+            [
+                (Refill::At(fable_refresh), false),
+                (Refill::Unreported, false),
+                (Refill::At(NOW + 72 * HOUR), false),
+            ]
+        );
+        assert_eq!(
+            windows.map(|window| ledger.usable(window)),
+            [Ok(100.0), Ok(100.0), Ok(64.0)]
+        );
+    }
+
+    #[test]
+    fn a_restarted_codex_allowance_adopts_its_reported_refresh_and_a_full_one_keeps_its_own() {
+        let mut ledger = codex_ledger(GrantKind::Full, 48 * HOUR, codex_pro_session_spent());
+        let basis = ledger.recommend(&work(&one_job(4.0)));
+        assert_eq!(basis.decision(), Some(Decision::Redeem));
+        let claim = claimed(ledger.apply(
+            NOW + MIN,
+            claim_of(ALPHA, GrantKind::Full, 48 * HOUR, basis),
+        ));
+        assert_eq!(
+            clock(&ledger, WindowId::Session),
+            (Refill::AwaitingReRead, true)
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Weekly),
+            (Refill::At(NOW + 100 * HOUR), false)
+        );
+        ledger.apply(NOW + 2 * MIN, reply(claim, Reply::Accepted));
+        assert_eq!(ledger.usable(WindowId::Session), Ok(0.0));
+        let after = NOW + 3 * MIN;
+        let refresh = after + 5 * HOUR;
+        ledger.apply(
+            after,
+            observe(
+                vec![
+                    seen("pro", WindowId::Session, after, 0.0, Some(refresh)),
+                    seen("pro", WindowId::Weekly, after, 0.0, Some(NOW + 100 * HOUR)),
+                ],
+                inventory_at(after, vec![counted(GrantKind::Full, 48 * HOUR, 0)]),
+            ),
+        );
+        assert!(matches!(
+            ledger.grant_state(),
+            GrantState::Spent { by: ALPHA, .. }
+        ));
+        assert_eq!(
+            clock(&ledger, WindowId::Session),
+            (Refill::At(refresh), false)
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Weekly),
+            (Refill::At(NOW + 100 * HOUR), false)
+        );
+        assert_eq!(ledger.usable(WindowId::Session), Ok(100.0));
+        let later = after + MIN;
+        let revised = refresh + 10 * MIN;
+        assert_eq!(
+            ledger.apply(
+                later,
+                observe(
+                    vec![seen("pro", WindowId::Session, later, 2.0, Some(revised))],
+                    InventoryEvidence::Unknown,
+                ),
+            ),
+            observed(Observation {
+                adopted: 1,
+                missing: 1,
+                ..Observation::default()
+            })
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Session),
+            (Refill::At(revised), false)
+        );
+        assert_eq!(ledger.usable(WindowId::Session), Ok(98.0));
+        assert_eq!(
+            ledger.apply(
+                later,
+                observe(
+                    vec![seen(
+                        "pro",
+                        WindowId::Session,
+                        later,
+                        2.0,
+                        Some(revised + MIN)
+                    )],
+                    InventoryEvidence::Unknown,
+                ),
+            ),
+            observed(Observation {
+                conflicting: 1,
+                missing: 1,
+                ..Observation::default()
+            })
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Session),
+            (Refill::Conflicting, false)
+        );
+        assert_eq!(ledger.usable(WindowId::Session), Err(Blocked::Conflicting));
+        assert_eq!(
+            ledger.apply(later, permit(ALPHA, &[(WindowId::Session, 1.0)])),
+            Transition::Refused(Refusal::Blocked(WindowId::Session, Blocked::Conflicting))
+        );
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(100.0));
+        let settled = later + MIN;
+        ledger.apply(
+            settled,
+            observe(
+                vec![seen("pro", WindowId::Session, settled, 3.0, Some(revised))],
+                InventoryEvidence::Unknown,
+            ),
+        );
+        assert_eq!(ledger.usable(WindowId::Session), Ok(97.0));
+        assert_eq!(ledger.claims().len(), 1);
+    }
+
+    #[test]
+    fn an_unrelated_codex_window_stays_independent_through_delayed_and_missing_reports() {
+        let mut ledger = codex_ledger(GrantKind::Full, 48 * HOUR, codex_plus_weekly_spent());
+        let basis = ledger.recommend(&work(&one_job(4.0)));
+        assert_eq!(basis.decision(), Some(Decision::Redeem));
+        let claim = claimed(ledger.apply(
+            NOW + MIN,
+            claim_of(ALPHA, GrantKind::Full, 48 * HOUR, basis),
+        ));
+        assert_eq!(
+            clock(&ledger, WindowId::Weekly),
+            (Refill::AwaitingReRead, true)
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Session),
+            (Refill::At(NOW + 2 * HOUR), false)
+        );
+        assert!(matches!(
+            ledger.apply(NOW + MIN, permit(BETA, &[(WindowId::Session, 20.0)])),
+            Transition::Permitted(_)
+        ));
+        assert_eq!(ledger.usable(WindowId::Session), Ok(50.0));
+        ledger.apply(NOW + 3 * MIN, reply(claim, Reply::Accepted));
+        let early = NOW + 2 * MIN;
+        assert_eq!(
+            ledger.apply(
+                NOW + 4 * MIN,
+                observe(
+                    vec![seen(
+                        "plus",
+                        WindowId::Weekly,
+                        early,
+                        0.0,
+                        Some(early + 7 * 24 * HOUR)
+                    )],
+                    inventory_at(early, vec![counted(GrantKind::Full, 48 * HOUR, 0)]),
+                ),
+            ),
+            observed(Observation {
+                adopted: 1,
+                delayed: 1,
+                ..Observation::default()
+            })
+        );
+        assert!(matches!(
+            ledger.grant_state(),
+            GrantState::Replied { by: ALPHA, .. }
+        ));
+        assert_eq!(
+            clock(&ledger, WindowId::Weekly),
+            (Refill::AwaitingReRead, true)
+        );
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(0.0));
+        let after = NOW + 5 * MIN;
+        let unreported = Reading {
+            used_percent: None,
+            ..seen("plus", WindowId::Weekly, after, 0.0, None)
+        };
+        assert_eq!(
+            ledger.apply(
+                after,
+                observe(
+                    vec![
+                        unreported,
+                        seen("plus", WindowId::Session, after, 33.0, Some(NOW + 2 * HOUR)),
+                    ],
+                    inventory_at(after, vec![counted(GrantKind::Full, 48 * HOUR, 0)]),
+                ),
+            ),
+            observed(Observation {
+                adopted: 2,
+                missing: 1,
+                ..Observation::default()
+            })
+        );
+        assert_eq!(
+            ledger.grant_state(),
+            GrantState::Spent {
+                claim,
+                by: ALPHA,
+                observed_at_unix: after
+            }
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Weekly),
+            (Refill::AwaitingReRead, true)
+        );
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(0.0));
+        assert_eq!(ledger.usable(WindowId::Session), Ok(47.0));
+        let reported = NOW + 6 * MIN;
+        let refresh = reported + 7 * 24 * HOUR;
+        ledger.apply(
+            reported,
+            observe(
+                vec![seen("plus", WindowId::Weekly, reported, 0.0, Some(refresh))],
+                InventoryEvidence::Unknown,
+            ),
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Weekly),
+            (Refill::At(refresh), false)
+        );
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(100.0));
+        let refilled = NOW + 2 * HOUR + MIN;
+        ledger.apply(
+            refilled,
+            observe(
+                vec![seen(
+                    "plus",
+                    WindowId::Session,
+                    refilled,
+                    0.0,
+                    Some(NOW + 7 * HOUR),
+                )],
+                InventoryEvidence::Unknown,
+            ),
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Session),
+            (Refill::At(NOW + 7 * HOUR), false)
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Weekly),
+            (Refill::At(refresh), false)
+        );
+        assert_eq!(ledger.usable(WindowId::Weekly), Err(Blocked::Stale));
+        assert_eq!(ledger.usable(WindowId::Session), Ok(80.0));
+        assert_eq!((ledger.claims().len(), ledger.permits().len()), (1, 1));
+    }
+
+    #[test]
+    fn crossed_weekly_model_and_short_windows_block_otherwise_useful_work() {
+        let job = work(&one_job(4.0));
+        let sonnet_work = [(WindowId::Session, 10.0), (WindowId::Weekly, 2.0)];
+        let fable_work = [
+            (WindowId::Session, 10.0),
+            (WindowId::Weekly, 2.0),
+            (FABLE, 5.0),
+        ];
+
+        let mut all_three = claude_ledger(GrantKind::Weekly, 240 * HOUR, crossed(true));
+        let basis = all_three.recommend(&job);
+        assert_eq!(basis.decision(), Some(Decision::Unknown(Undecided::Effect)));
+        assert_eq!(
+            all_three.apply(NOW + MIN, weekly_claim(ALPHA, basis)),
+            Transition::Refused(Refusal::NotRecommended(basis.decision()))
+        );
+        assert_eq!(
+            all_three.apply(NOW + MIN, permit(ALPHA, &sonnet_work)),
+            insufficient(WindowId::Session, 0.0)
+        );
+
+        let mut short_and_weekly = claude_ledger(GrantKind::Weekly, 240 * HOUR, crossed(false));
+        let basis = short_and_weekly.recommend(&job);
+        assert_eq!(
+            basis.decision(),
+            Some(Decision::Defer {
+                until_unix: NOW + 2 * HOUR
+            })
+        );
+        assert_eq!(
+            short_and_weekly.apply(NOW + MIN, weekly_claim(ALPHA, basis)),
+            Transition::Refused(Refusal::NotRecommended(basis.decision()))
+        );
+
+        let mut model_only = claude_ledger(GrantKind::Weekly, 240 * HOUR, claude_fable_exhausted());
+        let basis = model_only.recommend(&job);
+        assert_eq!(basis.decision(), Some(Decision::Unknown(Undecided::Effect)));
+        assert!(matches!(
+            model_only.apply(NOW + MIN, permit(ALPHA, &sonnet_work)),
+            Transition::Permitted(_)
+        ));
+        assert_eq!(
+            model_only.apply(NOW + MIN, permit(BETA, &fable_work)),
+            insufficient(FABLE, 0.0)
+        );
+        for ledger in [&all_three, &short_and_weekly, &model_only] {
+            assert!(ledger.claims().is_empty());
+            assert!(matches!(
+                ledger.grant_state(),
+                GrantState::Banked {
+                    resets_left: Some(1)
+                }
+            ));
+        }
+        assert_eq!(model_only.permits().len(), 1);
+    }
+
+    #[test]
+    fn waiting_out_a_deferral_turns_it_into_a_redemption_of_useful_work() {
+        let job = work(&one_job(4.0));
+        let mut ledger = claude_ledger(GrantKind::Weekly, 240 * HOUR, crossed(false));
+        let early = ledger.recommend(&job);
+        let until = NOW + 2 * HOUR;
+        assert_eq!(
+            early.decision(),
+            Some(Decision::Defer { until_unix: until })
+        );
+        assert_eq!(
+            ledger.apply(NOW + MIN, weekly_claim(ALPHA, early)),
+            Transition::Refused(Refusal::NotRecommended(early.decision()))
+        );
+        let after = until + MIN;
+        ledger.apply(
+            after,
+            observe(
+                vec![
+                    claude_at(WindowId::Session, until, 0.0, Some(until + 5 * HOUR)),
+                    claude_at(WindowId::Session, after, 0.0, Some(until + 5 * HOUR)),
+                    claude_at(WindowId::Weekly, after, 100.0, Some(NOW + 72 * HOUR)),
+                ],
+                inventory_at(after, vec![usable(GrantKind::Weekly, 240 * HOUR)]),
+            ),
+        );
+        assert_eq!(
+            ledger.apply(after, weekly_claim(ALPHA, early)),
+            Transition::Refused(Refusal::StaleBasis)
+        );
+        let late = ledger.recommend(&job);
+        assert_eq!(late.decision(), Some(Decision::Redeem));
+        let claim = claimed(ledger.apply(after, weekly_claim(ALPHA, late)));
+        ledger.apply(after + MIN, reply(claim, Reply::Accepted));
+        let spent_at = after + 2 * MIN;
+        let mut readings = spent_weekly(spent_at);
+        readings.push(claude_at(
+            WindowId::Session,
+            spent_at,
+            0.0,
+            Some(until + 5 * HOUR),
+        ));
+        ledger.apply(spent_at, observe(readings, weekly_count(spent_at, 0)));
+        assert!(matches!(
+            ledger.grant_state(),
+            GrantState::Spent { by: ALPHA, .. }
+        ));
+        assert!(matches!(
+            ledger.apply(
+                spent_at,
+                permit(ALPHA, &[(WindowId::Session, 20.0), (WindowId::Weekly, 8.0)])
+            ),
+            Transition::Permitted(_)
+        ));
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(92.0));
+        assert_eq!(ledger.usable(WindowId::Session), Ok(80.0));
+        assert_eq!((ledger.claims().len(), ledger.permits().len()), (1, 1));
+    }
+
+    #[test]
+    fn an_expiring_banked_grant_takes_away_no_existing_quota() {
+        let mut ledger = claude_ledger(GrantKind::Weekly, 30 * MIN, filling_weekly(72 * HOUR));
+        let draws = [(WindowId::Session, 10.0), (WindowId::Weekly, 5.0)];
+        let Transition::Permitted(issued) = ledger.apply(NOW + MIN, permit(ALPHA, &draws)) else {
+            panic!("the observed balance covers the work");
+        };
+        let windows = [WindowId::Session, WindowId::Weekly];
+        let before = windows.map(|window| ledger.usable(window));
+        assert_eq!(before, [Ok(90.0), Ok(35.0)]);
+        assert_eq!(
+            ledger.apply(NOW, Event::Tick),
+            Transition::Refused(Refusal::ClockBehind)
+        );
+        assert_eq!(
+            ledger.apply(NOW + 31 * MIN, Event::Tick),
+            Transition::Ticked
+        );
+        assert_eq!(ledger.grant_state(), GrantState::Expired);
+        assert_eq!(windows.map(|window| ledger.usable(window)), before);
+        assert!(ledger.permits().contains_key(&issued));
+        let lagging = NOW + 32 * MIN;
+        ledger.apply(
+            lagging,
+            observe(
+                Vec::new(),
+                inventory_at(lagging, vec![usable(GrantKind::Weekly, 30 * MIN)]),
+            ),
+        );
+        assert_eq!(ledger.grant_state(), GrantState::Expired);
+        let basis = ledger.recommend(&work(&one_job(4.0)));
+        assert_eq!(
+            basis.decision(),
+            Some(Decision::LetExpire(ExpireReason::NotRedeemable))
+        );
+        assert_eq!(
+            ledger.apply(lagging, claim_of(ALPHA, GrantKind::Weekly, 30 * MIN, basis)),
+            Transition::Refused(Refusal::Expired)
+        );
+        assert!(ledger.claims().is_empty());
+        assert_eq!(windows.map(|window| ledger.usable(window)), before);
     }
 }

@@ -16,12 +16,19 @@ recommends for each grant whether to **redeem** it now, **defer** to a stated se
 expire**, and says **unknown** whenever the evidence cannot settle the choice.
 
 It is pure computation. It reads no file, clock, environment, credential or provider, starts no
-process, opens no socket, redeems nothing, and keeps no state between calls: the caller supplies
-the time (`Input::now_unix`) and every fact. The same `Input` always gives the same plan, whatever
-the order of its readings. Nothing in the crate calls it yet; the handler that would (§13, *The
-capacity handler*) is not built, and a recommendation here is advisory, never a capacity permit or
-a redemption. Unredeemed grants never count as spendable quota: they enter only as a possible
-event in a simulated future.
+process, opens no socket, redeems nothing, and `plan` keeps no state between calls: the caller
+supplies the time (`Input::now_unix`) and every fact. The same `Input` always gives the same plan,
+whatever the order of its readings. Nothing in the crate calls it yet; the handler that would
+(§13, *The capacity handler*) is not built, and a recommendation here is advisory, never a
+capacity permit or a redemption. Unredeemed grants never count as spendable quota: they enter only
+as a possible event in a simulated future.
+
+The second half of the module, `Ledger` (below), is a fixture-driven state machine for one
+simulated grant on one account: from the planner's recommendation, through competing claims and a
+simulated redemption reply, to the account snapshot read afterwards. It holds its state in memory,
+in the value the caller owns, and is driven only by events the caller applies with a clock the
+caller supplies. It is the same kind of computation: no I/O, no real redemption, no persistence,
+no global lock and no live wiring.
 
 ## Data boundary
 
@@ -287,3 +294,154 @@ Worked examples the tests pin:
 | session grant, alpha (p10, 2 h) before beta (p1, 10 h); then the priorities swapped | `Redeem`; then `Defer` to `NOW + 10 h` |
 | weekly exhausted, refilling in 1 h, 3 h job: Claude (kept clock) vs a Codex fixture (restart) | `Redeem` vs `Defer` to `NOW + 3 h` |
 | several usable grants on one exhausted account | `Redeem` for the earliest-ending one; `Unknown(AwaitsReRead)` for the rest |
+
+## `pub struct Ledger {`
+
+One simulated grant on one account, and the capacity permits issued to work on that account. The
+two are kept apart on purpose:
+
+- The **banked grant** (`GrantState`) is the account's: a voluntary reset that can be redeemed
+  once. Claiming it reserves the right to redeem it; it is never capacity.
+- A **capacity permit** (`Permit`) is issued to a request for work, and draws percent from named
+  windows (`Permit::draws`). It is allocated only from a balance a snapshot reported; a claim, a
+  reply or a recommendation never issues one or enlarges what one may draw.
+
+`Setup` names the grant (`GrantRef`: account, kind and use-by second, which stay the same while
+its count changes), the provider, the freshness bound and, for Codex, the plan-specific covered
+allowances (`Setup::coverage`). The initial `Snapshot` seeds the windows and inventory.
+
+The state is small and plain: the accepted readings (which `recommend` hands to `plan`), the
+latest accepted inventory, one `WindowView` per window, the `GrantState`, the registered claims,
+the outstanding permits and a `generation` that every accepted change advances. Nothing is
+derived from the wall clock: `apply(now_unix, event)` moves the ledger's clock forward and refuses
+an earlier one (`Refusal::ClockBehind`).
+
+### `impl Ledger` › `pub fn recommend(&self, work: &Work) -> Recommendation {`
+
+Builds an `Input` from the ledger's readings and inventory at its own clock and calls `plan`, the
+same planner as above, unchanged. The `Recommendation` carries the planner's decision for this
+grant (`None` when the inventory is unknown or does not list it) and the generation and second it
+was read at. It changes nothing: two requests that ask at the same generation get equal
+recommendations, and the ledger is untouched. Its fields are private, so code outside the module
+cannot forge one.
+
+### `impl Ledger` › `fn claim(&mut self, request: RequestId, grant: &GrantRef, basis: Recommendation) -> Transition {`
+
+The only way to reserve the grant. Checks, in order: the request names this grant
+(`WrongGrant`); the grant is `Banked` (otherwise `Held { by }`, `Spent`, `Expired` or `Absent`);
+the basis is of the current generation and no older than the freshness bound (`StaleBasis`); the
+basis says `Redeem` (`NotRecommended`, carrying what it did say). The first claim to pass is
+registered (`claims`), the grant becomes `Reserved`, and the generation advances, so the other
+request's basis, read from the same state, can no longer pass even where the grant to be held is
+released again. In either order exactly one of two claims from one reading is registered.
+
+At the claim, each window the redemption may touch is marked `awaiting_re_read`: those where
+`effect` (for Codex, narrowed by the plan's covered allowances) is `Restores` or `Unknown`, and a
+`RestoresBelowFull` window not observed full. A window that `schedule_after_restore` says
+`MustReRead` also loses its refill (`Refill::AwaitingReRead`); a `Kept` one, Claude's weekly,
+keeps its fixed boundary. A Codex covered allowance observed full is not restarted, so it is not
+marked and keeps its schedule; a window the plan does not cover is unrelated and stays as it was.
+A marked window keeps its pre-claim balance as its allocatable balance: a reset only lowers use,
+so that balance is a lower bound, and nothing restored is credited.
+
+### `impl Ledger` › `fn reply(&mut self, claim: ClaimId, reply: Reply) -> Transition {`
+
+The simulated redemption response. A reply to the claim holding the grant moves it from
+`Reserved` to `Replied`, recording the reply and its second. `Accepted`, `Refused` and `Unknown`
+all leave the grant held and the marked windows awaiting a re-read: no reply is evidence of a
+balance. A second reply to the same claim is `Ignored(Duplicate)`; it moves nothing, except that a
+later `Accepted` is remembered over a `Refused` or `Unknown` so that an unchanged count can no
+longer release the grant. A reply to a claim that no longer holds the grant is `Ignored(Stale)`;
+a claim never registered is `Refused(UnknownClaim)`.
+
+### `impl Ledger` › `fn observe(&mut self, snapshot: Snapshot) -> Observation {`
+
+A snapshot is readings plus inventory evidence, each with its own observation second. Each
+reading, oldest first, is:
+
+| Verdict | When |
+|---|---|
+| rejected | another account, observed after the ledger's clock, a percent out of range or a reset not after its observation |
+| missing | no percent (the window was not reported); the window keeps its last view |
+| delayed | older than the window's view, or, for a window awaiting a re-read, observed before the reply (or with no reply yet) or not after its pre-claim view |
+| repeated | the same second and values as the window's view |
+| conflicting | the same second with different values: the window's balance and clock become unknown (`Refill::Conflicting`) until a later reading |
+| adopted | otherwise: the reading becomes the window's view, with its reported reset (`Refill::Unreported` when none is reported) and its mark cleared |
+
+The inventory is judged the same way by its second. An adopted inventory settles the grant:
+`Banked` and `Absent` follow the count; a `Replied` grant settles only on an inventory observed at
+or after the reply. Then a fallen count, or a grant no longer listed, is `Spent` (once, for the
+claim that held it), and an unchanged count after a `Refused` or `Unknown` reply releases it to
+`Banked`. After `Accepted`, an unchanged count settles nothing. Two inventories of one second that
+disagree leave the inventory unknown, which the planner reports as no decision.
+
+Settling the grant does not settle a window: a restored window stays at its pre-claim balance
+until a reading of its own, observed after the reply, is adopted. The two are independent, so a
+snapshot that confirms the spend but omits the window credits nothing. Repeated snapshots change
+nothing and do not advance the generation.
+
+### `impl Ledger` › `pub fn usable(&self, window: WindowId) -> Result<f64, Blocked> {`
+
+The percent a new permit may draw: `100` less the window's observed use, less what outstanding
+permits draw from it. It is `Blocked` when the window was never read (`NoReading`), its reports
+conflict (`Conflicting`), its view is older than the freshness bound (`Stale`), or its reported
+reset has passed (`Refilled`: the refill is real but unread, and is not credited). A permit
+(`Event::Permit`) is issued only when every window it draws has the balance; the first window in
+`WindowId` order that lacks it is named in `Refusal::Blocked`. `Event::Release` returns a permit.
+A permit outlives the grant: expiry (below) removes no balance and no permit.
+
+### `impl Ledger` › `fn expire(&mut self) {`
+
+When the clock reaches the grant's use-by second, a `Banked` or `Absent` grant becomes `Expired`,
+and a later inventory that still lists it does not revive it. A grant already claimed is left to
+its reply and snapshot, since the redemption may have been sent before the end. Window views and
+permits are untouched: expiry loses the chance to restore capacity, never existing quota.
+
+### Driving it from handler code
+
+A later handler stage can drive the ledger exactly as the tests do, without any of the parts this
+slice leaves out:
+
+1. Build a `Snapshot` from a reader's report (the data boundary above) and `Ledger::new` it with
+   the grant's `GrantRef` and the machine's clock.
+2. For each request, call `recommend` with the runs, demand and priorities it is arbitrating, and
+   pass the `Recommendation` back in `Event::Claim`. Only `Transition::Claimed` authorises the
+   holder to redeem.
+3. Apply the redemption's response as `Event::Reply`, and each later read as `Event::Observe`.
+4. Issue work only through `Event::Permit`, and read `usable`, `window` and `grant_state` for
+   display.
+
+Everything the ledger refuses comes back as a value (`Transition::Refused`, `Ignored`), never a
+panic, so a handler can log it. What it would add around this is outside the slice: persisting
+the ledger between processes, one machine-wide lock around `apply`, the real redemption call,
+timeouts for a holder that never replies, and run-specific policy.
+
+### Fixtures for the ledger
+
+All are synthetic (`Source::Fixture` or the planner fixtures above) and timed from `NOW`, with
+`MIN` = 60 s, a freshness bound of one hour and requests `ALPHA` and `BETA`.
+
+| Fixture | Windows |
+|---|---|
+| `claude_session_exhausted()` | session 100% (25%/h, refills in 2 h); weekly 30% (1%/h, 72 h) |
+| `exhausted_weekly()` (above) | weekly 100% (2%/h, 72 h); session 10% (10%/h, 4 h) |
+| `claude_fable_exhausted()` | Fable model 100% (10%/h, 50 h); session 20% (3 h); weekly 40% (72 h) |
+| `crossed(with_fable)` | weekly 100% (72 h) and session 100% (2 h), and Fable 100% (30 h) when asked |
+| `codex_covered_allowances()` | Codex plan `plus` covers weekly only; `pro` covers session and weekly |
+| `codex_pro_session_spent()` | `pro`: session 100% (3 h), weekly 0% (full, 100 h) |
+| `codex_plus_weekly_spent()` | `plus`: weekly 100% (2%/h, 50 h), session 30% (2 h, uncovered) |
+
+| Scene | What the tests pin |
+|---|---|
+| two requests, one reading, either order | one claim registered; the other `Held`, also on a fresh `Redeem`; duplicate reply ignored; repeated snapshot changes nothing; `Spent` by the winner; weekly 0 → 100 only after the snapshot |
+| all 120 orders of two claims, two replies, one snapshot | at most one claim; `Spent` exactly when the snapshot follows a reply to it; weekly allocatable only after that, or when no claim was pending |
+| `Accepted` then a snapshot with an unchanged count and no weekly reading | still `Replied`; the other claim `Held`; permits refused at weekly 0 |
+| `Refused`, delayed count, unchanged count, late reply, second claim with `Unknown` | released to `Banked` only on the count read after the reply; the late reply `Stale`; second claim `Spent` |
+| Claude session grant | session clock `AwaitingReRead` then `Unreported` (the five-hour clock is unknown); weekly untouched; session 0 → 100 |
+| Claude weekly grant | weekly keeps `At(NOW + 72 h)` throughout; 0 → 100 only after the snapshot |
+| Claude Fable grant | Fable and session must be re-read; weekly keeps its boundary and shows the reported share (60 → 64) |
+| Codex `pro`, full grant | session adopts the reported refresh, then a revised one, then conflicts and resolves; full weekly keeps `At(NOW + 100 h)` and is never marked |
+| Codex `plus`, full grant | uncovered session serves a permit while the weekly is pending, refills on its own clock; a delayed and a missing weekly report credit nothing; the weekly is usable once reported |
+| `crossed(true)`, `crossed(false)`, Fable-exhausted with a weekly grant | `Unknown(Effect)`, `Defer` to `NOW + 2 h`, `Unknown(Effect)`; no claim; Sonnet work permitted where only the Fable window blocks |
+| `crossed(false)` waited out | `Defer` refused at once; after the session refills, the old basis is `StaleBasis`, a new one `Redeem`, and the job is permitted after the snapshot |
+| weekly grant ending in 30 min | `Expired` at the end; balances and the permit unchanged; a lagging inventory does not revive it |
