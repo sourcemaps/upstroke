@@ -422,7 +422,8 @@ and take the bytes `write_answer` writes for it rather than spelling them by han
 ## `mod tests` › `fn assert_read_never_took(path: &Path, published: &[u8], read: &str) {`
 
 The rule is the run layout's design: `design/15`, "An answer file is read, never taken". Ingestion
-reads a published answer and never takes it, and the answer file belongs to the run-scoped
+reads a published answer and never takes it, so an ingestion leaves the file exactly as it found
+it; publication, which can replace the file, is outside the rule. The answer file belongs to the run-scoped
 run-directory contents that the effects vocabulary's row R21 accounts for. After a read of a
 published answer, the file is still present and `fs::read` of it equals the bytes taken before the
 read; each assertion message names R21's read-never-take rule and the read under test.

@@ -25,9 +25,12 @@ upstroke.toml                       # repo-root config, checked in
 ```
 
 **An answer file is read, never taken.** Ingesting `answers/<question-id>.json`
-reads it, and nothing in the engine removes or rewrites it afterwards, so it
-stays present and byte-identical for as long as the run directory does. This is
-part of the run-scoped run-directory contents that the effects vocabulary's
+reads it, and no reader of answers removes or rewrites it, so an ingestion
+leaves the file exactly as it found it. Publication is outside this rule:
+`upstroke answer` refuses a question already answered, but its check and its
+publish are not one step, so two concurrent answers to one question can leave
+the file holding the later one, recorded as the finding
+`PR381-ANSWER-PUBLISH-RACE`. This is part of the run-scoped run-directory contents that the effects vocabulary's
 resource row R21 accounts for. This paragraph was added on 2026-11-13 to record
 what the answer readers already do, so that their tests have a design sentence
 to be held to.
