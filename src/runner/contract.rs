@@ -2552,6 +2552,32 @@ fn charge_allowance(&mut self) {}
                  `ContainerRuntime::start`",
             ),
             (
+                "src/tracker/subscription.rs",
+                1,
+                1,
+                0,
+                "the subscription reader's native route (`capacity \
+                 --subscription-usage claude`, `--auth cli`): `read_cli` builds \
+                 one `CommandSpec` for `claude` and populates BOTH payload \
+                 fields. The `.env(` binds `reset::TOKEN_ENV` to an empty value, \
+                 so a reset bearer the operator exported is not visible to the \
+                 CLI, which answers from its own login; the `.stdin(` is the \
+                 fixed one-line `get_usage` control request. Both are spec \
+                 fields, on an agent-probe request \
+                 (`agent::probe_request(\"claude-code\", …, 0, …)`: role \
+                 `probe(claude-code)`, bound, no credential profile) that \
+                 `main.rs` hands to a host Runner of its own. No run's Runner \
+                 and no container carries it. It is the first production spec \
+                 with an overlay, and so the first with an overlay and a payload \
+                 together (the transport's `curl` probe below carries a payload \
+                 alone), so a grid carries that combination: \
+                 `runner::host::tests::a_subscription_probe_with_an_overlay_and_a_payload_reaches_the_containment_points` \
+                 sends it through every per-spawn containment observer and \
+                 fault. What holds its exact bytes, overlay, role and binding is \
+                 `tracker::tests::subscription_cli_is_one_exact_probe_with_its_profile_and_no_bearer`, \
+                 which drives the reader over a recording Runner",
+            ),
+            (
                 "src/tracker/transport.rs",
                 1,
                 0,

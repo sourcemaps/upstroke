@@ -1171,9 +1171,14 @@ on. So each gets production's own value for that role rather than one constant s
 * **stdin**: the adapter's prompt for the worker and the reviewer (`AgentAdapter::stdin_payload`,
   put on the spec by `WorkerAssembly::command` and `review::run_review`), empty for the gate and
   both probes, which is what their specs carry;
-* **env**: empty for all five, because that is production's only value: `ShellKind::spec` and
-  `bin::Invocation::spec` both write `env: Vec::new()`, and no call site adds an overlay entry
-  (asserted by `runner::contract::tests::every_production_command_spec_payload_is_classified`);
+* **env**: empty for all five, because that is what each role's production spec carries:
+  `ShellKind::spec` and `bin::Invocation::spec` both write `env: Vec::new()`, and no worker,
+  reviewer, gate or adapter-probe call site adds an overlay entry. The one production overlay is
+  the subscription reader's, on an agent probe that also carries a payload. That shape is a second
+  value for the agent-probe role, not a replacement for this one, so it has its own test:
+  `a_subscription_probe_with_an_overlay_and_a_payload_reaches_the_containment_points`. The census
+  that finds every overlay site is
+  `runner::contract::tests::every_production_command_spec_payload_is_classified`;
 * **timeout**: each role's own production default, five distinct values.
 
 ## `agent_cli_command(b""),`
@@ -1276,11 +1281,17 @@ this fixture's choice.
 
 ## `fn the_role_grid_sends_the_shapes_production_sends()` › `assert!(`
 
-Field 7: the overlay. Empty everywhere, because that is production's only value: both spec
-constructors write `env: Vec::new()` and no call site adds an entry
-(`runner::contract::tests::every_production_command_spec_payload_is_classified` is the tripwire).
-Stated as an assertion so that the day production carries an overlay, this row has to become a
-varying dimension.
+Field 7: the overlay. Empty for all five roles, because both spec constructors write
+`env: Vec::new()` and no role's own call site adds an entry. Production now carries one overlay:
+the subscription reader's empty reset-bearer binding, on an agent probe with a stdin payload
+(the `src/tracker/subscription.rs` row of
+`runner::contract::tests::every_production_command_spec_payload_is_classified`, the tripwire).
+That made the overlay a varying dimension, and the varying value lives in
+`a_subscription_probe_with_an_overlay_and_a_payload_reaches_the_containment_points`, not in this
+grid. That test sends the grid's own agent probe with both payload fields filled through the same
+observers and faults. Folding the shape into this grid instead would give the agent-probe role two
+payloads, and that would break the payload and binding split asserted above. This assertion still
+holds for the five-role grid.
 
 ## `fn the_role_grid_sends_the_shapes_production_sends()` › `let workspaces: BTreeSet<&Path> = requests.iter().map(|r| r.workspace.as_path()).collect();`
 
@@ -1539,6 +1550,57 @@ named in the caller's failure, so a funnel that collapsed the points into one ar
 `a_kill_armed_at_any_containment_point_actually_kills` and the Windows coordinator-death tests. The
 packet gives only `AmbientJobJoined` an error contract, so an `Error` at these points comes only from
 an observer, which is what a fault injection is, and `apply`/`apply_io` surface it.
+
+## `const OVERLAID_TO_EMPTY: &str = "UPSTROKE_SYNTHETIC_BLANKED_BEARER";`
+
+A synthetic variable name, not the reset bearer's real one. This file may not name the module that
+defines that constant (`tracker::tests::only_the_cli_reaches_the_tracker` reads test files too). The
+shape is what the grid has to carry, not the name: one overlay entry whose value is empty, so the
+child sees an empty value where the runner's base had a non-empty one.
+
+## `fn overlaid_probe_request() -> Result<RunnerRequest, UpstrokeError> {`
+
+The payload shape of the subscription reader's native route, `tracker::subscription::read_cli`. It
+is the grid's own agent probe with both payload fields filled: one overlay entry set to empty, and a
+one-line stdin payload. It is built by the same production builder, `crate::agent::probe_request`,
+for the same adapter and ordinal. The reader's timeout (`tracker::transport::PROCESS_TIMEOUT`) is
+not copied here. The role grid already varies the timeout over five distinct values, and keeping
+the grid's `AGENT_PROBE_TIMEOUT` makes the payload the only difference from the grid's request. The
+reader's exact bytes, overlay, role, binding and identity are pinned at the source by
+`tracker::tests::subscription_cli_is_one_exact_probe_with_its_profile_and_no_bearer`, over a
+recording Runner, with no process.
+
+## `fn inheriting_the_overlaid_key() -> HostEnvironment {`
+
+The process environment, plus a synthetic non-empty value under the overlaid name. Without that
+value, the overlay's empty value would replace nothing, and the composition check below would pass
+even if the overlay had never been applied.
+
+## `fn a_subscription_probe_with_an_overlay_and_a_payload_reaches_the_containment_points() {`
+
+The combined shape from the `src/tracker/subscription.rs` row of
+`runner::contract::tests::every_production_command_spec_payload_is_classified`. That row is the
+first production spec with an overlay, and so the first with an overlay and a stdin payload
+together. The tracker transport's `curl` probe carries a payload alone; its row says why no role
+grid varies it. The role grid sends neither field on a probe: its overlay is empty for all five
+roles, and its agent probe carries no payload. An observer suppression keyed on "a probe with a
+payload", or on "an overlay", would therefore be invisible to the grid (`PR4-CONF-006`). This
+test closes that gap, in four parts:
+
+* **Shape.** The request equals the role grid's agent probe in every request and spec field except
+  `env` and `stdin`. So it adds exactly the two census columns to a shape the grid already covers.
+* **Composition.** `HostRunner::child_environment` is the vector `supervise` passes to the child
+  after `env_clear`. It carries the overlay's empty value, not the inherited one. A probe role
+  starts in the started checkout, so `give_work_tree_context` never edits that vector.
+* **Observation.** It runs through the funnel under `RoleWitness`, the same observers and
+  assertions as `every_role_reaches_the_containment_points_of_this_platform`: every per-spawn
+  point reached, in the funnel's order, one child, and on Unix a child that leads its own group.
+* **Injection.** It runs once per point under `FailAt`, as in
+  `a_fault_armed_at_any_containment_point_stops_any_role`. The failure names the armed point, and a
+  count keeps the shape from dropping out of the grid unnoticed.
+
+The child is the grid's agent CLI (this test binary, running no test). It is never `claude`, and
+nothing here reads a credential or reaches a provider.
 
 ## `fn the_pre_exec_containment_step_runs_in_the_forked_child() {`
 

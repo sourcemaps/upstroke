@@ -4238,6 +4238,169 @@ fn a_fault_armed_at_any_containment_point_stops_any_role() {
     );
 }
 
+const OVERLAID_TO_EMPTY: &str = "UPSTROKE_SYNTHETIC_BLANKED_BEARER";
+
+const OVERLAID_PROBE_STDIN: &str =
+    "{\"type\":\"synthetic_control_request\",\"request_id\":\"role-grid\"}\n";
+
+fn overlaid_probe_request() -> Result<RunnerRequest, UpstrokeError> {
+    crate::agent::probe_request(
+        claude::ADAPTER_ID,
+        CommandSpec {
+            env: vec![(OVERLAID_TO_EMPTY.to_owned(), String::new())],
+            ..agent_cli_command(OVERLAID_PROBE_STDIN.as_bytes())
+        },
+        0,
+        AGENT_PROBE_TIMEOUT,
+    )
+}
+
+fn inheriting_the_overlaid_key() -> HostEnvironment {
+    let case = KeyCase::current();
+    HostEnvironment::with_base(
+        std::env::vars_os()
+            .filter(|(name, _)| !case.same_key(name, OsStr::new(OVERLAID_TO_EMPTY)))
+            .chain([(os(OVERLAID_TO_EMPTY), os("synthetic-inherited-value"))])
+            .collect(),
+        case,
+    )
+}
+
+#[test]
+fn a_subscription_probe_with_an_overlay_and_a_payload_reaches_the_containment_points() {
+    let workspace = scratch("overlaid-probe");
+    let grid = production_request(
+        &ExecutionRole::Probe(ProbeTarget::Agent(fixture_agent())),
+        &workspace,
+    )
+    .expect("the role grid's agent probe");
+    let _ = std::fs::remove_dir_all(&workspace);
+    let request = overlaid_probe_request().expect("a shipped adapter id");
+
+    assert!(
+        grid.command.env.is_empty() && grid.command.stdin.is_empty(),
+        "the role grid's agent probe carries neither payload field, so the shape below is one \
+         the role grid does not send"
+    );
+    assert_eq!(
+        request.command.env,
+        vec![(OVERLAID_TO_EMPTY.to_owned(), String::new())],
+        "one overlay entry, and its value is empty"
+    );
+    assert!(
+        !request.command.stdin.is_empty(),
+        "and a stdin payload beside it"
+    );
+    assert_eq!(
+        (
+            &request.role,
+            &request.agent,
+            request.invocation.render(),
+            &request.workspace,
+            request.timeout,
+            &request.credential_profile,
+        ),
+        (
+            &grid.role,
+            &grid.agent,
+            grid.invocation.render(),
+            &grid.workspace,
+            grid.timeout,
+            &grid.credential_profile,
+        ),
+        "every request field but the payload is the role grid's agent probe's"
+    );
+    assert_eq!(
+        CommandSpec {
+            env: Vec::new(),
+            stdin: Vec::new(),
+            ..request.command.clone()
+        },
+        grid.command,
+        "and every spec field but the two payload fields"
+    );
+
+    let composed = HostRunner::new()
+        .with_environment(inheriting_the_overlaid_key())
+        .child_environment(&request)
+        .expect("the overlay names no reserved key");
+    assert_eq!(
+        value(&composed, OVERLAID_TO_EMPTY, KeyCase::current()),
+        Some(OsStr::new("")),
+        "the environment the funnel starts the child with carries the overlay's empty value, \
+         not the inherited one"
+    );
+
+    let points = per_spawn_points();
+    let witness = RoleWitness::new();
+    let runner = HostRunner::new()
+        .with_environment(inheriting_the_overlaid_key())
+        .with_hooks(Box::new(witness.handle()));
+    let output = runner
+        .run_blocking(&request)
+        .unwrap_or_else(|error| panic!("{}: {error}", request.role));
+    assert_eq!(output.code, Some(0), "{output:?}");
+    assert!(
+        output.stdout.contains("0 passed"),
+        "the child under observation is not the grid's agent CLI: {}",
+        output.stdout
+    );
+    {
+        let harness = witness.harness.lock().expect("harness");
+        for point in &points {
+            assert!(
+                point
+                    .modes()
+                    .iter()
+                    .any(|mode| harness.reached_point(SPAWN_SITE, *point, *mode)),
+                "the funnel never reached {point} for an agent probe carrying an overlay and a \
+                 payload, so that spawn produces no containment-hook evidence"
+            );
+        }
+    }
+    assert_eq!(
+        *witness.order.lock().expect("order"),
+        points,
+        "the funnel's containment order"
+    );
+    assert_eq!(
+        witness.children.lock().expect("children").len(),
+        1,
+        "one spawn, one child"
+    );
+    #[cfg(unix)]
+    {
+        let (leads, seen) = group_leadership(&witness.led_own_group.lock().expect("groups"));
+        assert_eq!(
+            leads,
+            vec![true],
+            "the child did not lead its own process group, so the pre-exec containment step \
+             did not run for this shape; observed: {seen}"
+        );
+    }
+
+    let mut injections = 0_usize;
+    for point in &points {
+        let runner = HostRunner::new()
+            .with_environment(inheriting_the_overlaid_key())
+            .with_hooks(Box::new(FailAt(*point)));
+        let error = runner
+            .run_blocking(&request)
+            .err()
+            .unwrap_or_else(|| panic!("the fault armed at {point} was never introduced"));
+        assert!(
+            error.to_string().contains(&point.to_string()),
+            "the failure does not name the point it was armed at ({point}): {error}"
+        );
+        injections += 1;
+    }
+    assert_eq!(
+        injections,
+        points.len(),
+        "every point, counted so this shape cannot drop out of the grid in silence"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn the_pre_exec_containment_step_runs_in_the_forked_child() {

@@ -733,6 +733,21 @@ agent = \"claude-code\"
         let seen = runner.seen.lock().expect("seen lock");
         assert_eq!(seen.len(), 1);
         let request = seen.first().expect("one probe");
+        let agent = crate::runner::AgentId::new(crate::agent::claude::ADAPTER_ID);
+        let target = crate::runner::ProbeTarget::Agent(agent.clone());
+        assert_eq!(
+            request.role,
+            crate::runner::ExecutionRole::Probe(target.clone()),
+            "an agent probe of the shipped adapter, the role the host runner supplies the \
+             CLI's own credential location to"
+        );
+        assert_eq!(request.agent, Some(agent), "bound to that adapter");
+        assert_eq!(
+            request.invocation,
+            crate::runner::InvocationId::probe(target, 0).expect("a probe identity"),
+            "the first and only probe of this read"
+        );
+        assert_eq!(request.workspace, crate::agent::probe_workspace());
         assert_eq!(request.command.program, "claude");
         assert_eq!(
             request.command.args,
