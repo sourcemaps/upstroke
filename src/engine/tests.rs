@@ -13155,7 +13155,7 @@ fn open_at(dir: &fs::File, name: &std::ffi::OsStr, directory: bool) -> std::io::
     // its descriptor stays open and is the one the caller opened. `flags` is built just above from
     // `O_RDONLY`, `O_NOFOLLOW`, `O_NONBLOCK`, `O_CLOEXEC` and, for a directory, `O_DIRECTORY`, and
     // a caller can add nothing to it: it never holds `O_CREAT` or `O_TMPFILE` (which adds its own
-    // bit to `O_DIRECTORY`), the flags for which `openat` reads a third, variadic mode argument,
+    // bit to `O_DIRECTORY`), the flags for which `openat` reads a fourth, variadic mode argument,
     // so passing none is sound.
     let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
     if fd < 0 {
