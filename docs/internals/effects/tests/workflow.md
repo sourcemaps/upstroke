@@ -1388,9 +1388,9 @@ than history.
 ## `pub(super) fn ci_msrv_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(step, "run").is_some() {`
 
 A matrix job, so each `run:` step resolves a shell once per runner its
-entries name -- the distinct `check_runner`s of [`CI_TARGETS`], `ubuntu-latest`
-and `windows-latest` -- and a workflow-level default reaches every entry at
-once.
+entries name -- the distinct `msrv_runner`s of [`CI_TARGETS`], `macos-latest`,
+`ubuntu-latest` and `windows-latest` -- and a workflow-level default reaches
+every entry at once.
 
 ## `pub(super) fn ci_msrv_job_complaints(doc: &Yaml) -> Vec<String> {` › `out.extend(toolchain_complaints(job, MSRV_JOB, "msrv-toolchain", None));`
 
@@ -1406,23 +1406,27 @@ other than exactly `os` and `target` or a value that is not a string.
 
 The platform half. The job checks the floor for three targets, one
 `include:` entry apiece, and the entries are compared against the pairs
-`(check_runner, triple)` derived from [`CI_TARGETS`], each once -- the same
-table the Clippy gates and the test jobs' rows are derived from. The macOS
-entry runs on `ubuntu-latest` and names its tuple, for the reason
-`lint (macos)` does: GitHub runs at most five macOS jobs at once for the
-account, each run asked for seven, and run 45175187088 showed each macOS job
-starting as another ended. A floor is a per-target fact: a dependency that
-raises its MSRV behind a `cfg`, or a call newer than the floor inside a
-`#[cfg(target_os = "macos")]` region, fails on that target only.
+`(msrv_runner, triple)` derived from [`CI_TARGETS`], each once -- the same
+table the Clippy gates and the test jobs' rows are derived from. Each entry
+runs on its target's own platform, the macOS one on `macos-latest`, so Cargo
+builds the dependencies' build scripts and procedural macros for macOS at the
+floor, as a user's Mac does; the Clippy gates keep `check_runner`, which for
+macOS is `ubuntu-latest`. A floor is a per-target fact: a dependency that
+raises its MSRV behind a `cfg`, a call newer than the floor inside a
+`#[cfg(target_os = "macos")]` region, or a dependency host unit whose macOS
+code needs a newer Rust, fails on that target only.
 
 `matrix:` holds `include:` alone; an axis or `exclude:` beside it changes which
 combinations run, so either is refused as `[msrv-job-matrix]` whatever it
-would do. A dropped entry, an entry retargeted to another's tuple and an entry
-twice are refused the same way. `runs-on:` stays `${{ matrix.os }}`, and the
+would do. A dropped entry, an entry retargeted to another's tuple, an entry
+moved off its own platform and an entry twice are refused the same way.
+`runs-on:` stays `${{ matrix.os }}`, and the
 toolchain step's `targets:` is `${{ matrix.target }}`, the tuple the check
 names with `--target`; a missing or other `targets:` is
 `[msrv-job-toolchain]`. Measured, `MUT-MSRV-MATRIX-NARROWED`,
 `MUT-MSRV-MATRIX-EXCLUDED`, `MUT-MSRV-CROSS-TARGET-DROPPED`,
+`MUT-MSRV-MACOS-ON-LINUX` (the macOS entry back on `ubuntu-latest`, where
+every dependency host unit is built for Linux),
 `MUT-MSRV-TOOLCHAIN-TARGET-DROPPED` and, for the command's `--target`,
 `MUT-MSRV-COMMAND-UNTARGETED`.
 
@@ -1575,6 +1579,15 @@ rows came with the move: `MUT-GATE-CROSS-TARGET-DROPPED` (`no-gate-job`),
 `MUT-MSRV-TOOLCHAIN-TARGET-DROPPED` (`msrv-job-toolchain`). Each is described
 where the check that refuses it is: under [`ci_gate_complaints`] and
 [`ci_msrv_job_complaints`].
+
+When the macOS `msrv` entry returned to `macos-latest` on 2026-11-25, the
+rows that quote its `os:` were re-spelled with it: `MUT-MSRV-MATRIX-NARROWED`
+deletes `os: macos-latest` with its `target:`, and `MUT-MSRV-MATRIX-EXCLUDED`'s
+`exclude:` names that pair. `MUT-MSRV-CROSS-TARGET-DROPPED`,
+`MUT-MSRV-COMMAND-UNTARGETED` and `MUT-MSRV-TOOLCHAIN-TARGET-DROPPED` keep
+their mutations, with their escape text corrected for a native entry. One row
+came with the return, `MUT-MSRV-MACOS-ON-LINUX` (`msrv-job-matrix`), which
+moves the entry back to `ubuntu-latest`.
 
 ## `pub(super) struct WorkflowEscape` › `pub(super) name: &'static str,`
 

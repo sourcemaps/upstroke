@@ -41,16 +41,18 @@ tuple it compiles. The macOS gate is [`CLIPPY_GATE_MACOS_CROSS`].
 ## `pub(super) const CLIPPY_GATE_MACOS_CROSS: &str =`
 
 The macOS Clippy gate: [`CLIPPY_GATE`] with `--target aarch64-apple-darwin`,
-run on `ubuntu-latest`. `cfg` follows the target, not the host, so a Linux
-Clippy for that tuple evaluates every `#[cfg(target_os = "macos")]` region of
-the package's target code as a Mac would. A build script or a proc-macro is a
-host unit and compiles for Linux even under `--target`, so the package has
-none: `no_repository_file_adds_a_host_unit_the_macos_cross_checks_cannot_reach`
-refuses one, and adding one means restoring a native `macos-latest` Clippy and
-MSRV leg. `lint (macos)` ran on `macos-latest` until GitHub's cap of five
-macOS jobs at once for the account met seven per run -- this leg, an `msrv`
-entry and the five macOS test legs -- and run 45175187088 showed each macOS
-job starting as another ended. The five test legs still run natively.
+run on `ubuntu-latest`. Clippy lints only this package's own code, and `cfg`
+follows the target, not the host, so a Linux Clippy for that tuple evaluates
+every `#[cfg(target_os = "macos")]` region of the package's target code as a
+Mac would. A build script or a proc-macro of this package is a host unit and
+would be linted for Linux even under `--target`, so the package has none:
+`no_repository_file_adds_a_host_unit_the_macos_cross_checks_cannot_reach`
+refuses one, and adding one means restoring a native `macos-latest` Clippy
+leg. `lint (macos)` ran on `macos-latest` until GitHub's cap of five macOS
+jobs at once for the account met seven per run -- this leg, an `msrv` entry
+and the five macOS test legs -- and run 45175187088 showed each macOS job
+starting as another ended. The five test legs still run natively, and the
+`msrv` entry is native again: [`CiTarget`]'s `msrv_runner` says why.
 
 Dropping the flag leaves a gate that is still green and still exact text for
 the Linux one: two jobs then Clippy the Linux tuple and none the macOS
@@ -802,8 +804,10 @@ to decide, and it accepts CPython 3.12 only.
 
 `dtolnay/rust-toolchain` is given `components`, `targets` and `toolchain`.
 `targets` installs the standard library of a tuple other than the runner's,
-which the macOS cross gate and the `msrv` entries need; its values are held
-to [`TOOLCHAIN_TARGETS`], as `components`' are to [`TOOLCHAIN_COMPONENTS`].
+which the macOS cross gate needs; the `msrv` entries give it their own
+tuple, so the install and the check read one matrix value. Its values are
+held to [`TOOLCHAIN_TARGETS`], as `components`' are to
+[`TOOLCHAIN_COMPONENTS`].
 
 ## `pub(super) const TOOLCHAIN_COMPONENTS: [&str; 2] = ["clippy", "rustfmt, clippy"];`
 
@@ -1399,23 +1403,24 @@ it never tested. `CODING_STANDARDS.md` §2 and `CONTRIBUTING.md` both publish
 the command with the flag.
 
 `--target ${{ matrix.target }}` is the other half of the line. The job checks
-the floor for the three targets, one `include:` entry apiece, and the macOS
-entry runs on `ubuntu-latest` for the reason [`CLIPPY_GATE_MACOS_CROSS`]
-gives: the five-job macOS cap, and run 45175187088. Without the flag each
-entry checks its runner's own tuple, so the macOS entry compiles the Linux
-regions a second time and none of its own. Measured,
-`MUT-MSRV-COMMAND-UNTARGETED`.
+the floor for the three targets, one `include:` entry apiece, each on its
+target's own platform ([`CiTarget`]'s `msrv_runner`). Without the flag each
+entry checks its runner's own tuple, which today is its target's on every
+entry; the flag keeps the tuple the check compiles the one the entry names,
+so an entry moved to another runner -- as the macOS entry stood on
+`ubuntu-latest` until 2026-11-25 -- cannot compile that host's regions in
+place of its own. Measured, `MUT-MSRV-COMMAND-UNTARGETED`.
 
 ## `pub(super) const MSRV_ENTRY_KEYS: [&str; 2] = ["os", "target"];`
 
 The keys of each `msrv` `include:` entry, with the matrix's one key
 ([`MSRV_MATRIX_FIELDS`]), the job's `runs-on:` ([`MSRV_RUNS_ON`]) and the
 toolchain step's `targets:` ([`MSRV_TOOLCHAIN_TARGETS`]). The entries are the
-pairs `(check_runner, triple)` over [`CI_TARGETS`], each once; an axis or an
+pairs `(msrv_runner, triple)` over [`CI_TARGETS`], each once; an axis or an
 `exclude:` beside `include:` changes which combinations run, so `matrix:`
 holds `include:` alone. Measured, `MUT-MSRV-MATRIX-NARROWED`,
-`MUT-MSRV-MATRIX-EXCLUDED`, `MUT-MSRV-CROSS-TARGET-DROPPED` and
-`MUT-MSRV-TOOLCHAIN-TARGET-DROPPED`.
+`MUT-MSRV-MATRIX-EXCLUDED`, `MUT-MSRV-CROSS-TARGET-DROPPED`,
+`MUT-MSRV-MACOS-ON-LINUX` and `MUT-MSRV-TOOLCHAIN-TARGET-DROPPED`.
 
 ## `pub(super) const RUSTFLAGS_KEY: &str = "RUSTFLAGS";`
 
@@ -1748,8 +1753,8 @@ The shell the aggregate's script needs. It is written in bash -- `[[ ]]` and
 ## `pub(super) struct CiTarget {`
 
 A target CI compiles, the runner whose test legs run it, the runner and the
-command of its Clippy gate and its MSRV check, and the shell its `run:` steps
-get.
+command of its Clippy gate, the runner of its MSRV check, and the shell its
+`run:` steps get.
 
 The tuple is the load-bearing half. What discharges a platform's clause is
 not a job *name* but the target whose `#[cfg(...)]` bodies that job compiles,
@@ -1764,12 +1769,35 @@ compilers by. For macOS it stays `macos-latest`: the five test legs run there.
 
 ## `pub(super) struct CiTarget` › `pub(super) check_runner: &'static str,`
 
-The `runs-on:` value of the jobs that run this target's Clippy gate and its
-`msrv` entry. Linux and Windows check on their own runners; macOS checks on
-`ubuntu-latest`, by tuple, because GitHub runs at most five macOS jobs at
-once for the account and each run asked for seven (run 45175187088). The
-gate's shell is resolved for this runner, not for `runner`. Measured,
-`MUT-GATE-RUNNER-DRIFT`.
+The `runs-on:` value of the job that runs this target's Clippy gate. Linux
+and Windows are linted on their own runners; macOS on `ubuntu-latest`, by
+tuple. It moved there when GitHub ran at most five macOS jobs at once for
+the account and each run asked for seven (run 45175187088), and it stays:
+Clippy lints only this package's own code, whose `cfg` follows the target.
+The gate's shell is resolved for this runner, not for `runner`. Measured,
+`MUT-GATE-RUNNER-DRIFT`. The `msrv` entry's runner is `msrv_runner`, which
+for macOS differs.
+
+## `pub(super) struct CiTarget` › `pub(super) msrv_runner: &'static str,`
+
+The `os:` of the `msrv` `include:` entry that checks this target's tuple on
+the floor, and the runner each of that job's `run:` steps has its shell
+resolved for. It is the target's own platform for all three:
+`ubuntu-latest`, `windows-latest` and `macos-latest`.
+
+Natively, because the floor is also the dependencies'. Under `--target`
+Cargo builds every build script and procedural macro, and what they depend
+on, for the runner rather than for the target, so the macOS entry on
+`ubuntu-latest` checked the package's macOS regions at 1.85 and compiled
+every dependency host unit for Linux; a locked dependency whose macOS host
+code needs a newer Rust passed there and fails on a user's Mac
+(`PR412-MACOS-DEPENDENCY-HOST-MSRV-GAP`). On `macos-latest` Cargo builds
+them for macOS at 1.85, as that Mac does. The entry returned there on
+2026-11-25, once the organisation's macOS job limit, raised from 5 to 50
+with its move to GitHub Enterprise Cloud on 2026-11-24, was seen in effect.
+
+It differs from `check_runner` for macOS alone; the Clippy gate has no
+dependency host units to lint. Measured, `MUT-MSRV-MACOS-ON-LINUX`.
 
 ## `pub(super) struct CiTarget` › `pub(super) clippy_gate: &'static str,`
 
