@@ -106,7 +106,7 @@ head), provenance and first-bad commit as the draft gives them; only the guard's
 **Implemented on draft #331, and adopted on 2026-10-11 with decision O8 as an agent decision by `pr11_decide_d` under
 the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`)**, as part N of R-D1's preservation
 design, round 4 (sha256 `f9e81c07…`), with the coordinator's `kept_on_error` and `Workspace::pin_checkout`
-(`reviews/2026-10-02-pr11-follow-up-d-record.md` §5.17). Its engine witnesses, each red at D's head as the merge has it
+(`48f2af7a:reviews/2026-10-02-pr11-follow-up-d-record.md` §5.17). Its engine witnesses, each red at D's head as the merge has it
 and green here:
   `an_attempt_error_that_is_not_a_registry_refusal_keeps_the_output_pinned`,
   `a_snapshot_failure_that_is_not_the_registrys_keeps_the_output_pinned`,

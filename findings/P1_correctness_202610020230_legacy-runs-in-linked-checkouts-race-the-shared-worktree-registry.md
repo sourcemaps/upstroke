@@ -55,7 +55,7 @@ output was discarded. The resume fails the same way until the residue is removed
 
 **Measured at the Git level.**
 - Round 1 of PR #329 ran the legacy argv concurrently in two linked checkouts
-  (`reviews/2026-10-01-pr11-follow-up-b-record.md` §1.2, table C and "The legacy race"). With four
+  (`48f2af7a:reviews/2026-10-01-pr11-follow-up-b-record.md` §1.2, table C and "The legacy race"). With four
   loops per checkout, 12 and 16 commands failed in 7,200. With one loop per checkout, the shape one
   legacy coordinator per checkout gives, none failed in 5,400.
 - Round 3 ran the legacy argv untolerant in the main checkout beside the topology manager's
@@ -161,7 +161,7 @@ stays open under its guard.
 
 **Implemented, and adopted on 2026-10-11 with decision O8, as an agent decision by `pr11_decide_d` under the owner's
 delegation of 2026-10-11 (babysit's `0194a1e4…`).** Follow-up D's reviewed proposal is implemented on PR #331's branch,
-a draft, as its record's Implementation section gives it (`reviews/2026-10-02-pr11-follow-up-d-record.md`). Its five
+a draft, as its record's Implementation section gives it (`48f2af7a:reviews/2026-10-02-pr11-follow-up-d-record.md`). Its five
 `effects/allowlist.toml` texts, and `design/15`'s paragraph, are **adopted with O8**, and nothing of it is in force
 until that pull request merges, after PR #329.
 
