@@ -49,6 +49,29 @@ const ALPHA: TaskKey = TaskKey(1);
 const MID: TaskKey = TaskKey(2);
 const BETA: TaskKey = TaskKey(3);
 
+#[test]
+fn the_last_task_key_is_reached_at_every_length() {
+    use super::outcome::last_task_key;
+
+    assert_eq!(last_task_key(0), None);
+    assert_eq!(last_task_key(1), Some(TaskKey(0)));
+    assert_eq!(
+        last_task_key(u32::MAX as usize),
+        Some(TaskKey(u32::MAX - 1))
+    );
+    #[cfg(target_pointer_width = "64")]
+    {
+        assert_eq!(
+            last_task_key(u32::MAX as usize + 1),
+            Some(TaskKey(u32::MAX))
+        );
+        assert_eq!(
+            last_task_key(u32::MAX as usize + 2),
+            Some(TaskKey(u32::MAX))
+        );
+    }
+}
+
 fn sha(label: &str) -> CommitSha {
     let mut value: String = label
         .bytes()
