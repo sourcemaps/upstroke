@@ -43,7 +43,7 @@ every refusal says what the task gets instead:
 
 | comment or attribute | warning | what the task gets |
 |---|---|---|
-| `<!-- note -->`, `<!-- Upstroke: -->`, `<!-- upstroke handles it -->` | none: an author's comment | nothing; the comment stays in the body |
+| `<!-- note -->`, `<!-- Upstroke: -->`, `<!-- upstroke handles it -->` | none: an author's comment | nothing; in a section task the comment stays in the body, in a checklist item it is not carried into the body |
 | `<!-- upstroke: ...` with no `-->` in its block | unterminated; ignored | nothing; the text it opened stays in the body |
 | a second upstroke comment on one task | multiple; the first is used | the first comment, and every one is cut from the body |
 | `token` with no `=` | malformed; ignored | nothing from that token |
