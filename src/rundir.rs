@@ -1686,6 +1686,16 @@ pub fn write_question_payload<T: Serialize>(
 /// Removing the marker first would leave a marker-less husk carrying content,
 /// which the next census retains rather than finishes.
 ///
+/// **It sweeps the directory whole**: it lists the directory and removes what
+/// the listing finds. So the census uses it only for a husk that carries a
+/// marker, which is removed on that marker's authority. That is the public
+/// half after the private half went through the proof token, and, through
+/// [`remove_unbound_husk`], a husk whose marker names a private half that is
+/// gone ([`UnboundShape::TargetAbsent`]). An unbound husk with no marker is
+/// not swept. The census removes it by the shape it planned
+/// ([`remove_unbound_husk`]), because a listing taken when the removal runs
+/// can find an entry the plan never saw.
+///
 /// **A listing that fails removes nothing.** Its error is returned as
 /// [`UpstrokeError::Io`] for `public` before the first removal: what the
 /// directory holds is exactly what the failure leaves unknown, and an empty
@@ -1833,15 +1843,24 @@ fn remove_file_if_present(path: &Path) -> Result<(), UpstrokeError> {
 /// later census to report again (`SWEEP-NAMES-005`).
 ///
 /// **A listing that failed is an error, never an empty list**
-/// (`SWEEP-CLASSIFY-009`). Both production callers read an empty list as a
-/// bare directory, and a bare husk is one the census reclaims. This used to
-/// answer empty when `read_dir` itself failed, and its `.flatten()` dropped
-/// every entry whose read failed, so a transient failure (`EMFILE`, say)
-/// turned a committed run's public directory -- `events.jsonl` and no marker
-/// -- into a bare husk, and the removal, listing it again once the failure
-/// had passed, deleted the event log. Only `NotFound` on opening `dir` is the
-/// empty answer, because absence is a fact: a directory that is not there
-/// holds nothing.
+/// (`SWEEP-CLASSIFY-009`). The ownership proof's `unbound_shape` reads an
+/// empty list as a bare directory, and a bare husk is one the census
+/// reclaims; [`remove_public_husk`] reads it as nothing to remove before the
+/// marker. This used to answer empty when `read_dir` itself failed, and its
+/// `.flatten()` dropped every entry whose read failed, so a transient failure
+/// (`EMFILE`, say) turned a committed run's public directory -- `events.jsonl`
+/// and no marker -- into a bare husk, and the removal of that time, listing it
+/// again once the failure had passed, deleted the event log. Only `NotFound`
+/// on opening `dir` is the empty answer, because absence is a fact: a
+/// directory that is not there holds nothing.
+///
+/// The removal no longer lists an unbound husk again. The census removes it
+/// by the shape it planned ([`remove_unbound_husk`]): a bare husk by one
+/// `remove_dir`, which refuses a directory that is not empty, so an entry the
+/// plan never saw stays where it is. Only a husk that carries a marker is
+/// still listed here and swept whole, on its marker's authority: by
+/// [`remove_public_husk`] for both halves under the proof, and by
+/// [`remove_unbound_husk`] for [`UnboundShape::TargetAbsent`].
 ///
 /// # Errors
 ///

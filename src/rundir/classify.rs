@@ -359,7 +359,7 @@ fn first_committed_line(public: &Path) -> Observed<RunStartedHeader> {
     // reclaims both halves and does require `committed.json` to be absent
     // (conjunct 12), which a run that reached `run_started` published at P5b.
     // `NothingBound` reclaims the **public** half through
-    // `super::remove_public_husk` with no commit-record check anywhere on the
+    // `super::remove_unbound_husk` with no commit-record check anywhere on the
     // path — and it is what the proof answers as soon as the marker cannot be
     // read, which every committed run past P7 is, since P7 is the step that
     // removes the marker.
@@ -377,11 +377,18 @@ fn first_committed_line(public: &Path) -> Observed<RunStartedHeader> {
     // empty — and `unbound_shape` answers that error with
     // `RetainReason::PublicDirUnreadable`. A transient whole-process failure
     // (`EMFILE`, `ENFILE`) reaching the `open` below, the marker read and that
-    // listing at the same moment therefore ends in that retention, and
-    // `remove_public_husk`, which lists the directory again, returns a failed
-    // listing as an error before its first removal. Before
+    // listing at the same moment therefore ends in that retention. Before
     // `SWEEP-CLASSIFY-009`'s repair the listing folded both failures into `[]`,
     // the reclaiming answer.
+    //
+    // Nor does the removal look at the directory again to decide what to
+    // delete. `super::remove_unbound_husk` removes an unbound husk by the shape
+    // the census planned: a `Bare` or `StagedMarkerOnly` husk by a `remove_dir`
+    // that refuses a directory that is not empty, so an `events.jsonl` the plan
+    // never saw stays where it is. Only a husk that carries a marker is listed
+    // again and swept whole, on its marker's authority — `TargetAbsent`, and
+    // both halves under the proof through `super::remove_public_husk` — and
+    // that listing returns a failure as an error before its first removal.
     if !fs::symlink_metadata(&path).is_ok_and(|entry| entry.is_file()) {
         return Observed::Absent;
     }

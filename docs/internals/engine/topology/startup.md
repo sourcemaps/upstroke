@@ -196,12 +196,15 @@ the private half is known.
 
 ## `pub enum FailedStep` › `PublicHalf,`
 
-`RunDir.RemovePublicHusk` on a directory with nothing private bound.
+`RunDir.RemovePublicHusk` on a directory with nothing private bound, which
+`rundir::remove_unbound_husk` removes by the shape the census planned.
 Nothing private existed by ordering, so nothing private is at risk.
 
 This is also the answer when a `Bare` or `StagedMarkerOnly` directory has
 gained an entry since the census planned its reclaim. The removal refuses
-it, and the entry stays (see `apply`).
+it, and the entry stays (see `apply`). A `TargetAbsent` husk is the
+exception: it carries a marker and is still swept whole, on its marker's
+authority, so this error can come after some of its entries were removed.
 
 ## `pub enum FailedStep` › `PrivateHalf,`
 
@@ -773,9 +776,11 @@ directory again. It runs one `remove_dir`, after removing the staged marker
 for `StagedMarkerOnly`, and `remove_dir` refuses a directory that is not
 empty. So an entry that arrived after the plan is an error,
 `FailedStep::PublicHalf`, and the entry and the directory stay for the next
-census to classify again. `TargetAbsent` is decided by the marker's private
-target, not by what the public directory holds, so that shape still lists
-and empties the directory with the marker last, as `remove_public_husk` does.
+census to classify again. A husk that carries a marker is still swept
+whole, on its marker's authority. `TargetAbsent` is decided by the marker's
+private target, not by what the public directory holds, so that shape still
+lists and empties the directory with the marker last, as `remove_public_husk`
+does for both halves under the proof (the next arm).
 
 This arm used to call `remove_public_husk`, which listed the directory again
 and removed everything it found. Take a committed run whose public directory
