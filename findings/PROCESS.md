@@ -878,6 +878,9 @@ cause. That evidence is then recorded as established, and the remedy may be writ
    - the job log, by its path and the SHA-256 of the log as GitHub's API serves it
      (`actions/jobs/<id>/logs`) with ANSI escape sequences removed, never a copy made with
      `gh run view --log`;
+   - for a build machine's baseline, which has no run or job, instead of the three items above: the
+     date, the head it ran at with its pull request, the command, and its own log, by its path and
+     the SHA-256 of the log as the machine wrote it;
    - each fact, by its line in that log.
 4. **The same tree's passes.** A run is the same tree only when the commit it checked out has the
    failing run's tree. Otherwise the record says what differed, for example "the same branch tree,
@@ -912,10 +915,14 @@ make observable. `guard:` names that change. Diagnosis and design belong to that
 run what this record could only read.
 
 **The pull request's body** names each record by `id` and says what it adds. It does not restate
-the records' counts, rates or readings, so a repair to a record cannot leave the body stale.
+the records' counts, rates or readings, so a repair to a record cannot leave the body stale. The
+evidence `MAINTAINING.md` step 5 asks for a corrected fact, the command and its result, is not such
+a restatement: the body records it, beside the correction it proves.
 
 **Review of a `findings/` pull request that records reds is one round of passes. There is no
-second round.** Besides checking each fact against the logs and the source, each pass names any
+second round.** The one exception is a serious P1: once it is repaired, the repaired head gets the
+fresh pass `MAINTAINING.md` step 5 and §7 require. Besides checking each fact against the logs and
+the source, each pass names any
 open finding that records the same test, the same assertion, or the same error on the same
 platform. The repair:
 

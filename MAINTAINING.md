@@ -89,7 +89,7 @@ source, documentation, workflows, release machinery and this file.
    the runner, which is repaired in the test, not dismissed as the machine's.
 
    **Re-running CI past a red the change did not cause.** The operator may start a fresh CI run on
-   the same tree (an empty commit, or the same head re-enqueued after a merge-queue ejection)
+   the same branch tree (an empty commit, or the same head re-enqueued after a merge-queue ejection)
    without a ruling when all of these hold:
 
    1. One test failed, in one job, and any other job that did not pass was cancelled by GitHub
@@ -104,13 +104,15 @@ source, documentation, workflows, release machinery and this file.
       or test input (`src/`, `tests/`, `effects/`, `build.rs`, `Cargo.toml`, `Cargo.lock`,
       `.cargo/`, `rust-toolchain*`, `.github/workflows/`) and the red matches the test and assertion
       of an open finding.
-   5. This is at most the third re-run of this tree, counting every reason above.
+   5. This is at most the third re-run of this branch tree, counting every reason above.
 
    For every red re-run this way, the operator saves the job's log with ANSI escapes stripped and
    its SHA-256, names the red in the body's `BASELINE`, and records it in the next findings pull
    request: as a sighting of the open finding with the same test and assertion, or else as a new P3
    finding. A red on a run that gates nothing (a push to `master`, or a pull-request run after the
-   head was enqueued) is recorded the same way.
+   head was enqueued) is recorded the same way. The branch tree is the tree of the pull request's
+   head commit. What a run checks out also holds the `master` of the moment, so a later pass is
+   recorded as the same tree's only on `findings/PROCESS.md` §10's terms.
 
    Anything else (two failures, a job at its limit or short of its floor, a red the diff can reach,
    a repeat that item 4 does not allow, or a red after the third re-run) keeps the pull request a
@@ -576,7 +578,9 @@ and at the front of a `bulk-fix-P3/` slug, so `bulk-fix-P3/docs-contract-sweep` 
 batch. It ends at a word boundary, so `docs-contractual-review` begins with `docs` and not with a
 category. A name that carries none — or that is not passed at all — is reviewed at max. Fail
 expensive, never cheap. The review of a `findings/` branch asks one question: whether any finding it files
-duplicates one already filed. **A branch outside the vocabulary has no lane**: `lane_for` refuses it
+duplicates one already filed. The exception is a `findings/` pull request that records a red: each
+pass also checks every fact the record gives against the logs and the source (`findings/PROCESS.md`
+§10). **A branch outside the vocabulary has no lane**: `lane_for` refuses it
 and prints the table, and the pull request carrying it is reported `branch-prefix-unknown` rather
 than given a default.
 
