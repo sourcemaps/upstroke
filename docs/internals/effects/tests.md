@@ -2148,10 +2148,14 @@ The test asserts no count. It requires every row to change the document and to b
 the code the row names, and no two rows to share a name; a row taken out of
 the ledger is a claim nothing measures, and that is the diff's to show.
 
-## `fn the_workflow_shape_oracle_refuses_every_escape_the_ledger_names() {` › `let doc = parse_workflow(&text).expect(CI_WORKFLOW);`
+## `fn assert_workflow_escapes(text: &str, categories: &[TestCategory]) {` › `let doc = parse_workflow(text).expect(CI_WORKFLOW);`
 
 The negative control first: the real document has no complaint, so a
 refusal below is the mutation and not a contract that refuses everything.
+The wrapper supplies the checked-in registry; the filter-addition control supplies
+its fixture registry. Both run every static escape and every generated matrix
+escape, retaining the expected complaint codes, changed-document assertions and
+unique-name check across the two lists.
 
 ## `fn the_workflow_that_runs_these_tests_installs_the_compiler_they_need() {`
 
@@ -3041,6 +3045,38 @@ and the standalone `check` entry point with the same diagnostic and unchanged
 bytes. Generating must repair only the marked interiors; a subsequent check and
 second generation must preserve the exact synchronized bytes. All operations
 run under the ASCII-default control on Linux and against private fixture copies.
+
+## `fn regenerated_category_fixture(categories: &[TestCategory]) -> (ScratchTree, String) {`
+
+Write the supplied registry into a private copy of the model, regenerate the
+workflow with the real Python generator, and require `generate --check` to pass.
+Only the table changes in the fixture model; generation retains its normal
+marked-block boundary. The scratch guard owns the copies and cleanup.
+
+## `fn the_workflow_fixtures_follow_a_normal_filter_addition_and_regeneration() {`
+
+Add an ordinary filter to the sampler row, which also changes the skips generated
+for later categories. Require the regenerated workflow to select its inert name
+once on each platform and retain 7 Linux, 9 macOS and 20 Windows legs. Run the full
+workflow escape set against that accepted control. Thus a copied selector cannot
+make a fixture stale or let an unrelated baseline complaint satisfy its assertion.
+
+## `fn the_macos_inventory_owner_rejects_missing_multiple_and_malformed_ownership() {`
+
+Independent document snapshots omit the ownership field, give it null, string or
+integer values, remove the only owner, or add a second owner. Each must produce
+`test-categories`. Moving the check after its suite must produce the same code.
+Existing duplicate-key, stale-matrix and malformed-input tests remain in place.
+
+## `fn the_executed_macos_inventory_condition_has_one_owner_after_subdivision_and_rebalance() {`
+
+On Unix, regenerate the current registry and two legal rebalances: consolidate
+the coordinator legs and split unit tests, with `unit/cli` on leg 2 and then leg 1.
+The macOS job count stays nine. Expand the actual conditional script for each
+parsed include entry and run it under Bash. A recording script at the native
+check's path requires zero arguments and records a whole-inventory call without
+starting Cargo. Exactly one leg must call it before the suite marker, and that leg
+must select `cli_tests::inert`. The other legs emit only the suite marker.
 
 ## `fn the_category_inventory_counts_shared_names_in_distinct_harnesses() {`
 

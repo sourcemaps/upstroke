@@ -5381,15 +5381,16 @@ mod workflow;
 use ci_model::{
     CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, MSRV_COMMAND, MSRV_JOB, OVERRIDING_REPO_FILES,
     RUSTFLAGS_KEY, TEMP_FOLDS_CASE_KEY, TEST_CATEGORIES, TEST_COMMAND, TEST_JOBS,
-    TEST_SHARD_COMMAND, TEST_WINDOWS_HOSTED_JOB, WINDOWS_SHARD_WITNESS, WINDOWS_TEST_FLOOR,
-    category_legs,
+    TEST_SHARD_COMMAND, TEST_WINDOWS_HOSTED_JOB, TestCategory, WINDOWS_SHARD_WITNESS,
+    WINDOWS_TEST_FLOOR, category_legs,
 };
 use workflow::{
-    WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_test_job_complaints,
+    MATRIX_ESCAPES, WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_test_job_complaints,
     ci_test_windows_hosted_job_complaints, ci_windows_build_witness_complaints, ci_workflow_text,
     complaint_codes, cross_target, declared_msrv_toolchain, declared_rust_version, field,
-    field_names, libtest_runs, mutate_workflow, parse_workflow, rustflags_complaints, scalar,
-    steps_of, three_component, workflow_complaints,
+    field_names, libtest_runs, matrix_entries, mutate_matrix, mutate_workflow, parse_workflow,
+    rustflags_complaints, scalar, steps_of, three_component, workflow_complaints,
+    workflow_complaints_for,
 };
 
 #[test]
@@ -5432,10 +5433,12 @@ fn the_workflow_parser_rejects_duplicate_keys_and_reads_on_as_a_string() {
 
 #[test]
 fn the_workflow_shape_oracle_refuses_every_escape_the_ledger_names() {
-    let text = ci_workflow_text();
+    assert_workflow_escapes(&ci_workflow_text(), TEST_CATEGORIES);
+}
 
-    let doc = parse_workflow(&text).expect(CI_WORKFLOW);
-    let clean = workflow_complaints(&doc);
+fn assert_workflow_escapes(text: &str, categories: &[TestCategory]) {
+    let doc = parse_workflow(text).expect(CI_WORKFLOW);
+    let clean = workflow_complaints_for(&doc, categories);
     assert!(
         clean.is_empty(),
         "the unmutated workflow does not satisfy its own contract:\n{}",
@@ -5444,14 +5447,14 @@ fn the_workflow_shape_oracle_refuses_every_escape_the_ledger_names() {
 
     let mut refused: BTreeSet<&str> = BTreeSet::new();
     for escape in WORKFLOW_ESCAPES {
-        let mutated = mutate_workflow(&text, escape.job, escape.anchor, escape.replacement);
+        let mutated = mutate_workflow(text, escape.job, escape.anchor, escape.replacement);
         assert_ne!(
             mutated, text,
             "{}: the mutation changed nothing, so it measures nothing",
             escape.name
         );
         let complaints = match parse_workflow(&mutated) {
-            Ok(document) => workflow_complaints(&document),
+            Ok(document) => workflow_complaints_for(&document, categories),
             Err(error) => vec![error],
         };
         let codes = complaint_codes(&complaints);
@@ -5465,9 +5468,23 @@ fn the_workflow_shape_oracle_refuses_every_escape_the_ledger_names() {
         );
         refused.insert(escape.name);
     }
+    for escape in MATRIX_ESCAPES {
+        let mutated = mutate_matrix(&doc, escape);
+        let complaints = workflow_complaints_for(&mutated, categories);
+        let codes = complaint_codes(&complaints);
+        assert!(
+            codes.contains(escape.refused_as),
+            "{} was not refused as `{}` -- {}\nComplaints: {:#?}",
+            escape.name,
+            escape.refused_as,
+            escape.escape,
+            complaints
+        );
+        refused.insert(escape.name);
+    }
     assert_eq!(
         refused.len(),
-        WORKFLOW_ESCAPES.len(),
+        WORKFLOW_ESCAPES.len() + MATRIX_ESCAPES.len(),
         "two escapes share a name, so one of them was never measured"
     );
 }
@@ -6424,6 +6441,227 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         .env("PYTHONCOERCECLOCALE", "0")
         .output()
         .expect("run isolated category fixture with ASCII defaults on Linux")
+}
+
+fn regenerated_category_fixture(categories: &[TestCategory]) -> (ScratchTree, String) {
+    let directory = category_fixture();
+    let model = directory.path().join("src/effects/tests/ci_model.rs");
+    let source = fs::read_to_string(&model).expect("read the fixture registry");
+    let declaration = "const TEST_CATEGORIES: &[TestCategory] = ";
+    let (prefix, rest) = source
+        .split_once(declaration)
+        .expect("registry declaration");
+    let (_, suffix) = rest.split_once("\n];").expect("registry end");
+    let mut table = String::from("&[\n");
+    for row in categories {
+        let windows = row
+            .windows
+            .iter()
+            .map(|(leg, floor, filters)| format!("({leg}, {floor}, &{filters:?})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        table.push_str(&format!(
+            "    TestCategory {{\n        category: {:?},\n        subcategory: {:?},\n\
+             \x20       filters: &{:?},\n        macos: {},\n        windows: &[{windows}],\n    }},\n",
+            row.category, row.subcategory, row.filters, row.macos
+        ));
+    }
+    fs::write(&model, format!("{prefix}{declaration}{table}];{suffix}"))
+        .expect("write the fixture registry");
+    for args in [&["generate"][..], &["generate", "--check"][..]] {
+        let output = category_fixture_tool(directory.path(), args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let text = fs::read_to_string(directory.path().join(CI_WORKFLOW))
+        .expect("read the regenerated fixture matrix")
+        .replace("\r\n", "\n");
+    (directory, text)
+}
+
+#[test]
+fn the_workflow_fixtures_follow_a_normal_filter_addition_and_regeneration() {
+    let mut filters = TEST_CATEGORIES
+        .iter()
+        .find(|row| row.category == "kill-path" && row.subcategory == "samplers")
+        .expect("sampler row")
+        .filters
+        .to_vec();
+    filters.push("inventory_probe::");
+    let mut categories = TEST_CATEGORIES.to_vec();
+    categories
+        .iter_mut()
+        .find(|row| row.category == "kill-path" && row.subcategory == "samplers")
+        .expect("sampler row")
+        .filters = &filters;
+    let (_directory, text) = regenerated_category_fixture(&categories);
+    assert_ne!(text, ci_workflow_text());
+    let doc = parse_workflow(&text).expect("regenerated workflow");
+    for (job, count) in [
+        ("test-linux", 7),
+        ("test-macos", 9),
+        ("test-windows-hosted", 20),
+    ] {
+        let entries = matrix_entries(&doc, job);
+        assert_eq!(entries.len(), count);
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| libtest_runs(
+                    scalar(entry, "tests").expect("generated selection"),
+                    "inventory_probe::inert"
+                ))
+                .count(),
+            1,
+            "{job} selects the added filter exactly once"
+        );
+    }
+    assert_workflow_escapes(&text, &categories);
+}
+
+#[test]
+fn the_macos_inventory_owner_rejects_missing_multiple_and_malformed_ownership() {
+    use yaml_rust2::Yaml;
+
+    let doc = parse_workflow(&ci_workflow_text()).expect(CI_WORKFLOW);
+    let entries = matrix_entries(&doc, "test-macos");
+    let owner = entries
+        .iter()
+        .position(|entry| field(entry, "check_inventory").and_then(Yaml::as_bool) == Some(true))
+        .expect("one generated owner");
+    let other = entries
+        .iter()
+        .position(|entry| field(entry, "check_inventory").and_then(Yaml::as_bool) == Some(false))
+        .expect("a non-owner");
+    for value in [
+        None,
+        Some(Yaml::Null),
+        Some(Yaml::String("true".to_owned())),
+        Some(Yaml::Integer(1)),
+        Some(Yaml::Boolean(false)),
+    ] {
+        let mut malformed = doc.clone();
+        let Yaml::Array(entries) =
+            &mut malformed["jobs"]["test-macos"]["strategy"]["matrix"]["include"]
+        else {
+            panic!("matrix entries");
+        };
+        let Yaml::Hash(entry) = &mut entries[owner] else {
+            panic!("owner entry");
+        };
+        let key = Yaml::String("check_inventory".to_owned());
+        match value {
+            Some(value) => {
+                entry.insert(key, value);
+            }
+            None => {
+                entry.remove(&key);
+            }
+        }
+        assert!(
+            complaint_codes(&workflow_complaints(&malformed)).contains("test-categories"),
+            "invalid owner must fail the inventory obligation"
+        );
+    }
+    let mut duplicate = doc.clone();
+    duplicate["jobs"]["test-macos"]["strategy"]["matrix"]["include"][other]["check_inventory"] =
+        Yaml::Boolean(true);
+    assert!(complaint_codes(&workflow_complaints(&duplicate)).contains("test-categories"));
+
+    let mut late = doc.clone();
+    let Yaml::Array(steps) = &mut late["jobs"]["test-macos"]["steps"] else {
+        panic!("macOS steps");
+    };
+    let check = steps
+        .iter()
+        .position(|step| scalar(step, "run") == Some(ci_model::CATEGORY_CHECK_MACOS))
+        .expect("macOS inventory check");
+    let suite = steps
+        .iter()
+        .position(|step| scalar(step, "run") == Some(TEST_SHARD_COMMAND))
+        .expect("macOS suite");
+    steps.swap(check, suite);
+    assert!(complaint_codes(&workflow_complaints(&late)).contains("test-categories"));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_executed_macos_inventory_condition_has_one_owner_after_subdivision_and_rebalance() {
+    use yaml_rust2::Yaml;
+
+    for cli_leg in [None, Some(2), Some(1)] {
+        let mut categories = TEST_CATEGORIES.to_vec();
+        if let Some(cli_leg) = cli_leg {
+            for row in &mut categories {
+                if row.category == "coordinator" {
+                    row.macos = 1;
+                } else if row.category == "unit" {
+                    row.macos = match row.subcategory {
+                        "cli" => cli_leg,
+                        "util" => 2,
+                        _ => 1,
+                    };
+                }
+            }
+        }
+        let (directory, text) = regenerated_category_fixture(&categories);
+        let doc = parse_workflow(&text).expect("regenerated macOS matrix");
+        let complaints = workflow_complaints_for(&doc, &categories);
+        assert!(complaints.is_empty(), "{complaints:#?}");
+        let entries = matrix_entries(&doc, "test-macos");
+        assert_eq!(entries.len(), 9, "rebalance keeps the macOS job count");
+        let check = steps_of(&doc["jobs"]["test-macos"])
+            .iter()
+            .find(|step| scalar(step, "run") == Some(ci_model::CATEGORY_CHECK_MACOS))
+            .expect("actual inventory check step");
+        let script = scalar(check, "run").expect("actual conditional script");
+        let stub = directory.path().join(".github/scripts/test-categories.sh");
+        fs::write(
+            &stub,
+            "[ \"$#\" -eq 0 ] || exit 99\nprintf 'inventory\\n'\n",
+        )
+        .expect("record a whole-inventory call without running Cargo");
+        let mut owners = Vec::new();
+        for entry in entries {
+            let owns = field(entry, "check_inventory")
+                .and_then(Yaml::as_bool)
+                .expect("explicit boolean ownership");
+            let expanded = script.replace(
+                "${{ matrix.check_inventory }}",
+                if owns { "true" } else { "false" },
+            );
+            assert!(!expanded.contains("${{"), "all matrix expressions expanded");
+            let output = std::process::Command::new("bash")
+                .args(["--noprofile", "--norc", "-eo", "pipefail", "-c"])
+                .arg(format!("{expanded}\nprintf 'suite\\n'\n"))
+                .current_dir(directory.path())
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").expect("Bash on PATH"))
+                .output()
+                .expect("execute the workflow condition for an expanded macOS leg");
+            assert!(output.status.success(), "{output:?}");
+            if output.stdout == b"inventory\nsuite\n" {
+                owners.push(entry);
+            } else {
+                assert_eq!(output.stdout, b"suite\n");
+            }
+        }
+        assert_eq!(owners.len(), 1, "exactly one executed inventory call");
+        assert!(libtest_runs(
+            scalar(owners[0], "tests").expect("owner selection"),
+            "cli_tests::inert"
+        ));
+        if let Some(cli_leg) = cli_leg {
+            assert!(
+                scalar(owners[0], "leg")
+                    .expect("owner label")
+                    .starts_with(&format!("macos-latest, unit {cli_leg} of 2 "))
+            );
+        }
+    }
 }
 
 #[test]

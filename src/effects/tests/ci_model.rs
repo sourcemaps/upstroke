@@ -26,7 +26,7 @@ pub(super) const CATEGORY_CHECK: &str = "bash .github/scripts/test-categories.sh
 
 pub(super) const CATEGORY_CHECK_WINDOWS: &str = "python .github/scripts/test-categories.py check";
 
-pub(super) const CATEGORY_CHECK_MACOS: &str = r#"if [[ '${{ matrix.leg }}' == 'macos-latest, unit ('* ]]; then
+pub(super) const CATEGORY_CHECK_MACOS: &str = r#"if [[ '${{ matrix.check_inventory }}' == 'true' ]]; then
   bash .github/scripts/test-categories.sh
 fi
 "#;
@@ -173,13 +173,13 @@ pub(super) const TEST_WINDOWS_HOSTED_NAME: &str = "test (windows-latest, ${{ mat
 pub(super) const TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES: i64 = 40;
 pub(super) const CACHE_ACTION: &str = "Swatinem/rust-cache@";
 
-#[derive(Debug, serde::Serialize)]
-pub(super) struct TestCategory {
-    pub(super) category: &'static str,
-    pub(super) subcategory: &'static str,
-    pub(super) filters: &'static [&'static str],
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub(super) struct TestCategory<'a> {
+    pub(super) category: &'a str,
+    pub(super) subcategory: &'a str,
+    pub(super) filters: &'a [&'a str],
     pub(super) macos: u8,
-    pub(super) windows: &'static [(u8, u32, &'static [&'static str])],
+    pub(super) windows: &'a [(u8, u32, &'a [&'a str])],
 }
 
 pub(super) const TEST_CATEGORIES: &[TestCategory] = &[
@@ -778,11 +778,16 @@ pub(super) struct CategoryLeg {
     pub(super) name: String,
     pub(super) tests: String,
     pub(super) floor: u32,
+    pub(super) check_inventory: bool,
 }
 
 pub(super) fn category_legs(platform: &str) -> Vec<CategoryLeg> {
+    category_legs_for(TEST_CATEGORIES, platform)
+}
+
+pub(super) fn category_legs_for(categories: &[TestCategory], platform: &str) -> Vec<CategoryLeg> {
     let mut rows = Vec::new();
-    for row in TEST_CATEGORIES {
+    for row in categories {
         if platform == "windows" {
             for &(leg, floor, filters) in row.windows {
                 rows.push((
@@ -809,10 +814,10 @@ pub(super) fn category_legs(platform: &str) -> Vec<CategoryLeg> {
             ));
         }
     }
-    let categories: std::collections::BTreeSet<&str> =
-        TEST_CATEGORIES.iter().map(|row| row.category).collect();
+    let names: std::collections::BTreeSet<&str> =
+        categories.iter().map(|row| row.category).collect();
     let mut legs = Vec::new();
-    for category in categories {
+    for category in names {
         let count = rows
             .iter()
             .filter(|(row, _, _, _)| row.category == category)
@@ -829,7 +834,7 @@ pub(super) fn category_legs(platform: &str) -> Vec<CategoryLeg> {
                 .iter()
                 .flat_map(|(_, _, _, filters)| filters.iter().copied())
                 .collect();
-            let mut skips: Vec<&str> = TEST_CATEGORIES
+            let mut skips: Vec<&str> = categories
                 .iter()
                 .take_while(|row| row.category != category)
                 .flat_map(|row| row.filters.iter().copied())
@@ -886,6 +891,10 @@ pub(super) fn category_legs(platform: &str) -> Vec<CategoryLeg> {
                 ),
                 tests: words.join(" "),
                 floor: selected.iter().map(|(_, _, floor, _)| *floor).sum(),
+                check_inventory: platform == "macos"
+                    && selected
+                        .iter()
+                        .any(|(row, _, _, _)| row.category == "unit" && row.subcategory == "cli"),
             });
         }
     }

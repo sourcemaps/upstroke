@@ -20,13 +20,14 @@ use super::ci_model::{
     GOLDEN_IMAGE_TOOLCHAIN, HOST_ACCEPTANCE_CAPTURE, HOST_ACCEPTANCE_WINDOWS_CAPTURE, KNOWN_SHELLS,
     MSRV_COMMAND, MSRV_ENTRY_KEYS, MSRV_JOB, MSRV_JOB_FIELDS, MSRV_MATRIX_FIELDS, MSRV_RUNS_ON,
     MSRV_TOOLCHAIN_TARGETS, OPTIONAL_DEFAULTS_FIELD, PINNED_ACTIONS, REQUIRED_CONTEXT,
-    RETIRED_TEST_JOB, RUSTFLAGS_KEY, RUSTFLAGS_VALUE, STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND,
-    TEST_JOB_FIELDS, TEST_JOB_NAME, TEST_JOBS, TEST_SCRIPTS, TEST_SHARD_COMMAND, TEST_STEP_FIELDS,
-    TEST_TIMEOUT_MINUTES, TEST_WINDOWS_HOSTED_JOB, TEST_WINDOWS_HOSTED_JOB_FIELDS,
-    TEST_WINDOWS_HOSTED_NAME, TEST_WINDOWS_HOSTED_SCRIPTS, TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES,
-    TEST_WINDOWS_PLATFORM, TEST_WINDOWS_STEP_ENV, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS,
-    TOOLCHAIN_TARGETS, TestJob, WINDOWS_BUILD_WITNESS, WINDOWS_SHARD_WITNESS, WORKFLOW_ENV,
-    WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS, category_legs,
+    RETIRED_TEST_JOB, RUSTFLAGS_KEY, RUSTFLAGS_VALUE, STABLE_TOOLCHAIN, STEP_FIELDS,
+    TEST_CATEGORIES, TEST_COMMAND, TEST_JOB_FIELDS, TEST_JOB_NAME, TEST_JOBS, TEST_SCRIPTS,
+    TEST_SHARD_COMMAND, TEST_STEP_FIELDS, TEST_TIMEOUT_MINUTES, TEST_WINDOWS_HOSTED_JOB,
+    TEST_WINDOWS_HOSTED_JOB_FIELDS, TEST_WINDOWS_HOSTED_NAME, TEST_WINDOWS_HOSTED_SCRIPTS,
+    TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES, TEST_WINDOWS_PLATFORM, TEST_WINDOWS_STEP_ENV,
+    TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS, TOOLCHAIN_TARGETS, TestCategory, TestJob,
+    WINDOWS_BUILD_WITNESS, WINDOWS_SHARD_WITNESS, WORKFLOW_ENV, WORKFLOW_FIELDS,
+    WORKFLOW_PERMISSIONS, category_legs_for,
 };
 use super::repo_root;
 
@@ -484,6 +485,10 @@ fn aggregate_complaints(doc: &Yaml, jobs: &Yaml, job_names: &BTreeSet<String>) -
 }
 
 pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
+    ci_test_job_complaints_for(doc, TEST_CATEGORIES)
+}
+
+fn ci_test_job_complaints_for(doc: &Yaml, categories: &[TestCategory]) -> Vec<String> {
     let Some(jobs) = field(doc, "jobs") else {
         return vec!["[jobs] the workflow declares no `jobs:` mapping".to_owned()];
     };
@@ -635,7 +640,7 @@ pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
             Some(STABLE_TOOLCHAIN),
         ));
 
-        out.extend(test_leg_matrix_complaints(job, row));
+        out.extend(test_leg_matrix_complaints(job, row, categories));
         if scalar(job, "runs-on") != Some(row.runner) {
             out.push(format!(
                 "[test-job-matrix] `{id}` runs on {:?}, not `{}`. The job runs the shards of \
@@ -730,30 +735,46 @@ fn test_jobs_table_complaints() -> Vec<String> {
 struct TestLeg {
     leg: String,
     tests: String,
+    check_inventory: Option<bool>,
 }
 
-fn test_legs(row: &TestJob) -> Vec<TestLeg> {
+fn test_legs(row: &TestJob, categories: &[TestCategory]) -> Vec<TestLeg> {
     let platform = row.runner.strip_suffix("-latest").expect("a hosted runner");
-    category_legs(platform)
+    category_legs_for(categories, platform)
         .into_iter()
         .map(|leg| TestLeg {
             leg: format!("{}, {}", row.runner, leg.name),
             tests: leg.tests,
+            check_inventory: (platform == "macos").then_some(leg.check_inventory),
         })
         .collect()
 }
 
-fn test_leg(entry: &Yaml) -> Option<TestLeg> {
-    if !field_complaints(entry, &["leg", "tests"], &[]).is_empty() {
+fn test_leg(entry: &Yaml, macos: bool) -> Option<TestLeg> {
+    let keys = if macos {
+        &["leg", "tests", "check_inventory"][..]
+    } else {
+        &["leg", "tests"][..]
+    };
+    if !field_complaints(entry, keys, &[]).is_empty() {
         return None;
     }
     Some(TestLeg {
         leg: scalar(entry, "leg")?.to_owned(),
         tests: scalar(entry, "tests")?.to_owned(),
+        check_inventory: if macos {
+            Some(field(entry, "check_inventory")?.as_bool()?)
+        } else {
+            None
+        },
     })
 }
 
-fn test_leg_matrix_complaints(job: &Yaml, row: &TestJob) -> Vec<String> {
+fn test_leg_matrix_complaints(
+    job: &Yaml,
+    row: &TestJob,
+    categories: &[TestCategory],
+) -> Vec<String> {
     let id = row.id;
     let mut out = Vec::new();
     let Some(strategy) = field(job, "strategy") else {
@@ -788,15 +809,21 @@ fn test_leg_matrix_complaints(job: &Yaml, row: &TestJob) -> Vec<String> {
             ));
         }
     }
-    let expected: Vec<Option<TestLeg>> = test_legs(row).into_iter().map(Some).collect();
+    let expected: Vec<Option<TestLeg>> = test_legs(row, categories).into_iter().map(Some).collect();
     let found: Option<Vec<Option<TestLeg>>> = matrix
         .and_then(|matrix| field(matrix, "include"))
         .and_then(Yaml::as_vec)
-        .map(|entries| entries.iter().map(test_leg).collect());
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| test_leg(entry, row.runner == "macos-latest"))
+                .collect()
+        });
     if found.as_ref() != Some(&expected) {
         out.push(format!(
             "[test-job-matrix] `{id}`'s `matrix.include:` reads as {found:#?}, not, in order, \
-             exactly {expected:#?}. Each mapping has precisely the keys `leg` and `tests`: \
+             exactly {expected:#?}. Each mapping has precisely the keys `leg` and `tests` \
+             (plus boolean `check_inventory` on macOS): \
              its runner and category/subcategory name, and the libtest substring selection \
              `category_legs` derives from `TEST_CATEGORIES`. No leg is an executing catch-all. \
              An entry that reads as `None` is not such a mapping. A \
@@ -816,6 +843,13 @@ fn installs_a_toolchain(step: &Yaml) -> bool {
 }
 
 pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
+    ci_test_windows_hosted_job_complaints_for(doc, TEST_CATEGORIES)
+}
+
+fn ci_test_windows_hosted_job_complaints_for(
+    doc: &Yaml,
+    categories: &[TestCategory],
+) -> Vec<String> {
     let mut out = Vec::new();
     let Some(jobs) = field(doc, "jobs") else {
         return vec!["[jobs] the workflow declares no `jobs:` mapping".to_owned()];
@@ -868,7 +902,7 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
              minutes, not exactly {TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES}"
         ));
     }
-    out.extend(windows_shard_matrix_complaints(job));
+    out.extend(windows_shard_matrix_complaints(job, categories));
 
     for (index, step) in steps_of(job).iter().enumerate() {
         let named = format!("`{TEST_WINDOWS_HOSTED_JOB}` step {index}");
@@ -1057,8 +1091,8 @@ struct ShardLeg {
     floor: i64,
 }
 
-fn windows_shard_legs() -> Vec<ShardLeg> {
-    category_legs("windows")
+fn windows_shard_legs(categories: &[TestCategory]) -> Vec<ShardLeg> {
+    category_legs_for(categories, "windows")
         .into_iter()
         .map(|leg| ShardLeg {
             shard: leg.name,
@@ -1079,7 +1113,7 @@ fn shard_leg(entry: &Yaml) -> Option<ShardLeg> {
     })
 }
 
-fn windows_shard_matrix_complaints(job: &Yaml) -> Vec<String> {
+fn windows_shard_matrix_complaints(job: &Yaml, categories: &[TestCategory]) -> Vec<String> {
     let mut out = Vec::new();
     let Some(strategy) = field(job, "strategy") else {
         return vec![format!(
@@ -1113,7 +1147,10 @@ fn windows_shard_matrix_complaints(job: &Yaml) -> Vec<String> {
             ));
         }
     }
-    let expected: Vec<Option<ShardLeg>> = windows_shard_legs().into_iter().map(Some).collect();
+    let expected: Vec<Option<ShardLeg>> = windows_shard_legs(categories)
+        .into_iter()
+        .map(Some)
+        .collect();
     let found: Option<Vec<Option<ShardLeg>>> = matrix
         .and_then(|matrix| field(matrix, "include"))
         .and_then(Yaml::as_vec)
@@ -1908,9 +1945,13 @@ fn rustflags_override_complaints(node: &Yaml, named: &str) -> Vec<String> {
 }
 
 pub(super) fn workflow_complaints(doc: &Yaml) -> Vec<String> {
+    workflow_complaints_for(doc, TEST_CATEGORIES)
+}
+
+pub(super) fn workflow_complaints_for(doc: &Yaml, categories: &[TestCategory]) -> Vec<String> {
     let mut out = ci_gate_complaints(doc);
-    out.extend(ci_test_job_complaints(doc));
-    out.extend(ci_test_windows_hosted_job_complaints(doc));
+    out.extend(ci_test_job_complaints_for(doc, categories));
+    out.extend(ci_test_windows_hosted_job_complaints_for(doc, categories));
     out.extend(job_permissions_complaints(doc));
     out.extend(ci_windows_build_witness_complaints(doc));
     out.extend(workflow_env_complaints(doc));
@@ -1962,8 +2003,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-MACOS-CATEGORY-CHECK-WRONG-LEG",
         escape: "The macOS category check condition names no generated leg.",
         job: Some("test-macos"),
-        anchor: "== 'macos-latest, unit ('* ]]; then",
-        replacement: "== 'macos-latest, unclassified ('* ]]; then",
+        anchor: "${{ matrix.check_inventory }}",
+        replacement: "${{ matrix.missing_inventory_owner }}",
         refused_as: "test-categories",
     },
     WorkflowEscape {
@@ -2049,25 +2090,6 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         anchor: "\njobs:\n",
         replacement: "\ndefaults:\n  run:\n    shell: pwsh\n\njobs:\n",
         refused_as: "step-shell",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-MATRIX-EXCLUDED",
-        escape: "an `exclude:` naming the first macOS leg, beside the `include:` list in \
-                 `test-macos` that still names all nine. Over an axis, `exclude:` removes \
-                 combinations the axis still lists, and every check that reads the list passes \
-                 while the fixtures never run on that platform -- the matrix half of \
-                 `PR5-MACOS-CLIPPY-NEVER-RUN`, and what this row measured while the legs were \
-                 an `os:` axis. GitHub documents that `include:` entries are processed after \
-                 `exclude:`, so by that rule this one removes no leg of an `include:` list; \
-                 that is the rule as documented, and no workflow was run to watch it. The \
-                 oracle does not weigh it: the legs are read from `include:` and from nothing \
-                 else in `matrix:`, so the key is refused whatever it would remove.",
-        job: Some("test-macos"),
-        anchor: "        include:\n",
-        replacement: "        exclude:\n\
-                      \x20         - leg: \"macos-latest, 1 of 12\"\n\
-                      \x20       include:\n",
-        refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-AGGREGATE-STEM-COLLISION",
@@ -2223,14 +2245,6 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         anchor: "          components: clippy\n",
         replacement: "",
         refused_as: "test-job-toolchain",
-    },
-    WorkflowEscape {
-        name: "MUT-CI-TEST-MATRIX-NARROWED",
-        escape: "Deleting a named category leg leaves its tests unrun while the remaining legs can pass.",
-        job: Some("test-linux"),
-        anchor: "          - leg: \"ubuntu-latest, coordinator (core, interleaving, pipelines, registry_waits, runners, scheduling, shutdown, snapshot_registration, verification_charges)\"\n            tests: \"engine::topology::coordinator:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n",
-        replacement: "",
-        refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-MATRIX-KEEPS-WINDOWS",
@@ -3448,86 +3462,6 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         refused_as: "test-windows-hosted-checkout",
     },
     WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-HOSTED-SHARD-NARROWED",
-        escape: "An extra skip removes the workspace tests from their named leg.",
-        job: Some("test-windows-hosted"),
-        anchor: "          - shard: \"workspace 2 of 2 (guarded_reads, manager, reclaim, refs, registry, snapshots)\"\n            tests: \"workspace_manager:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::tests::containment:: --skip workspace_manager::tests::incarnations:: --skip workspace_manager::tests::residue::\"\n            floor: 94\n",
-        replacement: "          - shard: \"workspace 2 of 2 (guarded_reads, manager, reclaim, refs, registry, snapshots)\"\n            tests: \"--skip workspace_manager:: workspace_manager:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::tests::containment:: --skip workspace_manager::tests::incarnations:: --skip workspace_manager::tests::residue::\"\n            floor: 94\n",
-        refused_as: "test-windows-hosted-matrix",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-HOSTED-LAST-SHARD-SKIPS-MORE",
-        escape: "A trailing skip removes tests even when every expected selector is still present.",
-        job: Some("test-windows-hosted"),
-        anchor: "          - shard: \"workspace 2 of 2 (guarded_reads, manager, reclaim, refs, registry, snapshots)\"\n            tests: \"workspace_manager:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::tests::containment:: --skip workspace_manager::tests::incarnations:: --skip workspace_manager::tests::residue::\"\n            floor: 94\n",
-        replacement: "          - shard: \"workspace 2 of 2 (guarded_reads, manager, reclaim, refs, registry, snapshots)\"\n            tests: \"workspace_manager:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::tests::containment:: --skip workspace_manager::tests::incarnations:: --skip workspace_manager::tests::residue:: --skip workspace_manager::\"\n            floor: 94\n",
-        refused_as: "test-windows-hosted-matrix",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-HOSTED-SHARD-DROPPED",
-        escape: "Deleting a named category leg leaves its tests unrun while the remaining legs can pass.",
-        job: Some("test-windows-hosted"),
-        anchor: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::snapshot_registration::a_passing_ engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n",
-        replacement: "",
-        refused_as: "test-windows-hosted-matrix",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-HOSTED-FILTER-DROPPED-FROM-ITS-LEG",
-        escape: "Deleting a positive filter leaves the named subcategory outside its leg.",
-        job: Some("test-windows-hosted"),
-        anchor: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::snapshot_registration::a_passing_ engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n",
-        replacement: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::snapshot_registration::a_passing_ engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n",
-        refused_as: "test-windows-hosted-matrix",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-HOSTED-SKIP-DROPPED",
-        escape: "Deleting the kill-path exclusion runs its matrix tests again in the coordinator leg.",
-        job: Some("test-windows-hosted"),
-        anchor: "          - shard: \"coordinator 2 of 6 (core, interleaving, snapshot_registration)\"\n            tests: \"engine::topology::coordinator:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration::a_passing_ --skip engine::topology::coordinator::tests::snapshot_registration::an_ --skip engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip engine::topology::coordinator::tests::snapshot_registration::a_gate_ --skip engine::topology::coordinator::tests::snapshot_registration::a_verification_ --skip engine::topology::coordinator::tests::snapshot_registration::a_genuinely_ --skip engine::topology::coordinator::tests::snapshot_registration::a_container_ --skip engine::topology::coordinator::tests::snapshot_registration::a_classification_ --skip engine::topology::coordinator::tests::snapshot_registration::a_refusal_ --skip engine::topology::coordinator::tests::snapshot_registration::a_halted_ --skip engine::topology::coordinator::tests::snapshot_registration::a_cancelled_ --skip engine::topology::coordinator::tests::snapshot_registration::a_stale_ --skip engine::topology::coordinator::tests::snapshot_registration::a_staging_ --skip engine::topology::coordinator::tests::snapshot_registration::a_kept_ --skip engine::topology::coordinator::tests::snapshot_registration::a_complete_ --skip engine::topology::coordinator::tests::snapshot_registration::a_review_ --skip engine::topology::coordinator::tests::verification_charges::\"\n            floor: 15\n",
-        replacement: "          - shard: \"coordinator 2 of 6 (core, interleaving, snapshot_registration)\"\n            tests: \"engine::topology::coordinator:: --skip _child_kills_ --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration::a_passing_ --skip engine::topology::coordinator::tests::snapshot_registration::an_ --skip engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip engine::topology::coordinator::tests::snapshot_registration::a_gate_ --skip engine::topology::coordinator::tests::snapshot_registration::a_verification_ --skip engine::topology::coordinator::tests::snapshot_registration::a_genuinely_ --skip engine::topology::coordinator::tests::snapshot_registration::a_container_ --skip engine::topology::coordinator::tests::snapshot_registration::a_classification_ --skip engine::topology::coordinator::tests::snapshot_registration::a_refusal_ --skip engine::topology::coordinator::tests::snapshot_registration::a_halted_ --skip engine::topology::coordinator::tests::snapshot_registration::a_cancelled_ --skip engine::topology::coordinator::tests::snapshot_registration::a_stale_ --skip engine::topology::coordinator::tests::snapshot_registration::a_staging_ --skip engine::topology::coordinator::tests::snapshot_registration::a_kept_ --skip engine::topology::coordinator::tests::snapshot_registration::a_complete_ --skip engine::topology::coordinator::tests::snapshot_registration::a_review_ --skip engine::topology::coordinator::tests::verification_charges::\"\n            floor: 15\n",
-        refused_as: "test-windows-hosted-matrix",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-HOSTED-FILTER-MOVED-BETWEEN-LEGS",
-        escape: "Moving a selector between named legs violates their membership even if no filter is lost.",
-        job: Some("test-windows-hosted"),
-        anchor: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::snapshot_registration::a_passing_ engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n          - shard: \"coordinator 2 of 6 (core, interleaving, snapshot_registration)\"\n            tests: \"engine::topology::coordinator:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration::a_passing_ --skip engine::topology::coordinator::tests::snapshot_registration::an_ --skip engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip engine::topology::coordinator::tests::snapshot_registration::a_gate_ --skip engine::topology::coordinator::tests::snapshot_registration::a_verification_ --skip engine::topology::coordinator::tests::snapshot_registration::a_genuinely_ --skip engine::topology::coordinator::tests::snapshot_registration::a_container_ --skip engine::topology::coordinator::tests::snapshot_registration::a_classification_ --skip engine::topology::coordinator::tests::snapshot_registration::a_refusal_ --skip engine::topology::coordinator::tests::snapshot_registration::a_halted_ --skip engine::topology::coordinator::tests::snapshot_registration::a_cancelled_ --skip engine::topology::coordinator::tests::snapshot_registration::a_stale_ --skip engine::topology::coordinator::tests::snapshot_registration::a_staging_ --skip engine::topology::coordinator::tests::snapshot_registration::a_kept_ --skip engine::topology::coordinator::tests::snapshot_registration::a_complete_ --skip engine::topology::coordinator::tests::snapshot_registration::a_review_ --skip engine::topology::coordinator::tests::verification_charges::\"\n            floor: 15\n",
-        replacement: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::snapshot_registration::a_passing_ engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n          - shard: \"coordinator 2 of 6 (core, interleaving, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration::a_passing_ --skip engine::topology::coordinator::tests::snapshot_registration::an_ --skip engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip engine::topology::coordinator::tests::snapshot_registration::a_gate_ --skip engine::topology::coordinator::tests::snapshot_registration::a_verification_ --skip engine::topology::coordinator::tests::snapshot_registration::a_genuinely_ --skip engine::topology::coordinator::tests::snapshot_registration::a_container_ --skip engine::topology::coordinator::tests::snapshot_registration::a_classification_ --skip engine::topology::coordinator::tests::snapshot_registration::a_refusal_ --skip engine::topology::coordinator::tests::snapshot_registration::a_halted_ --skip engine::topology::coordinator::tests::snapshot_registration::a_cancelled_ --skip engine::topology::coordinator::tests::snapshot_registration::a_stale_ --skip engine::topology::coordinator::tests::snapshot_registration::a_staging_ --skip engine::topology::coordinator::tests::snapshot_registration::a_kept_ --skip engine::topology::coordinator::tests::snapshot_registration::a_complete_ --skip engine::topology::coordinator::tests::snapshot_registration::a_review_ --skip engine::topology::coordinator::tests::verification_charges::\"\n            floor: 15\n",
-        refused_as: "test-windows-hosted-matrix",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-HOSTED-FILTER-WIDENED",
-        escape: "Widening a packed topic prefix executes tests assigned to other category legs.",
-        job: Some("test-windows-hosted"),
-        anchor: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::snapshot_registration::a_passing_ engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n",
-        replacement: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::snapshot_registration:: engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n",
-        refused_as: "test-windows-hosted-matrix",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-HOSTED-FILTERS-COMMA-JOINED",
-        escape: "Libtest treats comma-joined filters as one substring and selects neither group.",
-        job: Some("test-windows-hosted"),
-        anchor: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::snapshot_registration::a_passing_ engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n",
-        replacement: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::registry_waits::,engine::topology::coordinator::tests::snapshot_registration::a_passing_ engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n",
-        refused_as: "test-windows-hosted-matrix",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED",
-        escape: "A lowered passing-test floor can accept a Windows leg that executed almost none of its tests.",
-        job: Some("test-windows-hosted"),
-        anchor: "          - shard: \"workspace 2 of 2 (guarded_reads, manager, reclaim, refs, registry, snapshots)\"\n            tests: \"workspace_manager:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::tests::containment:: --skip workspace_manager::tests::incarnations:: --skip workspace_manager::tests::residue::\"\n            floor: 94\n",
-        replacement: "          - shard: \"workspace 2 of 2 (guarded_reads, manager, reclaim, refs, registry, snapshots)\"\n            tests: \"workspace_manager:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::tests::containment:: --skip workspace_manager::tests::incarnations:: --skip workspace_manager::tests::residue::\"\n            floor: 1\n",
-        refused_as: "test-windows-hosted-matrix",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-ZEROED",
-        escape: "A lowered passing-test floor can accept a Windows leg that executed almost none of its tests.",
-        job: Some("test-windows-hosted"),
-        anchor: "          - shard: \"workspace 2 of 2 (guarded_reads, manager, reclaim, refs, registry, snapshots)\"\n            tests: \"workspace_manager:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::tests::containment:: --skip workspace_manager::tests::incarnations:: --skip workspace_manager::tests::residue::\"\n            floor: 94\n",
-        replacement: "          - shard: \"workspace 2 of 2 (guarded_reads, manager, reclaim, refs, registry, snapshots)\"\n            tests: \"workspace_manager:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::tests::containment:: --skip workspace_manager::tests::incarnations:: --skip workspace_manager::tests::residue::\"\n            floor: 0\n",
-        refused_as: "test-windows-hosted-matrix",
-    },
-    WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-FAIL-FAST-ENABLED",
         escape: "`fail-fast: true` on the shard matrix: the first leg to fail cancels the legs \
                  still running, so a run reports one shard's failing tests and none of the \
@@ -3543,23 +3477,6 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         job: Some("test-windows-hosted"),
         anchor: "      matrix:\n",
         replacement: "      matrix:\n        os: [windows-latest]\n",
-        refused_as: "test-windows-hosted-matrix",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-HOSTED-SHARD-EXCLUDED",
-        escape: "an `exclude:` naming the second shard, beside the `include:` list that still \
-                 names all twenty. Were it to remove that leg, the shard's tests would run on no \
-                 hosted leg while every reading of the list passed. GitHub documents that \
-                 `include:` entries are processed after `exclude:`, so by that rule it removes \
-                 no leg of a list with no axis; that is the rule as documented, and no workflow \
-                 was run to watch it. The oracle does not weigh it: the legs are read from \
-                 `include:` and from nothing else in `matrix:`, so the key is refused whatever \
-                 it would remove",
-        job: Some("test-windows-hosted"),
-        anchor: "        include:\n",
-        replacement: "        exclude:\n\
-                      \x20         - shard: \"2 of 22\"\n\
-                      \x20       include:\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
@@ -3590,54 +3507,6 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
         replacement: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList 'engine:: -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
         refused_as: "test-windows-hosted-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-MACOS-SHARD-NARROWED",
-        escape: "An extra skip removes the workspace tests from their named leg.",
-        job: Some("test-macos"),
-        anchor: "          - leg: \"macos-latest, workspace (checkout, containment, guarded_reads, incarnations, manager, reclaim, refs, registry, residue, snapshots)\"\n            tests: \"workspace_manager:: workspace::tests:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report::\"\n",
-        replacement: "          - leg: \"macos-latest, workspace (checkout, containment, guarded_reads, incarnations, manager, reclaim, refs, registry, residue, snapshots)\"\n            tests: \"--skip workspace_manager:: workspace_manager:: workspace::tests:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report::\"\n",
-        refused_as: "test-job-matrix",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-MACOS-LAST-SHARD-SKIPS-MORE",
-        escape: "A trailing skip removes tests even when every expected selector is still present.",
-        job: Some("test-macos"),
-        anchor: "          - leg: \"macos-latest, workspace (checkout, containment, guarded_reads, incarnations, manager, reclaim, refs, registry, residue, snapshots)\"\n            tests: \"workspace_manager:: workspace::tests:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report::\"\n",
-        replacement: "          - leg: \"macos-latest, workspace (checkout, containment, guarded_reads, incarnations, manager, reclaim, refs, registry, residue, snapshots)\"\n            tests: \"workspace_manager:: workspace::tests:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::\"\n",
-        refused_as: "test-job-matrix",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-MACOS-FILTER-DROPPED-FROM-ITS-LEG",
-        escape: "Deleting a positive filter leaves the named subcategory outside its leg.",
-        job: Some("test-macos"),
-        anchor: "          - leg: \"macos-latest, coordinator 1 of 2 (core, pipelines, snapshot_registration, verification_charges)\"\n            tests: \"engine::topology::coordinator:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown::\"\n",
-        replacement: "          - leg: \"macos-latest, coordinator 1 of 2 (core, pipelines, snapshot_registration, verification_charges)\"\n            tests: \"--skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown::\"\n",
-        refused_as: "test-job-matrix",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-MACOS-SKIP-DROPPED",
-        escape: "Deleting the kill-path exclusion runs its matrix tests again in the coordinator leg.",
-        job: Some("test-macos"),
-        anchor: "          - leg: \"macos-latest, coordinator 2 of 2 (interleaving, registry_waits, runners, scheduling, shutdown)\"\n            tests: \"engine::topology::coordinator::tests::interleaving:: engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::runners:: engine::topology::coordinator::tests::scheduling:: engine::topology::coordinator::tests::shutdown:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n",
-        replacement: "          - leg: \"macos-latest, coordinator 2 of 2 (interleaving, registry_waits, runners, scheduling, shutdown)\"\n            tests: \"engine::topology::coordinator::tests::interleaving:: engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::runners:: engine::topology::coordinator::tests::scheduling:: engine::topology::coordinator::tests::shutdown:: --skip _child_kills_ --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n",
-        refused_as: "test-job-matrix",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-MACOS-FILTER-MOVED-BETWEEN-LEGS",
-        escape: "Moving a selector between named legs violates their membership even if no filter is lost.",
-        job: Some("test-macos"),
-        anchor: "          - leg: \"macos-latest, coordinator 1 of 2 (core, pipelines, snapshot_registration, verification_charges)\"\n            tests: \"engine::topology::coordinator:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown::\"\n          - leg: \"macos-latest, coordinator 2 of 2 (interleaving, registry_waits, runners, scheduling, shutdown)\"\n            tests: \"engine::topology::coordinator::tests::interleaving:: engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::runners:: engine::topology::coordinator::tests::scheduling:: engine::topology::coordinator::tests::shutdown:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n",
-        replacement: "          - leg: \"macos-latest, coordinator 1 of 2 (core, pipelines, snapshot_registration, verification_charges)\"\n            tests: \"--skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown::\"\n          - leg: \"macos-latest, coordinator 2 of 2 (interleaving, registry_waits, runners, scheduling, shutdown)\"\n            tests: \"engine::topology::coordinator:: engine::topology::coordinator::tests::interleaving:: engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::runners:: engine::topology::coordinator::tests::scheduling:: engine::topology::coordinator::tests::shutdown:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n",
-        refused_as: "test-job-matrix",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-UBUNTU-LEG-FILTERED",
-        escape: "An extra skip removes the workspace tests from their named leg.",
-        job: Some("test-linux"),
-        anchor: "          - leg: \"ubuntu-latest, workspace (checkout, containment, guarded_reads, incarnations, manager, reclaim, refs, registry, residue, snapshots)\"\n            tests: \"workspace_manager:: workspace::tests:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report::\"\n",
-        replacement: "          - leg: \"ubuntu-latest, workspace (checkout, containment, guarded_reads, incarnations, manager, reclaim, refs, registry, residue, snapshots)\"\n            tests: \"--skip workspace_manager:: workspace_manager:: workspace::tests:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report::\"\n",
-        refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-SHARD-SELECTION-DROPPED",
@@ -4071,6 +3940,349 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
 ];
 
+#[derive(Clone, Copy)]
+enum MatrixEdit {
+    DropLeg,
+    PrependSkip,
+    AppendSkip,
+    DropFilter,
+    DropSkip,
+    MoveFilter,
+    WidenFilter,
+    CommaJoin,
+    LowerFloor,
+    ZeroFloor,
+    ExcludeLeg,
+}
+
+pub(super) struct MatrixEscape {
+    pub(super) name: &'static str,
+    pub(super) escape: &'static str,
+    job: &'static str,
+    selector: &'static str,
+    edit: MatrixEdit,
+    pub(super) refused_as: &'static str,
+}
+
+pub(super) const MATRIX_ESCAPES: &[MatrixEscape] = &[
+    MatrixEscape {
+        name: "MUT-TEST-MATRIX-EXCLUDED",
+        escape: "an `exclude:` naming the first macOS leg, beside the `include:` list in \
+                 `test-macos` that still names all nine. Over an axis, `exclude:` removes \
+                 combinations the axis still lists, and every check that reads the list passes \
+                 while the fixtures never run on that platform -- the matrix half of \
+                 `PR5-MACOS-CLIPPY-NEVER-RUN`, and what this row measured while the legs were \
+                 an `os:` axis. GitHub documents that `include:` entries are processed after \
+                 `exclude:`, so by that rule this one removes no leg of an `include:` list; \
+                 that is the rule as documented, and no workflow was run to watch it. The \
+                 oracle does not weigh it: the legs are read from `include:` and from nothing \
+                 else in `matrix:`, so the key is refused whatever it would remove.",
+        job: "test-macos",
+        selector: "engine::topology::coordinator::",
+        edit: MatrixEdit::ExcludeLeg,
+        refused_as: "test-job-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-CI-TEST-MATRIX-NARROWED",
+        escape: "Deleting a named category leg leaves its tests unrun while the remaining legs can pass.",
+        job: "test-linux",
+        selector: "engine::topology::coordinator::",
+        edit: MatrixEdit::DropLeg,
+        refused_as: "test-job-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-SHARD-NARROWED",
+        escape: "An extra skip removes the workspace tests from their named leg.",
+        job: "test-windows-hosted",
+        selector: "workspace_manager::",
+        edit: MatrixEdit::PrependSkip,
+        refused_as: "test-windows-hosted-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-LAST-SHARD-SKIPS-MORE",
+        escape: "A trailing skip removes tests even when every expected selector is still present.",
+        job: "test-windows-hosted",
+        selector: "workspace_manager::",
+        edit: MatrixEdit::AppendSkip,
+        refused_as: "test-windows-hosted-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-SHARD-DROPPED",
+        escape: "Deleting a named category leg leaves its tests unrun while the remaining legs can pass.",
+        job: "test-windows-hosted",
+        selector: "engine::topology::coordinator::tests::registry_waits::",
+        edit: MatrixEdit::DropLeg,
+        refused_as: "test-windows-hosted-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-FILTER-DROPPED-FROM-ITS-LEG",
+        escape: "Deleting a positive filter leaves the named subcategory outside its leg.",
+        job: "test-windows-hosted",
+        selector: "engine::topology::coordinator::tests::registry_waits::",
+        edit: MatrixEdit::DropFilter,
+        refused_as: "test-windows-hosted-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-SKIP-DROPPED",
+        escape: "Deleting the kill-path exclusion runs its matrix tests again in the coordinator leg.",
+        job: "test-windows-hosted",
+        selector: "engine::topology::coordinator::",
+        edit: MatrixEdit::DropSkip,
+        refused_as: "test-windows-hosted-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-FILTER-MOVED-BETWEEN-LEGS",
+        escape: "Moving a selector between named legs violates their membership even if no filter is lost.",
+        job: "test-windows-hosted",
+        selector: "engine::topology::coordinator::tests::registry_waits::",
+        edit: MatrixEdit::MoveFilter,
+        refused_as: "test-windows-hosted-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-FILTER-WIDENED",
+        escape: "Widening a packed topic prefix executes tests assigned to other category legs.",
+        job: "test-windows-hosted",
+        selector: "engine::topology::coordinator::tests::registry_waits::",
+        edit: MatrixEdit::WidenFilter,
+        refused_as: "test-windows-hosted-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-FILTERS-COMMA-JOINED",
+        escape: "Libtest treats comma-joined filters as one substring and selects neither group.",
+        job: "test-windows-hosted",
+        selector: "engine::topology::coordinator::tests::registry_waits::",
+        edit: MatrixEdit::CommaJoin,
+        refused_as: "test-windows-hosted-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED",
+        escape: "A lowered passing-test floor can accept a Windows leg that executed almost none of its tests.",
+        job: "test-windows-hosted",
+        selector: "workspace_manager::",
+        edit: MatrixEdit::LowerFloor,
+        refused_as: "test-windows-hosted-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-ZEROED",
+        escape: "A lowered passing-test floor can accept a Windows leg that executed almost none of its tests.",
+        job: "test-windows-hosted",
+        selector: "workspace_manager::",
+        edit: MatrixEdit::ZeroFloor,
+        refused_as: "test-windows-hosted-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-SHARD-EXCLUDED",
+        escape: "an `exclude:` naming the second shard, beside the `include:` list that still \
+                 names all twenty. Were it to remove that leg, the shard's tests would run on no \
+                 hosted leg while every reading of the list passed. GitHub documents that \
+                 `include:` entries are processed after `exclude:`, so by that rule it removes \
+                 no leg of a list with no axis; that is the rule as documented, and no workflow \
+                 was run to watch it. The oracle does not weigh it: the legs are read from \
+                 `include:` and from nothing else in `matrix:`, so the key is refused whatever \
+                 it would remove",
+        job: "test-windows-hosted",
+        selector: "engine::topology::coordinator::tests::registry_waits::",
+        edit: MatrixEdit::ExcludeLeg,
+        refused_as: "test-windows-hosted-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-TEST-MACOS-SHARD-NARROWED",
+        escape: "An extra skip removes the workspace tests from their named leg.",
+        job: "test-macos",
+        selector: "workspace_manager::",
+        edit: MatrixEdit::PrependSkip,
+        refused_as: "test-job-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-TEST-MACOS-LAST-SHARD-SKIPS-MORE",
+        escape: "A trailing skip removes tests even when every expected selector is still present.",
+        job: "test-macos",
+        selector: "workspace_manager::",
+        edit: MatrixEdit::AppendSkip,
+        refused_as: "test-job-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-TEST-MACOS-FILTER-DROPPED-FROM-ITS-LEG",
+        escape: "Deleting a positive filter leaves the named subcategory outside its leg.",
+        job: "test-macos",
+        selector: "engine::topology::coordinator::tests::registry_waits::",
+        edit: MatrixEdit::DropFilter,
+        refused_as: "test-job-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-TEST-MACOS-SKIP-DROPPED",
+        escape: "Deleting the kill-path exclusion runs its matrix tests again in the coordinator leg.",
+        job: "test-macos",
+        selector: "engine::topology::coordinator::tests::interleaving::",
+        edit: MatrixEdit::DropSkip,
+        refused_as: "test-job-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-TEST-MACOS-FILTER-MOVED-BETWEEN-LEGS",
+        escape: "Moving a selector between named legs violates their membership even if no filter is lost.",
+        job: "test-macos",
+        selector: "engine::topology::coordinator::tests::registry_waits::",
+        edit: MatrixEdit::MoveFilter,
+        refused_as: "test-job-matrix",
+    },
+    MatrixEscape {
+        name: "MUT-TEST-UBUNTU-LEG-FILTERED",
+        escape: "An extra skip removes the workspace tests from their named leg.",
+        job: "test-linux",
+        selector: "workspace_manager::",
+        edit: MatrixEdit::PrependSkip,
+        refused_as: "test-job-matrix",
+    },
+];
+
+pub(super) fn matrix_entries<'a>(doc: &'a Yaml, job: &str) -> &'a [Yaml] {
+    field(doc, "jobs")
+        .and_then(|jobs| field(jobs, job))
+        .and_then(|job| field(job, "strategy"))
+        .and_then(|strategy| field(strategy, "matrix"))
+        .and_then(|matrix| field(matrix, "include"))
+        .and_then(Yaml::as_vec)
+        .expect("the fixture has an include matrix")
+}
+
+fn selection(entry: &Yaml) -> &str {
+    scalar(entry, "tests").expect("the fixture entry has a selection")
+}
+
+fn selecting_entry(entries: &[Yaml], selector: &str) -> usize {
+    let matches: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            selection(entry)
+                .split_whitespace()
+                .take_while(|word| *word != "--skip")
+                .any(|word| word == selector)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(matches.len(), 1, "one positive selector {selector}");
+    matches[0]
+}
+
+pub(super) fn mutate_matrix(doc: &Yaml, escape: &MatrixEscape) -> Yaml {
+    let mut changed = doc.clone();
+    let matrix = &mut changed["jobs"][escape.job]["strategy"]["matrix"];
+    let Yaml::Array(entries) = &mut matrix["include"] else {
+        panic!("the fixture has an include array");
+    };
+    let index = selecting_entry(entries, escape.selector);
+    let before = selection(&entries[index]).to_owned();
+    let witness = format!("{}inert", escape.selector);
+    assert!(libtest_runs(&before, &witness), "{}", escape.name);
+    match escape.edit {
+        MatrixEdit::DropLeg => {
+            assert_eq!(
+                entries
+                    .iter()
+                    .filter(|entry| libtest_runs(selection(entry), &witness))
+                    .count(),
+                1
+            );
+            entries.remove(index);
+            assert!(
+                entries
+                    .iter()
+                    .all(|entry| !libtest_runs(selection(entry), &witness))
+            );
+        }
+        MatrixEdit::PrependSkip | MatrixEdit::AppendSkip => {
+            let after = if matches!(escape.edit, MatrixEdit::PrependSkip) {
+                format!("--skip {} {before}", escape.selector)
+            } else {
+                format!("{before} --skip {}", escape.selector)
+            };
+            assert!(!libtest_runs(&after, &witness));
+            entries[index]["tests"] = Yaml::String(after);
+        }
+        MatrixEdit::DropFilter | MatrixEdit::MoveFilter => {
+            let positives = before
+                .split_whitespace()
+                .take_while(|word| *word != "--skip")
+                .count();
+            assert!(positives > 1, "removal must not create a catch-all");
+            let mut words: Vec<&str> = before.split_whitespace().collect();
+            let position = words
+                .iter()
+                .position(|word| *word == escape.selector)
+                .expect("the positive selector exists");
+            words.remove(position);
+            let after = words.join(" ");
+            assert!(!libtest_runs(&after, &witness));
+            entries[index]["tests"] = Yaml::String(after);
+            if matches!(escape.edit, MatrixEdit::MoveFilter) {
+                let destination = selecting_entry(entries, "engine::topology::coordinator::");
+                assert_ne!(index, destination);
+                let destination_before = selection(&entries[destination]);
+                assert!(!libtest_runs(destination_before, &witness));
+                let destination_after = format!(
+                    "{} {}",
+                    escape.selector,
+                    destination_before.replace(&format!(" --skip {}", escape.selector), "")
+                );
+                assert!(libtest_runs(&destination_after, &witness));
+                entries[destination]["tests"] = Yaml::String(destination_after);
+            }
+        }
+        MatrixEdit::DropSkip => {
+            let skipped = format!("{}_stopped_at_any_phase_inert", escape.selector);
+            assert!(!libtest_runs(&before, &skipped));
+            let after = before.replace(" --skip _stopped_at_any_phase_", "");
+            assert!(libtest_runs(&after, &skipped));
+            entries[index]["tests"] = Yaml::String(after);
+        }
+        MatrixEdit::WidenFilter => {
+            let extra = "engine::tests::inert";
+            assert!(!libtest_runs(&before, extra));
+            let after = before.replacen(escape.selector, "engine::", 1);
+            assert!(libtest_runs(&after, extra));
+            entries[index]["tests"] = Yaml::String(after);
+        }
+        MatrixEdit::CommaJoin => {
+            let positives: Vec<&str> = before
+                .split_whitespace()
+                .take_while(|word| *word != "--skip")
+                .collect();
+            assert!(positives.len() > 1);
+            let after = before.replacen(&positives.join(" "), &positives.join(","), 1);
+            for filter in positives {
+                assert!(!libtest_runs(&after, &format!("{filter}inert")));
+            }
+            entries[index]["tests"] = Yaml::String(after);
+        }
+        MatrixEdit::LowerFloor | MatrixEdit::ZeroFloor => {
+            let floor = field(&entries[index], "floor")
+                .and_then(Yaml::as_i64)
+                .expect("a Windows passing-test floor");
+            let lowered = if matches!(escape.edit, MatrixEdit::ZeroFloor) {
+                0
+            } else {
+                assert!(floor > 1);
+                1
+            };
+            assert!(lowered < floor);
+            entries[index]["floor"] = Yaml::Integer(lowered);
+        }
+        MatrixEdit::ExcludeLeg => {
+            let excluded = entries[index].clone();
+            let Yaml::Hash(mapping) = matrix else {
+                panic!("the fixture matrix is a mapping");
+            };
+            mapping.insert(
+                Yaml::String("exclude".to_owned()),
+                Yaml::Array(vec![excluded]),
+            );
+        }
+    }
+    assert_ne!(&changed, doc, "{} changed nothing", escape.name);
+    changed
+}
+
 pub(super) fn mutate_workflow(
     text: &str,
     job: Option<&str>,
@@ -4146,13 +4358,34 @@ fn category_check_complaints(job: &Yaml, id: &str, command: &str, suite: &str) -
         .iter()
         .position(|step| scalar(step, "run") == Some(suite));
     if let ([check], Some(suite_at)) = (checks.as_slice(), suite_at) {
-        if *check < suite_at {
+        if *check < suite_at && (command != CATEGORY_CHECK_MACOS || macos_inventory_owner(job)) {
             return Vec::new();
         }
     }
     vec![format!(
         "[test-categories] {id} must check the native category inventory exactly once before its suite"
     )]
+}
+
+pub(super) fn macos_inventory_owner(job: &Yaml) -> bool {
+    let Some(matrix) = field(job, "strategy").and_then(|strategy| field(strategy, "matrix")) else {
+        return false;
+    };
+    if !field_complaints(matrix, &["include"], &[]).is_empty() {
+        return false;
+    }
+    let Some(entries) = field(matrix, "include").and_then(Yaml::as_vec) else {
+        return false;
+    };
+    let mut owners = 0;
+    for entry in entries {
+        match field(entry, "check_inventory").and_then(Yaml::as_bool) {
+            Some(true) => owners += 1,
+            Some(false) => {}
+            None => return false,
+        }
+    }
+    owners == 1
 }
 
 pub(super) fn libtest_runs(selection: &str, name: &str) -> bool {

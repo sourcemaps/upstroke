@@ -91,7 +91,10 @@ def legs(rows, platform):
             subs = ", ".join(sorted({row["subcategory"] for row, _, _, _ in selected}))
             suffix = f" {number} of {count}" if count > 1 else ""
             result.append(dict(name=f"{category}{suffix} ({subs})", tests=" ".join(words),
-                               floor=sum(floor for _, _, floor, _ in selected)))
+                               floor=sum(floor for _, _, floor, _ in selected),
+                               check_inventory=platform == "macos" and any(
+                                   row["category"] == "unit" and row["subcategory"] == "cli"
+                                   for row, _, _, _ in selected)))
     return result
 
 
@@ -255,6 +258,8 @@ def matrix(rows, platform):
                       f"            tests: {json.dumps(leg['tests'])}"])
         if platform == "windows":
             lines.append(f"            floor: {leg['floor']}")
+        elif platform == "macos":
+            lines.append(f"            check_inventory: {json.dumps(leg['check_inventory'])}")
     return "\n".join(lines) + "\n"
 
 

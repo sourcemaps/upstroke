@@ -216,7 +216,7 @@ command runs this?". A parsed document has no comments in it at all, so that
 class is gone by construction rather than by a strip whose bite had to be
 asserted.
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if field(jobs, RETIRED_TEST_JOB).is_some() {`
+## `fn ci_test_job_complaints_for(doc: &Yaml, categories: &[TestCategory]) -> Vec<String> {` › `if field(jobs, RETIRED_TEST_JOB).is_some() {`
 
 A job named `test` ([`RETIRED_TEST_JOB`]) left in the workflow, code
 `test-job-split`. The split is the contract: beside the two jobs such a job
@@ -225,13 +225,13 @@ platforms' legs under one `runs-on:` this function no longer reads. No row
 of the ledger measures it; the rows that measured the one job's mistakes
 were re-aimed at the two.
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let Some(job) = field(jobs, id) else {`
+## `fn ci_test_job_complaints_for(doc: &Yaml, categories: &[TestCategory]) -> Vec<String> {` › `let Some(job) = field(jobs, id) else {`
 
 A row whose job is missing is one complaint naming the job's id, code
 `test-job-missing`, and the other row is still checked: a missing
 `test-macos` does not hide what is wrong with `test-linux`.
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite = scalar(step, "run") == Some(TEST_SHARD_COMMAND);`
+## `fn ci_test_job_complaints_for(doc: &Yaml, categories: &[TestCategory]) -> Vec<String> {` › `let runs_the_suite = scalar(step, "run") == Some(TEST_SHARD_COMMAND);`
 
 The suite step is the one whose `run:` is [`TEST_SHARD_COMMAND`], the
 command with the leg's `matrix.tests` handed to libtest, and it is recognised
@@ -310,7 +310,7 @@ spell with `"1"`, except `MUT-TEST-CAPTURE-STEP-DELETED`, which spells
 the job fields' mostly at `test-linux`. The two jobs have the same steps, so
 each such row measures the one check both jobs run.
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(step, "run").is_some() {`
+## `fn ci_test_job_complaints_for(doc: &Yaml, categories: &[TestCategory]) -> Vec<String> {` › `if scalar(step, "run").is_some() {`
 
 Each `run:` step resolves its shell under the row's runner, the one machine
 its job runs on, and must be that platform's default: a workflow-level
@@ -320,7 +320,7 @@ each step was resolved once per runner that hosts tests; each job now has
 one runner, and a runner this contract does not model is refused once, as
 `step-shell`, before the steps are read.
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `out.extend(test_leg_matrix_complaints(job, row));`
+## `fn ci_test_job_complaints_for(doc: &Yaml, categories: &[TestCategory]) -> Vec<String> {` › `out.extend(test_leg_matrix_complaints(job, row, categories));`
 
 The matrix is the platform half of the same claim: a fixture that runs on
 one platform proves nothing about the other. Each job's matrix is held to
@@ -329,7 +329,7 @@ runners, once for both jobs, to the same derived runner set the Clippy legs
 are compared against, less the one platform whose suite runs in its own job
 ([`test_jobs_table_complaints`]).
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(job, "runs-on") != Some(row.runner) {`
+## `fn ci_test_job_complaints_for(doc: &Yaml, categories: &[TestCategory]) -> Vec<String> {` › `if scalar(job, "runs-on") != Some(row.runner) {`
 
 The job's `runs-on:` is the row's runner as a literal. On another runner the
 job runs that platform's shards elsewhere: every leg keeps its name and its
@@ -339,7 +339,7 @@ Code `test-job-matrix`, the code the one job's `runs-on:` check had when it
 required `${{ matrix.os }}`. Measured, `MUT-TEST-MACOS-ON-LINUX`, and
 `MUT-CI-CARGO-TEST-STEP-SKIPPED` anchors on `test-linux`'s line.
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(job, "name") != Some(TEST_JOB_NAME) {`
+## `fn ci_test_job_complaints_for(doc: &Yaml, categories: &[TestCategory]) -> Vec<String> {` › `if scalar(job, "name") != Some(TEST_JOB_NAME) {`
 
 The job's `name:`, as the workflow writes it ([`TEST_JOB_NAME`]). Nothing
 reads a leg's name but a person and the API's listing, and that is the
@@ -349,7 +349,7 @@ read `matrix.os` until the macOS suite was divided -- a job's shards publish
 one name. Code `test-job-name`. Measured, `MUT-TEST-LEGS-NAMED-BY-RUNNER`,
 which names `test-macos` `test (macos-latest)`.
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let minutes = field(job, "timeout-minutes").and_then(Yaml::as_i64);`
+## `fn ci_test_job_complaints_for(doc: &Yaml, categories: &[TestCategory]) -> Vec<String> {` › `let minutes = field(job, "timeout-minutes").and_then(Yaml::as_i64);`
 
 The job's limit, exactly [`TEST_TIMEOUT_MINUTES`] and an integer: one number
 for every leg of both jobs. An expression, such as the one the one job
@@ -360,7 +360,7 @@ ubuntu, reads as a string here and is refused as no number at all. Code
 a plain integer, which reads as a number and is refused by the equality
 alone. With a job per platform the macOS raise needs no expression.
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let toolchains: Vec<&Yaml> = steps_of(job)`
+## `fn ci_test_job_complaints_for(doc: &Yaml, categories: &[TestCategory]) -> Vec<String> {` › `let toolchains: Vec<&Yaml> = steps_of(job)`
 
 `clippy` is a TEST dependency of this job, not only a lint one:
 `every_declared_effect_denial_refuses_for_the_reason_it_declares` drives
@@ -389,14 +389,14 @@ job's table of runners and filters.
 
 ## `struct TestLeg {`
 
-One leg of a test job's matrix as the oracle compares it: the leg's label
-and the libtest arguments. The expected legs and the legs read from
+One leg of a test job's matrix as the oracle compares it: the leg's label,
+libtest arguments and, on macOS, boolean inventory ownership. The expected legs and the legs read from
 `ci.yml` are both made of it, as the Windows shards' are of [`ShardLeg`], so
 the comparison is one equality and a refusal prints both sides field by
 field. Until the split it also carried the leg's `os:`, its runner; the
 runner is now the job's.
 
-## `fn test_legs(row: &TestJob) -> Vec<TestLeg> {`
+## `fn test_legs(row: &TestJob, categories: &[TestCategory]) -> Vec<TestLeg> {`
 
 The expected matrix, derived from `category_legs` in `super::ci_model`.
 The runner's `-latest` suffix is removed to choose the platform, and its full
@@ -408,11 +408,12 @@ The order is generated category order, not first-match priority. The latter
 comes from the ordered `TEST_CATEGORIES` rows and is encoded in the selectors.
 No generated entry has an empty positive selection.
 
-## `fn test_leg(entry: &Yaml) -> Option<TestLeg> {`
+## `fn test_leg(entry: &Yaml, macos: bool) -> Option<TestLeg> {`
 
 One `include:` entry of `ci.yml` read as a leg, or nothing: a mapping with
-exactly the keys `leg` and `tests`, each a string. A third key, an `os:`
-among them, is refused rather than ignored, for [`shard_leg`]'s reason: an
+exactly the keys `leg` and `tests`, each a string, plus `check_inventory` as a
+boolean on macOS. Any other key, an `os:` among them, is refused rather than ignored,
+for [`shard_leg`]'s reason: an
 `include:` entry may set anything a step or the job reads from `matrix`,
 and a key this contract does not model is one whose reader it has not
 looked for. A
@@ -420,7 +421,7 @@ looked for. A
 string, the empty one, and reads as a leg; a bare `tests:` is YAML's null,
 which is no string, and does not.
 
-## `fn test_leg_matrix_complaints(job: &Yaml, row: &TestJob) -> Vec<String> {`
+## `fn test_leg_matrix_complaints(`
 
 The whole strategy under code `test-job-matrix`, naming the job:
 
@@ -428,8 +429,8 @@ The whole strategy under code `test-job-matrix`, naming the job:
 2. `fail-fast` is false so every leg can report its result.
 3. The matrix declares exactly `include`; an extra axis changes how GitHub
    expands entries, and `exclude` is outside this contract.
-4. The ordered include list equals `test_legs(row)`, with exactly `leg` and
-   `tests` in each entry.
+4. The ordered include list equals `test_legs(row, categories)`, with exactly `leg`
+   and `tests` in each entry, plus boolean `check_inventory` on macOS.
 
 The platform table check separately holds both jobs to the runners in
 `CI_TARGETS`. The matrix equality holds the generated names and selectors;
@@ -443,8 +444,10 @@ removes a Linux category leg, replaces a Linux selection, and narrows macOS
 selections. The macOS filter controls remove or move a positive selector,
 drop a kill-path exclusion from a coordinator leg, or append an extra skip.
 These are refused by exact entry equality even when the remaining tests would
-pass. Their anchors name the generated category entries; the earlier numbered
-shards' anchors are no longer the source contract.
+pass. `MATRIX_ESCAPES` locates each positive selector in the parsed generated
+entries and edits that entry, preserving its other selectors and metadata.
+Fixtures assert the intended membership change before asking the oracle for the
+original complaint code. No fixture stores a copy of a generated selection.
 
 ## `fn installs_a_toolchain(step: &Yaml) -> bool {`
 
@@ -527,7 +530,7 @@ this job under other names: `MUT-STEP-USES-UNPINNED`,
 `MUT-DEFAULTS-WORKING-DIRECTORY` and
 `MUT-JOB-PERMISSIONS-ON-THE-HOSTED-SHARDS`.
 
-## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite = scalar(step, "run") == Some(WINDOWS_SHARD_WITNESS);`
+## `fn ci_test_windows_hosted_job_complaints_for(` › `let runs_the_suite = scalar(step, "run") == Some(WINDOWS_SHARD_WITNESS);`
 
 The suite step is the one whose `run:` is [`WINDOWS_SHARD_WITNESS`], and it
 is recognised by that text everywhere this function asks for it: for the
@@ -557,7 +560,7 @@ put beside the declaration is measured on `test-macos`' observation; the
 row that put one on a Windows observation mutated the guest's job and went
 with it on 2026-11-20.
 
-## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `&STEP_FIELDS`
+## `fn ci_test_windows_hosted_job_complaints_for(` › `&STEP_FIELDS`
 
 No step of this job may carry an `if:`. The suite step and the capture keep
 [`TEST_STEP_FIELDS`], the observation [`CAPABILITY_STEP_FIELDS`] and every
@@ -572,7 +575,7 @@ the merge queue, so that the queue still runs the suite and every pull
 request is green on Windows having run none of its tests. The rows that
 measured this on the guest's job went with it on 2026-11-20.
 
-## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `let running = steps_of(job)`
+## `fn ci_test_windows_hosted_job_complaints_for(` › `let running = steps_of(job)`
 
 Exactly one suite step, under `test-windows-hosted-command`. The whole step,
 not the commands inside it. The build and the harness loop say which suite
@@ -686,7 +689,7 @@ Each row in this section edits the workflow alone and is refused under
 constant, and `the_windows_leg_counts_the_tests_it_ran` holds its build
 line, its loop line and its floor line to what the model makes them.
 
-## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `let selected = field(step, "with").and_then(|with| scalar(with, "toolchain"));`
+## `fn ci_test_windows_hosted_job_complaints_for(` › `let selected = field(step, "with").and_then(|with| scalar(with, "toolchain"));`
 
 The install selects [`GOLDEN_IMAGE_TOOLCHAIN`], exactly: the compiler the
 guest's image carried when the guest was retired. Not `stable`, which
@@ -712,7 +715,7 @@ written for the jobs that pin `stable`. Measured,
 `MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-FLOATS` and
 `MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-DOWNGRADED`.
 
-## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(step, "uses").is_some_and(|uses| uses.starts_with(CACHE_ACTION)) {`
+## `fn ci_test_windows_hosted_job_complaints_for(` › `if scalar(step, "uses").is_some_and(|uses| uses.starts_with(CACHE_ACTION)) {`
 
 No cache step, at any position. The job carries none, and the reason its
 cache step was taken out has gone: until 2026-11-20 `master` saved a cache for this
@@ -725,7 +728,7 @@ adding a cache step is a change of its own, made together with this refusal
 step between the suite and the capture; this refuses one anywhere, and
 names the cause. Measured, `MUT-TEST-WINDOWS-HOSTED-CACHE-RESTORED`.
 
-## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `let components: BTreeSet<&str> = steps_of(job)`
+## `fn ci_test_windows_hosted_job_complaints_for(` › `let components: BTreeSet<&str> = steps_of(job)`
 
 The `clippy` component, read from the install step the way the Linux and
 macOS test jobs' check reads it: the suite's effect-denial fixtures run `clippy-driver`, and
@@ -739,7 +742,7 @@ label, the libtest arguments, and the floor. The expected legs and the legs
 read from `ci.yml` are both made of it, so the comparison is one equality
 and a refusal prints both sides field by field.
 
-## `fn windows_shard_legs() -> Vec<ShardLeg> {`
+## `fn windows_shard_legs(categories: &[TestCategory]) -> Vec<ShardLeg> {`
 
 The expected Windows entries from `category_legs("windows")`: each generated
 name becomes `shard`, its selector becomes `tests`, and the summed floor is
@@ -758,7 +761,7 @@ looked for. A quoted `floor: "24"` is refused too. GitHub would put the
 same text into the script, so nothing would run differently; the refusal
 keeps the table to one spelling, a floor that can only be a number.
 
-## `fn windows_shard_matrix_complaints(job: &Yaml) -> Vec<String> {`
+## `fn windows_shard_matrix_complaints(job: &Yaml, categories: &[TestCategory]) -> Vec<String> {`
 
 The whole strategy under code `test-windows-hosted-matrix`: exactly
 `fail-fast: false` and a matrix with only `include`, whose ordered entries
@@ -1399,17 +1402,37 @@ than a quietly weaker test.
 Require exactly one step whose `run` equals the platform's category-check
 constant, and require its position before the suite step. Otherwise return
 `test-categories`. Linux uses the Bash command, Windows the Python command,
-and macOS the entire pinned conditional script, whose unit-leg prefix must
-match a generated label. Step field and script pins still govern the check.
+and macOS the entire pinned conditional script, which compares
+`matrix.check_inventory` to `true`. The macOS check also reads the actual
+include-only matrix, requires a boolean on every entry and counts exactly one
+true value. Step field and script pins still govern the check.
 
 The check first refuses matrices that differ from the registry using the generator's
 comparison, including when invoked independently by lint. It then lists the native
 inventory, including ignored registrations, without executing test bodies. Harness
 identity accompanies each name so shared library/binary names count separately.
 The ledger removes Linux and Windows checks and changes
-the macOS condition to name no leg. First-match ownership and generation live
+the macOS condition to read a missing field. First-match ownership and generation live
 in `ci_model::TEST_CATEGORIES` and `ci_model::category_legs`; there is no
 `shard_selections` catch-all builder.
+
+## `pub(super) fn workflow_complaints_for(doc: &Yaml, categories: &[TestCategory]) -> Vec<String> {`
+
+The ordinary entry point supplies `TEST_CATEGORIES`. Positive controls supply an
+independent fixture registry to the same oracle, so a regenerated matrix must be
+accepted before its malformed variants can count as evidence. All other pins,
+including the aggregate and suite commands, remain identical.
+
+## `pub(super) fn mutate_matrix(doc: &Yaml, escape: &MatrixEscape) -> Yaml {`
+
+Each fixture owns a cloned document snapshot so its edit cannot affect the clean
+control or another fixture. The exclude control takes a second snapshot of its
+chosen entry to put under `exclude`. Selections come from parsed matrix data;
+stable positive filters identify the entry rather than a display name or copied
+argument list. Narrowing, removal, movement, widening, comma joining and dropped
+skips assert their effects on inert test names. Floor controls read the current
+floor and lower it to one or zero; all controls must change the document and retain their original
+complaint codes and unique names.
 
 ## `pub(super) fn libtest_runs(selection: &str, name: &str) -> bool {`
 

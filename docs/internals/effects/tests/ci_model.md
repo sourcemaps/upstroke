@@ -151,11 +151,15 @@ with all category filters skipped. The remainder must be empty.
 
 The same check under the Windows runner's Python, before every suite witness.
 
-## `pub(super) const CATEGORY_CHECK_MACOS: &str = r#"if [[ '${{ matrix.leg }}' == 'macos-latest, unit ('* ]]; then`
+## `pub(super) const CATEGORY_CHECK_MACOS: &str = r#"if [[ '${{ matrix.check_inventory }}' == 'true' ]]; then`
 
-The exact conditional script for macOS. It runs the native inventory check
-before the unit leg's suite. Other macOS legs reach the step but do not list.
-A Linux inventory cannot establish macOS-only membership.
+The exact conditional script for macOS. It runs the whole native inventory check
+before the suite of the generated `check_inventory: true` leg. The generator
+assigns that responsibility to the leg containing `unit/cli`, so splitting unit
+tests or moving that subcategory between legs preserves one owner. Every other
+macOS leg explicitly carries `false`. A Linux inventory cannot establish
+macOS-only membership. The workflow oracle counts owners in the actual matrix;
+an execution control expands the condition for every leg and observes one call.
 
 ## `pub(super) const TEST_SCRIPTS: [&str; 6] = [`
 
@@ -1089,7 +1093,11 @@ a leg's 40 minutes is not measured, and adding a cache step is a change of
 its own, made together with this refusal. Measured,
 `MUT-TEST-WINDOWS-HOSTED-CACHE-RESTORED`.
 
-## `pub(super) struct TestCategory {`
+## `pub(super) struct TestCategory<'a> {`
+
+Rows borrow their labels and filters. The registry supplies static slices; a
+positive control can append a filter to its own vector and borrow that snapshot
+without replacing the row's existing filters.
 
 One registry row; the field meanings and first-match rule are below.
 
@@ -1106,10 +1114,15 @@ starts-with predicate. An unassigned or multiply assigned partition fails the ch
 
 ## `pub(super) struct CategoryLeg {`
 
-One generated leg: its display `name`, libtest `tests` arguments and Windows
-`floor` (zero for Linux and macOS, which enforce no passing-count floor).
+One generated leg: its display `name`, libtest `tests` arguments, Windows
+`floor` (zero for Linux and macOS, which enforce no passing-count floor), and
+`check_inventory`. The latter is true only for the macOS leg containing `unit/cli`;
+only the macOS YAML entries carry it.
 
 ## `pub(super) fn category_legs(platform: &str) -> Vec<CategoryLeg> {`
+
+Delegates to `category_legs_for` with `TEST_CATEGORIES`. The latter also accepts
+fixture registries for normal filter additions, unit subdivision and rebalancing.
 
 `category_legs` combines the rows into seven Linux, nine macOS and twenty Windows
 test legs. Names contain the category, `k of n` only for a split category,
@@ -1130,7 +1143,7 @@ explicit UTF-8. `generate --check` and standalone `check` share the same compari
 and refuse drift; `check` does so before building or accepting any inventory.
 The generator reads the literal
 Rust table, and an effects test compares its parsed registry and generated legs
-with the compiled Rust values, including names, selectors and floors. The workflow
+with the compiled Rust values, including names, selectors, floors and inventory ownership. The workflow
 oracle still checks each actual YAML entry, required aggregate context, suite
 command and witness. Its mutation controls still delete, move, widen and narrow
 selectors, lower floors, remove legs, change matrix expansion and remove checks.
@@ -1146,7 +1159,7 @@ location. An empty example harness is permitted; an empty aggregate or failed
 listing fails.
 On a build box it uses `upstroke-build`; on CI it uses Cargo directly. Windows uses
 the same Python implementation. Listing occurs before every Linux and Windows suite;
-on macOS the pinned condition runs it before the unit suite. C3's existing equality
+on macOS the pinned condition runs it before the generated owner's suite. C3's existing equality
 between shell gate files and Linux lint invocations is retained: lint also runs the
 new shell gate. This adds listing/build overhead to that existing job, not a test
 leg. No hosted overhead measurement is claimed.
