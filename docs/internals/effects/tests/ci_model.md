@@ -1903,3 +1903,79 @@ library twice: once as a library, and once as a test harness with `test`
 set. Coverage asks whether **some** invocation compiles the body, so the
 valuations are enumerated rather than merged -- merging them would make
 `all(test, not(test))` look reachable.
+
+## Category registry (owner item 33, 2026-11-26)
+
+`TEST_CATEGORIES` replaces the three flat platform filter tables. Each row names
+a category, subcategory, substring filters, its macOS leg number, and Windows
+partitions as `(leg, passing-test floor contribution, filters)`. An empty partition
+filter list inherits the row's filters; it never means an unfiltered test run.
+Linux has one leg per category. The first matching row owns a registration,
+including an ignored registration. Split topic rows precede their broad residual
+row. Windows partitions refine that ownership with substring filters, not a
+starts-with predicate. An unassigned or multiply assigned partition fails the check.
+
+`category_legs` combines the rows into seven Linux, nine macOS and twenty Windows
+test legs, named for their category and subcategories. Earlier categories are
+excluded; a broad residual topic excludes earlier pieces owned by another leg.
+Repeated categories start at their first row, so unit/model retains precedence
+over self-checks/effects. Redundant positive filters are removed without changing
+the selected set. These combined selectors are a representation of this inventory:
+the native check compares their actual substring membership to first-row ownership
+for every name. A new collision is an error, never an implicit assignment.
+
+`python3 .github/scripts/test-categories.py generate` replaces only the marked
+matrix blocks. `generate --check` refuses drift. The generator reads the literal
+Rust table, and an effects test compares its parsed registry and generated legs
+with the compiled Rust values, including names, selectors and floors. The workflow
+oracle still checks each actual YAML entry, required aggregate context, suite
+command and witness. Its mutation controls still delete, move, widen and narrow
+selectors, lower floors, remove legs, change matrix expansion and remove checks.
+
+`bash .github/scripts/test-categories.sh` obtains Cargo's native all-target,
+all-feature terse list, including ignored tests, validates ownership and exactly
+one named selection, and repeats the native list with every category filter skipped.
+Any remaining name fails with the table location. Empty or failed listings fail.
+On a build box it uses `upstroke-build`; on CI it uses Cargo directly. Windows uses
+the same Python implementation. Listing occurs before every Linux and Windows suite;
+on macOS the pinned condition runs it before the unit suite. C3's existing equality
+between shell gate files and Linux lint invocations is retained: lint also runs the
+new shell gate. This adds listing/build overhead to that existing job, not a test
+leg. No hosted overhead measurement is claimed.
+
+The native-libtest proof first checks Cargo's real all-target inventory and
+requires nonzero CLI membership. The check's `--explain` option prints the count
+for every subcategory and each name also matched by a later row. A nested Cargo
+listing reuses its caller-owned build slot without setting a target directory.
+The proof then lists the real library harness separately with each
+generated selector and compares the sets to first-match ownership. A compiled
+fixture proves the CLI prefix, ordinary and ignored registrations, and rejection
+of an inert ignored registration named `newly_registered_unclassified`. Its bodies
+panic if executed; the check only lists them.
+
+Planning evidence was checked from all three recorded runs, 45732809453,
+45733917605 and 45733836381, after the split-family remaps and CLI rename:
+
+| OS | Registered, each run | Ignored, each run | Test legs | Membership delta |
+|---|---:|---:|---:|---:|
+| Windows | 3,929 | 113 | 20 | 0 |
+| macOS | 4,265 | 171 | 9 | 0 |
+| Linux | 4,406 | 207 | 7 | 0 |
+
+Every recorded name selects exactly its candidate leg, including all ten
+platform-only split-family registrations. The broad workspace prefix in the
+kill-path proposal is represented by the incarnations and reclaim matrix-family
+prefixes; copying it as a naked libtest filter would have selected ordinary
+workspace tests too. Equivalent word prefixes were consolidated within the same
+membership. No recorded test changes leg, so the test-weight cost delta is zero.
+Windows timing is measured; the Darwin and Linux per-test weights are estimates
+calibrated to measured job durations. The planning TSVs are not runtime dependencies.
+
+The total Windows floor remains 1,700. It is apportioned over row/leg partitions
+in proportion to the 3,816 recorded non-ignored Windows tests, rounding down and
+then assigning remaining units by largest fractional remainder in table order.
+Every combined Windows leg has a positive floor. Floors, compiler verification,
+per-test reporting, process cleanup and the separate ignored record witnesses
+remain enforced. The 1,700 total is a minimum execution witness, not the inventory
+size.
+

@@ -5379,17 +5379,17 @@ mod ci_model;
 mod workflow;
 
 use ci_model::{
-    CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, LINUX_SHARD_FILTERS, MACOS_SHARD_FILTERS,
-    MSRV_COMMAND, MSRV_JOB, OVERRIDING_REPO_FILES, RUSTFLAGS_KEY, TEMP_FOLDS_CASE_KEY,
-    TEST_COMMAND, TEST_JOBS, TEST_SHARD_COMMAND, TEST_WINDOWS_HOSTED_JOB, WINDOWS_SHARD_FILTERS,
-    WINDOWS_SHARD_FLOORS, WINDOWS_SHARD_WITNESS, WINDOWS_TEST_FLOOR,
+    CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, MSRV_COMMAND, MSRV_JOB, OVERRIDING_REPO_FILES,
+    RUSTFLAGS_KEY, TEMP_FOLDS_CASE_KEY, TEST_CATEGORIES, TEST_COMMAND, TEST_JOBS,
+    TEST_SHARD_COMMAND, TEST_WINDOWS_HOSTED_JOB, WINDOWS_SHARD_WITNESS, WINDOWS_TEST_FLOOR,
+    category_legs,
 };
 use workflow::{
     WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_test_job_complaints,
     ci_test_windows_hosted_job_complaints, ci_windows_build_witness_complaints, ci_workflow_text,
     complaint_codes, cross_target, declared_msrv_toolchain, declared_rust_version, field,
     field_names, libtest_runs, mutate_workflow, parse_workflow, rustflags_complaints, scalar,
-    shard_selections, steps_of, three_component, workflow_complaints,
+    steps_of, three_component, workflow_complaints,
 };
 
 #[test]
@@ -6269,218 +6269,233 @@ fn the_hosted_windows_shards_run_the_suite_on_the_compiler_they_install() {
 
 #[test]
 fn the_shard_tables_run_every_test_in_exactly_one_shard() {
-    let windows = shard_selections(&WINDOWS_SHARD_FILTERS);
-    let macos = shard_selections(&MACOS_SHARD_FILTERS);
-    let linux = shard_selections(&LINUX_SHARD_FILTERS);
-    for (table, selections, filters, shards) in [
-        ("Windows", &windows, WINDOWS_SHARD_FILTERS.as_slice(), 22),
-        ("macOS", &macos, MACOS_SHARD_FILTERS.as_slice(), 12),
-        ("Linux", &linux, LINUX_SHARD_FILTERS.as_slice(), 5),
-    ] {
-        assert_eq!(
-            selections.len(),
-            shards,
-            "the {table} table yields {} shards, not {shards}: one for each filter list and a \
-             last one for every test no list selects",
-            selections.len()
+    for (platform, count) in [("windows", 20), ("macos", 9), ("ubuntu", 7)] {
+        let legs = category_legs(platform);
+        assert_eq!(legs.len(), count, "{platform} job count");
+        assert!(legs.iter().all(|leg| !leg.tests.starts_with("--skip")));
+        assert!(
+            legs.iter()
+                .all(|leg| !libtest_runs(&leg.tests, "unclassified::inert"))
         );
-        assert_eq!(
-            selections.first().map(String::as_str),
-            filters.first().map(|first| first.join(" ")).as_deref(),
-            "the {table} table's first shard's libtest arguments are not its first filter list, \
-             space-separated, with no skip"
-        );
-    }
-    let windows_filters: Vec<&str> = WINDOWS_SHARD_FILTERS
-        .iter()
-        .flat_map(|list| list.iter().copied())
-        .collect();
-    assert_eq!(
-        windows_filters.len(),
-        109,
-        "the Windows table holds {} filters, not 109",
-        windows_filters.len()
-    );
-    assert_eq!(
-        windows.last().map(String::as_str),
-        Some(
-            windows_filters
-                .iter()
-                .map(|filter| format!("--skip {filter}"))
-                .collect::<Vec<String>>()
-                .join(" ")
-                .as_str()
-        ),
-        "the last Windows shard's libtest arguments are not exactly a `--skip` for each of the \
-         table's filters in order: each shard's are its own filters and a `--skip` for every \
-         filter of every shard before it, and the last shard's are only the skips"
-    );
-    assert_eq!(
-        linux,
-        [
-            "effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner engine::topology::coordinator::tests::interleaving:: engine::topology::recover:: workspace_manager::tests::s workspace::",
-            "engine::topology::coordinator::tests::a_g engine::topology::coordinator::tests::a_r workspace_manager::tests::t runner::contract:: topology::census:: --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::recover:: --skip workspace_manager::tests::s --skip workspace::",
-            "engine::topology::attempt:: workspace_manager::tests::r runner::container:: engine::tests:: --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::recover:: --skip workspace_manager::tests::s --skip workspace:: --skip engine::topology::coordinator::tests::a_g --skip engine::topology::coordinator::tests::a_r --skip workspace_manager::tests::t --skip runner::contract:: --skip topology::census::",
-            "engine::topology::coordinator::tests::a_p engine::topology::coordinator::tests::a_s workspace_manager::tests::a workspace_manager::tests::e workspace_manager::tests::n --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::recover:: --skip workspace_manager::tests::s --skip workspace:: --skip engine::topology::coordinator::tests::a_g --skip engine::topology::coordinator::tests::a_r --skip workspace_manager::tests::t --skip runner::contract:: --skip topology::census:: --skip engine::topology::attempt:: --skip workspace_manager::tests::r --skip runner::container:: --skip engine::tests::",
-            "--skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::recover:: --skip workspace_manager::tests::s --skip workspace:: --skip engine::topology::coordinator::tests::a_g --skip engine::topology::coordinator::tests::a_r --skip workspace_manager::tests::t --skip runner::contract:: --skip topology::census:: --skip engine::topology::attempt:: --skip workspace_manager::tests::r --skip runner::container:: --skip engine::tests:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_s --skip workspace_manager::tests::a --skip workspace_manager::tests::e --skip workspace_manager::tests::n",
-        ],
-        "the Linux shards' libtest arguments are not the five written out here"
-    );
-    let unsharded = shard_selections(&[]);
-    assert_eq!(
-        unsharded,
-        [""],
-        "a table with no filter is not one shard with no arguments, which is the whole suite"
-    );
-
-    for (name, windows_shard, macos_shard, linux_shard) in [
-        (
-            "engine::topology::coordinator::tests::a_pipeline_is_served_while_an_intent_removals_repair_plan_waits_on_a_torn_registration",
-            16,
-            10,
-            4,
-        ),
-        (
-            "engine::topology::coordinator::tests::a_registry_refusal_after_two_paid_passes_is_recorded_with_both_at_width_one",
-            1,
-            2,
-            2,
-        ),
-        (
-            "engine::topology::coordinator::tests::a_budget_stop_drains",
-            22,
-            12,
-            5,
-        ),
-        (
-            "engine::topology::coordinator::tests::halt_cancels_in_flight_attempt_at_width_three",
-            6,
-            12,
-            5,
-        ),
-        (
-            "engine::topology::coordinator::tests::interleaving::a_budget_stop_under_every_seed",
-            19,
-            7,
-            1,
-        ),
-        (
-            "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect",
-            12,
-            7,
-            1,
-        ),
-        (
-            "engine::topology::attempt::tests::kill_after_the_snapshot_intent_before_its_worktree_is_reclaimed",
-            17,
-            10,
-            3,
-        ),
-        ("engine::tests::host_acceptance_record", 22, 12, 3),
-        (
-            "engine::tests::a_kept_pin_is_written_whatever_head_is_when_the_snapshot_is_refused",
-            14,
-            3,
-            3,
-        ),
-        (
-            "runner::container::tests::container_capability_record",
-            5,
-            8,
-            3,
-        ),
-        (
-            "workspace_manager::tests::engine::a_name_with_a_filter_inside_it",
-            2,
-            6,
-            4,
-        ),
-        (
-            "workspace_manager::tests::a_reservation_is_released",
-            9,
-            10,
-            4,
-        ),
-        (
-            "effects::tests::the_workflow_shape_oracle_refuses_every_escape_the_ledger_names",
-            22,
-            12,
-            5,
-        ),
-        ("tests::a_test_of_the_binary_harness", 22, 12, 5),
-    ] {
-        for (table, selections, expected) in [
-            ("Windows", &windows, windows_shard),
-            ("macOS", &macos, macos_shard),
-            ("Linux", &linux, linux_shard),
-            ("empty", &unsharded, 1),
+        let floors: u32 = legs.iter().map(|leg| leg.floor).sum();
+        if platform == "windows" {
+            assert_eq!(floors, WINDOWS_TEST_FLOOR);
+            assert!(legs.iter().all(|leg| leg.floor > 0));
+        }
+        for (name, category) in [
+            ("topology::effects::tests::inert", "unit"),
+            ("topology::events::tests::inert", "unit"),
+            ("engine::topology::repair::tests::inert", "engine"),
+            ("cli_tests::inert", "unit"),
+            ("engine::tests::host_acceptance_record", "engine"),
+            (
+                "runner::container::tests::container_capability_record",
+                "runner",
+            ),
+            (
+                "engine::tests::a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converges",
+                "engine",
+            ),
+            (
+                "engine::topology::coordinator::tests::hosted_linked_registry_role_child",
+                "coordinator",
+            ),
+            (
+                "workspace_manager::tests::containment::a_base_derived_from_its_8dot3_spelling_is_refused_under_the_spelling_the_manager_holds",
+                "workspace",
+            ),
+            (
+                "workspace_manager::tests::incarnations::a_git_dir_over_the_byte_budget_is_refused_before_any_registry_access_on_windows",
+                "workspace",
+            ),
+            (
+                "workspace_manager::tests::containment::a_junction_below_the_private_root_refuses_the_execution_root",
+                "workspace",
+            ),
+            (
+                "workspace_manager::tests::containment::a_locked_marker_a_terminated_add_still_holds_is_read_across_its_closing_and_as_held_past_it",
+                "workspace",
+            ),
+            (
+                "workspace_manager::tests::containment::a_worktree_whose_killed_child_is_still_closing_is_removed_not_refused",
+                "workspace",
+            ),
+            (
+                "workspace_manager::tests::incarnations::an_earlier_instance_held_open_refuses_the_reclaim_until_its_handle_closes",
+                "workspace",
+            ),
+            (
+                "workspace_manager::tests::guarded_reads::on_windows_a_drive_or_root_relative_value_refuses_and_a_drive_or_unc_path_does_not",
+                "workspace",
+            ),
+            (
+                "workspace_manager::tests::containment::windows_resolves_a_dot_dot_below_an_absent_component_before_the_filesystem_sees_it",
+                "workspace",
+            ),
         ] {
-            let running: Vec<usize> = selections
+            let selected: Vec<_> = legs
                 .iter()
-                .enumerate()
-                .filter(|(_, selection)| libtest_runs(selection, name))
-                .map(|(index, _)| index + 1)
+                .filter(|leg| libtest_runs(&leg.tests, name))
                 .collect();
-            assert_eq!(
-                running,
-                [expected],
-                "`{name}` runs in shards {running:?} of the {table} table, not in shard \
-                 {expected} alone. A test no shard runs is one the sharded suite never executes \
-                 while every shard reports success, and a test two shards run is run twice."
+            assert_eq!(selected.len(), 1, "{platform}: {name}: {selected:?}");
+            assert!(
+                selected[0].name.starts_with(category),
+                "{name}: {selected:?}"
             );
         }
     }
+    let mut pairs = BTreeSet::new();
+    for row in TEST_CATEGORIES {
+        assert!(
+            pairs.insert((row.category, row.subcategory)),
+            "duplicate row"
+        );
+        assert!(
+            !row.filters.is_empty(),
+            "{} has no filters",
+            row.subcategory
+        );
+        for filter in row.filters.iter().chain(
+            row.windows
+                .iter()
+                .flat_map(|(_, _, filters)| filters.iter()),
+        ) {
+            assert!(
+                !filter.is_empty()
+                    && !filter.starts_with('-')
+                    && !filter.contains(char::is_whitespace),
+                "invalid selector {filter:?}"
+            );
+        }
+    }
+}
 
-    for (table, lists) in [
-        ("WINDOWS_SHARD_FILTERS", WINDOWS_SHARD_FILTERS.as_slice()),
-        ("MACOS_SHARD_FILTERS", MACOS_SHARD_FILTERS.as_slice()),
-        ("LINUX_SHARD_FILTERS", LINUX_SHARD_FILTERS.as_slice()),
-    ] {
-        assert!(
-            lists.iter().all(|list| !list.is_empty()),
-            "`{table}` holds an empty filter list, so that shard has no filter and runs every \
-             test no earlier shard ran, the last shard's tests among them"
-        );
-        let filters: Vec<&str> = lists.iter().flat_map(|list| list.iter().copied()).collect();
-        let malformed: Vec<&str> = filters
-            .iter()
-            .copied()
-            .filter(|filter| {
-                filter.is_empty() || filter.contains(char::is_whitespace) || filter.starts_with('-')
-            })
-            .collect();
-        assert!(
-            malformed.is_empty(),
-            "`{table}` holds {malformed:?}. Each filter is one word of a libtest command line: \
-             an empty one is no word at all, so its own shard has no filter and a later shard's \
-             `--skip` takes the next word as its string; one with whitespace in it is two words; \
-             and one that starts with `-` is read as an option."
-        );
-        let distinct: BTreeSet<&str> = filters.iter().copied().collect();
+fn category_tool(args: &[&std::ffi::OsStr]) -> std::process::Output {
+    std::process::Command::new(if cfg!(windows) { "python" } else { "python3" })
+        .arg(repo_root().join(".github/scripts/test-categories.py"))
+        .args(args)
+        .output()
+        .expect("run the repository category checker with the runner's Python")
+}
+
+#[test]
+fn the_category_generator_and_workflow_use_the_rust_registry() {
+    let output = category_tool(&["contract".as_ref()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let contract: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("category contract JSON");
+    assert_eq!(
+        contract["registry"],
+        serde_json::to_value(TEST_CATEGORIES).expect("Rust registry JSON")
+    );
+    for platform in ["ubuntu", "macos", "windows"] {
         assert_eq!(
-            distinct.len(),
-            filters.len(),
-            "`{table}` names a filter twice, so a later shard skips one of its own filters and \
-             loses the tests it selects, or one shard names a filter twice"
+            contract["legs"][platform],
+            serde_json::to_value(category_legs(platform)).expect("Rust legs JSON"),
+            "{platform}: the generator and compiled oracle disagree"
         );
     }
-
-    assert_eq!(
-        WINDOWS_SHARD_FLOORS.len(),
-        windows.len(),
-        "`WINDOWS_SHARD_FLOORS` does not hold one floor for each Windows shard"
-    );
+    let generated = category_tool(&["generate".as_ref(), "--check".as_ref()]);
     assert!(
-        WINDOWS_SHARD_FLOORS.iter().all(|floor| *floor > 0),
-        "a floor in {WINDOWS_SHARD_FLOORS:?} is zero, which a shard that executed nothing clears"
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
     );
-    assert_eq!(
-        WINDOWS_SHARD_FLOORS.iter().sum::<u32>(),
-        WINDOWS_TEST_FLOOR,
-        "the Windows shards' floors {WINDOWS_SHARD_FLOORS:?} do not sum to {WINDOWS_TEST_FLOOR}, \
-         the floor the whole suite was held to as one job: the legs together must not accept \
-         fewer passing tests"
+}
+
+#[test]
+fn the_category_selectors_agree_with_the_native_libtest_inventory() {
+    let all_targets = category_tool(&["check".as_ref(), "--explain".as_ref()]);
+    assert!(
+        all_targets.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&all_targets.stdout),
+        String::from_utf8_lossy(&all_targets.stderr)
     );
+    let inventory = String::from_utf8_lossy(&all_targets.stdout);
+    assert!(
+        inventory.lines().any(|line| {
+            line.strip_prefix("subcategory unit/cli: ")
+                .is_some_and(|count| count.parse::<usize>().is_ok_and(|count| count > 0))
+        }),
+        "the all-target list must include the real CLI harness: {inventory}"
+    );
+    let harness = std::env::current_exe().expect("native libtest harness");
+    let output = category_tool(&["prove".as_ref(), "--harness".as_ref(), harness.as_os_str()]);
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn the_category_check_refuses_an_inert_unclassified_registration_including_ignored_tests() {
+    let directory = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "categories")
+        .expect("category fixture directory");
+    let source = directory.path().join("category_fixture.rs");
+    fs::write(
+        &source,
+        r#"
+mod cli_tests {
+    #[test]
+    fn ordinary() { panic!("listing must never execute a test"); }
+    #[test]
+    #[ignore = "an inert record registration"]
+    fn ignored_record() { panic!("listing must never execute an ignored test"); }
+}
+#[cfg(uncategorised)]
+#[test]
+#[ignore = "an inert unclassified registration"]
+fn newly_registered_unclassified() { panic!("the catch-all must not execute"); }
+"#,
+    )
+    .expect("write an inert libtest fixture");
+    for unclassified in [false, true] {
+        let harness = directory.path().join(if cfg!(windows) {
+            "fixture.exe"
+        } else {
+            "fixture"
+        });
+        let mut compiler = std::process::Command::new("rustc");
+        compiler.arg("--test").arg(&source).arg("-o").arg(&harness);
+        if unclassified {
+            compiler.args(["--cfg", "uncategorised"]);
+        }
+        let built = compiler
+            .output()
+            .expect("compile inert libtest registrations");
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let output = category_tool(&["prove".as_ref(), "--harness".as_ref(), harness.as_os_str()]);
+        if unclassified {
+            assert!(
+                !output.status.success(),
+                "an unclassified ignored registration was accepted"
+            );
+            let diagnostic = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                diagnostic.contains("uncategorised: newly_registered_unclassified"),
+                "{diagnostic}"
+            );
+            assert!(diagnostic.contains("TEST_CATEGORIES"), "{diagnostic}");
+        } else {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("2 registrations"));
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]

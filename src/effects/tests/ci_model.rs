@@ -22,15 +22,27 @@ pub(super) const WINDOWS_BUILD_WITNESS: &str = "cargo build --all-targets --all-
 
 pub(super) const GIT_IDENTITY_SCRIPT: &str = "git config --global user.email \"ci@upstroke.local\"\ngit config --global user.name \"upstroke CI\"\n";
 
-pub(super) const TEST_SCRIPTS: [&str; 4] = [
+pub(super) const CATEGORY_CHECK: &str = "bash .github/scripts/test-categories.sh";
+
+pub(super) const CATEGORY_CHECK_WINDOWS: &str = "python .github/scripts/test-categories.py check";
+
+pub(super) const CATEGORY_CHECK_MACOS: &str = r#"if [[ '${{ matrix.leg }}' == 'macos-latest, unit ('* ]]; then
+  bash .github/scripts/test-categories.sh
+fi
+"#;
+
+pub(super) const TEST_SCRIPTS: [&str; 6] = [
     GIT_IDENTITY_SCRIPT,
+    CATEGORY_CHECK,
+    CATEGORY_CHECK_MACOS,
     TEST_SHARD_COMMAND,
     HOST_ACCEPTANCE_CAPTURE,
     CAPABILITY_OBSERVATION,
 ];
 
-pub(super) const TEST_WINDOWS_HOSTED_SCRIPTS: [&str; 4] = [
+pub(super) const TEST_WINDOWS_HOSTED_SCRIPTS: [&str; 5] = [
     GIT_IDENTITY_SCRIPT,
+    CATEGORY_CHECK_WINDOWS,
     WINDOWS_SHARD_WITNESS,
     HOST_ACCEPTANCE_WINDOWS_CAPTURE,
     CAPABILITY_WINDOWS_OBSERVATION,
@@ -107,16 +119,17 @@ pub(super) const CAPABILITY_STEP_FIELDS: [&str; 4] = ["env", "name", "run", "tim
 pub(super) const CAPABILITY_STEP_TIMEOUT_MINUTES: i64 = 4;
 
 pub(super) const FMT_GATE: &str = "cargo fmt --check";
-pub(super) const SHELL_GATES: [&str; 6] = [
+pub(super) const SHELL_GATES: [&str; 7] = [
     "bash .github/scripts/test-release-record.sh",
     "bash .github/scripts/test-pr-policy.sh",
     "bash .github/scripts/test-pr-ledger-evidence.sh",
     "bash .github/scripts/test-docs-consistency.sh",
     "bash .github/scripts/test-internals-notes.sh",
     "bash .github/scripts/test-pr-ready-audit.sh",
+    CATEGORY_CHECK,
 ];
 
-pub(super) const GATE_SCRIPTS: [&str; 10] = [
+pub(super) const GATE_SCRIPTS: [&str; 11] = [
     CLIPPY_GATE,
     CLIPPY_GATE_MACOS_CROSS,
     WINDOWS_BUILD_WITNESS,
@@ -127,6 +140,7 @@ pub(super) const GATE_SCRIPTS: [&str; 10] = [
     SHELL_GATES[3],
     SHELL_GATES[4],
     SHELL_GATES[5],
+    SHELL_GATES[6],
 ];
 
 pub(super) const PINNED_ACTIONS: [&str; 4] = [
@@ -159,282 +173,724 @@ pub(super) const TEST_WINDOWS_HOSTED_NAME: &str = "test (windows-latest, ${{ mat
 pub(super) const TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES: i64 = 40;
 pub(super) const CACHE_ACTION: &str = "Swatinem/rust-cache@";
 
-pub(super) const WINDOWS_SHARD_FILTERS: [&[&str]; 21] = [
-    &[
-        "engine::topology::coordinator::tests::a_review_v",
-        "engine::topology::coordinator::tests::a_reg",
-        "engine::topology::recover::tests::a_t",
-        "engine::topology::dispatch::",
-        "engine::tests::a_n",
-        "engine::tests::r",
-    ],
-    &[
-        "engine::topology::coordinator::tests::d",
-        "engine::topology::recover::tests::f",
-        "engine::topology::integrate::",
-        "workspace_manager::tests::e",
-        "workspace_manager::tests::n",
-        "engine::tests::a_t",
-    ],
-    &[
-        "effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner",
-        "workspace_manager::tests::c",
-        "engine::tests::a_r",
-        "runner::host::",
-        "agent::",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_pipeline_is_served_while_a_f",
-        "engine::topology::recover::tests::a_kill_af",
-        "engine::topology::coordinator::tests::a_pu",
-        "engine::topology::coordinator::tests::a_v",
-        "engine::topology::coordinator::tests::t",
-        "workspace::",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_ref",
-        "engine::topology::recover::tests::a_kill_b",
-        "engine::topology::recover::tests::a_c",
-        "engine::topology::run::",
-        "runner::container::",
-        "runner::contract::",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_review_i",
-        "engine::topology::coordinator::tests::h",
-        "engine::topology::recover::tests::a_f",
-        "engine::topology::recover::tests::a_g",
-        "engine::tests::a_b",
-        "engine::tests::a_p",
-    ],
-    &[
-        "effects::tests::the_production_code_region_contains_the_truncated_one",
-        "engine::topology::coordinator::tests::interleaving::e",
-        "engine::topology::recover::tests::a_kill_at",
-        "engine::topology::recover::tests::r",
-        "engine::topology::coverage::",
-    ],
-    &[
-        "engine::topology::coordinator::tests::o",
-        "engine::topology::coordinator::tests::r",
-        "engine::topology::recover::tests::a_r",
-        "engine::tests::a_d",
-        "engine::tests::a_g",
-        "engine::tests::at",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_sy",
-        "engine::topology::recover::tests::an",
-        "workspace_manager::tests::a",
-        "engine::tests::e",
-        "engine::tests::f",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_pipeline_is_served_while_a_r",
-        "engine::topology::coordinator::tests::a_sh",
-        "engine::topology::coordinator::tests::a_l",
-        "engine::topology::candidate::",
-        "engine::tests::a_f",
-    ],
-    &[
-        "effects::tests::every_fence_of_a_governed_lint_forbids_wherever_forbid_would_compile",
-        "engine::topology::coordinator::tests::a_ge",
-        "engine::topology::coordinator::tests::a_st",
-        "engine::topology::coordinator::tests::an",
-        "engine::tests::a_s",
-    ],
-    &[
-        "engine::topology::coordinator::tests::independent_tasks_dispatch_together_and_keep_per_key_projections_under_every_seed",
-        "engine::topology::coordinator::tests::a_h",
-        "engine::topology::coordinator::tests::ap",
-        "engine::topology::recover::tests::k",
-        "engine::tests::s",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_ret",
-        "engine::topology::coordinator::tests::l",
-        "engine::topology::finalize::",
-        "workspace_manager::tests::t",
-        "engine::tests::l",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_pipeline_is_served_while_a_v",
-        "engine::topology::coordinator::tests::interleaving::s",
-        "engine::topology::coordinator::tests::p",
-        "engine::tests::a_k",
-        "engine::tests::an",
-    ],
-    &[
-        "engine::topology::coordinator::tests::interleaving::r",
-        "engine::topology::coordinator::tests::ad",
-        "engine::topology::recover::tests::s",
-        "workspace_manager::tests::s",
-        "engine::tests::a_l",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_pipeline_is_served_while_an",
-        "engine::topology::coordinator::tests::a_d",
-        "engine::topology::coordinator::tests::c",
-        "engine::topology::recover::tests::p",
-        "topology::census::",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_pipeline_is_g",
-        "engine::topology::coordinator::tests::interleaving::i",
-        "engine::topology::coordinator::tests::a_pa",
-        "engine::topology::attempt::",
-        "engine::tests::o",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_pipeline_is_served_while_a_c",
-        "engine::topology::coordinator::tests::a_c",
-        "engine::topology::coordinator::tests::s",
-        "engine::topology::recover::tests::t",
-        "workspace_manager::tests::r",
-    ],
-    &[
-        "effects::tests::every_test_the_container_fault_row_names_is_a_test_in_this_tree",
-        "engine::topology::coordinator::tests::interleaving::a",
-        "engine::topology::coordinator::tests::a_f",
-        "engine::topology::coordinator::tests::a_k",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_res",
-        "engine::topology::coordinator::tests::a_ga",
-        "engine::topology::recover::tests::a_kill_i",
-        "engine::topology::ledger::",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_pipeline_is_served_while_a_p",
-        "engine::topology::coordinator::tests::a_pipeline_is_served_while_a_s",
-        "engine::topology::coordinator::tests::e",
-        "engine::tests::a_c",
-        "engine::tests::t",
-    ],
+#[derive(Debug, serde::Serialize)]
+pub(super) struct TestCategory {
+    pub(super) category: &'static str,
+    pub(super) subcategory: &'static str,
+    pub(super) filters: &'static [&'static str],
+    pub(super) macos: u8,
+    pub(super) windows: &'static [(u8, u32, &'static [&'static str])],
+}
+
+pub(super) const TEST_CATEGORIES: &[TestCategory] = &[
+    TestCategory {
+        category: "kill-path",
+        subcategory: "samplers",
+        filters: &["_child_kills_"],
+        macos: 1,
+        windows: &[(1, 2, &[])],
+    },
+    TestCategory {
+        category: "kill-path",
+        subcategory: "matrices",
+        filters: &[
+            "kill_at_every_cell",
+            "kill_after_report_before_each_cleanup_step",
+            "_stopped_at_any_phase_",
+        ],
+        macos: 1,
+        windows: &[
+            (
+                1,
+                1,
+                &[
+                    "engine::topology::coordinator::tests::interleaving::a_concurrent_halted_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell_",
+                ],
+            ),
+            (
+                2,
+                3,
+                &[
+                    "engine::topology::recover::tests::a_kill_at_every_cell_of_a_",
+                    "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect",
+                    "engine::topology::finalize::tests::a_cross_kind_scrub_stopped_at_any_phase_converges_on_the_next",
+                ],
+            ),
+            (
+                3,
+                3,
+                &[
+                    "engine::topology::coordinator::tests::interleaving::a_concurrent_complete_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell_",
+                    "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect",
+                    "workspace_manager::tests::incarnations::r_o2_a_cross_kind_scrub_stopped_at_any_phase_",
+                    "workspace_manager::tests::reclaim::a_torn_reclaim_stopped_at_any_phase_",
+                ],
+            ),
+        ],
+    },
+    TestCategory {
+        category: "coordinator",
+        subcategory: "interleaving",
+        filters: &["engine::topology::coordinator::tests::interleaving::"],
+        macos: 2,
+        windows: &[(2, 7, &[])],
+    },
+    TestCategory {
+        category: "coordinator",
+        subcategory: "pipelines",
+        filters: &["engine::topology::coordinator::tests::pipelines::"],
+        macos: 1,
+        windows: &[(5, 13, &[])],
+    },
+    TestCategory {
+        category: "coordinator",
+        subcategory: "registry_waits",
+        filters: &["engine::topology::coordinator::tests::registry_waits::"],
+        macos: 2,
+        windows: &[(1, 21, &[])],
+    },
+    TestCategory {
+        category: "coordinator",
+        subcategory: "runners",
+        filters: &["engine::topology::coordinator::tests::runners::"],
+        macos: 2,
+        windows: &[(4, 4, &[])],
+    },
+    TestCategory {
+        category: "coordinator",
+        subcategory: "scheduling",
+        filters: &["engine::topology::coordinator::tests::scheduling::"],
+        macos: 2,
+        windows: &[(6, 11, &[])],
+    },
+    TestCategory {
+        category: "coordinator",
+        subcategory: "shutdown",
+        filters: &["engine::topology::coordinator::tests::shutdown::"],
+        macos: 2,
+        windows: &[(5, 19, &[])],
+    },
+    TestCategory {
+        category: "coordinator",
+        subcategory: "snapshot_registration",
+        filters: &["engine::topology::coordinator::tests::snapshot_registration::"],
+        macos: 1,
+        windows: &[
+            (
+                1,
+                3,
+                &[
+                    "engine::topology::coordinator::tests::snapshot_registration::a_passing_",
+                    "engine::topology::coordinator::tests::snapshot_registration::an_",
+                    "engine::topology::coordinator::tests::snapshot_registration::a_clean_",
+                ],
+            ),
+            (
+                2,
+                5,
+                &[
+                    "engine::topology::coordinator::tests::snapshot_registration::a_retained_",
+                    "engine::topology::coordinator::tests::snapshot_registration::a_resume_",
+                    "engine::topology::coordinator::tests::snapshot_registration::the_",
+                    "engine::topology::coordinator::tests::snapshot_registration::a_live_",
+                    "engine::topology::coordinator::tests::snapshot_registration::a_promotions_",
+                ],
+            ),
+            (
+                3,
+                7,
+                &[
+                    "engine::topology::coordinator::tests::snapshot_registration::a_gate_",
+                    "engine::topology::coordinator::tests::snapshot_registration::a_verification_",
+                    "engine::topology::coordinator::tests::snapshot_registration::a_genuinely_",
+                    "engine::topology::coordinator::tests::snapshot_registration::a_container_",
+                    "engine::topology::coordinator::tests::snapshot_registration::a_classification_",
+                    "engine::topology::coordinator::tests::snapshot_registration::a_refusal_",
+                    "engine::topology::coordinator::tests::snapshot_registration::a_halted_",
+                ],
+            ),
+            (
+                4,
+                3,
+                &[
+                    "engine::topology::coordinator::tests::snapshot_registration::a_cancelled_",
+                    "engine::topology::coordinator::tests::snapshot_registration::a_stale_",
+                    "engine::topology::coordinator::tests::snapshot_registration::a_staging_",
+                    "engine::topology::coordinator::tests::snapshot_registration::a_kept_",
+                    "engine::topology::coordinator::tests::snapshot_registration::a_complete_",
+                ],
+            ),
+            (
+                6,
+                4,
+                &["engine::topology::coordinator::tests::snapshot_registration::a_review_"],
+            ),
+        ],
+    },
+    TestCategory {
+        category: "coordinator",
+        subcategory: "verification_charges",
+        filters: &["engine::topology::coordinator::tests::verification_charges::"],
+        macos: 1,
+        windows: &[(4, 11, &[])],
+    },
+    TestCategory {
+        category: "coordinator",
+        subcategory: "core",
+        filters: &["engine::topology::coordinator::"],
+        macos: 1,
+        windows: &[(2, 3, &[])],
+    },
+    TestCategory {
+        category: "engine",
+        subcategory: "recover",
+        filters: &["engine::topology::recover::"],
+        macos: 1,
+        windows: &[
+            (
+                1,
+                15,
+                &[
+                    "engine::topology::recover::tests::a_resume_",
+                    "engine::topology::recover::tests::a_one_",
+                    "engine::topology::recover::tests::picking_",
+                    "engine::topology::recover::tests::a_test_",
+                    "engine::topology::recover::tests::a_checkouts_",
+                    "engine::topology::recover::tests::every_",
+                    "engine::topology::recover::tests::barrier_",
+                    "engine::topology::recover::tests::unsynced_",
+                    "engine::topology::recover::tests::append_",
+                    "engine::topology::recover::tests::malformed_",
+                    "engine::topology::recover::tests::a_prepared_",
+                    "engine::topology::recover::tests::a_refused_",
+                    "engine::topology::recover::tests::closure_",
+                ],
+            ),
+            (
+                2,
+                22,
+                &[
+                    "engine::topology::recover::tests::a_fault_",
+                    "engine::topology::recover::tests::resume_",
+                    "engine::topology::recover::tests::a_torn_",
+                    "engine::topology::recover::tests::a_lost_",
+                    "engine::topology::recover::tests::two_",
+                    "engine::topology::recover::tests::a_verification_",
+                    "engine::topology::recover::tests::a_git_",
+                    "engine::topology::recover::tests::finalized_",
+                    "engine::topology::recover::tests::a_budget_",
+                    "engine::topology::recover::tests::a_delivered_",
+                    "engine::topology::recover::tests::over_",
+                    "engine::topology::recover::tests::a_log_",
+                    "engine::topology::recover::tests::a_missing_",
+                ],
+            ),
+            (
+                3,
+                22,
+                &[
+                    "engine::topology::recover::tests::an_",
+                    "engine::topology::recover::tests::run_",
+                    "engine::topology::recover::tests::t_",
+                    "engine::topology::recover::tests::repeated_",
+                    "engine::topology::recover::tests::declining_",
+                    "engine::topology::recover::tests::a_retained_",
+                    "engine::topology::recover::tests::a_clean_",
+                    "engine::topology::recover::tests::late_",
+                    "engine::topology::recover::tests::a_dispatch_",
+                    "engine::topology::recover::tests::projections_",
+                    "engine::topology::recover::tests::a_recorded_",
+                    "engine::topology::recover::tests::a_crash_",
+                    "engine::topology::recover::tests::a_plan_",
+                    "engine::topology::recover::tests::a_call_",
+                    "engine::topology::recover::tests::candidate_",
+                    "engine::topology::recover::tests::container_",
+                    "engine::topology::recover::tests::finalization_",
+                    "engine::topology::recover::tests::process_",
+                    "engine::topology::recover::tests::recovery_",
+                    "engine::topology::recover::tests::staging_",
+                ],
+            ),
+            (
+                4,
+                6,
+                &[
+                    "engine::topology::recover::tests::a_repair_",
+                    "engine::topology::recover::tests::max_",
+                    "engine::topology::recover::tests::synthetic_",
+                    "engine::topology::recover::tests::a_reviewer_",
+                    "engine::topology::recover::tests::a_fresh_",
+                    "engine::topology::recover::tests::a_completed_",
+                    "engine::topology::recover::tests::a_live_",
+                    "engine::topology::recover::tests::answer_",
+                    "engine::topology::recover::tests::a_runs_",
+                    "engine::topology::recover::tests::a_run_",
+                    "engine::topology::recover::tests::replayed_",
+                    "engine::topology::recover::tests::a_rebound_",
+                ],
+            ),
+            (
+                5,
+                18,
+                &[
+                    "engine::topology::recover::tests::the_",
+                    "engine::topology::recover::tests::a_report_",
+                    "engine::topology::recover::tests::a_failed_",
+                    "engine::topology::recover::tests::private_",
+                    "engine::topology::recover::tests::each_",
+                    "engine::topology::recover::tests::a_paid_",
+                    "engine::topology::recover::tests::a_binding_",
+                    "engine::topology::recover::tests::a_removal_",
+                    "engine::topology::recover::tests::halted_",
+                    "engine::topology::recover::tests::a_retried_",
+                    "engine::topology::recover::tests::steps_",
+                    "engine::topology::recover::tests::ledgers_",
+                    "engine::topology::recover::tests::a_fixture_",
+                ],
+            ),
+            (
+                6,
+                21,
+                &[
+                    "engine::topology::recover::tests::a_kill_",
+                    "engine::topology::recover::tests::fresh_",
+                    "engine::topology::recover::tests::a_gate_",
+                    "engine::topology::recover::tests::kill_",
+                    "engine::topology::recover::tests::a_ref_",
+                    "engine::topology::recover::tests::a_rejected_",
+                    "engine::topology::recover::tests::a_repairs_",
+                    "engine::topology::recover::tests::a_dependent_",
+                    "engine::topology::recover::tests::a_runner_",
+                    "engine::topology::recover::tests::a_closed_",
+                    "engine::topology::recover::tests::retry_",
+                    "engine::topology::recover::tests::forged_",
+                    "engine::topology::recover::tests::a_build_",
+                ],
+            ),
+        ],
+    },
+    TestCategory {
+        category: "engine",
+        subcategory: "capacity_budget",
+        filters: &["engine::tests::capacity_budget::"],
+        macos: 1,
+        windows: &[(4, 17, &[])],
+    },
+    TestCategory {
+        category: "engine",
+        subcategory: "kept_output",
+        filters: &["engine::tests::kept_output::"],
+        macos: 2,
+        windows: &[(3, 19, &[])],
+    },
+    TestCategory {
+        category: "engine",
+        subcategory: "legacy_resume",
+        filters: &["engine::tests::legacy_resume::"],
+        macos: 1,
+        windows: &[(2, 27, &[])],
+    },
+    TestCategory {
+        category: "engine",
+        subcategory: "questions",
+        filters: &["engine::tests::questions::"],
+        macos: 2,
+        windows: &[(6, 17, &[])],
+    },
+    TestCategory {
+        category: "engine",
+        subcategory: "snapshot_registration",
+        filters: &["engine::tests::snapshot_registration::"],
+        macos: 1,
+        windows: &[(4, 12, &[])],
+    },
+    TestCategory {
+        category: "engine",
+        subcategory: "topology_admission",
+        filters: &["engine::tests::topology_admission::"],
+        macos: 1,
+        windows: &[(4, 8, &[])],
+    },
+    TestCategory {
+        category: "engine",
+        subcategory: "topology_execution",
+        filters: &["engine::tests::topology_execution::"],
+        macos: 2,
+        windows: &[(6, 8, &[])],
+    },
+    TestCategory {
+        category: "engine",
+        subcategory: "verification",
+        filters: &["engine::tests::verification::"],
+        macos: 1,
+        windows: &[(5, 27, &[])],
+    },
+    TestCategory {
+        category: "engine",
+        subcategory: "end-to-end",
+        filters: &["engine::tests::"],
+        macos: 2,
+        windows: &[(5, 2, &[])],
+    },
+    TestCategory {
+        category: "engine",
+        subcategory: "attempt",
+        filters: &["engine::topology::attempt::"],
+        macos: 2,
+        windows: &[(5, 25, &[])],
+    },
+    TestCategory {
+        category: "engine",
+        subcategory: "topology",
+        filters: &[
+            "engine::topology::run::",
+            "engine::topology::integrate::",
+            "engine::topology::dispatch::",
+            "engine::topology::coverage::",
+            "engine::topology::ledger::",
+            "engine::topology::candidate::",
+            "engine::topology::finalize::",
+            "engine::topology::create::",
+            "engine::topology::startup::",
+            "engine::topology::repair::",
+            "engine::topology::permits::",
+            "engine::topology::emit::",
+            "engine::topology::settle::",
+            "engine::topology::entry::",
+            "engine::topology::identity::",
+            "engine::topology::preflight::",
+            "engine::topology::prelock::",
+            "engine::topology::profiled::",
+            "engine::topology::seams::",
+            "engine::topology::select::",
+        ],
+        macos: 2,
+        windows: &[(1, 213, &[])],
+    },
+    TestCategory {
+        category: "engine",
+        subcategory: "report",
+        filters: &["engine::report::"],
+        macos: 2,
+        windows: &[(2, 4, &[])],
+    },
+    TestCategory {
+        category: "workspace",
+        subcategory: "containment",
+        filters: &["workspace_manager::tests::containment::"],
+        macos: 1,
+        windows: &[(1, 23, &[])],
+    },
+    TestCategory {
+        category: "workspace",
+        subcategory: "guarded_reads",
+        filters: &["workspace_manager::tests::guarded_reads::"],
+        macos: 1,
+        windows: &[(2, 16, &[])],
+    },
+    TestCategory {
+        category: "workspace",
+        subcategory: "incarnations",
+        filters: &["workspace_manager::tests::incarnations::"],
+        macos: 1,
+        windows: &[(1, 11, &[])],
+    },
+    TestCategory {
+        category: "workspace",
+        subcategory: "reclaim",
+        filters: &["workspace_manager::tests::reclaim::"],
+        macos: 1,
+        windows: &[(2, 12, &[])],
+    },
+    TestCategory {
+        category: "workspace",
+        subcategory: "refs",
+        filters: &["workspace_manager::tests::refs::"],
+        macos: 1,
+        windows: &[(2, 10, &[])],
+    },
+    TestCategory {
+        category: "workspace",
+        subcategory: "registry",
+        filters: &["workspace_manager::tests::registry::"],
+        macos: 1,
+        windows: &[(2, 14, &[])],
+    },
+    TestCategory {
+        category: "workspace",
+        subcategory: "residue",
+        filters: &["workspace_manager::tests::residue::"],
+        macos: 1,
+        windows: &[(1, 16, &[])],
+    },
+    TestCategory {
+        category: "workspace",
+        subcategory: "snapshots",
+        filters: &["workspace_manager::tests::snapshots::"],
+        macos: 1,
+        windows: &[(2, 13, &[])],
+    },
+    TestCategory {
+        category: "workspace",
+        subcategory: "manager",
+        filters: &["workspace_manager::"],
+        macos: 1,
+        windows: &[(2, 29, &[])],
+    },
+    TestCategory {
+        category: "workspace",
+        subcategory: "checkout",
+        filters: &["workspace::tests::"],
+        macos: 1,
+        windows: &[(1, 22, &[])],
+    },
+    TestCategory {
+        category: "runner",
+        subcategory: "container",
+        filters: &["runner::container::"],
+        macos: 1,
+        windows: &[(1, 116, &[])],
+    },
+    TestCategory {
+        category: "runner",
+        subcategory: "contract",
+        filters: &["runner::contract::"],
+        macos: 1,
+        windows: &[(1, 13, &[])],
+    },
+    TestCategory {
+        category: "runner",
+        subcategory: "host",
+        filters: &["runner::host::"],
+        macos: 1,
+        windows: &[(1, 41, &[])],
+    },
+    TestCategory {
+        category: "runner",
+        subcategory: "policy",
+        filters: &["runner::invocation::", "runner::policy::"],
+        macos: 1,
+        windows: &[(1, 13, &[])],
+    },
+    TestCategory {
+        category: "unit",
+        subcategory: "model",
+        filters: &[
+            "topology::fold::",
+            "topology::effects::",
+            "topology::events::",
+            "topology::registry::",
+            "topology::schema::",
+            "topology::paths::",
+        ],
+        macos: 1,
+        windows: &[(1, 193, &[])],
+    },
+    TestCategory {
+        category: "self-checks",
+        subcategory: "effects",
+        filters: &["effects::tests::"],
+        macos: 1,
+        windows: &[(1, 46, &[])],
+    },
+    TestCategory {
+        category: "self-checks",
+        subcategory: "census",
+        filters: &["topology::census::"],
+        macos: 1,
+        windows: &[(1, 18, &[])],
+    },
+    TestCategory {
+        category: "unit",
+        subcategory: "agent-proc",
+        filters: &["agent::proc::"],
+        macos: 1,
+        windows: &[(1, 34, &[])],
+    },
+    TestCategory {
+        category: "unit",
+        subcategory: "agent-adapters",
+        filters: &[
+            "agent::adapter::",
+            "agent::bin::",
+            "agent::claude::",
+            "agent::codex::",
+            "agent::copilot::",
+        ],
+        macos: 1,
+        windows: &[(1, 63, &[])],
+    },
+    TestCategory {
+        category: "unit",
+        subcategory: "config",
+        filters: &["config::", "capacity::", "tracker::", "connect::"],
+        macos: 1,
+        windows: &[(1, 152, &[])],
+    },
+    TestCategory {
+        category: "unit",
+        subcategory: "plan",
+        filters: &[
+            "plan::",
+            "validate::",
+            "ir::tests::",
+            "ladder::",
+            "catalog::",
+            "route::",
+        ],
+        macos: 1,
+        windows: &[(1, 104, &[])],
+    },
+    TestCategory {
+        category: "unit",
+        subcategory: "run-state",
+        filters: &[
+            "rundir::",
+            "events::",
+            "review::",
+            "gates::",
+            "interaction::",
+            "answer::",
+            "status::",
+            "export::",
+        ],
+        macos: 1,
+        windows: &[(1, 120, &[])],
+    },
+    TestCategory {
+        category: "unit",
+        subcategory: "util",
+        filters: &["util::", "ulid::", "error::"],
+        macos: 1,
+        windows: &[(1, 12, &[])],
+    },
+    TestCategory {
+        category: "unit",
+        subcategory: "cli",
+        filters: &["cli_tests::"],
+        macos: 1,
+        windows: &[(1, 6, &[])],
+    },
 ];
 
-pub(super) const WINDOWS_SHARD_FLOORS: [u32; 22] = [
-    29, 20, 163, 40, 165, 19, 26, 29, 85, 29, 23, 13, 27, 24, 13, 26, 31, 28, 10, 14, 25, 861,
-];
+#[derive(Debug, serde::Serialize)]
+pub(super) struct CategoryLeg {
+    pub(super) name: String,
+    pub(super) tests: String,
+    pub(super) floor: u32,
+}
 
-pub(super) const MACOS_SHARD_FILTERS: [&[&str]; 11] = [
-    &[
-        "engine::topology::coordinator::tests::interleaving::r",
-        "engine::topology::coordinator::tests::a_pa",
-        "engine::topology::coordinator::tests::r",
-        "workspace_manager::tests::r",
-        "workspace_manager::tests::t",
-        "engine::tests::s",
-    ],
-    &[
-        "engine::topology::coordinator::tests::interleaving::e",
-        "engine::topology::coordinator::tests::a_r",
-        "engine::topology::integrate::",
-        "workspace_manager::tests::s",
-        "engine::tests::a_s",
-        "engine::tests::f",
-    ],
-    &[
-        "effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner",
-        "engine::topology::coordinator::tests::a_s",
-        "engine::topology::coordinator::tests::ap",
-        "engine::topology::candidate::",
-        "engine::topology::coverage::",
-        "engine::tests::a_k",
-    ],
-    &[
-        "effects::tests::every_test_the_container_fault_row_names_is_a_test_in_this_tree",
-        "engine::topology::coordinator::tests::a_pipeline_is_served_while_a_",
-        "engine::topology::coordinator::tests::a_c",
-        "engine::topology::coordinator::tests::c",
-        "engine::topology::coordinator::tests::t",
-        "workspace::",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_k",
-        "engine::topology::coordinator::tests::a_v",
-        "engine::topology::coordinator::tests::o",
-        "engine::topology::recover::tests::a_",
-        "engine::tests::l",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_d",
-        "engine::topology::coordinator::tests::a_h",
-        "workspace_manager::tests::e",
-        "engine::topology::ledger::",
-        "topology::census::",
-        "engine::tests::r",
-    ],
-    &[
-        "engine::topology::coordinator::tests::interleaving::a",
-        "engine::topology::recover::tests::an",
-        "engine::topology::recover::tests::k",
-        "engine::topology::dispatch::",
-        "engine::tests::a_t",
-        "engine::tests::t",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_pipeline_is_g",
-        "engine::topology::run::",
-        "runner::container::",
-        "engine::tests::a_l",
-        "engine::tests::a_p",
-        "engine::tests::an",
-    ],
-    &[
-        "engine::topology::coordinator::tests::interleaving::s",
-        "engine::topology::coordinator::tests::an",
-        "engine::topology::recover::tests::t",
-        "workspace_manager::tests::c",
-        "workspace_manager::tests::n",
-        "engine::tests::a_r",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_pipeline_is_served_while_an",
-        "engine::topology::attempt::",
-        "workspace_manager::tests::a",
-        "engine::tests::a_c",
-        "engine::tests::a_d",
-        "engine::tests::a_f",
-    ],
-    &[
-        "engine::topology::coordinator::tests::interleaving::i",
-        "engine::topology::coordinator::tests::a_f",
-        "engine::topology::coordinator::tests::a_g",
-        "engine::tests::a_b",
-        "runner::contract::",
-    ],
-];
-
-pub(super) const LINUX_SHARD_FILTERS: [&[&str]; 4] = [
-    &[
-        "effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner",
-        "engine::topology::coordinator::tests::interleaving::",
-        "engine::topology::recover::",
-        "workspace_manager::tests::s",
-        "workspace::",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_g",
-        "engine::topology::coordinator::tests::a_r",
-        "workspace_manager::tests::t",
-        "runner::contract::",
-        "topology::census::",
-    ],
-    &[
-        "engine::topology::attempt::",
-        "workspace_manager::tests::r",
-        "runner::container::",
-        "engine::tests::",
-    ],
-    &[
-        "engine::topology::coordinator::tests::a_p",
-        "engine::topology::coordinator::tests::a_s",
-        "workspace_manager::tests::a",
-        "workspace_manager::tests::e",
-        "workspace_manager::tests::n",
-    ],
-];
+pub(super) fn category_legs(platform: &str) -> Vec<CategoryLeg> {
+    let mut rows = Vec::new();
+    for row in TEST_CATEGORIES {
+        if platform == "windows" {
+            for &(leg, floor, filters) in row.windows {
+                rows.push((
+                    row,
+                    leg,
+                    floor,
+                    if filters.is_empty() {
+                        row.filters
+                    } else {
+                        filters
+                    },
+                ));
+            }
+        } else {
+            assert!(
+                platform == "macos" || platform == "ubuntu",
+                "unknown platform {platform}"
+            );
+            rows.push((
+                row,
+                if platform == "macos" { row.macos } else { 1 },
+                0,
+                row.filters,
+            ));
+        }
+    }
+    let categories: std::collections::BTreeSet<&str> =
+        TEST_CATEGORIES.iter().map(|row| row.category).collect();
+    let mut legs = Vec::new();
+    for category in categories {
+        let count = rows
+            .iter()
+            .filter(|(row, _, _, _)| row.category == category)
+            .map(|(_, leg, _, _)| *leg)
+            .max()
+            .expect("category has rows");
+        for leg in 1..=count {
+            let owns = |row: &TestCategory, number: u8| row.category == category && number == leg;
+            let selected: Vec<_> = rows
+                .iter()
+                .filter(|(row, number, _, _)| owns(row, *number))
+                .collect();
+            let filters: Vec<&str> = selected
+                .iter()
+                .flat_map(|(_, _, _, filters)| filters.iter().copied())
+                .collect();
+            let mut skips: Vec<&str> = TEST_CATEGORIES
+                .iter()
+                .take_while(|row| row.category != category)
+                .flat_map(|row| row.filters.iter().copied())
+                .collect();
+            for (index, (row, number, _, excluded)) in rows.iter().enumerate() {
+                if row.category != category || owns(row, *number) {
+                    continue;
+                }
+                for filter in *excluded {
+                    if rows
+                        .iter()
+                        .skip(index + 1)
+                        .any(|(later, number, _, included)| {
+                            owns(later, *number) && included.iter().any(|own| filter.contains(own))
+                        })
+                    {
+                        skips.push(filter);
+                    }
+                }
+            }
+            let mut words: Vec<String> = Vec::new();
+            for filter in &filters {
+                if !filters
+                    .iter()
+                    .any(|other| other != filter && filter.contains(other))
+                    && !words.iter().any(|word| word == filter)
+                {
+                    words.push((*filter).to_owned());
+                }
+            }
+            assert!(
+                !words.is_empty(),
+                "{category}/{leg} has no positive selector"
+            );
+            let mut skipped = std::collections::BTreeSet::new();
+            for skip in skips {
+                if skipped.insert(skip) {
+                    words.extend(["--skip".to_owned(), skip.to_owned()]);
+                }
+            }
+            let subs: std::collections::BTreeSet<&str> = selected
+                .iter()
+                .map(|(row, _, _, _)| row.subcategory)
+                .collect();
+            let suffix = if count == 1 {
+                String::new()
+            } else {
+                format!(" {leg} of {count}")
+            };
+            legs.push(CategoryLeg {
+                name: format!(
+                    "{category}{suffix} ({})",
+                    subs.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+                tests: words.join(" "),
+                floor: selected.iter().map(|(_, _, floor, _)| *floor).sum(),
+            });
+        }
+    }
+    legs
+}
 
 pub(super) const TEST_JOB_NAME: &str = "test (${{ matrix.leg }})";
 pub(super) const TEST_TIMEOUT_MINUTES: i64 = 30;
@@ -442,7 +898,6 @@ pub(super) const TEST_TIMEOUT_MINUTES: i64 = 30;
 pub(super) struct TestJob {
     pub(super) id: &'static str,
     pub(super) runner: &'static str,
-    pub(super) filters: &'static [&'static [&'static str]],
     pub(super) step_env: [(&'static str, &'static str); 1],
 }
 
@@ -450,13 +905,11 @@ pub(super) const TEST_JOBS: [TestJob; 2] = [
     TestJob {
         id: "test-linux",
         runner: "ubuntu-latest",
-        filters: &LINUX_SHARD_FILTERS,
         step_env: [(TEMP_FOLDS_CASE_KEY, "")],
     },
     TestJob {
         id: "test-macos",
         runner: "macos-latest",
-        filters: &MACOS_SHARD_FILTERS,
         step_env: [(TEMP_FOLDS_CASE_KEY, "1")],
     },
 ];

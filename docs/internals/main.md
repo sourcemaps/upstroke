@@ -391,7 +391,7 @@ pressing Enter would leave the command sitting there saying nothing.
 Piped: read to end so an answer can span lines. The interpreter
 trims and treats the whole thing as the operator's words.
 
-## `mod tests` › `const DISPATCH: &[(&str, &[&str], CommandClass)] = &[`
+## `mod cli_tests` › `const DISPATCH: &[(&str, &[&str], CommandClass)] = &[`
 
 Every subcommand this binary dispatches, with an invocation that parses
 and the class the packet gives it.
@@ -403,24 +403,24 @@ being added here fails
 [`every_dispatch_arm_is_classified_by_the_packets_rule`] — the list that
 rots is replaced by a list that is checked.
 
-## `mod tests` › `const ABSENT_PLAN: &str = "/upstroke-pr4-no-such-plan-33f1a9/plan.md";`
+## `mod cli_tests` › `const ABSENT_PLAN: &str = "/upstroke-pr4-no-such-plan-33f1a9/plan.md";`
 
 A plan path that exists on no machine, so the dispatch arm that reads it
 fails in a way nothing else produces.
 
-## `mod tests` › `fn every_dispatch_arm_is_classified_by_the_packets_rule() {`
+## `mod cli_tests` › `fn every_dispatch_arm_is_classified_by_the_packets_rule() {`
 
 The whole point of the table: a new subcommand cannot reach the dispatch
 without a classification, and cannot be classified in production without
 being classified here too.
 
-## `mod tests` › `fn the_dry_run_preview_is_classified_with_its_arm() {`
+## `mod cli_tests` › `fn the_dry_run_preview_is_classified_with_its_arm() {`
 
 The classification is by dispatch arm, so the preview shares the class
 of the command it previews. Stated in `command_class`, asserted here, so
 the widening cannot become invisible.
 
-## `mod tests` › `fn the_commands_that_spawn_outside_a_run_are_named_and_counted() {`
+## `mod cli_tests` › `fn the_commands_that_spawn_outside_a_run_are_named_and_counted() {`
 
 The two commands that spawn a host child outside a run, counted so the
 boundary cannot grow in silence. `connect` and `capacity` both probe the
@@ -432,7 +432,7 @@ pool that names a usage provider, through the same host Runner: it is the
 same command, so the count stands at two, and it is the only child any
 command starts in order to reach a network.
 
-## `mod tests` › `fn a_write_command_refuses_before_any_effect_when_containment_fails() {`
+## `mod cli_tests` › `fn a_write_command_refuses_before_any_effect_when_containment_fails() {`
 
 A refused ambient join stops the write command **before** its arm runs.
 
@@ -442,7 +442,7 @@ when the join succeeds — names the plan it could not read. If
 containment ran after the arm, or not at all, the first call would carry
 the plan's error instead.
 
-## `mod tests` › `fn every_write_command_establishes_containment_and_no_read_only_one_does() {`
+## `mod cli_tests` › `fn every_write_command_establishes_containment_and_no_read_only_one_does() {`
 
 **Every** write command joins, and every read-only command does not.
 
@@ -474,7 +474,7 @@ And the refusal is per command, not per class: a write command
 whose join fails refuses, a read-only one cannot fail because it
 never calls it.
 
-## `mod tests` › `fn the_cli_write_path_runs_the_real_containment_step() {`
+## `mod cli_tests` › `fn the_cli_write_path_runs_the_real_containment_step() {`
 
 The CLI's own wiring: `run_wired` composes the **real** containment step
 with `dispatch`, on every platform.
@@ -499,7 +499,7 @@ alone cannot say: the error the caller receives is the plan's.
 
 The other side of the classification, through the same wiring.
 
-## `mod tests` › `fn a_cli_write_command_refuses_when_the_real_containment_step_refuses() {`
+## `mod cli_tests` › `fn a_cli_write_command_refuses_when_the_real_containment_step_refuses() {`
 
 And the refusal reaches the caller through that same wiring, on the
 platform where the join can fail.
@@ -528,7 +528,7 @@ Named fragments rather than the whole sentence, and rather than the
 production's own diagnostic (`proc::AMBIENT_REFUSAL_PREFIX` +
 `AMBIENT_REFUSAL_SIMULATED`), not the funnel's internal coordinate.
 
-## `mod tests` › `fn the_cli_wires_the_real_containment_step_into_dispatch() {`
+## `mod cli_tests` › `fn the_cli_wires_the_real_containment_step_into_dispatch() {`
 
 `run` itself cannot fabricate a success, because it constructs no value.
 
@@ -566,16 +566,16 @@ indistinguishable. The rule is deliberately simple — everything from
 a `//` that is not part of a `://` — and it is checked, below,
 against a line this file is known to carry.
 
-## `mod tests` › `fn a_read_only_command_does_not_join_the_ambient_job() {`
+## `mod cli_tests` › `fn a_read_only_command_does_not_join_the_ambient_job() {`
 
 A read-only command never joins. The oracle is a join that cannot be
 called without failing the test.
 
-## `mod tests` › `const AMBIENT_LATCH_RECORD: &str = "UPSTROKE_PR4_CLI_LATCH_RECORD";`
+## `mod cli_tests` › `const AMBIENT_LATCH_RECORD: &str = "UPSTROKE_PR4_CLI_LATCH_RECORD";`
 
 Where the ambient-latch helper writes what it observed.
 
-## `mod tests` › `fn cli_ambient_latch_helper() {`
+## `mod cli_tests` › `fn cli_ambient_latch_helper() {`
 
 The child half of
 [`a_write_command_establishes_the_ambient_job_and_a_read_only_command_does_not`]:
@@ -594,7 +594,7 @@ seen up to it.
 composition `run` uses, so the child exercises the CLI's real path to
 the join instead of a reassembly of it.
 
-## `mod tests` › `fn a_write_command_establishes_the_ambient_job_and_a_read_only_command_does_not() {`
+## `mod cli_tests` › `fn a_write_command_establishes_the_ambient_job_and_a_read_only_command_does_not() {`
 
 The real join, at the real coordinate, on the platform that has one.
 

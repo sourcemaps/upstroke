@@ -61,7 +61,7 @@ bash .github/scripts/test-pr-ready-audit.sh
 
 The crate defines no features today, so `--all-features` is a no-op; use the CI form regardless.
 `1.85.0` is the MSRV and CI pins it; there is **no** `rust-toolchain.toml`, so toolchain selection
-is explicit at call sites. The 6 `test-*.sh` gates in `.github/scripts/` run in CI's `lint` job.
+is explicit at call sites. The 7 `test-*.sh` gates in `.github/scripts/` run in CI's `lint` job.
 `test-release-record.sh` needs `jq`. These are CI's commands; a shared build machine may wrap
 `cargo` and assign target directories itself, and its wrapper is the way to run them there.
 
@@ -142,7 +142,7 @@ the owner's read of that PR's diff. `MAINTAINING.md` step 7 governs.
 | `MAINTAINING.md` | Change lifecycle, trust boundary, release contract |
 | `CONTRIBUTING.md` | Contributor rules and CLA |
 | `docs/internals/` | Internal module notes, one file per module mirroring `src/`. A module with notes carries a single `Extended notes:` pointer in its header and no other prose (§13), held both ways by `test-internals-notes.sh`. `docs/` is the GitHub Pages source for upstroke.rs, so anything added there is published |
-| `.github/scripts/` | The 6 `test-*.sh` gates and the `validate-*` helpers they exercise |
+| `.github/scripts/` | The 7 `test-*.sh` gates and the `validate-*` helpers they exercise |
 | `scripts/pr-ready-audit.sh` | Lane readiness audit: maintains `lane:*` and `ready-to-merge`, enqueues with `--enqueue` |
 | `findings/` | The standing finding ledger, one file per open finding; `findings/README.md` names and shapes a finding, `findings/PROCESS.md` is how the ledger is worked |
 | `effects/` | The effect-governance allowlists the `src/effects/tests.rs` census enforces |

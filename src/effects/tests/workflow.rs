@@ -14,19 +14,19 @@ use yaml_rust2::{Yaml, YamlLoader};
 use super::ci_model::{
     ACTION_INPUTS, AGGREGATE_JOB, AGGREGATE_JOB_FIELDS, AGGREGATE_SCRIPT, AGGREGATE_SHELL,
     AGGREGATE_STEP_FIELDS, CACHE_ACTION, CAPABILITY_OBSERVATION, CAPABILITY_STEP_FIELDS,
-    CAPABILITY_STEP_TIMEOUT_MINUTES, CAPABILITY_WINDOWS_OBSERVATION, CI_TARGETS, CI_WORKFLOW,
-    CLIPPY_GATE, CiTarget, DEFAULTS_FIELDS, DEFAULTS_RUN_FIELDS, ENCODED_RUSTFLAGS_KEY,
-    GATE_JOB_FIELDS, GATE_SCRIPTS, GOLDEN_IMAGE_TOOLCHAIN, HOST_ACCEPTANCE_CAPTURE,
-    HOST_ACCEPTANCE_WINDOWS_CAPTURE, KNOWN_SHELLS, MSRV_COMMAND, MSRV_ENTRY_KEYS, MSRV_JOB,
-    MSRV_JOB_FIELDS, MSRV_MATRIX_FIELDS, MSRV_RUNS_ON, MSRV_TOOLCHAIN_TARGETS,
-    OPTIONAL_DEFAULTS_FIELD, PINNED_ACTIONS, REQUIRED_CONTEXT, RETIRED_TEST_JOB, RUSTFLAGS_KEY,
-    RUSTFLAGS_VALUE, STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS, TEST_JOB_NAME,
-    TEST_JOBS, TEST_SCRIPTS, TEST_SHARD_COMMAND, TEST_STEP_FIELDS, TEST_TIMEOUT_MINUTES,
-    TEST_WINDOWS_HOSTED_JOB, TEST_WINDOWS_HOSTED_JOB_FIELDS, TEST_WINDOWS_HOSTED_NAME,
-    TEST_WINDOWS_HOSTED_SCRIPTS, TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES, TEST_WINDOWS_PLATFORM,
-    TEST_WINDOWS_STEP_ENV, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS, TOOLCHAIN_TARGETS, TestJob,
-    WINDOWS_BUILD_WITNESS, WINDOWS_SHARD_FILTERS, WINDOWS_SHARD_FLOORS, WINDOWS_SHARD_WITNESS,
-    WORKFLOW_ENV, WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
+    CAPABILITY_STEP_TIMEOUT_MINUTES, CAPABILITY_WINDOWS_OBSERVATION, CATEGORY_CHECK,
+    CATEGORY_CHECK_MACOS, CATEGORY_CHECK_WINDOWS, CI_TARGETS, CI_WORKFLOW, CLIPPY_GATE, CiTarget,
+    DEFAULTS_FIELDS, DEFAULTS_RUN_FIELDS, ENCODED_RUSTFLAGS_KEY, GATE_JOB_FIELDS, GATE_SCRIPTS,
+    GOLDEN_IMAGE_TOOLCHAIN, HOST_ACCEPTANCE_CAPTURE, HOST_ACCEPTANCE_WINDOWS_CAPTURE, KNOWN_SHELLS,
+    MSRV_COMMAND, MSRV_ENTRY_KEYS, MSRV_JOB, MSRV_JOB_FIELDS, MSRV_MATRIX_FIELDS, MSRV_RUNS_ON,
+    MSRV_TOOLCHAIN_TARGETS, OPTIONAL_DEFAULTS_FIELD, PINNED_ACTIONS, REQUIRED_CONTEXT,
+    RETIRED_TEST_JOB, RUSTFLAGS_KEY, RUSTFLAGS_VALUE, STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND,
+    TEST_JOB_FIELDS, TEST_JOB_NAME, TEST_JOBS, TEST_SCRIPTS, TEST_SHARD_COMMAND, TEST_STEP_FIELDS,
+    TEST_TIMEOUT_MINUTES, TEST_WINDOWS_HOSTED_JOB, TEST_WINDOWS_HOSTED_JOB_FIELDS,
+    TEST_WINDOWS_HOSTED_NAME, TEST_WINDOWS_HOSTED_SCRIPTS, TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES,
+    TEST_WINDOWS_PLATFORM, TEST_WINDOWS_STEP_ENV, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS,
+    TOOLCHAIN_TARGETS, TestJob, WINDOWS_BUILD_WITNESS, WINDOWS_SHARD_WITNESS, WORKFLOW_ENV,
+    WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS, category_legs,
 };
 use super::repo_root;
 
@@ -597,6 +597,16 @@ pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
                  under the {TEST_TIMEOUT_MINUTES} minutes set for a shard of it."
             ));
         }
+        out.extend(category_check_complaints(
+            job,
+            id,
+            if row.runner == "macos-latest" {
+                CATEGORY_CHECK_MACOS
+            } else {
+                CATEGORY_CHECK
+            },
+            TEST_SHARD_COMMAND,
+        ));
         out.extend(capture_complaints(
             job,
             id,
@@ -723,18 +733,12 @@ struct TestLeg {
 }
 
 fn test_legs(row: &TestJob) -> Vec<TestLeg> {
-    let selections = shard_selections(row.filters);
-    let shards = selections.len();
-    selections
+    let platform = row.runner.strip_suffix("-latest").expect("a hosted runner");
+    category_legs(platform)
         .into_iter()
-        .enumerate()
-        .map(|(index, tests)| TestLeg {
-            leg: if shards == 1 {
-                row.runner.to_owned()
-            } else {
-                format!("{}, {} of {shards}", row.runner, index + 1)
-            },
-            tests,
+        .map(|leg| TestLeg {
+            leg: format!("{}, {}", row.runner, leg.name),
+            tests: leg.tests,
         })
         .collect()
 }
@@ -792,11 +796,10 @@ fn test_leg_matrix_complaints(job: &Yaml, row: &TestJob) -> Vec<String> {
     if found.as_ref() != Some(&expected) {
         out.push(format!(
             "[test-job-matrix] `{id}`'s `matrix.include:` reads as {found:#?}, not, in order, \
-             exactly {expected:#?}. That is one mapping for each leg its row of `TEST_JOBS` \
-             derives, with exactly the keys `leg` and `tests`: the runner alone where its suite \
-             runs whole, otherwise the runner, a comma and the shard's place; and the libtest \
-             arguments `shard_selections` derives from the row's filters, the empty string for \
-             a suite that runs whole. An entry that reads as `None` is not such a mapping. A \
+             exactly {expected:#?}. Each mapping has precisely the keys `leg` and `tests`: \
+             its runner and category/subcategory name, and the libtest substring selection \
+             `category_legs` derives from `TEST_CATEGORIES`. No leg is an executing catch-all. \
+             An entry that reads as `None` is not such a mapping. A \
              dropped leg leaves its tests unrun on `{}` while the others are green -- the whole \
              suite, or one shard of it -- a narrowed one does the same for the tests it lost, a \
              widened one runs another shard's tests a second time, and a leg labelled for \
@@ -957,6 +960,12 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
              nothing would be."
         ));
     }
+    out.extend(category_check_complaints(
+        job,
+        TEST_WINDOWS_HOSTED_JOB,
+        CATEGORY_CHECK_WINDOWS,
+        WINDOWS_SHARD_WITNESS,
+    ));
     out.extend(capture_complaints(
         job,
         TEST_WINDOWS_HOSTED_JOB,
@@ -1048,22 +1057,13 @@ struct ShardLeg {
     floor: i64,
 }
 
-pub(super) fn windows_shard_labels() -> Vec<String> {
-    let shards = WINDOWS_SHARD_FILTERS.len() + 1;
-    (1..=shards)
-        .map(|shard| format!("{shard} of {shards}"))
-        .collect()
-}
-
 fn windows_shard_legs() -> Vec<ShardLeg> {
-    windows_shard_labels()
+    category_legs("windows")
         .into_iter()
-        .zip(shard_selections(&WINDOWS_SHARD_FILTERS))
-        .zip(WINDOWS_SHARD_FLOORS)
-        .map(|((shard, tests), floor)| ShardLeg {
-            shard,
-            tests,
-            floor: i64::from(floor),
+        .map(|leg| ShardLeg {
+            shard: leg.name,
+            tests: leg.tests,
+            floor: i64::from(leg.floor),
         })
         .collect()
 }
@@ -1122,9 +1122,9 @@ fn windows_shard_matrix_complaints(job: &Yaml) -> Vec<String> {
         out.push(format!(
             "[test-windows-hosted-matrix] `{TEST_WINDOWS_HOSTED_JOB}`'s `matrix.include:` reads \
              as {found:#?}, not, in order, exactly {expected:#?}. That is one mapping for each \
-             shard, with exactly the keys `shard`, `tests` and `floor`: the shard's place as a \
-             string, the libtest arguments `shard_selections` derives for it from \
-             `WINDOWS_SHARD_FILTERS`, and its floor in `WINDOWS_SHARD_FLOORS` as an integer; an \
+             shard, with exactly the keys `shard`, `tests` and `floor`: the category/subcategory name, \
+             the libtest arguments and its positive passing-test floor, all derived by \
+             `category_legs` from `TEST_CATEGORIES`; an \
              entry that reads as `None` is not such a mapping. A dropped or narrowed shard runs \
              its tests nowhere while the other legs are green, a widened one runs another \
              shard's tests a second time, and a floor below the table's is one a shard that \
@@ -1943,6 +1943,30 @@ pub(super) struct WorkflowEscape {
 
 pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
+        name: "MUT-TEST-LINUX-CATEGORY-CHECK-REMOVED",
+        escape: "The suite starts without checking the native category inventory.",
+        job: Some("test-linux"),
+        anchor: "        run: bash .github/scripts/test-categories.sh\n",
+        replacement: "        run: echo categories skipped\n",
+        refused_as: "test-categories",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-CATEGORY-CHECK-REMOVED",
+        escape: "The suite starts without checking the native category inventory.",
+        job: Some("test-windows-hosted"),
+        anchor: "        run: python .github/scripts/test-categories.py check\n",
+        replacement: "        run: echo categories skipped\n",
+        refused_as: "test-categories",
+    },
+    WorkflowEscape {
+        name: "MUT-MACOS-CATEGORY-CHECK-WRONG-LEG",
+        escape: "The macOS category check condition names no generated leg.",
+        job: Some("test-macos"),
+        anchor: "== 'macos-latest, unit ('* ]]; then",
+        replacement: "== 'macos-latest, unclassified ('* ]]; then",
+        refused_as: "test-categories",
+    },
+    WorkflowEscape {
         name: "MUT-GATE-ECHOED",
         escape: "the job echoes the gate command, succeeds, and the aggregate settles green \
                  while Clippy never examines a denied call in that platform's code. The \
@@ -2029,7 +2053,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-MATRIX-EXCLUDED",
         escape: "an `exclude:` naming the first macOS leg, beside the `include:` list in \
-                 `test-macos` that still names all twelve. Over an axis, `exclude:` removes \
+                 `test-macos` that still names all nine. Over an axis, `exclude:` removes \
                  combinations the axis still lists, and every check that reads the list passes \
                  while the fixtures never run on that platform -- the matrix half of \
                  `PR5-MACOS-CLIPPY-NEVER-RUN`, and what this row measured while the legs were \
@@ -2202,21 +2226,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-CI-TEST-MATRIX-NARROWED",
-        escape: "the hosted fixtures run on one platform and the other goes unexercised, \
-                 while every check that names the command still passes. The legs removed from \
-                 `test-linux`'s `include:` list are its five, their ten lines, which are that \
-                 platform's whole suite: the twelve macOS legs of `test-macos` stay, each green.",
+        escape: "Deleting a named category leg leaves its tests unrun while the remaining legs can pass.",
         job: Some("test-linux"),
-        anchor: "          - leg: \"ubuntu-latest, 1 of 5\"\n\
-                 \x20           tests: \"effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner engine::topology::coordinator::tests::interleaving:: engine::topology::recover:: workspace_manager::tests::s workspace::\"\n\
-                 \x20         - leg: \"ubuntu-latest, 2 of 5\"\n\
-                 \x20           tests: \"engine::topology::coordinator::tests::a_g engine::topology::coordinator::tests::a_r workspace_manager::tests::t runner::contract:: topology::census:: --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::recover:: --skip workspace_manager::tests::s --skip workspace::\"\n\
-                 \x20         - leg: \"ubuntu-latest, 3 of 5\"\n\
-                 \x20           tests: \"engine::topology::attempt:: workspace_manager::tests::r runner::container:: engine::tests:: --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::recover:: --skip workspace_manager::tests::s --skip workspace:: --skip engine::topology::coordinator::tests::a_g --skip engine::topology::coordinator::tests::a_r --skip workspace_manager::tests::t --skip runner::contract:: --skip topology::census::\"\n\
-                 \x20         - leg: \"ubuntu-latest, 4 of 5\"\n\
-                 \x20           tests: \"engine::topology::coordinator::tests::a_p engine::topology::coordinator::tests::a_s workspace_manager::tests::a workspace_manager::tests::e workspace_manager::tests::n --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::recover:: --skip workspace_manager::tests::s --skip workspace:: --skip engine::topology::coordinator::tests::a_g --skip engine::topology::coordinator::tests::a_r --skip workspace_manager::tests::t --skip runner::contract:: --skip topology::census:: --skip engine::topology::attempt:: --skip workspace_manager::tests::r --skip runner::container:: --skip engine::tests::\"\n\
-                 \x20         - leg: \"ubuntu-latest, 5 of 5\"\n\
-                 \x20           tests: \"--skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::recover:: --skip workspace_manager::tests::s --skip workspace:: --skip engine::topology::coordinator::tests::a_g --skip engine::topology::coordinator::tests::a_r --skip workspace_manager::tests::t --skip runner::contract:: --skip topology::census:: --skip engine::topology::attempt:: --skip workspace_manager::tests::r --skip runner::container:: --skip engine::tests:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_s --skip workspace_manager::tests::a --skip workspace_manager::tests::e --skip workspace_manager::tests::n\"\n",
+        anchor: "          - leg: \"ubuntu-latest, coordinator (core, interleaving, pipelines, registry_waits, runners, scheduling, shutdown, snapshot_registration, verification_charges)\"\n            tests: \"engine::topology::coordinator:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n",
         replacement: "",
         refused_as: "test-job-matrix",
     },
@@ -2226,7 +2238,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  labelled `windows-latest` that runs the suite whole. The job's runner is \
                  `ubuntu-latest`, so the whole suite runs once more on Linux, on the critical \
                  path, under the check name `test (windows-latest)`, which reads as a Windows \
-                 result beside the twenty-two legs of the job that runs the Windows suite, with \
+                 result beside the twenty legs of the job that runs the Windows suite, with \
                  every other check passing.",
         job: Some("test-linux"),
         anchor: "        include:\n",
@@ -3292,7 +3304,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the shards' suite step keeps the suite command and loses the count: the line \
                  that sums it, the line that holds it to the shard's floor and the line that \
                  prints it. A Cargo target runner in the runner's environment or Cargo home \
-                 then hands every harness to a wrapper that exits zero, and each of the twenty-two \
+                 then hands every harness to a wrapper that exits zero, and each of the twenty \
                  legs is green having executed nothing, on every event: no other job runs the \
                  Windows suite",
         job: Some("test-windows-hosted"),
@@ -3340,7 +3352,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-ON-THE-GUEST",
-        escape: "the twenty-two legs moved onto the labels of a self-hosted guest deleted on \
+        escape: "the twenty legs moved onto the labels of a self-hosted guest deleted on \
                  2026-11-20, which no runner carries: every leg of every run is queued for a \
                  machine that does not exist, and the Windows suite starts on no event",
         job: Some("test-windows-hosted"),
@@ -3425,7 +3437,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-CHECKOUT-REF",
-        escape: "the shards check out `master`: on every event the twenty-two legs test a tree the \
+        escape: "the shards check out `master`: on every event the twenty legs test a tree the \
                  candidate never touched, and the Windows suite is green over a candidate it \
                  never ran",
         job: Some("test-windows-hosted"),
@@ -3437,132 +3449,82 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-NARROWED",
-        escape: "the last shard, the one with no filter, gains a `--skip effects::`. Every test \
-                 of that shard whose name contains `effects::` then runs in no leg, this \
-                 oracle's among them. The leg's floor is a little under half of its count, so \
-                 where the skip takes less than the rest all twenty-two legs are green over a \
-                 suite that lost those tests",
+        escape: "An extra skip removes the workspace tests from their named leg.",
         job: Some("test-windows-hosted"),
-        anchor: "          - shard: \"22 of 22\"\n            tests: \"",
-        replacement: "          - shard: \"22 of 22\"\n            tests: \"--skip effects:: ",
+        anchor: "          - shard: \"workspace 2 of 2 (guarded_reads, manager, reclaim, refs, registry, snapshots)\"\n            tests: \"workspace_manager:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::tests::containment:: --skip workspace_manager::tests::incarnations:: --skip workspace_manager::tests::residue::\"\n            floor: 94\n",
+        replacement: "          - shard: \"workspace 2 of 2 (guarded_reads, manager, reclaim, refs, registry, snapshots)\"\n            tests: \"--skip workspace_manager:: workspace_manager:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::tests::containment:: --skip workspace_manager::tests::incarnations:: --skip workspace_manager::tests::residue::\"\n            floor: 94\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-LAST-SHARD-SKIPS-MORE",
-        escape: "the same skip put last in the last shard's arguments, after the 109 the table \
-                 derives. Every test of that shard whose name contains `effects::` runs in no \
-                 leg, as under `MUT-TEST-WINDOWS-HOSTED-SHARD-NARROWED`; here the string opens \
-                 as the table's does and every word of the table's is in its place, so a \
-                 reading that stopped at the table's last word would pass it",
+        escape: "A trailing skip removes tests even when every expected selector is still present.",
         job: Some("test-windows-hosted"),
-        anchor: "--skip engine::tests::t\"\n            floor: 861\n",
-        replacement: "--skip engine::tests::t --skip effects::\"\n            floor: 861\n",
+        anchor: "          - shard: \"workspace 2 of 2 (guarded_reads, manager, reclaim, refs, registry, snapshots)\"\n            tests: \"workspace_manager:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::tests::containment:: --skip workspace_manager::tests::incarnations:: --skip workspace_manager::tests::residue::\"\n            floor: 94\n",
+        replacement: "          - shard: \"workspace 2 of 2 (guarded_reads, manager, reclaim, refs, registry, snapshots)\"\n            tests: \"workspace_manager:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::tests::containment:: --skip workspace_manager::tests::incarnations:: --skip workspace_manager::tests::residue:: --skip workspace_manager::\"\n            floor: 94\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-DROPPED",
-        escape: "the second shard's entry gone from the `include:` list, its three lines. Its \
-                 tests, `engine::topology::integrate::`'s among them, are named by none of the \
-                 first shard's filters: every later leg skips them and no leg left asks for \
-                 them, so they run on no hosted leg. The twenty-one legs left each clear their \
-                 own floor, the job's result is `success`, and the aggregate reads a Windows \
-                 suite that passed",
+        escape: "Deleting a named category leg leaves its tests unrun while the remaining legs can pass.",
         job: Some("test-windows-hosted"),
-        anchor: "          - shard: \"2 of 22\"\n\
-                 \x20           tests: \"engine::topology::coordinator::tests::d engine::topology::recover::tests::f engine::topology::integrate:: workspace_manager::tests::e workspace_manager::tests::n engine::tests::a_t --skip engine::topology::coordinator::tests::a_review_v --skip engine::topology::coordinator::tests::a_reg --skip engine::topology::recover::tests::a_t --skip engine::topology::dispatch:: --skip engine::tests::a_n --skip engine::tests::r\"\n\
-                 \x20           floor: 20\n",
+        anchor: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::snapshot_registration::a_passing_ engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n",
         replacement: "",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-FILTER-DROPPED-FROM-ITS-LEG",
-        escape: "the third shard's first filter, \
-                 `effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner`, \
-                 deleted from that shard's own `tests:` line and from nowhere else. Every later \
-                 shard still skips it and the first two never named it, so the one test it \
-                 names runs on no hosted leg, while the other twenty-one legs run what the table \
-                 gives them. The leg's floor counts tests, not which ones, so it refuses the \
-                 loss only where the leg's count was within one of it",
+        escape: "Deleting a positive filter leaves the named subcategory outside its leg.",
         job: Some("test-windows-hosted"),
-        anchor: "            tests: \"effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner workspace_manager::tests::c ",
-        replacement: "            tests: \"workspace_manager::tests::c ",
+        anchor: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::snapshot_registration::a_passing_ engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n",
+        replacement: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::snapshot_registration::a_passing_ engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SKIP-DROPPED",
-        escape: "the last shard's first skip, \
-                 `--skip engine::topology::coordinator::tests::a_review_v`, deleted. The first \
-                 shard runs the coordinator's tests whose names open `a_review_v`, and the last \
-                 no longer excludes them, so they run twice, in the first leg and again in the \
-                 last. A count only grows by it, so no floor refuses it, and the last leg spends \
-                 those tests' time a second time",
+        escape: "Deleting the kill-path exclusion runs its matrix tests again in the coordinator leg.",
         job: Some("test-windows-hosted"),
-        anchor: "          - shard: \"22 of 22\"\n            tests: \"--skip engine::topology::coordinator::tests::a_review_v --skip ",
-        replacement: "          - shard: \"22 of 22\"\n            tests: \"--skip ",
+        anchor: "          - shard: \"coordinator 2 of 6 (core, interleaving, snapshot_registration)\"\n            tests: \"engine::topology::coordinator:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration::a_passing_ --skip engine::topology::coordinator::tests::snapshot_registration::an_ --skip engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip engine::topology::coordinator::tests::snapshot_registration::a_gate_ --skip engine::topology::coordinator::tests::snapshot_registration::a_verification_ --skip engine::topology::coordinator::tests::snapshot_registration::a_genuinely_ --skip engine::topology::coordinator::tests::snapshot_registration::a_container_ --skip engine::topology::coordinator::tests::snapshot_registration::a_classification_ --skip engine::topology::coordinator::tests::snapshot_registration::a_refusal_ --skip engine::topology::coordinator::tests::snapshot_registration::a_halted_ --skip engine::topology::coordinator::tests::snapshot_registration::a_cancelled_ --skip engine::topology::coordinator::tests::snapshot_registration::a_stale_ --skip engine::topology::coordinator::tests::snapshot_registration::a_staging_ --skip engine::topology::coordinator::tests::snapshot_registration::a_kept_ --skip engine::topology::coordinator::tests::snapshot_registration::a_complete_ --skip engine::topology::coordinator::tests::snapshot_registration::a_review_ --skip engine::topology::coordinator::tests::verification_charges::\"\n            floor: 15\n",
+        replacement: "          - shard: \"coordinator 2 of 6 (core, interleaving, snapshot_registration)\"\n            tests: \"engine::topology::coordinator:: --skip _child_kills_ --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration::a_passing_ --skip engine::topology::coordinator::tests::snapshot_registration::an_ --skip engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip engine::topology::coordinator::tests::snapshot_registration::a_gate_ --skip engine::topology::coordinator::tests::snapshot_registration::a_verification_ --skip engine::topology::coordinator::tests::snapshot_registration::a_genuinely_ --skip engine::topology::coordinator::tests::snapshot_registration::a_container_ --skip engine::topology::coordinator::tests::snapshot_registration::a_classification_ --skip engine::topology::coordinator::tests::snapshot_registration::a_refusal_ --skip engine::topology::coordinator::tests::snapshot_registration::a_halted_ --skip engine::topology::coordinator::tests::snapshot_registration::a_cancelled_ --skip engine::topology::coordinator::tests::snapshot_registration::a_stale_ --skip engine::topology::coordinator::tests::snapshot_registration::a_staging_ --skip engine::topology::coordinator::tests::snapshot_registration::a_kept_ --skip engine::topology::coordinator::tests::snapshot_registration::a_complete_ --skip engine::topology::coordinator::tests::snapshot_registration::a_review_ --skip engine::topology::coordinator::tests::verification_charges::\"\n            floor: 15\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-FILTER-MOVED-BETWEEN-LEGS",
-        escape: "the third shard's last filter, `agent::`, moved to the front of the fourth \
-                 shard's filters: one word moved and none lost, so every filter of the table is \
-                 still in the matrix. The fourth shard still skips it, as every shard after the \
-                 third does, and libtest runs no test a `--skip` names whatever filter selects \
-                 it, so the tests whose names contain `agent::` run on no hosted leg. The two \
-                 legs' floors count tests, not which ones",
+        escape: "Moving a selector between named legs violates their membership even if no filter is lost.",
         job: Some("test-windows-hosted"),
-        anchor: " agent:: --skip engine::topology::coordinator::tests::a_review_v --skip engine::topology::coordinator::tests::a_reg --skip engine::topology::recover::tests::a_t --skip engine::topology::dispatch:: --skip engine::tests::a_n --skip engine::tests::r --skip engine::topology::coordinator::tests::d --skip engine::topology::recover::tests::f --skip engine::topology::integrate:: --skip workspace_manager::tests::e --skip workspace_manager::tests::n --skip engine::tests::a_t\"\n            floor: 163\n          - shard: \"4 of 22\"\n            tests: \"",
-        replacement: " --skip engine::topology::coordinator::tests::a_review_v --skip engine::topology::coordinator::tests::a_reg --skip engine::topology::recover::tests::a_t --skip engine::topology::dispatch:: --skip engine::tests::a_n --skip engine::tests::r --skip engine::topology::coordinator::tests::d --skip engine::topology::recover::tests::f --skip engine::topology::integrate:: --skip workspace_manager::tests::e --skip workspace_manager::tests::n --skip engine::tests::a_t\"\n            floor: 163\n          - shard: \"4 of 22\"\n            tests: \"agent:: ",
+        anchor: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::snapshot_registration::a_passing_ engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n          - shard: \"coordinator 2 of 6 (core, interleaving, snapshot_registration)\"\n            tests: \"engine::topology::coordinator:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration::a_passing_ --skip engine::topology::coordinator::tests::snapshot_registration::an_ --skip engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip engine::topology::coordinator::tests::snapshot_registration::a_gate_ --skip engine::topology::coordinator::tests::snapshot_registration::a_verification_ --skip engine::topology::coordinator::tests::snapshot_registration::a_genuinely_ --skip engine::topology::coordinator::tests::snapshot_registration::a_container_ --skip engine::topology::coordinator::tests::snapshot_registration::a_classification_ --skip engine::topology::coordinator::tests::snapshot_registration::a_refusal_ --skip engine::topology::coordinator::tests::snapshot_registration::a_halted_ --skip engine::topology::coordinator::tests::snapshot_registration::a_cancelled_ --skip engine::topology::coordinator::tests::snapshot_registration::a_stale_ --skip engine::topology::coordinator::tests::snapshot_registration::a_staging_ --skip engine::topology::coordinator::tests::snapshot_registration::a_kept_ --skip engine::topology::coordinator::tests::snapshot_registration::a_complete_ --skip engine::topology::coordinator::tests::snapshot_registration::a_review_ --skip engine::topology::coordinator::tests::verification_charges::\"\n            floor: 15\n",
+        replacement: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::snapshot_registration::a_passing_ engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n          - shard: \"coordinator 2 of 6 (core, interleaving, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration::a_passing_ --skip engine::topology::coordinator::tests::snapshot_registration::an_ --skip engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip engine::topology::coordinator::tests::snapshot_registration::a_gate_ --skip engine::topology::coordinator::tests::snapshot_registration::a_verification_ --skip engine::topology::coordinator::tests::snapshot_registration::a_genuinely_ --skip engine::topology::coordinator::tests::snapshot_registration::a_container_ --skip engine::topology::coordinator::tests::snapshot_registration::a_classification_ --skip engine::topology::coordinator::tests::snapshot_registration::a_refusal_ --skip engine::topology::coordinator::tests::snapshot_registration::a_halted_ --skip engine::topology::coordinator::tests::snapshot_registration::a_cancelled_ --skip engine::topology::coordinator::tests::snapshot_registration::a_stale_ --skip engine::topology::coordinator::tests::snapshot_registration::a_staging_ --skip engine::topology::coordinator::tests::snapshot_registration::a_kept_ --skip engine::topology::coordinator::tests::snapshot_registration::a_complete_ --skip engine::topology::coordinator::tests::snapshot_registration::a_review_ --skip engine::topology::coordinator::tests::verification_charges::\"\n            floor: 15\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-FILTER-WIDENED",
-        escape: "the first shard's `engine::topology::coordinator::tests::a_review_v`, a filter \
-                 that opens a test's name, cut by its last character to \
-                 `engine::topology::coordinator::tests::a_review_` on that shard's line alone. \
-                 The first leg then runs every coordinator test whose name opens `a_review_`, \
-                 and every later leg skips only the `a_review_v` it still names, so the ones a \
-                 later leg runs -- the sixth's `a_review_i` -- run there too: twice. A count \
-                 only grows by it, so no floor refuses it",
+        escape: "Widening a packed topic prefix executes tests assigned to other category legs.",
         job: Some("test-windows-hosted"),
-        anchor: "            tests: \"engine::topology::coordinator::tests::a_review_v engine::",
-        replacement: "            tests: \"engine::topology::coordinator::tests::a_review_ engine::",
+        anchor: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::snapshot_registration::a_passing_ engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n",
+        replacement: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::snapshot_registration:: engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-FILTERS-COMMA-JOINED",
-        escape: "the first shard's first two filters joined by a comma, \
-                 `engine::topology::coordinator::tests::a_review_v,engine::topology::coordinator::tests::a_reg`. \
-                 libtest takes no list: the word is one filter, a substring no test's name \
-                 contains, so the first leg runs neither the coordinator's tests whose names \
-                 open `a_review_v` nor those that open `a_reg`, and every later leg still skips \
-                 both: they run on no hosted leg. The first leg's floor counts tests, not which \
-                 ones",
+        escape: "Libtest treats comma-joined filters as one substring and selects neither group.",
         job: Some("test-windows-hosted"),
-        anchor: "            tests: \"engine::topology::coordinator::tests::a_review_v engine::topology::coordinator::tests::a_reg ",
-        replacement: "            tests: \"engine::topology::coordinator::tests::a_review_v,engine::topology::coordinator::tests::a_reg ",
+        anchor: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::snapshot_registration::a_passing_ engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n",
+        replacement: "          - shard: \"coordinator 1 of 6 (registry_waits, snapshot_registration)\"\n            tests: \"engine::topology::coordinator::tests::registry_waits::,engine::topology::coordinator::tests::snapshot_registration::a_passing_ engine::topology::coordinator::tests::snapshot_registration::an_ engine::topology::coordinator::tests::snapshot_registration::a_clean_ --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n            floor: 24\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED",
-        escape: "the last shard's floor lowered to 1 in the table, the script untouched. The \
-                 step still tests the count against `matrix.floor`, so its pin holds, and a leg \
-                 that executed one test clears the floor the matrix now hands it",
+        escape: "A lowered passing-test floor can accept a Windows leg that executed almost none of its tests.",
         job: Some("test-windows-hosted"),
-        anchor: "            floor: 861\n",
-        replacement: "            floor: 1\n",
+        anchor: "          - shard: \"workspace 2 of 2 (guarded_reads, manager, reclaim, refs, registry, snapshots)\"\n            tests: \"workspace_manager:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::tests::containment:: --skip workspace_manager::tests::incarnations:: --skip workspace_manager::tests::residue::\"\n            floor: 94\n",
+        replacement: "          - shard: \"workspace 2 of 2 (guarded_reads, manager, reclaim, refs, registry, snapshots)\"\n            tests: \"workspace_manager:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::tests::containment:: --skip workspace_manager::tests::incarnations:: --skip workspace_manager::tests::residue::\"\n            floor: 1\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-ZEROED",
-        escape: "the last shard's floor set to zero in the table, the script untouched. It is \
-                 the largest of the twenty-two, 861 of 1700, the floor the whole suite was held \
-                 to as one job, and with it gone the leg is green having executed nothing: the \
-                 count the step sums is never below zero. \
-                 `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED`'s floor of 1 still asks for one \
-                 test; this asks for none, which is the arrival the count exists to refuse",
+        escape: "A lowered passing-test floor can accept a Windows leg that executed almost none of its tests.",
         job: Some("test-windows-hosted"),
-        anchor: "            floor: 861\n",
-        replacement: "            floor: 0\n",
+        anchor: "          - shard: \"workspace 2 of 2 (guarded_reads, manager, reclaim, refs, registry, snapshots)\"\n            tests: \"workspace_manager:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::tests::containment:: --skip workspace_manager::tests::incarnations:: --skip workspace_manager::tests::residue::\"\n            floor: 94\n",
+        replacement: "          - shard: \"workspace 2 of 2 (guarded_reads, manager, reclaim, refs, registry, snapshots)\"\n            tests: \"workspace_manager:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::tests::containment:: --skip workspace_manager::tests::incarnations:: --skip workspace_manager::tests::residue::\"\n            floor: 0\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
@@ -3577,21 +3539,16 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-MATRIX-AXIS-ADDED",
-        escape: "an axis beside the `include:` list, which still names all twenty-two shards. \
-                 By GitHub's documented rule for `include:`, each entry is added to the axis's \
-                 one combination instead of making a leg of its own, and a later entry \
-                 overwrites the `shard`, `tests` and `floor` an earlier one added: one leg runs, \
-                 the last shard's, it clears its own floor, the job's result is `success`, and \
-                 twenty-one shards' tests ran nowhere",
+        escape: "An axis beside include changes GitHub's matrix expansion and collapses the named legs.",
         job: Some("test-windows-hosted"),
-        anchor: "      matrix:\n        include:\n",
-        replacement: "      matrix:\n        os: [windows-latest]\n        include:\n",
+        anchor: "      matrix:\n",
+        replacement: "      matrix:\n        os: [windows-latest]\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-EXCLUDED",
         escape: "an `exclude:` naming the second shard, beside the `include:` list that still \
-                 names all twenty-two. Were it to remove that leg, the shard's tests would run on no \
+                 names all twenty. Were it to remove that leg, the shard's tests would run on no \
                  hosted leg while every reading of the list passed. GitHub documents that \
                  `include:` entries are processed after `exclude:`, so by that rule it removes \
                  no leg of a list with no axis; that is the rule as documented, and no workflow \
@@ -3608,9 +3565,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED",
         escape: "the line that runs the harnesses loses the leg's selection, so each harness runs \
-                 whole again, the table and the floors untouched: each of the twenty-two legs \
+                 whole again, the table and the floors untouched: each of the twenty legs \
                  runs the whole suite. Measured on 2026-11-15 at 59 to 76 minutes a job, that is \
-                 twenty-two legs cancelled at their limit; on a faster runner it is twenty-two \
+                 twenty legs cancelled at their limit; on a faster runner it is twenty \
                  green legs and no shard",
         job: Some("test-windows-hosted"),
         anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
@@ -3627,7 +3584,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  27 + 99 + 76 + 235 + 195 + 120 = 802 passing tests, and the rest of \
                  `engine::topology::`, which none of them named, was 484 tests by the counts \
                  the floors of 2026-11-19 were set from. 802 + 484 = 1,286 is above every one \
-                 of the twenty-two floors, the last leg's 861 among them: twenty-two green legs \
+                 of the twenty floors, the last leg's 861 among them: twenty green legs \
                  over a suite that lost every test whose name does not contain `engine::`",
         job: Some("test-windows-hosted"),
         anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
@@ -3636,92 +3593,59 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-MACOS-SHARD-NARROWED",
-        escape: "the last macOS shard, the one with no filter, gains a `--skip effects::`. Every \
-                 test of that shard whose name contains `effects::` then runs on no macOS leg, \
-                 `topology::effects::registry::`'s among them. These legs hold no count to a \
-                 floor, so all twelve are green over a macOS suite that lost those tests, beside \
-                 a Linux leg that still runs them",
+        escape: "An extra skip removes the workspace tests from their named leg.",
         job: Some("test-macos"),
-        anchor: "          - leg: \"macos-latest, 12 of 12\"\n\
-                 \x20           tests: \"",
-        replacement: "          - leg: \"macos-latest, 12 of 12\"\n\
-                      \x20           tests: \"--skip effects:: ",
+        anchor: "          - leg: \"macos-latest, workspace (checkout, containment, guarded_reads, incarnations, manager, reclaim, refs, registry, residue, snapshots)\"\n            tests: \"workspace_manager:: workspace::tests:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report::\"\n",
+        replacement: "          - leg: \"macos-latest, workspace (checkout, containment, guarded_reads, incarnations, manager, reclaim, refs, registry, residue, snapshots)\"\n            tests: \"--skip workspace_manager:: workspace_manager:: workspace::tests:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report::\"\n",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-MACOS-LAST-SHARD-SKIPS-MORE",
-        escape: "the same skip put last in the last macOS leg's arguments, after the \
-                 sixty-four the table derives. Every test of that leg whose name contains \
-                 `effects::` runs on no macOS leg, as under `MUT-TEST-MACOS-SHARD-NARROWED`, and \
-                 no floor is there to say so; here the string opens as the table's does, so a \
-                 reading that stopped at the table's last word would pass it",
+        escape: "A trailing skip removes tests even when every expected selector is still present.",
         job: Some("test-macos"),
-        anchor: "--skip runner::contract::\"\n    steps:\n",
-        replacement: "--skip runner::contract:: --skip effects::\"\n    steps:\n",
+        anchor: "          - leg: \"macos-latest, workspace (checkout, containment, guarded_reads, incarnations, manager, reclaim, refs, registry, residue, snapshots)\"\n            tests: \"workspace_manager:: workspace::tests:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report::\"\n",
+        replacement: "          - leg: \"macos-latest, workspace (checkout, containment, guarded_reads, incarnations, manager, reclaim, refs, registry, residue, snapshots)\"\n            tests: \"workspace_manager:: workspace::tests:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report:: --skip workspace_manager::\"\n",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-MACOS-FILTER-DROPPED-FROM-ITS-LEG",
-        escape: "the second macOS leg's first filter, \
-                 `engine::topology::coordinator::tests::interleaving::e`, deleted from that \
-                 leg's own `tests:` line and from nowhere else. Every later macOS leg still \
-                 skips it and the first never named it, so the coordinator's interleaving tests \
-                 whose names open `e` run on no macOS leg. These legs hold no count to a floor, \
-                 so all twelve are green over a macOS suite that lost those tests, beside the \
-                 Linux and Windows legs that still run them",
+        escape: "Deleting a positive filter leaves the named subcategory outside its leg.",
         job: Some("test-macos"),
-        anchor: "            tests: \"engine::topology::coordinator::tests::interleaving::e engine::topology::coordinator::tests::a_r ",
-        replacement: "            tests: \"engine::topology::coordinator::tests::a_r ",
+        anchor: "          - leg: \"macos-latest, coordinator 1 of 2 (core, pipelines, snapshot_registration, verification_charges)\"\n            tests: \"engine::topology::coordinator:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown::\"\n",
+        replacement: "          - leg: \"macos-latest, coordinator 1 of 2 (core, pipelines, snapshot_registration, verification_charges)\"\n            tests: \"--skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown::\"\n",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-MACOS-SKIP-DROPPED",
-        escape: "the last macOS leg's first skip, \
-                 `--skip engine::topology::coordinator::tests::interleaving::r`, deleted. The \
-                 first macOS leg runs the coordinator's interleaving tests whose names open `r`, \
-                 and the last no longer excludes them, so they run twice on macOS, in the first \
-                 leg and again in the last. These legs hold no count to a floor, and a repeat \
-                 would only raise one: the last leg spends those tests' time a second time and \
-                 every leg is green",
+        escape: "Deleting the kill-path exclusion runs its matrix tests again in the coordinator leg.",
         job: Some("test-macos"),
-        anchor: "          - leg: \"macos-latest, 12 of 12\"\n            tests: \"--skip engine::topology::coordinator::tests::interleaving::r --skip ",
-        replacement: "          - leg: \"macos-latest, 12 of 12\"\n            tests: \"--skip ",
+        anchor: "          - leg: \"macos-latest, coordinator 2 of 2 (interleaving, registry_waits, runners, scheduling, shutdown)\"\n            tests: \"engine::topology::coordinator::tests::interleaving:: engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::runners:: engine::topology::coordinator::tests::scheduling:: engine::topology::coordinator::tests::shutdown:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n",
+        replacement: "          - leg: \"macos-latest, coordinator 2 of 2 (interleaving, registry_waits, runners, scheduling, shutdown)\"\n            tests: \"engine::topology::coordinator::tests::interleaving:: engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::runners:: engine::topology::coordinator::tests::scheduling:: engine::topology::coordinator::tests::shutdown:: --skip _child_kills_ --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-MACOS-FILTER-MOVED-BETWEEN-LEGS",
-        escape: "the third macOS leg's last filter, `engine::tests::a_k`, moved to the front of \
-                 the fourth leg's filters: one word moved and none lost. The fourth leg still \
-                 skips it, as every macOS leg after the third does, and libtest runs no test a \
-                 `--skip` names whatever filter selects it, so the engine's own tests whose \
-                 names open `a_k` run on no macOS leg. These legs hold no count to a floor, so \
-                 all twelve are green",
+        escape: "Moving a selector between named legs violates their membership even if no filter is lost.",
         job: Some("test-macos"),
-        anchor: " engine::tests::a_k --skip engine::topology::coordinator::tests::interleaving::r --skip engine::topology::coordinator::tests::a_pa --skip engine::topology::coordinator::tests::r --skip workspace_manager::tests::r --skip workspace_manager::tests::t --skip engine::tests::s --skip engine::topology::coordinator::tests::interleaving::e --skip engine::topology::coordinator::tests::a_r --skip engine::topology::integrate:: --skip workspace_manager::tests::s --skip engine::tests::a_s --skip engine::tests::f\"\n          - leg: \"macos-latest, 4 of 12\"\n            tests: \"",
-        replacement: " --skip engine::topology::coordinator::tests::interleaving::r --skip engine::topology::coordinator::tests::a_pa --skip engine::topology::coordinator::tests::r --skip workspace_manager::tests::r --skip workspace_manager::tests::t --skip engine::tests::s --skip engine::topology::coordinator::tests::interleaving::e --skip engine::topology::coordinator::tests::a_r --skip engine::topology::integrate:: --skip workspace_manager::tests::s --skip engine::tests::a_s --skip engine::tests::f\"\n          - leg: \"macos-latest, 4 of 12\"\n            tests: \"engine::tests::a_k ",
+        anchor: "          - leg: \"macos-latest, coordinator 1 of 2 (core, pipelines, snapshot_registration, verification_charges)\"\n            tests: \"engine::topology::coordinator:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown::\"\n          - leg: \"macos-latest, coordinator 2 of 2 (interleaving, registry_waits, runners, scheduling, shutdown)\"\n            tests: \"engine::topology::coordinator::tests::interleaving:: engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::runners:: engine::topology::coordinator::tests::scheduling:: engine::topology::coordinator::tests::shutdown:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n",
+        replacement: "          - leg: \"macos-latest, coordinator 1 of 2 (core, pipelines, snapshot_registration, verification_charges)\"\n            tests: \"--skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown::\"\n          - leg: \"macos-latest, coordinator 2 of 2 (interleaving, registry_waits, runners, scheduling, shutdown)\"\n            tests: \"engine::topology::coordinator:: engine::topology::coordinator::tests::interleaving:: engine::topology::coordinator::tests::registry_waits:: engine::topology::coordinator::tests::runners:: engine::topology::coordinator::tests::scheduling:: engine::topology::coordinator::tests::shutdown:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_\"\n",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-UBUNTU-LEG-FILTERED",
-        escape: "the last Linux leg, the one with no filter, handed filters: its `tests:`, the \
-                 nineteen skips, becomes the first Linux leg's, its five filters. The first and \
-                 the last Linux legs then both run the tests those five select, and no Linux \
-                 leg runs a test that none of the four lists selects; they hold no count to a \
-                 floor, and all five are green. The macOS shards and the Windows suite still \
-                 run the rest on their platforms; the tests that run on Linux alone, the one \
-                 that executes the aggregate's script among them, then run nowhere",
+        escape: "An extra skip removes the workspace tests from their named leg.",
         job: Some("test-linux"),
-        anchor: "          - leg: \"ubuntu-latest, 5 of 5\"\n            tests: \"--skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::recover:: --skip workspace_manager::tests::s --skip workspace:: --skip engine::topology::coordinator::tests::a_g --skip engine::topology::coordinator::tests::a_r --skip workspace_manager::tests::t --skip runner::contract:: --skip topology::census:: --skip engine::topology::attempt:: --skip workspace_manager::tests::r --skip runner::container:: --skip engine::tests:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_s --skip workspace_manager::tests::a --skip workspace_manager::tests::e --skip workspace_manager::tests::n\"\n",
-        replacement: "          - leg: \"ubuntu-latest, 5 of 5\"\n            tests: \"effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner engine::topology::coordinator::tests::interleaving:: engine::topology::recover:: workspace_manager::tests::s workspace::\"\n",
+        anchor: "          - leg: \"ubuntu-latest, workspace (checkout, containment, guarded_reads, incarnations, manager, reclaim, refs, registry, residue, snapshots)\"\n            tests: \"workspace_manager:: workspace::tests:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report::\"\n",
+        replacement: "          - leg: \"ubuntu-latest, workspace (checkout, containment, guarded_reads, incarnations, manager, reclaim, refs, registry, residue, snapshots)\"\n            tests: \"--skip workspace_manager:: workspace_manager:: workspace::tests:: --skip _child_kills_ --skip kill_at_every_cell --skip kill_after_report_before_each_cleanup_step --skip _stopped_at_any_phase_ --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::pipelines:: --skip engine::topology::coordinator::tests::registry_waits:: --skip engine::topology::coordinator::tests::runners:: --skip engine::topology::coordinator::tests::scheduling:: --skip engine::topology::coordinator::tests::shutdown:: --skip engine::topology::coordinator::tests::snapshot_registration:: --skip engine::topology::coordinator::tests::verification_charges:: --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::capacity_budget:: --skip engine::tests::kept_output:: --skip engine::tests::legacy_resume:: --skip engine::tests::questions:: --skip engine::tests::snapshot_registration:: --skip engine::tests::topology_admission:: --skip engine::tests::topology_execution:: --skip engine::tests::verification:: --skip engine::tests:: --skip engine::topology::attempt:: --skip engine::topology::run:: --skip engine::topology::integrate:: --skip engine::topology::dispatch:: --skip engine::topology::coverage:: --skip engine::topology::ledger:: --skip engine::topology::candidate:: --skip engine::topology::finalize:: --skip engine::topology::create:: --skip engine::topology::startup:: --skip engine::topology::repair:: --skip engine::topology::permits:: --skip engine::topology::emit:: --skip engine::topology::settle:: --skip engine::topology::entry:: --skip engine::topology::identity:: --skip engine::topology::preflight:: --skip engine::topology::prelock:: --skip engine::topology::profiled:: --skip engine::topology::seams:: --skip engine::topology::select:: --skip engine::report::\"\n",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-SHARD-SELECTION-DROPPED",
         escape: "`test-macos`'s cargo line loses the leg's selection and is the whole suite's \
-                 again, the table untouched: each of its twelve legs runs the whole macOS suite, \
+                 again, the table untouched: each of its nine legs runs the whole macOS suite, \
                  a leg that took 27 to 37 minutes while it was one, under the 30 minutes set \
-                 for a shard. That is twelve macOS legs cancelled at their limit on a slow day, \
-                 and twelve green legs and no shard on a fast one",
+                 for a shard. That is nine macOS legs cancelled at their limit on a slow day, \
+                 and nine green legs and no shard on a fast one",
         job: Some("test-macos"),
         anchor: "      - run: cargo test --all-targets --all-features -- ${{ matrix.tests }}\n",
         replacement: "      - run: cargo test --all-targets --all-features\n",
@@ -3743,8 +3667,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-LEGS-NAMED-BY-RUNNER",
         escape: "`test-macos` named by its runner again, `test (macos-latest)`, as the macOS \
-                 leg was while each runner had one leg. The twelve macOS shards then publish that \
-                 one name twelve times over, and a red one does not say which shard's tests \
+                 leg was while each runner had one leg. The nine macOS shards then publish that \
+                 one name nine times over, and a red one does not say which shard's tests \
                  failed",
         job: Some("test-macos"),
         anchor: "    name: test (${{ matrix.leg }})\n",
@@ -3779,7 +3703,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-MACOS-ON-LINUX",
         escape: "`test-macos`'s `runs-on: macos-latest` becomes `ubuntu-latest`. Every leg keeps \
-                 its macOS name and its macOS shard's filters, and all twelve run on Linux: the \
+                 its macOS name and its macOS shard's filters, and all nine run on Linux: the \
                  macOS shards run elsewhere, every leg is green, and no test of this job runs on \
                  a Mac",
         job: Some("test-macos"),
@@ -3795,7 +3719,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  shard reported its tests and did not end before its job's limit. By the \
                  inference the step is written against, a test process that outlives its \
                  harness holds that pipe, so a leg whose tests all passed is cancelled at its \
-                 40 minutes with no failing test to show for it, on whichever of the twenty-two legs \
+                 40 minutes with no failing test to show for it, on whichever of the twenty legs \
                  runs the test that leaves the process",
         job: Some("test-windows-hosted"),
         anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
@@ -3805,9 +3729,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SURVIVOR-ALLOWED",
         escape: "line 11 of the shards' suite step, the throw for a test process left running, \
-                 is gone, on all twenty-two legs at once. Each leg still lists the `upstroke*` \
+                 is gone, on all twenty legs at once. Each leg still lists the `upstroke*` \
                  processes left and asks Windows to stop them, then counts and clears its \
-                 floor: the leg whose tests leave a process is green beside the other twenty-one, \
+                 floor: the leg whose tests leave a process is green beside the other nineteen, \
                  the process is forgotten whether or not it stopped, and which test leaves it, \
                  the question both runs that did not end left open, is asked by nothing",
         job: Some("test-windows-hosted"),
@@ -3821,7 +3745,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  line sets it again. The build then runs in the bootstrap mode the variable \
                  exists for: Cargo and every compiler it starts accept unstable features, and a \
                  build script that asks whether the compiler does is answered yes, so the \
-                 harnesses all twenty-two legs test can be built otherwise than the ones the other \
+                 harnesses all twenty legs test can be built otherwise than the ones the other \
                  platforms' legs build and a user builds, from a tree nobody changed",
         job: Some("test-windows-hosted"),
         anchor: "          $out = Join-Path $env:RUNNER_TEMP 'suite-stdout.log'; $err = Join-Path $env:RUNNER_TEMP 'suite-stderr.log'; $built = Join-Path $env:RUNNER_TEMP 'suite-build.json'\n",
@@ -3861,7 +3785,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the harnesses started without `-Z unstable-options --report-time`, the leg's \
                  `matrix.tests` still theirs: every leg runs its shard, clears its floor and is \
                  green, and no line of any leg's log carries the time a test took on the hosted \
-                 runner. The times the step exists to record are lost on all twenty-two legs at once, \
+                 runner. The times the step exists to record are lost on all twenty legs at once, \
                  and nothing fails to say so",
         job: Some("test-windows-hosted"),
         anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
@@ -3924,7 +3848,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-WINDOWS-HOSTED-BUILD-RUNS-THE-SUITE",
         escape: "the build started without `--no-run`: Cargo runs every harness it builds, over \
                  the whole suite, with no selection and no times, and only then does the loop \
-                 run the leg's shard again. Each of the twenty-two legs runs the whole suite once and \
+                 run the leg's shard again. Each of the twenty legs runs the whole suite once and \
                  its own shard a second time, and on 2026-11-15 the whole suite alone took \
                  3,311 to 4,292 s in the harness on this runner, more than a leg's 40 minutes",
         job: Some("test-windows-hosted"),
@@ -3974,7 +3898,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-WINDOWS-HOSTED-CONDITIONED",
         escape: "a job-level `if:` that excludes the merge queue: the routing by event that \
                  this workflow dropped on 2026-11-20, put back. A pull request and a push still \
-                 run the twenty-two legs; on a queue entry the job is skipped, the aggregate reads \
+                 run the twenty legs; on a queue entry the job is skipped, the aggregate reads \
                  `skipped` and fails, and no entry lands. Not a false green: the oracle refuses \
                  it before it is pushed, where the queue would refuse it one entry at a time",
         job: Some("test-windows-hosted"),
@@ -3998,7 +3922,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-WINDOWS-HOSTED-RUN-RETARGETED",
         escape: "the shards' identity step fetches `master` and checks it out detached before \
                  the suite runs. The runner, the fields, the shells, the input-free checkout \
-                 and the suite's script all still match; all twenty-two legs test `master`, on every \
+                 and the suite's script all still match; all twenty legs test `master`, on every \
                  event, and are green over a candidate they never ran",
         job: Some("test-windows-hosted"),
         anchor: "          git config --global user.name \"upstroke CI\"\n",
@@ -4211,25 +4135,24 @@ fn mutate_job(text: &str, job: &str, anchor: &str, replacement: &str) -> String 
     )
 }
 
-pub(super) fn shard_selections(table: &[&[&str]]) -> Vec<String> {
-    (0..=table.len())
-        .map(|shard| {
-            let skips = table
-                .iter()
-                .take(shard)
-                .flat_map(|earlier| earlier.iter())
-                .flat_map(|filter| ["--skip", *filter]);
-            table
-                .get(shard)
-                .copied()
-                .unwrap_or_default()
-                .iter()
-                .copied()
-                .chain(skips)
-                .collect::<Vec<&str>>()
-                .join(" ")
-        })
-        .collect()
+fn category_check_complaints(job: &Yaml, id: &str, command: &str, suite: &str) -> Vec<String> {
+    let checks: Vec<usize> = steps_of(job)
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| scalar(step, "run") == Some(command))
+        .map(|(index, _)| index)
+        .collect();
+    let suite_at = steps_of(job)
+        .iter()
+        .position(|step| scalar(step, "run") == Some(suite));
+    if let ([check], Some(suite_at)) = (checks.as_slice(), suite_at) {
+        if *check < suite_at {
+            return Vec::new();
+        }
+    }
+    vec![format!(
+        "[test-categories] {id} must check the native category inventory exactly once before its suite"
+    )]
 }
 
 pub(super) fn libtest_runs(selection: &str, name: &str) -> bool {

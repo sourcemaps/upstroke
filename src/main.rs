@@ -470,7 +470,7 @@ fn prompt_for_answer(repo_root: &std::path::Path, question_id: &str) -> anyhow::
 }
 
 #[cfg(test)]
-mod tests {
+mod cli_tests {
     use std::collections::BTreeSet;
 
     use clap::CommandFactory;
