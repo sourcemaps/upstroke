@@ -525,39 +525,59 @@ fn parse_debug_models(text: &str) -> Result<DebugModels, UpstrokeError> {
 }
 
 fn validate_model_efforts(version: &str, models: &DebugModels) -> Result<(), UpstrokeError> {
-    for slug in catalog::known_models(ADAPTER_ID) {
-        let model = models
-            .models
-            .iter()
-            .find(|model| model.slug == slug)
-            .ok_or_else(|| UpstrokeError::Agent {
-                message: format!(
-                    "codex {version}'s local model catalog does not contain known model `{slug}`; \
-                     refusing before a configured `--model` fails at runtime"
-                ),
-            })?;
-        let supported: Vec<Effort> = model
-            .supported_reasoning_levels
-            .iter()
-            .filter_map(|level| Effort::parse(&level.effort))
-            .collect();
-        let missing: Vec<Effort> = Effort::ALL
-            .into_iter()
-            .filter(|effort| !supported.contains(effort))
-            .collect();
-        if !missing.is_empty() {
-            return Err(UpstrokeError::Agent {
-                message: format!(
-                    "codex {version} model `{slug}` does not advertise required reasoning \
-                     level(s): {}. Refusing before `model_reasoning_effort` can fail an attempt.",
-                    missing
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            });
-        }
+    const EARLIER_ROSTER: [&str; 2] = ["gpt-6-astra", "gpt-5.6-sol"];
+    for slug in EARLIER_ROSTER {
+        validate_model_effort(version, models, slug)?;
+    }
+    for slug in catalog::known_models(ADAPTER_ID)
+        .into_iter()
+        .filter(|slug| !EARLIER_ROSTER.contains(slug))
+    {
+        validate_model_effort(version, models, slug).map_err(|error| {
+            UpstrokeError::CodexRosterUpgrade {
+                message: error.to_string(),
+            }
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_model_effort(
+    version: &str,
+    models: &DebugModels,
+    slug: &str,
+) -> Result<(), UpstrokeError> {
+    let model = models
+        .models
+        .iter()
+        .find(|model| model.slug == slug)
+        .ok_or_else(|| UpstrokeError::Agent {
+            message: format!(
+                "codex {version}'s local model catalog does not contain known model `{slug}`; \
+                 refusing before a configured `--model` fails at runtime"
+            ),
+        })?;
+    let supported: Vec<Effort> = model
+        .supported_reasoning_levels
+        .iter()
+        .filter_map(|level| Effort::parse(&level.effort))
+        .collect();
+    let missing: Vec<Effort> = Effort::ALL
+        .into_iter()
+        .filter(|effort| !supported.contains(effort))
+        .collect();
+    if !missing.is_empty() {
+        return Err(UpstrokeError::Agent {
+            message: format!(
+                "codex {version} model `{slug}` does not advertise required reasoning \
+                 level(s): {}. Refusing before `model_reasoning_effort` can fail an attempt.",
+                missing
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
     }
     Ok(())
 }
@@ -790,6 +810,10 @@ impl AdapterSource for CodexAdapter {
         (id == ADAPTER_ID).then_some(self)
     }
 }
+
+#[cfg(test)]
+#[cfg(unix)]
+pub(crate) mod fixture;
 
 #[cfg(test)]
 mod tests {

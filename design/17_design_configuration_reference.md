@@ -126,6 +126,16 @@ float `1e16` and requires `--force` once. No universal cross-version `Unchanged`
 promised. Malformed TOML, including malformed comments, requires `--force`. A read error other
 than a missing file is reported even with `--force`.
 
+There is one roster-upgrade exception: if the existing TOML contains a pool whose `agent` is
+`codex`, and the installed CLI satisfies the entire earlier two-model roster and its five
+efforts but fails an added model or effort requirement, `connect` refuses even with `--force`.
+It leaves the existing file byte-for-byte intact, including all operator settings, and asks
+the operator to restore a compatible Codex CLI and retry. This is not evidence that the saved
+provider disappeared. Fresh discovery without a saved Codex pool retains the normal unusable-agent
+report; genuinely absent CLIs, failures of the earlier requirements and unrelated providers
+retain their existing behavior. Once the full roster passes, a deliberate `--force` rewrite
+works as below.
+
 *Should* it be rewritten: if anything but the first generated write-time header differs,
 comments included, so a login between two runs updates the auth comment while an
 unchanged machine leaves the file, and the date on it, alone. `--force` carries `profile`,
@@ -253,4 +263,6 @@ The source of truth for the Codex roster is `CATALOG` in `src/catalog.rs`, read 
 
 This is the plan a run resolves when it starts. A run records its review plan, and a resume keeps the reviewers recorded, though a recorded Codex reviewer still meets today's Codex probe. Only a sequential log that predates the review record resolves its plan again on resume, from today's config and this build's catalog.
 
-On a schema-2 sequential resume whose log predates recorded review plans, the plan is re-derived as above. If Codex is needed only for its optional alternative reviewer and its probe fails, the sequential preflight warns and drops that alternative; the primary may then review work its own model implemented. This fallback does not cover Codex needed by an implementation chain, the primary reviewer or an explicit second opinion: those agents must pass their probes. A schema-4 run does not drop an unavailable alternative, because its recorded probe set binds its resume too. The test suites satisfy these probes with stub CLIs, so an acceptance run with stubs implies no provider call.
+Sequential preflight distinguishes this roster upgrade from pre-existing unavailability. If the CLI passes all earlier probe requirements, including both `gpt-6-astra` and `gpt-5.6-sol` with every required effort, but lacks an added model or effort, it refuses before work or any durable review-plan change. This protects schema-3 recorded plans and schema-2 plans both with and without a review record: the latter are still re-derived, but no downgraded plan is persisted. Restore a CLI whose local `codex debug models` advertises the full roster and all five efforts, then retry the original resume; the independent reviewer remains available to the original plan. Classification comes from the parsed local catalog, never arbitrary stderr text.
+
+For unrelated pre-existing probe failures, including a genuinely absent CLI or a failure of the earlier two-model requirements, the sequential optional-alternative behavior is unchanged: preflight warns and drops the alternative, and the primary may review work its own model implemented. This fallback does not cover Codex needed by an implementation chain, the primary reviewer or an explicit second opinion: those agents must pass their probes. A schema-4 run does not drop an unavailable alternative, because its recorded probe set binds its resume too. The regression tests use isolated configured CLI stubs, temporary pools and synthetic persisted run records; they exercise refusal and a full-roster retry without provider accounts.

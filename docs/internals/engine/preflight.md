@@ -247,11 +247,20 @@ finding #10 — but in two classes. Everything the config *asked* for is
 required. The anti-self-review alternative was upstroke's own idea, so a
 machine that cannot run it loses the upgrade rather than the run.
 
-Resume draws the line in the same place. Requiring the alternative there
+Resume draws the line in the same place for pre-existing unavailability. Requiring the alternative there
 — on the grounds that a run should keep one verification standard — would
 refuse to continue over a reviewer that may never have judged anything,
 and the per-attempt record already names who judged each attempt, so the
 ledger stays honest either way. A loud warning beats a dead run.
+
+The specific Codex roster upgrade is an exception. `CodexRosterUpgrade` means
+the installed CLI passed the entire earlier contract, including both original
+models at all five efforts, and failed an added model or effort. It refuses
+before `drop_alternative`, work, or a durable review-plan change. This covers
+schema-3 recorded plans and schema-2 plans with or without a review record;
+the schema-2 upgrade cannot persist a downgraded plan. Restoring a compatible
+CLI allows retry with the original identity. The adapter classifies the parsed
+catalog once; preflight neither repeats probes nor examines stderr for a cause.
 
 ## `let tier = analysis`
 

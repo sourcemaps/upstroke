@@ -170,6 +170,25 @@ policy values. The CLI's local catalog is separate zero-spend
 evidence for each model × effort pair, so require every known Codex
 model to expose every shared effort level before a run can start.
 
+## `fn validate_model_efforts(version: &str, models: &DebugModels) -> Result<(), UpstrokeError> {`
+
+The earlier roster (`gpt-6-astra`, `gpt-5.6-sol`) is a historical compatibility
+boundary, not a second current model catalog. Validate it first with the same
+per-model validator, then validate the remaining `catalog::known_models` entries.
+Only a failure in that second group becomes `CodexRosterUpgrade`; the entire
+earlier roster and all preceding CLI contract probes must have passed. A missing
+model and a missing effort both qualify. Absent binaries, failed commands,
+malformed catalogs and earlier-contract failures retain their ordinary errors.
+No arbitrary stderr string is treated as roster evidence.
+
+This keeps the global four-model, five-effort probe strict. The typed distinction
+lets sequential preflight preserve independent review identity and lets connect
+preserve a saved Codex pool without either caller maintaining a model list or
+repeating a probe. The refusal tells the operator to restore a compatible CLI
+and retry. `fixture::ConfiguredCodex` runs isolated shell stubs through the real
+runner and this adapter's probe, discovery, build and parser for those regression
+tests; its configured paths never select a provider CLI or account.
+
 ## `fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError> {` › `json_output: true,`
 
 Asked for and parsed, unlike Copilot's route where the flag's

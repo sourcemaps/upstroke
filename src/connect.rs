@@ -125,6 +125,18 @@ pub fn run_with<'a>(
                 });
             }
             Err(error) => {
+                if matches!(error, UpstrokeError::CodexRosterUpgrade { .. })
+                    && existing_text.as_deref().is_some_and(has_codex_pool)
+                {
+                    return Err(UpstrokeError::Refused {
+                        message: format!(
+                            "cannot rediscover the saved Codex pool: {error}. {} was left \
+                             unchanged, including its operator settings; --force does not \
+                             override this roster upgrade refusal",
+                            path.display()
+                        ),
+                    });
+                }
                 agents.push(AgentReport {
                     agent: id.to_owned(),
                     outcome: Err(error.to_string()),
@@ -158,6 +170,20 @@ pub fn run_with<'a>(
         agents,
         warnings,
     })
+}
+
+fn has_codex_pool(text: &str) -> bool {
+    let Ok(document) = toml::from_str::<toml::Table>(text) else {
+        return false;
+    };
+    document
+        .get("pools")
+        .and_then(toml::Value::as_table)
+        .is_some_and(|pools| {
+            pools
+                .values()
+                .any(|pool| pool.get("agent").and_then(toml::Value::as_str) == Some("codex"))
+        })
 }
 
 fn write_pools(path: &std::path::Path, content: &str) -> Result<(), UpstrokeError> {
@@ -1626,5 +1652,160 @@ mod tests {
         ] {
             assert!(operator_keys(document).is_empty(), "{document}");
         }
+    }
+
+    #[cfg(unix)]
+    const SAVED_CODEX_POOL: &str = "# operator settings, keep these bytes on refusal\r\n\
+        [pools.codex]\r\nkind = \"api-key\"\r\nagent = \"codex\"\r\n\
+        reserve = 0.47\r\nsafety_margin = 0.29\r\n\
+        profile = \"/profiles/operator\"\r\nmonthly_allowance = 275\r\n\
+        endpoint = \"http://localhost:11434/v1\"\r\n\
+        usage_provider = \"openai-cost\"\r\nusage_token_env = \"FIXTURE_COST_KEY\"\r\n";
+
+    #[cfg(unix)]
+    #[test]
+    fn force_preserves_saved_codex_pool_bytes_on_roster_upgrade_and_allows_restored_retry() {
+        use crate::agent::codex::fixture::{ConfiguredCodex, Roster};
+
+        for mismatch in [Roster::Earlier, Roster::AddedEffortMissing] {
+            let tree = scratch("codex-roster-pool");
+            let path = tree.path().join("pools.toml");
+            let codex = ConfiguredCodex::new(&tree.path().join("cli"));
+            codex.roster(mismatch);
+            for name in ["codex", "operator-codex"] {
+                let saved = SAVED_CODEX_POOL.replace("pools.codex", &format!("pools.{name}"));
+                fs::write(&path, &saved).expect("saved operator configuration");
+                for force in [false, true] {
+                    let error = run_with(
+                        &ConnectOptions {
+                            pools_path: Some(path.clone()),
+                            force,
+                        },
+                        &codex,
+                        ["codex"],
+                    )
+                    .expect_err("even force cannot discard a pool on this new mismatch")
+                    .to_string();
+                    assert!(error.contains("codex roster upgrade"), "{error}");
+                    assert!(error.contains("Restore a compatible Codex CLI"), "{error}");
+                    assert!(error.contains("retry the original command"), "{error}");
+                    assert!(error.contains("left unchanged"), "{error}");
+                    assert_eq!(fs::read(&path).expect("preserved bytes"), saved.as_bytes());
+                }
+            }
+
+            fs::write(&path, SAVED_CODEX_POOL).expect("the established default pool name");
+            codex.roster(Roster::Full);
+            let opts = ConnectOptions {
+                pools_path: Some(path.clone()),
+                force: false,
+            };
+            assert_eq!(
+                run_with(&opts, &codex, ["codex"])
+                    .expect("ordinary conflict")
+                    .outcome,
+                Wrote::Refused
+            );
+            assert_eq!(
+                fs::read(&path).expect("still saved"),
+                SAVED_CODEX_POOL.as_bytes()
+            );
+            let report = run_with(
+                &ConnectOptions {
+                    force: true,
+                    ..opts
+                },
+                &codex,
+                ["codex"],
+            )
+            .expect("a compatible deliberate force rewrite remains allowed");
+            assert_eq!(report.outcome, Wrote::Written);
+            let pool = the_one_pool(&path);
+            assert_eq!(pool.agent, "codex");
+            assert_eq!(pool.kind, PoolKind::SubscriptionWindow);
+            assert_eq!(pool.reserve, crate::capacity::DEFAULT_RESERVE);
+            assert_eq!(pool.profile.as_deref(), Some("/profiles/operator"));
+            assert_eq!(pool.endpoint.as_deref(), Some("http://localhost:11434/v1"));
+            assert_eq!(
+                pool.monthly_allowance,
+                crate::capacity::Allowance::Units(275.0)
+            );
+            assert_eq!(
+                pool.usage
+                    .expect("operator usage settings retained")
+                    .token_env
+                    .as_deref(),
+                Some("FIXTURE_COST_KEY")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_discovery_and_unrelated_provider_failures_keep_ordinary_force_behavior() {
+        use crate::agent::codex::fixture::{ConfiguredCodex, Roster};
+
+        let tree = scratch("codex-roster-controls");
+        let codex = ConfiguredCodex::new(&tree.path().join("cli"));
+        for (index, roster) in [
+            Roster::Full,
+            Roster::Earlier,
+            Roster::AddedEffortMissing,
+            Roster::EarlierModelMissing,
+            Roster::EarlierEffortMissing,
+            Roster::UnrelatedFailure,
+            Roster::Malformed,
+            Roster::Absent,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            codex.roster(roster);
+            let path = tree.path().join(format!("fresh-{index}.toml"));
+            let opts = ConnectOptions {
+                pools_path: Some(path.clone()),
+                force: true,
+            };
+            let report = run_with(&opts, &codex, ["codex"]).expect("fresh discovery");
+            assert_eq!(report.outcome, Wrote::Written);
+            assert_eq!(
+                has_codex_pool(&report.content),
+                matches!(roster, Roster::Full)
+            );
+
+            fs::write(&path, OTHER_POOL).expect("an unrelated saved pool");
+            let report = run_with(&opts, &codex, ["codex"])
+                .expect("a Codex mismatch does not protect an unrelated provider");
+            assert_eq!(report.outcome, Wrote::Written);
+
+            if !matches!(roster, Roster::Earlier | Roster::AddedEffortMissing) {
+                fs::write(&path, SAVED_CODEX_POOL).expect("saved Codex configuration");
+                let report = run_with(&opts, &codex, ["codex"])
+                    .expect("only the added roster requirement changes force behavior");
+                assert_eq!(report.outcome, Wrote::Written);
+                assert_eq!(
+                    has_codex_pool(&report.content),
+                    matches!(roster, Roster::Full)
+                );
+            }
+        }
+
+        let path = tree.path().join("unrelated-provider.toml");
+        fs::write(&path, SAVED_CODEX_POOL).expect("saved Codex pool");
+        let report = run_with(
+            &ConnectOptions {
+                pools_path: Some(path),
+                force: true,
+            },
+            &Machine {
+                adapters: vec![FakeAdapter {
+                    id: "copilot",
+                    discovery: None,
+                }],
+            },
+            ["copilot"],
+        )
+        .expect("an unrelated provider's failure is not the Codex upgrade refusal");
+        assert_eq!(report.outcome, Wrote::Written);
     }
 }

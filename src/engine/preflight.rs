@@ -238,6 +238,14 @@ pub(super) fn preflight_with_recorded(
             Ok(caps_for_id) => {
                 caps.insert(id, caps_for_id);
             }
+            Err(error @ UpstrokeError::CodexRosterUpgrade { .. }) => {
+                return Err(UpstrokeError::Refused {
+                    message: format!(
+                        "cannot probe this run's independent reviewer: {error}. No new work has \
+                         started and the durable review plan has not changed"
+                    ),
+                });
+            }
             Err(error) => {
                 let binding = review_plan
                     .alternative

@@ -78,7 +78,8 @@ One entry per registered adapter, in registry order.
 
 `Err` means this agent contributed no pool. It never aborts the others:
 a machine with Claude Code and no Copilot is the normal case, not a
-broken one.
+broken one. The saved-pool roster-upgrade refusal returns before creating
+this report, so it cannot be mistaken for an absent provider to omit.
 
 ## `pub fn run(opts: &ConnectOptions) -> Result<ConnectReport, UpstrokeError> {`
 
@@ -94,7 +95,20 @@ machine at all.
 
 Returns a refusal when no destination can be determined, an I/O error
 when the existing file cannot be read, or a filesystem error naming a
-failed directory creation or file write.
+failed directory creation or file write. A saved Codex pool also causes a
+refusal on `CodexRosterUpgrade`, even with `--force`, before any file write.
+
+## `fn has_codex_pool(text: &str) -> bool {`
+
+A parsed `[pools]` table containing any pool with `agent = "codex"` identifies
+saved configuration, including an operator-renamed pool. It does not require
+today's discovery to succeed or discard operator settings to establish this.
+When the adapter reports that the earlier roster still passes but the added
+requirements fail, the whole file stays byte-for-byte unchanged and the error
+asks for a compatible CLI and retry. Fresh discovery, malformed TOML, genuinely
+absent providers, earlier-contract failures and unrelated-provider failures
+retain ordinary behavior. A valid deliberate force rewrite after restoring the
+full roster still carries the established operator keys by pool name.
 
 ## `Some(path) => path.clone(),`
 
