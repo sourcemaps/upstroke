@@ -8521,18 +8521,19 @@ fn a_reviewers_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_p
     assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
 }
 
+// `-` for the real message's `·`, as in the tests above.
+const LIMIT_PAST_THE_HEAD: &str = concat!(
+    r#"{"type":"result","is_error":true,"result":"MCP cache resets 9am (UTC). "#,
+    "mcp server docs: tool list refreshed in 812ms, 14 tools registered, 2 skipped as duplicates. ",
+    "mcp server docs: tool list refreshed in 815ms, 14 tools registered, 2 skipped as duplicates. ",
+    "mcp server docs: tool list refreshed in 818ms, 14 tools registered, 2 skipped as duplicates. ",
+    "mcp server docs: tool list refreshed in 821ms, 14 tools registered, 2 skipped as duplicates. ",
+    "mcp server docs: tool list refreshed in 824ms, 14 tools registered, 2 skipped as duplicates. ",
+    r#"You've hit your 5-hour limit - resets 5:30am (UTC)","session_id":"fake-review-session","fake":"UPSTROKE-FAKE-REVIEW"}"#,
+);
+
 #[test]
 fn a_reviewers_limit_in_the_result_past_the_reasons_head_records_its_reset_on_pool_exhausted() {
-    // `-` for the real message's `·`, as in the tests above.
-    const LIMIT_PAST_THE_HEAD: &str = concat!(
-        r#"{"type":"result","is_error":true,"result":"MCP cache resets 9am (UTC). "#,
-        "mcp server docs: tool list refreshed in 812ms, 14 tools registered, 2 skipped as duplicates. ",
-        "mcp server docs: tool list refreshed in 815ms, 14 tools registered, 2 skipped as duplicates. ",
-        "mcp server docs: tool list refreshed in 818ms, 14 tools registered, 2 skipped as duplicates. ",
-        "mcp server docs: tool list refreshed in 821ms, 14 tools registered, 2 skipped as duplicates. ",
-        "mcp server docs: tool list refreshed in 824ms, 14 tools registered, 2 skipped as duplicates. ",
-        r#"You've hit your 5-hour limit - resets 5:30am (UTC)","session_id":"fake-review-session","fake":"UPSTROKE-FAKE-REVIEW"}"#,
-    );
     let payload: serde_json::Value =
         serde_json::from_str(LIMIT_PAST_THE_HEAD).expect("the reviewer's result is JSON");
     let result = payload["result"]
@@ -8603,6 +8604,90 @@ fn a_reviewers_limit_in_the_result_past_the_reasons_head_records_its_reset_on_po
         .reset_at
         .as_deref()
         .expect("the reviewer's limit in its result named its reset");
+    assert!(reset_at.ends_with("T05:30:00Z"), "{reset_at}");
+    assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
+}
+
+#[test]
+fn a_reviewers_quota_limit_in_the_result_outranks_a_generic_limit_on_stderr_on_pool_exhausted() {
+    const GENERIC_LIMIT: &str = "HTTP 429: rate limit";
+    assert!(
+        crate::agent::looks_rate_limited(GENERIC_LIMIT),
+        "the stderr signals a limit"
+    );
+    assert!(
+        !crate::agent::names_a_quota_limit(GENERIC_LIMIT),
+        "the stderr names no quota limit"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(LIMIT_PAST_THE_HEAD).expect("the reviewer's result is JSON");
+    let result = payload["result"]
+        .as_str()
+        .expect("the payload has a result");
+    let limit = result
+        .find("You've hit your 5-hour limit")
+        .expect("the result holds the limit");
+    assert!(
+        limit > 400,
+        "the limit starts past the reason's head: {limit}"
+    );
+    let reason = format!("reviewer unavailable: {}", crate::util::head(result, 400));
+    assert!(
+        !crate::agent::names_a_quota_limit(&reason),
+        "the reason's head names no quota limit, so only the whole result can give the reset"
+    );
+
+    let (_tree, repo) = temp_engine_repo("poolexhaustedreviewergeneric");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    opts.pools_path = Some(pools_file(&repo, CLAUDE_POOL));
+    let mut source = source(
+        vec![Effect::EditFile],
+        vec![ReviewBehavior::RateLimited, ReviewBehavior::Pass],
+    );
+    source.adapter.review_limit_result = LIMIT_PAST_THE_HEAD;
+    source.adapter.review_limit_on_stderr = Some(GENERIC_LIMIT);
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let t1 = task(&report, "t1");
+    assert_eq!(t1.attempts.len(), 2, "{report:?}");
+    let refused = t1.attempts[0]
+        .failure
+        .as_ref()
+        .expect("the first attempt's reviewer was refused");
+    assert_eq!(refused.kind, FailureKind::RateLimited);
+    assert_eq!(refused.origin, FailureOrigin::Reviewer);
+    assert_eq!(
+        refused.reason, reason,
+        "the displayed reason is still the result's 400-byte head"
+    );
+
+    let events = events_of(&repo, &report.run_id);
+    let signals: Vec<&events::PoolExhausted> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signals.len(), 1, "{signals:?}");
+    assert_eq!(signals[0].pool, "claude-max");
+    assert_eq!(signals[0].agent, "claude-code");
+    assert_eq!(
+        signals[0].detail,
+        crate::util::head(&reason, 400),
+        "{signals:?}"
+    );
+    let reset_at = signals[0]
+        .reset_at
+        .as_deref()
+        .expect("the quota limit in the result, not the generic stderr, named the reset");
     assert!(reset_at.ends_with("T05:30:00Z"), "{reset_at}");
     assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
 }

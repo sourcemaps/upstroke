@@ -5286,6 +5286,18 @@ reason, so what is displayed has not changed; the one `pool_exhausted` names `cl
 `None`, only the cut reason was read, and the reset was 09:00 and then, once the parser stopped
 reading a reset no limit gives, `None`.
 
+## `fn a_reviewers_quota_limit_in_the_result_outranks_a_generic_limit_on_stderr_on_pool_exhausted() {`
+
+`PR380-GENERIC-STDERR-HIDES-REVIEW-RESET`, the test above with a stderr that does signal a limit
+but names no quota: `HTTP 429: rate limit`. The test first checks that `looks_rate_limited`
+accepts that stderr, that `names_a_quota_limit` refuses it, and that the reason built from the
+result's 400-byte head names no quota limit either, so only the whole result can give the reset.
+The first attempt's failure is `RateLimited`, from the reviewer, with that reason; the one
+`pool_exhausted` names `claude-max` and `claude-code`, carries the reason's head as its detail,
+and has a `reset_at` ending `T05:30:00Z`. Before `run_review` preferred the text naming a quota
+limit, the generic stderr was the first `looks_rate_limited` accepted, so it became the
+`limit_message`, and the coordinator, finding no text naming a quota limit, recorded `None`.
+
 ## `fn a_rate_limited_failure_carries_a_limit_from_stderr_without_changing_its_reason() {`
 
 The same defect one level down, at `evaluate_outcome`. The output `ClaudeCodeAdapter::parse` reads

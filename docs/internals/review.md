@@ -405,9 +405,11 @@ failed task and the retry ladder punishes the implementer for it.
 
 ## `pub enum ReviewResult` › `limit_message: Option<String>,`
 
-The text that signalled a rate-limited reviewer's limit, whole: its stderr
-when that stderr signals the limit, and otherwise its full result text when
-that result signals it. `None` on every other unavailable result.
+The text that signalled a rate-limited reviewer's limit, whole: the first of
+its stderr and its full result text that names a quota limit
+(`agent::names_a_quota_limit`), and when neither does, the first of them
+that signals a limit at all (`agent::looks_rate_limited`). `None` on every
+other unavailable result.
 `engine::attempt::review_failure` hands it to the failure through
 `AttemptFailure::with_limit_message`. That is the same in-memory carrier a
 worker's stderr rides on, so the coordinator can read the reviewer's reset
@@ -588,6 +590,19 @@ result is read before anything shortens it, and the reset is 05:30. The
 reason keeps its 400-byte head, so nothing displayed changes. Stderr comes
 first because, when it signals, the result is the unrelated text beside it
 (`request failed`), as above.
+
+"Signals the limit" is two tests, tried in turn. The first text, stderr then
+the result, that names a quota limit (`agent::names_a_quota_limit`, the test
+the coordinator reads a reset with) is kept; only when neither names one is
+the first that `agent::looks_rate_limited` accepts kept, as before. That
+matcher is broad (`429`, `rate limit`, ...), so a stderr of `HTTP 429: rate
+limit` beside the result above used to win: the limit message named no
+quota, the reason's head held only the unrelated reset, the coordinator found
+no text naming a quota limit, and `pool_exhausted` recorded no reset
+(`PR380-GENERIC-STDERR-HIDES-REVIEW-RESET`). Now the result names the quota,
+so it is kept, and the reset is 05:30.
+`a_reviewers_quota_limit_in_the_result_outranks_a_generic_limit_on_stderr_on_pool_exhausted`
+holds it.
 
 ## `Ok(ReviewOutcome {`
 

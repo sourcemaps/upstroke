@@ -614,10 +614,12 @@ pub fn run_review(
         if outcome.status != OutcomeStatus::Completed {
             let limit_message = (outcome.status == OutcomeStatus::RateLimited)
                 .then(|| {
-                    [Some(&output.stderr), outcome.detail.as_ref()]
-                        .into_iter()
-                        .flatten()
-                        .find(|text| crate::agent::looks_rate_limited(text))
+                    let texts = [Some(&output.stderr), outcome.detail.as_ref()];
+                    let first = |accepts: fn(&str) -> bool| {
+                        texts.into_iter().flatten().find(|text| accepts(text))
+                    };
+                    first(crate::agent::names_a_quota_limit)
+                        .or_else(|| first(crate::agent::looks_rate_limited))
                         .cloned()
                 })
                 .flatten();
