@@ -15,14 +15,16 @@ bash .github/scripts/test-internals-notes.sh
 bash .github/scripts/test-pr-ready-audit.sh
 ```
 
-CI splits the ten across jobs: `lint` runs rustfmt, Clippy and the six Bash gates; `test-linux` runs
-the suite on Linux in five legs, `test (ubuntu-latest, k of 5)`, and `test-macos` on macOS in
-twelve, `test (macos-latest, k of 12)`, each leg
-under 30 minutes, and `test-windows-hosted` runs it on Windows, on `windows-latest` in twenty-two
-shards, `test (windows-latest, k of 22)`, each shard under 40 minutes, by the same rule as the
-Linux and macOS shards, a test running in exactly one shard, for a pull request, a push and a
-merge-queue entry alike
-(`MAINTAINING.md` step 3); `msrv` runs the locked check for each of the three targets, each
+CI splits the ten across jobs: `lint` runs rustfmt, Clippy and the six baseline Bash gates, plus
+the native category inventory check, `bash .github/scripts/test-categories.sh`. `test-linux`
+runs the suite in seven named category legs and `test-macos` in nine, each under 30 minutes;
+`test-windows-hosted` runs twenty named legs on `windows-latest`, each under 40 minutes. The
+first-match registry, generation and local listing check are described in §12; the generated
+names, Windows floors and OS-specific checks are in `MAINTAINING.md` step 3. Every registered
+test belongs to exactly one leg on its platform; there is no executing catch-all. The same
+jobs are required for a pull request, a push and a merge-queue entry alike. These category
+checks supplement the ten-command local baseline above, whose full-suite command is unchanged.
+`msrv` runs the locked check for each of the three targets, each
 checked natively on its own platform; `lint (windows)` runs Clippy natively and builds every
 target as the hosted Windows compile witness; `lint (macos)` runs Clippy on Linux for
 `aarch64-apple-darwin`; `upstroke-ci` aggregates every leg and is the required context. The

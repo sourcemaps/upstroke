@@ -398,25 +398,15 @@ runner is now the job's.
 
 ## `fn test_legs(row: &TestJob) -> Vec<TestLeg> {`
 
-The table a test job's matrix must equal, derived and never written out:
-one leg for each string [`shard_selections`] makes of the row's filters, in
-order.
+The expected matrix, derived from `category_legs` in `super::ci_model`.
+The runner's `-latest` suffix is removed to choose the platform, and its full
+name is prefixed to each category leg's name. The selector is copied unchanged.
+That yields seven Linux and nine macOS entries with category and subcategory
+labels, including a within-category number only for split categories.
 
-- `tests` is the string. A runner with no filter has one, the empty string:
-  no arguments, the whole suite.
-- `leg` is the runner alone where it has that one leg, and otherwise the
-  runner, a comma and the shard's place, `k of n`. The count is the number
-  of strings, so a filter added to a runner's list renames that runner's
-  legs and no label is written down.
-
-Today that is five legs for `test-linux`, `ubuntu-latest, 1 of 5` to
-`ubuntu-latest, 5 of 5`, and twelve for `test-macos`, `macos-latest, 1 of 12`
-to `macos-latest, 12 of 12`. The label is what GitHub puts in the leg's job name
-in place of `${{ matrix.leg }}` ([`TEST_JOB_NAME`]), so each check name is
-the one the leg had in the one job. No runner has an empty
-filter list today, so no leg is labelled by its runner alone: the Linux leg
-was, as `test (ubuntu-latest)`, the name it had while the matrix was an
-`os:` axis, until its suite was divided in two.
+The order is generated category order, not first-match priority. The latter
+comes from the ordered `TEST_CATEGORIES` rows and is encoded in the selectors.
+No generated entry has an empty positive selection.
 
 ## `fn test_leg(entry: &Yaml) -> Option<TestLeg> {`
 
@@ -432,117 +422,29 @@ which is no string, and does not.
 
 ## `fn test_leg_matrix_complaints(job: &Yaml, row: &TestJob) -> Vec<String> {`
 
-A test job's `strategy:`, whole, under the one code `test-job-matrix`, each
-complaint naming the job. Four things, each its own complaint:
+The whole strategy under code `test-job-matrix`, naming the job:
 
-1. `strategy:` declares exactly `fail-fast` and `matrix`. `max-parallel` is
-   the rest of what a strategy may say today; an equality over the field set
-   refuses it and whatever GitHub adds next.
-2. `fail-fast` is `false`. Otherwise the first leg to fail cancels the legs
-   still running, and a run reports one shard's failures and none of the
-   others'.
-3. `matrix:` declares exactly `include`. An axis beside the list changes
-   what the list means, by the rule [`windows_shard_matrix_complaints`]
-   records for the Windows shards, and `exclude:` removes combinations of an
-   axis. The legs are the list and nothing else.
-4. `include:` is, in order, exactly [`test_legs`]' entries for the row,
-   each read by [`test_leg`].
+1. The strategy declares exactly `fail-fast` and `matrix`.
+2. `fail-fast` is false so every leg can report its result.
+3. The matrix declares exactly `include`; an extra axis changes how GitHub
+   expands entries, and `exclude` is outside this contract.
+4. The ordered include list equals `test_legs(row)`, with exactly `leg` and
+   `tests` in each entry.
 
-The table's runners are held to the platforms once, for both jobs, by
-[`test_jobs_table_complaints`]; until the split that was this function's
-first check, and the fourth check here was its fifth.
+The platform table check separately holds both jobs to the runners in
+`CI_TARGETS`. The matrix equality holds the generated names and selectors;
+native inventory checking holds those selectors to first-match ownership of
+the names compiled on that platform. Neither Linux nor macOS has a
+passing-count floor, and neither has a last leg that executes uncategorised
+tests. A missing selector must fail rather than silently send tests elsewhere.
 
-Until the macOS suite was divided the matrix was one `os:` axis, compared as
-a set with the runners that host tests, and `include:` was refused with
-`exclude:` as a key that could add a platform nobody declared. The legs
-became the `include:` list because an axis cannot say them: the seven
-shared two runners and differed in what they are handed. The platform
-claim the set equality made is [`test_jobs_table_complaints`] and each
-job's fourth check together.
-
-In order, though GitHub does not run the legs in order: within a runner the
-order is the shard table's, each leg skipping the filters of the legs before
-it, and an equality over an ordered list is the plain way to hold every leg
-to its own row.
-
-These legs hold no count of passing tests to a floor, where each Windows
-shard does, and the fourth check is what stands in for one here. A shard's
-floor refuses a leg whose filters matched almost nothing; in these jobs such
-a leg is green, and the tests its filters no longer match are run by a later
-leg, since every later leg only skips those filters. That holds while every
-leg's arguments are its runner's table's, which is this equality.
-
-Measured, `MUT-TEST-MATRIX-EXCLUDED`, `MUT-CI-TEST-MATRIX-NARROWED`,
-`MUT-TEST-MATRIX-KEEPS-WINDOWS`, `MUT-TEST-MACOS-SHARD-NARROWED`,
-`MUT-TEST-MACOS-LAST-SHARD-SKIPS-MORE` and `MUT-TEST-UBUNTU-LEG-FILTERED`.
-The first three were written for the `os:` axis and were re-spelled for the
-list: an `exclude:` beside `include:`, the Linux entries deleted, and a
-Windows entry added. Of an `include:` list GitHub documents that its entries
-are processed after `exclude:`, so by that rule the first removes no leg
-today, and the row says so; it is refused as a key the contract does not
-read. The second deleted the one Linux leg while that leg ran the suite
-whole. The Linux suite is five legs now and the row deletes all five, so
-that it still removes a platform and not a shard of one. Its
-anchor therefore spells the five Linux legs' arguments whole, which the
-oracle otherwise writes out in one test; the macOS twelve's are written out
-nowhere whole, only the parts of them the macOS rows below quote.
-
-At the split the rows were aimed at the job that holds what they mutate,
-and the entries lost their `os:` lines: the exclusion names the first macOS
-leg in `test-macos`; the narrowing deletes `test-linux`'s entries, then two
-entries in four lines and since 2026-11-25 five in ten; and the Windows
-entry is one more entry of `test-linux`, now its sixth, labelled
-`windows-latest`, which would run the suite whole on `ubuntu-latest` under a
-Windows name. Every anchor that spelled a `- os:` line now spells the
-`- leg:` line that opens the entry.
-
-The last three change what a leg is handed, and the fourth check refuses
-each. `MUT-TEST-MACOS-SHARD-NARROWED` puts a `--skip effects::` first in the
-last macOS leg's arguments and `MUT-TEST-MACOS-LAST-SHARD-SKIPS-MORE` puts
-it last, after every word the table derives. The appended skip's anchor is
-the end of the last entry's `tests:` value and the `steps:` line after it,
-so it spells that leg's last skip and not its whole arguments, and the
-sentence above still holds of the macOS shards.
-`MUT-TEST-UBUNTU-LEG-FILTERED` was written for the one Linux leg, whose
-`tests:` was the empty string, and gave it the filter `engine::`: the leg
-that ran the suite whole ran a subset. That leg is gone, and the row is now
-its nearest equivalent. It gives the last Linux leg, the one with no filter,
-the first leg's arguments: while the Linux suite was two legs, `engine::`
-where it read `--skip engine::`, and since 2026-11-25 the first leg's five
-filters where it read nineteen skips. The first and the last Linux legs run
-the one subset, and the tests that run on Linux alone run nowhere. Its
-anchor spells the last leg's entry whole, so a change to the Linux table
-re-spells it.
-
-Three more rows make three of the Windows shards' mutations on the macOS
-legs, and the fourth check refuses each. `MUT-TEST-MACOS-FILTER-DROPPED-FROM-ITS-LEG`
-deletes the second leg's first filter,
-`engine::topology::coordinator::tests::interleaving::e`, from that leg's own
-`tests:` alone; every later leg still skips it, so the coordinator's
-interleaving tests whose names open `e` run on no macOS leg.
-`MUT-TEST-MACOS-SKIP-DROPPED` deletes the last leg's first skip, so the
-tests the first leg runs under `...coordinator::tests::interleaving::r` run
-in the last leg too. And `MUT-TEST-MACOS-FILTER-MOVED-BETWEEN-LEGS` moves
-the third leg's last filter, `engine::tests::a_k`, to the front of the
-fourth leg's, which still skips it: libtest's skip wins over any filter, and
-those tests run on no macOS leg. These legs hold no count to a floor, so under each of the three
-every leg is green. The moved filter's anchor spells the third leg's skips
-whole and the opening of the fourth leg's value, so a change to the table
-re-spells it; the other two spell a leg's opening words.
-
-A deleted macOS leg and the table check were measured by hand instead, on
-2026-11-17, while the macOS legs were three and one `test` job ran them, each
-in the tree and then restored. With the third macOS entry's three lines
-removed from `ci.yml`, three tests of `super` failed, each with the
-`include:` complaint and both tables printed --
-`the_workflow_shape_oracle_refuses_every_escape_the_ledger_names` at its
-clean-workflow check,
-`the_workflow_that_runs_these_tests_installs_the_compiler_they_need` and
-`every_platform_this_crate_configures_for_has_a_clippy_gate_the_aggregate_requires`.
-With `macos-latest` removed from `TEST_LEGS`, the one job's table, and its
-three entries from `ci.yml` together, the same three failed with the table
-complaint, now [`test_jobs_table_complaints`]', and no other. Neither was
-measured again at the split.
+The mutation ledger still changes matrix shape, adds a Windows-labelled entry,
+removes a Linux category leg, replaces a Linux selection, and narrows macOS
+selections. The macOS filter controls remove or move a positive selector,
+drop a kill-path exclusion from a coordinator leg, or append an extra skip.
+These are refused by exact entry equality even when the remaining tests would
+pass. Their anchors name the generated category entries; the earlier numbered
+shards' anchors are no longer the source contract.
 
 ## `fn installs_a_toolchain(step: &Yaml) -> bool {`
 
@@ -563,6 +465,7 @@ shape of [`ci_test_job_complaints`], on one runner and under PowerShell:
 - every step's fields, the case-fold map on the suite, capture and
   observation steps, and the observation's bound;
 - the platform-default shell on every `run:` step;
+- exactly one native category check before the suite;
 - exactly one suite step running [`WINDOWS_SHARD_WITNESS`], the capture
   immediately after it and the observation immediately after that;
 - one input-free checkout at step 0;
@@ -584,7 +487,7 @@ The runner is [`TEST_WINDOWS_PLATFORM`], as a scalar, under
 `test-windows-hosted-runner`: the suite runs on GitHub's runner on every
 event. A label set names a self-hosted machine, and an expression a runner
 this contract cannot read. Measured, `MUT-TEST-WINDOWS-HOSTED-ON-THE-GUEST`:
-the twenty-two legs put on the labels of the guest deleted on 2026-11-20, which no
+the twenty category legs put on the labels of the guest deleted on 2026-11-20, which no
 runner carries, so that every leg queues for a machine that does not exist.
 
 The timeout is exactly [`TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES`], an integer,
@@ -688,15 +591,9 @@ zero. Until the legs reported their tests' times both rows edited the line
 that started `cargo` over the selection; they edit the loop's line now, and
 measure the same thing. Measured,
 `MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED` and
-`MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`. The second is the one no floor
-refuses: every leg runs the tests whose names contain `engine::`, and by the
-counts the ten-shard floors of 2026-11-20 were set from that subset clears
-all twenty-two floors. The first six of those ten shards and the
-ninth, whose filters each contained `engine::`, were 802 tests, and the rest
-of `engine::topology::`, which none of them named, was 484 tests by the
-counts of 2026-11-19: 1,286, above the last leg's 861 and every other floor.
-Before the re-split of 2026-11-20 the subset was the first seven shards'
-tests, 1,295 by those counts, against a last floor of 734.
+`MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`. The second makes every leg run
+names containing `engine::`. Even if that subset clears a floor, it violates
+membership; the script pin refuses it independently of counts.
 
 The same equality holds how the step runs the suite and what it does about a
 test process left running. `MUT-TEST-WINDOWS-HOSTED-SUITE-PIPED-AGAIN` makes
@@ -736,7 +633,7 @@ is refused for that, by a throw that says so.
 `MUT-TEST-WINDOWS-HOSTED-HARNESS-TIMES-DROPPED` starts the harnesses
 without `-Z unstable-options --report-time`. Every leg runs its shard,
 clears its floor and is green, and no log carries a test's time: the times
-the step exists to record are lost on all twenty-two legs, and no exit code or
+the step exists to record are lost on all twenty legs, and no exit code or
 floor shows it.
 
 `MUT-TEST-WINDOWS-HOSTED-LOOP-PASSES-A-FAILED-HARNESS` takes the loop's
@@ -842,25 +739,13 @@ label, the libtest arguments, and the floor. The expected legs and the legs
 read from `ci.yml` are both made of it, so the comparison is one equality
 and a refusal prints both sides field by field.
 
-## `pub(super) fn windows_shard_labels() -> Vec<String> {`
-
-The `shard:` value of each leg, in order: `1 of 22` to `22 of 22`. The count
-is [`WINDOWS_SHARD_FILTERS`]' length and one more, as [`shard_selections`]
-makes one more shard than it is given filter lists, so a list added to the
-table renames every leg and no label is written down.
-
-The label is what GitHub puts in the leg's job name, in place of
-`${{ matrix.shard }}`, and what the suite step prints beside its count.
-[`windows_shard_legs`] is its one reader now. Until 2026-11-20 the picker's
-fixtures in `super` built the legs' listed names from it as well.
-
 ## `fn windows_shard_legs() -> Vec<ShardLeg> {`
 
-The table the job's matrix must equal, derived and never written out: leg
-`k` has the `k`-th label, the `k`-th string [`shard_selections`] makes of
-[`WINDOWS_SHARD_FILTERS`], and the `k`-th of [`WINDOWS_SHARD_FLOORS`].
-`the_shard_tables_run_every_test_in_exactly_one_shard` holds the floors to
-one for each shard, so the three lists are one length.
+The expected Windows entries from `category_legs("windows")`: each generated
+name becomes `shard`, its selector becomes `tests`, and the summed floor is
+converted to an integer for the YAML comparison. There is no parallel label
+or floor table. The twenty entries are named by category, optional
+within-category partition and sorted subcategories.
 
 ## `fn shard_leg(entry: &Yaml) -> Option<ShardLeg> {`
 
@@ -875,174 +760,39 @@ keeps the table to one spelling, a floor that can only be a number.
 
 ## `fn windows_shard_matrix_complaints(job: &Yaml) -> Vec<String> {`
 
-The `strategy:` of [`TEST_WINDOWS_HOSTED_JOB`], whole, under the one code
-`test-windows-hosted-matrix`. Four things, each its own complaint:
+The whole strategy under code `test-windows-hosted-matrix`: exactly
+`fail-fast: false` and a matrix with only `include`, whose ordered entries
+equal `windows_shard_legs()`. Each entry has exactly `shard`, `tests` and
+integer `floor`. The twenty legs derive all three from `TEST_CATEGORIES`.
 
-1. `strategy:` declares exactly `fail-fast` and `matrix`.
-2. `fail-fast` is `false`. Otherwise the first leg to fail cancels the legs
-   still running, and a run reports one shard's failures and none of the
-   others'.
-3. `matrix:` declares exactly `include`. An axis beside the list changes
-   what the list means. GitHub documents that each `include:` entry is added
-   to every combination the axes make where it overwrites none of their
-   values, a later entry overwriting what an earlier one added, and becomes
-   a leg of its own only where it cannot be added. By that rule, with one
-   axis of one value all twenty-two entries land on one combination and the last
-   wins: one leg, the last shard's, and a job whose result is `success`.
-   That is the rule as documented; no workflow was run to watch it.
-4. `include:` is, in order, exactly [`windows_shard_legs`]' twenty-two, each read
-   by [`shard_leg`].
+The first-match and native-list proofs concern those generated selectors.
+This equality binds the workflow to them. A missing or narrowed selector can
+lose tests, a widened one can repeat tests, and a lowered floor can admit a
+suite that executed almost nothing. The suite script's own text pin cannot
+detect changes to values it reads from `matrix`.
 
-The fourth is the one the shard table exists for. The rule that every test
-runs in exactly one shard is proved of [`shard_selections`]' strings; it
-says nothing of a workflow whose strings differ from them. A leg dropped
-from the list, or one whose arguments select less than the table's, runs
-its tests in no leg while the others are green, and the aggregate reads
-one `success`. A leg whose arguments select more runs another shard's tests
-twice. A floor below the table's is one a shard clears having executed
-almost none of its tests; the script's pin cannot see that, since the
-script reads the floor from the matrix ([`WINDOWS_SHARD_WITNESS`]).
+The ledger's matrix controls retain their named failure classes:
 
-In order, though GitHub does not run the legs in order: the order is the
-table's, each leg skipping the filters of the legs before it, and an
-equality over an ordered list is the plain way to hold every leg to its own
-row.
-
-Measured, for the second check, `MUT-TEST-WINDOWS-HOSTED-FAIL-FAST-ENABLED`.
-
-Measured, for the third, `MUT-TEST-WINDOWS-HOSTED-MATRIX-AXIS-ADDED` and
-`MUT-TEST-WINDOWS-HOSTED-SHARD-EXCLUDED`: an axis beside the list, and an
-`exclude:` beside it. Of a list with no axis GitHub documents that its
-entries are processed after `exclude:`, so by that rule the second removes
-no leg today, and the row says so; it is refused as a key the contract does
-not read, as `MUT-TEST-MATRIX-EXCLUDED` is in `test-macos`.
-
-Measured, for the fourth:
-
-- `MUT-TEST-WINDOWS-HOSTED-SHARD-DROPPED`, the second leg's entry deleted;
+- `MUT-TEST-WINDOWS-HOSTED-SHARD-DROPPED` deletes coordinator leg 1 of 6.
 - `MUT-TEST-WINDOWS-HOSTED-SHARD-NARROWED` and
-  `MUT-TEST-WINDOWS-HOSTED-LAST-SHARD-SKIPS-MORE`, a `--skip effects::` put
-  first in the last leg's arguments and put last, after every word the
-  table derives;
+  `MUT-TEST-WINDOWS-HOSTED-LAST-SHARD-SKIPS-MORE` add a leading or trailing
+  skip to workspace leg 2 of 2.
+- `MUT-TEST-WINDOWS-HOSTED-FILTER-DROPPED-FROM-ITS-LEG` removes a positive
+  selector; `MUT-TEST-WINDOWS-HOSTED-FILTER-MOVED-BETWEEN-LEGS` moves one.
+- `MUT-TEST-WINDOWS-HOSTED-SKIP-DROPPED` removes the kill-matrix exclusion
+  from coordinator leg 2, so those tests would execute again.
+- `MUT-TEST-WINDOWS-HOSTED-FILTER-WIDENED` broadens a packed topic prefix.
+- `MUT-TEST-WINDOWS-HOSTED-FILTERS-COMMA-JOINED` makes two filters one
+  substring rather than two alternatives.
 - `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED` and
-  `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-ZEROED`, the last leg's floor at 1
-  and at 0. At 1 the leg must still execute a test; at 0 it is green having
-  executed none;
-- `MUT-TEST-WINDOWS-HOSTED-FILTER-DROPPED-FROM-ITS-LEG`, the third leg's
-  first filter deleted from its own `tests:` and kept in every later leg's
-  skips, so the one test it names runs on no leg;
-- `MUT-TEST-WINDOWS-HOSTED-SKIP-DROPPED`, the last leg's first skip deleted,
-  so the tests it excluded run in the first leg and again in the last;
-- `MUT-TEST-WINDOWS-HOSTED-FILTER-MOVED-BETWEEN-LEGS`, the third leg's last
-  filter moved to the front of the fourth leg's, which still skips it:
-  libtest's skip wins, and its tests run on no leg;
-- `MUT-TEST-WINDOWS-HOSTED-FILTER-WIDENED`, the first leg's
-  `...coordinator::tests::a_review_v` cut to `...tests::a_review_` on its own
-  line, so that leg also runs tests later legs run;
-- `MUT-TEST-WINDOWS-HOSTED-FILTERS-COMMA-JOINED`, the first leg's first two
-  filters joined by a comma: libtest reads the word as one filter, which no
-  test's name contains.
+  `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-ZEROED` change the final workspace
+  leg's floor from 94 to 1 or 0.
+- The fail-fast, extra-axis and exclusion controls change strategy semantics
+  or introduce keys outside the contract.
 
-Two of the last five only raise a leg's count, which no floor refuses. The
-other three lower one leg's count by the tests they lose, which its floor
-refuses only where they take the leg below it: a floor counts tests, not
-which ones. What refuses all five is the equality of each leg's `tests:`
-with the string `shard_selections` derives, word for word.
-
-The deleted leg's anchor is that entry's three lines, so the second leg's
-arguments are written out there, the only place they are. A change to the
-table has to re-spell that
-row; until it does, the row fails saying the workflow moved. The appended
-skip's anchor is the end of the last entry's `tests:` value and its `floor:`
-line, which spells that leg's last skip and not its whole arguments.
-
-The change from five shards to ten, on 2026-11-19, re-spelled each of these
-rows against the new table and kept what each measures: the second leg
-became the coordinator's tests named `a_r...`, the last leg's last skip
-`workspace_manager::` and its floor 734, and the `exclude:` names
-`2 of 10`. The re-split of 2026-11-20 kept the second leg, so the deleted
-leg's anchor and the `exclude:` stand as they were, and moved the last
-leg: its last skip is now `engine::tests::` and its floor is 965, and the
-appended skip's row and the two floor rows are re-spelled with them. No row
-of the then single `test` job's was re-spelled for the macOS table then: none spells a
-macOS leg's whole arguments, and the last macOS leg's last skip was still
-`runner::`. `MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED` kept its anchor and
-had its count restated
-([`ci_test_windows_hosted_job_complaints`]).
-
-The fourteen shards of 2026-11-22, each named by a list of filters,
-re-spelled them again. The second leg's entry is now the one whose own
-filters open with `effects::tests::every_pr6_...` and include the
-coordinator's `...tests::a_p`, with floor 36; the last leg's last skip is
-`engine::tests::a_d` and its floor 969; the narrowed leg and the `exclude:`
-name `14 of 14` and `2 of 14`. On the macOS side
-`MUT-TEST-MACOS-LAST-SHARD-SKIPS-MORE` now anchors on the last macOS leg's
-last skip, `engine::tests::t`. `MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`
-kept its anchor and had its count restated against the fourteen floors.
-
-The re-pack from three timed runs re-spelled them once more. The second
-leg's entry still opens with `effects::tests::every_pr6_...` and goes on with
-`engine::topology::recover::tests::a_k`, `...recover::tests::an`,
-`engine::tests::a_p` and `runner::contract::`, with floor 43; the last leg's
-last skip is `engine::tests::a_f` and its floor 980; and the last macOS
-leg's last skip is `engine::tests::an`. `MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`
-kept its anchor and had the last floor restated. The five Windows rows the
-re-pack added spell short pieces of the first four legs' `tests:` values;
-the moved filter's spells the third leg's skips whole, from its last filter
-to the opening of the fourth leg's value, so a change to the table re-spells
-it too.
-
-The rebalance from the five runs' medians, which moved whole filters
-between legs, re-spelled them once more. The second leg's entry now ends
-its own filters with the coordinator's `...tests::o`, moved there from the
-first leg, with floor 44; the moved filter's row spells the third leg's
-skips, which now end with that `o`, and floor 224; the first leg's first two
-filters, which the comma-joined row joins, are now `...tests::a_h` and
-`...tests::t`; and the last leg's last skip is `engine::tests::f` and its
-floor 985. On the macOS side the last leg's last skip is
-`engine::topology::attempt::`, and the third leg's last filter, which
-`MUT-TEST-MACOS-FILTER-MOVED-BETWEEN-LEGS` moves, is `events::log::`. The
-second macOS leg now names `effects::tests::`, so this oracle's own tests no
-longer run in the last macOS leg; the `--skip effects::` of the two macOS
-skip rows now takes the tests under `topology::effects::` outside its
-`tests` module, such as `topology::effects::registry::`'s, which still run
-there.
-`MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED` kept its anchor and had the last
-floor restated.
-
-The re-pack of 2026-11-25, which divided every suite again to about seven
-minutes a leg, twenty-two Windows legs, twelve macOS and five Linux,
-re-spelled them once more, each row still making the mistake it made. The
-second leg's entry now opens with the coordinator's `...tests::d` and holds
-`engine::topology::integrate::`, with floor 20, the first leg's six filters
-its skips. `effects::tests::every_pr6_...` opens the third leg now, so the
-row that drops it from its own leg names the third leg. The moved filter is
-the third leg's last, `agent::`, and its anchor spells that leg's twelve
-skips and floor 163. The first leg's first two filters, which the widened
-and the comma-joined rows edit, are `...tests::a_review_v` and
-`...tests::a_reg`: cut by its last character the first becomes
-`...tests::a_review_`, which also takes the sixth leg's `a_review_i`. The
-last leg is `22 of 22`, its first skip `...tests::a_review_v`, its last
-`engine::tests::t` and its floor 861, and the `exclude:` names `2 of 22`.
-On the macOS side the last leg is `12 of 12`, its first skip
-`...interleaving::r` and its last `runner::contract::`; the second leg's
-first filter is `...interleaving::e`; and the third leg's last filter,
-which `MUT-TEST-MACOS-FILTER-MOVED-BETWEEN-LEGS` moves, is
-`engine::tests::a_k`. `MUT-TEST-UBUNTU-LEG-FILTERED` and
-`MUT-CI-TEST-MATRIX-NARROWED` spell the five Linux legs. Every row's count
-of legs, shards and filters was restated with them.
-
-Before that row a deleted leg was measured by hand, on 2026-11-17, while
-the legs were five, in `ci.yml` itself and then restored: with the fifth
-entry's three lines removed, three tests of `super` failed, each with the
-fourth complaint and both tables printed --
-`the_workflow_shape_oracle_refuses_every_escape_the_ledger_names` at its
-clean-workflow check,
-`the_hosted_windows_shards_run_the_suite_on_the_compiler_they_install`
-under the name it then had, and
-`every_platform_this_crate_configures_for_has_a_clippy_gate_the_aggregate_requires`.
-The same three failed the same way with the second leg's `--skip` naming
-`tests::b`.
+Floors count executions, not membership. The exact matrix comparison is what
+refuses all these edits regardless of whether a changed selection still
+clears its passing-test floor.
 
 ## `fn capture_complaints(`
 
@@ -1644,51 +1394,23 @@ that lands somewhere unintended, or that no longer matches because the
 workflow moved, is a mutation nobody measured. Both are failures here rather
 than a quietly weaker test.
 
-## `pub(super) fn shard_selections(table: &[&[&str]]) -> Vec<String> {`
+## `fn category_check_complaints(job: &Yaml, id: &str, command: &str, suite: &str) -> Vec<String> {`
 
-The libtest arguments of each shard an ordered table of filter lists makes:
-the shard rule, in one place.
+Require exactly one step whose `run` equals the platform's category-check
+constant, and require its position before the suite step. Otherwise return
+`test-categories`. Linux uses the Bash command, Windows the Python command,
+and macOS the entire pinned conditional script, whose unit-leg prefix must
+match a generated label. Step field and script pins still govern the check.
 
-A table of `n` lists makes `n + 1` shards. Shard `k` gets the filters of list
-`k`, in order, then `--skip F` for each filter `F` of every list before it,
-in table order; the last shard gets only the skips, one for every filter of
-the table. The words of each are joined by single spaces. So
-`[&["a::", "c::"], &["b::"]]` gives `a:: c::`, `b:: --skip a:: --skip c::`
-and `--skip a:: --skip c:: --skip b::`, and an empty table gives one empty
-string: one shard with no arguments, which is the whole suite.
-
-That divides any set of test names, whatever the filters are, provided each
-is one word libtest reads as a filter and no list is empty. libtest runs a
-test when its name contains any of the filters, or no filter was given, and
-contains no skip string. Take the first list in the table holding a filter
-the name contains. Every shard before that list's asks only for filters the
-name does not contain; that list's own shard asks for one it does contain
-and skips only filters the name does not contain; and every shard after it,
-the last included, skips that filter. A name that contains no filter is run
-by the last shard and by no other. So each name runs in exactly one shard,
-and nothing about prefixes or modules is assumed, which is as well: a filter
-is a substring of the whole path.
-
-The proviso is the caller's. An empty filter is no word at all, one with
-whitespace in it is two, and one that starts with `-` is an option; an empty
-list is a shard with no filter, which runs every test no earlier shard ran.
-`the_shard_tables_run_every_test_in_exactly_one_shard` in `super` refuses
-each in the three tables of `super::ci_model`, and a filter listed twice in
-a table, whose later place skips it or names it again. The same test holds
-the count of each table's strings, the first of each and the last Windows
-one, and the five Linux strings to written-out literals.
-
-One function, so that the tables and anything derived from them cannot
-disagree about the rule. The Windows shards' matrix is the first thing derived
-from one: [`windows_shard_legs`] takes each leg's arguments from here, and
-`ci.yml` is held to them. The `test-linux` and `test-macos` matrices are the second:
-[`test_legs`] takes the twelve macOS legs' arguments and the five Linux legs'
-from here. Until the Linux suite was divided its one leg's came from the
-empty list, whose one string is the whole suite.
+The check lists the native inventory, including ignored registrations, without
+executing test bodies. The ledger removes Linux and Windows checks and changes
+the macOS condition to name no leg. First-match ownership and generation live
+in `ci_model::TEST_CATEGORIES` and `ci_model::category_legs`; there is no
+`shard_selections` catch-all builder.
 
 ## `pub(super) fn libtest_runs(selection: &str, name: &str) -> bool {`
 
-Whether libtest, handed one of [`shard_selections`]' strings as its
+Whether libtest, handed one of `ci_model::category_legs`' selectors as its
 arguments, selects the test called `name`: a model of its rule, so that a
 table can be shown to divide a set of names without a harness being run.
 
@@ -1700,6 +1422,6 @@ Containment, not equality and not a prefix: that is libtest's rule without
 the model cannot read as a selection must not count as one that runs a test.
 
 It models those two kinds of word and no other. Any other option would be
-read as a filter, and [`shard_selections`] emits none. It also says nothing
+read as a filter, and `category_legs` emits none. It also says nothing
 of `#[ignore]`: a selected test that is ignored is reported ignored by its
 shard, as it is by the whole suite.

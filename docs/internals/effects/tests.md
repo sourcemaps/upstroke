@@ -2164,10 +2164,10 @@ line of the comment-stripped text, and whether the file contained the test
 command anywhere; both survive an `echo`, and the strip existed only because
 the job's own comment spelled the needle.
 
-Every platform, and now every leg: the Linux suite runs as five shards in
-`test-linux` and the macOS suite as twelve in `test-macos`, and the oracle
-holds each job's matrix to the legs it derives from that job's row of
-`TEST_JOBS` (`test_leg_matrix_complaints` in the workflow notes).
+Every platform, and every leg: the Linux suite runs as seven category legs in
+`test-linux` and the macOS suite as nine in `test-macos`. The oracle holds each
+job's matrix to `category_legs` for its `TEST_JOBS` runner
+(`test_leg_matrix_complaints` in the workflow notes).
 
 The test also asserts the table itself: one job per platform that hosts
 tests, `test-linux` on `ubuntu-latest` and then `test-macos` on
@@ -2284,11 +2284,12 @@ and its line carries no time. libtest writes the time apart from the
 result, so a child a test starts on the harness's console can write between
 them and move the time to the next line; the `mklink` that `link_dir` in
 `src/rundir/tests.rs` starts was one, and `link_dir` now captures its
-output. The tests were packed into legs (`WINDOWS_SHARD_FILTERS`) by those
+output. The tests were packed into the earlier numbered legs by those
 times on 2026-11-22 and re-packed from three timed runs on 2026-11-23, as
 `MAINTAINING.md` step 3 records, then rebalanced by the median of each
-test's times over five runs, as the notes on `WINDOWS_SHARD_FILTERS` in
-`docs/internals/effects/tests/ci_model.md` record.
+test's times over five runs. The history under `TEST_WINDOWS_HOSTED_JOB` in
+`docs/internals/effects/tests/ci_model.md` records those earlier layouts;
+their timings do not measure the category layout.
 `--report-time` is unstable: libtest takes it only after
 `-Z unstable-options`, and on a stable compiler takes that only where
 `RUSTC_BOOTSTRAP` is set in the harness's own environment, which line 7 of
@@ -2506,7 +2507,7 @@ variable is set, compiles it again with it, and turns the feature on where
 that compiles. Each also has Cargo run it again whenever the variable
 changes. Under the variable the three, and every harness built over them,
 are built otherwise than the legs of `test-linux` and `test-macos` and a user's machine build
-them, from a tree nobody changed, on these twenty-two legs alone. That is read
+them, from a tree nobody changed, on these twenty Windows legs alone. That is read
 from the three build scripts at the versions `Cargo.lock` held on
 2026-11-21; no build here was made with the variable set.
 
@@ -2562,7 +2563,7 @@ selection is, is the exact line's to hold
 The times are the one thing this step does that nothing downstream judges.
 Without them every leg runs its shard, clears its floor and is green; what
 is lost is the record a later change is to pack the legs from, on all
-twenty-two at once, and no check would fail to say so. Measured by one edit in
+twenty at once, and no check would fail to say so. Measured by one edit in
 [`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`], the
 two arguments removed; in the workflow alone,
 `MUT-TEST-WINDOWS-HOSTED-HARNESS-TIMES-DROPPED`.
@@ -2795,7 +2796,7 @@ runs Cargo or a harness, which is what the ninth of the ten refuses.
 
 Line 13 must open `if ($passed -lt ${{ matrix.floor }}) { throw `. No floor
 is a number in the text: the matrix hands each leg its own, and the oracle
-holds the matrix to `WINDOWS_SHARD_FLOORS`. Without this assertion those
+holds the matrix to `category_legs`' summed Windows floors. Without this assertion those
 could be floors no leg tests, with the workflow and the constant edited
 together and the pin holding. The fourteenth line, which prints the count,
 is held by the oracle's pin alone.
@@ -2992,107 +2993,61 @@ measured again since the test became these two assertions.
 
 ## `fn the_shard_tables_run_every_test_in_exactly_one_shard() {`
 
-The three shard tables of the CI model, `WINDOWS_SHARD_FILTERS`,
-`MACOS_SHARD_FILTERS` and `LINUX_SHARD_FILTERS`, each divide the suite:
-every test runs in exactly one shard. The test reads no workflow. It was the
-proof that came before any line of `ci.yml` was derived from a table. All
-three matrices now are: `windows_shard_matrix_complaints` in the workflow notes is
-what holds the Windows shards' to the Windows table, and
-`test_leg_matrix_complaints` what holds `test-macos`'s twelve legs to the
-macOS table and `test-linux`'s five legs to the Linux table.
+The structural checks on `TEST_CATEGORIES` and `category_legs`, without
+reading the workflow. There are seven Linux selections, nine macOS and
+twenty Windows. Each has a positive selector, and none selects the synthetic
+`unclassified::inert` name. Every Windows floor is positive and their sum
+is the unchanged `WINDOWS_TEST_FLOOR`, 1700.
 
-Five claims.
+The sample names pin category boundaries: topology model tests containing
+`effects::` stay in unit, engine and coordinator names select their own
+categories, the CLI prefix is `cli_tests::`, and ignored record names still
+belong to engine or runner. The ten platform-only names whose test families
+moved are checked under every platform's selectors, even where the local
+compiler does not register them. Every sample selects exactly one leg with
+the expected category prefix.
 
-1. The tables yield twenty-two Windows selections, twelve macOS ones and
-   five Linux ones, as [`shard_selections`] derives them. Each table's first
-   selection is its first filter list joined by spaces, with no skip, and
-   the last Windows selection is exactly a `--skip` for each of the table's
-   109 filters, in table order: the two ends of the rule, stated a second
-   way.
-2. The Linux table's five are written out as literals, the `tests:` values
-   of `test-linux`'s five legs in order, and a table with no list gives one
-   empty string -- one shard, no arguments, the whole suite. No runner's
-   table is empty since the Linux suite was divided; the empty one stays as
-   the rule's base case.
-3. Each of fourteen names is run by exactly one selection of each table
-   under [`libtest_runs`], and by the one named beside it, in a column for
-   each of the three tables; under the empty table's one selection every
-   name runs. The names are the boundaries of the rule, with the Windows
-   shard of each and the filter that puts it there:
-   - coordinator tests named `a_pipeline_is_served_while_an...` (shard 16,
-     `...tests::a_pipeline_is_served_while_an`), which the filters that
-     open `a_pipeline_is_served_while_a_` do not reach, and `a_registry...`
-     (1, `...tests::a_reg`); one that no coordinator filter names,
-     `a_budget_stop_drains` (22); and `halt...` (6, `...tests::h`);
-   - a test named `a_...` in the coordinator's `interleaving` module (19,
-     `...interleaving::a`), which the coordinator's `...tests::a_` filters
-     do not reach because each is a substring that runs through `tests::a_`;
-   - a recovery test (12, `...recover::tests::k`) and an attempt test (17,
-     `engine::topology::attempt::`);
-   - `engine::tests::host_acceptance_record` (22), which no
-     `engine::tests::` filter names, and `engine::tests::a_kept_pin...` (14,
-     `engine::tests::a_k`);
-   - a runner test (5, `runner::container::`);
-   - `workspace_manager::tests::engine::a_name_with_a_filter_inside_it` (2,
-     `workspace_manager::tests::e`), a name outside the engine that contains
-     `engine::`. No table has a bare `engine::` filter since the Linux one
-     was divided again on 2026-11-25, and the name contains no
-     `engine::tests::` filter: `engine::a_n` is not `engine::tests::a_n`.
-     So in each table the workspace manager's filter decides. libtest's
-     filter is a substring, so a filter that did occur inside the name
-     would run it in that filter's shard and every later shard would skip
-     it: once, as for any other name;
-   - a workspace manager test named `a_...` (9, `workspace_manager::tests::a`);
-   - a library test that contains no filter (22), and a name with no module
-     before `tests::`, which is how a harness lists a test at its crate's
-     root, the bin harness's among them (22).
+Each category/subcategory pair is unique; row filters are nonempty, and
+each row or Windows partition filter is a nonempty word with no whitespace
+or leading dash. This test's samples are not a census. The native inventory
+test below supplies that check, and the generator test binds the Python and
+Rust representations.
 
-   On macOS the same fourteen fall in shards 10, 2, 12, 12, 7, 7, 10, 12,
-   3, 8, 6, 10, 12 and 12: there the tenth list takes the coordinator's
-   `a_pipeline_is_served_while_an...` tests, by a filter of that name, which
-   the fourth list's `...while_a_` does not reach, and with them the attempt
-   tests and the workspace manager's named `a...`; the second takes the
-   coordinator's `a_r...` tests; the third the engine's own `a_k...`; the
-   sixth the workspace manager's `e...` tests; the seventh the
-   `interleaving` tests named `a...` and the recovery tests named `k...`;
-   the eighth `runner::container::`; and no macOS filter names the
-   coordinator's `a_b...` or `halt...`. In the Linux column the
-   `interleaving` and recovery tests fall in shard 1, under
-   `...interleaving::` and `engine::topology::recover::`; the coordinator's
-   `a_r...` in 2; the attempt test, the engine's own two and the runner's
-   test in 3, under `engine::topology::attempt::`, `engine::tests::` and
-   `runner::container::`; the coordinator's `a_p...` and the workspace
-   manager's two in 4; and the coordinator's `a_b...` and `halt...` and the
-   last two in 5.
-4. In all three tables no list is empty, no filter is empty, contains
-   whitespace or starts with `-`, and no filter appears twice anywhere in
-   the table. An empty list is a shard with no filter, which runs every test
-   no earlier shard ran. Each filter is one word of a command line: an empty
-   one is no word, so its own shard loses a filter and a later shard's
-   `--skip` takes the next word as its string; one with whitespace is two
-   words; one that starts with `-` is an option. A repeated filter is
-   skipped by its own later shard, or named twice by one.
-5. `WINDOWS_SHARD_FLOORS` has one entry for each Windows shard, each above
-   zero, and they sum to [`WINDOWS_TEST_FLOOR`], 1700: the floor the whole
-   suite was held to as one job. The twenty-two legs together must not
-   accept fewer passing tests than that job did. No script reads the 1700
-   now; it is the sum the twenty-two floors are held to.
+## `fn category_tool(args: &[&std::ffi::OsStr]) -> std::process::Output {`
 
-Fourteen names are examples, not a census of the suite, and the test does
-not ask whether a test of each name exists. That the rule divides every set
-of names is the argument in the workflow notes, under `shard_selections`;
-these are the cases that argument turns on, executed. The names were
-thirteen until the re-split of 2026-11-20, which added the engine test
-named `a_...`: the Windows table then gained a filter that divides
-`engine::tests::` by the opening of a test's name.
+Run the repository's `test-categories.py` with `python` on Windows and
+`python3` elsewhere, capturing its output for the caller's assertions.
 
-Measured, while the Windows table made five shards and the names were
-eight, by making [`libtest_runs`] read a skip string as a prefix of the
-name rather than a substring, and restoring it: this test failed on
-`workspace_manager::tests::engine::a_name_with_a_filter_inside_it`, run by
-Windows shards 4 and 5 of that table. It was not measured again for the
-ten, of 2026-11-19 or of the re-split, for the fourteen of 2026-11-22, or
-for the twenty-two of 2026-11-25.
+## `fn the_category_generator_and_workflow_use_the_rust_registry() {`
+
+Read the tool's `contract` JSON and compare its parsed registry to the
+compiled `TEST_CATEGORIES`. Compare generated names, selectors and floors
+for all three platforms to `category_legs`, then require
+`generate --check` to accept the checked-in workflow blocks. Planning
+inventories and timing files are not inputs to either representation.
+
+## `fn the_category_selectors_agree_with_the_native_libtest_inventory() {`
+
+Run `check --explain` over Cargo's real native all-target, all-feature list
+and require nonzero `unit/cli` membership. This validates first-row ownership,
+exactly one generated selection per registration, and an empty remainder
+when all category filters are skipped. Ignored registrations are included.
+
+Then run `prove --harness` on the current library harness: libtest itself
+lists each generated selection, and each set must equal the first-match
+owner's set. Across legs every registration must occur exactly once, and the
+all-skipped list must be empty. The nested Cargo listing reuses the enclosing
+build slot; it does not allocate another slot or execute test bodies. These
+are native proofs, so the other operating systems still supply their own
+inventories in CI.
+
+## `fn the_category_check_refuses_an_inert_unclassified_registration_including_ignored_tests() {`
+
+Compile a libtest fixture twice. Both builds contain ordinary and ignored
+`cli_tests::` registrations; the second adds the ignored, unclassified
+`newly_registered_unclassified`. The first must pass `prove`; the second
+must fail with that name and `TEST_CATEGORIES` in its diagnostic. Every
+fixture body panics if executed, making this a listing-only refusal witness.
 
 ## `mod merge_gate_answers {`
 

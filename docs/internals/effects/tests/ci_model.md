@@ -51,7 +51,7 @@ refuses one, and adding one means restoring a native `macos-latest` Clippy
 leg. `lint (macos)` ran on `macos-latest` until GitHub's cap of five macOS
 jobs at once for the account met seven per run -- this leg, an `msrv` entry
 and the five macOS test legs -- and run 45175187088 showed each macOS job
-starting as another ended. The macOS test legs, twelve since 2026-11-25,
+starting as another ended. The macOS test legs, nine under the category registry,
 still run natively, and the
 `msrv` entry is native again: [`CiTarget`]'s `msrv_runner` says why.
 
@@ -80,10 +80,10 @@ here, as it is in `ci.yml`; GitHub replaces it with the leg's `tests:` value
 from the job's matrix (its row of [`TEST_JOBS`]) before bash reads the line. What follows `--` goes to
 libtest in every harness `--all-targets` builds.
 
-- On every leg, Linux or macOS, the value is the shard's filters, if it has
-  any, and a `--skip` for each filter of the legs before it on the same
-  runner. Without the selection each of the seventeen legs runs its platform's
-  whole suite.
+- On every leg, Linux or macOS, the value is the positive filters and skips
+  derived by `category_legs` from `TEST_CATEGORIES`. The skips preserve
+  first-row ownership and the platform partitions; display order is not
+  priority. Without the selection all sixteen legs run their platform's whole suite.
 - Until the Linux suite was divided its one leg's value was the empty
   string: the line ended at `--`, libtest was handed nothing, and the leg
   ran the whole suite, as it did when the step was [`TEST_COMMAND`] alone.
@@ -140,51 +140,50 @@ checkout and the pinned test command that follows all still matched.
 Measured, `MUT-TEST-WINDOWS-HOSTED-RUN-RETARGETED` and
 `MUT-TEST-RUN-RETARGETED`.
 
-## `pub(super) const TEST_SCRIPTS: [&str; 4] = [`
+## `pub(super) const CATEGORY_CHECK: &str = "bash .github/scripts/test-categories.sh";`
 
-Every script `test-linux` and `test-macos` may run: the identity script, the suite
-over the leg's selection ([`TEST_SHARD_COMMAND`]),
-[`HOST_ACCEPTANCE_CAPTURE`] and [`CAPABILITY_OBSERVATION`]. Each is one exact
-string; the list grows by one pinned script at a time, and nothing in it is a
-pattern.
+The native inventory check in Linux lint and before every Linux suite.
+It lists all targets and features, including ignored registrations, checks
+first-match ownership and one generated selection per name, then lists again
+with all category filters skipped. The remainder must be empty.
 
-## `pub(super) const TEST_WINDOWS_HOSTED_SCRIPTS: [&str; 4] = [`
+## `pub(super) const CATEGORY_CHECK_WINDOWS: &str = "python .github/scripts/test-categories.py check";`
 
-The scripts every leg of [`TEST_WINDOWS_HOSTED_JOB`] runs: the identity
-script, the suite with the witness that it executed
-([`WINDOWS_SHARD_WITNESS`]), [`HOST_ACCEPTANCE_WINDOWS_CAPTURE`] and
-[`CAPABILITY_WINDOWS_OBSERVATION`]. Each is one exact string, as in
-[`TEST_SCRIPTS`].
+The same check under the Windows runner's Python, before every suite witness.
 
-The identity script is the one `test-linux` and `test-macos` run, the same on any runner. The two
-acceptance-record steps were the guest's job's as well until 2026-11-20,
-the same two constants, because neither depended on the guest's image: each
-runs the test it names and checks the frame it prints, and every container
-capability class passes, an absent Docker included. Each of the twenty-two
-legs runs both, after its own share of the suite, so a run prints twenty-two
-Windows host acceptance records and twenty-two capability observations, where
-the guest's
-one job printed one of each.
+## `pub(super) const CATEGORY_CHECK_MACOS: &str = r#"if [[ '${{ matrix.leg }}' == 'macos-latest, unit ('* ]]; then`
+
+The exact conditional script for macOS. It runs the native inventory check
+before the unit leg's suite. Other macOS legs reach the step but do not list.
+A Linux inventory cannot establish macOS-only membership.
+
+## `pub(super) const TEST_SCRIPTS: [&str; 6] = [`
+
+The scripts Linux and macOS test jobs may run: identity setup, the direct and
+conditional category checks, the selected suite, host acceptance capture and
+container capability observation. These are exact strings, not patterns.
+The oracle requires the appropriate check exactly once before the suite.
+
+## `pub(super) const TEST_WINDOWS_HOSTED_SCRIPTS: [&str; 5] = [`
+
+The Windows scripts: identity setup, native category check, suite witness,
+host acceptance capture and container capability observation. Each of the
+twenty legs runs both record steps after its suite. These remain separate
+executions of named ignored registrations, outside the ordinary suite's
+passing-test count.
 
 ## `pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;`
 
-The sum the twenty-two shard floors must make ([`WINDOWS_SHARD_FLOORS`]): the
-floor the whole Windows suite was held to as one job. No script reads it
-now. Each leg is held to its own floor, and
-`the_shard_tables_run_every_test_in_exactly_one_shard` holds the twenty-two to this
-sum, so the legs together accept no fewer passing tests than the one job
-did.
+The sum of the twenty Windows legs' floors, retained from the whole-suite
+execution witness. Each floor sums its selected `TEST_CATEGORIES` partition
+contributions; every combined floor is positive.
+`the_shard_tables_run_every_test_in_exactly_one_shard` holds the sum to this
+constant; the suite script reads its own `matrix.floor`.
 
-At `cb8ac1f` the one job reported 1771: 1761 from the lib harness, 10 from
-the bin one, 0 from the example. The floor sat below that by a margin wide
-enough that ordinary churn did not touch it and narrow enough that a suite
-which silently stopped running could not clear it. The ten legs counted
-3,558 passing tests between them in run 44736631711, when each floor was
-about 0.48 of its shard's count. The twenty-two of 2026-11-25 divide 3,806
-tests, the Windows list of run 45513139892, and each floor is about 0.45 of
-its shard's share of them ([`WINDOWS_SHARD_FLOORS`]). Dropping this many
-Windows tests is a deliberate act, and it edits the shard floors and this
-number in the same change.
+The total is a minimum number of passing tests, not an inventory size. The
+allocation uses the recorded Windows inventory described under
+`TEST_CATEGORIES`. A deliberate change to the total edits the partition
+contributions and this constant together.
 
 ## `pub(super) const WINDOWS_SHARD_WITNESS: &str`
 
@@ -254,12 +253,10 @@ crate, and the suite itself was not run). The fifth,
 `the_file_level_lint_reader_answers_what_rustc_does`, links nothing and
 passes on the other compiler, but only in a run the other four have already
 failed. So no green run of the leg that runs those four has spawned a
-fixture compiler other than the one Cargo built with. By
-[`WINDOWS_SHARD_FILTERS`] that is the last leg, the one with no filter: the
-five fixtures' paths contain none of the table's 109 filters. That bound is the fixtures',
-not the questions', and it rests on those four tests running on a Windows
-leg, which nothing here pins by name: the floors count tests, not which
-ones.
+fixture compiler other than the one Cargo built with. Those effects fixtures
+belong to the `self-checks` leg under `TEST_CATEGORIES`. That bound is the
+fixtures', not the questions'. Their membership is checked by the category
+inventory and selectors; passing-test floors alone do not name tests.
 
 The step now starts the harnesses itself (line 7), and Cargo builds none
 of their processes. A harness has the step's own environment, with
@@ -397,8 +394,8 @@ run, and its line carries no time. libtest writes the time apart from
 the result, so a child a test starts on the harness's console can write
 between them and move the time to the next line; the `mklink` that
 `link_dir` in `src/rundir/tests.rs` starts was one, and `link_dir` now
-captures its output. The tests were packed into legs
-([`WINDOWS_SHARD_FILTERS`]) by those times: on 2026-11-22 by CI run
+captures its output. The tests were packed into the earlier numbered legs
+by those times: on 2026-11-22 by CI run
 45045067738's, and again on 2026-11-23 by the mean of each test's times over
 CI runs 45045067738, 45161322179 and 45233912312 (`MAINTAINING.md` step 3).
 The filters were then rebalanced by the median of each test's times over CI
@@ -558,10 +555,10 @@ After the suite, lines 12 to 14 are the count:
 The floor is not in this text. It reaches the script from the matrix, so
 the equality over the script holds that line 13 reads `matrix.floor` and
 the oracle's check of the matrix holds what each leg's floor is
-([`WINDOWS_SHARD_FLOORS`]); a lowered floor in the table leaves this pin
+(`category_legs`' summed Windows contributions); a lowered floor in the workflow leaves this pin
 intact and is refused there. The same division holds the selection: this
 text says line 7 reads `matrix.tests`, and the matrix check says what each
-leg's is ([`WINDOWS_SHARD_FILTERS`]).
+leg's is (`category_legs`' selectors).
 `the_windows_leg_counts_the_tests_it_ran` holds line 13 to opening with the
 test of `matrix.floor`, so the floors the oracle holds the matrix to are
 floors a leg tests. Line 14 is held by the oracle's pin alone.
@@ -585,8 +582,8 @@ guest's job ([`TEST_WINDOWS_HOSTED_JOB`]).
 The hosted `test-linux` and `test-macos` jobs' capture of the native HOST acceptance record (G7,
 root direction `087fea89`), character for character. It runs on every leg in
 GitHub's default `bash -e` and must stand immediately after the suite step;
-each of the twelve macOS legs and the five Linux legs runs it after its own
-share of the suite, so a run prints twelve macOS records and five Linux ones
+each of the nine macOS legs and the seven Linux legs runs it after its own
+share of the suite, so a run prints nine macOS records and seven Linux ones
 where it printed one of each.
 Line by line:
 
@@ -663,8 +660,8 @@ those edits are measured on the capture of `test-linux` and `test-macos`
 
 The hosted `test-linux` and `test-macos` jobs' container capability observation (G7, root direction
 `ecf15a9c`, contract version 2 under its root audit 2), character for
-character. It runs on every leg in GitHub's default `bash -e`, the twelve
-macOS legs and the five Linux legs each, and must stand immediately after
+character. It runs on every leg in GitHub's default `bash -e`, the nine
+macOS legs and the seven Linux legs each, and must stand immediately after
 [`HOST_ACCEPTANCE_CAPTURE`]. Line by line:
 
 1. `set -eo pipefail`. Under `bash -e` a pipeline takes its status from `tee`;
@@ -765,10 +762,15 @@ was the guest's 20-minute job. Measured, `MUT-TEST-CAPABILITY-TIMEOUT-DROPPED`,
 
 ## `pub(super) const FMT_GATE: &str = "cargo fmt --check";`
 
-The formatter gate and the six shell gates the `lint` job runs from the
-repository root, character for character.
+The formatter gate, character for character.
 
-## `pub(super) const GATE_SCRIPTS: [&str; 10] = [`
+## `pub(super) const SHELL_GATES: [&str; 7] = [`
+
+The six baseline Bash gates plus the native category inventory check that
+`lint` runs from the repository root. The listing check supplements the
+unchanged ten-command local baseline.
+
+## `pub(super) const GATE_SCRIPTS: [&str; 11] = [`
 
 Every script a gate job may run, the native and the macOS cross Clippy gate
 among them. A union across the three gate jobs rather than a set per job:
@@ -887,7 +889,7 @@ to this runner and [`TEST_JOBS`]' rows to every other. Measured,
 ## `pub(super) const TEST_WINDOWS_HOSTED_JOB: &str = "test-windows-hosted";`
 
 The job that runs the Windows suite, on every event: a pull request, a push
-to `master` and a merge-queue entry alike. It is a matrix of twenty-two legs on
+to `master` and a merge-queue entry alike. It is a matrix of twenty category legs on
 GitHub's `windows-latest`, each on a runner of its own. Each leg installs
 [`GOLDEN_IMAGE_TOOLCHAIN`] with `clippy` at step 1 and then runs
 [`TEST_WINDOWS_HOSTED_SCRIPTS`]: one shard of the suite, on the pinned
@@ -901,8 +903,9 @@ suite's two homes (History, below).
 
 The name is `test (windows-latest, ${{ matrix.shard }})`, an expression, and
 the constant holds it as the workflow writes it. GitHub lists each leg under
-the name with its shard in place, `test (windows-latest, 1 of 22)` to
-`test (windows-latest, 22 of 22)`. The oracle holds the `name:` to the
+the name with its category, optional partition number and sorted subcategories:
+`test (windows-latest, coordinator 1 of 6 (registry_waits, snapshot_registration))`,
+for example. The oracle holds the `name:` to the
 constant, and nothing reads the legs' listed names: until 2026-11-20 they
 were the names another run's picker was handed, and it read none of them.
 
@@ -953,17 +956,17 @@ time would be about ten minutes or less, the target until 2026-11-25. The
 rebalance was not timed before it landed: the CI run of the pull request
 that landed it was its first measurement.
 
-Twenty-two legs since 2026-11-25, each but the last named by a list of
-filters ([`WINDOWS_SHARD_FILTERS`]), when every suite was divided again so
-that each leg takes about seven minutes, with the organisation's limits
+The preceding layout had twenty-two legs from 2026-11-25, each but the last
+named by a list of filters, when every suite was divided again to target
+about seven minutes per leg, with the organisation's limits
 raised to 500 jobs and 50 macOS jobs. From the five complete runs
 45503042270, 45505425187, 45506422808, 45508617577 and 45513139892 a Windows
 job's fixed part -- setup, compile, the two record captures and teardown --
 is a median of 210 s, and a run spends 4760 s running Windows tests. A leg
 takes about the fixed part plus its share; one more leg would save about
-9 s, and each of the twenty-two is predicted at 421 to 428 s. The re-pack
-was not timed before it landed: the CI run of the pull request that lands
-it is its first measurement.
+9 s, and each of those twenty-two was predicted at 421 to 428 s. The re-pack
+was not timed before it landed. These predictions describe that earlier
+layout, not measured performance of the category layout.
 
 Single tests set a floor under every leg. A leg takes no less than its
 longest test plus the job's fixed minutes, and in run 45045067738 the two
@@ -978,7 +981,7 @@ first of the two takes about 189 s, so the leg that runs it takes no less
 than about 399 s with the fixed part, under the 421 to 428 s each leg is
 predicted at.
 
-The aggregate reads the twenty-two legs through one result,
+The aggregate reads the twenty category legs through one result,
 `needs.test-windows-hosted.result`, as it reads the `test-linux`,
 `test-macos` and `msrv` matrices through one result each, and it accepts `success` alone from it, as
 from every gate ([`AGGREGATE_SCRIPT`]). `fail-fast` is `false`, so a failed
@@ -1086,247 +1089,103 @@ a leg's 40 minutes is not measured, and adding a cache step is a change of
 its own, made together with this refusal. Measured,
 `MUT-TEST-WINDOWS-HOSTED-CACHE-RESTORED`.
 
-## `pub(super) const WINDOWS_SHARD_FILTERS: [&[&str]; 21] = [`
+## `pub(super) struct TestCategory {`
 
-The ordered filter lists that divide the Windows suite into twenty-two shards,
-as data: the table the matrix of [`TEST_WINDOWS_HOSTED_JOB`] is held to. The
-table came first, with the proof that it loses no test and repeats none, and
-the matrix is derived from it rather than written beside it:
-`windows_shard_matrix_complaints` in `super::workflow` requires each leg's
-`tests:` in `ci.yml` to be the string `shard_selections` makes of this table
-for that shard, in order. The second shard's string is written out once more,
-in the anchor of the ledger row that deletes that leg,
-`MUT-TEST-WINDOWS-HOSTED-SHARD-DROPPED`, and the third shard's skips in the
-anchor of `MUT-TEST-WINDOWS-HOSTED-FILTER-MOVED-BETWEEN-LEGS`; the other rows
-are under `windows_shard_matrix_complaints` in the workflow notes.
+One registry row; the field meanings and first-match rule are below.
 
-The rule is `shard_selections`' in `super::workflow`. Shard `k` runs the tests
-whose names contain any filter of list `k` and no filter of any list before
-it, and one more shard, after the last list's, runs the tests that contain
-none of them. Twenty-one lists, 109 filters in all, make twenty-two shards;
-the twenty-second runs everything no filter names, the bin harness's tests
-among them.
+## `pub(super) const TEST_CATEGORIES: &[TestCategory] = &[`
 
-The lists of 2026-11-25 come from the median of each test's `--report-time`
-seconds over the five complete CI runs 45503042270, 45505425187,
-45506422808, 45508617577 and 45513139892, converted to a leg's wall time by
-the parallelism those runs measured, and packed so that each leg, its fixed
-part and its share of the tests, takes about seven minutes
-([`TEST_WINDOWS_HOSTED_JOB`]). 14 of the 109 filters are a whole module
-path ending `::`, such as `runner::container::`, `agent::` or
-`engine::topology::ledger::`, and the rest open a test's name in one large
-module, such as `engine::topology::coordinator::tests::a_review_v` or
-`engine::tests::l`. Five of those are a single test's whole path.
+`TEST_CATEGORIES` replaces the three flat platform filter tables. Each row names
+a category, subcategory, substring filters, its macOS leg number, and Windows
+partitions as `(leg, passing-test floor contribution, filters)`. An empty partition
+filter list inherits the row's filters; it never means an unfiltered test run.
+Linux has one leg per category. The first matching row owns a registration,
+including an ignored registration. Split topic rows precede their broad residual
+row. Windows partitions refine that ownership with substring filters, not a
+starts-with predicate. An unassigned or multiply assigned partition fails the check.
 
-The fourteen shards of 2026-11-22 to 2026-11-25 came from the median of each
-test's measured Windows times over CI runs 45259861458, 45265008874,
-45269007219, 45273775506 and 45337940696, which rebalanced lists packed from
-the mean of each test's times over CI runs 45045067738, 45161322179 and
-45233912312 by moving whole filters between shards; the first lists of
-2026-11-22 came from run 45045067738's alone. Tests were packed into shards
-whole module by whole module, and a module was split by the opening of its
-tests' names only where it alone exceeded a shard's budget: 12 of their 69
-filters were a whole module path, and three a single test's whole path.
+## `pub(super) struct CategoryLeg {`
 
-The list was four filters and five shards until 2026-11-19:
-`engine::topology::coordinator::tests::a`, the rest of
-`engine::topology::coordinator::`, the rest of `engine::topology::`, and the
-rest of `engine::`. On that day it became nine filters and ten shards,
-divided by measured time ([`TEST_WINDOWS_HOSTED_JOB`]):
+One generated leg: its display `name`, libtest `tests` arguments and Windows
+`floor` (zero for Linux and macOS, which enforce no passing-count floor).
 
-1. `engine::topology::coordinator::tests::a_p`;
-2. `engine::topology::coordinator::tests::a_r`;
-3. the rest of `engine::topology::coordinator::tests::a`;
-4. the rest of `engine::topology::coordinator::`;
-5. `engine::topology::recover::`;
-6. the rest of `engine::topology::`;
-7. the rest of `engine::`;
-8. `runner::`;
-9. `workspace_manager::`;
-10. everything else.
+## `pub(super) fn category_legs(platform: &str) -> Vec<CategoryLeg> {`
 
-Run 44667503206 measured those ten, and the re-split of 2026-11-20 was made
-from it: nine filters still, `engine::topology::coordinator::tests::a_p`,
-`...tests::a_r`, the rest of `...tests::a_`, the rest of
-`engine::topology::coordinator::`, `engine::topology::recover::`,
-`engine::tests::a`, `runner::`, `workspace_manager::` and the rest of
-`engine::tests::`, with every other `engine::` test in the last shard. The
-fourteen shards of 2026-11-22 replaced it, and the twenty-two of 2026-11-25
-replaced them.
+`category_legs` combines the rows into seven Linux, nine macOS and twenty Windows
+test legs. Names contain the category, `k of n` only for a split category,
+and sorted subcategories in parentheses. Categories are sorted for display,
+not ownership. Windows floors sum the selected partition contributions. Earlier categories are
+excluded; a broad residual topic excludes earlier pieces owned by another leg.
+Repeated categories start at their first row, so unit/model retains precedence
+over self-checks/effects. Redundant positive filters are removed without changing
+the selected set. These combined selectors are a representation of this inventory:
+the native check compares their actual substring membership to first-row ownership
+for every name. Later matches are allowed by the first-match rule and reported by `--explain`;
+a selection that disagrees with the first owner is an error.
 
-The order is part of the rule. libtest's filter is a substring of a test's
-whole path, not a prefix and not a module, and a shard skips every filter of
-every list before it. A filter that contained a filter of an earlier list
-would find every test it names already skipped, and select nothing; no
-filter of this table contains another. Where a name holds filters of two
-lists it runs in the earlier list's shard, which is still exactly one
-shard. The same holds of a name that contains a filter away from its start:
-a module called `engine` anywhere in the tree runs where its other filters
-put it, or in the last shard.
-`the_shard_tables_run_every_test_in_exactly_one_shard` holds the count of
-derived argument strings, the first and the last of them, places fourteen
-names of those kinds in the shard each belongs to, and holds every list to
-at least one filter and every filter to one word that libtest reads as a
-filter, none of them twice in the table.
+`python3 .github/scripts/test-categories.py generate` replaces only the marked
+matrix blocks. `generate --check` refuses drift. The generator reads the literal
+Rust table, and an effects test compares its parsed registry and generated legs
+with the compiled Rust values, including names, selectors and floors. The workflow
+oracle still checks each actual YAML entry, required aggregate context, suite
+command and witness. Its mutation controls still delete, move, widen and narrow
+selectors, lower floors, remove legs, change matrix expansion and remove checks.
 
-## `pub(super) const WINDOWS_SHARD_FLOORS: [u32; 22] = [`
+`bash .github/scripts/test-categories.sh` obtains Cargo's native all-target,
+all-feature terse list, including ignored tests, validates ownership and exactly
+one named selection, and repeats the native list with every category filter skipped.
+Any remaining name fails with the table location. Empty or failed listings fail.
+On a build box it uses `upstroke-build`; on CI it uses Cargo directly. Windows uses
+the same Python implementation. Listing occurs before every Linux and Windows suite;
+on macOS the pinned condition runs it before the unit suite. C3's existing equality
+between shell gate files and Linux lint invocations is retained: lint also runs the
+new shell gate. This adds listing/build overhead to that existing job, not a test
+leg. No hosted overhead measurement is claimed.
 
-The count each Windows shard must report before it may succeed, in shard
-order: [`WINDOWS_TEST_FLOOR`] divided among the twenty-two, 29, 20, 163, 40,
-165, 19, 26, 29, 85, 29, 23, 13, 27, 24, 13, 26, 31, 28, 10, 14, 25 and 861.
-Each is its leg's
-`floor:` in the job's matrix, an integer the oracle holds to this list, and
-the number line 13 of [`WINDOWS_SHARD_WITNESS`] tests the leg's count against.
+The native-libtest proof first checks Cargo's real all-target inventory and
+requires nonzero CLI membership. The check's `--explain` option prints the count
+for every subcategory and each name also matched by a later row. A nested Cargo
+listing reuses its caller-owned build slot without setting a target directory.
+The proof then lists the real library harness separately with each
+generated selector and compares the sets to first-match ownership. A compiled
+fixture proves the CLI prefix, ordinary and ignored registrations, and rejection
+of an inert ignored registration named `newly_registered_unclassified`. Its bodies
+panic if executed; the check only lists them.
 
-They sum to that floor, 1700, the floor the whole suite was held to as one
-job, and `the_shard_tables_run_every_test_in_exactly_one_shard` holds the
-sum, one entry for each shard, and every entry above zero. The twenty-two legs
-together must not accept fewer passing tests than the one job did; and a
-shard whose floor is zero passes having executed nothing, which is the
-arrival the count exists to refuse ([`WINDOWS_SHARD_WITNESS`]). That test
-holds this list; the oracle holds each leg's `floor:` in `ci.yml` to it.
-Measured, `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED` and
-`MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-ZEROED`.
+Planning evidence was checked from all three recorded runs, 45732809453,
+45733917605 and 45733836381, after the split-family remaps and CLI rename:
 
-The twenty-two floors of 2026-11-25 divide 1700 in proportion to each
-shard's share of the 3,806 tests in run 45513139892's Windows list, the
-largest remainders rounded up: 66, 45, 364, 89, 369, 43, 59, 65, 191, 65,
-51, 28, 60, 53, 28, 59, 70, 63, 23, 31, 57 and 1,927, so each floor is about
-0.45 of its count. The fourteen floors before them, from 2026-11-22, were
-22, 44, 224, 43, 27, 33, 36, 35, 54, 26, 83, 45, 43 and 985.
+| OS | Registered, each run | Ignored, each run | Test legs | Membership delta |
+|---|---:|---:|---:|---:|
+| Windows | 3,929 | 113 | 20 | 0 |
+| macOS | 4,265 | 171 | 9 | 0 |
+| Linux | 4,406 | 207 | 7 | 0 |
 
-The ten floors of the re-split of 2026-11-20 were 24, 13, 47, 36, 113, 93,
-200, 152, 57 and 965, each about 0.48 of its shard's count of passing tests
-as that re-split was estimated: 50, 27, 99, 76, 235, 195, 417, 318, 120 and
-2,011, which are 3,548 together.
+Every recorded name selects exactly its candidate leg, including all ten
+platform-only split-family registrations. The broad workspace prefix in the
+kill-path proposal is represented by the incarnations and reclaim matrix-family
+prefixes; copying it as a naked libtest filter would have selected ordinary
+workspace tests too. Equivalent word prefixes were consolidated within the same
+membership. No recorded test changes leg, so the test-weight cost delta is zero.
+Windows timing is measured; the Darwin and Linux per-test weights are estimates
+calibrated to measured job durations. The planning TSVs are not runtime dependencies.
 
-The ten floors of 2026-11-19 were 24, 13, 55, 28, 112, 231, 155, 196, 152
-and 734, each about 0.48 of a count likewise: 50, 27, 116, 59, 235, 484,
-324, 411, 318 and 1,538, which are 3,562 together. The five floors before
-them, 95, 30, 340, 150 and 1085, were each about half of a count. Where
-those ten divided the five, the estimate agreed with what the five legs
-reported in run 44614925593: the first three counts are that run's 193, the
-fourth its 59, and the fifth and sixth its 719.
+The total Windows floor remains 1,700. It is apportioned over row/leg partitions
+in proportion to the 3,816 recorded non-ignored Windows tests, rounding down and
+then assigning remaining units by largest fractional remainder in table order.
+Every combined Windows leg has a positive floor. Floors, compiler verification,
+per-test reporting, process cleanup and the separate ignored record witnesses
+remain enforced. The 1,700 total is a minimum execution witness, not the inventory
+size.
 
-Run 44736631711 was the first to count the ten of the re-split: 50, 27, 99,
-76, 235, 199, 416, 325, 117 and 2,014, which are 3,558 together. Each leg
-prints its count beside its floor (line 14 of [`WINDOWS_SHARD_WITNESS`]), so
-every run counts them again.
-
-## `pub(super) const MACOS_SHARD_FILTERS: [&[&str]; 11] = [`
-
-The same kind of table for the macOS suite, under the same rule: eleven
-filter lists, 64 filters, twelve shards. 11 of the 64 are whole module paths
-ending `::` -- `engine::topology::integrate::`, `...candidate::`,
-`...coverage::`, `...ledger::`, `...dispatch::`, `...run::` and
-`...attempt::` under `engine::topology::`, `workspace::`,
-`topology::census::`, `runner::container::` and `runner::contract::` -- and
-the rest open a test's name in one large module, such as
-`engine::topology::coordinator::tests::a_pa` or
-`workspace_manager::tests::a`; two of those are a single test's whole path.
-The twelfth shard is everything else. The twelve
-legs of `test-macos` are derived from it, through its row of [`TEST_JOBS`];
-until the macOS suite was divided nothing in `ci.yml` read it, and the suite
-was one leg of the `test` matrix. `the_shard_tables_run_every_test_in_exactly_one_shard`
-holds its count of derived argument strings and the first of them, places
-the same fourteen names, and holds its filters to the same shape.
-
-The lists of 2026-11-25 were packed with the Windows table's, from the same
-five complete runs. macOS prints no per-test times, so a test carries its
-median Windows seconds times its leg's factor: the median test time of the
-macOS leg it ran in over those runs, divided by the Windows seconds of that
-leg's tests. A test that is not in the Windows list, a `cfg(unix)` one,
-carries no weight, and the rule still puts it in exactly one leg. A macOS
-job's fixed part is a median of 249 s over those runs, a run spends 2121 s
-running macOS tests, and each of the twelve legs is predicted at 418 to
-426 s. Twelve and not more: with the native `msrv` entry a run asks for 13
-macOS jobs, so three runs at once stay within the 50 macOS jobs.
-
-The five legs before them, of 2026-11-22, were packed as the Windows table's
-were, whole module by whole
-module, from the same mean of each test's Windows times over CI runs
-45045067738, 45161322179 and 45233912312, each test's time scaled by a
-ratio of macOS to Windows time fitted for each group of tests on the macOS
-legs measured with the lists before 2026-11-22 and with the first lists
-packed that day. Those first lists took run 45045067738's times alone, each
-scaled by the ratio measured for the macOS leg the test ran in under the
-lists before. They were then rebalanced, as the Windows table was, from the
-median of each test's time over CI runs 45259861458, 45265008874,
-45269007219, 45273775506 and 45337940696, moving whole filters between legs
-so that each leg's median job time would be about ten minutes or less.
-
-It was two filters and three shards until 2026-11-19: `engine::topology::`,
-the rest of `engine::`, and everything else. In run 44614925593 those three
-legs took 22.2, 11.3 and 14.3 minutes, and 16.6, 11.8 and 14.5 in run
-44516609416, about 4 minutes of each fixed. On that day it became four
-filters, divided by measured time as the Windows list is:
-`engine::topology::coordinator::`, the rest of `engine::topology::`, the
-rest of `engine::`, `runner::`, and everything else, with the slowest of the
-five legs predicted at about 14 to 15 minutes.
-
-Run 44667503206 measured those five for the first time: 15.8, 4.7, 8.2, 8.1
-and 8.1 minutes a leg, their libtest harnesses 721, 126, 310, 255 and 312 s,
-about 3.9 minutes of each leg fixed. The first leg, the coordinator's, took
-nearly twice the next slowest. The re-split of 2026-11-20 is made from that
-run, as the Windows one is ([`TEST_WINDOWS_HOSTED_JOB`]), and changes the
-first filter alone: `engine::topology::coordinator::tests::a_` where it was
-`engine::topology::coordinator::`, so the rest of the coordinator's tests
-run in the second shard, with the rest of `engine::topology::`. The slowest
-of the five legs was predicted at about 11.8 minutes
-([`TEST_TIMEOUT_MINUTES`]). Run 44736631711 measured the re-split for the
-first time: its slowest leg, the second, took 16.0 minutes. The lists of
-2026-11-22 replaced its four filters, and those of 2026-11-25 replaced
-them.
-
-The table has no floors beside it, where the Windows one has
-[`WINDOWS_SHARD_FLOORS`]. The Linux and macOS legs held no count of passing
-tests before the shards and gained none with them. A filter here that
-matches no test only moves tests to a later leg; none stops running.
-
-## `pub(super) const LINUX_SHARD_FILTERS: [&[&str]; 4] = [`
-
-The same kind of table for the Linux suite, under the same rule: four
-filter lists, 19 filters, five shards. 8 of the 19 are whole module paths
-ending `::`, among them the coordinator's `interleaving::`,
-`engine::topology::recover::` and `engine::tests::`; one is a single test's
-whole path; and the fifth shard is everything else. The five legs of
-`test-linux` are derived from it, through its row of [`TEST_JOBS`].
-`the_shard_tables_run_every_test_in_exactly_one_shard` holds its five derived
-argument strings to literals and places the same fourteen names, and holds
-its filters to the same shape.
-
-Until 2026-11-19 `ubuntu-latest` had no filter and ran the suite whole, as
-one leg: 11.4 minutes in run 44614925593 and 13.4 in run 44516609416, about
-1.6 of them fixed. Divided by measured time, as the other two tables are,
-into one list of one filter, `engine::`, and everything else, the slower of
-its two legs was predicted at about 8 to 9 minutes
-([`TEST_TIMEOUT_MINUTES`]). Run 44667503206 measured the two at 7.8 and 8.2
-minutes, and the re-split of 2026-11-20 that moved the other two tables left
-this one as it was.
-
-On 2026-11-25 it was divided again, with the other two, from the same five
-complete runs and by the same weights as the macOS table: a Linux job's
-fixed part is a median of 115 s over those runs, a run spends 722 s running
-Linux tests, and each of the five legs is predicted at 257 to 268 s. One
-more leg would save about 24 s.
-
-No floors here either, for [`MACOS_SHARD_FILTERS`]' reason. A Linux leg
-handed another's arguments is a different matter: the tests that run on
-Linux alone then run nowhere, and the matrix check refuses it. Measured,
-`MUT-TEST-UBUNTU-LEG-FILTERED`.
 
 ## `pub(super) const TEST_JOB_NAME: &str = "test (${{ matrix.leg }})";`
 
-The `name:` of `test-linux` and `test-macos`, an expression, held as the
-workflow writes it; it was the one `test` job's before the split, so every
-leg's check name is unchanged.
-GitHub lists each leg under the name with its `leg:` in place:
-`test (ubuntu-latest, 1 of 5)` to `test (ubuntu-latest, 5 of 5)`, and
-`test (macos-latest, 1 of 12)` to `test (macos-latest, 12 of 12)`. Until the
-Linux suite was divided its one leg was `test (ubuntu-latest)`, the name it
-had while the name read `matrix.os`; under that expression the legs of one
-runner would share one name, and a red one would not say which shard's tests
-failed.
+The `name:` expression of `test-linux` and `test-macos`. Each matrix `leg`
+contains its runner and the name from `category_legs`, for example
+`test (macos-latest, coordinator 1 of 2 (core, pipelines, snapshot_registration, verification_charges))`.
+The seven Linux and nine macOS labels say which category and topics a leg runs.
+The within-category number appears only for split categories.
 
 No check reads these names. Branch protection requires the aggregate's
 context alone ([`REQUIRED_CONTEXT`]), and no script of the workflow reads
@@ -1349,7 +1208,7 @@ every run that did not wait for the guest: 32m 23s of run 43705001427's
 32m 32s on 2026-11-15, the harness 1,777 s for 3,888 tests on three
 processors, 72% of that limit.
 
-The three shards [`MACOS_SHARD_FILTERS`] first made ran on macOS in draft
+The first three macOS shards ran on macOS in draft
 pull request #339 on 2026-10-18, run 39146387106: 10m 13s, 12m 10s and
 12m 17s a leg. The whole leg has taken 27 to 37 minutes since. No shard was
 timed at the suite the shards landed on; the CI run of the pull request that
@@ -1365,13 +1224,14 @@ macOS table was divided again on 2026-11-20, from that run, with its slowest
 leg predicted at about 11.8 minutes and measured at 16.0 in run 44736631711.
 Its lists were then re-packed, and rebalanced from five runs' medians so
 that each leg's median job time would be about ten minutes or less. On
-2026-11-25 both suites were divided again so that each leg takes about seven
-minutes, macOS into twelve legs and Linux into five
-([`MACOS_SHARD_FILTERS`], [`LINUX_SHARD_FILTERS`]), the slowest predicted at
+2026-11-25 both suites were divided again targeting about seven minutes
+per leg, macOS into twelve legs and Linux into five, the slowest predicted at
 426 s on macOS and 268 s on Linux. 30 minutes is about four times the
 slowest leg expected and a little under twice the 16.0 measured, and the
 limit the Linux leg already had. Code `test-job-timeout`.
 Measured, `MUT-TEST-TIMEOUT-RAISED-FOR-MACOS` and `MUT-TEST-TIMEOUT-RAISED`.
+The category layout retains the limit. Historical timings above do not measure
+its seven Linux and nine macOS legs.
 
 ## `pub(super) struct TestJob {`
 
@@ -1396,12 +1256,6 @@ under. `test_leg_matrix_complaints` derives each leg's `leg:` label from it.
 A job on another runner runs that platform's shards elsewhere: code
 `test-job-matrix`, measured by `MUT-TEST-MACOS-ON-LINUX`.
 
-## `pub(super) struct TestJob` › `pub(super) filters: &'static [&'static [&'static str]],`
-
-The ordered filter lists that divide the job's suite:
-[`LINUX_SHARD_FILTERS`] for `test-linux`, five legs, and
-[`MACOS_SHARD_FILTERS`] for `test-macos`, twelve.
-
 ## `pub(super) struct TestJob` › `pub(super) step_env: [(&'static str, &'static str); 1],`
 
 The `env:` map the job's suite, capture and observation steps carry, pinned
@@ -1413,25 +1267,12 @@ are under [`TEMP_FOLDS_CASE_KEY`].
 
 ## `pub(super) const TEST_JOBS: [TestJob; 2] = [`
 
-The Linux and macOS test jobs, as data: each runner that hosts its platform's
-tests there, the job that runs them, the ordered filter lists that divide its
-suite, and its steps' pinned case-fold map.
-
-Each job's matrix is derived from its row rather than written beside it.
-`test_legs` in `super::workflow` makes one leg for each string
-`shard_selections` makes of the row's filters, five for `test-linux` and twelve
-for `test-macos`, and `test_leg_matrix_complaints` requires the job's
-`include:` list in `ci.yml` to be those legs, entry for entry and in order:
-each entry's `leg:` the label [`TEST_JOB_NAME`] reads and its `tests:` the
-string [`TEST_SHARD_COMMAND`] hands to libtest. No entry has an `os:`: the
-runner is the job's.
-
-A filter list for each runner, not one for both. What divides a suite is
-how long it takes on that runner: the Linux suite, never the slow one
-([`TEST_TIMEOUT_MINUTES`]), ran whole and with no filter until 2026-11-19,
-and is five legs where the macOS suite is twelve. Giving `ubuntu-latest` its
-filter was an edit to this table and to `ci.yml`, and to the ledger rows
-that quote the Linux entries, and so was each later division of it.
+The Linux and macOS jobs, their runners and their steps' pinned case-fold maps.
+The runner chooses a platform in `category_legs`; `TestJob` no longer carries
+a separate filter table. `test_legs` in `super::workflow` prefixes that runner
+to each generated name and keeps its selector. The oracle requires the actual
+`include:` list to equal those entries in order: seven Linux and nine macOS
+legs. No entry carries `os:`; the runner is the job's.
 
 The rows' runners must be the [`CI_TARGETS`] runners that host tests, in
 order and one job each; `test_jobs_table_complaints` refuses any other
@@ -1665,7 +1506,7 @@ The fields [`TEST_WINDOWS_HOSTED_JOB`] declares: the same five as `test-linux`
 and `test-macos`, each pinned by value as well. `name` is held to
 [`TEST_WINDOWS_HOSTED_NAME`], `runs-on` to [`TEST_WINDOWS_PLATFORM`] and
 `timeout-minutes` to [`TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES`]. `strategy`
-carries the twenty-two legs and is required, not admitted: without it the job is
+carries the twenty category legs and is required, not admitted: without it the job is
 one leg whose `matrix` expressions are empty. Its contents are pinned whole
 by `windows_shard_matrix_complaints` in `super::workflow`.
 
@@ -1827,7 +1668,7 @@ invocations actually set rather than collecting the names inside them.
 
 The `runs-on:` value of the test legs that compile and run this target
 natively, and the label the cfg census in `cfg.rs` reports a predicate's
-compilers by. For macOS it stays `macos-latest`: the twelve test legs run there.
+compilers by. For macOS it stays `macos-latest`: the nine test legs run there.
 
 ## `pub(super) struct CiTarget` › `pub(super) check_runner: &'static str,`
 
@@ -1903,79 +1744,4 @@ library twice: once as a library, and once as a test harness with `test`
 set. Coverage asks whether **some** invocation compiles the body, so the
 valuations are enumerated rather than merged -- merging them would make
 `all(test, not(test))` look reachable.
-
-## Category registry (owner item 33, 2026-11-26)
-
-`TEST_CATEGORIES` replaces the three flat platform filter tables. Each row names
-a category, subcategory, substring filters, its macOS leg number, and Windows
-partitions as `(leg, passing-test floor contribution, filters)`. An empty partition
-filter list inherits the row's filters; it never means an unfiltered test run.
-Linux has one leg per category. The first matching row owns a registration,
-including an ignored registration. Split topic rows precede their broad residual
-row. Windows partitions refine that ownership with substring filters, not a
-starts-with predicate. An unassigned or multiply assigned partition fails the check.
-
-`category_legs` combines the rows into seven Linux, nine macOS and twenty Windows
-test legs, named for their category and subcategories. Earlier categories are
-excluded; a broad residual topic excludes earlier pieces owned by another leg.
-Repeated categories start at their first row, so unit/model retains precedence
-over self-checks/effects. Redundant positive filters are removed without changing
-the selected set. These combined selectors are a representation of this inventory:
-the native check compares their actual substring membership to first-row ownership
-for every name. A new collision is an error, never an implicit assignment.
-
-`python3 .github/scripts/test-categories.py generate` replaces only the marked
-matrix blocks. `generate --check` refuses drift. The generator reads the literal
-Rust table, and an effects test compares its parsed registry and generated legs
-with the compiled Rust values, including names, selectors and floors. The workflow
-oracle still checks each actual YAML entry, required aggregate context, suite
-command and witness. Its mutation controls still delete, move, widen and narrow
-selectors, lower floors, remove legs, change matrix expansion and remove checks.
-
-`bash .github/scripts/test-categories.sh` obtains Cargo's native all-target,
-all-feature terse list, including ignored tests, validates ownership and exactly
-one named selection, and repeats the native list with every category filter skipped.
-Any remaining name fails with the table location. Empty or failed listings fail.
-On a build box it uses `upstroke-build`; on CI it uses Cargo directly. Windows uses
-the same Python implementation. Listing occurs before every Linux and Windows suite;
-on macOS the pinned condition runs it before the unit suite. C3's existing equality
-between shell gate files and Linux lint invocations is retained: lint also runs the
-new shell gate. This adds listing/build overhead to that existing job, not a test
-leg. No hosted overhead measurement is claimed.
-
-The native-libtest proof first checks Cargo's real all-target inventory and
-requires nonzero CLI membership. The check's `--explain` option prints the count
-for every subcategory and each name also matched by a later row. A nested Cargo
-listing reuses its caller-owned build slot without setting a target directory.
-The proof then lists the real library harness separately with each
-generated selector and compares the sets to first-match ownership. A compiled
-fixture proves the CLI prefix, ordinary and ignored registrations, and rejection
-of an inert ignored registration named `newly_registered_unclassified`. Its bodies
-panic if executed; the check only lists them.
-
-Planning evidence was checked from all three recorded runs, 45732809453,
-45733917605 and 45733836381, after the split-family remaps and CLI rename:
-
-| OS | Registered, each run | Ignored, each run | Test legs | Membership delta |
-|---|---:|---:|---:|---:|
-| Windows | 3,929 | 113 | 20 | 0 |
-| macOS | 4,265 | 171 | 9 | 0 |
-| Linux | 4,406 | 207 | 7 | 0 |
-
-Every recorded name selects exactly its candidate leg, including all ten
-platform-only split-family registrations. The broad workspace prefix in the
-kill-path proposal is represented by the incarnations and reclaim matrix-family
-prefixes; copying it as a naked libtest filter would have selected ordinary
-workspace tests too. Equivalent word prefixes were consolidated within the same
-membership. No recorded test changes leg, so the test-weight cost delta is zero.
-Windows timing is measured; the Darwin and Linux per-test weights are estimates
-calibrated to measured job durations. The planning TSVs are not runtime dependencies.
-
-The total Windows floor remains 1,700. It is apportioned over row/leg partitions
-in proportion to the 3,816 recorded non-ignored Windows tests, rounding down and
-then assigning remaining units by largest fractional remainder in table order.
-Every combined Windows leg has a positive floor. Floors, compiler verification,
-per-test reporting, process cleanup and the separate ignored record witnesses
-remain enforced. The 1,700 total is a minimum execution witness, not the inventory
-size.
 

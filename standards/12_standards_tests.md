@@ -53,6 +53,53 @@ than adjective:
 Carried flakes live in the finding ledger (`findings/`, one file per finding; older
 ones in `48f2af7a:reviews/FINDINGS.md`) with their rate, owner and consequence.
 
+**Classifying a test for CI.** The ordered `TEST_CATEGORIES` table in
+`src/effects/tests/ci_model.rs` is the registry for all three platforms. The first row whose
+`filters` contain a substring of the full libtest name owns that registration, including an
+ignored test. These are case-sensitive substrings, not prefixes, regular expressions or exact
+names. Put a specific topic before its broader residual row. The kill-path rows precede the
+coordinator and engine rows; `unit/model` precedes the broad `self-checks/effects` match so that
+`topology::effects::` stays in `unit`. A later match is permitted only when the generated selectors
+still select the name in exactly its first row's leg. No leg executes an uncategorised remainder.
+
+Each row declares a `category`, `subcategory`, `filters`, a `macos` leg number and `windows`
+partitions of `(leg, passing-test floor contribution, filters)`. Linux uses leg 1 of each category.
+An empty Windows partition filter list inherits the row's filters; otherwise exactly one
+partition must match the name by substring. It is not a fallback partition after other matches.
+The categories are `kill-path`, `coordinator`, `engine`, `workspace`, `runner`, `unit` and
+`self-checks`; their subcategories and platform assignments live in the table.
+
+After adding or renaming a test, run from the repository root:
+
+```bash
+python3 .github/scripts/test-categories.py generate
+python3 .github/scripts/test-categories.py generate --check
+bash .github/scripts/test-categories.sh --explain
+```
+
+The generator changes only the three `BEGIN TEST_CATEGORIES` / `END TEST_CATEGORIES` matrix
+blocks in `.github/workflows/ci.yml`. Commit the table and its generated matrices together; do
+not hand-edit the generated selectors. `generate --check` refuses stale blocks. The local
+check builds and lists the native all-target, all-feature inventory, including ignored tests,
+without executing test bodies. It checks one correct leg per name and lists again with all
+category filters skipped: that remainder must be empty. `--explain` reports subcategory counts
+and later matches. The script uses `upstroke-build cargo` when that wrapper is available, or
+reuses the caller-owned Cargo build slot when invoked from a test; it does not assign a target
+directory. Workstations and CI otherwise use Cargo directly.
+
+For `uncategorised: <name>`, inspect the test's full module path and purpose. Move it into the
+appropriate already classified module, or add a narrowly justified filter or row to
+`TEST_CATEGORIES`. For `uncategorised partition`, update the owning row's Windows partitions so
+exactly one matches. For `category selection`, inspect the reported first owner and selected
+legs for substring overlap; adjust the row order or filters. Regenerate and repeat the native
+check after the correction. Do not add an empty selector, a catch-all runner, or an ignore to
+silence the failure: ignored registrations are classified too. A local listing covers only its
+host's `cfg` registrations; the native checks on the other operating systems remain required.
+
+Leg names, floors and the OS-specific CI checks are described in `MAINTAINING.md` step 3.
+These listing checks supplement the full local baseline in §2; they do not execute the suite
+or replace release verification.
+
 **Instruments and censuses.** Source-based enforcement is code and is tested like code. A census of
 Rust structure blanks comments and string, character, byte-string and raw-string literals before
 counting, preserves positions and length, and proves the blanker on a fixture with removable
@@ -67,5 +114,6 @@ each field independently. Name each test as the sentence it proves.
 Test code may trade abstraction for clarity but does not weaken production invariants by reaching
 through private state when the public behaviour can be exercised.
 
-Enforced by: `cargo test --all-targets --all-features` on three platforms; each instrument's own
-positive control; review for sufficiency, readiness and flake records.
+Enforced by: `cargo test --all-targets --all-features` on three platforms; the native category
+inventory checks and effects oracles; each instrument's own positive control; review for
+sufficiency, readiness and flake records.

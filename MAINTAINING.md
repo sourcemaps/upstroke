@@ -14,22 +14,67 @@ source, documentation, workflows, release machinery and this file.
    pushing.
 3. **Run the ten-command baseline** (`CODING_STANDARDS.md` §2) before every push, then wait for
    the two required contexts: `upstroke-ci` (formatting, Clippy on three platforms, the Linux and macOS
-   test jobs, the Windows suite in `test-windows-hosted` -- twenty-two shards on `windows-latest`, on
+   test jobs, the Windows suite in `test-windows-hosted` -- twenty category legs on `windows-latest`, on
    every pull request, push and merge-queue entry -- the MSRV matrix, the six
-   Bash gates) and `upstroke-pr-policy` (title, body sections, ledger). A
+   baseline Bash gates and the category inventory check) and `upstroke-pr-policy` (title, body sections, ledger). A
    branch behind `master` is not updated by hand to merge once the ruleset carries the merge
    queue (Repository rules): the queue builds the entry on `master`'s head and runs both
    contexts there (step 7), so update it only when the change needs what `master` gained.
    Until the ruleset carries the queue, the up-to-date requirement stands: a branch behind
    `master` is updated first and waits again, and the audit reports it as `behind-master`.
 
-   **The Windows suite runs in twenty-two shards**, `test (windows-latest, k of 22)`, the legs of
-   `test-windows-hosted`. Each shard installs and asserts the pinned compiler, `1.97.1`, runs
-   the suite step with its shard's test-name filter, and holds a share of the Windows suite's
-   passing-test floor of 1700; the shares sum to it. A test runs in exactly one shard: each
-   shard runs the tests whose names contain any of its filters and none of the filters of the
-   shards before it, and the last takes what no filter names.
-   `upstroke-ci` requires the job, which passes only when all twenty-two shards do. From 2026-09-01
+   **The suite is divided by an ordered category registry.** `TEST_CATEGORIES` in
+   `src/effects/tests/ci_model.rs` owns the filters, subcategories and platform partitions.
+   The first row whose filter is a substring of the full libtest name owns it, ignored tests
+   included; specific rows precede broader residual rows. Windows partitions refine that row
+   and must select exactly one leg. Every generated leg has a positive selector; no last leg
+   runs an uncategorised remainder. §12 of the test standards explains how to classify a new
+   name and resolve an unmatched or overlapping selection.
+
+   From the repository root, reproduce all three matrices with
+   `python3 .github/scripts/test-categories.py generate`, check their checked-in text with
+   `python3 .github/scripts/test-categories.py generate --check`, and check the local native
+   inventory with `bash .github/scripts/test-categories.sh --explain`. The generator reads the
+   Rust table and replaces only the three marked matrix blocks in `.github/workflows/ci.yml`;
+   planning inventories and timing files are not inputs. The local check lists registrations
+   without running test bodies. It supplements the unchanged ten-command local baseline.
+
+   | Job | Native runner | Category legs | Per-leg limit |
+   |---|---|---:|---:|
+   | `test-linux` | `ubuntu-latest` | 7 | 30 minutes |
+   | `test-macos` | `macos-latest` | 9 | 30 minutes |
+   | `test-windows-hosted` | `windows-latest` | 20 | 40 minutes |
+
+   Check names are `test (<runner>, <category> [k of n] (<subcategories>))`, where `k of n`
+   appears only when that category has multiple legs on that platform. Categories and the
+   subcategory lists are sorted in generated output; their display order does not set
+   first-match priority. For example, Windows has
+   `test (windows-latest, coordinator 1 of 6 (registry_waits, snapshot_registration))`.
+   Linux has one leg per category; macOS splits coordinator and engine into two each;
+   Windows splits coordinator and engine into six each, kill-path into three and workspace
+   into two. Runner, self-checks and unit each remain one leg on every platform.
+
+   Each Windows leg installs and asserts compiler `1.97.1` and holds the sum of its registry
+   partitions' passing-test floor contributions. Every leg's floor is positive and the twenty
+   sum to the existing 1700 minimum. This counts passing tests, not listed or ignored tests;
+   it is an execution witness, not the inventory size. Linux and macOS have no passing-count
+   floors. The registry and workflow oracles hold all three matrices to their exact names and
+   selectors, and Windows to its floors as well.
+
+   CI runs `bash .github/scripts/test-categories.sh` in `lint` and before every Linux suite.
+   On macOS the pinned condition runs that command before the `macos-latest, unit (` leg's
+   suite. Every Windows leg runs `python .github/scripts/test-categories.py check` before its
+   suite witness. Each uses its native all-target, all-feature libtest list, including ignored
+   registrations, checks first-match ownership against exactly one generated selection, and
+   lists with every category filter skipped to require an empty remainder. A Linux pass does
+   not establish membership for Windows-only or macOS-only names. The effects tests also
+   compare the Python generator to the compiled Rust registry and prove selectors against
+   real libtest listings. Ignored host-acceptance and container-capability records retain
+   their separate CI steps. `upstroke-ci` still requires every matrix leg and the other gates;
+   the release rules below are unchanged. The category layout has no measured hosted runtime
+   here; earlier timings and packing predictions below describe earlier layouts.
+
+   **Earlier layouts and measurements.** From 2026-09-01
    to 2026-11-20 the suite ran on an ephemeral self-hosted guest unless the run was sent to
    `windows-latest`: the merge queue's entries ran there from 2026-09-16 until its October
    timeouts, and from 2026-11-12 a `pick-windows-home` job could send any run to
@@ -70,15 +115,15 @@ source, documentation, workflows, release machinery and this file.
    as they were. Run 45233912312 measured that packing at 358 to 693 seconds on Windows and 248
    to 699 on macOS. On 2026-11-23 the tests were packed again, whole module by whole module as
    before, by the mean of each test's Windows times over three timed runs, 45045067738,
-   45161322179 and 45233912312; each Windows job is predicted at about 503 to 519 seconds and
+   45161322179 and 45233912312; each Windows job was predicted at about 503 to 519 seconds and
    each macOS leg at about 578 to 610.
    Single tests set a floor under every Windows leg: a leg takes no less than its longest test
    plus the job's fixed minutes. In CI run 45045067738 the longest single Windows tests were
    `engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect`
    (249.8 s) and
    `engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect`
-   (244.5 s). Under the packing, every Windows leg's prediction, about 9 minutes a job, is above
-   that floor. On 2026-11-25 every suite was divided again, to about seven minutes a leg (Linux
+   (244.5 s). Under that packing, every Windows leg's prediction, about 9 minutes a job, was above
+   that floor. On 2026-11-25 every suite was divided again, targeting about seven minutes a leg (Linux
    5, macOS 12, Windows 22), from the five complete CI runs 45503042270, 45505425187,
    45506422808, 45508617577 and 45513139892.
    Each shard runs under a 40-minute limit. In the 2026-11-15 run one whole-suite job failed a
