@@ -597,7 +597,8 @@ pub fn load_captured_with(
                                 path: repo_path,
                                 message: format!(
                                     "routing entry `review`: {e} (expected `tier`, `timeout_secs`, \
-                             `cross_family = false` to name no other-family reviewer, or \
+                             `cross_family = false` to drop the opportunistic other-family \
+                             alternative reviewer (explicit second opinions are unaffected), or \
                              `enabled = false` to run without review)"
                                 ),
                             });
