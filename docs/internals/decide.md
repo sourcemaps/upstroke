@@ -533,7 +533,8 @@ raiser is unknown rather than guessing.
 
 ## `fn check_reply(question: &Question, text: &str) -> Result<Value, String> {`
 
-Exactly one fenced `json` block, with no line outside it holding a fence (`fenced_json`); all six
+Exactly one fenced `json` block as the Markdown parser reads the reply, with no line outside it
+holding a fence (`fenced_json`); all six
 fields, their types, and a choice and guidance the run could apply as a person's answer. A choice
 outside the options, a choice `interaction::answer_for_option` maps to a decline (or whose text
 `interaction::interpret` reads as one), and `null` where the question has options are refused
@@ -546,12 +547,25 @@ Guidance that merely mentions such a word, or names an option that does not give
 
 ## `fn fenced_json(text: &str) -> Result<&str, String> {`
 
-The reply's one block opens at the first line that is ```` ``` ```` and the info string `json`
-(a space between them allowed), and closes at the next line that is ```` ``` ```` alone, each with
-nothing beside it but whitespace and a carriage return. Nothing inside the block is read as a
-fence, so the JSON may mention ```` ``` ```` or `~~~` in a string: a JSON string holds no raw line
-break, so no line of valid JSON is ```` ``` ```` alone, and the closing line is never the JSON's
-own (`a_fence_mentioned_inside_the_json_block_is_its_text_and_only_a_line_alone_closes_it`).
+Where a block opens and where it ends is the Markdown parser's reading, never a line's look:
+`json_blocks` reads the reply with `pulldown-cmark`, the parser the plan adapter reads plans with,
+under CommonMark's rules alone, and places each fenced block of the info string `json` by the
+reply's lines. The reply's block is the first of them whose opening line is ```` ``` ```` and
+`json` (a space between them allowed), with nothing beside them but whitespace and a carriage
+return, and a closing fence of its own must end it, on a line that is ```` ``` ```` alone. Nothing
+inside the block is read as a fence, so the JSON may mention ```` ``` ```` or `~~~` in a string: a
+JSON string holds no raw line break, so no line of valid JSON is ```` ``` ```` alone
+(`a_fence_mentioned_inside_the_json_block_is_its_text_and_only_a_line_alone_closes_it`).
+
+The block used to be found by a walk over the reply's lines that trimmed each line before asking
+whether it was a fence. So a line indented four spaces, which Markdown reads as the text of an
+indented code block, a literal example, opened or closed the block, and a reply whose only `json`
+block was an indented example of it was saved as an accepted proposal though it holds no fenced
+block at all (`an_indented_example_is_not_a_fenced_json_reply`). The walk is gone rather than
+guarded: an indented example opens nothing, an indented closing line is the block's text, and a
+block that a list item ended, its JSON written outside the item, is never closed. A reply is
+accepted only when the parser reads exactly one fenced block in it, that one: any other fenced
+block's opening line is a line outside it holding a fence, which the next paragraph refuses.
 
 Every line outside the block, before it opens or after it closes, is refused when it holds three
 backticks or three tildes anywhere in it, a fence of another block or a run within a line of
@@ -561,9 +575,10 @@ closing line is the block's, never outside text, so a reply whose closing ```` `
 last line is accepted, while a second ```` ``` ```` line after it is refused. The refusal names
 the line and whether it came before the block opened or after it closed at which line. A second
 `json` block, a block of any other info string or none, a block fenced with tildes, a block left
-open after the proposal and a line of inline code are each refused that way; a reply with no
-opening line, and a block whose closing line has text beside it or more backticks than three, and
-so is never closed, are refused as such (`a_reply_is_one_json_block_and_no_line_outside_it_holds_a_fence`,
+open after the proposal, a line of inline code and an indented example of the block are each
+refused that way; a reply with no opening line, and a block whose closing line has text beside
+it, more backticks than three or four spaces before it, or that ends without one, and so is never
+closed, are refused as such (`a_reply_is_one_json_block_and_no_line_outside_it_holds_a_fence`,
 whose cases are replies written out in plain text).
 
 ## `fn create_durably(path: &Path, bytes: &[u8]) -> std::io::Result<()> {`

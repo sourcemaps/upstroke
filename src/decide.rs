@@ -1272,16 +1272,6 @@ const TILDE_FENCE: &str = "~~~";
 /// The info string of the block a reply answers in.
 const REPLY_INFO: &str = "json";
 
-/// Where the walk over a reply's lines is, against its one `json` block.
-enum Framing<'a> {
-    /// No line has opened the block yet.
-    Before,
-    /// The block opened at line `opened`, and its body starts at byte `body`.
-    Inside { opened: usize, body: usize },
-    /// The block closed at line `closed`, holding `body`.
-    After { closed: usize, body: &'a str },
-}
-
 /// The run of fence characters `line` holds anywhere in it, if any.
 fn fence_marker(line: &str) -> Option<&'static str> {
     [FENCE, TILDE_FENCE]
@@ -1289,67 +1279,123 @@ fn fence_marker(line: &str) -> Option<&'static str> {
         .find(|marker| line.contains(marker))
 }
 
-/// The body of the reply's one fenced `json` block, or why the reply is refused. The block opens
-/// at the first line that is "```" and the info string `json`, and closes at the next line that
-/// is "```" alone, each with nothing beside it but whitespace (a `\r` included); nothing inside
-/// it is read as a fence, so its JSON may mention one in a string (a JSON string holds no raw
-/// line break, so no line of valid JSON is "```" alone, and the closing line is never the JSON's
-/// own). Every line outside the block, before it opens or after it closes, is refused when it
-/// holds three backticks or three tildes anywhere: whether Markdown reads it as a fence of
-/// another block or as text, it is something fenced, or a fence-like run, outside the one block
-/// the reply is asked for. The closing line is the block's own and never outside text. A reply
-/// with no opening line, or a block never closed, is refused as such.
-fn fenced_json(text: &str) -> Result<&str, String> {
-    let mut framing = Framing::Before;
-    let mut end = 0;
-    for (line, number) in text.split_inclusive('\n').zip(1_usize..) {
-        let start = end;
-        end += line.len();
-        let bare = line.trim();
-        framing = match framing {
-            Framing::Inside { body, .. } if bare == FENCE => Framing::After {
-                closed: number,
-                body: text.get(body..start).unwrap_or_default(),
-            },
-            inside @ Framing::Inside { .. } => inside,
-            Framing::Before
-                if bare
-                    .strip_prefix(FENCE)
-                    .is_some_and(|info| info.trim() == REPLY_INFO) =>
-            {
-                Framing::Inside {
-                    opened: number,
-                    body: end,
+/// The line of `text` that holds byte `at`, counted from 1, a line ending at each `\n`.
+fn line_of(text: &str, at: usize) -> usize {
+    let before = text.as_bytes().get(..at).unwrap_or_default();
+    before.iter().filter(|byte| **byte == b'\n').count() + 1
+}
+
+/// A fenced code block of the info string `json`, as the Markdown parser reads a reply, placed by
+/// `line_of`'s lines.
+struct ParsedBlock {
+    /// The line of its opening fence.
+    opened: usize,
+    /// Its last line: its closing fence's, or, when the end of the reply or of a block around it
+    /// ends it instead, the last line it holds.
+    ended: usize,
+    /// Whether a closing fence of its own ends it.
+    fenced_shut: bool,
+}
+
+/// Every fenced code block of the info string `json` that `pulldown-cmark`, the parser the plan
+/// adapter reads plans with, reads in `text`, in order, under CommonMark's rules alone.
+fn json_blocks(text: &str) -> Vec<ParsedBlock> {
+    use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+    let mut blocks = Vec::new();
+    // The `json` block being read: its range, and where the last of its text read so far ends.
+    let mut reading: Option<(std::ops::Range<usize>, Option<usize>)> = None;
+    for (event, range) in Parser::new_ext(text, Options::empty()).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) if &*info == REPLY_INFO => {
+                reading = Some((range, None));
+            }
+            Event::Text(_) if !range.is_empty() => {
+                if let Some((_, last_text)) = &mut reading {
+                    *last_text = Some(range.end);
                 }
             }
-            outside => {
-                if let Some(marker) = fence_marker(line) {
-                    let place = match &outside {
-                        Framing::After { closed, .. } => {
-                            format!("after the json block closed at line {closed}")
-                        }
-                        _ => "before the json block opens".to_owned(),
-                    };
-                    return Err(format!(
-                        "line {number} of the reply holds {marker} {place}; nothing outside the \
-                         reply's one json block may hold three backticks or three tildes"
-                    ));
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some((block, last_text)) = reading.take() {
+                    let opened = line_of(text, block.start);
+                    let ended = line_of(text, block.end.saturating_sub(1).max(block.start));
+                    let text_ends = last_text.map_or(opened, |end| line_of(text, end - 1));
+                    blocks.push(ParsedBlock {
+                        opened,
+                        ended,
+                        fenced_shut: ended > text_ends,
+                    });
                 }
-                outside
             }
-        };
+            _ => {}
+        }
     }
-    match framing {
-        Framing::After { body, .. } => Ok(body),
-        Framing::Inside { opened, .. } => Err(format!(
-            "the json block opened at line {opened} is never closed: no later line is ``` alone"
-        )),
-        Framing::Before => Err(
+    blocks
+}
+
+/// Refuses the first of `lines`, numbered from `first`, that holds three backticks or three
+/// tildes anywhere, as standing `place`, outside the reply's one block.
+fn no_fence_in(lines: &[&str], first: usize, place: &str) -> Result<(), String> {
+    for (line, number) in lines.iter().zip(first..) {
+        if let Some(marker) = fence_marker(line) {
+            return Err(format!(
+                "line {number} of the reply holds {marker} {place}; nothing outside the reply's \
+                 one json block may hold three backticks or three tildes"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The body of the reply's one fenced `json` block, or why the reply is refused. Where a block
+/// opens and where it ends is the Markdown parser's reading (`json_blocks`), never a line's look:
+/// a line indented four spaces is an indented code block's text, a literal example, and opens or
+/// closes nothing, and neither does a fence that a list item it is not inside has ended. The
+/// reply's block is the first the parser reads whose opening line is "```" and the info string
+/// `json`, with nothing beside them but whitespace (a `\r` included), and a closing fence of its
+/// own must end it, on a line that is "```" alone; anything else is a block never closed. Nothing
+/// inside it is read as a fence, so its JSON may mention one in a string (a JSON string holds no
+/// raw line break, so no line of valid JSON is "```" alone). Every line outside the block, before
+/// it opens or after it closes, is refused when it holds three backticks or three tildes
+/// anywhere: whether Markdown reads it as a fence of another block or as text, it is something
+/// fenced, or a fence-like run, outside the one block the reply is asked for. The closing line is
+/// the block's own and never outside text.
+fn fenced_json(text: &str) -> Result<&str, String> {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let line = |number: usize| lines.get(number - 1).copied().unwrap_or_default();
+    let opens = |block: &ParsedBlock| {
+        line(block.opened)
+            .trim()
+            .strip_prefix(FENCE)
+            .is_some_and(|info| info.trim() == REPLY_INFO)
+    };
+    let before = "before the json block opens";
+    let Some(block) = json_blocks(text).into_iter().find(opens) else {
+        no_fence_in(&lines, 1, before)?;
+        return Err(
             "the reply holds no fenced json block: no line is ```json, and one json block is \
              asked for"
                 .to_owned(),
-        ),
+        );
+    };
+    no_fence_in(lines.get(..block.opened - 1).unwrap_or_default(), 1, before)?;
+    if !block.fenced_shut || line(block.ended).trim() != FENCE {
+        return Err(format!(
+            "the json block opened at line {} is never closed: no line of ``` alone closes it",
+            block.opened
+        ));
     }
+    no_fence_in(
+        lines.get(block.ended..).unwrap_or_default(),
+        block.ended + 1,
+        &format!("after the json block closed at line {}", block.ended),
+    )?;
+    let body_from: usize = lines.iter().take(block.opened).map(|kept| kept.len()).sum();
+    let body_to: usize = lines
+        .iter()
+        .take(block.ended - 1)
+        .map(|kept| kept.len())
+        .sum();
+    Ok(text.get(body_from..body_to).unwrap_or_default())
 }
 
 const FIELDS: [&str; 6] = [

@@ -152,7 +152,7 @@ fn a_fence_mentioned_inside_the_json_block_is_its_text_and_only_a_line_alone_clo
 /// Replies as a reviewer writes them, in plain text: what each is, the reply, and `None` where it
 /// is accepted or the words its refusal holds. Each is read against a question offering a retry
 /// and a give-up option.
-const FRAMINGS: [(&str, &str, Option<&str>); 26] = [
+const FRAMINGS: [(&str, &str, Option<&str>); 29] = [
     (
         "the block alone",
         concat!("```json\n", valid!(), "\n```\n"),
@@ -309,7 +309,51 @@ const FRAMINGS: [(&str, &str, Option<&str>); 26] = [
         valid!(),
         Some("the reply holds no fenced json block"),
     ),
+    (
+        "a block indented four spaces is a literal example, and no fence",
+        concat!("an example:\n\n    ```json\n    ", valid!(), "\n    ```\n"),
+        Some("line 3 of the reply holds ``` before the json block opens"),
+    ),
+    (
+        "a closing line indented four spaces is the block's text",
+        concat!("```json\n", valid!(), "\n    ```\n"),
+        Some("the json block opened at line 1 is never closed"),
+    ),
+    (
+        "a line outside the list item a block opened in ends the block",
+        concat!("- my proposal:\n  ```json\n", valid!(), "\n  ```\n"),
+        Some("the json block opened at line 2 is never closed"),
+    ),
 ];
+
+/// `PR435-INDENTED-EXAMPLE-AS-REPLY`: a reply whose only `json` block is indented four spaces
+/// holds an example of the block, which Markdown reads as an indented code block's text, and no
+/// fenced block at all, so it is no reply.
+#[test]
+fn an_indented_example_is_not_a_fenced_json_reply() {
+    use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag};
+    let asked = question(&[RETRY, crate::interaction::GIVE_UP_OPTION]);
+    let text = concat!(
+        "My proposal, in the form asked for:\n\n    ```json\n    ",
+        valid!(),
+        "\n    ```\n"
+    );
+    let blocks: Vec<CodeBlockKind<'_>> = Parser::new(text)
+        .filter_map(|event| match event {
+            Event::Start(Tag::CodeBlock(kind)) => Some(kind),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(blocks.as_slice(), [CodeBlockKind::Indented]),
+        "the Markdown parser reads one indented block and no fenced one: {blocks:?}"
+    );
+    let refused = check_reply(&asked, text).expect_err("an indented example is no reply");
+    assert!(
+        refused.contains("line 3 of the reply holds ``` before the json block opens"),
+        "{refused}"
+    );
+}
 
 /// Framing: exactly one `json` block, and no line outside it holding three backticks or three
 /// tildes, while the block's own closing line is the block's and never outside text.
