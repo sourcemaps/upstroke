@@ -2159,6 +2159,15 @@ the two `sleep`s, each more than ten days long
 The controls, sampled from another thread while the invocation is in
 flight: both processes really are on this machine.
 
+The sampler polls every 50 ms until it has seen both or `returned` is
+set. The main thread sets it as soon as `run_blocking` returns, before
+unwrapping or asserting on the result and before the join, so an
+invocation that fails cannot leave the scope waiting on a sampler with
+nothing to see. It has no deadline of its own because the invocation's
+return already bounds it, and one of its own could expire during a slow
+Docker start the thirty-second timeout still allows, failing the
+controls although both processes ran (`CI-FLAKE-REAL-DOCKER-START-DEADLINE`).
+
 ## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `let leader = pids_with(LEADER_MARKER);`
 
 The container is gone, and so is everything it contained. The

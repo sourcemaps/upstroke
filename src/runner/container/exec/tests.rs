@@ -6257,6 +6257,8 @@ fn real_docker_withholds_an_image_credential_variable_from_a_role_that_takes_non
 #[test]
 #[cfg(unix)]
 fn real_docker_a_container_contains_a_daemonised_descendant() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     const LEADER_MARKER: &str = "903222";
     const DESCENDANT_MARKER: &str = "903111";
 
@@ -6336,19 +6338,21 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
     );
     request.timeout = Duration::from_secs(30);
 
+    let returned = AtomicBool::new(false);
     let seen = std::thread::scope(|scope| {
         let sampler = scope.spawn(|| {
-            let deadline = Instant::now() + Duration::from_secs(20);
             let mut leader = false;
             let mut descendant = false;
-            while Instant::now() < deadline && !(leader && descendant) {
+            while !(returned.load(Ordering::SeqCst) || (leader && descendant)) {
                 leader |= !pids_with(LEADER_MARKER).is_empty();
                 descendant |= !pids_with(DESCENDANT_MARKER).is_empty();
                 std::thread::sleep(Duration::from_millis(50));
             }
             (leader, descendant)
         });
-        let output = runner.run_blocking(&request).expect("runs");
+        let ran = runner.run_blocking(&request);
+        returned.store(true, Ordering::SeqCst);
+        let output = ran.expect("runs");
         assert!(output.timed_out, "the fixture did not reach its timeout");
         sampler.join().expect("the sampler panicked")
     });
