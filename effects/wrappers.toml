@@ -1800,6 +1800,7 @@ effect_free = [
     "render",
     "render_duration",
     "report",
+    "retire_served_pools",
     "strategy_preview",
 ]
 

@@ -2052,7 +2052,10 @@ pub(crate) mod tests {
                 "src/capacity.rs",
                 0,
                 1,
-                "reads an outcome to account for it. A reader, not a decider",
+                "reads an outcome to account for it. A reader, not a decider. \
+                 `retire_served_pools` is that reader, and the coordinator's \
+                 retiring now goes through `capacity::retire_served_pools`, so \
+                 `src/engine/coordinator.rs` no longer reads the outcome itself",
             ),
             (
                 "src/engine/attempt.rs",
@@ -2085,12 +2088,6 @@ pub(crate) mod tests {
                  `attempt_record` for an `attempt_interrupted` settlement, so \
                  that record is built by the one record builder (J12 \
                  follow-up)",
-            ),
-            (
-                "src/engine/coordinator.rs",
-                0,
-                1,
-                "reads an outcome while reporting. A reader",
             ),
             (
                 "src/export.rs",

@@ -294,6 +294,10 @@ estimate said "unknown" where the log had once named the time.
 `a_rate_limit_after_a_success_retired_its_pool_writes_pool_exhausted_again`
 in `engine::tests` holds the two together.
 
+It is effect-free in `effects/wrappers.toml`, like the rest of this module:
+it reads the record it is given and removes entries from the map it is
+given, and reaches no primitive and no path.
+
 ## `fn retire_served_pools` › `for review in &record.reviews {`
 
 A review pass that reached a verdict proves its own pool served, which on

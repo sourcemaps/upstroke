@@ -1316,6 +1316,10 @@ keeps its own for the escalation vocabulary it owns.
 
 (file, `AttemptFailure::new` calls, `ReviewPassOutcome::` uses, why).
 
+`src/engine/coordinator.rs` has no row. Its retiring of a served pool now
+goes through `capacity::retire_served_pools`, so the review outcome it
+read is read once, in `src/capacity.rs`'s row.
+
 ## `mod tests` › `fn the_rungs_allowance_is_counted_in_one_production_place() {`
 
 **The rung's allowance is counted in one production place, and decided
