@@ -126,9 +126,11 @@ must_fix_for() {
 #
 # THE TWO HARD RULES ARE APPLIED BEFORE THIS, and this answer does not reach past them: a finding
 # carrying a failing test, reproduction or mutation witness, and a `MUST` deviation, are fixed
-# whatever their severity (MAINTAINING.md step 5). scripts/pr-ready-audit.sh blocks both, and moves
-# on to the next finding, before it ever asks this -- so a witnessed or `MUST` P3 is never accepted
-# here, and a caller that consulted this first would be accepting what step 5 says is fixed.
+# whatever their severity (MAINTAINING.md step 5). scripts/pr-ready-audit.sh settles both before it
+# ever asks this: a `MUST` deviation always blocks, and a witnessed finding blocks unless its row is
+# `fixed` and a person reads the repair (a repair push, or `body-fixed:<id>` for a finding located
+# in the body) -- so a witnessed or `MUST` P3 is never accepted here, and a caller that consulted
+# this first would be accepting what step 5 says is fixed.
 #
 # A LANE THIS DOES NOT KNOW IS REFUSED, for `must_fix_for`'s reason turned round: an answer invented
 # for a caller that cannot be answered is an acceptance nobody ruled on. Every lane `lane_for`

@@ -186,10 +186,12 @@ source, documentation, workflows, release machinery and this file.
    push. A fix that needs anything else — code, a test, a workflow, a note or a rule document, or a
    claim no command or cited source settles — is a repair under the paragraph above, or is filed; a
    sentence a pass of this pull request has already found wrong once is corrected only from a source
-   the body cites by file and line, or deleted. Until `scripts/pr-ready-audit.sh` reads such a row,
-   it reports `fixed-but-head-unmoved:<id>` for it, or `witnessed:<id>` for a witnessed one; the
-   enqueue may pass exactly those lines, for exactly the ids the body names as fixed in its text,
-   and no other blocker.
+   the body cites by file and line, or deleted. `scripts/pr-ready-audit.sh` reads such a row as
+   NEEDS-ATTEST, never READY: `body-fixed:<id>` for a finding the review located in the body
+   (`pr.md:<line>`, which the row may record as its location), or a repair push for a fix pushed as
+   a change under `findings/`; it is enqueued after the read above. A `fixed` row on any other
+   finding with nothing pushed outside the ledger is still `fixed-but-head-unmoved:<id>`, or
+   `witnessed:<id>` for a witnessed one.
 6. **Record the pass as written.** A `CHANGES_REQUIRED` whose findings all landed as repairs or
    ledger rows is recorded as that verdict with each disposition, never as a pass. When the merged
    head differs from the reviewed head, list the delta commits and what verified each. Re-run
