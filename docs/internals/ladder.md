@@ -139,8 +139,9 @@ How many rungs the resolved chain has.
 ## `pub struct LadderPolicy` › `pub max_defers: u32,`
 
 How many deferrals a task may take before the pool counts as down and
-the human is asked instead. Without the capacity engine there is no
-reset time to wait for, so this bound is what stops an exhausted pool
+the human is asked instead. The sequential engine now records a reset
+time on `pool_exhausted` where Claude Code's message names one, but
+nothing waits on it yet, so this bound is what stops an exhausted pool
 spinning forever.
 
 ## `pub struct LadderState {`

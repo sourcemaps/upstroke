@@ -8110,6 +8110,86 @@ fn a_rate_limit_that_names_its_reset_records_it_on_pool_exhausted() {
 }
 
 #[test]
+fn a_deferral_rate_limit_keeps_the_reset_pool_exhausted_recorded() {
+    let (_tree, repo) = temp_engine_repo("poolexhaustedkeepsreset");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let pools = pools_file(&repo, CLAUDE_POOL);
+    opts.pools_path = Some(pools.clone());
+    let mut source = source(
+        vec![Effect::RateLimited, Effect::RateLimited, Effect::EditFile],
+        vec![ReviewBehavior::Pass],
+    );
+    source.adapter.worker_rate_limit = "You've hit your 5-hour limit · resets 5:30am (UTC)";
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let events = events_of(&repo, &report.run_id);
+    let signals: Vec<&events::PoolExhausted> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signals.len(), 1, "one outage, one signal: {signals:?}");
+    let reset_at = signals[0]
+        .reset_at
+        .clone()
+        .expect("the failure text named its reset");
+
+    let rate_limited: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| match &e.body {
+            EventBody::AttemptFinished { data, .. } => data
+                .failure
+                .as_ref()
+                .is_some_and(|f| f.kind == FailureKind::RateLimited),
+            _ => false,
+        })
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(rate_limited.len(), 2, "two rate-limited attempts");
+    let signal_at = events
+        .iter()
+        .position(|e| matches!(e.body, EventBody::PoolExhausted { .. }))
+        .expect("the signal is in the log");
+    assert!(
+        rate_limited[0] < signal_at && signal_at < rate_limited[1],
+        "the second rate limit falls after the signal it must not erase"
+    );
+
+    let mut warnings = Vec::new();
+    let cfg = config::load(None, &repo, Some(&pools), &mut warnings).expect("pools");
+    let after_the_deferral =
+        capacity::estimate(&cfg.pools, &capacity::observe(&events[..=rate_limited[1]]));
+    assert_eq!(
+        after_the_deferral[0].remaining,
+        capacity::Remaining::Exhausted
+    );
+    assert_eq!(
+        after_the_deferral[0].reset_at.as_deref(),
+        Some(reset_at.as_str()),
+        "{}",
+        after_the_deferral[0].describe()
+    );
+
+    let settled = capacity::estimate(&cfg.pools, &capacity::observe(&events));
+    assert_ne!(
+        settled[0].remaining,
+        capacity::Remaining::Exhausted,
+        "{}",
+        settled[0].describe()
+    );
+}
+
+#[test]
 fn reviewer_rate_limit_retires_recovered_implementer_pool_live() {
     let (_tree, repo) = temp_engine_repo("reviewerlimitretiresworker");
     seed(&repo, FRONTIER_AUTH_PLAN, Some(SECOND_OPINION_CONFIG));

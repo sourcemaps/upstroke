@@ -258,6 +258,19 @@ The attempt settlement itself is the durable source of a rate-limit
 signal. `pool_exhausted` remains useful detail, but a crash between the
 two appends must not make replay forget which subscription refused work.
 
+## `fn retire_signals` › `exhausted.entry(pool.clone()).or_insert(None);`
+
+Mark the pool, but keep a reset already known for it. The sequential
+engine writes one `pool_exhausted` per outage, carrying the reset it read
+from the first refusal, and every deferral after it settles as one more
+rate-limited attempt with no signal of its own. Overwriting with `None`
+here let the first deferral — about a minute later on the default
+back-off — erase that reset, so `validate` said the signal carried none
+and a resume's `capacity_snapshot` wrote `reset_at: null` beside an open
+signal that named one. A rate limit with no earlier signal still marks
+the pool, with no reset; a success or an available review still retires
+it above.
+
 ## `pub fn drain_of<'a>(`
 
 The same fold, over attempt records rather than events — what the ledger
@@ -555,6 +568,24 @@ And order is respected: recovery then a fresh outage stays down.
 
 A reviewer-side limit is attached to the failed review pool, while
 the same settlement proves the worker and earlier reviewers served.
+
+## `fn a_later_rate_limit_keeps_the_reset_its_pool_exhausted_recorded()` › `let obs = observe(&[record(1, Some(FailureKind::RateLimited))]);`
+
+A rate limit with no signal before it marks the pool exhausted with no
+reset — the settlement alone is enough to remember the outage.
+
+## `fn a_later_rate_limit_keeps_the_reset_its_pool_exhausted_recorded()` › `let obs = observe(&events);`
+
+The sequential engine's shape: the refusal, the one `pool_exhausted`
+carrying the reset read from it, then a deferral that is rate limited
+again and writes no signal of its own. That second attempt must not
+erase the reset, or `validate` and a resume's `capacity_snapshot` report
+none for a pool whose open signal names one.
+
+## `fn a_later_rate_limit_keeps_the_reset_its_pool_exhausted_recorded()` › `events.push(record(3, None));`
+
+Keeping the reset does not make the outage sticky: the attempt that
+finally succeeds still retires the pool.
 
 ## `fn self_metering_cannot_talk_an_exhausted_pool_back_up()` › `let mut p = pool("claude-max");`
 

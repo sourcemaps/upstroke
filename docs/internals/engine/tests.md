@@ -5148,3 +5148,15 @@ estimate folded from the log up to the signal reports the pool exhausted with th
 `attempt_finished` comes first and marks the pool with no reset, and `pool_exhausted` after it
 supplies the time. The run still completes, as the test above does, so the reset changes what is
 recorded and nothing about how the attempt is deferred or retried.
+
+## `fn a_deferral_rate_limit_keeps_the_reset_pool_exhausted_recorded() {`
+
+The same run as the test above, rate limited twice before it succeeds: `[RateLimited, RateLimited,
+EditFile]`, with the text that names the reset. The engine writes one `pool_exhausted` for the
+outage, after the first rate-limited `attempt_finished` and before the second; the second is the
+first deferral, and it writes no signal of its own. The estimate folded from the log through that
+second `attempt_finished` still reports the pool exhausted with the reset the signal recorded.
+Before `retire_signals` kept a known reset, that settlement marked the pool again with none, so
+`upstroke validate` said the signal carried no reset time and a resume's `capacity_snapshot` wrote
+`reset_at: null` beside an open signal that named one. The estimate over the whole log no longer
+reads the pool as exhausted: the attempt that succeeds still retires it.

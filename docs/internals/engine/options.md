@@ -52,7 +52,8 @@ reasons, both current: neither CLI reports a machine-readable reset time, and
 the one read out of prose (`agent::reset_at_from_limit_message`, for Claude
 Code's `· resets 5:30am (UTC)` and its dated form) covers one vendor's
 wording, so the field is often `None`; and §13 ships the capacity engine
-read-only in v0.1, so nothing routes on a reset even when there is one. Waiting for a reset instead of counting deferrals is capacity-*driven*
+read-only in v0.1, so nothing routes on a reset even when there is one.
+Waiting for a reset instead of counting deferrals is capacity-*driven*
 behaviour, and it arrives with the rest of it in v0.2. Until then this is
 what keeps an exhausted pool from deferring forever.
 
