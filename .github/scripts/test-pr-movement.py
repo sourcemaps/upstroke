@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Offline movement contracts: ordinary temporary history, no remote or enqueue calls."""
+"""Offline movement contracts: local history and partial clones, no network or enqueue calls."""
 
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -49,7 +50,8 @@ class MovementContracts(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.repo = Path(self.temp.name)
+        self.repo = Path(self.temp.name) / "source"
+        self.repo.mkdir()
         self.old_cwd = Path.cwd()
         os.chdir(self.repo)
         self.addCleanup(os.chdir, self.old_cwd)
@@ -58,6 +60,7 @@ class MovementContracts(unittest.TestCase):
             "GIT_AUTHOR_NAME": "Movement Test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
             "GIT_COMMITTER_NAME": "Movement Test", "GIT_COMMITTER_EMAIL": "test@example.invalid",
             "GIT_AUTHOR_DATE": "2001-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2001-01-01T00:00:00Z",
+            "GIT_ALLOW_PROTOCOL": "file",
         })
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -94,6 +97,148 @@ class MovementContracts(unittest.TestCase):
         reader = parser.GitEvidence()
         return [change for oid, commit in reader.branch_commits(self.reviewed, head, self.base)
                 for change in reader.changes(oid, commit)]
+
+    def oid(self, ref):
+        return self.git("rev-parse", "--verify", ref).decode("ascii").strip()
+
+    @contextlib.contextmanager
+    def partial_clone(self, objects):
+        # The only transport is a local file URL. Supply exactly the objects needed by a
+        # movement read, then forbid ALL transports so missing evidence cannot be fetched.
+        self.git("config", "uploadpack.allowFilter", "true")
+        clone = Path(tempfile.mkdtemp(prefix="partial-", dir=self.temp.name))
+        self.git("clone", "--quiet", "--no-checkout", "--filter=tree:0", self.repo.as_uri(), str(clone))
+        for kind, oid in objects:
+            data = self.git("cat-file", kind, oid)
+            result = subprocess.run(["git", "-C", str(clone), "hash-object", "-w", "-t", kind, "--stdin"],
+                                    input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            self.assertEqual(result.stdout, (oid + "\n").encode("ascii"))
+        with mock.patch.dict(os.environ, {"GIT_ALLOW_PROTOCOL": ""}):
+            os.chdir(clone)
+            try:
+                yield
+            finally:
+                os.chdir(self.repo)
+
+    def assert_unavailable(self, oid):
+        result = subprocess.run(["git", "cat-file", "-e", oid], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, check=False)
+        self.assertNotEqual(result.returncode, 0, "the fixture must actually lack this object")
+
+    def assert_indeterminate(self, head):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/pr-review-parse.py"), "movement",
+             self.reviewed, head, self.base], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, b"")
+        script = ('PR_READY_AUDIT_LIBRARY=1 source "$1"; moved=indeterminate; '
+                  'if read_movement "$2" "$3" "$4"; then exit 99; fi; printf "%s" "$moved"')
+        result = subprocess.run(["bash", "-c", script, "movement-test",
+                                 str(ROOT / "scripts/pr-ready-audit.sh"), self.reviewed, head, self.base],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, b"indeterminate")
+
+    def test_verified_addition_does_not_need_an_unchanged_subtree(self):
+        self.write("unaffected/nested/file.txt", "unchanged\n")
+        self.write("findings/untouched/old.md", "unchanged finding\n")
+        self.reviewed = self.commit("reviewed subtree")
+        self.write("findings/new.md", "new finding\n")
+        head = self.commit("verified addition")
+        untouched = self.oid(head + ":unaffected")
+        nested = self.oid(head + ":findings/untouched")
+        objects = [("tree", self.oid(ref)) for ref in
+                   (self.reviewed + "^{tree}", head + "^{tree}",
+                    self.reviewed + ":findings", head + ":findings")]
+        with self.partial_clone(objects):
+            self.assert_unavailable(untouched)
+            self.assert_unavailable(nested)
+            self.assertEqual(self.movement(head), "ledger-only")
+            self.assertEqual([(one.commit, one.status, one.path) for one in self.changes(head)],
+                             [(head, "A", b"findings/new.md")])
+            with mock.patch.dict(os.environ, {"GIT_TRACE": "1", "GIT_TRACE2": "1"}):
+                self.assertEqual(self.movement(head), "ledger-only")
+            self.assert_unavailable(untouched)
+            self.assert_unavailable(nested)
+
+    def test_missing_changed_tree_cannot_hide_a_record_beside_a_repair(self):
+        self.write("findings/old.md", "before\n")
+        self.reviewed = self.commit("reviewed finding")
+        self.write("findings/old.md", "after\n")
+        self.write("source.txt", "repair\n")
+        head = self.commit("rewrite and repair")
+        objects = [("tree", self.oid(ref)) for ref in
+                   (self.reviewed + "^{tree}", head + "^{tree}",
+                    self.reviewed + ":findings", head + ":findings")]
+        for missing in objects:
+            with self.subTest(missing=missing), self.partial_clone([one for one in objects if one != missing]):
+                self.assert_unavailable(missing[1])
+                self.assert_indeterminate(head)
+        with self.partial_clone(objects):
+            self.assertEqual(self.movement(head), "repairs")
+            self.assertEqual({(one.status, one.path) for one in self.changes(head)},
+                             {("M", b"findings/old.md"), ("M", b"source.txt")})
+
+    def test_unchanged_archive_still_requires_complete_reads_in_a_partial_clone(self):
+        self.write("reviews/FINDINGS.md", "closed archive\n")
+        self.write("reviews/findings/old.md", "legacy finding\n")
+        self.reviewed = self.commit("reviewed archives")
+        self.write("findings/new.md", "new finding\n")
+        self.write("source.txt", "repair\n")
+        head = self.commit("addition and repair")
+        required = [("tree", self.oid(head + ":reviews")),
+                    ("blob", self.oid(head + ":reviews/FINDINGS.md")),
+                    ("tree", self.oid(head + ":reviews/findings"))]
+        objects = [("tree", self.oid(ref)) for ref in
+                   (self.reviewed + "^{tree}", head + "^{tree}", head + ":findings")] + required
+        for missing in required:
+            with self.subTest(missing=missing), self.partial_clone([one for one in objects if one != missing]):
+                self.assert_unavailable(missing[1])
+                self.assert_indeterminate(head)
+        with self.partial_clone(objects):
+            self.assertEqual(self.movement(head), "repairs")
+
+    def test_inherited_git_tracing_does_not_change_verified_movement(self):
+        self.write("findings/new.md", "first\n")
+        addition = self.commit("add")
+        self.write("findings/new.md", "second\n")
+        rewrite = self.commit("edit")
+        self.write("source.txt", "repair\n")
+        repair = self.commit("repair")
+        for trace in ("GIT_TRACE", "GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE_PERFORMANCE"):
+            with self.subTest(trace=trace), mock.patch.dict(os.environ, {trace: "1"}):
+                reader = parser.GitEvidence()
+                self.assertTrue(reader.ancestor(self.reviewed, addition))
+                self.assertFalse(reader.ancestor(addition, self.reviewed))
+                self.assertEqual(self.movement(addition), "ledger-only")
+                self.assertEqual(self.movement(rewrite), "ledger-rewrite")
+                self.assertEqual(self.movement(repair), "repairs")
+
+    def test_directory_replacement_keeps_every_leaf_record_in_each_commit(self):
+        self.write("findings/item", "file\n")
+        self.reviewed = self.commit("reviewed file")
+        (self.repo / "findings/item").unlink()
+        self.write("findings/item/nested/one.md", "one\n")
+        self.write("findings/item/two.md", "two\n")
+        directory = self.commit("file becomes directory")
+        self.assertEqual([(one.commit, one.status, one.path) for one in self.changes(directory)], [
+            (directory, "D", b"findings/item"),
+            (directory, "A", b"findings/item/nested/one.md"),
+            (directory, "A", b"findings/item/two.md")])
+        (self.repo / "findings/item/nested/one.md").unlink()
+        (self.repo / "findings/item/nested").rmdir()
+        (self.repo / "findings/item/two.md").unlink()
+        (self.repo / "findings/item").rmdir()
+        self.write("findings/item", "file\n")
+        restored = self.commit("directory becomes file")
+        self.assertEqual([(one.commit, one.status, one.path) for one in self.changes(restored)], [
+            (restored, "A", b"findings/item"),
+            (restored, "D", b"findings/item/nested/one.md"),
+            (restored, "D", b"findings/item/two.md"),
+            (directory, "D", b"findings/item"),
+            (directory, "A", b"findings/item/nested/one.md"),
+            (directory, "A", b"findings/item/two.md")])
+        self.assertEqual(self.movement(restored), "ledger-rewrite")
 
     def test_add_then_edit_keeps_both_commit_records(self):
         self.write("findings/one.md", "first\n")
@@ -274,6 +419,11 @@ class MovementContracts(unittest.TestCase):
         with mock.patch.object(parser.subprocess, "run", return_value=response):
             with self.assertRaises(parser.Unparsed):
                 parser.GitEvidence().ancestor(self.base, self.base)
+        for status in (0, 1):
+            response = subprocess.CompletedProcess([], status, b"unexpected stdout", b"trace diagnostics")
+            with mock.patch.object(parser.subprocess, "run", return_value=response):
+                with self.assertRaises(parser.Unparsed):
+                    parser.GitEvidence().ancestor(self.base, self.base)
 
     def test_base_commits_and_merge_commits_stay_excluded(self):
         self.write("findings/one.md", "one\n")

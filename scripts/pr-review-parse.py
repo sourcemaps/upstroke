@@ -1328,7 +1328,9 @@ class GitEvidence:
     def ancestor(self, older, newer):
         result = subprocess.run(["git", "--no-replace-objects", "merge-base", "--is-ancestor", older, newer],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-        if result.returncode not in (0, 1) or result.stdout or result.stderr:
+        # Git's 0/1 status is the answer; stdout must be empty. Inherited tracing writes
+        # diagnostics to stderr even on success, and those bytes are not movement evidence.
+        if result.returncode not in (0, 1) or result.stdout:
             raise Unparsed("Git ancestry lookup failed")
         return result.returncode == 0
 
@@ -1349,18 +1351,35 @@ class GitEvidence:
                 result.append((oid, commit))
         return result
 
-    def leaves(self, tree):
-        result = {}
-        pending = [(b"", tree)]
+    def changed_leaves(self, old_tree, new_tree):
+        """Flatten unequal entries only; matching ids in checked parents prove no movement.
+
+        An unchanged subtree need not be available in a partial clone. Every differing subtree
+        must still be read completely, including every leaf of an added or deleted directory.
+        """
+        old, new = {}, {}
+        pending = [(b"", old_tree, new_tree)]
         while pending:
-            prefix, oid = pending.pop()
-            for name, entry in self.tree(oid).items():
+            prefix, before_tree, after_tree = pending.pop()
+            if before_tree == after_tree:
+                continue
+            before_entries = self.tree(before_tree) if before_tree is not None else {}
+            after_entries = self.tree(after_tree) if after_tree is not None else {}
+            for name in before_entries.keys() | after_entries.keys():
+                before, after = before_entries.get(name), after_entries.get(name)
+                if before == after:
+                    continue
                 path = prefix + name
-                if entry.mode == b"40000":
-                    pending.append((path + b"/", entry.oid))
-                else:
-                    result[path] = entry
-        return result
+                before_dir = before is not None and before.mode == b"40000"
+                after_dir = after is not None and after.mode == b"40000"
+                if before_dir or after_dir:
+                    pending.append((path + b"/", before.oid if before_dir else None,
+                                    after.oid if after_dir else None))
+                if before is not None and not before_dir:
+                    old[path] = before
+                if after is not None and not after_dir:
+                    new[path] = after
+        return old, new
 
     def archive(self, tree, path, modes):
         """present / absent / wrong-type, or an exception for an indeterminate read.
@@ -1390,8 +1409,8 @@ class GitEvidence:
         return "present"
 
     def changes(self, oid, commit):
-        old = self.leaves(self.commit(commit.parents[0]).tree) if commit.parents else {}
-        new = self.leaves(commit.tree)
+        parent_tree = self.commit(commit.parents[0]).tree if commit.parents else None
+        old, new = self.changed_leaves(parent_tree, commit.tree)
         changes = []
         for path in sorted(old.keys() | new.keys()):
             before, after = old.get(path), new.get(path)
