@@ -82,7 +82,24 @@
 #   MUT-LEDGER-TABBED-CELL       cells were trimmed of spaces only, so a tab around a policy-valid
 #                                `P3` reached the audit as part of the severity and an accepted,
 #                                filed P3 blocked as `severity-mismatch` instead of reading READY
-#   MUT-JSON-SPLIT-BY-REGEX     findings read by splitting text on "},{" instead of a parser
+#   MUT-LEDGER-POST-TABLE-ROW    a `|` line in the ledger section AFTER the canonical table had
+#                                ended was read as a row: the table held only `None yet`, a blank
+#                                line ended it for both validators, and a later row recording the
+#                                review's P3 as `accepted-risk` -- a row neither validator checked --
+#                                read READY (PR382-POST-TABLE-ROW-ACCEPTED) instead of the ledger
+#                                being refused
+#   MUT-LEDGER-ID-ROW-SHADOWED   a row was told from the header by its id cell, so the canonical
+#                                row of a finding whose id is `ID`, recording P2 `accepted-risk`,
+#                                was dropped as the header, and a second row after a blank line,
+#                                with tabs around `ID` and recording P3, was the only row returned:
+#                                READY, where the validated row is a P2 the owner has to rule on
+#   MUT-LEDGER-HEADER-BY-CONTENT the header and separator were found by what a cell says rather
+#                                than where the line is, so a finding whose id is `ID`, recorded P3
+#                                `accepted-risk` in the canonical table and filed once, lost its row
+#                                to the header pattern and blocked instead of reading READY -- or a
+#                                section whose first two `|` lines are not the canonical header and
+#                                separator was read instead of refused
+#   MUT-JSON-SPLIT-BY-REGEX    findings read by splitting text on "},{" instead of a parser
 #   MUT-NULL-WITNESS             a null witness field counted as a witness
 #   MUT-MUST-UNSEEN              a MUST deviation was not flagged
 #   MUT-BAD-SEVERITY-PASSES      a P9 finding passed as deferrable
@@ -8028,8 +8045,8 @@ expect "MUT-LEDGER-SECOND-HEADING CRLF" "$(ledger_rows "$tmp/crlf-body.md")" \
 
 # ONE ID, ONE ROW. The validator refuses the repeat inside the canonical table, compared after
 # trimming, and so does the parser. A repeat in a row past the canonical table's end -- after a
-# blank line, where the validator stops reading rows -- the validator passes and the parser, which
-# reads every `|` line in the section, refuses: stricter again.
+# blank line, where the validator stops reading rows -- the validator passes and the parser
+# refuses, as it refuses any `|` line past the table's end: stricter again.
 ledger_policy_body "$tmp/repeated-id.md" "$(
   printf '## Review finding ledger\n\n'
   ledger_table ACCEPT-P3:P3:accepted-risk ACCEPT-P3:P2:accepted-risk)"
@@ -8064,6 +8081,69 @@ expect "MUT-LEDGER-TABBED-CELL policy" "$(body_policy "$tmp/tabbed-row.md")" pas
 expect MUT-LEDGER-TABBED-CELL "$(ledger_rows "$tmp/tabbed-row.md")" '0|ACCEPT-P3:P3:accepted-risk'
 expect MUT-LEDGER-TABBED-CELL "$(parse_nul ledger "$tmp/tabbed-row.md")" \
   '0|ledger|1|ACCEPT-P3|P3|accepted-risk|'
+
+# --- the canonical table, found by position, and nothing after it -------------------------------
+# validate-pr-body.sh's walk: after the heading, the header is the first `|` line, the separator
+# the next line, and the rows the contiguous `|` lines after it, up to the first line that is not
+# one. No cell's content says which line is the header, so a row whose id is `ID` is a row. A `|`
+# line in the section once the table has ended is refused, and so is a section whose first two `|`
+# lines are not the canonical header and separator. The first two bodies below are ones the body
+# validator PASSES, so the parser's refusal is all that stands between them and READY.
+#
+# PR382-POST-TABLE-ROW-ACCEPTED, the frontier's witness. The canonical table holds only `None yet`.
+# A blank line ends it for both validators, and a later row in the same section records ACCEPT-P3
+# as a P3 `accepted-risk`. Read as every `|` line, that row was returned, and no validator had
+# looked at it.
+ledger_none_row='| None yet | — | — | — | — | — | — | — | — |'
+ledger_policy_body "$tmp/none-yet.md" "$(
+  printf '## Review finding ledger\n\n'; ledger_table; printf '%s\n' "$ledger_none_row")"
+expect "MUT-LEDGER-POST-TABLE-ROW none-yet policy" "$(body_policy "$tmp/none-yet.md")" pass
+expect "MUT-LEDGER-POST-TABLE-ROW none-yet" "$(ledger_rows "$tmp/none-yet.md")" '0|'
+ledger_policy_body "$tmp/post-table-row.md" "$(
+  printf '## Review finding ledger\n\n'; ledger_table; printf '%s\n' "$ledger_none_row"
+  printf '\n'; ledger_row ACCEPT-P3:P3:accepted-risk)"
+expect "MUT-LEDGER-POST-TABLE-ROW policy" "$(body_policy "$tmp/post-table-row.md")" pass
+expect MUT-LEDGER-POST-TABLE-ROW "$(ledger_rows "$tmp/post-table-row.md")" '1|'
+expect MUT-LEDGER-POST-TABLE-ROW "$(parse_nul ledger "$tmp/post-table-row.md")" '1|'
+# past prose or a sub-heading too: the table has ended, and the section has not
+ledger_policy_body "$tmp/post-table-row-prose.md" "$(
+  printf '## Review finding ledger\n\n'; ledger_table; printf '%s\n' "$ledger_none_row"
+  printf 'Notes.\n### Later\n'; ledger_row ACCEPT-P3:P3:accepted-risk)"
+expect "MUT-LEDGER-POST-TABLE-ROW prose" "$(ledger_rows "$tmp/post-table-row-prose.md")" '1|'
+
+# THE REGRESSION LENS'S P1. A finding whose id is literally `ID`. The canonical row records it P2
+# `accepted-risk`. After a blank line, a second row records it P3, with tabs around `ID` so the old
+# header pattern missed it. The canonical row was dropped as the header, the shadow row was the only
+# row, and the duplicate-id guard saw one. Read by position, the canonical row is a row and the
+# shadow row is past the table.
+ledger_policy_body "$tmp/id-row-shadowed.md" "$(
+  printf '## Review finding ledger\n\n'; ledger_table ID:P2:accepted-risk
+  printf '\n'; ledger_row $'\tID\t:P3:accepted-risk')"
+expect "MUT-LEDGER-ID-ROW-SHADOWED policy" "$(body_policy "$tmp/id-row-shadowed.md")" pass
+expect MUT-LEDGER-ID-ROW-SHADOWED "$(ledger_rows "$tmp/id-row-shadowed.md")" '1|'
+expect MUT-LEDGER-ID-ROW-SHADOWED "$(parse_nul ledger "$tmp/id-row-shadowed.md")" '1|'
+
+# and the same finding recorded once, P3 `accepted-risk`, in the canonical table, is one row whose
+# id is `ID` -- spelled with the header's own spaces, which is the cell the old pattern matched.
+ledger_policy_body "$tmp/id-row.md" "$(
+  printf '## Review finding ledger\n\n'; ledger_table ID:P3:accepted-risk)"
+expect "MUT-LEDGER-HEADER-BY-CONTENT policy" "$(body_policy "$tmp/id-row.md")" pass
+expect MUT-LEDGER-HEADER-BY-CONTENT "$(ledger_rows "$tmp/id-row.md")" '0|ID:P3:accepted-risk'
+expect MUT-LEDGER-HEADER-BY-CONTENT "$(parse_nul ledger "$tmp/id-row.md")" \
+  '0|ledger|1|ID|P3|accepted-risk|'
+# THE FIRST TWO `|` LINES ARE THE HEADER AND THE SEPARATOR, or the section is refused. A `|` line
+# above the canonical header -- which the body validator steps over, finding its header by content
+# -- and a header whose next line is not the separator, and a heading with no table under it.
+ledger_policy_body "$tmp/pipe-above-header.md" "$(
+  printf '## Review finding ledger\n\n| a note |\n\n'; ledger_table ACCEPT-P3:P3:accepted-risk)"
+expect "MUT-LEDGER-HEADER-BY-CONTENT above policy" "$(body_policy "$tmp/pipe-above-header.md")" pass
+expect "MUT-LEDGER-HEADER-BY-CONTENT above" "$(ledger_rows "$tmp/pipe-above-header.md")" '1|'
+ledger_policy_body "$tmp/header-no-separator.md" "$(
+  printf '## Review finding ledger\n\n'; ledger_table ACCEPT-P3:P3:accepted-risk \
+    | sed '2d')"
+expect "MUT-LEDGER-HEADER-BY-CONTENT no separator" "$(ledger_rows "$tmp/header-no-separator.md")" '1|'
+ledger_policy_body "$tmp/heading-no-table.md" "$(printf '## Review finding ledger\n\nNone.\n')"
+expect "MUT-LEDGER-HEADER-BY-CONTENT no table" "$(ledger_rows "$tmp/heading-no-table.md")" '1|'
 # A body the audit could not fetch is not a body with no ledger in it. It used to be `gh pr view
 # ... | ledger_rows_from_body` captured into a variable, so a failed fetch ended the whole run
 # through `set -e` -- not a decision about this pull request, just an exit -- and any rewrite of
@@ -8097,20 +8177,23 @@ got="$(STUB_REVIEW_BODY="$tmp/truncating-review.md" STUB_COMMENTS_STATUS=0 run_s
 #
 # The heads are commits on the harness head made with plumbing -- the harness repository's own
 # branch and index are left where the cases above put them -- each adding findings/ with the named
-# files, every one of which files ACCEPT-P3 in its frontmatter. The harness head itself has none.
-accept_head_with() {  # accept_head_with NAME...: a commit on the harness head, one file per NAME
+# files, every one of which files the one id it was given in its frontmatter: ACCEPT-P3, or `ID`
+# for the finding the ledger-table cases below are about. The harness head itself has none.
+accept_head_with() {  # accept_head_with ID NAME...: a commit on the harness head, one file per NAME
   local blob listing="" name findings_tree root_tree
-  blob="$(printf -- '---\nid: ACCEPT-P3\nseverity: P3\n---\n\nAccepted, and still open.\n' \
+  blob="$(printf -- '---\nid: %s\nseverity: P3\n---\n\nAccepted, and still open.\n' "$1" \
     | git -C "$enqueue_repo" hash-object -w --stdin)"
+  shift
   for name in "$@"; do listing+="100644 blob $blob"$'\t'"$name"$'\n'; done
   findings_tree="$(printf '%s' "$listing" | git -C "$enqueue_repo" mktree)"
   root_tree="$(printf '040000 tree %s\tfindings\n' "$findings_tree" | git -C "$enqueue_repo" mktree)"
   git -C "$enqueue_repo" -c user.email=t@example -c user.name=t \
-    commit-tree "$root_tree" -p "$enqueue_head" -m "file ACCEPT-P3 under findings/"
+    commit-tree "$root_tree" -p "$enqueue_head" -m "file a finding under findings/"
 }
-accept_head_one="$(accept_head_with accept-p3.md)"
-accept_head_two="$(accept_head_with accept-p3.md accept-p3-again.md)"
+accept_head_one="$(accept_head_with ACCEPT-P3 accept-p3.md)"
+accept_head_two="$(accept_head_with ACCEPT-P3 accept-p3.md accept-p3-again.md)"
 accept_head_none="$enqueue_head"
+id_head_one="$(accept_head_with ID id.md)"
 # The heads are what they say, counted by the audit's own helper, so a READY or a `no-file` below is
 # about the row and not about a head that was built wrong.
 expect "MUT-P3-ACCEPT-UNFILED one-file head" \
@@ -8119,6 +8202,8 @@ expect "MUT-P3-ACCEPT-UNFILED two-file head" \
   "$(cd "$enqueue_repo" && finding_file_count ACCEPT-P3 "$accept_head_two")" 2
 expect "MUT-P3-ACCEPT-UNFILED no-file head" \
   "$(cd "$enqueue_repo" && finding_file_count ACCEPT-P3 "$accept_head_none")" 0
+expect "MUT-LEDGER-HEADER-BY-CONTENT one-file head" \
+  "$(cd "$enqueue_repo" && finding_file_count ID "$id_head_one")" 1
 accept_gh="$tmp/accept-gh"
 mkdir -p "$accept_gh"
 printf '#!/usr/bin/env bash\nhead=${STUB_HEAD:-%s}\n' "$enqueue_head" > "$accept_gh/gh"
@@ -8173,6 +8258,7 @@ accept_review "$tmp/accept-p3-witnessed.md" \
 accept_review "$tmp/accept-p3-must.md" \
   '{"id":"ACCEPT-P3","severity":"P3","correction":"This is a MUST deviation of standards section 7"}' \
   "$accept_head_one"
+accept_review "$tmp/id-p3.md" '{"id":"ID","severity":"P3"}' "$id_head_one"
 accept_ledger "$tmp/accept-p3-row.md" ACCEPT-P3 P3 accepted-risk
 accept_ledger "$tmp/accept-p3-row-says-p2.md" ACCEPT-P3 P2 accepted-risk
 accept_ledger "$tmp/accept-p2-row.md" ACCEPT-P2 P2 accepted-risk
@@ -8301,6 +8387,33 @@ for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
   expect "MUT-LEDGER-TABBED-CELL status [$accept_branch]" "${got%%|*}" 0
   [[ "$got" == *severity-mismatch* || "$got" == *NOT-READY* ]] \
     && error "MUT-LEDGER-TABBED-CELL: a tabbed P3 row still blocked on [$accept_branch]: [$got]"
+done
+
+# --- the canonical table by position, through main -------------------------------------------------
+# The bodies the canonical-table section above built. Read the old way, the first two were READY,
+# on a row past the table's end that neither validator checked, and the third was not READY,
+# because its one row was dropped as the header.
+for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
+  # PR382-POST-TABLE-ROW-ACCEPTED: the row after a `None yet` table is refused, and the refusal is
+  # the blocker.
+  got="$(accept_run "$accept_branch" "$tmp/accept-p3.md" "$tmp/post-table-row.md" "$accept_head_one")"
+  [[ "$got" == *" READY "* ]] \
+    && error "MUT-LEDGER-POST-TABLE-ROW: a row past the table accepted ACCEPT-P3 on [$accept_branch]: [$got]"
+  contains "MUT-LEDGER-POST-TABLE-ROW [$accept_branch]" "$got" " NOT-READY "
+  contains "MUT-LEDGER-POST-TABLE-ROW [$accept_branch]" "$got" "ledger-parse-failed:1"
+  # The finding named `ID`: its canonical P2 row is a row, the tabbed P3 row past the table is
+  # refused, and nothing is accepted.
+  got="$(accept_run "$accept_branch" "$tmp/id-p3.md" "$tmp/id-row-shadowed.md" "$id_head_one")"
+  [[ "$got" == *" READY "* ]] \
+    && error "MUT-LEDGER-ID-ROW-SHADOWED: a shadow row accepted ID on [$accept_branch]: [$got]"
+  contains "MUT-LEDGER-ID-ROW-SHADOWED [$accept_branch]" "$got" " NOT-READY "
+  contains "MUT-LEDGER-ID-ROW-SHADOWED [$accept_branch]" "$got" "ledger-parse-failed:1"
+  # and recorded P3 `accepted-risk` in the canonical table and filed once, it is the READY case.
+  got="$(accept_run "$accept_branch" "$tmp/id-p3.md" "$tmp/id-row.md" "$id_head_one")"
+  [[ "$got" == *no-row* || "$got" == *NOT-READY* || "$got" == *GH-UNSTUBBED* ]] \
+    && error "MUT-LEDGER-HEADER-BY-CONTENT: an accepted, filed P3 named ID still blocked on [$accept_branch]: [$got]"
+  contains "MUT-LEDGER-HEADER-BY-CONTENT [$accept_branch]" "$got" " READY "
+  expect "MUT-LEDGER-HEADER-BY-CONTENT status [$accept_branch]" "${got%%|*}" 0
 done
 
 if ((failed)); then
