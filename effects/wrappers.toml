@@ -1909,6 +1909,7 @@ effect_free = [
     "load",
     "load_captured",
     "load_captured_with",
+    "load_for_report",
     "load_limits",
     "load_with",
     "path",
