@@ -303,6 +303,35 @@ given, and reaches no primitive and no path.
 A review pass that reached a verdict proves its own pool served, which on
 a cross-vendor second opinion is a different subscription entirely.
 
+## `pub(crate) fn pool_exhausted_to_record(`
+
+Which `pool_exhausted` a settled failure writes, if any. It applies the
+rules of the legacy coordinator's `record_pool_exhausted`, with the parts
+that touch the world taken out: the clock comes in as `now_unix`, the
+pools already recorded come in as a map, and the answer goes back to the
+caller to emit. So every rule can be tested on plain values.
+
+- Only a rate-limited failure writes one.
+- A worker failure names the attempt's own pool and the agent it was given.
+  A reviewer failure names the last review's pool and *that review's*
+  agent. A cross-vendor second opinion drains a different subscription
+  than the worker, so the reset is read in the reviewer's dialect.
+- No pool means no signal. An unattributed refusal belongs to no
+  subscription.
+- A reset is read only from Claude Code's limit message: the captured
+  limit text first, then the reason. Any other agent answers
+  `reset_at: None`.
+- A pool already recorded answers nothing, unless this refusal names a
+  different reset from the one recorded. That is the five-hour limit
+  clearing into the weekly one, and `observe` then reports the later
+  reset. A refusal that names no reset never replaces a known one.
+
+The legacy coordinator keeps its own copy for now. Its code is left as
+it is, and this function is not called yet.
+
+It is effect-free in `effects/wrappers.toml`. The census gate asks for a
+row for every externally reachable function of this module.
+
 ## `pub fn drain_of<'a>(`
 
 The same fold, over attempt records rather than events — what the ledger

@@ -1797,6 +1797,7 @@ effect_free = [
     "observe",
     "parse",
     "parse_duration",
+    "pool_exhausted_to_record",
     "pool_for",
     "read_in_v0_1",
     "render",

@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
-use crate::events::{AttemptRecord, Event, EventBody, ReviewPassOutcome};
-use crate::ladder::FailureKind;
+use crate::events::{AttemptRecord, Event, EventBody, PoolExhausted, ReviewPassOutcome};
+use crate::ladder::{AttemptFailure, FailureKind, FailureOrigin};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolKind {
@@ -260,6 +260,55 @@ pub(crate) fn retire_served_pools(
             }
         }
     }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the legacy coordinator keeps its own copy; this awaits its first caller"
+    )
+)]
+pub(crate) fn pool_exhausted_to_record(
+    failure: &AttemptFailure,
+    record: &AttemptRecord,
+    agent: &str,
+    recorded: &BTreeMap<String, Option<String>>,
+    now_unix: u64,
+) -> Option<PoolExhausted> {
+    if failure.kind != FailureKind::RateLimited {
+        return None;
+    }
+    let (pool, agent) = match failure.origin {
+        FailureOrigin::Worker => (record.pool.as_ref(), agent),
+        FailureOrigin::Reviewer => {
+            let review = record.reviews.last()?;
+            (review.pool.as_ref(), review.agent.as_str())
+        }
+    };
+    let pool = pool?;
+    let reset_at = if agent == crate::agent::claude::ADAPTER_ID {
+        failure
+            .limit_message()
+            .into_iter()
+            .chain(std::iter::once(failure.reason.as_str()))
+            .find(|text| crate::agent::names_a_quota_limit(text))
+            .and_then(|text| crate::agent::reset_at_from_limit_message(text, now_unix))
+    } else {
+        None
+    };
+    let already_recorded = recorded
+        .get(pool)
+        .is_some_and(|known| reset_at.is_none() || *known == reset_at);
+    if already_recorded {
+        return None;
+    }
+    Some(PoolExhausted {
+        pool: pool.clone(),
+        agent: agent.to_owned(),
+        reset_at,
+        detail: crate::util::head(&failure.reason, 400),
+    })
 }
 
 pub fn drain_of<'a>(
@@ -1060,6 +1109,199 @@ mod tests {
             "before the second signal, the first one's reset stands: {:?}",
             obs.exhausted
         );
+    }
+
+    const FIVE_HOUR_LIMIT: &str = "You've hit your 5-hour limit · resets 5:30am (UTC)";
+    const FABLE_LIMIT: &str = "You've hit your Fable limit · resets Nov 14, 9am (UTC)";
+    const NOV_11_2026_AT_3AM: u64 = 1_794_355_200 + 3 * 3_600;
+
+    fn settled(pool: Option<&str>, reviews: Vec<crate::events::ReviewRecord>) -> AttemptRecord {
+        AttemptRecord {
+            attempt: 1,
+            tier: "small".to_owned(),
+            model: "m".to_owned(),
+            pool: pool.map(str::to_owned),
+            resumed: false,
+            duration: Duration::ZERO,
+            cost_usd: None,
+            reviews,
+            session_id: None,
+            usage: None,
+            failure: None,
+        }
+    }
+
+    fn review_on(agent: &str, pool: Option<&str>) -> crate::events::ReviewRecord {
+        crate::events::ReviewRecord {
+            pass: "review".to_owned(),
+            agent: agent.to_owned(),
+            model: "m".to_owned(),
+            adapter: None,
+            preflight_cli_version: None,
+            effort: None,
+            pool: pool.map(str::to_owned),
+            cost_usd: None,
+            outcome: ReviewPassOutcome::Unavailable,
+        }
+    }
+
+    fn rate_limited(reason: &str) -> AttemptFailure {
+        AttemptFailure::new(FailureKind::RateLimited, reason)
+    }
+
+    #[test]
+    fn a_rate_limited_claude_code_worker_failure_naming_a_reset_answers_that_pool_and_reset() {
+        let answer = pool_exhausted_to_record(
+            &rate_limited(FIVE_HOUR_LIMIT),
+            &settled(Some("claude-max"), Vec::new()),
+            crate::agent::claude::ADAPTER_ID,
+            &BTreeMap::new(),
+            NOV_11_2026_AT_3AM,
+        );
+        assert_eq!(
+            answer,
+            Some(PoolExhausted {
+                pool: "claude-max".to_owned(),
+                agent: "claude-code".to_owned(),
+                reset_at: Some("2026-11-11T05:30:00Z".to_owned()),
+                detail: FIVE_HOUR_LIMIT.to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_pool_already_recorded_with_the_same_reset_answers_no_pool_exhausted() {
+        let recorded = BTreeMap::from([(
+            "claude-max".to_owned(),
+            Some("2026-11-11T05:30:00Z".to_owned()),
+        )]);
+        let answer = pool_exhausted_to_record(
+            &rate_limited(FIVE_HOUR_LIMIT),
+            &settled(Some("claude-max"), Vec::new()),
+            crate::agent::claude::ADAPTER_ID,
+            &recorded,
+            NOV_11_2026_AT_3AM,
+        );
+        assert_eq!(answer, None);
+    }
+
+    #[test]
+    fn a_pool_already_recorded_with_a_different_reset_answers_one_with_the_new_reset() {
+        let recorded = BTreeMap::from([(
+            "claude-max".to_owned(),
+            Some("2026-11-11T05:30:00Z".to_owned()),
+        )]);
+        let answer = pool_exhausted_to_record(
+            &rate_limited(FABLE_LIMIT),
+            &settled(Some("claude-max"), Vec::new()),
+            crate::agent::claude::ADAPTER_ID,
+            &recorded,
+            NOV_11_2026_AT_3AM,
+        );
+        assert_eq!(
+            answer,
+            Some(PoolExhausted {
+                pool: "claude-max".to_owned(),
+                agent: "claude-code".to_owned(),
+                reset_at: Some("2026-11-14T09:00:00Z".to_owned()),
+                detail: FABLE_LIMIT.to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_rate_limited_reviewer_failure_takes_the_last_reviews_pool_and_agent() {
+        let record = settled(
+            Some("worker-pool"),
+            vec![
+                review_on("codex", Some("recovered-reviewer")),
+                review_on("claude-code", Some("limited-reviewer")),
+            ],
+        );
+        let answer = pool_exhausted_to_record(
+            &rate_limited(FIVE_HOUR_LIMIT).from_reviewer(),
+            &record,
+            "codex",
+            &BTreeMap::new(),
+            NOV_11_2026_AT_3AM,
+        );
+        assert_eq!(
+            answer,
+            Some(PoolExhausted {
+                pool: "limited-reviewer".to_owned(),
+                agent: "claude-code".to_owned(),
+                reset_at: Some("2026-11-11T05:30:00Z".to_owned()),
+                detail: FIVE_HOUR_LIMIT.to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_rate_limited_failure_naming_no_pool_answers_no_pool_exhausted() {
+        let worker = rate_limited(FIVE_HOUR_LIMIT);
+        let reviewer = rate_limited(FIVE_HOUR_LIMIT).from_reviewer();
+        for (failure, record) in [
+            (&worker, settled(None, Vec::new())),
+            (&reviewer, settled(Some("worker-pool"), Vec::new())),
+            (
+                &reviewer,
+                settled(
+                    Some("worker-pool"),
+                    vec![
+                        review_on("claude-code", Some("earlier-reviewer")),
+                        review_on("claude-code", None),
+                    ],
+                ),
+            ),
+        ] {
+            let answer = pool_exhausted_to_record(
+                failure,
+                &record,
+                crate::agent::claude::ADAPTER_ID,
+                &BTreeMap::new(),
+                NOV_11_2026_AT_3AM,
+            );
+            assert_eq!(answer, None, "{failure:?} on {record:?}");
+        }
+    }
+
+    #[test]
+    fn a_rate_limited_non_claude_agent_answers_a_pool_exhausted_with_no_reset() {
+        let answer = pool_exhausted_to_record(
+            &rate_limited(FIVE_HOUR_LIMIT),
+            &settled(Some("codex-pro"), Vec::new()),
+            "codex",
+            &BTreeMap::new(),
+            NOV_11_2026_AT_3AM,
+        );
+        assert_eq!(
+            answer,
+            Some(PoolExhausted {
+                pool: "codex-pro".to_owned(),
+                agent: "codex".to_owned(),
+                reset_at: None,
+                detail: FIVE_HOUR_LIMIT.to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_failure_that_is_not_rate_limited_answers_no_pool_exhausted() {
+        for kind in [
+            FailureKind::AgentError,
+            FailureKind::GateFailed,
+            FailureKind::ReviewUnavailable,
+            FailureKind::Interrupted,
+        ] {
+            let answer = pool_exhausted_to_record(
+                &AttemptFailure::new(kind, FIVE_HOUR_LIMIT),
+                &settled(Some("claude-max"), Vec::new()),
+                crate::agent::claude::ADAPTER_ID,
+                &BTreeMap::new(),
+                NOV_11_2026_AT_3AM,
+            );
+            assert_eq!(answer, None, "{kind:?}");
+        }
     }
 
     #[test]
