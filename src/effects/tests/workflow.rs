@@ -821,8 +821,6 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
     out
 }
 
-/// A Windows suite job needs the picker, runs under exactly its own condition on the
-/// picker's answer, and is bounded by exactly its own timeout.
 fn windows_home_complaints(
     job: &Yaml,
     named: &str,

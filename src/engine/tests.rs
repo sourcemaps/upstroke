@@ -18243,10 +18243,7 @@ fn a_schema_4_run_publishes_its_records_in_order_and_records_one_runner() {
 // G7: the native HOST acceptance record
 // ---------------------------------------------------------------------------
 //
-// One ignored test, selected by its exact name by the capture step that follows
-// the full suite in CI's `test` job and in whichever of the Windows suite's two
-// jobs ran, `test-windows` or its hosted twin. It drives two schema-4
-// runs on the production `HostRunner` through the public entry points, asserts
+// One ignored test. It drives two schema-4 runs on the production `HostRunner` through the public entry points, asserts
 // of each what the PR12 witnesses above assert, and only then prints the runs'
 // raw records as bounded, numbered lines that a reader of the job log can
 // reconstruct and verify. The notes give the framing and what acceptance needs.
