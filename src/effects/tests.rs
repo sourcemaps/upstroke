@@ -6273,9 +6273,9 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
     let macos = shard_selections(&MACOS_SHARD_FILTERS);
     let linux = shard_selections(&LINUX_SHARD_FILTERS);
     for (table, selections, filters, shards) in [
-        ("Windows", &windows, WINDOWS_SHARD_FILTERS.as_slice(), 14),
-        ("macOS", &macos, MACOS_SHARD_FILTERS.as_slice(), 5),
-        ("Linux", &linux, LINUX_SHARD_FILTERS.as_slice(), 2),
+        ("Windows", &windows, WINDOWS_SHARD_FILTERS.as_slice(), 22),
+        ("macOS", &macos, MACOS_SHARD_FILTERS.as_slice(), 12),
+        ("Linux", &linux, LINUX_SHARD_FILTERS.as_slice(), 5),
     ] {
         assert_eq!(
             selections.len(),
@@ -6297,8 +6297,8 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
         .collect();
     assert_eq!(
         windows_filters.len(),
-        69,
-        "the Windows table holds {} filters, not 69",
+        109,
+        "the Windows table holds {} filters, not 109",
         windows_filters.len()
     );
     assert_eq!(
@@ -6317,8 +6317,14 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
     );
     assert_eq!(
         linux,
-        ["engine::", "--skip engine::"],
-        "the Linux shards' libtest arguments are not the two written out here"
+        [
+            "effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner engine::topology::coordinator::tests::interleaving:: engine::topology::recover:: workspace_manager::tests::s workspace::",
+            "engine::topology::coordinator::tests::a_g engine::topology::coordinator::tests::a_r workspace_manager::tests::t runner::contract:: topology::census:: --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::recover:: --skip workspace_manager::tests::s --skip workspace::",
+            "engine::topology::attempt:: workspace_manager::tests::r runner::container:: engine::tests:: --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::recover:: --skip workspace_manager::tests::s --skip workspace:: --skip engine::topology::coordinator::tests::a_g --skip engine::topology::coordinator::tests::a_r --skip workspace_manager::tests::t --skip runner::contract:: --skip topology::census::",
+            "engine::topology::coordinator::tests::a_p engine::topology::coordinator::tests::a_s workspace_manager::tests::a workspace_manager::tests::e workspace_manager::tests::n --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::recover:: --skip workspace_manager::tests::s --skip workspace:: --skip engine::topology::coordinator::tests::a_g --skip engine::topology::coordinator::tests::a_r --skip workspace_manager::tests::t --skip runner::contract:: --skip topology::census:: --skip engine::topology::attempt:: --skip workspace_manager::tests::r --skip runner::container:: --skip engine::tests::",
+            "--skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::recover:: --skip workspace_manager::tests::s --skip workspace:: --skip engine::topology::coordinator::tests::a_g --skip engine::topology::coordinator::tests::a_r --skip workspace_manager::tests::t --skip runner::contract:: --skip topology::census:: --skip engine::topology::attempt:: --skip workspace_manager::tests::r --skip runner::container:: --skip engine::tests:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_s --skip workspace_manager::tests::a --skip workspace_manager::tests::e --skip workspace_manager::tests::n",
+        ],
+        "the Linux shards' libtest arguments are not the five written out here"
     );
     let unsharded = shard_selections(&[]);
     assert_eq!(
@@ -6330,78 +6336,78 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
     for (name, windows_shard, macos_shard, linux_shard) in [
         (
             "engine::topology::coordinator::tests::a_pipeline_is_served_while_an_intent_removals_repair_plan_waits_on_a_torn_registration",
+            16,
+            10,
             4,
-            1,
-            1,
         ),
         (
             "engine::topology::coordinator::tests::a_registry_refusal_after_two_paid_passes_is_recorded_with_both_at_width_one",
-            10,
-            3,
             1,
+            2,
+            2,
         ),
         (
             "engine::topology::coordinator::tests::a_budget_stop_drains",
-            14,
+            22,
+            12,
             5,
-            1,
         ),
         (
             "engine::topology::coordinator::tests::halt_cancels_in_flight_attempt_at_width_three",
-            14,
+            6,
+            12,
             5,
-            1,
         ),
         (
             "engine::topology::coordinator::tests::interleaving::a_budget_stop_under_every_seed",
-            12,
-            2,
+            19,
+            7,
             1,
         ),
         (
             "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect",
-            1,
-            3,
+            12,
+            7,
             1,
         ),
         (
             "engine::topology::attempt::tests::kill_after_the_snapshot_intent_before_its_worktree_is_reclaimed",
-            13,
-            4,
-            1,
+            17,
+            10,
+            3,
         ),
-        ("engine::tests::host_acceptance_record", 14, 5, 1),
+        ("engine::tests::host_acceptance_record", 22, 12, 3),
         (
             "engine::tests::a_kept_pin_is_written_whatever_head_is_when_the_snapshot_is_refused",
-            10,
-            1,
-            1,
+            14,
+            3,
+            3,
         ),
         (
             "runner::container::tests::container_capability_record",
+            5,
+            8,
             3,
-            4,
-            2,
         ),
         (
             "workspace_manager::tests::engine::a_name_with_a_filter_inside_it",
-            7,
             2,
-            1,
+            6,
+            4,
         ),
         (
             "workspace_manager::tests::a_reservation_is_released",
-            3,
-            3,
-            2,
+            9,
+            10,
+            4,
         ),
         (
             "effects::tests::the_workflow_shape_oracle_refuses_every_escape_the_ledger_names",
-            14,
-            2,
-            2,
+            22,
+            12,
+            5,
         ),
-        ("tests::a_test_of_the_binary_harness", 14, 5, 2),
+        ("tests::a_test_of_the_binary_harness", 22, 12, 5),
     ] {
         for (table, selections, expected) in [
             ("Windows", &windows, windows_shard),
