@@ -1260,127 +1260,549 @@ fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
 }
 
 #[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupStep {
+    Signal,
+    Kill,
+    Look(Option<bool>),
+    Pin,
+    Pause,
+    Reap,
+}
+
+#[cfg(unix)]
+const SCRIPTED_PAUSE: Duration = Duration::from_millis(1);
+
+#[cfg(unix)]
+const UNREACHED_BOUND: Duration = Duration::from_secs(3600);
+
+#[cfg(unix)]
+struct ScriptedGroup {
+    steps: Vec<GroupStep>,
+    signals: std::collections::VecDeque<Option<i32>>,
+    looks: std::collections::VecDeque<Option<bool>>,
+    looks_then: Option<bool>,
+    pins: std::collections::VecDeque<Result<bool, i32>>,
+    reaped: bool,
+    started: Instant,
+    elapsed: Duration,
+}
+
+#[cfg(unix)]
+impl ScriptedGroup {
+    fn new(signals: &[Option<i32>], looks: &[Option<bool>], looks_then: Option<bool>) -> Self {
+        Self {
+            steps: Vec::new(),
+            signals: signals.iter().copied().collect(),
+            looks: looks.iter().copied().collect(),
+            looks_then,
+            pins: std::collections::VecDeque::new(),
+            reaped: false,
+            started: Instant::now(),
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    fn with_pins(mut self, pins: &[Result<bool, i32>]) -> Self {
+        self.pins = pins.iter().copied().collect();
+        self
+    }
+
+    fn signal(&mut self) -> Option<i32> {
+        self.steps.push(GroupStep::Signal);
+        self.signals.pop_front().flatten()
+    }
+
+    fn kill(&mut self) {
+        self.steps.push(GroupStep::Kill);
+    }
+
+    fn look(&mut self) -> Option<bool> {
+        let seen = self.looks.pop_front().unwrap_or(self.looks_then);
+        self.steps.push(GroupStep::Look(seen));
+        seen
+    }
+
+    fn pinned(&mut self) -> std::io::Result<bool> {
+        self.steps.push(GroupStep::Pin);
+        if self.reaped {
+            return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+        }
+        self.pins
+            .pop_front()
+            .unwrap_or(Ok(true))
+            .map_err(std::io::Error::from_raw_os_error)
+    }
+
+    fn reap(&mut self) -> std::io::Result<()> {
+        self.steps.push(GroupStep::Reap);
+        self.reaped = true;
+        Ok(())
+    }
+
+    fn now(&mut self) -> Instant {
+        self.started + self.elapsed
+    }
+
+    fn pause(&mut self) {
+        self.steps.push(GroupStep::Pause);
+        self.elapsed += SCRIPTED_PAUSE;
+    }
+
+    fn count(&self, step: GroupStep) -> usize {
+        self.steps.iter().filter(|seen| **seen == step).count()
+    }
+}
+
+#[cfg(unix)]
+fn scripted_ending(
+    rule: fn(Option<i32>) -> SignalVerdict,
+    bound: Duration,
+) -> GroupEnding<ScriptedGroup> {
+    GroupEnding {
+        bound,
+        signal: ScriptedGroup::signal,
+        kill: ScriptedGroup::kill,
+        observe: Some(ScriptedGroup::look),
+        pinned: ScriptedGroup::pinned,
+        reap: ScriptedGroup::reap,
+        now: ScriptedGroup::now,
+        pause: ScriptedGroup::pause,
+        rule,
+    }
+}
+
+#[cfg(unix)]
 #[test]
-fn a_group_signals_error_is_settled_only_by_esrch_or_by_eperm_beside_no_running_member() {
-    // (the signal's errno, the scanner's answer, settled)
-    let table = [
-        // A delivered signal, whatever was observed.
-        (None, None, true),
-        (None, Some(false), true),
-        (None, Some(true), true),
-        // ESRCH: no member was left, whatever was observed.
-        (Some(libc::ESRCH), None, true),
-        (Some(libc::ESRCH), Some(false), true),
-        (Some(libc::ESRCH), Some(true), true),
-        // EPERM for a group observed with no running member: macOS's answer
-        // for a zombie-only group (PR292), not a refusal.
-        (Some(libc::EPERM), Some(false), true),
-        // EPERM beside a running member: a refusal of a signal to a live
-        // process.
-        (Some(libc::EPERM), Some(true), false),
-        // EPERM for a group nothing observed: `signal_group_kill`'s own
-        // judgement, which keeps it an error.
-        (Some(libc::EPERM), None, false),
-        // Any other errno, whatever was observed.
-        (Some(libc::EINVAL), None, false),
-        (Some(libc::EINVAL), Some(false), false),
-        (Some(libc::EINVAL), Some(true), false),
-    ];
-    for (error, members, settled) in table {
+fn the_signal_rules_satisfy_a_delivered_signal_or_esrch_and_differ_only_on_eperm() {
+    for answer in [None, Some(libc::ESRCH)] {
         assert_eq!(
-            group_signal_settled(error, members),
-            settled,
-            "errno {error:?} (None: delivered) beside a scanner answer of {members:?}: settled \
-             only when delivered, by ESRCH, or by EPERM beside no running member"
+            (linux_signal_verdict(answer), macos_signal_verdict(answer)),
+            (SignalVerdict::Satisfied, SignalVerdict::Satisfied),
+            "{answer:?} (None: delivered) satisfies the signal rule on both platforms"
+        );
+    }
+    assert_eq!(
+        linux_signal_verdict(Some(libc::EPERM)),
+        SignalVerdict::Failed(libc::EPERM),
+        "Linux delivers a signal to a zombie-only group, so its EPERM is a refusal and fails"
+    );
+    assert_eq!(
+        macos_signal_verdict(Some(libc::EPERM)),
+        SignalVerdict::Refused(libc::EPERM),
+        "macOS answers a zombie-only group with EPERM, so the settle loop judges it"
+    );
+    for errno in [libc::EINVAL, libc::EAGAIN, libc::EINTR, libc::ECHILD, 0] {
+        assert_eq!(
+            (
+                linux_signal_verdict(Some(errno)),
+                macos_signal_verdict(Some(errno))
+            ),
+            (SignalVerdict::Failed(errno), SignalVerdict::Failed(errno)),
+            "errno {errno} fails on both platforms"
         );
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 #[test]
-fn the_settle_loop_settles_at_the_first_look_that_finds_no_running_member() {
-    let mut answers = [Some(true), Some(true), Some(false)].into_iter();
-    let mut looks = 0_u32;
-    let mut signals = 0_u32;
-    let established = settle_group(
-        4242,
-        |_| {
-            looks += 1;
-            answers
-                .next()
-                .expect("the loop looks again only while the group is not settled")
-        },
-        |_| signals += 1,
-        GROUP_SETTLE_BOUND,
+fn this_hosts_kill_path_keeps_eperm_on_linux_and_hands_it_to_the_settle_loop_on_macos() {
+    let expected = if cfg!(target_os = "macos") {
+        SignalVerdict::Refused(libc::EPERM)
+    } else {
+        SignalVerdict::Failed(libc::EPERM)
+    };
+    assert_eq!(group_signal_rule()(Some(libc::EPERM)), expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn kill_tree_ends_a_group_by_signal_kill_settlement_and_reap_in_that_order() {
+    use GroupStep::{Kill, Look, Pause, Pin, Reap, Signal};
+
+    let mut group = ScriptedGroup::new(&[], &[Some(true), None], Some(false));
+    let not_established = end_group(
+        &mut group,
+        &scripted_ending(linux_signal_verdict, UNREACHED_BOUND),
     );
+    assert!(not_established.is_empty(), "{not_established:?}");
     assert_eq!(
-        established,
-        Some(false),
-        "the group was observed with no running member"
+        group.steps,
+        [
+            Signal,
+            Kill,
+            Look(Some(true)),
+            Pin,
+            Signal,
+            Pause,
+            Look(None),
+            Pin,
+            Signal,
+            Pause,
+            Look(Some(false)),
+            Reap,
+        ],
+        "the group signal, the direct child's kill, then looks with a pinned retry after each \
+         one that did not settle, and the reap last"
     );
-    assert_eq!(
-        looks, 3,
-        "the look that found the group settled is the last"
+}
+
+#[cfg(unix)]
+#[test]
+fn the_direct_child_is_reaped_only_after_the_last_look_at_its_group() {
+    let mut group = ScriptedGroup::new(&[], &[Some(true), Some(true)], Some(false));
+    let not_established = end_group(
+        &mut group,
+        &scripted_ending(linux_signal_verdict, UNREACHED_BOUND),
     );
     assert!(
-        signals >= 2,
-        "the group was signalled again after each look that found a member running: {signals}"
+        not_established.is_empty(),
+        "every retry found the direct child still pinning the group's id: {not_established:?}"
+    );
+    let reap = group.steps.iter().position(|step| *step == GroupStep::Reap);
+    let last_look = group
+        .steps
+        .iter()
+        .rposition(|step| matches!(step, GroupStep::Look(_)));
+    assert_eq!(
+        (reap, group.count(GroupStep::Reap)),
+        (Some(group.steps.len() - 1), 1),
+        "the reap is the last step, and the only one: {:?}",
+        group.steps
+    );
+    assert!(
+        last_look < reap,
+        "the reap follows the last look: {:?}",
+        group.steps
     );
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 #[test]
-fn a_settle_loop_whose_probe_always_finds_a_member_answers_members_still_running() {
-    let bound = Duration::from_millis(10);
-    let mut looks = 0_u32;
-    let mut signals = 0_u32;
-    let established = settle_group(
-        4242,
-        |_| {
-            looks += 1;
-            Some(true)
-        },
-        |_| signals += 1,
-        bound,
+fn a_group_still_running_after_its_signal_is_never_answered_gone() {
+    let mut group = ScriptedGroup::new(&[], &[], Some(true));
+    let not_established = end_group(
+        &mut group,
+        &scripted_ending(linux_signal_verdict, Duration::from_millis(3)),
     );
     assert_eq!(
-        established,
+        not_established,
+        ["the group settle passed its 3ms bound: the last look found a member still running"],
+        "a group seen running at every look is not established gone"
+    );
+    assert_eq!(
+        group.count(GroupStep::Look(Some(true))),
+        4,
+        "the group was looked at until the bound: {:?}",
+        group.steps
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_retried_signal_that_fails_ends_the_settlement_with_its_error() {
+    use GroupStep::{Kill, Look, Pin, Reap, Signal};
+
+    for (rule, errno) in [
+        (
+            linux_signal_verdict as fn(Option<i32>) -> SignalVerdict,
+            libc::EINVAL,
+        ),
+        (macos_signal_verdict, libc::EINVAL),
+        (linux_signal_verdict, libc::EPERM),
+    ] {
+        let mut group = ScriptedGroup::new(&[None, Some(errno)], &[], Some(true));
+        let not_established = end_group(&mut group, &scripted_ending(rule, UNREACHED_BOUND));
+        assert_eq!(
+            not_established,
+            [format!(
+                "a retried group signal failed ({}): the last look found a member still running",
+                std::io::Error::from_raw_os_error(errno)
+            )],
+            "a retry's errno {errno} is judged as the first signal's is"
+        );
+        assert_eq!(
+            group.steps,
+            [Signal, Kill, Look(Some(true)), Pin, Signal, Reap],
+            "nothing is signalled or looked at after the failed retry"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn linux_keeps_a_group_signals_eperm_as_an_error() {
+    use GroupStep::{Kill, Reap, Signal};
+
+    let mut group = ScriptedGroup::new(&[Some(libc::EPERM)], &[], Some(false));
+    let not_established = end_group(
+        &mut group,
+        &scripted_ending(linux_signal_verdict, UNREACHED_BOUND),
+    );
+    assert_eq!(
+        not_established,
+        ["the group signal failed (Operation not permitted (os error 1))"],
+        "no look clears an EPERM on Linux, where a zombie-only group takes the signal"
+    );
+    assert_eq!(
+        group.steps,
+        [Signal, Kill, Reap],
+        "a failed group signal is not followed by a settlement that could clear it"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn macos_clears_an_eperm_only_after_two_consecutive_looks_finding_no_running_member() {
+    use GroupStep::{Kill, Look, Pause, Pin, Reap, Signal};
+
+    let mut group = ScriptedGroup::new(
+        &[Some(libc::EPERM)],
+        &[
+            Some(false),
+            Some(true),
+            Some(false),
+            None,
+            Some(false),
+            Some(false),
+        ],
         Some(true),
-        "a group never seen settled by the bound is answered as members still running, which \
-         `settle_signalled_group` reports as its error"
     );
+    let not_established = end_group(
+        &mut group,
+        &scripted_ending(macos_signal_verdict, UNREACHED_BOUND),
+    );
+    assert!(not_established.is_empty(), "{not_established:?}");
     assert_eq!(
-        signals + 1,
-        looks,
-        "the group was signalled again after every look but the one at the bound"
+        group.steps,
+        [
+            Signal,
+            Kill,
+            Look(Some(false)),
+            Pause,
+            Look(Some(true)),
+            Pin,
+            Signal,
+            Pause,
+            Look(Some(false)),
+            Pause,
+            Look(None),
+            Pin,
+            Signal,
+            Pause,
+            Look(Some(false)),
+            Pause,
+            Look(Some(false)),
+            Reap,
+        ],
+        "a running or unknown look breaks the run, and a look with no running member is not \
+         followed by a signal"
+    );
+
+    let mut group = ScriptedGroup::new(
+        &[None, Some(libc::EPERM)],
+        &[Some(true), Some(false)],
+        Some(false),
+    );
+    let not_established = end_group(
+        &mut group,
+        &scripted_ending(macos_signal_verdict, UNREACHED_BOUND),
+    );
+    assert!(not_established.is_empty(), "{not_established:?}");
+    assert_eq!(
+        group.steps,
+        [
+            Signal,
+            Kill,
+            Look(Some(true)),
+            Pin,
+            Signal,
+            Pause,
+            Look(Some(false)),
+            Pause,
+            Look(Some(false)),
+            Reap,
+        ],
+        "a retry's EPERM also waits for two consecutive looks"
     );
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(unix)]
 #[test]
-fn a_settle_loop_whose_probe_never_answers_answers_that_nothing_was_observed() {
-    let bound = Duration::from_millis(10);
-    let mut looks = 0_u32;
-    let mut signals = 0_u32;
-    let established = settle_group(
-        4242,
-        |_| {
-            looks += 1;
-            None
-        },
-        |_| signals += 1,
-        bound,
+fn a_lost_pin_stops_the_retries_with_an_error() {
+    use GroupStep::{Kill, Look, Pin, Reap, Signal};
+
+    let mut group = ScriptedGroup::new(&[], &[], Some(true)).with_pins(&[Err(libc::ECHILD)]);
+    let not_established = end_group(
+        &mut group,
+        &scripted_ending(linux_signal_verdict, UNREACHED_BOUND),
     );
     assert_eq!(
-        established, None,
-        "a probe that never answered established nothing, which `settle_signalled_group` \
-         reports as a membership that could not be observed"
+        not_established,
+        [
+            "the direct child no longer pinned its group's id before a retried signal (No child \
+             processes (os error 10)), so the group was not signalled again: the last look found \
+             a member still running"
+        ],
     );
     assert_eq!(
-        signals + 1,
-        looks,
-        "a look that could not answer is followed by a signal as a running member is"
+        group.steps,
+        [Signal, Kill, Look(Some(true)), Pin, Reap],
+        "no signal follows a failed pin check"
     );
+
+    let mut group = ScriptedGroup::new(&[], &[Some(true)], Some(false)).with_pins(&[Ok(false)]);
+    let not_established = end_group(
+        &mut group,
+        &scripted_ending(linux_signal_verdict, UNREACHED_BOUND),
+    );
+    assert!(
+        not_established.is_empty() && group.count(GroupStep::Signal) == 2,
+        "a direct child not yet dead is still unreaped, so it still pins the id: \
+         {not_established:?} {:?}",
+        group.steps
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unknown_look_settles_nothing_and_clears_no_refusal() {
+    let mut group = ScriptedGroup::new(&[], &[], None);
+    let not_established = end_group(
+        &mut group,
+        &scripted_ending(linux_signal_verdict, Duration::from_millis(3)),
+    );
+    assert_eq!(
+        not_established,
+        [
+            "the group settle passed its 3ms bound: the last look could not observe the group's \
+             membership"
+        ],
+    );
+    assert_eq!(
+        group.count(GroupStep::Signal),
+        4,
+        "each unknown look before the bound is followed by a retry: {:?}",
+        group.steps
+    );
+
+    let mut group = ScriptedGroup::new(
+        &[Some(libc::EPERM)],
+        &[Some(false), None, Some(false)],
+        None,
+    );
+    let not_established = end_group(
+        &mut group,
+        &scripted_ending(macos_signal_verdict, Duration::from_millis(5)),
+    );
+    assert_eq!(
+        not_established,
+        [
+            "the group settle passed its 5ms bound: the last look could not observe the group's \
+             membership, and the group signal's refusal (Operation not permitted (os error 1)) \
+             was not cleared by two consecutive looks finding no running member"
+        ],
+        "an unknown look between two with no running member breaks the run"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_bound_reports_the_last_look() {
+    use GroupStep::{Kill, Look, Reap, Signal};
+
+    let bound = Duration::from_millis(3);
+    for (looks, rule, first, reported) in [
+        (
+            [Some(true), Some(true), Some(true), None],
+            linux_signal_verdict as fn(Option<i32>) -> SignalVerdict,
+            None,
+            "the last look could not observe the group's membership".to_owned(),
+        ),
+        (
+            [None, None, None, Some(true)],
+            linux_signal_verdict,
+            None,
+            "the last look found a member still running".to_owned(),
+        ),
+        (
+            [Some(true), Some(true), Some(true), Some(false)],
+            macos_signal_verdict,
+            Some(libc::EPERM),
+            "the last look found no running member, and the group signal's refusal (Operation \
+             not permitted (os error 1)) was not cleared by two consecutive looks finding no \
+             running member"
+                .to_owned(),
+        ),
+    ] {
+        let mut group = ScriptedGroup::new(&[first], &looks, Some(false));
+        let not_established = end_group(&mut group, &scripted_ending(rule, bound));
+        assert_eq!(
+            not_established,
+            [format!("the group settle passed its 3ms bound: {reported}")]
+        );
+        assert_eq!(
+            (
+                group.count(GroupStep::Pause),
+                group.steps.last().copied(),
+                group.elapsed,
+            ),
+            (3, Some(Reap), bound),
+            "one pause per look before the bound, on the fake clock: {:?}",
+            group.steps
+        );
+    }
+
+    let mut group = ScriptedGroup::new(&[], &[Some(true), Some(true), Some(true)], Some(false));
+    let not_established = end_group(&mut group, &scripted_ending(linux_signal_verdict, bound));
+    assert!(
+        not_established.is_empty(),
+        "a look that settles is answered before the bound is read: {not_established:?}"
+    );
+
+    let mut group = ScriptedGroup::new(&[], &[], Some(true));
+    let not_established = end_group(
+        &mut group,
+        &scripted_ending(linux_signal_verdict, Duration::ZERO),
+    );
+    assert_eq!(
+        (not_established.len(), group.steps.as_slice()),
+        (1, [Signal, Kill, Look(Some(true)), Reap].as_slice()),
+        "a zero bound still looks once, and retries nothing"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn without_an_observer_the_group_ends_as_master_ended_it() {
+    use GroupStep::{Kill, Reap, Signal};
+
+    for (first, rule, reported) in [
+        (
+            None,
+            linux_signal_verdict as fn(Option<i32>) -> SignalVerdict,
+            None,
+        ),
+        (Some(libc::ESRCH), linux_signal_verdict, None),
+        (
+            Some(libc::EPERM),
+            macos_signal_verdict,
+            Some("the group signal failed (Operation not permitted (os error 1))"),
+        ),
+    ] {
+        let mut group = ScriptedGroup::new(&[first], &[], Some(true));
+        let ending = GroupEnding {
+            observe: None,
+            ..scripted_ending(rule, UNREACHED_BOUND)
+        };
+        let not_established = end_group(&mut group, &ending);
+        assert_eq!(
+            not_established,
+            reported.into_iter().collect::<Vec<_>>(),
+            "{first:?}: nothing can clear a refusal without a look"
+        );
+        assert_eq!(group.steps, [Signal, Kill, Reap]);
+    }
 }
 
 #[cfg(unix)]

@@ -388,17 +388,27 @@ when it is a `cmd.exe` shim: the real agent process would survive, keep
 running, and keep the pipes open.
 
 `Ok` is evidence, not a courtesy: on Windows the job was observed empty
-(`terminate_and_wait`). On Linux and macOS the group was signalled
-(`kill(-pgid, SIGKILL)`), the leader was reaped, and then the group was
-observed until no non-zombie member remained ([`settle_signalled_group`],
-over [`settle_group`]). The observer is the scanner `cleanup_reaper_group`
-loops on (`group_has_non_zombie_members`), and the group is signalled
-again after every look that still finds a member or cannot answer. If
-`GROUP_SETTLE_BOUND` passes first, the primitive returns its error. The
-reason names which case it was: members still running, or the group's
-membership could not be observed. The first signal's error is judged only
-after that observation ([`group_signal_settled`]), so a zombie-only
-group's `EPERM` no longer fails the kill (`signal_group_kill`, below).
+(`terminate_and_wait`). On Unix the answer is [`end_unix_group`]'s, run
+by [`end_group`] in four steps and in this order: the group is signalled
+(`kill(-pgid, SIGKILL)`), the direct child is killed, the group is
+observed until no non-zombie member remains ([`settle_group`], on Linux
+and macOS), and only then is the direct child reaped. Every reason it
+could not establish the group gone is joined into this primitive's one
+error.
+
+The direct child is the group's identity anchor until the settlement
+ends. The group's id is the leader's pid, and this process's unreaped
+child holds that pid, zombie or not, until this process waits for it.
+#438's first round reaped the leader first and then looped
+re-signalling, so nothing this process held kept the id from being
+issued again while it was signalled: once the leader is reaped and the
+last member has exited, `kill(-pgid, …)` can reach a stranger's group.
+The reap is now the last step, and every retried signal is preceded by
+`exited_unreaped` finding the leader still unreaped ([`settle_group`]).
+
+The non-Windows block carries one statement gated `cfg(unix)` and no
+`not(unix)` body: the platform census (`effects::tests`) refuses a body no
+CI runner compiles. The Windows arm is unchanged by any of this.
 
 One delivered `SIGKILL` is not enough. The notes used to say otherwise:
 after it no member can run user code or complete a `fork`.
@@ -415,140 +425,184 @@ what it was: the signal delivered (or `ESRCH`) and the leader reaped. The
 review of `79ddbffb` found this primitive answering an unconditional `Ok`
 with every result discarded.
 
-## `fn signal_group_kill(child: &ProcessTree) -> std::io::Result<()> {`
-
-The Unix half of [`kill_tree_primitive`]'s evidence: `SIGKILL` to the group the
-child leads, `Ok` when it was delivered or `ESRCH` said the group is
-already empty. Its own function so the non-Windows block of `kill_tree_primitive`
-carries only positively gated statements and no `not(unix)` body — the
-platform census (`effects::tests`) refuses a body no CI runner compiles.
-The settlement follows the same rule. On Linux and macOS one gated `let`
-re-judges this function's answer, and nothing in the block is compiled
-only for another Unix, which therefore keeps the answer given here.
-
-This function judges its own error before anything has looked at the
-group: [`group_signal_settled`] with `None` for the observation. Only `ESRCH`
-settles there, and every other error, `EPERM` among them, is returned.
-On Linux and macOS that `EPERM` is not the final judgement. `kill_tree_primitive`
-judges it again against what [`settle_group`] then observed, and settles
-it only if the scanner found no non-zombie member. The reason is
-`PR292-MACOS-ZOMBIE-ONLY-GROUP-EPERM-FAILS-KILL-TREE`. macOS answers a
-signal to a group that holds nothing but zombies with `EPERM`. On #292 the
-spawn after-phase's error path dropped the `Supervisor` first. Its reaper
-killed the group and left the unreaped leader as the group's only process,
-a zombie. This function's signal was then refused. The primitive went on
-to reap the leader, so the group was gone, yet it reported the group not
-established gone, and the fate stayed `Unresolved`. Any other `EPERM` stays
-an error, because a host policy can refuse a signal to a live process
-(`REFUSED-KILL-UNBOUNDS-THE-BOUNDED-DOCKER-REAP`): an `EPERM` beside a
-running member, or for a group the scanner could not observe, is an error.
-
-## `fn group_signal_settled(error: Option<i32>, non_zombie_members: Option<bool>) -> bool {`
-
-What a group signal's error means, given what was then observed of the
-group. A pure function so the `EPERM` judgement is a table a test can read
-on any Unix, with no group and no zombie to build. `error` is the errno
-`kill(-pgid, SIGKILL)` failed with (`None`: delivered).
-`non_zombie_members` is the scanner's answer (`None`: not observed, or the
-scanner could not answer). A delivered signal and `ESRCH` are settled
-whatever was observed. `EPERM` is settled only beside `Some(false)`, which
-is `PR292-MACOS-ZOMBIE-ONLY-GROUP-EPERM-FAILS-KILL-TREE`'s zombie-only
-group. Every other `EPERM` and every other errno are not settled.
-`signal_group_kill` asks it with `None`; on Linux and macOS
-[`settle_signalled_group`] asks it again with the settle loop's answer.
-
 ## `const GROUP_SETTLE_BOUND: Duration = Duration::from_secs(10);`
 
-How long [`kill_tree_primitive`] keeps observing and re-signalling the
-group before it reports the group not established gone. It is a failsafe,
-not a wait. A group that is going to settle does so once the kernel has
-acted on the `SIGKILL`s, and the loop ends on that observation, usually at
-its first look. The bound turns a group that never settles into the
-primitive's error. Such a group may hold a member the kernel will not hand
-back, live behind a signal a host policy refuses, or sit behind a scanner
-that cannot answer. Without the bound the caller would be held for ever,
-which is the defect `HELPER_END_BUDGET` was written against. `cleanup_reaper_group`
-has no such bound because it runs in the reaper, which must not release
-the cleanup lease early. This primitive runs on the caller's thread.
+The observation bound, and exactly what it covers. It bounds
+[`settle_group`] and nothing else. Its clock is the ending's `now`, and
+it starts when the settlement does, straight after the direct child's
+kill. Every look, pin check, retried signal and pause falls inside it.
+The first group signal and the direct child's kill come before it. The
+reap comes after it and is not bounded by it.
+
+The loop reads the bound once per pass, after a look that did not
+settle. So a look that settles is answered whatever the clock says, a
+zero bound still looks once, and a pass can overrun the bound by one
+look, one pin check, one signal and one pause before the next read
+returns the error. The bound interrupts no step: a look, pin check or
+signal that blocks holds the loop until it returns. The error names the
+bound and the last look ([`last_look`]).
+
+It is a failsafe, not a wait. A group that is going to settle does so
+once the kernel has acted on the `SIGKILL`s, and the loop ends on that
+observation, usually at its first look. The bound turns a group that never
+settles into the primitive's error. Such a group may hold a member the
+kernel will not hand back, live behind a signal a host policy refuses, or
+sit behind a scanner that cannot answer. Without the bound the caller
+would be held for ever, which is the defect `HELPER_END_BUDGET` was written
+against. `cleanup_reaper_group` has no such bound because it runs in the
+reaper, which must not release the cleanup lease early. This primitive
+runs on the caller's thread.
+
+The reap after it is master's blocking `wait`, kept as it was: no bound
+covers it. After a settled group whose leader is still in it, the wait
+returns at once, because the look found no member of the group running.
+After any error from the settlement it waits on a direct child that has
+been sent `SIGKILL` by `child.kill()` and by the group signal, which is
+the wait master made in every case. A leader the kernel never hands back
+holds the caller there, as it always could.
 
 ## `const GROUP_SETTLE_POLL_SLICE: Duration = Duration::from_millis(1);`
 
-The pause [`settle_group`] takes after each re-signal before it looks
-again. It sets the cadence of the observation and stands in for no fact:
-the loop ends on the scanner's answer, never on time spent. Without it, a
-member that takes a moment to die would have the whole process table
-rescanned in a busy loop. The pause is `HELPER_END_POLL_SLICE`'s
-millisecond, for the same reason: a member that dies on a `SIGKILL` is
-gone within one.
+The pause production's ending takes at the end of each settlement pass
+that did not settle, before the next look. It sets the cadence of the
+observation and stands in for no fact: the loop ends on the scanner's
+answer, never on time spent. Without it, a member that takes a moment to
+die would have the whole process table rescanned in a busy loop. The
+pause is `HELPER_END_POLL_SLICE`'s millisecond, for the same reason: a
+member that dies on a `SIGKILL` is gone within one. The ending's `pause`
+step is where it is taken, so a mocked ending supplies its own.
 
-## `fn settle_signalled_group(`
+## `enum SignalVerdict {`
 
-[`kill_tree_primitive`]'s settlement of the group its leader led, on the two
-platforms the termination module's scanner exists for. It runs
-[`settle_group`] over `termination::group_has_non_zombie_members` and a
-repeated `kill(-pgid, SIGKILL)`, the one `unsafe` call the loop repeats.
-It then judges the first signal's error against what that loop answered
-([`group_signal_settled`]). It answers that judged signal, and the reason
-when the group was not observed settled: members still running at the
-bound, or a membership that could not be observed. A leader pid with no
-`i32` form has no group to observe. `signal_group_kill` has already
-refused it with `EINVAL`, and this reports the membership unobserved
-beside that.
+What one group signal's answer means under a platform's rule.
+`Satisfied`: the signal rule holds, because the signal was delivered or
+the kernel answered `ESRCH`. `Refused(errno)`: macOS's `EPERM`, which
+[`settle_group`] may clear only after two consecutive looks find no
+non-zombie member. `Failed(errno)`: every other answer. A failed first
+signal ends the ending's signalling before the settlement, and a failed
+retry ends the settlement. Either is reported with its errno.
 
-It runs after the leader's reap, as the plan for
-`PR281-MACOS-KILL-TREE-SETTLE-ONLY-THE-DIRECT-CHILD` orders it. So nothing
-of the primitive's own pins the group id. The members still running pin
-it, and once none is left the scanner answers `Some(false)` and nothing
-more is sent. The loop signals straight after a look, never after the
-pause, to keep the window between a look and the next signal as short as
-the calls allow.
+## `fn linux_signal_verdict(answer: Option<i32>) -> SignalVerdict {`
 
-## `fn settle_group(`
+The rule on Linux, and on any Unix but macOS. `answer` is the errno
+`kill(-pgid, SIGKILL)` failed with (`None`: delivered). A delivered signal
+and `ESRCH` satisfy it, and every other errno fails, `EPERM` among them.
+Linux answers a signal to a group of zombies with success (PR292's
+record), so an `EPERM` there is a refusal to signal a live process. A
+host policy can make that refusal
+(`REFUSED-KILL-UNBOUNDS-THE-BOUNDED-DOCKER-REAP`), and no look clears it.
 
-The settle loop, with the scanner and the signal as parameters so it can
-be tested without a real group (`mod group_settle_tests`). It looks at
-the group and stops on `Some(false)`. On any other answer it checks the
-bound, signals, pauses for `GROUP_SETTLE_POLL_SLICE` and looks again,
-which is `cleanup_reaper_group`'s loop with a bound. It answers what the
-probe established: `Some(false)` once the probe said so. At the bound it
-answers `Some(true)` if the probe ever found a non-zombie member, and
-`None` if the probe answered `None` throughout. A member seen once
-followed by a scanner that stopped answering is still a member seen
-running. It is not an unobservable group.
+## `fn macos_signal_verdict(answer: Option<i32>) -> SignalVerdict {`
 
-## `mod group_settle_tests {`
+The macOS rule. It is Linux's except that `EPERM` is `Refused` rather
+than `Failed`. macOS answers a signal to a group that holds nothing but
+zombies with `EPERM` (`PR292-MACOS-ZOMBIE-ONLY-GROUP-EPERM-FAILS-KILL-TREE`).
+On #292 the spawn after-phase's error path dropped the `Supervisor` first.
+Its reaper killed the group and left the unreaped leader as the group's
+only process, a zombie, and the primitive's signal was then refused. The
+group was gone, yet the primitive reported it not established gone, and
+the fate stayed `Unresolved`.
 
-[`group_signal_settled`] and [`settle_group`] against scripted answers
-rather than a real process group. A real group cannot be made, on demand
-and on both platforms, to answer a zombie-only `EPERM` (Linux delivers
-that signal) or to keep a member that never dies.
-`kill_tree_settles_the_whole_unix_group_before_it_returns` in
-`proc/tests.rs` remains the witness on a real tree. Gated to Linux and
-macOS with the loop it tests.
+A host policy's refusal is answered with the same errno, so the errno
+alone cannot tell the two apart. [`settle_group`] tells them apart by
+looking. Two consecutive looks that find no non-zombie member clear the
+refusal, and nothing else does: not one such look, not a look that
+cannot answer, and not a later signal that is delivered. A look walks
+the process table one entry at a time and is atomic with nothing, which
+is why the clearing asks for two rather than trusting one.
 
-## `mod group_settle_tests` › `fn group_signal_errors_settle_only_by_esrch_or_an_eperm_on_a_zombie_only_group() {`
+## `fn group_signal_rule() -> fn(Option<i32>) -> SignalVerdict {`
 
-The whole judgement table. A delivered signal and `ESRCH` are settled
-under every observation, and other errnos under none. `EPERM` is settled
-beside `Some(false)` only: beside `Some(true)` it is a refusal of a signal
-to a live process, and beside `None` nothing established otherwise.
+The rule production's ending passes: macOS's on macOS, Linux's
+everywhere else. A runtime `cfg!` rather than two gated bodies, so no Unix
+but Linux and macOS gets a body no CI runner compiles, and so a test can
+read the choice on each host
+(`this_hosts_kill_path_keeps_eperm_on_linux_and_hands_it_to_the_settle_loop_on_macos`).
 
-## `mod group_settle_tests` › `fn the_settle_loop_signals_after_every_unsettled_look_and_stops_at_the_settled_one() {`
+## `struct GroupEnding<P> {`
 
-One look per answer and one signal after each look that was not settled,
-all at the group given. Neither happens after the settled look. A group
-already settled is looked at once and never signalled again. That is the
-common case, a tree that died on the first signal.
+The Unix ending's steps as function pointers over a process `P`, so the
+whole lifecycle can run against a scripted process mock and a fake clock
+(`ScriptedGroup` in `proc/tests.rs`) rather than a real group. Pointers
+to non-capturing closures rather than a trait: a trait impl's functions
+are externally reachable to the effects census and would each need an
+`effects/wrappers.toml` row. Every step takes the process, so a mock can
+record the order of signals, the kill, looks, pin checks, pauses and the
+reap. Time (`now`), the pause (`pause`) and the platform rule (`rule`) are
+parameters like the rest, and so is the bound. `observe` is optional,
+for a platform with no scanner.
 
-## `mod group_settle_tests` › `fn a_group_that_never_settles_is_answered_at_the_bound_with_what_was_seen() {`
+## `fn end_unix_group(child: &mut ProcessTree) -> Vec<String> {`
 
-The failsafe. A group that always has a member is answered `Some(true)`
-no sooner than the bound, after being signalled again meanwhile. A scanner
-that never answers yields `None`. A member seen once and then a silent
-scanner still yields `Some(true)`. A bound already passed ends the loop at
-its first look, unsignalled. Only the lower edge of the bound is asserted,
-because the loop cannot return before its deadline, so the test cannot
-flake on a slow runner.
+Production's ending. `signal_group_kill` is the signal, `child.kill()`
+the kill, `child_exited_unreaped` the pin check, and master's blocking
+`child.wait()` the reap. The clock is `Instant::now`, the pause a
+`GROUP_SETTLE_POLL_SLICE` sleep, and the rule [`group_signal_rule`]'s.
+
+On Linux and macOS one gated `let` adds the observer, which is the scanner
+`cleanup_reaper_group` loops on (`termination::group_has_non_zombie_members`)
+over the leader's pid as the group's id. A pid with no `i32` form has no
+group to observe. The observer answers `None` for it, but no look is
+taken, because `signal_group_kill` has already failed it with `EINVAL`.
+Any other Unix keeps the binding before that `let`, with no observer, so
+nothing here is compiled only for another Unix.
+
+## `fn signal_group_kill(child: &ProcessTree) -> Option<i32> {`
+
+`SIGKILL` to the group the child leads, answering the errno it failed
+with (`None`: delivered). It judges nothing. The ending's rule judges the
+first signal and every retry alike. A pid with no `i32` form is answered
+`EINVAL` without a call.
+
+Its `SAFETY:` comment is what the ending's order buys. The first signal
+is sent before anything reaps the child. Each retry is sent straight
+after `exited_unreaped` found the child unreaped, which is a `waitid`
+with `WNOWAIT` that found this process's own child at that pid, running
+or a zombie. Either way the pid is held and cannot be issued again.
+`kill_tree_primitive` holds the `ProcessTree` by `&mut`, so the child's
+own handle cannot reap it between the check and the signal.
+
+## `fn end_group<P>(group: &mut P, ending: &GroupEnding<P>) -> Vec<String> {`
+
+The lifecycle: the group signal, the direct child's kill, the settlement,
+and finally the reap, in that order whatever the answers. The first
+signal's answer is judged by the ending's rule. `Failed`, or `Refused`
+with no observer to clear it, is reported as "the group signal failed
+(…)", and then nothing is looked at or signalled again before the reap.
+That is master's answer, with master's words. Otherwise
+[`settle_group`] runs, carrying the refusal if there is one.
+
+It answers every reason the group was not established gone, empty when
+it was: the settlement's first, then the reap's.
+
+## `fn settle_group<P>(`
+
+The settlement loop. Each pass looks at the group once. Only a definite
+negative, a look that finds no non-zombie member (`Some(false)`), settles
+the group, and while a refusal is outstanding it must be the second such
+look in a row. A look that finds a member (`Some(true)`) or cannot answer
+(`None`) settles nothing, clears nothing and breaks a run of settled
+looks.
+
+Then the bound is read (`GROUP_SETTLE_BOUND`). After a look that settled
+nothing comes a retry. A retry is the pin check and then the signal. A
+failed pin check stops the signalling and answers that error, because
+without the leader unreaped nothing holds the group's id. Otherwise the
+signal's answer is judged by the rule. `Refused` sets the refusal, which
+a later delivered signal does not clear, and `Failed` ends the loop with
+"a retried group signal failed (…)". A look that found no running member
+under an outstanding refusal is not followed by a signal: the group was
+seen without a running member, and what the refusal needs next is a
+look. Every pass that goes on ends with the pause.
+
+Every error the loop answers ends with the last look ([`last_look`]).
+
+## `fn last_look(seen: Option<bool>, refused: Option<i32>) -> String {`
+
+The last look's answer in words, followed by the outstanding refusal if
+there is one. A look that found no running member is in an error only
+beside a refusal, which is the macOS case where one settled look was seen
+and the second never came before the bound.
 
 ## `fn settle_failed_supervision(`
 
@@ -2505,7 +2559,7 @@ into permission to release the cleanup lease.
 ## `mod termination` › `pub(super) fn group_has_non_zombie_members(pgid: i32) -> Option<bool> {`
 
 `pub(super)` on both definitions, Linux and macOS, so that
-[`settle_signalled_group`] in `agent::proc` can observe the group
+[`end_unix_group`] in `agent::proc` can observe the group
 [`kill_tree_primitive`] signalled through the same scanner
 `cleanup_reaper_group` loops on (`PR281-MACOS-KILL-TREE-SETTLE-ONLY-THE-DIRECT-CHILD`).
 This is the narrowest visibility that reaches the parent module, and the
