@@ -109,7 +109,7 @@ a copy with the same SHA-256 at `~/eight-logs/af0b64b-failed-20261128T085437Z/03
 - Line 4969:
   `test result: FAILED. 4203 passed; 1 failed; 207 ignored; 0 measured; 0 filtered out; finished in 193.73s`.
   Line 4971: `` error: test failed, to rerun pass `--lib` ``. Line 56 is the log's only `Running`
-  line, so no other harness ran in this step.
+  line: it shows Cargo starting the library's test target (`unittests src/lib.rs`) and no other.
 
 **What the test asserts**, by line at `af0b64b7`, where `src/runner/container/exec/tests.rs` is the
 blob `master` has (`9bd5ba3e`, at `6513c22d` and at `d431d220`). It is a different test from this
@@ -148,6 +148,10 @@ the command at `~/selfhost-docker-question-20261128/evidence/baseline-push1/matc
 - **Not established:** which process held the stub open for writing.
 - **Not established: the rate.** This file records two sightings, both on the build machine, and
   none in CI.
+- `PR172-REAPER-ROUNDS-STUB-NEVER-RAN`
+  (`findings/P3_correctness_202609052115_reaper-rounds-stub-never-ran.md:16-22`) records a different
+  test, `the_reaper_performs_as_many_rounds_as_the_machine_needs`, whose own `docker` stub's `execv`
+  was refused with `ETXTBSY`, in three sightings on tactusbox, this build machine, on 2026-09-05.
 
 ## What the change that takes this up should do
 
