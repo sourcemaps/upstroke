@@ -473,8 +473,19 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     /// The legacy writer of schemas 1–3, which reads the capacity module
-    /// directly and is the census's one named exception.
+    /// directly and is the seam census's one named exception.
     const LEGACY_WRITER: [&str; 2] = ["src/engine/coordinator.rs", "src/engine/resume.rs"];
+
+    /// The `pub(crate)` constructor of the built-in client, the one way to
+    /// build one outside this file.
+    const CONSTRUCTOR: &str = "builtin_capacity_client_from_log";
+
+    /// The production files that name [`CONSTRUCTOR`], each with how many
+    /// times: its definition here, and its one call, in `TopologyRun::resumed`.
+    const CONSTRUCTOR_SITES: [(&str, usize); 2] = [
+        ("src/capacity/client.rs", 1),
+        ("src/engine/topology/run.rs", 1),
+    ];
 
     /// Production source files, by repository-relative path: every `.rs`
     /// file under `src/`, read as the tracker's census reads them, less the
@@ -525,54 +536,53 @@ mod tests {
         character.is_none_or(|character| !is_identifier(character))
     }
 
-    /// Whether the code before `at` is inside a `use` declaration: the last
-    /// word-bounded `use` before it has no `;` after it.
-    fn in_a_use_declaration(code: &str, at: usize) -> bool {
-        let head = &code[..at];
-        head.rmatch_indices("use")
-            .find(|(start, word)| {
-                bounded(head[..*start].chars().next_back())
-                    && bounded(head[start + word.len()..].chars().next())
+    /// The byte offsets of the word-bounded occurrences of `word` in `code`.
+    fn word_occurrences(code: &str, word: &str) -> Vec<usize> {
+        code.match_indices(word)
+            .map(|(at, _)| at)
+            .filter(|at| {
+                bounded(code[..*at].chars().next_back())
+                    && bounded(code[at + word.len()..].chars().next())
             })
-            .is_some_and(|(start, _)| !head[start..].contains(';'))
+            .collect()
     }
 
     /// Whether `code`, with comments, literals and test-only items blanked,
-    /// names the capacity module other than through `capacity::client`.
+    /// writes `capacity` other than as `capacity::client`: rule one, the seam.
     ///
-    /// A word-bounded `capacity` that does not follow a `.` is a segment of
-    /// the module's path when `::` follows it (after optional whitespace), or
-    /// when a `use` declaration names it (`use crate::capacity;`, `use
-    /// crate::{capacity as c};`). It goes through the seam only when that
-    /// `::` is followed by a word-bounded `client`. What comes before it is
-    /// not read: `crate::capacity`, `super::capacity` and `Root::capacity`
-    /// after `use crate as Root;` all name the module, whatever the case of
-    /// their owner. A method or field after a `.` (`v.capacity()`), a type's
-    /// associated function (`Vec::capacity(v)`, `Vec::<u8>::capacity(v)`,
-    /// followed by `(`) and a binding or field called `capacity` (`capacity:
-    /// Box<dyn CapacityClient>`) are neither followed by `::` nor named by a
-    /// `use`, so none is a segment.
+    /// The census reads words, not paths. Each word-bounded `capacity` that
+    /// does not follow a `.` (after optional whitespace) must be followed,
+    /// after optional whitespace, by `::` and then, after optional
+    /// whitespace, by the word-bounded `client`; any other is a reach around
+    /// the seam. Nothing before the word is read, so `crate::capacity`,
+    /// `super::capacity` and `Root::capacity` after `use crate as Root;` are
+    /// read alike. A method or field after a `.` (`v.capacity()`,
+    /// `run.capacity`) is no segment of a path, and passes.
     ///
-    /// A text census reads what is written, not what a macro expands to: a
-    /// macro that builds the path (`reach!(capacity)` over a body that writes
-    /// `crate::$module::pool_for`) names the module where `capacity` is not
-    /// followed by `::`, and passes unseen.
+    /// Every other `capacity` fails, whether or not it names the module: a
+    /// rename (`use crate::{capacity as c};`), a bare import (`use
+    /// crate::capacity;`), a group (`use crate::capacity::{client, Pool};`,
+    /// and `use crate::capacity::{client, client::Pool};` too, though each of
+    /// its items is the client's), a type's associated function
+    /// (`Vec::capacity(v)`, `Vec::<u8>::capacity(v)`) and a binding or field
+    /// declared `capacity`. Telling those apart would take a parser of Rust
+    /// paths; refusing them leaves one spelling, `capacity::client::<item>`,
+    /// written in full.
+    ///
+    /// A text census reads the words a file writes: a path a macro assembles
+    /// from pieces, or a re-export by a file outside the engine (`pub(crate)
+    /// use crate::capacity::pool_for as reach;` in `src/util.rs`, then
+    /// `crate::util::reach`), writes no `capacity` in the engine and passes
+    /// unseen.
     fn reaches_capacity_around_the_seam(code: &str) -> bool {
         const NAME: &str = "capacity";
-        code.match_indices(NAME).any(|(at, _)| {
-            let before = &code[..at];
-            let after = &code[at + NAME.len()..];
-            if !bounded(before.chars().next_back()) || !bounded(after.chars().next()) {
+        word_occurrences(code, NAME).into_iter().any(|at| {
+            if code[..at].trim_end().ends_with('.') {
                 return false;
             }
-            if before.trim_end().ends_with('.') {
-                return false;
-            }
-            let joined = after.trim_start().strip_prefix("::");
-            if joined.is_none() && !in_a_use_declaration(code, at) {
-                return false;
-            }
-            let through_the_client = joined
+            let through_the_client = code[at + NAME.len()..]
+                .trim_start()
+                .strip_prefix("::")
                 .map(str::trim_start)
                 .and_then(|rest| rest.strip_prefix("client"))
                 .is_some_and(|rest| bounded(rest.chars().next()));
@@ -599,6 +609,40 @@ mod tests {
         engine_production_code(sources)
             .filter(|(_, code)| reaches_capacity_around_the_seam(code))
             .map(|(path, _)| path)
+            .collect()
+    }
+
+    /// The production files whose code, with comments, literals and
+    /// test-only items blanked, names [`CONSTRUCTOR`] as a word, each with how
+    /// many times it does.
+    ///
+    /// Every word counts, whatever is around it: a definition, a call, a
+    /// call behind `impl CapacityClient + use<>`, a rename in a `use`, a
+    /// function value. A file that builds a client through a wrapper counts
+    /// nothing, but the wrapper's own file counts its call.
+    fn constructor_sites(sources: &[(String, String)]) -> Vec<(&str, usize)> {
+        sources
+            .iter()
+            .map(|(path, source)| {
+                let code = crate::effects::production_code(source);
+                (path.as_str(), word_occurrences(&code, CONSTRUCTOR).len())
+            })
+            .filter(|(_, sites)| *sites > 0)
+            .collect()
+    }
+
+    /// Rule two, the constructor: whether production code names
+    /// [`CONSTRUCTOR`] exactly at [`CONSTRUCTOR_SITES`], so the client the run
+    /// installs is the one built-in client there is.
+    fn only_the_run_builds_the_client(sources: &[(String, String)]) -> bool {
+        constructor_sites(sources) == CONSTRUCTOR_SITES
+    }
+
+    /// Owned `(path, source)` pairs, for a planted census.
+    fn planted(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(path, source)| ((*path).to_owned(), (*source).to_owned()))
             .collect()
     }
 
@@ -655,14 +699,36 @@ mod tests {
             "the schema-4 engine asks capacity only through `CapacityClient` \
              (`crate::capacity::client`), so a second client can replace the built-in one; a \
              file that names the capacity module any other way answers a capacity question \
-             the replacement never sees. The legacy writer of schemas 1–3 ({LEGACY_WRITER:?}) \
-             is the one named exception"
+             the replacement never sees. The census reads words, so it accepts one spelling: \
+             `capacity::client::<item>`, written in full on every path, never grouped \
+             (`capacity::{{client, ..}}`) or renamed; a binding, field or associated function \
+             called `capacity` is refused with them, and a method or field is read only after a \
+             `.`. The legacy writer of schemas 1–3 ({LEGACY_WRITER:?}) is the one named \
+             exception"
+        );
+    }
+
+    #[test]
+    fn the_builtin_client_is_built_only_by_the_run() {
+        assert_eq!(
+            constructor_sites(&production_sources()),
+            CONSTRUCTOR_SITES,
+            "`{CONSTRUCTOR}` is the one way to build the built-in client outside \
+             `src/capacity/client.rs`, so production code names it twice: its definition there \
+             and its call in `TopologyRun::resumed` (`src/engine/topology/run.rs`). The run asks \
+             the client it installed (`self.capacity_client`), so a second client anywhere, \
+             another file's, a second one in the run, or one a wrapper builds, answers capacity \
+             questions an installed handler never sees. A file missing from the counts means \
+             the constructor was renamed or the run no longer calls it, and this census proves \
+             nothing until it names the one that builds the run's client"
         );
     }
 
     #[test]
     fn the_capacity_census_sees_a_bypass_and_ignores_prose() {
-        let planted: Vec<(String, String)> = [
+        let sources = planted(&[
+            // Refused: each names the module, or writes the word, other than
+            // as `capacity::client`.
             (
                 "src/engine/planted.rs",
                 "fn f() { let _ = crate::capacity::pool_for; }\n",
@@ -682,38 +748,75 @@ mod tests {
                 "fn f() { let _ = Root::capacity::pool_for; }\n",
             ),
             (
-                "src/engine/seam.rs",
-                "use crate::capacity::client::{CapacityClient, Pool};\n",
+                "src/engine/regrouped.rs",
+                "use crate::capacity::{client, client::Pool};\n",
             ),
             (
-                "src/engine/prose.rs",
-                "// the capacity a pool has left\nconst S: &str = \"capacity\";\n\
-                 fn f(v: &Vec<u8>) -> usize { v.capacity() }\n",
+                "src/engine/associated.rs",
+                "fn f(v: &Vec<u8>) -> usize { Vec::capacity(v) }\n",
             ),
             (
-                "src/engine/method.rs",
-                "fn f(v: &Vec<u8>) -> usize { Vec::capacity(v) + Vec::<u8>::capacity(v) }\n",
+                "src/engine/turbofish.rs",
+                "fn f(v: &Vec<u8>) -> usize { Vec::<u8>::capacity(v) }\n",
+            ),
+            (
+                "src/engine/field.rs",
+                "struct Run { capacity: Box<dyn CapacityClient> }\n",
             ),
             (
                 "src/engine/binding.rs",
-                "struct Run { capacity: Box<dyn CapacityClient> }\n\
-                 fn f(capacity: Box<dyn CapacityClient>) -> Run { Run { capacity } }\n",
+                "fn f(capacity: Box<dyn CapacityClient>) -> Run {\n    \
+                 Run { capacity_client: capacity }\n}\n",
+            ),
+            // Accepted: the seam, a method or field after a `.`, prose, test
+            // code, a file outside the engine, and the legacy writer.
+            ("src/engine/seam.rs", "use crate::capacity::client::Pool;\n"),
+            (
+                "src/engine/called.rs",
+                "fn f(agent: &str, pools: &[Pool]) -> Option<&Pool> {\n    \
+                 crate::capacity::client::pool_for(agent, pools)\n}\n",
+            ),
+            (
+                "src/engine/spaced.rs",
+                "fn f(agent: &str, pools: &[Pool]) -> Option<&Pool> {\n    \
+                 crate::capacity\n        :: client::pool_for(agent, pools)\n}\n",
+            ),
+            (
+                "src/engine/method.rs",
+                "fn f(v: &Vec<u8>) -> usize {\n    v.capacity() + v\n        .capacity()\n}\n",
+            ),
+            (
+                "src/engine/dotted.rs",
+                "fn f(run: &Run, other: &Run) -> bool {\n    \
+                 run.capacity.is_some() && other . capacity.is_some()\n}\n",
+            ),
+            (
+                "src/engine/prose.rs",
+                "// the capacity a pool has left; `capacity: Box<dyn CapacityClient>`\n\
+                 /// `use crate::capacity;`\n\
+                 const S: &str = \"let capacity = crate::capacity::pool_for;\";\n",
             ),
             (
                 "src/engine/tested.rs",
-                "fn f() {}\n#[cfg(test)]\nmod tests {\n    use crate::capacity::pool_for;\n}\n",
+                "fn f() {}\n#[cfg(test)]\nmod tests {\n    use crate::capacity::pool_for;\n    \
+                 struct Run { capacity: u8 }\n    \
+                 fn g(capacity: u8) -> Run { Run { capacity } }\n}\n",
+            ),
+            (
+                "src/cli.rs",
+                "use crate::capacity;\nfn f(capacity: u8) -> u8 { capacity }\n",
             ),
             (
                 "src/engine/coordinator.rs",
                 "fn f() { let _ = crate::capacity::observe; }\n",
             ),
-            ("src/cli.rs", "use crate::capacity;\n"),
-        ]
-        .into_iter()
-        .map(|(path, source)| (path.to_owned(), source.to_owned()))
-        .collect();
+            (
+                "src/engine/resume.rs",
+                "use crate::capacity;\nfn f(capacity: u8) -> u8 { capacity }\n",
+            ),
+        ]);
         assert_eq!(
-            bypasses_the_seam(&planted),
+            bypasses_the_seam(&sources),
             vec![
                 "src/engine/planted.rs",
                 "src/engine/aliased.rs",
@@ -721,7 +824,108 @@ mod tests {
                 "src/engine/grouped.rs",
                 "src/engine/rooted.rs",
                 "src/engine/upper.rs",
+                "src/engine/regrouped.rs",
+                "src/engine/associated.rs",
+                "src/engine/turbofish.rs",
+                "src/engine/field.rs",
+                "src/engine/binding.rs",
             ]
         );
+    }
+
+    #[test]
+    fn the_constructor_census_sees_a_second_client() {
+        const CLIENT: &str = "src/capacity/client.rs";
+        const RUN: &str = "src/engine/topology/run.rs";
+        const DEFINITION: &str = "pub(crate) fn builtin_capacity_client_from_log(\n    \
+                                  events: &[TopologyEvent],\n) -> Box<dyn CapacityClient> {\n    \
+                                  Box::new(BuiltinClient::replay(events))\n}\n";
+        const RESUMED: &str = "fn resumed(handle: H) -> TopologyRun {\n    \
+                               let capacity_client =\n        \
+                               crate::capacity::client::builtin_capacity_client_from_log(\
+                               &handle.events);\n    \
+                               TopologyRun { capacity_client }\n}\n";
+        const WRAPPER: &str = "pub(crate) fn client_of(e: &[E]) -> Box<dyn CapacityClient> {\n    \
+                               crate::capacity::client::builtin_capacity_client_from_log(e)\n}\n";
+        const RESUMED_THROUGH_THE_WRAPPER: &str = "fn resumed(handle: H) -> TopologyRun {\n    \
+                                                   let capacity_client = \
+                                                   crate::util::client_of(&handle.events);\n    \
+                                                   TopologyRun { capacity_client }\n}\n";
+        let twice_plain = format!(
+            "{RESUMED}fn second(e: &[E]) -> Box<dyn CapacityClient> {{\n    \
+             crate::capacity::client::builtin_capacity_client_from_log(e)\n}}\n"
+        );
+        let twice_behind_use = format!(
+            "{RESUMED}fn f(e: &[E]) -> impl CapacityClient + use<> {{\n    \
+             crate::capacity::client::builtin_capacity_client_from_log(e)\n}}\n"
+        );
+
+        let accepted = planted(&[
+            (CLIENT, DEFINITION),
+            (RUN, RESUMED),
+            (
+                "src/engine/prose.rs",
+                "// builtin_capacity_client_from_log builds the run's client\n\
+                 const S: &str = \"builtin_capacity_client_from_log(&handle.events)\";\n",
+            ),
+            (
+                "src/engine/tested.rs",
+                "fn f() {}\n#[cfg(test)]\nmod tests {\n    \
+                 fn g(e: &[E]) { builtin_capacity_client_from_log(e); }\n}\n",
+            ),
+        ]);
+        assert_eq!(constructor_sites(&accepted), CONSTRUCTOR_SITES);
+        assert!(only_the_run_builds_the_client(&accepted));
+
+        /// A refused case: what it plants, and the counts the census reads.
+        type Refused<'a> = (&'a str, Vec<(String, String)>, Vec<(&'a str, usize)>);
+        let refused: [Refused<'_>; 5] = [
+            (
+                "a second call in another production file",
+                planted(&[
+                    (CLIENT, DEFINITION),
+                    (RUN, RESUMED),
+                    (
+                        "src/engine/second.rs",
+                        "fn f(e: &[E]) -> Option<String> {\n    \
+                         crate::capacity::client::builtin_capacity_client_from_log(e)\
+                         .grant(&[], e, 0)\n}\n",
+                    ),
+                ]),
+                vec![(CLIENT, 1), (RUN, 1), ("src/engine/second.rs", 1)],
+            ),
+            (
+                "a second call in the run",
+                planted(&[(CLIENT, DEFINITION), (RUN, twice_plain.as_str())]),
+                vec![(CLIENT, 1), (RUN, 2)],
+            ),
+            (
+                "a second call in the run, behind `impl CapacityClient + use<>`",
+                planted(&[(CLIENT, DEFINITION), (RUN, twice_behind_use.as_str())]),
+                vec![(CLIENT, 1), (RUN, 2)],
+            ),
+            (
+                "a wrapper in `src/util.rs`, beside the run's own call",
+                planted(&[
+                    (CLIENT, DEFINITION),
+                    (RUN, RESUMED),
+                    ("src/util.rs", WRAPPER),
+                ]),
+                vec![(CLIENT, 1), (RUN, 1), ("src/util.rs", 1)],
+            ),
+            (
+                "a wrapper in `src/util.rs`, which the run calls instead",
+                planted(&[
+                    (CLIENT, DEFINITION),
+                    (RUN, RESUMED_THROUGH_THE_WRAPPER),
+                    ("src/util.rs", WRAPPER),
+                ]),
+                vec![(CLIENT, 1), ("src/util.rs", 1)],
+            ),
+        ];
+        for (case, sources, sites) in &refused {
+            assert_eq!(&constructor_sites(sources), sites, "{case}");
+            assert!(!only_the_run_builds_the_client(sources), "{case}");
+        }
     }
 }
