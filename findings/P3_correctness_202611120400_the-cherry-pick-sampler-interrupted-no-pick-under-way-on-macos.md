@@ -159,6 +159,23 @@ checked out `b6d4879b835ada30c133b59f1fee0089cc64d2b6` itself (line 111 of its j
 Its log: `~/selfhost-findings-20261128b/evidence/job-46138654089-140959498813.log`, SHA-256
 `0b9f2771e300927650cab7f60b541f1730b6da235289a1d1faa3316909647993`.
 
+**The same tree passed twice more,** in #445's pull-request runs on its head `5426bcd4`, each of
+which checked out `9deafdcf` (line 107 of each log), GitHub's merge of `5426bcd4` into `master`
+`6513c22d`, whose tree is `b6d4879b`'s, `42a5beb3`: run `46134228691`, job `140945897793`,
+`test (macos-latest, 12 of 12)`, 10:14:47Z to 10:22:02Z, where line 1969 logs the test `... ok` and
+line 2969 reads
+`test result: ok. 2428 passed; 0 failed; 107 ignored; 0 measured; 1732 filtered out; finished in 280.63s`;
+and run `46137408037`, job `140955694201`, the same leg, 10:55:13Z to 11:04:56Z, where line 1970
+logs the test `... ok` and line 2970 reads
+`test result: ok. 2428 passed; 0 failed; 107 ignored; 0 measured; 1732 filtered out; finished in 328.22s`.
+Both ran on image version `20261123.0526.1` (line 18). Their logs, as GitHub's API serves them with
+ANSI escape sequences removed:
+`~/selfhost-findings-20261128b/evidence/job-46134228691-140945897793.log`, SHA-256
+`16628d1d3cd5ce67a26a9e8dffa4ae4b61953c12d9fe326feef847cc9ef04d84`, and
+`~/selfhost-findings-20261128b/evidence/job-46137408037-140955694201.log`, SHA-256
+`44fd4356682ef9750204a4da474a191cb2a17da2e7d6acf565e02bc73dab86b6`, each fetched for this record on
+2026-11-28.
+
 **What is and is not established for this sighting.**
 
 - **Established:** on a hosted macOS runner, at `master`'s `b6d4879b`, each of the test's seven
@@ -171,6 +188,30 @@ Its log: `~/selfhost-findings-20261128b/evidence/job-46138654089-140959498813.lo
 - `PR281-RECOVER-SAMPLER-NO-SAMPLE-DIED-BY-THE-KILL`
   (`findings/P2_correctness_202609131201_the-recover-sampler-cold-probe-sibling.md:16-19`) records
   this test failing the other assertion, "no sample died by the kill".
+- `PR247-SAMPLER-REFUSED-A-LOCKED-INDEX-ON-WINDOWS`
+  (`findings/P3_correctness_202609072359_sampler-refused-a-locked-index-on-windows.md:16-26`)
+  records this test failing on CI's winguest leg, where its classifier refused 1 of 8 samples after
+  a read of the staging worktree's `index.lock` answered `Access is denied. (os error 5)`.
+- `PR281-CLEANUP-LEASE-HOLD-OUTLIVED-AND-ITS-UNREADABLE-TWIN`
+  (`findings/P2_correctness_202609131202_a-cancelled-job-hides-which-assertion-failed.md:187-193`,
+  `:209-215`) records a production resume refused with "that process holds the run's cleanup lease",
+  seen in this test among others.
+- `G7-CI-MACOS-HOOK-COMMIT-FLAKE`
+  (`findings/P2_correctness_202611092054_the-macos-hook-commit-test-intermittently-loses-its-git-exit-status.md:76-84`)
+  lists run `43118198459`, this file's first sighting, among the `test (macos-latest)` jobs that
+  "failed on other tests only".
+- `PR80-MACOS-WORKSPACE-SAMPLER-COLD-PROBE-RECURRENCE`
+  (`findings/P2_correctness_202608311200_the-macos-sampler-cold-probe-recurrence.md:32`, `:50-51`)
+  records this test passing in job `138750047150`, a `test (macos-latest, 3 of 5)` job of
+  2026-11-24.
+- `CI-FLAKE-DISPATCH-SAMPLER-NO-KILL-WHILE-WRITING`
+  (`findings/P3_correctness_202611220301_the-dispatch-sampler-landed-no-kill-while-writing-on-hosted-windows.md:14`,
+  `:22-26`) records a different test, the dispatch sampler, which kills
+  `git cherry-pick --no-commit` children, failing its `while_writing` assertion on a hosted Windows
+  runner.
+- `CLASS-INTERMITTENT-SUBPROCESS-KILL-SETTLE-RESIDUE-FAILURES`
+  (`findings/P1_liveness_202609031117_intermittent-kill-settle-and-residue-failures.md:37-51`) lists
+  this test among four kill samplers that it records as not members of it.
 
 ## What the change that takes this up should do
 
