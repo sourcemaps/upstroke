@@ -2386,6 +2386,75 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_unresumed_runs_in_flight_attempt_counts_once_unpriced_on_the_pool_it_started_on() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-schema4-in-flight");
+        let repo = tree.path();
+        let mut run = Schema4Run::started(repo, SCHEMA_4_RUN);
+
+        run.begin_attempt(ALPHA, "claude-max");
+        run.push(finished(failed(
+            priced(settled(Some("claude-max"), Vec::new()), 1.0),
+            FailureKind::RateLimited,
+            FailureOrigin::Worker,
+        )));
+
+        run.begin_attempt(BETA, "claude-max");
+
+        let (gathered, warnings) = folded(repo);
+
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!((gathered.runs, gathered.unread), (1, 0));
+        assert_eq!(
+            gathered.observations.self_spend,
+            BTreeMap::from([(
+                "claude-max".to_owned(),
+                Spend {
+                    usd: Some(1.0),
+                    attempts: 2,
+                    unpriced: 1,
+                },
+            )]),
+            "nothing holds the run, so the attempt its log leaves in flight was cut off on the \
+             pool it started on, at a cost nothing recorded"
+        );
+
+        let status = crate::status::render(
+            &crate::status::load(repo, Some(SCHEMA_4_RUN)).expect("the run's status"),
+        );
+        assert!(
+            status.contains("claude-max: 2 attempt(s), $1.0000?"),
+            "`status` counts the in-flight attempt the same way: {status}"
+        );
+
+        let rendered = capacity_report(repo).render();
+        assert!(
+            rendered.contains(
+                "claude-max: exhausted [signal] — upstroke on this machine drew, this month, \
+                 $1.0000? over 2 attempt(s)"
+            ),
+            "{rendered}"
+        );
+
+        let _held = crate::rundir::RunLock::acquire(&crate::rundir::public_dir(repo, SCHEMA_4_RUN))
+            .expect("hold the run as its coordinator would");
+        let (gathered, warnings) = folded(repo);
+
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(
+            gathered.observations.self_spend,
+            BTreeMap::from([(
+                "claude-max".to_owned(),
+                Spend {
+                    usd: Some(1.0),
+                    attempts: 1,
+                    unpriced: 0,
+                },
+            )]),
+            "a live coordinator still owns the attempt in flight, so it is not counted yet"
+        );
+    }
+
+    #[test]
     fn an_interrupted_attempt_whose_start_names_no_pool_adds_to_no_pools_spend() {
         let settled_on_the_pool = [
             started(ALPHA, Some("claude-max")),
