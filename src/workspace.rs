@@ -6206,6 +6206,32 @@ mod tests {
                 ]),
                 Err(CopyBarrierBreach::ErrorNotPropagated { call: open_call }),
             ),
+            (
+                "the copy published another way, and success returned, ahead of the barrier",
+                braced(&[
+                    "if publish_without_syncing(partial, copy)? {",
+                    "return Ok(());",
+                    "}",
+                    OPEN,
+                    SYNC,
+                    RENAME,
+                    SYNC_PARENT,
+                ]),
+                Err(CopyBarrierBreach::ReturnNotAnError),
+            ),
+            (
+                "an error returned ahead of the barrier",
+                braced(&[
+                    "if heads.trim() != commit {",
+                    "return Err(UpstrokeError::Git { message: heads });",
+                    "}",
+                    OPEN,
+                    SYNC,
+                    RENAME,
+                    SYNC_PARENT,
+                ]),
+                Ok(()),
+            ),
         ] {
             assert_eq!(
                 check_copy_barrier(&body),
@@ -6285,17 +6311,11 @@ mod tests {
         ErrorNotPropagated {
             call: &'static str,
         },
+        ReturnNotAnError,
     }
 
     fn check_copy_barrier(body: &str) -> Result<(), CopyBarrierBreach> {
-        let body: String = body
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
-        let tried = |rest: &str| {
-            let Some(inside) = rest.strip_prefix(".map_err(") else {
-                return false;
-            };
+        fn closed(inside: &str) -> Option<&str> {
             let mut depth = 1_usize;
             for (at, character) in inside.char_indices() {
                 match character {
@@ -6303,15 +6323,33 @@ mod tests {
                     ')' => {
                         depth -= 1;
                         if depth == 0 {
-                            return inside
-                                .get(at + 1..)
-                                .is_some_and(|after| after.starts_with("?;"));
+                            return inside.get(at + 1..);
                         }
                     }
                     _ => {}
                 }
             }
-            false
+            None
+        }
+        let word = |character: char| character.is_alphanumeric() || character == '_';
+        let returns_other_than_an_error = body.match_indices("return").any(|(at, keyword)| {
+            let ahead = body.get(..at).expect("on a character boundary");
+            let rest = body.get(at + keyword.len()..).expect("and ends on one");
+            let an_error = rest
+                .trim_start()
+                .strip_prefix("Err(")
+                .and_then(closed)
+                .is_some_and(|after| after.trim_start().starts_with([';', '}', ',']));
+            !ahead.ends_with(word) && !rest.starts_with(word) && !an_error
+        });
+        let body: String = body
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        let tried = |rest: &str| {
+            rest.strip_prefix(".map_err(")
+                .and_then(closed)
+                .is_some_and(|after| after.starts_with("?;"))
         };
         let mut reached = 0_usize;
         let mut before = "";
@@ -6344,6 +6382,9 @@ mod tests {
             }
             reached = at + call.len();
             before = call;
+        }
+        if returns_other_than_an_error {
+            return Err(CopyBarrierBreach::ReturnNotAnError);
         }
         Ok(())
     }
