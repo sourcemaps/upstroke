@@ -879,8 +879,8 @@ cause. That evidence is then recorded as established, and the remedy may be writ
      (`actions/jobs/<id>/logs`) with ANSI escape sequences removed, never a copy made with
      `gh run view --log`;
    - for a build machine's baseline, which has no run or job, instead of the three items above: the
-     date, the head it ran at with its pull request, the command, and its own log, by its path and
-     the SHA-256 of the log as the machine wrote it;
+     date, the machine and its platform, the head it ran at with its pull request, the command, and
+     its own log, by its path and the SHA-256 of the log as the machine wrote it;
    - each fact, by its line in that log.
 4. **The same tree's passes.** A run is the same tree only when the commit it checked out has the
    failing run's tree. Otherwise the record says what differed, for example "the same branch tree,
