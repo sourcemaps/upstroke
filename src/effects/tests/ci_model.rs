@@ -167,19 +167,19 @@ pub(super) const TEST_WINDOWS_HOSTED_CONDITION: &str =
 pub(super) const WINDOWS_SHARD_FILTERS: [&str; 9] = [
     "engine::topology::coordinator::tests::a_p",
     "engine::topology::coordinator::tests::a_r",
-    "engine::topology::coordinator::tests::a",
+    "engine::topology::coordinator::tests::a_",
     "engine::topology::coordinator::",
     "engine::topology::recover::",
-    "engine::topology::",
-    "engine::",
+    "engine::tests::a",
     "runner::",
     "workspace_manager::",
+    "engine::tests::",
 ];
 
-pub(super) const WINDOWS_SHARD_FLOORS: [u32; 10] = [24, 13, 55, 28, 112, 231, 155, 196, 152, 734];
+pub(super) const WINDOWS_SHARD_FLOORS: [u32; 10] = [24, 13, 47, 36, 113, 93, 200, 152, 57, 965];
 
 pub(super) const MACOS_SHARD_FILTERS: [&str; 4] = [
-    "engine::topology::coordinator::",
+    "engine::topology::coordinator::tests::a_",
     "engine::topology::",
     "engine::",
     "runner::",

@@ -60,12 +60,27 @@ jobs:
     # of them fixed. So the matrix below divides both suites by measured
     # time, macOS into five shards and Linux into two: per-test weights from
     # a sequential Linux run, scaled to each platform's measured wall time
-    # for each shard and blended with a uniform per-test model. The slowest
-    # leg is predicted at about 14 to 15 minutes on macOS and about 8 to 9
-    # on Linux, and neither split was timed before it landed: the CI run of
-    # the pull request that landed them is their first measurement. 30 is
-    # about twice the slowest shard expected, and the limit the Linux leg
-    # already had.
+    # for each shard and blended with a uniform per-test model. The macOS
+    # five of 2026-11-19 were `engine::topology::coordinator::`, the rest of
+    # `engine::topology::`, the rest of `engine::`, `runner::`, and
+    # everything else. Their slowest leg was predicted at about 14 to 15
+    # minutes, and the slower Linux leg at about 8 to 9. Run 44667503206
+    # measured both splits for the first time. The five macOS legs took
+    # 15.8, 4.7, 8.2, 8.1 and 8.1 minutes, their libtest harnesses 721, 126,
+    # 310, 255 and 312 s, about 3.9 minutes of each leg fixed. The two Linux
+    # legs took 7.8 and 8.2 minutes, and that split stands.
+    #
+    # The macOS suite was divided again on 2026-11-20, from that run: each
+    # test's sequential Linux duration scaled so that the leg it ran in sums
+    # to that leg's measured harness, blended half and half with a uniform
+    # per-test model, and the filters chosen by a search for the slowest
+    # leg. The first leg, the 15.8 minutes, now runs only the coordinator's
+    # tests whose names begin with `a_`, and the rest of the coordinator's
+    # run with the rest of `engine::topology::`. The slowest macOS leg is
+    # predicted at about 11.8 minutes, and the re-split was not timed before
+    # it landed: the CI run of the pull request that landed it is its first
+    # measurement. 30 is about two and a half times the slowest shard
+    # expected, and the limit the Linux leg already had.
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -78,8 +93,8 @@ jobs:
         # when the guest is busy; these legs stay on GitHub's runners.
         #
         # Seven legs: the Linux suite as two shards -- `engine::`, and
-        # everything else -- and the macOS suite as five --
-        # `engine::topology::coordinator::`, the rest of `engine::topology::`,
+        # everything else -- and the macOS suite as five -- the coordinator's
+        # tests whose names begin with `a_`, the rest of `engine::topology::`,
         # the rest of `engine::`, `runner::`, and everything else. The shard
         # rule is the one `test-windows-hosted` states below, applied to each
         # runner's legs on their own: a leg runs the tests whose names
@@ -102,19 +117,19 @@ jobs:
             tests: "--skip engine::"
           - os: macos-latest
             leg: "macos-latest, 1 of 5"
-            tests: "engine::topology::coordinator::"
+            tests: "engine::topology::coordinator::tests::a_"
           - os: macos-latest
             leg: "macos-latest, 2 of 5"
-            tests: "engine::topology:: --skip engine::topology::coordinator::"
+            tests: "engine::topology:: --skip engine::topology::coordinator::tests::a_"
           - os: macos-latest
             leg: "macos-latest, 3 of 5"
-            tests: "engine:: --skip engine::topology::coordinator:: --skip engine::topology::"
+            tests: "engine:: --skip engine::topology::coordinator::tests::a_ --skip engine::topology::"
           - os: macos-latest
             leg: "macos-latest, 4 of 5"
-            tests: "runner:: --skip engine::topology::coordinator:: --skip engine::topology:: --skip engine::"
+            tests: "runner:: --skip engine::topology::coordinator::tests::a_ --skip engine::topology:: --skip engine::"
           - os: macos-latest
             leg: "macos-latest, 5 of 5"
-            tests: "--skip engine::topology::coordinator:: --skip engine::topology:: --skip engine:: --skip runner::"
+            tests: "--skip engine::topology::coordinator::tests::a_ --skip engine::topology:: --skip engine:: --skip runner::"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -622,13 +637,42 @@ jobs:
   # harnesses took 1201, 508, 976, 564 and 860 s, and the slowest job took
   # 24.3 minutes, against about 3.6 minutes fixed per leg: setup, the
   # compiler questions, a 1m45s to 2m46s compile, and the two record
-  # captures. The nine filters below come from per-test weights of a
-  # sequential Linux run, scaled to those five measured walls and blended
-  # with a uniform per-test model. The first three divide the 1201 s shard
+  # captures. The nine filters of 2026-11-19 came from per-test weights of
+  # a sequential Linux run, scaled to those five measured walls and blended
+  # with a uniform per-test model. The first three divided the 1201 s shard
   # by the opening of a test's name, `a_p`, `a_r` and the rest of `a`; the
-  # other filters are module paths. The slowest leg is predicted at about
-  # 13 to 16 minutes, and the ten were not timed before they landed: the CI
-  # run of the pull request that landed them is their first measurement.
+  # other six were module paths: the rest of
+  # `engine::topology::coordinator::`, `engine::topology::recover::`, the
+  # rest of `engine::topology::`, the rest of `engine::`, `runner::` and
+  # `workspace_manager::`, with everything else last. Their slowest leg was
+  # predicted at about 13 to 16 minutes. Run 44667503206 measured the ten
+  # for the first time. The jobs took 6.4, 8.1, 15.8, 12.1, 14.0, 10.0,
+  # 18.6, 4.5, 13.2 and 7.4 minutes, and their libtest harnesses 189, 209,
+  # 708, 498, 636, 368, 878, 76, 545 and 223 s, 4330 s in all, with about
+  # 3.8 minutes of each job fixed. The slowest, at 18.6 minutes, was the
+  # seventh, the rest of `engine::`.
+  #
+  # The nine filters below are the re-split of 2026-11-20, made from that
+  # run: each test's sequential Linux duration scaled so that the leg it
+  # ran in sums to that leg's measured harness, blended half and half with
+  # a uniform per-test model, and the filters chosen by a search for the
+  # slowest leg. The first three divide the coordinator's tests as before,
+  # but for the third, which is now the rest of `a_` and leaves the other
+  # names that begin with `a` to the fourth. The sixth and the ninth divide
+  # `engine::tests::` by the opening of a test's name, `a` and the rest.
+  # The other four are module paths. No filter names the rest of
+  # `engine::topology::` or the rest of `engine::` now, and those tests
+  # run in the last leg. The slowest leg is predicted at about 14.4
+  # minutes, and the re-split was not timed before it landed: the CI run of
+  # the pull request that landed it is its first measurement.
+  #
+  # Single tests set the floor under that prediction: a leg takes no less
+  # than its longest test and the fixed minutes. Two tests are each
+  # estimated at about 9 minutes of their leg's harness, and the re-split
+  # changes neither:
+  # `engine::topology::recover::tests::a_kill_at_every_cell_of_a_complete_finalization_converges_on_the_next_resume`
+  # and
+  # `workspace_manager::tests::r_o2_a_cross_kind_scrub_stopped_at_any_phase_converges_with_no_instance_registered`.
   #
   # The shard rule: a leg runs the tests whose names contain its filter and
   # none of the filters of the legs before it, each of those a `--skip`; the
@@ -688,29 +732,29 @@ jobs:
             tests: "engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_p"
             floor: 13
           - shard: "3 of 10"
-            tests: "engine::topology::coordinator::tests::a --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r"
-            floor: 55
+            tests: "engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r"
+            floor: 47
           - shard: "4 of 10"
-            tests: "engine::topology::coordinator:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a"
-            floor: 28
+            tests: "engine::topology::coordinator:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_"
+            floor: 36
           - shard: "5 of 10"
-            tests: "engine::topology::recover:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator::"
-            floor: 112
+            tests: "engine::topology::recover:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator::"
+            floor: 113
           - shard: "6 of 10"
-            tests: "engine::topology:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover::"
-            floor: 231
+            tests: "engine::tests::a --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover::"
+            floor: 93
           - shard: "7 of 10"
-            tests: "engine:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::topology::"
-            floor: 155
+            tests: "runner:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::a"
+            floor: 200
           - shard: "8 of 10"
-            tests: "runner:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::topology:: --skip engine::"
-            floor: 196
-          - shard: "9 of 10"
-            tests: "workspace_manager:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::topology:: --skip engine:: --skip runner::"
+            tests: "workspace_manager:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::a --skip runner::"
             floor: 152
+          - shard: "9 of 10"
+            tests: "engine::tests:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::a --skip runner:: --skip workspace_manager::"
+            floor: 57
           - shard: "10 of 10"
-            tests: "--skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::topology:: --skip engine:: --skip runner:: --skip workspace_manager::"
-            floor: 734
+            tests: "--skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::a --skip runner:: --skip workspace_manager:: --skip engine::tests::"
+            floor: 965
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 

@@ -2938,34 +2938,44 @@ Five claims.
    out, and a table with no filter gives one empty string -- one shard, no
    arguments, the whole suite. No runner's table is empty since the Linux
    suite was divided; the empty one stays as the rule's base case.
-3. Each of thirteen names is run by exactly one selection of each table
+3. Each of fourteen names is run by exactly one selection of each table
    under [`libtest_runs`], and by the one named beside it, in a column for
    each of the three tables; under the empty table's one selection every
-   name runs. The names are the boundaries of the rule, in Windows shard
-   order but for the tenth:
+   name runs. The names are the boundaries of the rule, with the Windows
+   shard of each beside it:
    - a coordinator test named `a_p...` (shard 1), one named `a_r...` (2),
-     and one named `a...` that is neither (3);
-   - a coordinator test not named `a...` (4), and one named `a...` in a
+     and one named `a_...` that is neither (3);
+   - a coordinator test not named `a_...` (4), and one named `a_...` in a
      child module of the coordinator's tests (4), which the first three
      filters do not reach because each is a substring that runs through
-     `tests::a`;
-   - a recovery test (5), a topology test outside the coordinator and
-     recovery (6), and an engine test outside topology (7);
-   - a runner test (8);
-   - `workspace_manager::tests::engine::a_name_with_a_filter_inside_it` (7),
-     a name outside the engine that contains `engine::`, and a second filter
-     besides, `workspace_manager::`. libtest's filter is a substring, so the
-     engine's shard runs it, and the workspace manager's shard and the last
-     shard skip it: once, as for any other name;
-   - a workspace manager test that contains no earlier filter (9);
+     `tests::a_`;
+   - a recovery test (5);
+   - a topology test outside the coordinator and recovery (10). No filter
+     names `engine::topology::` since the re-split of 2026-11-20, so the
+     last shard runs it;
+   - `engine::tests::host_acceptance_record` (9), a test of the engine's
+     own `tests` module whose name does not begin with `a`, and one there
+     whose name does (6). The sixth filter, `engine::tests::a`, contains the
+     ninth, `engine::tests::`, and comes first;
+   - a runner test (7);
+   - `workspace_manager::tests::engine::a_name_with_a_filter_inside_it` (8),
+     a name outside the engine that contains `engine::`. The Windows table
+     has no `engine::` filter now, and the name contains neither
+     `engine::tests::a` nor `engine::tests::`, so the workspace manager's
+     shard runs it. The macOS and Linux tables do have that filter.
+     libtest's filter is a substring, so there the `engine::` shard runs the
+     name and every later shard skips it: once, as for any other name;
+   - a workspace manager test that contains no other filter (8);
    - a library test that contains no filter (10), and a name with no module
      before `tests::`, which is how a harness lists a test at its crate's
      root, the bin harness's among them (10).
 
-   On macOS the same thirteen fall in shards 1, 1, 1, 1, 1, 2, 2, 3, 4, 3,
-   5, 5 and 5. The Linux column is the newest: every name that contains
-   `engine::` falls in shard 1, the first eight and the tenth, and the
-   runner's test and the last three in shard 2.
+   On macOS the same fourteen fall in shards 1, 1, 1, 2, 2, 2, 2, 3, 3, 4,
+   3, 5, 5 and 5: the first filter there is the coordinator's tests named
+   `a_...`, so the other two coordinator names fall in the second shard
+   with the rest of `engine::topology::`. In the Linux column every name
+   that contains `engine::` falls in shard 1, the first nine and the
+   eleventh, and the runner's test and the last three in shard 2.
 4. In all three lists no filter is empty, contains whitespace or starts
    with `-`, and none repeats. Each filter is one word of a command line: an
    empty one is no word, so its own shard has no filter and a later shard's
@@ -2976,17 +2986,20 @@ Five claims.
    zero, and they sum to [`WINDOWS_TEST_FLOOR`]: the hosted shards together
    must not accept fewer passing tests than the guest's one job does.
 
-Thirteen names are examples, not a census of the suite, and the test does
+Fourteen names are examples, not a census of the suite, and the test does
 not ask whether a test of each name exists. That the rule divides every set
 of names is the argument in the workflow notes, under `shard_selections`;
-these are the cases that argument turns on, executed.
+these are the cases that argument turns on, executed. The names were
+thirteen until the re-split of 2026-11-20, which added the engine test
+named `a_...`: the Windows table then gained a filter that divides
+`engine::tests::` by the opening of a test's name.
 
 Measured, while the Windows table made five shards and the names were
 eight, by making [`libtest_runs`] read a skip string as a prefix of the
 name rather than a substring, and restoring it: this test failed on
 `workspace_manager::tests::engine::a_name_with_a_filter_inside_it`, run by
 Windows shards 4 and 5 of that table. It was not measured again for the
-ten.
+ten, of 2026-11-19 or of the re-split.
 
 ## `mod merge_gate_answers {`
 

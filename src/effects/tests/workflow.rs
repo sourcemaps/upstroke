@@ -4283,8 +4283,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  as the table's does and every word of the table's is in its place, so a \
                  reading that stopped at the table's last word would pass it",
         job: Some("test-windows-hosted"),
-        anchor: "--skip workspace_manager::\"\n            floor: 734\n",
-        replacement: "--skip workspace_manager:: --skip effects::\"\n            floor: 734\n",
+        anchor: "--skip engine::tests::\"\n            floor: 965\n",
+        replacement: "--skip engine::tests:: --skip effects::\"\n            floor: 965\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
@@ -4308,19 +4308,19 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  step still tests the count against `matrix.floor`, so its pin holds, and a leg \
                  that executed one test clears the floor the matrix now hands it",
         job: Some("test-windows-hosted"),
-        anchor: "            floor: 734\n",
+        anchor: "            floor: 965\n",
         replacement: "            floor: 1\n",
         refused_as: "test-windows-hosted-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-ZEROED",
         escape: "the last shard's floor set to zero in the table, the script untouched. It is \
-                 the largest of the ten, 734 of the guest's 1700, and with it gone the leg is \
+                 the largest of the ten, 965 of the guest's 1700, and with it gone the leg is \
                  green having executed nothing: the count the step sums is never below zero. \
                  `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED`'s floor of 1 still asks for one \
                  test; this asks for none, which is the arrival the count exists to refuse",
         job: Some("test-windows-hosted"),
-        anchor: "            floor: 734\n",
+        anchor: "            floor: 965\n",
         replacement: "            floor: 0\n",
         refused_as: "test-windows-hosted-matrix",
     },
@@ -4379,11 +4379,14 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED",
         escape: "the cargo line names one filter, `engine::`, where it read the leg's \
                  `matrix.tests`, the table and the floors untouched. Every leg then runs the one \
-                 subset, the first seven shards' tests together, and every test outside it runs \
-                 on no hosted leg. By the counts the floors were set from, that subset is 50 + \
-                 27 + 116 + 59 + 235 + 484 + 324 = 1,295 passing tests, above every floor in \
-                 the table, the last leg's 734 among them: ten green legs over a suite that \
-                 lost the 2,267 tests of its last three shards",
+                 subset, and every test outside it runs on no hosted leg. By the counts the \
+                 floors were set from, the first six shards and the ninth, whose filters each \
+                 contain `engine::`, are 50 + 27 + 99 + 76 + 235 + 195 + 120 = 802 passing \
+                 tests, above nine of the ten floors. The subset also holds the rest of \
+                 `engine::topology::`, which no filter names now and which was 484 tests by \
+                 the counts the floors of 2026-11-19 were set from; and 802 + 484 = 1,286 is \
+                 above the last leg's 965 too: ten green legs over a suite that lost every \
+                 test whose name does not contain `engine::`",
         job: Some("test-windows-hosted"),
         anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- ${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
         replacement: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- engine::' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",

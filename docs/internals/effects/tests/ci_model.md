@@ -819,12 +819,34 @@ Ten legs since 2026-11-19, divided by measured time, because a run's slowest
 leg sets its wall clock. In run 44614925593 the five legs' libtest harnesses
 took 1201, 508, 976, 564 and 860 s, and the slowest job took 24.3 minutes,
 against about 3.6 minutes fixed per leg: setup, the compiler questions, a
-1m45s to 2m46s compile, and the two record captures. The filters of
-[`WINDOWS_SHARD_FILTERS`] come from per-test weights of a sequential Linux
-run, scaled to those five walls and blended with a uniform per-test model.
-The slowest of the ten is predicted at about 13 to 16 minutes. The ten were
-not timed before they landed: the CI run of the pull request that landed
-them is their first measurement.
+1m45s to 2m46s compile, and the two record captures. The nine filters of
+that day came from per-test weights of a sequential Linux run, scaled to
+those five walls and blended with a uniform per-test model, and the slowest
+of the ten legs was predicted at about 13 to 16 minutes.
+
+Run 44667503206 measured those ten for the first time. The jobs took 6.4,
+8.1, 15.8, 12.1, 14.0, 10.0, 18.6, 4.5, 13.2 and 7.4 minutes, and their
+libtest harnesses 189, 209, 708, 498, 636, 368, 878, 76, 545 and 223 s,
+4330 s in all, with about 3.8 minutes of each job fixed. The slowest, at
+18.6 minutes against the 13 to 16 predicted, was the seventh, the rest of
+`engine::`.
+
+The filters of [`WINDOWS_SHARD_FILTERS`] are the re-split of 2026-11-20,
+made from that run. Each test's sequential Linux duration is scaled so that
+the leg it ran in sums to that leg's measured harness, and blended half and
+half with a uniform per-test model; the filters were then chosen by a
+search for the slowest leg. The slowest of the ten is predicted at about
+14.4 minutes. The re-split was not timed before it landed: the CI run of the
+pull request that landed it is its first measurement.
+
+Single tests set the floor under that prediction. A leg takes no less than
+its longest test and the fixed minutes, and two tests are each estimated at
+about 9 minutes of their leg's harness:
+
+- `engine::topology::recover::tests::a_kill_at_every_cell_of_a_complete_finalization_converges_on_the_next_resume`;
+- `workspace_manager::tests::r_o2_a_cross_kind_scrub_stopped_at_any_phase_converges_with_no_instance_registered`.
+
+The re-split changes neither test.
 
 The aggregate is unchanged by the matrix. `needs.<job>.result` for a matrix
 job is `success` only when every leg succeeded, and the aggregate already
@@ -888,37 +910,75 @@ them. Nine filters make ten shards:
    coordinator's `tests` module whose name begins with `a_p`;
 2. `engine::topology::coordinator::tests::a_r`: everything there whose name
    begins with `a_r`;
-3. the rest of `engine::topology::coordinator::tests::a`, the names there
-   that begin with `a`;
+3. the rest of `engine::topology::coordinator::tests::a_`, the names there
+   that begin with `a_`;
+4. the rest of `engine::topology::coordinator::`, the names in its `tests`
+   module that begin with `a` and not with `a_` among them;
+5. `engine::topology::recover::`;
+6. `engine::tests::a`: everything in the engine's own `tests` module whose
+   name begins with `a`;
+7. `runner::`;
+8. `workspace_manager::`;
+9. the rest of `engine::tests::`;
+10. everything else: the rest of `engine::topology::`, the rest of
+    `engine::`, which no filter names, and the bin harness's tests among
+    them.
+
+The list was four filters and five shards until 2026-11-19:
+`engine::topology::coordinator::tests::a`, the rest of
+`engine::topology::coordinator::`, the rest of `engine::topology::`, and the
+rest of `engine::`. On that day it became nine filters and ten shards,
+divided by measured time ([`TEST_WINDOWS_HOSTED_JOB`]):
+
+1. `engine::topology::coordinator::tests::a_p`;
+2. `engine::topology::coordinator::tests::a_r`;
+3. the rest of `engine::topology::coordinator::tests::a`;
 4. the rest of `engine::topology::coordinator::`;
 5. `engine::topology::recover::`;
 6. the rest of `engine::topology::`;
 7. the rest of `engine::`;
 8. `runner::`;
 9. `workspace_manager::`;
-10. everything else, the bin harness's tests among them.
+10. everything else.
 
-The list was four filters and five shards until 2026-11-19: the third, the
-fourth, the sixth and the seventh above. The five it gained divide the
-suite by measured time ([`TEST_WINDOWS_HOSTED_JOB`]). The first two divide
-what was the first shard, the slowest at 1201 s in run 44614925593, by the
-opening of a test's name; the other three are module paths.
+Run 44667503206 measured those ten, and the re-split of 2026-11-20 is made
+from it ([`TEST_WINDOWS_HOSTED_JOB`]). It keeps the first, second, fourth
+and fifth filters, and `runner::` and `workspace_manager::`, which are now
+the seventh and eighth. The rest changed:
+
+- the third filter is `...tests::a_` where it was `...tests::a`, so the
+  coordinator's tests that begin with `a` and not with `a_` run in the
+  fourth shard;
+- the filters `engine::topology::` and `engine::` are gone. The seventh
+  shard, the rest of `engine::`, was the slowest in that run, at 878 s in
+  the harness and 18.6 minutes a job;
+- two filters are new, the sixth and the ninth: `engine::tests::a` and
+  `engine::tests::` divide the engine's own `tests` module by the opening
+  of a test's name, as the first three divide the coordinator's;
+- every other `engine::` test, the rest of `engine::topology::` among
+  them, runs in the last shard.
 
 The order is part of the rule. libtest's filter is a substring of a test's
-whole path, not a prefix and not a module. Each of the first six filters
-contains a later one -- the first two the third, and so on down to
-`engine::`, which the fifth and the sixth each contain -- and the narrower
-comes first: placed after the wider one it would find every test it names
-already skipped, and its shard would select nothing. For the same reason a
-name that only contains `engine::` -- a module called `engine` anywhere else
-in the tree -- runs in shard 7, which is still exactly one shard, whatever
-later filter it also contains.
+whole path, not a prefix and not a module. Four of the filters contain a
+later one -- the first two contain the third, each of the first three
+contains the fourth, and the sixth, `engine::tests::a`, contains the ninth,
+`engine::tests::` -- and the narrower comes first: placed after the wider
+one it would find every test it names already skipped, and its shard would
+select nothing. The ninth filter comes after `runner::` and
+`workspace_manager::`, which it neither contains nor is contained by, and
+that order decides only where a name holding two of the three would run:
+in the earliest one's shard, which is still exactly one shard. The same
+holds of a name that contains a filter away from its start. On the macOS
+and Linux tables a module called `engine` anywhere in the tree puts its
+tests in the `engine::` shard; this table has had no `engine::` filter since
+2026-11-20, so here such a name runs where its other filters put it, or in
+the last shard.
 `the_shard_tables_run_every_test_in_exactly_one_shard` holds the ten derived
-argument strings to literals, places thirteen names of those kinds in the
+argument strings to literals, places fourteen names of those kinds in the
 shard each belongs to, and holds every filter to one word that libtest reads
 as a filter, none of them twice.
 
-## `pub(super) const WINDOWS_SHARD_FLOORS: [u32; 10] = [24, 13, 55, 28, 112, 231, 155, 196, 152, 734];`
+## `pub(super) const WINDOWS_SHARD_FLOORS: [u32; 10] = [24, 13, 47, 36, 113, 93, 200, 152, 57, 965];`
 
 The count each Windows shard must report before it may succeed, in shard
 order: [`WINDOWS_TEST_FLOOR`] divided among the ten. Each is its leg's
@@ -935,35 +995,61 @@ holds this list; the oracle holds each leg's `floor:` in `ci.yml` to it.
 Measured, `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED` and
 `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-ZEROED`.
 
-Each floor is about 0.48 of its shard's count of passing tests as the split
-of 2026-11-19 was estimated: 50, 27, 116, 59, 235, 484, 324, 411, 318 and
-1,538. Those are 3,562 together, of which the guest's 1700 is about 0.48 in
-the same way; the five floors before them, 95, 30, 340, 150 and 1085, were
-each about half of a count likewise. Where the ten divide the five, the
-estimate agrees with what the five legs reported in run 44614925593: the
-first three counts are that run's 193, the fourth its 59, and the fifth and
-sixth its 719. No run has counted the ten. Each leg prints its count beside
-its floor (line 11 of [`WINDOWS_SHARD_WITNESS`]), and the first run sent to
-the twin is that measurement.
+Each floor is about 0.48 of its shard's count of passing tests as the
+re-split of 2026-11-20 was estimated: 50, 27, 99, 76, 235, 195, 417, 318,
+120 and 2,011. Those are 3,548 together, of which the guest's 1700 is about
+0.48 in the same way. The first, second and fifth shards are shards the
+split of 2026-11-19 had, and the eighth, the workspace manager's, was its
+ninth; each keeps its count. The fifth's floor is 113 where it was 112,
+because the ratio is 1700 of 3,548 where it was 1700 of 3,562. The last
+shard's count was the largest before and is larger now, and its floor with
+it, because it runs the rest of `engine::topology::` and the rest of
+`engine::` as well.
+
+The ten floors of 2026-11-19 were 24, 13, 55, 28, 112, 231, 155, 196, 152
+and 734, each about 0.48 of a count likewise: 50, 27, 116, 59, 235, 484,
+324, 411, 318 and 1,538, which are 3,562 together. The five floors before
+them, 95, 30, 340, 150 and 1085, were each about half of a count. Where
+those ten divided the five, the estimate agreed with what the five legs
+reported in run 44614925593: the first three counts are that run's 193, the
+fourth its 59, and the fifth and sixth its 719.
+
+No run has counted the ten of the re-split. Each leg prints its count
+beside its floor (line 11 of [`WINDOWS_SHARD_WITNESS`]), and the first run
+sent to the twin after the re-split is that measurement.
 
 ## `pub(super) const MACOS_SHARD_FILTERS: [&str; 4] = [`
 
 The same kind of list for the macOS suite, under the same rule: four
-filters, five shards -- `engine::topology::coordinator::`, the rest of
-`engine::topology::`, the rest of `engine::`, `runner::`, and everything
-else. The `test` job's five macOS legs are derived from it, through
-[`TEST_LEGS`]; until the macOS suite was divided nothing in `ci.yml` read
-it, and the suite was one leg of the `test` matrix.
+filters, five shards -- `engine::topology::coordinator::tests::a_`, which is
+everything in the coordinator's `tests` module whose name begins with `a_`,
+the rest of `engine::topology::`, the rest of `engine::`, `runner::`, and
+everything else. The `test` job's five macOS legs are derived from it,
+through [`TEST_LEGS`]; until the macOS suite was divided nothing in `ci.yml`
+read it, and the suite was one leg of the `test` matrix.
 `the_shard_tables_run_every_test_in_exactly_one_shard` holds its five
-derived argument strings to literals and places the same thirteen names, and
+derived argument strings to literals and places the same fourteen names, and
 holds its filters to the same shape.
 
 It was two filters and three shards until 2026-11-19: `engine::topology::`,
 the rest of `engine::`, and everything else. In run 44614925593 those three
 legs took 22.2, 11.3 and 14.3 minutes, and 16.6, 11.8 and 14.5 in run
-44516609416, about 4 minutes of each fixed. The four filters divide the
-suite by measured time, as the Windows list does, and the slowest of the
-five legs is predicted at about 14 to 15 minutes ([`TEST_TIMEOUT_MINUTES`]).
+44516609416, about 4 minutes of each fixed. On that day it became four
+filters, divided by measured time as the Windows list is:
+`engine::topology::coordinator::`, the rest of `engine::topology::`, the
+rest of `engine::`, `runner::`, and everything else, with the slowest of the
+five legs predicted at about 14 to 15 minutes.
+
+Run 44667503206 measured those five for the first time: 15.8, 4.7, 8.2, 8.1
+and 8.1 minutes a leg, their libtest harnesses 721, 126, 310, 255 and 312 s,
+about 3.9 minutes of each leg fixed. The first leg, the coordinator's, took
+nearly twice the next slowest. The re-split of 2026-11-20 is made from that
+run, as the Windows one is ([`TEST_WINDOWS_HOSTED_JOB`]), and changes the
+first filter alone: `engine::topology::coordinator::tests::a_` where it was
+`engine::topology::coordinator::`, so the rest of the coordinator's tests
+run in the second shard, with the rest of `engine::topology::`. The slowest
+of the five legs is now predicted at about 11.8 minutes
+([`TEST_TIMEOUT_MINUTES`]), and the re-split was not timed before it landed.
 
 The table has no floors beside it, where the Windows one has
 [`WINDOWS_SHARD_FLOORS`]. The `test` job's legs held no count of passing
@@ -976,14 +1062,16 @@ The same kind of list for the Linux suite, under the same rule: one filter,
 two shards -- `engine::`, and everything else. The `test` job's two Linux
 legs are derived from it, through [`TEST_LEGS`].
 `the_shard_tables_run_every_test_in_exactly_one_shard` holds its two derived
-argument strings to literals and places the same thirteen names, and holds
+argument strings to literals and places the same fourteen names, and holds
 its filter to the same shape.
 
 Until 2026-11-19 `ubuntu-latest` had no filter and ran the suite whole, as
 one leg: 11.4 minutes in run 44614925593 and 13.4 in run 44516609416, about
 1.6 of them fixed. Divided by measured time, as the other two tables are,
-the slower of its two legs is predicted at about 8 to 9 minutes
-([`TEST_TIMEOUT_MINUTES`]).
+the slower of its two legs was predicted at about 8 to 9 minutes
+([`TEST_TIMEOUT_MINUTES`]). Run 44667503206 measured the two at 7.8 and 8.2
+minutes, and the re-split of 2026-11-20 that moved the other two tables left
+this one as it was.
 
 No floors here either, for [`MACOS_SHARD_FILTERS`]' reason. A Linux leg
 handed the other's arguments is a different matter: the tests that run on
@@ -1033,11 +1121,15 @@ landed them is that measurement.
 In run 44614925593 on 2026-11-19 those three took 22.2, 11.3 and 14.3
 minutes and the one Linux leg 11.4. The two suites are now divided by
 measured time, macOS into five legs and Linux into two
-([`MACOS_SHARD_FILTERS`], [`LINUX_SHARD_FILTERS`]), with the slowest
-predicted at about 14 to 15 minutes on macOS and about 8 to 9 on Linux;
-the CI run of the pull request that landed that split is its first
-measurement. 30 minutes is about twice the slowest shard
-expected, and the limit the Linux leg already had. Code `test-job-timeout`.
+([`MACOS_SHARD_FILTERS`], [`LINUX_SHARD_FILTERS`]). The split of that day
+had its slowest leg predicted at about 14 to 15 minutes on macOS and about
+8 to 9 on Linux, and run 44667503206 measured it for the first time: 15.8
+minutes for the slowest macOS leg and 8.2 for the slower Linux one. The
+macOS table was divided again on 2026-11-20, from that run, and its slowest
+leg is predicted at about 11.8 minutes; the CI run of the pull request that
+landed the re-split is its first measurement. 30 minutes is about two and a
+half times the slowest shard expected, and the limit the Linux leg already
+had. Code `test-job-timeout`.
 Measured, `MUT-TEST-TIMEOUT-RAISED-FOR-MACOS` and `MUT-TEST-TIMEOUT-RAISED`.
 
 ## `pub(super) const TEST_LEGS: [(&str, &[&str]); 2] = [`

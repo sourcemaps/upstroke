@@ -7122,14 +7122,14 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
         [
             "engine::topology::coordinator::tests::a_p",
             "engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_p",
-            "engine::topology::coordinator::tests::a --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r",
-            "engine::topology::coordinator:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a",
-            "engine::topology::recover:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator::",
-            "engine::topology:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover::",
-            "engine:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::topology::",
-            "runner:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::topology:: --skip engine::",
-            "workspace_manager:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::topology:: --skip engine:: --skip runner::",
-            "--skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::topology:: --skip engine:: --skip runner:: --skip workspace_manager::",
+            "engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r",
+            "engine::topology::coordinator:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_",
+            "engine::topology::recover:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator::",
+            "engine::tests::a --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover::",
+            "runner:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::a",
+            "workspace_manager:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::a --skip runner::",
+            "engine::tests:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::a --skip runner:: --skip workspace_manager::",
+            "--skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::a --skip runner:: --skip workspace_manager:: --skip engine::tests::",
         ],
         "the Windows shards' libtest arguments are not the ten written out here: each shard's \
          are its filter and a `--skip` for every filter before it, and the last shard's are \
@@ -7139,11 +7139,11 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
     assert_eq!(
         macos,
         [
-            "engine::topology::coordinator::",
-            "engine::topology:: --skip engine::topology::coordinator::",
-            "engine:: --skip engine::topology::coordinator:: --skip engine::topology::",
-            "runner:: --skip engine::topology::coordinator:: --skip engine::topology:: --skip engine::",
-            "--skip engine::topology::coordinator:: --skip engine::topology:: --skip engine:: --skip runner::",
+            "engine::topology::coordinator::tests::a_",
+            "engine::topology:: --skip engine::topology::coordinator::tests::a_",
+            "engine:: --skip engine::topology::coordinator::tests::a_ --skip engine::topology::",
+            "runner:: --skip engine::topology::coordinator::tests::a_ --skip engine::topology:: --skip engine::",
+            "--skip engine::topology::coordinator::tests::a_ --skip engine::topology:: --skip engine:: --skip runner::",
         ],
         "the macOS shards' libtest arguments are not the five written out here"
     );
@@ -7182,13 +7182,13 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
         (
             "engine::topology::coordinator::tests::halt_cancels_in_flight_attempt_at_width_three",
             4,
-            1,
+            2,
             1,
         ),
         (
             "engine::topology::coordinator::tests::interleaving::a_budget_stop_under_every_seed",
             4,
-            1,
+            2,
             1,
         ),
         (
@@ -7199,26 +7199,32 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
         ),
         (
             "engine::topology::attempt::tests::kill_after_the_snapshot_intent_before_its_worktree_is_reclaimed",
-            6,
+            10,
             2,
             1,
         ),
-        ("engine::tests::host_acceptance_record", 7, 3, 1),
+        ("engine::tests::host_acceptance_record", 9, 3, 1),
+        (
+            "engine::tests::a_kept_pin_is_written_whatever_head_is_when_the_snapshot_is_refused",
+            6,
+            3,
+            1,
+        ),
         (
             "runner::container::tests::container_capability_record",
-            8,
+            7,
             4,
             2,
         ),
         (
             "workspace_manager::tests::engine::a_name_with_a_filter_inside_it",
-            7,
+            8,
             3,
             1,
         ),
         (
             "workspace_manager::tests::a_reservation_is_released",
-            9,
+            8,
             5,
             2,
         ),

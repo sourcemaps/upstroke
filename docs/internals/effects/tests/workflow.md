@@ -569,8 +569,13 @@ a filter of its own where the pinned text reads `matrix.tests`. Measured,
 `MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED` and
 `MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`. The second is the one no floor
 refuses: every leg runs the tests whose names contain `engine::`, and by the
-counts the floors were set from that subset, the first seven shards' 1,295
-tests, clears all ten, the last leg's 734 among them. So, too, would
+counts the floors were set from that subset clears all ten. The first six
+shards and the ninth, whose filters each contain `engine::`, are 802 tests,
+above nine of the floors. The subset also holds the rest of
+`engine::topology::`, which no filter names since the re-split of 2026-11-20
+and which was 484 tests by the counts of 2026-11-19, and 1,286 is above the
+last leg's 965. Before the re-split the subset was the first seven shards'
+tests, 1,295 by those counts, against a last floor of 734. So, too, would
 one whose line 4 piped Cargo into `Tee-Object` again, or whose line 8, the
 throw for a test process left running, was gone:
 `MUT-TEST-WINDOWS-HOSTED-SUITE-PIPED-AGAIN` and
@@ -711,10 +716,18 @@ skip's anchor is the end of the last entry's `tests:` value and its `floor:`
 line, which spells that leg's last skip and not its whole arguments.
 
 The change from five shards to ten, on 2026-11-19, re-spelled each of these
-rows against the new table and kept what each measures: the second leg is
-now the coordinator's tests named `a_r...`, the last leg's last skip is
-`workspace_manager::`, its floor is 734, and the `exclude:` names
-`2 of 10`.
+rows against the new table and kept what each measures: the second leg
+became the coordinator's tests named `a_r...`, the last leg's last skip
+`workspace_manager::` and its floor 734, and the `exclude:` names
+`2 of 10`. The re-split of 2026-11-20 kept the second leg, so the deleted
+leg's anchor and the `exclude:` stand as they were, and moved the last
+leg: its last skip is now `engine::tests::` and its floor is 965, and the
+appended skip's row and the two floor rows are re-spelled with them. No row
+of the `test` job's was re-spelled for the macOS table: none spells a macOS
+leg's whole arguments, and the last macOS leg's last skip is still
+`runner::`. `MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED` kept its anchor and
+had its count restated
+([`ci_test_windows_hosted_job_complaints`]).
 
 Before that row a deleted leg was measured by hand, on 2026-11-17, while
 the legs were five, in `ci.yml` itself and then restored: with the fifth
