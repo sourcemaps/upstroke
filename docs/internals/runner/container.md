@@ -2174,8 +2174,13 @@ is text the environment shapes. With TLS material missing under a directory
 named `no such container`, the CLI fails **before contacting the daemon** and
 quotes that path back; every phrase table in this file matched the quoted path,
 so a local failure settled `Gone` and `ProcessGone` beside a container that was
-still running — the sequence and its reproduction are `pr8-triage.md` §9,
-finding 1.
+still running. The sequence: a gate starts under valid TLS material, the
+material disappears, every later Docker command fails locally, and the false
+settlement prunes the mounted R19 view, removes the R26 intent, makes the Runner
+answer `Gone`, and lets the verification settle and reclaim its snapshot while
+the gate's container survives.
+`tests::real_docker_fails_locally_without_ever_saying_a_container_is_gone`
+reproduces the local failure against the live CLI.
 
 Two things have to hold before a phrase means anything at all. The message has
 to be one the daemon spoke, which the CLI marks by opening the line with
@@ -2247,10 +2252,17 @@ holding the container at all.
 
 The vocabulary and the fallthrough are PR6's, unchanged: a container being
 removed counts as running until its record is gone, and a status this does not
-enumerate lands on the terminated side. `pr8-triage.md` §7.3 records why that
-arm is the class's remaining weak one and why refusing an unenumerated state,
-though the conforming shape, is a behaviour change to PR6 code with no
-reproduction behind it.
+enumerate lands on the terminated side. That fallthrough is the one weak arm
+left among the sites that conclude a process gone, and it is not a defect
+today: Docker's status vocabulary is closed and every member of it is
+classified — `created`, `exited` and `dead` hold no live process — and every
+way the query can fail is an `Err` before this match is reached. It would
+become a defect if the runtime gained a state that means a process is still
+running and is not one of the four this maps to `Running`: the census would
+observe a live container terminated and `reclaim` would remove it. Refusing an
+unenumerated state is the
+conforming shape, but it would change PR6's behaviour with no reproduction
+behind it, so the fallthrough stays.
 
 ## `const CONTAINER_STATE_FORMAT: &str = "{{.Names}}\u{1f}{{.State}}";`
 
