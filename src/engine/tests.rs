@@ -17252,35 +17252,54 @@ fn a_tracked_filtered_path_moved_out_stays_refused_and_is_pinned_once_its_attrib
         Some(commit),
         "the copy puts the pin back"
     );
-    let advice = "remove the attribute that sets it, after copying out anything to keep";
-    for (what, text) in [
-        ("the kept note", warning.as_str()),
-        ("the refusal", refusal.as_str()),
-        ("the refusal after the move", still_refused.as_str()),
+    let filter = "git error: working-tree path `paid.dat` uses clean/smudge filter `paid-marker`";
+    let kept_advice = ". Nothing outside this checkout keeps it, so `git clean` or \
+                       `git reset --hard` there would lose it. Fix what stopped the pin first \
+                       (for a clean or smudge filter, remove the attribute that sets it, after \
+                       copying out anything to keep), and then resume";
+    let refused_advice = format!(
+        ". Nothing was discarded: whatever the attempt left stays in the checkout, and \
+         `git clean` or `git reset --hard` would lose any of it that no kept pin holds. Fix that \
+         first (for a clean or smudge filter, remove the attribute that sets it, after copying \
+         out anything to keep), and then resume: the resume discards none of it before `{pin}` \
+         and a copy of that pin it writes in {} hold it.",
+        paths_of(&repo, &run_id).public.display()
+    );
+    let listing = format!(
+        "attempt 1 of `t1` is in flight, and listing this checkout's uncommitted paths stopped: \
+         {filter}; refusing before git status can execute configured filter code"
+    );
+    let remove = "remove the attribute that sets it, after copying out anything to keep";
+    for (what, text, cause, advice) in [
+        (
+            "the kept note",
+            warning.as_str(),
+            format!(
+                "the worker's output for attempt 1 of `t1` is kept in this checkout, and pinning \
+                 it at `{pin}` failed: {filter}; refusing before git add can execute configured \
+                 filter code"
+            ),
+            kept_advice,
+        ),
+        (
+            "the refusal",
+            refusal.as_str(),
+            listing.clone(),
+            refused_advice.as_str(),
+        ),
+        (
+            "the refusal after the move",
+            still_refused.as_str(),
+            listing,
+            refused_advice.as_str(),
+        ),
     ] {
-        assert!(
-            !text.contains("move that path out"),
-            "{what} offers no move-out for a tracked path: {text}"
-        );
-        let lower = text.to_lowercase();
-        let moving = lower.split(|c: char| !c.is_alphanumeric()).find(|word| {
-            word.starts_with("mov")
-                || matches!(
-                    *word,
-                    "mv" | "rename" | "renamed" | "relocate" | "relocated" | "elsewhere"
-                )
-        });
         assert_eq!(
-            moving, None,
-            "{what} offers no move-out for a tracked path in any words: {text}"
+            text,
+            format!("{cause}{advice}"),
+            "{what} carries exactly this advice for a tracked path, and no other"
         );
-        for phrase in ["path out", "out of the checkout", "out of this checkout"] {
-            assert!(
-                !lower.contains(phrase),
-                "{what} offers no move-out for a tracked path, as {phrase:?} would: {text}"
-            );
-        }
-        assert!(text.contains(advice), "{what} says to {advice}: {text}");
+        assert!(text.contains(remove), "{what} says to {remove}: {text}");
     }
 }
 

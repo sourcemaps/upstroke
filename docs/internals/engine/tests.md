@@ -3378,11 +3378,22 @@ path put back and the attribute file copied out and removed, as the advice says,
 holds the paid bytes and the rest of the output but not the attribute file, which only the operator's copy keeps, and
 its copy puts the pin back. On Unix the filter's driver appends to a marker, with `git hash-object` as the positive
 control (`a_marking_filter`), and no Git child of the run or of any resume runs it; elsewhere no driver is configured,
-the refusal is the same and the marker is not checked. The words are checked last: the kept note, the refusal and the
-refusal after the move each name the attribute's removal after copying out anything to keep, and none offers to move
-the path out in any words: besides the withdrawn spelling, no word of them is a form of "move", nor "mv", "rename",
-"relocate" or "elsewhere", and none says "path out", "out of the checkout" or "out of this checkout" (F1R-3, so that a
-rewording such as "move the path out" is refused too).
+the refusal is the same and the marker is not checked. The words are checked last, whole: the kept note, the refusal
+and the refusal after the move are each compared with their exact text, so that an alternative added to the advice in
+any words, a move-out among them, fails the test (a list of forbidden words, which this replaces, passed any other
+wording). Only what varies is spliced in, from the run itself: the kept pin `kept_pin_of` names and the run's public
+directory. The note says attempt 1 of `t1`'s output is kept in the checkout and its pin failed on the filter refusal
+before `git add`, then gives `kept_on_error`'s advice: nothing outside this checkout keeps the output, `git clean` or
+`git reset --hard` there would lose it, and what stopped the pin is fixed first (for a filter, by removing the
+attribute that sets it, after copying out anything to keep) before the resume. Each refusal says that attempt is in
+flight and the listing stopped on the filter refusal before `git status`, then gives the resume's advice: nothing was
+discarded, `git clean` or `git reset --hard` would lose what no kept pin holds, the same fix comes first, and the
+resume discards none of it before that pin and a copy of it in the run's directory hold it. Each still names the
+attribute's removal after copying out anything to keep.
+
+Measured before commit: with "Alternatively, try renaming the filtered file to a location outside this checkout and
+resume" appended to `kept_on_error`'s advice, the test fails on the kept note's comparison; appended instead to the
+resume refusal's advice, it fails on the refusal's.
 
 ## `fn two_gated_tasks(repo: &Path) {`
 
