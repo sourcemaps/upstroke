@@ -39,7 +39,7 @@ At `d724fb16` the failure does not occur, on either host.
 
 ## Evidence
 
-This is Gate 5 run 6's figure F59, recorded in `reviews/2026-09-25-gate-G5.md` §8.2 and §13, with
+This is Gate 5 run 6's figure F59, recorded in `48f2af7a:reviews/2026-09-25-gate-G5.md` §8.2 and §13, with
 receipts under `~/tactus-artifacts/g5-evidence-d724fb1/st07/adapter-exclusion/`. The unchanged checker
 was run over a raw copy of each observation export and over a copy without the moved module's records,
 which is the one record per export:

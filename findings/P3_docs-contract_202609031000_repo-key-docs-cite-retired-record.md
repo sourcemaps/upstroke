@@ -19,5 +19,5 @@ the body says every citation of the retired execution-root record in both files 
 
 deferred by owner direction: the parent's sweep, `standards/SWEEP.md` queue row 11, rewrites the docs; a01eecb carried the shape to reinstate — a `repo_key` v1 sentence in `design/15_design_event_log_resume_run_layout.md` and both docs citing it — and f90935542720d76b2ffea43b08cdab1f104d99e8 withdrew it; `the_repo_key_is_the_packets_digest_and_not_a_neighbouring_one` pins the formula meanwhile
 
-Recorded by the PR #120 `src/workspace_manager/containment.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the PR #120 `src/workspace_manager/containment.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

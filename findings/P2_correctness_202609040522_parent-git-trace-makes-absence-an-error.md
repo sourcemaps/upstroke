@@ -19,5 +19,5 @@ guard: deferred to the sweep of src/workspace_manager.rs, queue row 11, with the
 
 deferred to the sweep of `src/workspace_manager.rs`, queue row 11, with the reproduction: run with `GIT_TRACE=1` and query a missing object. The repair is for the helper that runs Git: either a trace-proof environment for inspections, or an absence test that does not depend on stderr being empty; both are decisions about how this project runs Git, which is the parent's
 
-Recorded by the PR #128 `src/workspace_manager/residue.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the PR #128 `src/workspace_manager/residue.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

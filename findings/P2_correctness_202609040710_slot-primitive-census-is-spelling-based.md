@@ -19,5 +19,5 @@ guard: claims corrected, no third census written. every_slot_taking_primitive_re
 
 **claims corrected, no third census written.** `every_slot_taking_primitive_refuses_a_hostile_slot_name` and `slot_taking_fallible_primitives` now say the set is matched by spelling rather than derived, name both invisible spellings, and state that adding a primitive spelt as the existing eleven are fails by name while one spelt otherwise does not. Two text censuses in this file have been walked around three times between them, so the third attempt is not being made; the shape a real derivation needs is the parent's signatures read structurally, which is queue row 11's ground
 
-Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

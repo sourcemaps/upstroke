@@ -19,5 +19,5 @@ guard: deferred to the parent's sweep of src/workspace_manager.rs, the queue's l
 
 deferred to the parent's sweep of `src/workspace_manager.rs`, the queue's last row of this family; `a_git_dir_that_cannot_be_searched_is_an_error_and_not_an_absent_residue` says in its doc why it drives `administrative_residue_at` directly
 
-Recorded by the PR #128 `src/workspace_manager/residue.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the PR #128 `src/workspace_manager/residue.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

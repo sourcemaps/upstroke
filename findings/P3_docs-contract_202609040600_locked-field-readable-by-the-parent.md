@@ -19,5 +19,5 @@ residue.rs compares `record.locked` with `initializing` directly -> at the revie
 
 deferred: the doc comment on the `locked` field says why it is readable and what moves. It was sweep_coordinator's rule of 2026-09-04 that #128's file was not this sweep's to edit while #128 was open; now that #128 has merged, the remaining line belongs to the next change that touches it, and the parent's sweep (queue row 11) reads every call site of this record. Editing a file whose own sweep has just merged, on a round with no further frontier pass, is what this pull request declines to do
 
-Recorded by the `src/workspace_manager/worktree.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/worktree.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

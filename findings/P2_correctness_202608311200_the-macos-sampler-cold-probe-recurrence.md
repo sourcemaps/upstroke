@@ -32,4 +32,4 @@ discarded, median-of-three, recalibration against actual duration, bounded retry
 demonstrate on a controlled macOS repetition that a kill actually lands, without masking the
 vacuity oracle that caught this. The oracle is doing its job; the schedule is what is wrong.
 
-Recorded in `reviews/FINDINGS.md` §40. The row carries **P2** in the ledger's own words.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §40. The row carries **P2** in the ledger's own words.

@@ -19,5 +19,5 @@ the attributes are read with `from_utf8_lossy` into the `String` fields of `Work
 
 deferred: the field types are `worktree.rs`'s (queue row 8) and the comparison is the parent's (row 11); the doc comment on `parse_worktree_records` states what each attribute is read for
 
-Recorded by the `src/workspace_manager/parsers.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/parsers.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

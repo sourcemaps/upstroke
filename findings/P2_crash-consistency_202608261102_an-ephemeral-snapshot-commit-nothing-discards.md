@@ -25,4 +25,4 @@ place, so deleting it would contradict an explicit contract. An implementer cann
 that — what is needed is an owner packet decision that reclassifies the commit, and only then a
 reclaim path.
 
-Recorded in `reviews/FINDINGS.md` §20 and reclassified by §38. Severity is this migration's judgement.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §20 and reclassified by §38. Severity is this migration's judgement.

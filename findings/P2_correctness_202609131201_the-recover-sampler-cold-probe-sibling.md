@@ -49,7 +49,7 @@ limits membership to four named fingerprints and this is none of them.
 
 **It is, however, already named by a row this tree does not hold.**
 `RECOVER-CHERRY-PICK-SAMPLER-COLD-PROBE` is this fingerprint, filed on pull request #254 and not in
-this repository (`reviews/2026-09-10-gate-G4.md:108`), which is why the five sightings above were
+this repository (`48f2af7a:reviews/2026-09-10-gate-G4.md:108`), which is why the five sightings above were
 read as unfiled. It is the row `f837f4ca` was written against, and
 `docs/internals/engine/topology/recover/tests.md:3425` names the same five runs under it.
 
@@ -76,7 +76,7 @@ against. None of them is a post-repair observation.
 **What is outstanding is native macOS confirmation, and only that.** No sighting of this assertion
 after `f837f4ca` has been recorded. What has been measured since is Linux: gate G4 ran this sampler
 five times at `7e0110a1`, a head that contains the repair, for **40 spawns, 40 kills, 0 refusals**,
-9 of them mid-write (`reviews/2026-09-10-gate-G4.md:1565`), and the test passes alone on the build
+9 of them mid-write (`48f2af7a:reviews/2026-09-10-gate-G4.md:1565`), and the test passes alone on the build
 box at the head this row was filed at (`1 passed; 0 failed`, exit 0). **Linux passing does not
 establish macOS correctness.** The failure is a scheduling margin that only the hosted
 `test (macos-latest)` runner has produced; the build box's first pick in a fresh staging worktree is

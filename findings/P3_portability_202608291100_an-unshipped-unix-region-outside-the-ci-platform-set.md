@@ -24,4 +24,4 @@ Decide the platform scope: either add a runner that compiles the region, or stat
 region is out of the supported set and let the census pin that statement. This is an owner decision
 about what the project supports rather than a repair an implementer can choose.
 
-Recorded in `reviews/FINDINGS.md` §27. Severity is this migration's judgement.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §27. Severity is this migration's judgement.

@@ -48,7 +48,7 @@ construction: `git grep -n -E '\.(attribution|citation)\s*=[^=]' -- src` matches
 included; `git grep -n 'Some(QuestionAttribution::DesignDefect)' -- src` matches the two
 constructors, the derivation, the answer writer's check and test literals only. The two legacy
 emitters (`src/engine/coordinator.rs`, `src/engine/resume.rs`) write `None, None`; the topology
-has no production emitter of the record at all (`reviews/2026-09-14-o3-attribution-record.md`
+has no production emitter of the record at all (`48f2af7a:reviews/2026-09-14-o3-attribution-record.md`
 §14). And the reader rule makes the shape harmless to every projection: `status` and any reader of
 `effective_attribution()` see a discovery, never a conviction. So at this head the invalid shape
 can be written only by code that sets a public field on purpose, and read only as a discovery.

@@ -34,6 +34,6 @@ Transcribe the remaining row arrays so the census's domain matches its name, or 
 first is the fix; the second is the honest minimum and should not be skipped if the first is deferred
 again.
 
-Raised as observation O2 of the G3 cumulative review gate, `reviews/2026-09-08-gate-G3.md`, with the
+Raised as observation O2 of the G3 cumulative review gate, `48f2af7a:reviews/2026-09-08-gate-G3.md`, with the
 suggested disposition "a ledger row proposing the five arrays, or a rename of the test to say which
 row it covers". No row was filed at the time; this is that row.

@@ -19,5 +19,5 @@ the ref funnels return containment refusals and I/O errors while their `# Errors
 
 deferred by owner direction (P3 and lower recorded): every parent `# Errors` list is rewritten in the parent's sweep, `standards/SWEEP.md` queue row 11; the body names each contract; `a_hook_written_into_hooks_none_at_the_before_hook_refuses_the_worktree_add_and_never_runs` pins one outcome the ref docs omit
 
-Recorded by the PR #120 `src/workspace_manager/containment.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the PR #120 `src/workspace_manager/containment.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

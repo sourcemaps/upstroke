@@ -28,4 +28,4 @@ from PR5: it requires adding a variant to a frozen enum in a file the 2026-08-20
 name, and a fixture in a separate crate would test its own enum rather than this one. The row says
 so rather than pointing at a test that does not exist.
 
-Recorded in `reviews/FINDINGS.md` §8 and counted among its two carried rows by §35.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §8 and counted among its two carried rows by §35.

@@ -19,5 +19,5 @@ guard: deferred to the parent's sweep of src/workspace_manager.rs (standards/SWE
 
 deferred to the parent's sweep of `src/workspace_manager.rs` (`standards/SWEEP.md` queue row 11), where the primitives that would take the type live: move `ObjectId` beside its predicates in `object.rs`, take it on both sides of `create_ref_zero_old`, `compare_and_swap_ref` and `delete_ref_expected_old`, and let the engine's `CommitSha` carry one; until then `ObjectId::new` is the one validated entry and `a_malformed_value_is_refused_as_not_an_object_id_with_the_value_as_offered` pins it
 
-Recorded by the PR #130 `src/workspace_manager/snapshot_ref.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the PR #130 `src/workspace_manager/snapshot_ref.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

@@ -27,4 +27,4 @@ of re-implementing a mutation that was only ever recorded in prose. Settling it 
 bounded. Do not carry these forward as "five regressions": that is the claim this exercise exists
 to avoid making without evidence.
 
-Recorded in `reviews/FINDINGS.md` §15 as one of the six entries needing adjudication. Severity is this migration's judgement: the entry is not yet classified as a regression.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §15 as one of the six entries needing adjudication. Severity is this migration's judgement: the entry is not yet classified as a regression.

@@ -19,5 +19,5 @@ guard: deferred: the mapping is DESIGN.md's to state (a retired-records row for 
 
 deferred: the mapping is `DESIGN.md`'s to state (a retired-records row for `workspace_candidates`, or the section that now carries its substance), and 50 of the 51 citations are other files'; this file quotes the record as the record's own words meanwhile, which is the only claim it can support
 
-Recorded by the `src/workspace_manager/worktree.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/worktree.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

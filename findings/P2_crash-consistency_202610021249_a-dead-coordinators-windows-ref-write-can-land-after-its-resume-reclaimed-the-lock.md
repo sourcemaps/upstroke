@@ -7,7 +7,7 @@ pr: 330
 reviewed_sha: a0464f432f3d93134360f5d5a88e60b653cd6fb4
 location: src/workspace_manager.rs:3634
 provenance: pre_existing
-first_bad: predates PR11; the Windows ref-lock reclaim has rested on the ambient job's kill-on-close since it landed (design/26_design_merge_queue_protocol.md:398); named R-REF in #330's design round 3 and regraded in its round 4 (reviews/2026-10-02-pr11-follow-up-c-record.md, section 4.8)
+first_bad: predates PR11; the Windows ref-lock reclaim has rested on the ambient job's kill-on-close since it landed (design/26_design_merge_queue_protocol.md:398); named R-REF in #330's design round 3 and regraded in its round 4 (48f2af7a:reviews/2026-10-02-pr11-follow-up-c-record.md, section 4.8)
 guard: before G6, a native Windows execution of a terminated update-ref against a reclaimed ref lock decides its ceiling, or the owner accepts the Windows residual as master has it; the change to the Windows ref-lock reclaim takes it up
 ---
 
