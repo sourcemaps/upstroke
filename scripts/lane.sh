@@ -142,6 +142,16 @@ may_accept_for() {
   esac
 }
 
+# MAINTAINING step 5's body-only repair still needs a personal read. This set
+# grants no witness, MUST, location or movement exemption by itself.
+may_fix_body_for() {
+  case "${1:-}" in
+    findings) echo "P2 P3" ;;
+    feature|refactor|ci|gate|standards|docs|fix-p0p1|fix-p2|bulk-fix-p2|fix-p3) echo "P3" ;;
+    *) return 1 ;;
+  esac
+}
+
 # effort_for <lane> [branch]: the effort the frontier review is run at.
 #
 # THE BRANCH IS OPTIONAL AND IS CONSULTED FOR ONE LANE. Every other lane is answered from the lane

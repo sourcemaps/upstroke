@@ -8,7 +8,15 @@ if [[ $# -ne 1 || ! "$1" =~ ^[0-9a-f]{40}$ ]]; then
 fi
 
 head_sha="$1"
-body="$(tr -d '\r')"
+# Bash drops NUL in command substitutions. Make it detectable before reading,
+# and retain the final newline so only actual CRLF pairs are normalized.
+body="$(tr '\000' '\001' && printf '.')"
+if [[ "$body" == *$'\001'* ]]; then
+  echo 'pull-request body contains a control byte' >&2
+  exit 1
+fi
+body="${body%.}"
+body="${body//$'\r\n'/$'\n'}"
 failed=0
 
 error() {
@@ -107,7 +115,8 @@ for ((index = header_index + 2; index < ${#lines[@]}; index++)); do
   # review, so its lines are not the reviewed ones: no tree lookup and no
   # line-count check. The reviewed SHA above still had to resolve and be
   # integrated, and the guard below is checked as for any row.
-  if [[ "$path" != 'pr.md' ]]; then
+  # `[` compares literally even when the caller enables bash's nocasematch.
+  if [ "$path" != 'pr.md' ]; then
     location_key="$reviewed_sha:$path"
     if [[ -z "${location_lines[$location_key]:-}" ]]; then
       if ! git cat-file -e "$location_key" 2>/dev/null; then

@@ -110,7 +110,9 @@
 #     deferred or accepted on its row: both are blocked first (the two hard rules, below), a MUST
 #     one whatever the row says; a witnessed one's block is lifted only when its row is `fixed`
 #     and a person reads the repair -- a repair push (NEEDS-ATTEST), or `body-fixed:<id>` for a
-#     finding located in the body -- so that row is at best NEEDS-ATTEST
+#     eligible body finding -- so that row is at best NEEDS-ATTEST. The body exception requires
+#     the same ID, severity and body location category in review and row, and `may_fix_body_for`
+#     permits only P3, or P2 in the findings lane. Other location categories cannot grant it.
 #   - the audit's OWN run of .github/scripts/validate-pr-body.sh, on the pull request's title and
 #     on the very bytes the ledger is parsed from -- the body is fetched once and both read that one
 #     copy -- exits 0; any other status is `body-policy-failed:<status>`. A green
@@ -182,7 +184,7 @@
 # Other states: NEEDS-ATTEST (the head moved past the reviewed commit by more than clean merges
 # and ledger pushes: a repair-only push the owner reads and attests under step 5, a merge commit
 # that is not git's own merge of its parents, or a new change that needs another pass; or a
-# `body-fixed:<id>` stands: a `fixed` row on a finding the review located in the body, repaired in
+# `body-fixed:<id>` stands: an eligible `fixed` row agreeing with the review's body location, repaired in
 # the body or in finding text with no push outside the ledger -- never READY, because no commit
 # shows the repair and a person must read it, MAINTAINING step 5), MANUAL
 # (the review is prose the audit cannot judge: findings without ids, or a severity token outside
@@ -236,7 +238,7 @@ set -euo pipefail
 # a run from any directory finds them beside the audit rather than beside the caller.
 audit_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-# `lane_for`, `lane_list`, `must_fix_for`, `may_accept_for` and `effort_for`, from the one table.
+# `lane_for`, `lane_list`, `must_fix_for`, `may_accept_for`, `may_fix_body_for` and `effort_for`.
 # Sourced rather than copied: the copy in this file, the copy in review-poller.sh and the copy in
 # make-fix-brief.sh all read `codex/` prefixes that the branch vocabulary does not contain, and all
 # three disagreed. A table that cannot be read is not a table with no lanes in it, so a failure here
@@ -331,6 +333,19 @@ read_parser_fields() {
   [[ "$count" =~ ^[0123456789]+$ ]] || return 1
   # `10#` so a count bash would read as octal is read as the decimal the parser wrote.
   ((${#fields[@]} == head_count + per_record * 10#$count))
+}
+
+# The ledger's fourth field is a closed category, not an arbitrary truthy flag.
+# Old or partial parser records cannot silently stand for repository locations.
+read_ledger_fields() {
+  local j
+  read_parser_fields "$1" ledger 2 4 || return 1
+  for ((j = 5; j < ${#fields[@]}; j += 4)); do
+    if [ "${fields[j]}" != body ] && [ "${fields[j]}" != repository ] &&
+       [ "${fields[j]}" != unknown ]; then
+      return 1
+    fi
+  done
 }
 
 # ---- the body policy -----------------------------------------------------------------------------
@@ -1036,7 +1051,7 @@ audit_one() {
     printf '%-5s %-14s %-8s %-13s %s\n' "#$pr" "-" "-" NOT-READY "blockers=pr-lookup-failed"
     return 0
   fi
-  local lane must_fix may_accept may_accept_status=0 state
+  local lane must_fix may_accept may_accept_status=0 may_fix_body body_lane_status=0 state
   # A BRANCH OUTSIDE THE VOCABULARY HAS NO LANE, AND IS NOT GIVEN ONE. The catch-all this replaces
   # is the defect: it handed a prefix nobody had thought about the loosest fix set in silence.
   # `lane_for` refuses it and prints the table; this pull request is reported unaudited, and the
@@ -1048,6 +1063,7 @@ audit_one() {
   fi
   must_fix="$(must_fix_for "$lane")"
   may_accept="$(may_accept_for "$lane")" || may_accept_status=$?
+  may_fix_body="$(may_fix_body_for "$lane")" || body_lane_status=$?
   blockers=()
   state=READY
   # THE SEVERITIES THIS LANE MAY ACCEPT WITHOUT A MANUAL READ (owner, 2026-11-13) -- on a ledger
@@ -1058,6 +1074,10 @@ audit_one() {
   if ((may_accept_status != 0)); then
     blockers+=("may-accept-unanswered:$lane")
     may_accept=""
+  fi
+  if ((body_lane_status != 0)); then
+    blockers+=("may-fix-body-unanswered:$lane")
+    may_fix_body=""
   fi
 
   [[ "$draft" == "true" ]] && blockers+=("draft")
@@ -1254,8 +1274,8 @@ audit_one() {
   # anything that had decided what to do about it. What the audit does is stated here instead, and
   # the lookup itself is an expansion, so there is no command in it left to fail.
   #
-  # Three fields per row: its id, its severity and its disposition. The severity is the ROW'S, and
-  # it is read so an `accepted-risk` row is held to the severity the review gave: judged on the
+  # Four fields per row: id, severity, disposition and location category. The severity is the ROW'S,
+  # read so an `accepted-risk` row is held to the severity the review gave: judged on the
   # review's alone, a review P3 whose row recorded P2 and `accepted-risk` read READY, though a P2
   # recorded so is the owner's call.
   #
@@ -1267,9 +1287,10 @@ audit_one() {
   # `body-policy-failed:<status>`. The validator judges the title too, so the title is read here;
   # a title that could not be read is `title-lookup-failed`, and the validator is not run on a
   # title that was never read, since its refusal would then be the read's and not the body's.
-  local body_file ledger_file ledger_status=0 ledger_body_status=0 disposition row_severity nfiles j k
+  local body_file ledger_file ledger_status=0 ledger_body_status=0 disposition row_severity row_location
+  local nfiles j k
   local title title_status=0 policy_status=0
-  ledger_id=(); ledger_severity=(); ledger_disposition=()
+  ledger_id=(); ledger_severity=(); ledger_disposition=(); ledger_location=()
   title="$(gh pr view "$pr" --repo "$repo" --json title --jq .title)" || title_status=$?
   if ((title_status != 0)); then blockers+=("title-lookup-failed"); fi
   body_file="$(mktemp)"
@@ -1286,19 +1307,20 @@ audit_one() {
     run_review_parser ledger "$body_file" "$ledger_file" || ledger_status=$?
     if ((ledger_status != 0)); then
       blockers+=("ledger-parse-failed:$ledger_status")
-    elif ! read_parser_fields "$ledger_file" ledger 2 3; then
+    elif ! read_ledger_fields "$ledger_file"; then
       blockers+=("ledger-parse-incomplete")
     else
-      for ((j = 2; j < ${#fields[@]}; j += 3)); do
+      for ((j = 2; j < ${#fields[@]}; j += 4)); do
         ledger_id+=("${fields[j]}")
         ledger_severity+=("${fields[j + 1]}")
         ledger_disposition+=("${fields[j + 2]}")
+        ledger_location+=("${fields[j + 3]}")
       done
     fi
   fi
   rm -f "$body_file" "$ledger_file"
 
-  local sev id wit read_by_a_person unwitnessed_p3=0 repeated=()
+  local sev id wit read_by_a_person body_repair unwitnessed_p3=0 repeated=()
   # ONE ID IS ONE FINDING, IN THE REVIEW AS IN findings/. The parser hands the review's findings
   # over as given, duplicates included, and everything below judges a finding against the ledger BY
   # ITS ID -- so two distinct unwitnessed P3s sharing `DUP-P3` were both satisfied by the one
@@ -1319,7 +1341,7 @@ audit_one() {
     id="${finding_id[k]}"
     if [[ "${finding_sev[k]}" == ERR || "$id" == "-" || "${repeated[k]}" == 1 ]]; then continue; fi
     for ((j = k + 1; j < ${#finding_sev[@]}; j++)); do
-      if [[ "${finding_sev[j]}" != ERR && "${finding_id[j]}" == "$id" ]]; then
+      if [[ "${finding_sev[j]}" != ERR ]] && [ "${finding_id[j]}" = "$id" ]; then
         repeated[k]=1; repeated[j]=1
       fi
     done
@@ -1343,11 +1365,12 @@ audit_one() {
     # finding's disposition in place, which is a deferred row standing in for a finding that has
     # none. A finding with no id has no row, and nor has an id the review repeats: whichever finding
     # the row was written for, the other has none, and a row answering both is the defect.
-    disposition=""; row_severity=""
+    disposition=""; row_severity=""; row_location=""
     if [[ -n "$id" && "${repeated[k]}" != 1 ]]; then
       for ((j = 0; j < ${#ledger_id[@]}; j++)); do
-        if [[ "${ledger_id[j]}" == "$id" ]]; then
-          disposition="${ledger_disposition[j]}"; row_severity="${ledger_severity[j]}"; break
+        if [ "${ledger_id[j]}" = "$id" ]; then
+          disposition="${ledger_disposition[j]}"; row_severity="${ledger_severity[j]}"
+          row_location="${ledger_location[j]}"; break
         fi
       done
     fi
@@ -1362,8 +1385,29 @@ audit_one() {
       blockers+=("must-deviation:${id:-unnamed}")
       continue
     fi
+    # Only the row for this reviewed finding is compared. Historical rows can
+    # record other reviews, but cannot relabel a current code finding as body text
+    # (or a body finding as code). Missing/unknown locations confer no exemption.
+    if [ -n "$row_location" ]; then
+      if { (( wit & 4 )) && [ "$row_location" != body ]; } ||
+         { (( (wit & 4) == 0 )) && [ "$row_location" = body ]; }; then
+        blockers+=("location-mismatch:$id")
+        continue
+      fi
+      if [ "$row_location" = body ] && [ "$row_severity" != "$sev" ]; then
+        blockers+=("severity-mismatch:$id")
+        continue
+      fi
+    fi
+    body_repair=0
+    if (( wit & 4 )) && [ "$row_location" = body ] &&
+       [[ " $may_fix_body " == *" $sev "* ]]; then
+      case "$moved" in
+        "" | ledger-only | merges-only) body_repair=1 ;;
+      esac
+    fi
     # A witnessed finding passes on one row only, `fixed`, and only where a person reads the repair:
-    # a push of repairs (NEEDS-ATTEST from `moved`) or a body finding on a head nothing but the
+    # a push of repairs (NEEDS-ATTEST from `moved`) or an eligible body finding on a head only the
     # ledger or clean merges moved (`body-fixed`, from the `fixed` arm). It then goes on as an
     # unwitnessed one would, so the must-fix set still asks a serious P1 for a fresh pass.
     #
@@ -1376,7 +1420,7 @@ audit_one() {
       if [[ "$disposition" == fixed ]]; then
         case "$moved" in
           repairs) read_by_a_person=1 ;;
-          "" | ledger-only | merges-only) if (( wit & 4 )); then read_by_a_person=1; fi ;;
+          "" | ledger-only | merges-only) read_by_a_person=$body_repair ;;
         esac
       fi
       if ((read_by_a_person == 0)); then
@@ -1444,7 +1488,7 @@ audit_one() {
         # commit to show it, so `body-fixed` asks a person for the same read; any other finding
         # with nothing pushed outside the ledger is not repaired at this head.
         if [[ "$moved" != repairs && "$moved" != merge-edits:* ]]; then
-          if (( wit & 4 )); then
+          if (( body_repair )); then
             blockers+=("body-fixed:$id")
           else
             blockers+=("fixed-but-head-unmoved:$id")

@@ -361,7 +361,7 @@ USAGE = (
     "usage: pr-review-parse.py {review|ledger} [--nul] [--out FILE] FILE\n"
     "       pr-review-parse.py movement [--nul] [--out FILE] REVIEWED HEAD BASE\n"
     "  review: the review's kind, reviewed commit, verdict, base, stray token and findings\n"
-    "  ledger: the pull-request body's ledger rows, each as its id, severity and disposition"
+    "  ledger: the body's rows, each as its id, severity, disposition and location kind"
 )
 
 
@@ -1053,10 +1053,27 @@ LEDGER_NONE = "None yet"
 # `str.strip()` with no argument takes off every character Python calls whitespace -- U+00A0 and
 # U+001C among them -- and the validator keeps both.
 C_SPACE = " \t\n\v\f\r"
+LEDGER_LOCATION = re.compile(r"[0-9a-f]{40}\s+/\s+([A-Za-z0-9._/-]+):[1-9][0-9]*\Z", re.ASCII)
+
+
+def ledger_location_kind(value):
+    """Classify the recorded location without repairing it or looking up Git objects.
+
+    The evidence validator establishes ancestry, file existence and line counts. This category
+    lets the audit bind the virtual-path exception to the review of the same finding. Older rows
+    with no resolvable location remain readable, but cannot establish a body repair.
+    """
+    match = LEDGER_LOCATION.fullmatch(value)
+    if match is None:
+        return "unknown"
+    path = match.group(1)
+    if (path.startswith(("/", "./")) or ".." in path.split("/") or "//" in path):
+        return "unknown"
+    return "body" if path == "pr.md" else "repository"
 
 
 def ledger_result(args):
-    """ledger FILE: the id, severity and disposition of every row of the body's finding ledger.
+    """ledger FILE: the id, severity, disposition and location kind of every ledger row.
 
     THE TABLE IS THE VALIDATOR'S TABLE, AND ITS PARTS ARE FOUND BY POSITION. This reads exactly the
     table `validate-pr-body.sh` checks (see below for how the two walks meet). After the heading,
@@ -1105,14 +1122,10 @@ def ledger_result(args):
     kind -- is refused wherever it stands. Skipped instead, it would be a heading the parser did not
     read standing where a reader sees one, and the validator would see a body without a ledger.
 
-    THE LINES ARE THE VALIDATOR'S LINES. `validate-pr-body.sh` deletes every carriage return
-    (`tr -d '\\r'`) and its command substitution drops every NUL before it compares a line, so both
-    are deleted here first. Kept, `## Review fi<CR>nding ledger` was the heading to the validator
-    and not to this, and a trailing-space copy elsewhere in the body was the only heading this saw:
-    the validator checked one section and the audit read another. A body with CRLF line ends is
-    therefore the same body as its LF spelling to both, and the validator does not refuse it: the
-    `\\r` `mapfile` would keep is gone before `mapfile` runs. A space or tab before the CR is not a
-    carriage return, survives the deletion on both sides, and is a near miss here.
+    THE LINES ARE THE VALIDATOR'S LINES. Only CRLF pairs become LF. An interior carriage return
+    is not deleted: deleting it turned `p<CR>r.md` into the virtual body path. NUL is refused,
+    rather than dropped as bash's command substitution would do. A space or tab before CRLF
+    survives on both sides, so a padded heading is still a near miss.
 
     AGAINST THE VALIDATORS, WHERE THE TWO WALKS MEET. `validate-pr-body.sh` takes the
     heading only as the exact line and refuses a second one. Every line it takes this takes, and
@@ -1128,11 +1141,12 @@ def ledger_result(args):
     table's rows by both. `validate-pr-ledger-evidence.sh` does not look at the heading: it reads
     from the first canonical header line anywhere in the body, and does not look for a repeated id.
 
-    IN EACH ROW THIS READS THREE CELLS, AND A BODY IT READS IS NOT A BODY THE POLICY PASSES. This
-    used to call itself stricter than the validators and never looser, and it is not. It returns
+    A BODY THIS READS IS NOT A BODY THE POLICY PASSES. This used to call itself stricter than
+    the validators and never looser, and it is not. It returns
     each row's id, severity and disposition, holds them to none of the validator's rules -- its id
-    pattern, `P0`-`P3`, its dispositions -- and reads no other column at all. So a body the
-    validator refuses can be read here whole: a guard cell of `—`, or a row beside `None yet`. READY
+    pattern, `P0`-`P3`, its dispositions -- and classifies the location without verifying it.
+    So a body the validator refuses can be read here whole: a guard cell of `—`, or a row beside
+    `None yet`. READY
     needs the validator's pass on the same bytes, and the audit checks that: it runs
     `validate-pr-body.sh` itself, on the one file it hands this.
 
@@ -1154,7 +1168,10 @@ def ledger_result(args):
     # Where the walk stands: outside the ledger section, or inside it before the header, at the
     # separator, among the rows, or past the end of the table.
     place = "outside"
-    for line in read_input(args[0]).replace("\r", "").replace(NUL, "").split("\n"):
+    body = read_input(args[0])
+    if NUL in body:
+        raise Unparsed("the body carries NUL")
+    for line in body.replace("\r\n", "\n").split("\n"):
         if line == LEDGER_HEADING:
             headings += 1
             if headings > 1:
@@ -1201,6 +1218,9 @@ def ledger_result(args):
                 "id": identifier,
                 "severity": (cells[2] if len(cells) > 2 else "").strip(C_SPACE),
                 "disposition": (cells[9] if len(cells) > 9 else "").strip(C_SPACE),
+                "location_kind": ledger_location_kind(
+                    (cells[3] if len(cells) > 3 else "").strip(C_SPACE)
+                ),
             }
         )
     if place in ("header", "separator"):
@@ -1209,11 +1229,10 @@ def ledger_result(args):
 
 
 def ledger_fields(result):
-    """The ledger as flat fields: two, the second of which is the row count, then three per row --
-    its id, its severity and its disposition, in that order."""
+    """Two header fields (tag, count), then id, severity, disposition and location kind per row."""
     fields = ["ledger", str(len(result["rows"]))]
     for row in result["rows"]:
-        fields += [row["id"], row["severity"], row["disposition"]]
+        fields += [row["id"], row["severity"], row["disposition"], row["location_kind"]]
     return fields
 
 

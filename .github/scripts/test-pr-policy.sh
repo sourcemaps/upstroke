@@ -35,6 +35,10 @@ valid_none="$prefix$header"$'\n'"$separator"$'\n'"$none_row"
 valid_finding="$prefix$header"$'\n'"$separator"$'\n'"$finding_row"
 expect_pass 'empty canonical ledger' "$valid_none"
 expect_pass 'fully classified finding' "$valid_finding"
+expect_pass 'canonical body location' "${valid_finding/src\/engine.rs:42/pr.md:42}"
+expect_pass 'CRLF body' "${valid_finding//$'\n'/$'\r\n'}"$'\r'
+expect_fail 'interior carriage return in body path' "${valid_finding/src\/engine.rs:42/$'p\rr.md:42'}"
+expect_fail 'interior carriage return in repository path' "${valid_finding/src\/engine.rs:42/$'src/eng\rine.rs:42'}"
 
 expect_fail 'hyphenated provenance alias' "${valid_finding/pre_existing/pre-existing}"
 expect_fail 'unsupported category alias' "${valid_finding/crash-consistency/test-reliability}"
