@@ -104,11 +104,19 @@ Read from the job's log as GitHub's API serves it, with ANSI escape sequences re
   finished in 673.78s`. This test was the job's only failure.
 - #400 changes nothing under `src/engine/topology/dispatch/`. Its change to
   `src/workspace_manager/fixture.rs` is comment-only.
-- `test (windows-latest, 10 of 10)` passed this test on the same tree in run 44996199348
-  (`cf200561`, an empty commit whose tree is `ff0148d9`'s), and on #400's earlier heads in runs
-  44970652323 (`c3908c6e`) and 44978559642 (`c0f60b7b`).
+- `test (windows-latest, 10 of 10)` passed this test in run 44996199348, on `cf200561`, an empty
+  commit whose tree is `ff0148d9`'s, and on #400's earlier heads in runs 44970652323 (`c3908c6e`)
+  and 44978559642 (`c0f60b7b`). CI ran GitHub's merge commit of each head with `master`, not the
+  head itself, and `master` had moved between the two runs. The failing job ran `1bbe3b68`, the
+  merge of `ff0148d9` into `fe2b9bc5` (its log, line 112). The passing job (`job-137127690628`, its
+  log with ANSI escape sequences removed has SHA256
+  `cd6ca2bab642ab20a5a237b5c538b383a9fa948c66585523524e4135c9f010d4`) ran `9b58fc9f`, the merge of
+  `cf200561` into `5437a06b` (its log, line 112). `git diff --name-only fe2b9bc5 5437a06b` lists 28
+  files, nine of them Rust files, none under `src/engine/topology/dispatch/` and not
+  `src/workspace_manager/fixture.rs`.
 - **Established:** the same test failed the same assertion again, on a second pull request whose
-  diff does not reach the sampler, and passed on the same tree in a later run.
+  diff does not reach the sampler, and passed in a later run on the same pull-request tree, which
+  CI merged with a later `master`.
 
 ## What is and is not established
 
@@ -142,8 +150,8 @@ and whether it moved. Write times beside only the return clock would not remove 
 kill that returned after `MERGE_MSG` was written could have been entered before the write or after
 it. The kill call's entry time is also needed.
 
-**Not established: the rate.** One sighting on a hosted runner. The other runs of this test on
-2026-11-22 were not counted.
+**Not established: the rate.** Two sightings on hosted runners: the first, on #399, and the second,
+on #400, both recorded above. The other runs of this test on 2026-11-22 were not counted.
 
 A second sighting, on #400, is recorded above; it adds no reading.
 
