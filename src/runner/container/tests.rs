@@ -9737,3 +9737,139 @@ fn the_capability_observer_reads_an_absent_image_without_pulling_it() {
     );
     control.assert_absent("absent-image", &["image store", "/var/run"]);
 }
+
+#[test]
+fn an_unanswered_docker_question_names_the_end_it_met_and_the_time_it_ran() {
+    use crate::agent::ProcessOutput;
+    let cli = DockerCli::default();
+    let op = RuntimeOp::ListByLabel;
+    let args = ["ps", "--all"];
+    let signal = ProcessOutput {
+        code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        duration: Duration::from_micros(4_999),
+        timed_out: false,
+        output_limited: false,
+    };
+    let bound = ProcessOutput {
+        duration: Duration::from_millis(60_012),
+        timed_out: true,
+        ..signal.clone()
+    };
+    let bound_and_limit = ProcessOutput {
+        duration: Duration::from_millis(60_004),
+        timed_out: true,
+        output_limited: true,
+        ..signal.clone()
+    };
+    let limit = ProcessOutput {
+        duration: Duration::from_millis(2_740),
+        output_limited: true,
+        ..signal.clone()
+    };
+    assert_eq!(
+        cli.answer_within(op, "census", &args, Ok(bound)),
+        Err(RuntimeError::Failed {
+            operation: op,
+            detail: "`docker ps --all` ended before it answered: the bound it was asked under \
+                     passed, its invocation was cancelled, or a signal ended it; the end it met \
+                     was its bound, after 60012 ms"
+                .to_owned(),
+        })
+    );
+    assert_eq!(
+        cli.answer_within(op, "census", &args, Ok(bound_and_limit)),
+        Err(RuntimeError::Failed {
+            operation: op,
+            detail: "`docker ps --all` ended before it answered: the bound it was asked under \
+                     passed, its invocation was cancelled, or a signal ended it; the end it met \
+                     was its bound, after 60004 ms"
+                .to_owned(),
+        })
+    );
+    assert_eq!(
+        cli.answer_within(op, "census", &args, Ok(limit)),
+        Err(RuntimeError::Failed {
+            operation: op,
+            detail: "`docker ps --all` ended before it answered: the bound it was asked under \
+                     passed, its invocation was cancelled, or a signal ended it; the end it met \
+                     was the output limit or a signal, after 2740 ms"
+                .to_owned(),
+        })
+    );
+    assert_eq!(
+        cli.answer_within(op, "census", &args, Ok(signal)),
+        Err(RuntimeError::Failed {
+            operation: op,
+            detail: "`docker ps --all` ended before it answered: the bound it was asked under \
+                     passed, its invocation was cancelled, or a signal ended it; the end it met \
+                     was a signal, after 4 ms"
+                .to_owned(),
+        })
+    );
+}
+
+#[test]
+fn an_unanswered_docker_question_names_its_cancellation_only_when_its_stop_fired() {
+    use crate::agent::ProcessOutput;
+    let cli = DockerCli::default();
+    let op = RuntimeOp::Observe;
+    let args = ["ps", "--all"];
+    let signal = ProcessOutput {
+        code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        duration: Duration::from_millis(1_250),
+        timed_out: false,
+        output_limited: false,
+    };
+    let cancelled = crate::runner::Cancellation::new();
+    cancelled.cancel();
+    let live = crate::runner::Cancellation::new();
+
+    let mut cancelled_answer = None;
+    let stopped = cli.answer_recording_stop(op, "container", &args, &cancelled, |stop| {
+        cancelled_answer = Some(stop());
+        Ok(signal.clone())
+    });
+    assert_eq!(cancelled_answer, Some(true));
+    assert_eq!(
+        stopped,
+        Err(RuntimeError::Failed {
+            operation: op,
+            detail: "`docker ps --all` ended before it answered: the bound it was asked under \
+                     passed, its invocation was cancelled, or a signal ended it; the end it met \
+                     was its invocation's cancellation, after 1250 ms"
+                .to_owned(),
+        })
+    );
+
+    let mut live_answer = None;
+    let unstopped = cli.answer_recording_stop(op, "container", &args, &live, |stop| {
+        live_answer = Some(stop());
+        Ok(signal.clone())
+    });
+    assert_eq!(live_answer, Some(false));
+    assert_eq!(
+        unstopped,
+        Err(RuntimeError::Failed {
+            operation: op,
+            detail: "`docker ps --all` ended before it answered: the bound it was asked under \
+                     passed, its invocation was cancelled, or a signal ended it; the end it met \
+                     was a signal, after 1250 ms"
+                .to_owned(),
+        })
+    );
+
+    assert_eq!(
+        cli.answer_recording_stop(op, "container", &args, &cancelled, |_| Ok(signal)),
+        Err(RuntimeError::Failed {
+            operation: op,
+            detail: "`docker ps --all` ended before it answered: the bound it was asked under \
+                     passed, its invocation was cancelled, or a signal ended it; the end it met \
+                     was a signal, after 1250 ms"
+                .to_owned(),
+        })
+    );
+}

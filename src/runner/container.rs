@@ -1006,7 +1006,7 @@ impl DockerCli {
             .map_err(|failure| self.unanswered(op, target, args, failure))?;
         let limited = output.output_limited;
         if !limited && (output.timed_out || output.code.is_none()) {
-            return Err(unfinished(op, args));
+            return Err(unfinished(op, args, &output, QuestionStop::NeverFired));
         }
         if !limited && output.code != Some(0) {
             return Err(classify_docker_failure(op, output.stderr.trim().to_owned()));
@@ -1113,14 +1113,15 @@ impl DockerCli {
                 ),
             });
         }
-        let outcome = self.question(
-            op,
-            target,
-            args,
-            deadline.saturating_duration_since(Instant::now()),
-            &|| cancellation.is_cancelled(),
-        );
-        self.answer_within(op, target, args, outcome)
+        self.answer_recording_stop(op, target, args, cancellation, |stop| {
+            self.question(
+                op,
+                target,
+                args,
+                deadline.saturating_duration_since(Instant::now()),
+                stop,
+            )
+        })
     }
 
     fn answer_within(
@@ -1130,9 +1131,40 @@ impl DockerCli {
         args: &[&str],
         outcome: Result<ProcessOutput, ProcessFailure>,
     ) -> Result<String, RuntimeError> {
+        self.read_outcome(op, target, args, outcome, QuestionStop::NeverFired)
+    }
+
+    fn answer_recording_stop(
+        &self,
+        op: RuntimeOp,
+        target: &str,
+        args: &[&str],
+        cancellation: &Cancellation,
+        question: impl FnOnce(&dyn Fn() -> bool) -> Result<ProcessOutput, ProcessFailure>,
+    ) -> Result<String, RuntimeError> {
+        let record = std::cell::Cell::new(QuestionStop::NeverFired);
+        let stop = || {
+            let cancelled = cancellation.is_cancelled();
+            if cancelled {
+                record.set(QuestionStop::Fired);
+            }
+            cancelled
+        };
+        let outcome = question(&stop);
+        self.read_outcome(op, target, args, outcome, record.get())
+    }
+
+    fn read_outcome(
+        &self,
+        op: RuntimeOp,
+        target: &str,
+        args: &[&str],
+        outcome: Result<ProcessOutput, ProcessFailure>,
+        stop: QuestionStop,
+    ) -> Result<String, RuntimeError> {
         let output = outcome.map_err(|failure| self.unanswered(op, target, args, failure))?;
         if output.timed_out || output.code.is_none() {
-            return Err(unfinished(op, args));
+            return Err(unfinished(op, args, &output, stop));
         }
         if output.output_limited {
             return Err(RuntimeError::Failed {
@@ -1690,15 +1722,40 @@ fn spelled(args: &[&str]) -> String {
     format!("`{DOCKER_PROGRAM} {}`", args.join(" "))
 }
 
-fn unfinished(op: RuntimeOp, args: &[&str]) -> RuntimeError {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuestionStop {
+    Fired,
+    NeverFired,
+}
+
+fn unfinished(
+    op: RuntimeOp,
+    args: &[&str],
+    output: &ProcessOutput,
+    stop: QuestionStop,
+) -> RuntimeError {
     RuntimeError::Failed {
         operation: op,
         detail: format!(
             "{} ended before it answered: the bound it was asked under passed, its invocation \
              was cancelled, or a signal ended it",
             spelled(args)
-        ),
+        ) + &end_and_time(output, stop),
     }
+}
+
+fn end_and_time(output: &ProcessOutput, stop: QuestionStop) -> String {
+    let end = if output.timed_out {
+        "its bound"
+    } else if stop == QuestionStop::Fired {
+        "its invocation's cancellation"
+    } else if output.output_limited {
+        "the output limit or a signal"
+    } else {
+        "a signal"
+    };
+    let millis = output.duration.as_millis();
+    format!("; the end it met was {end}, after {millis} ms")
 }
 
 fn exit_text(exit: Option<i32>) -> String {
