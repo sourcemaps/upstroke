@@ -16,9 +16,10 @@ is the living design authority.
 ## Module
 
 Agent adapters (DESIGN.md §8, §16): turn a `TaskRun` into a subprocess of
-an official agent CLI and parse what came back. Adapters never edit files,
-never commit, and never speak HTTP — they only build commands and read
-process output. One file per agent.
+an official agent CLI and parse what came back. Adapters never commit and
+never speak HTTP. Besides building commands and reading process output,
+each adapter's `materialize_permissions` writes the permission settings
+file its CLI reads (`util::write_json`). One file per agent.
 
 ## `#![deny(`
 

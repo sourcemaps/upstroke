@@ -153,8 +153,9 @@ bytes, and nothing that names a machine.
 
 ### Errors
 
-A refusal to run this profile at all (§19/§20), or a binary that cannot
-be located.
+A refusal to run this profile at all (§19/§20). `build` names the CLI by its bare program name and
+does not look for it: a binary the boundary cannot find shows when the Runner starts it, or at
+`probe`.
 
 ## `pub trait AgentAdapter: Send + Sync` › `fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError>;`
 
@@ -229,8 +230,9 @@ Registry in routing order; ids match `WorkerProfile.agent`.
 
 The shared effort levels the help entry for `--effort` does not advertise: all of them when help
 has no `--effort` line. Looking only for the flag proves too little, since CLI versions have
-exposed `--effort` with a narrower enum. The option's own wrapped help block is parsed so unrelated
-words elsewhere in `--help` cannot masquerade as a supported value.
+exposed `--effort` with a narrower enum. It reads from the first help line that contains `--effort`
+to the next line that starts with `-`, so words elsewhere in `--help` are not read; a prose line
+mentioning `--effort` before the option's own entry would start the read there instead.
 
 ## `pub(crate) fn advertises_flag(help: &str, flag: &str) -> bool {`
 
@@ -1146,8 +1148,9 @@ Prose mentions an ordinal too, and a comment starts no process.
 
 ## `mod probe_identity_tests` › `fn every_probe_call_site_passes_its_own_ordinal_constant() {`
 
-Every ordinal an adapter's pre-flight passes to the Runner, **read from the call sites** rather than
-from the table beside them.
+The ordinals an adapter's production code names, read by scanning its source lines that mention
+`probe_ordinal::` and counting its `probe_request(` calls, rather than from the table beside them.
+The scan does not tie an ordinal to the call that passes it.
 
 An invocation identity is unique per process. Each adapter's
 `every_preflight_process_has_its_own_ordinal` builds its set from the `probe_ordinal::ALL` array, so

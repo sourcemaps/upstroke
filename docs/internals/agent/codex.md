@@ -435,10 +435,10 @@ Anything unrecognised stays Unknown and says so in a note.
 
 ## `mod tests` › `struct RecordingRunner {`
 
-A boundary that answers each of this adapter's twelve pre-flight processes the way a working
-`codex` does, and records each request. The answers let the sequence *complete*: a validator that
-refuses stops the walk, and a walk that stops after one process says nothing about the identities
-of the rest.
+A boundary that answers each of the twelve processes this adapter's `probe` and `discover` start
+(ten and two) the way a working `codex` does, and records each request. The answers let the
+sequence *complete*: a validator that refuses stops the walk, and a walk that stops after one
+process says nothing about the identities of the rest.
 
 It answers by **argument**, never by program: what the CLI is called at the boundary is the
 boundary's business, and a fixture keyed on the program string would assert the adapter's answer
@@ -500,7 +500,8 @@ reserved ordinal no step uses, fails here.
 
 ## `mod tests` › `fn every_preflight_process_names_the_cli_at_whichever_boundary_is_asked() {`
 
-Each of the twelve pre-flight processes names the CLI and nothing this machine contributed.
+Each of the twelve processes `probe` and `discover` start names the CLI and nothing this machine
+contributed; a run's pre-flight starts only `probe`'s ten.
 
 The same adapter is then driven against a second boundary in the same process, and that boundary
 must be asked the identical program strings. A resolution memoised in a process-wide cell is
@@ -514,8 +515,8 @@ nothing.
 
 ## `mod tests` › `fn every_preflight_process_has_its_own_ordinal() {`
 
-This adapter runs 12 pre-flight processes, so the ordinals it fixes must be 12 distinct values.
-The expected count is written from the steps the adapter performs, not read from the table under
+This adapter's `probe` and `discover` start 12 processes (a run's pre-flight starts `probe`'s ten),
+so the ordinals it fixes must be 12 distinct values. The expected count is written from the steps the adapter performs, not read from the table under
 test, which would otherwise agree with itself after losing an entry.
 
 ## `fn every_preflight_process_has_its_own_ordinal()` › `let ids: BTreeSet<String> = probe_ordinal::ALL`
@@ -525,8 +526,9 @@ And they render as 12 distinct identities in the probe form naming this agent
 
 ## `mod tests` › `fn probe_against_real_binary_when_present() {`
 
-Runs only where the real CLI exists; deterministic fixtures do the compatibility proof, while this
-catches local help or catalog drift.
+Runs only where the real CLI exists, and returns early elsewhere. The deterministic fixtures replay
+the CLI behaviour this adapter was written against and do not detect a CLI that has since changed;
+where this test runs, it catches local help or catalog drift.
 
 ## `fn probe_against_real_binary_when_present()` › `if crate::util::find_program(CLI).is_none() {`
 
