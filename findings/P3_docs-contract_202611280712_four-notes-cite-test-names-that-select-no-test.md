@@ -39,7 +39,11 @@ A reader takes a test name a note cites and asks Cargo for it, and no test is se
 
 - Each of the four was read on `6513c22d` with `git grep`.
 - They were found by ruling R85's control on #439's head `bcb4c251`, which listed the Linux library
-  and binary tests and matched every backticked test path under the notes directory against the list
+  and binary tests and matched against the list the backticked lower-case paths under the notes
+  directory that contain `::tests::` or begin `tests::`
+  (`~/selfhost-catshards-20261125/r85-controls.py:19-20`), so a test cited under a module of another
+  name, as the one at `docs/internals/runner/host/tests.md:2187` is under
+  `agent::adapter::built_program_tests`, was not compared
   (`~/selfhost-catshards-20261125/evidence/r85-cited-names.json`, SHA-256
   `1fea1c95c81e95e7025d39107e04dd1cfa9dd0e934fe4a0228c108e71af56c47`). Its other two stale names are
   #439's split, not `master`'s, and three of its seven unresolved names are modules of the effects
