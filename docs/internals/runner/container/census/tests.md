@@ -1350,7 +1350,7 @@ differs is whether their owner's run directory is reported live.
 
 Pre-clean before the first `docker create`, not after the last teardown.
 
-`reviews/FINDINGS.md` §16: this test's own cleanup is correct and cannot
+`48f2af7a:reviews/FINDINGS.md` §16: this test's own cleanup is correct and cannot
 help, because no in-process cleanup runs when the process is SIGKILLed.
 These two names come from [`real_docker_census_owners`]: two fixed run
 ids and this slot's own repo key, all stable across runs *in* this slot,

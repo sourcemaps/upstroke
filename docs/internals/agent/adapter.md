@@ -339,7 +339,7 @@ panic.
 
 Three forms have been observed. The five-hour form is the one from run
 `01M740JX5N8HB94RNC7W2MM777` above (2026-11-11, exit code 1). The session
-form, `You've hit your session limit`, is in `reviews/FINDINGS.md`, in the
+form, `You've hit your session limit`, is in `48f2af7a:reviews/FINDINGS.md`, in the
 record of a worker that returned rc=1 with that message while its wrapper
 reported success. The model form, `You've hit your Fable limit · resets Nov
 14, 9am (UTC)`, was printed on the build machine on 2026-11-12, when one
@@ -864,7 +864,7 @@ the weekly message is worded like the five-hour and session ones.
 
 ## `mod tests` › `fn the_recorded_hit_your_session_limit_message_signals() {`
 
-The session window, in the words `reviews/FINDINGS.md` records from a worker
+The session window, in the words `48f2af7a:reviews/FINDINGS.md` records from a worker
 that returned rc=1 with `You've hit your session limit`. None of the twelve
 phrases matches it. Remove "session" from the windows and this test fails.
 

@@ -40,7 +40,7 @@ the include file its role processes read that graph through. And
 module reads that constant and calls none of the manager's funnels.
 
 **A second amendment, adopted:** B-W924-R1, by the owner's ruling of 2026-10-08
-(the follow-up B record, `reviews/2026-10-01-pr11-follow-up-b-record.md`, §9.25
+(the follow-up B record, `48f2af7a:reviews/2026-10-01-pr11-follow-up-b-record.md`, §9.25
 and §9.28). The snapshot path's three registry commands run again past another
 registration's empty `commondir`, and nothing else in the module changes. It
 governs on master. In this draft it is superseded at those three commands, the
@@ -58,7 +58,7 @@ B-W924-R1-S, as an agent decision by `pr11_decide_d` under the owner's delegatio
 2026-10-11 (babysit's `0194a1e4…`)**: follow-up D (#331, a draft), to close
 `PR329-LEGACY-RUNS-IN-LINKED-CHECKOUTS-RACE-THE-SHARED-WORKTREE-REGISTRY` and R-G. The
 row's text in `effects/allowlist.toml` gives it exactly, marked there as adopted, and
-the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its
+the record `48f2af7a:reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its
 Implementation section) is why. It is three things. The three Git children that
 enumerate the shared worktree registry — `switch_branch`'s `git switch`,
 `add_gate_worktree`'s `git worktree add`, and `cleanup_gate_workspace`'s

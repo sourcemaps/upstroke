@@ -565,7 +565,7 @@ Since #329 a failure after Git took the snapshot's destination over
 refuses at once, resumably, as `UpstrokeError::RegistryRefused`, because a
 prune deleting the snapshot's registration after the takeover leaves the
 same end state, and that is registry state
-(`reviews/2026-10-01-pr11-follow-up-b-record.md`, §7.3). That narrows
+(`48f2af7a:reviews/2026-10-01-pr11-follow-up-b-record.md`, §7.3). That narrows
 `not_repairs`' defer-then-park for a genuine checkout failure to a
 resumable stop: `PR329-A-GENUINE-CHECKOUT-FAILURE-AFTER-THE-TAKEOVER-REFUSES`
 (P2), which needs the owner's disposition before G6.
@@ -919,7 +919,7 @@ finds a hook-harness helper in `topology/effects.rs` and two test helpers —
 command's own output contradicts: two of the three *are* under
 `src/engine/`. `PR7-R6-ATT-008`. The doc-comment filter is the other half —
 a needle quoted here would otherwise match its own quotation,
-`reviews/FINDINGS.md` §4. That is
+`48f2af7a:reviews/FINDINGS.md` §4. That is
 verbatim the defect this module's own header exists because of — "six
 independent readers all assumed the driver existed" — reproduced in the
 justification for a type. `PR7-R3-CONTRACT-007`; confirmed against the tree
@@ -1137,7 +1137,7 @@ could not carry it and that a resume therefore restarted the brief empty
 `75da796` raised as finding 2. [`crate::events::FailureRecord::detail`]
 now carries what §11.4 sends, and [`Brief`] derives the whole map from
 the log by the same step the live loop applies.
-`PR7-FEEDBACK-NOT-DURABLE-IN-SCHEMA-4` in `reviews/FINDINGS.md` §2 is
+`PR7-FEEDBACK-NOT-DURABLE-IN-SCHEMA-4` in `48f2af7a:reviews/FINDINGS.md` §2 is
 closed by that field, authorised as Class C in
 `decisions/2026-08-26-durable-retry-feedback.md`.
 
@@ -2599,7 +2599,7 @@ It took `hooks` **and** a journal. The driver's journal must hold
 `hooks` to emit through [`emit`], and one `&mut dyn TopologyHooks`
 cannot be both. The test journal sidesteps that by holding a *different*
 events bundle — the two-observation-surface divergence
-`reviews/FINDINGS.md` records — and production must not, because then
+`48f2af7a:reviews/FINDINGS.md` records — and production must not, because then
 the candidate sequence's appends would not be the ones the harness sees.
 
 So `complete_promotion` is now the composition of three halves that

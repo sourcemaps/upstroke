@@ -1868,7 +1868,7 @@ function), `AttemptContext::settle_interrupted` and
 census counting the bare name is satisfied by either of the other two.
 Measured by S5 round 4: deleting step (d)'s only production call left the
 census **and the entire suite** green, with `attempt_interrupted` appended
-by no run. `reviews/FINDINGS.md` §4's "a refutation must name which item it
+by no run. `48f2af7a:reviews/FINDINGS.md` §4's "a refutation must name which item it
 inspected" is the same rule; this is it applied to the instrument.
 
 ## `pub(crate) enum Call` › `Free,`
@@ -1898,7 +1898,7 @@ most likely to trip over, because a scaffold, a fake and a readiness
 protocol exist to *name* the things production names. Found by S5 round
 5's `seams`, `attempt` and `settle` lenses independently; the
 consolidation had been filed one commit earlier in
-`reviews/FINDINGS.md` §20 as tidiness.
+`48f2af7a:reviews/FINDINGS.md` §20 as tidiness.
 
 ### Panics
 

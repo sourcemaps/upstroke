@@ -528,7 +528,7 @@ platform that happens to be reading it — the same class as
 ## `fn the_cli_wires_the_real_containment_step_into_dispatch()` › `let code: String = production`
 
 Comments are not code, and this census would otherwise be the exact
-hazard `reviews/FINDINGS.md` records as `PR4-CENSUS-COMMENT-ORACLE`:
+hazard `48f2af7a:reviews/FINDINGS.md` records as `PR4-CENSUS-COMMENT-ORACLE`:
 `run_wired`'s doc comment quotes the mutation it exists to kill, and
 a source count that read it would make the doc and the code
 indistinguishable. The rule is deliberately simple — everything from

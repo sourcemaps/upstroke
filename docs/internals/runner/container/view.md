@@ -339,7 +339,7 @@ nothing will ever reclaim, because the record naming it is gone.
 an error. It gives a delete-pending name another chance to disappear without
 treating access denial as success. The bound used to be sixty-four yields,
 which a winner descheduled between marking the name and closing its handle
-outlasted; [reviews/FINDINGS.md §43](https://github.com/sourcemaps/upstroke/blob/master/reviews/FINDINGS.md) records
+outlasted; [48f2af7a:reviews/FINDINGS.md §43](https://github.com/sourcemaps/upstroke/blob/48f2af7a/reviews/FINDINGS.md) records
 the first Windows sighting and `PR154-WINDOWS-CENSUS-VIEW-REMOVAL-ACCESS-DENIED`
 the measured cause. The later attempts now sleep, on the schedule
 `super::racing_pause` and its constants state. A protected view remains an

@@ -2615,7 +2615,7 @@ appends are asserted here, in
 one run, against the pool the assembler actually resolves — which is the
 behavioural witness `79cd9c8` said was unavailable because "no driver
 fixture can reach the arm". This fixture reaches it, and reached it then.
-`reviews/FINDINGS.md` §19, claims (2) and (3).
+`48f2af7a:reviews/FINDINGS.md` §19, claims (2) and (3).
 
 ## `fn the_retaining_incarnation_retries_in_place()` › `let briefed = runner`
 
@@ -2798,7 +2798,7 @@ rung there is. Measured at `cf22a8c`: replacing the driver's
 `self.ladder_position(key)?.0` with a literal `0` failed **no** topology
 test.
 
-That is occurrence 4 of `reviews/FINDINGS.md` §4's accumulator class, and the
+That is occurrence 4 of `48f2af7a:reviews/FINDINGS.md` §4's accumulator class, and the
 sharpest argument for its re-scoping: the class was filed *from* this
 instance, and half of this instance was still open.
 
@@ -3089,7 +3089,7 @@ is `(claude-code, opus)` while its rung-0 implementer is
 **exact `(agent, model)` equality**, so it does not fire and the pass
 keeps agent `claude-code`: the two lookups were the same lookup, both
 behaviours passed, and the mutation recorded as killed died because the
-pool became *empty* rather than wrong. `reviews/FINDINGS.md` §19,
+pool became *empty* rather than wrong. `48f2af7a:reviews/FINDINGS.md` §19,
 claim (8).
 
 With `REVIEW_AGENT` on the primary and a pool for each agent, inheriting
@@ -3377,7 +3377,7 @@ and a lease held past the bound apart.
 `a_lease_copy_that_outlives_the_bound_still_fails_the_first_incarnations_death` and
 `a_lease_observation_that_fails_still_fails_the_first_incarnations_death_at_once` hold the three
 behaviours. Frozen hunk H3 as revised, adopted by the owner's ruling B-W, revised, on 2026-10-08
-(`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.22.3 and §9.28).
+(`48f2af7a:reviews/2026-10-01-pr11-follow-up-b-record.md` §9.22.3 and §9.28).
 
 ## `enum LeaseCopyWait {`
 
@@ -4443,7 +4443,7 @@ else. Of the ten never-called things listed above, `Spend::replay`,
 `TopologyRun`, `Started`, `CandidateJournal`, `settle_*` and
 `complete_promotion`'s continuation are **not** among them — this would not
 have caught them, and the commit that added it said otherwise. Corrected in
-`reviews/FINDINGS.md` §19, claim (7); recorded here because the reader who
+`48f2af7a:reviews/FINDINGS.md` §19, claim (7); recorded here because the reader who
 needs it is the one adding the twelfth entry.
 
 Four ways this could pass while a clause stayed unperformed, and each is

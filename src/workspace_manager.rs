@@ -2228,7 +2228,7 @@ fn note_removal_attempt(_attempt: u32) {}
 
 /// One lock per repository's worktree registry (`<common git dir>/worktrees`),
 /// shared by every [`WorkspaceManager`] of that repository in this process:
-/// the working record's R-X (`reviews/2026-10-01-pr11-follow-up-b-record.md`).
+/// the working record's R-X (`48f2af7a:reviews/2026-10-01-pr11-follow-up-b-record.md`).
 ///
 /// **Why a lock, and why it is no longer what keeps the registry whole.** From
 /// PR11 several pipelines of one run add and remove snapshots while the
@@ -2451,7 +2451,7 @@ fn sleep_for(pause: std::time::Duration) -> Result<(), UpstrokeError> {
 fn note_slept_pause() {}
 
 /// Run one registry access as a series of attempts: the tolerant registry
-/// access (the working record `reviews/2026-10-01-pr11-follow-up-b-record.md`,
+/// access (the working record `48f2af7a:reviews/2026-10-01-pr11-follow-up-b-record.md`,
 /// §5.3 to §5.5 with §6.4 and §7.6 as the contract's current text).
 ///
 /// **Nothing is classified.** It reads no store state, no error text and no
@@ -4433,7 +4433,7 @@ impl WorkspaceManager {
     /// [`UpstrokeError::RegistryRefused`]. So this funnel returns Git state only
     /// for a destination that could not be made or was not an empty directory
     /// when it began, and neither depends on the registry
-    /// (`reviews/2026-10-01-pr11-follow-up-b-record.md`, §7.2, §7.3, §8.2). A
+    /// (`48f2af7a:reviews/2026-10-01-pr11-follow-up-b-record.md`, §7.2, §7.3, §8.2). A
     /// refused add removes the destination it made, when that is still an
     /// empty directory.
     ///

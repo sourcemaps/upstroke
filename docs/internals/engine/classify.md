@@ -272,7 +272,7 @@ construction" outright, and there is a second: `events::InterruptedAttempt::even
 builds the record for an attempt that started and never reported back, which
 by construction was never classified. A census over the type's initializers
 in production regions returns exactly those two, and the unqualified sentence
-is the class §22b of `reviews/FINDINGS.md` names — a property claim about the
+is the class §22b of `48f2af7a:reviews/FINDINGS.md` names — a property claim about the
 rest of the tree, true when written and checkable only by census. It was
 caught by adding a field to `FailureRecord` and reading the compiler's list
 of what stopped compiling.

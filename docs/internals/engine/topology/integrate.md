@@ -309,7 +309,7 @@ reading the ref.
 [`decide`], with the hooks its `assert_publishable` waits through; [`integrate`] passes its journal's, so
 a coordinator that lends itself as those hooks answers its messages while the check waits. Proposed
 at follow-up B's repair round 3 as part of hunk H1, and adopted by the owner's ruling B-H on 2026-10-08
-(`reviews/2026-10-01-pr11-follow-up-b-record.md` §9.13 and §9.28). [`decide`] keeps its signature and
+(`48f2af7a:reviews/2026-10-01-pr11-follow-up-b-record.md` §9.13 and §9.28). [`decide`] keeps its signature and
 waits by sleeping.
 
 ## `pub fn dispatch_head(`
@@ -349,7 +349,7 @@ moved nor recreated here.
 through the operator's registry hooks, so on the topology coordinator the
 check's waits answer its messages; this function is master's, unchanged
 (follow-up B's repair round 6, I2-7, which withdrew the split round 3 had
-proposed here as hunk H2: `reviews/2026-10-01-pr11-follow-up-b-record.md`
+proposed here as hunk H2: `48f2af7a:reviews/2026-10-01-pr11-follow-up-b-record.md`
 §9.16).
 
 **What a replay sees.** Nothing: the base a task was dispatched at is
@@ -580,7 +580,7 @@ snapshot this removes is the integration's own.
 **Its enumeration waits through the journal's hooks:** the frozen hunk C-R1, granted by an agent
 decision by `pr11_decide_c` under the owner's delegation of 2026-10-11 (babysit's 0194a1e4…): its two
 lines, incremental over follow-up B as merged and bound to the merge SHA of follow-up C, the change that
-makes them (`reviews/2026-10-02-pr11-follow-up-c-record.md` §6.11, granted in §6.16). The
+makes them (`48f2af7a:reviews/2026-10-02-pr11-follow-up-c-record.md` §6.11, granted in §6.16). The
 walk enumerates through `WorkspaceManager::intents_pausing(journal.hooks().effects())`, so the registry
 read that discovers earlier incarnations' instances waits through the journal's hooks. On the topology
 coordinator that read answers its messages while pipelines are live, as the removals that follow it

@@ -62,7 +62,7 @@ sees the whole exchange.
 What `answers/<question-id>.json` holds: the `Answer` (flattened, so the
 file is the answer's own object) and the attribution a human ruled on the
 question, in the two optional fields the `design_defect` record carries in
-the same serde mold (`reviews/2026-09-14-o3-attribution-record.md`, R5).
+the same serde mold (`48f2af7a:reviews/2026-09-14-o3-attribution-record.md`, R5).
 A record without a ruling serialises to exactly the bytes `write_answer`
 wrote before the fields existed, and a file written before them reads as
 `Unclassified`. The attribution sits on the record rather than inside the

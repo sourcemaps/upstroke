@@ -2647,7 +2647,7 @@ not involved at all.
 CLIs — and they are still not coordinators, so INV-18's "the
 **coordinator's** ambient … Job Object" does not reach their children.
 Protecting those is a stronger guarantee than the packet asks for; it is
-recorded as `PR4A-SPAWN-WITHOUT-AMBIENT` in `reviews/FINDINGS.md` with an
+recorded as `PR4A-SPAWN-WITHOUT-AMBIENT` in `48f2af7a:reviews/FINDINGS.md` with an
 owner, not done here.
 
 ## `std::iter::empty(),`
@@ -3196,7 +3196,7 @@ replacements.
 The tests appended by follow-up D (adopted with decision O8 on 2026-10-11 as an agent decision by
 `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), and in force
 only from #331's merge;
-`reviews/2026-10-02-pr11-follow-up-d-record.md`, its Implementation section) drive the
+`48f2af7a:reviews/2026-10-02-pr11-follow-up-d-record.md`, its Implementation section) drive the
 real legacy engine — `run_with` and `resume_harness` — through a worktree registry another
 process has torn. Their residue is a foreign registration under this name: `gitdir`
 written as Git writes it (`GitdirRule::native().spelling`) and `commondir` opened and

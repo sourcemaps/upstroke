@@ -13,7 +13,7 @@ LEGACY-EFFECT: this module is in the **frozen legacy section** of
 `effects/allowlist.toml`, which carries its justification and the condition
 under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2).
 
-**Adopted on 2026-10-11 with decision O8 (decision B), as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`).** Follow-up D (#331, a draft) amends this module's freeze; the amendment is its row's text in `effects/allowlist.toml`, marked there as adopted, and the record `reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its Implementation section) is why. Nothing it adds is in force until the pull request merges. In this module it is one constant, `KEPT_PIN_SUFFIX`, and one arm
+**Adopted on 2026-10-11 with decision O8 (decision B), as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`).** Follow-up D (#331, a draft) amends this module's freeze; the amendment is its row's text in `effects/allowlist.toml`, marked there as adopted, and the record `48f2af7a:reviews/2026-10-02-pr11-follow-up-d-record.md` (§1 to §4, and its Implementation section) is why. Nothing it adds is in force until the pull request merges. In this module it is one constant, `KEPT_PIN_SUFFIX`, and one arm
 of the attempt's error path, below.
 
 ## `pub fn run(opts: &RunOptions) -> Result<RunReport, UpstrokeError> {`
@@ -1056,7 +1056,7 @@ the tag is historical; the record carries the judgment. This is the schema-3
 writer, and it writes the record **unclassified**: `attribution: None,
 citation: None`, never through `DesignDefect::discovered` or `::convicted`,
 so the bytes are what this writer always wrote and a reader treats them as
-written before the taxonomy (`reviews/2026-09-14-o3-attribution-record.md`,
+written before the taxonomy (`48f2af7a:reviews/2026-09-14-o3-attribution-record.md`,
 R1). The ruling an answer file may carry is not read here: `read_answer`
 returns the answer alone.
 

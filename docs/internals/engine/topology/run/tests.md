@@ -220,7 +220,7 @@ profile and the driver's `RetryRequest` reach one answer. `79cd9c8` said it
 gave the rule "one production implementation" and it did not: `assembly.rs`
 called `crate::capacity::pool_for` from three places, two of them
 character-for-character copies of the seam's body, and the seam's only caller
-was `run.rs`. `reviews/FINDINGS.md` §19, claim (4).
+was `run.rs`. `48f2af7a:reviews/FINDINGS.md` §19, claim (4).
 
 **Who asks the seam has changed since, and the count has not.** An agent may
 have several pools now. The plan builder is handed the pool its attempt binds
@@ -306,12 +306,12 @@ very next commit inserted nineteen lines above it. `PR7-R6-ATT-003`, and
 the rule it gives: a doc comment names an item, because a line number is a
 claim about a version of a file and decays silently. The doc-comment filter
 (`| grep -v '///'`) is the other half — a needle quoted here would otherwise
-match its own quotation, `reviews/FINDINGS.md` §4.
+match its own quotation, `48f2af7a:reviews/FINDINGS.md` §4.
 
 It drives `TopologyRun::step` twice in one process and the second iteration
 **is** the retained-generation retry. It now asserts the pool on both
 `attempt_started` appends, which is the behavioural witness this census was
-offered in place of. `reviews/FINDINGS.md` §19, claim (3).
+offered in place of. `48f2af7a:reviews/FINDINGS.md` §19, claim (3).
 
 **And this census does not read the file the defect was in.** The two sites
 below are `attempt.rs` and `settle.rs`; the literal `None` that

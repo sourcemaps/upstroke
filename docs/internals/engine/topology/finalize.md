@@ -163,7 +163,7 @@ pin the refusal of a torn registration no intent names.
 **Its enumeration waits through the hooks it is handed:** the frozen hunk C-R1, granted by an agent
 decision by `pr11_decide_c` under the owner's delegation of 2026-10-11 (babysit's 0194a1e4…): its two
 lines, incremental over follow-up B as merged and bound to the merge SHA of follow-up C, the change that
-makes them (`reviews/2026-10-02-pr11-follow-up-c-record.md` §6.11, granted in §6.16). The
+makes them (`48f2af7a:reviews/2026-10-02-pr11-follow-up-c-record.md` §6.11, granted in §6.16). The
 walk enumerates through `WorkspaceManager::intents_pausing(hooks.effects())`, so the registry read that
 discovers earlier incarnations' instances waits through these hooks. On the topology coordinator, which
 lends itself as them, a closure's or a finalization's wait answers its messages, and one that answers a

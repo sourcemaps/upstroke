@@ -36,11 +36,11 @@ none of them, and it defines no region of its own — which is what
 `every_early_stop_is_at_a_module` counts two lines from its end.
 
 **No name here is a test name.** The twelve `#[test]` wrappers stay in
-`super` under the harness names the contract, CI and `reviews/FINDINGS.md`
+`super` under the harness names the contract, CI and `48f2af7a:reviews/FINDINGS.md`
 know, and the sixteen functions below are deliberately named otherwise — so
 every name `--list` reports for this file is one of those wrappers and
 nothing nests under `effects::tests::source_oracles`. `effects/wrappers.toml` names
-`no_topology_module_calls_a_funnel_in_production` and `reviews/FINDINGS.md`
+`no_topology_module_calls_a_funnel_in_production` and `48f2af7a:reviews/FINDINGS.md`
 names three more; all four still resolve, because the harness did not move.
 
 ### Why the bodies sit inside a `cfg(test)` module

@@ -81,7 +81,7 @@ cannot happen.** `record`'s `failure: None` means "the work was judged
 and accepted", and every `settle_failed` case is by definition not that.
 The allowance is decided from this field, so a grid that varied `Next`
 and left the failure fixed varied one half of a correlated pair — the
-class `reviews/FINDINGS.md` §4 records eleven of.
+class `48f2af7a:reviews/FINDINGS.md` §4 records eleven of.
 
 ## `reviews: if failure.is_none() {`
 
@@ -285,7 +285,7 @@ The backoff doubles and is capped, and progress resets it.
 ## `fn the_defer_backoff_doubles_caps_and_resets()` › `assert_eq!(`
 
 **And what the event carries**, which is a different claim from what
-the accumulator holds — `reviews/FINDINGS.md` §4's "an accumulator's
+the accumulator holds — `48f2af7a:reviews/FINDINGS.md` §4's "an accumulator's
 witness proves the accumulation and not the read", at four
 occurrences. `DeferWaitElapsed4.round` is documented on the wire, a
 frontier reviewer reads it there, and until this line nothing asserted

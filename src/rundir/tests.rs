@@ -1799,7 +1799,7 @@ fn a_missing_directory_and_a_missing_log_are_both_husks() {
 /// `run_started` at every length — a fixture that padded outside the JSON
 /// would refuse on the parse and could never distinguish a length bound
 /// from a parse failure. That confound is the `bounded_grid` shape recorded
-/// four times in `reviews/FINDINGS.md`, and `PR5B-CLASSIFIER-TERMINATOR-
+/// four times in `48f2af7a:reviews/FINDINGS.md`, and `PR5B-CLASSIFIER-TERMINATOR-
 /// UNTESTED` is the same file's most recent instance.
 fn committed_line_of_exactly(run_id: &str, total: usize) -> Vec<u8> {
     let line = committed_line(run_id, 3);
@@ -1828,7 +1828,7 @@ fn committed_line_of_exactly(run_id: &str, total: usize) -> Vec<u8> {
 /// is *independence*, so shrinking the constant must leave this test
 /// passing. What would fail is any re-introduction of a length bound —
 /// which is the mutation that matters here, and it is witnessed in
-/// `reviews/FINDINGS.md`.
+/// `48f2af7a:reviews/FINDINGS.md`.
 #[test]
 fn classification_does_not_depend_on_the_probe_window() {
     let tree = scratch("window");
