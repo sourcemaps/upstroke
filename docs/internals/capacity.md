@@ -225,6 +225,16 @@ the source of truth). Attempts that name no pool contribute nothing — an
 unattributed cost belongs to no subscription, and guessing which would be
 worse than leaving the pool unmeasured.
 
+## `pub fn observe(events: &[Event]) -> Observations {` › `EventBody::PoolExhausted { data, .. } => {`
+
+A signal sets its pool's reset to its own: the latest signal wins. The
+engine writes a second `pool_exhausted` for a pool already exhausted only
+when a later refusal names a different reset — the five-hour limit
+clearing into the weekly one — and that later time is the one the
+estimate must report, not the five-hour reset already past. A rate-limited
+settlement, unlike a signal, never replaces a known reset (see
+`retire_signals`).
+
 ## `fn retire_signals`
 
 Withdraw the exhausted mark from any pool this attempt proves is serving
@@ -262,7 +272,8 @@ two appends must not make replay forget which subscription refused work.
 
 Mark the pool, but keep a reset already known for it. The sequential
 engine writes one `pool_exhausted` per outage, carrying the reset it read
-from the first refusal, and every deferral after it settles as one more
+from the first refusal (and one more only when a later refusal names a
+different reset), and every other deferral after it settles as one more
 rate-limited attempt with no signal of its own. Overwriting with `None`
 here let the first deferral — about a minute later on the default
 back-off — erase that reset, so `validate` said the signal carried none
@@ -586,6 +597,15 @@ none for a pool whose open signal names one.
 
 Keeping the reset does not make the outage sticky: the attempt that
 finally succeeds still retires the pool.
+
+## `fn a_later_pool_exhausted_with_a_different_reset_replaces_the_earlier_one() {`
+
+Signal A (the five-hour limit, resetting 05:30), a rate-limited
+settlement, then signal B (the weekly limit, resetting 17:00 on Nov 14):
+the fold reports B. A settlement keeps a known reset, but a signal is a
+newer statement of when the pool comes back, so it replaces one. A
+further rate limit after B keeps B, and the log cut before B still
+reports A — the replacement is the signal's doing, not the settlement's.
 
 ## `fn self_metering_cannot_talk_an_exhausted_pool_back_up()` › `let mut p = pool("claude-max");`
 

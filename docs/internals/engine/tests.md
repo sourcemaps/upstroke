@@ -130,6 +130,14 @@ text `pool_exhausted` reads its reset from. Both constructors set it to
 existed, so only a test that assigns it sees anything else. The reviewer's
 rate limit keeps its own literal.
 
+## `worker_rate_limits: Vec<&'static str>,`
+
+The same detail scripted per worker call, indexed like `effects`: a run
+whose refusals say different things — the five-hour limit, then the
+weekly one — sets this. Past the script's end the last entry repeats,
+and an empty script (both constructors' default) leaves every refusal
+saying `worker_rate_limit`.
+
 ## `const FIVE_HOUR_LIMIT_REACHED: &str = "5-hour limit reached";`
 
 The older Claude Code wording, which names no reset.
@@ -5161,3 +5169,16 @@ Before `retire_signals` kept a known reset, that settlement marked the pool agai
 `upstroke validate` said the signal carried no reset time and a resume's `capacity_snapshot` wrote
 `reset_at: null` beside an open signal that named one. The estimate over the whole log no longer
 reads the pool as exhausted: the attempt that succeeds still retires it.
+
+## `fn a_different_later_reset_writes_one_more_pool_exhausted() {`
+
+The same run as the test above, but the two refusals say different things, through
+`worker_rate_limits`: first `You've hit your 5-hour limit · resets 5:30am (UTC)`, then `You've hit
+your weekly limit · resets Nov 14, 5pm (UTC)` — a pool refused for its weekly cap on the deferral
+after its five-hour cap cleared. Two `pool_exhausted` events, one after each rate-limited
+`attempt_finished`: the first carries the `T05:30:00Z` reset, the second the `-11-14T17:00:00Z` one
+and the weekly text in its detail. The estimate folded through the second signal reports the pool
+exhausted until the weekly reset. Before the engine remembered each pool's recorded reset, the
+second refusal wrote nothing, and the estimate kept a 05:30 that had already passed. The test above,
+where the same reset is named twice, and `one_outage_records_one_signal_however_many_deferrals_it_causes`,
+where no reset is named, still write one signal each.

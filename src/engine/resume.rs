@@ -771,7 +771,7 @@ pub(super) fn resume_harness_inner_on(
         branch: started.branch.clone(),
         warnings,
         unanswerable: Vec::new(),
-        exhausted_pools: prior_signals.keys().cloned().collect(),
+        exhausted_pools: prior_signals.clone(),
         #[cfg(test)]
         after_candidate_capture: None,
     };

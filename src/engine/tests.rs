@@ -93,6 +93,8 @@ struct FakeAdapter {
     reports_cost: bool,
 
     worker_rate_limit: &'static str,
+
+    worker_rate_limits: Vec<&'static str>,
     calls: Mutex<Calls>,
     role_probe: Option<RoleProbe>,
 }
@@ -126,6 +128,7 @@ impl FakeAdapter {
             probe_error: None,
             reports_cost: true,
             worker_rate_limit: FIVE_HOUR_LIMIT_REACHED,
+            worker_rate_limits: Vec::new(),
             calls: Mutex::new(Calls::default()),
             role_probe: None,
         }
@@ -139,6 +142,7 @@ impl FakeAdapter {
             probe_error: None,
             reports_cost: true,
             worker_rate_limit: FIVE_HOUR_LIMIT_REACHED,
+            worker_rate_limits: Vec::new(),
             calls: Mutex::new(Calls::default()),
             role_probe: None,
         }
@@ -506,7 +510,9 @@ impl AgentAdapter for FakeAdapter {
         };
         let detail = match effect {
             Effect::Error => Some("fake adapter error detail".to_owned()),
-            Effect::RateLimited => Some(self.worker_rate_limit.to_owned()),
+            Effect::RateLimited => {
+                Some(scripted(&self.worker_rate_limits, index, self.worker_rate_limit).to_owned())
+            }
             Effect::AskQuestion => Some(
                 "I made a start but stopped.\nUPSTROKE-QUESTION: should cursors be opaque or \
                      signed?"
@@ -8186,6 +8192,95 @@ fn a_deferral_rate_limit_keeps_the_reset_pool_exhausted_recorded() {
         capacity::Remaining::Exhausted,
         "{}",
         settled[0].describe()
+    );
+}
+
+#[test]
+fn a_different_later_reset_writes_one_more_pool_exhausted() {
+    let (_tree, repo) = temp_engine_repo("poolexhaustedlaterreset");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let pools = pools_file(&repo, CLAUDE_POOL);
+    opts.pools_path = Some(pools.clone());
+    let mut source = source(
+        vec![Effect::RateLimited, Effect::RateLimited, Effect::EditFile],
+        vec![ReviewBehavior::Pass],
+    );
+    source.adapter.worker_rate_limits = vec![
+        "You've hit your 5-hour limit · resets 5:30am (UTC)",
+        "You've hit your weekly limit · resets Nov 14, 5pm (UTC)",
+    ];
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let events = events_of(&repo, &report.run_id);
+    let signals: Vec<(usize, &events::PoolExhausted)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(at, e)| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some((at, data)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        signals.len(),
+        2,
+        "a later refusal naming a different reset is one more fact: {signals:?}"
+    );
+    assert!(
+        signals
+            .iter()
+            .all(|(_, signal)| signal.pool == "claude-max"),
+        "{signals:?}"
+    );
+    let five_hour = signals[0]
+        .1
+        .reset_at
+        .clone()
+        .expect("the five-hour text named its reset");
+    assert!(five_hour.ends_with("T05:30:00Z"), "{five_hour}");
+    let weekly = signals[1]
+        .1
+        .reset_at
+        .clone()
+        .expect("the weekly text named its reset");
+    assert!(weekly.ends_with("-11-14T17:00:00Z"), "{weekly}");
+    assert!(signals[1].1.detail.contains("weekly limit"), "{signals:?}");
+
+    let rate_limited: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| match &e.body {
+            EventBody::AttemptFinished { data, .. } => data
+                .failure
+                .as_ref()
+                .is_some_and(|f| f.kind == FailureKind::RateLimited),
+            _ => false,
+        })
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(rate_limited.len(), 2, "two rate-limited attempts");
+    assert!(
+        rate_limited[0] < signals[0].0
+            && signals[0].0 < rate_limited[1]
+            && rate_limited[1] < signals[1].0,
+        "each signal follows the refusal it was read from"
+    );
+
+    let mut warnings = Vec::new();
+    let cfg = config::load(None, &repo, Some(&pools), &mut warnings).expect("pools");
+    let through_both = capacity::estimate(&cfg.pools, &capacity::observe(&events[..=signals[1].0]));
+    assert_eq!(through_both[0].remaining, capacity::Remaining::Exhausted);
+    assert_eq!(
+        through_both[0].reset_at.as_deref(),
+        Some(weekly.as_str()),
+        "the latest signal's reset, not the five-hour one it replaced: {}",
+        through_both[0].describe()
     );
 }
 

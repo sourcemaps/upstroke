@@ -974,6 +974,88 @@ mod tests {
     }
 
     #[test]
+    fn a_later_pool_exhausted_with_a_different_reset_replaces_the_earlier_one() {
+        use crate::events::{AttemptRecord, Event, EventBody, PoolExhausted};
+        use crate::ladder::{FailureKind, FailureOrigin};
+
+        let signal = |reset_at: &str, detail: &str| {
+            Event::now(EventBody::PoolExhausted {
+                task: "t1".to_owned(),
+                data: PoolExhausted {
+                    pool: "claude-max".to_owned(),
+                    agent: "claude-code".to_owned(),
+                    reset_at: Some(reset_at.to_owned()),
+                    detail: detail.to_owned(),
+                },
+            })
+        };
+        let rate_limited = Event::now(EventBody::AttemptFinished {
+            task: "t1".to_owned(),
+            attempt: 2,
+            rung: 0,
+            profile: "p".to_owned(),
+            parking: None,
+            transition: None,
+            prepared_commit: None,
+            data: Box::new(AttemptRecord {
+                attempt: 2,
+                tier: "small".to_owned(),
+                model: "m".to_owned(),
+                pool: Some("claude-max".to_owned()),
+                resumed: false,
+                duration: Duration::ZERO,
+                cost_usd: None,
+                reviews: Vec::new(),
+                session_id: None,
+                usage: None,
+                failure: Some(crate::events::FailureRecord {
+                    kind: FailureKind::RateLimited,
+                    origin: FailureOrigin::Worker,
+                    reason: "You've hit your weekly limit · resets Nov 14, 5pm (UTC)".to_owned(),
+                    detail: None,
+                }),
+            }),
+        });
+        let five_hour = signal(
+            "2026-11-14T05:30:00Z",
+            "You've hit your 5-hour limit · resets 5:30am (UTC)",
+        );
+        let weekly = signal(
+            "2026-11-14T17:00:00Z",
+            "You've hit your weekly limit · resets Nov 14, 5pm (UTC)",
+        );
+
+        let obs = observe(&[five_hour.clone(), rate_limited.clone(), weekly.clone()]);
+        assert_eq!(
+            obs.exhausted.get("claude-max"),
+            Some(&Some("2026-11-14T17:00:00Z".to_owned())),
+            "the latest signal's reset wins over the one it replaced: {:?}",
+            obs.exhausted
+        );
+
+        let obs = observe(&[
+            five_hour.clone(),
+            rate_limited.clone(),
+            weekly,
+            rate_limited.clone(),
+        ]);
+        assert_eq!(
+            obs.exhausted.get("claude-max"),
+            Some(&Some("2026-11-14T17:00:00Z".to_owned())),
+            "a rate limit after the second signal keeps that signal's reset: {:?}",
+            obs.exhausted
+        );
+
+        let obs = observe(&[five_hour, rate_limited]);
+        assert_eq!(
+            obs.exhausted.get("claude-max"),
+            Some(&Some("2026-11-14T05:30:00Z".to_owned())),
+            "before the second signal, the first one's reset stands: {:?}",
+            obs.exhausted
+        );
+    }
+
+    #[test]
     fn self_metering_cannot_talk_an_exhausted_pool_back_up() {
         let mut p = pool("claude-max");
         p.monthly_allowance = Allowance::Units(100.0);

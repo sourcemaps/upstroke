@@ -280,7 +280,7 @@ pub(super) fn run_harness_inner_with_id(
         branch,
         warnings,
         unanswerable: Vec::new(),
-        exhausted_pools: std::collections::BTreeSet::new(),
+        exhausted_pools: BTreeMap::new(),
         #[cfg(test)]
         after_candidate_capture: opts.after_candidate_capture,
     };
@@ -356,7 +356,7 @@ pub(super) struct Run<'a> {
     pub(super) branch: String,
     pub(super) warnings: Vec<String>,
     pub(super) unanswerable: Vec<QuestionId>,
-    pub(super) exhausted_pools: std::collections::BTreeSet<String>,
+    pub(super) exhausted_pools: BTreeMap<String, Option<String>>,
     #[cfg(test)]
     pub(super) after_candidate_capture: Option<AfterCandidateCapture>,
 }
@@ -1055,15 +1055,21 @@ impl Run<'_> {
             FailureOrigin::Worker => (pool_option(&implementer.pool), implementer.agent.clone()),
         };
         let Some(pool) = pool else { return Ok(()) };
-        if !self.exhausted_pools.insert(pool.clone()) {
+        let reset_at = reset_at_from_limit_message(&failure.reason, util::unix_seconds_now());
+        let already_recorded = self
+            .exhausted_pools
+            .get(&pool)
+            .is_some_and(|recorded| reset_at.is_none() || *recorded == reset_at);
+        if already_recorded {
             return Ok(());
         }
+        self.exhausted_pools.insert(pool.clone(), reset_at.clone());
         self.emit(EventBody::PoolExhausted {
             task: task.to_owned(),
             data: events::PoolExhausted {
                 pool,
                 agent,
-                reset_at: reset_at_from_limit_message(&failure.reason, util::unix_seconds_now()),
+                reset_at,
                 detail: util::head(&failure.reason, 400),
             },
         })
