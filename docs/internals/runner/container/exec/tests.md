@@ -2988,6 +2988,44 @@ collector and the coordinator handle are adapted from an earlier candidate's: th
 coordinator now also takes its worktree lock, the admission asks include the different
 run's, and the handle fails closed (below).
 
+## `#[cfg(target_os = "linux")]` › `fn children_of(pid: &str) -> Result<Vec<libc::pid_t>, String> {`
+
+Why a list that is not found sends this helper back to a fresh listing
+(`CI-FLAKE-HANDOFF-CHILDREN-LIST-RACE`, a defect of the test helper: no product code reads
+these lists). The helper lists a process's tasks, `/proc/<pid>/task`, and then reads each
+listed task's children list. The listing and the reads are separate system calls, not one
+snapshot: a thread that ends between them leaves an entry whose list is gone, and the read
+fails with not-found. Until this change that was the helper's error. In CI run 42918059287,
+job 130185502003 (the Ubuntu test job of pull request #360, a change to documentation
+alone), `handoff_harness_child`'s `expect` on the coordinator's children lists panicked on
+it: no such file or directory. Which of the coordinator's threads had ended is not known.
+One candidate is the thread of `handoff_coordinator_child` that reports the backstops: it
+returns as soon as its report is written, and that report is what the harness waits for
+before it reads the lists.
+
+**A vanished task is not read as a task with no children.** When a thread ends, the kernel
+hands its children to another live thread of the same process, and that may be a thread
+whose list this pass has already read. Skipping the vanished entry could therefore lose a
+child, which is the answer of "no children" the helper refuses. So a not-found list ends the
+pass: the tasks are listed again and every list is read again, and the helper answers only
+from a pass that read the list of every task it listed.
+
+**The retry is bounded, and only a not-found list starts one.** A task whose list was not
+found because it ended is not named by a fresh listing, so a further pass meets a not-found
+only if another task ends during it. `LISTINGS`, five, bounds the listings: one retry answers
+the interleaving that was seen, and the rest absorb a few threads ending in quick
+succession. Five is that allowance, not a measurement. If the last listing also meets a
+not-found list, that error is returned, saying how many listings were made, and never an
+empty answer; a kernel with no children lists at all fails the same way, five listings
+later. Every other failure is returned at once, as before: a task directory that cannot be
+listed (as when the process itself is gone), a list that fails for any other reason, and a
+child that does not parse as a pid. Every caller therefore still receives an error for a list
+that stays unreadable, and what each does with one is unchanged.
+
+**No test witnesses the retry.** The interleaving cannot be produced on demand, so no test
+fails without this change. What was checked instead is that the retry is bounded and that a
+list that stays unreadable is still an error to every caller.
+
 ## `#[cfg(target_os = "linux")]` › `fn helper_reaper_candidates(`
 
 Which process the lease-kill harness calls the paused helper's reaper (finding

@@ -9383,30 +9383,49 @@ fn stat_of(pid: libc::pid_t) -> Result<(Identified, char), String> {
 }
 
 /// The children of `pid`, read from the children list of each of its tasks
-/// (`/proc/<pid>/task/<tid>/children`). An unreadable list is an error, never
-/// an answer of "no children"; and a list read empty is discovery only, never
-/// evidence that no child remains.
+/// (`/proc/<pid>/task/<tid>/children`). When a listed task's list is not found
+/// it lists the tasks and reads every list again, at most `LISTINGS` listings
+/// in all, and returns the last listing's not-found as its error. An unreadable
+/// list is an error, never an answer of "no children"; and a list read empty
+/// is discovery only, never evidence that no child remains.
 #[cfg(target_os = "linux")]
 fn children_of(pid: &str) -> Result<Vec<libc::pid_t>, String> {
-    let tasks = std::fs::read_dir(format!("/proc/{pid}/task"))
-        .map_err(|error| format!("/proc/{pid}/task: {error}"))?;
-    let mut children = Vec::new();
-    for task in tasks {
-        let task = task.map_err(|error| format!("/proc/{pid}/task: {error}"))?;
-        let list = task.path().join("children");
-        let text = std::fs::read_to_string(&list)
-            .map_err(|error| format!("{}: {error}", list.display()))?;
-        for child in text.split_whitespace() {
-            children.push(
-                child
-                    .parse::<libc::pid_t>()
-                    .map_err(|error| format!("{}: {child}: {error}", list.display()))?,
-            );
+    const LISTINGS: usize = 5;
+    let mut listing = 1;
+    'relist: loop {
+        let tasks = std::fs::read_dir(format!("/proc/{pid}/task"))
+            .map_err(|error| format!("/proc/{pid}/task: {error}"))?;
+        let mut children = Vec::new();
+        for task in tasks {
+            let task = task.map_err(|error| format!("/proc/{pid}/task: {error}"))?;
+            let list = task.path().join("children");
+            let text = match std::fs::read_to_string(&list) {
+                Ok(text) => text,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if listing == LISTINGS {
+                        return Err(format!(
+                            "{}: {error} (a listed task's list was not found in each of \
+                             {LISTINGS} listings)",
+                            list.display()
+                        ));
+                    }
+                    listing += 1;
+                    continue 'relist;
+                }
+                Err(error) => return Err(format!("{}: {error}", list.display())),
+            };
+            for child in text.split_whitespace() {
+                children.push(
+                    child
+                        .parse::<libc::pid_t>()
+                        .map_err(|error| format!("{}: {child}: {error}", list.display()))?,
+                );
+            }
         }
+        children.sort_unstable();
+        children.dedup();
+        return Ok(children);
     }
-    children.sort_unstable();
-    children.dedup();
-    Ok(children)
 }
 
 /// What is established about a process this harness identified. Only
