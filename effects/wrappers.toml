@@ -2116,6 +2116,7 @@ not_an_effect = [
     "P_PIDFD",
     "RLIMIT_CORE",
     "RLIMIT_NOFILE",
+    "RLIMIT_NPROC",
     "SA_RESTART",
     "SA_SIGINFO",
     "SECCOMP_MODE_FILTER",
