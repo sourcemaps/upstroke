@@ -83,16 +83,19 @@ or more) is counted, at its price. Any other outcome a call returns is saved as 
 the command, since what it spent is unknown. Once nothing is left, or when the command stops on
 such an outcome or on a write that fails, no further question is started, and the report names
 those left. A reply
-is accepted only when it holds exactly one fenced block, every block counted whatever its info
-string and whether closed or left open, and that block is a closed `json` block, its fences whole
-lines, holding `choice`, `guidance`, `reasons`, `confidence`, `needs_a_person` and `citations`,
-whose `choice` is one of the question's options and never one that gives up, or `null` where
-there are none. Each reply,
+is accepted only when it holds exactly one closed fenced `json` block, its fences whole lines, and
+no line outside that block holds three backticks or three tildes anywhere, a fence of another
+block or a run within a line alike (the block's own closing line is the block's), holding
+`choice`, `guidance`, `reasons`, `confidence`, `needs_a_person` and `citations`, whose `choice` is
+one of the question's options and never one that gives up, or `null` where there are none, and
+whose `guidance` is never one `upstroke answer --text` would read as declining. Each reply,
 accepted or refused, is saved as §15 lays out. The report gives each question's decider, status,
 choice and the reply's fields, cost and saved path, then the total cost, naming any call that did
-not settle, the directory that claims the run, and ends saying nothing was answered. Agent text, question text and file names are
+not settle, the directory that claims the run and the proposals saved, and ends saying nothing was answered. Agent text, question text, file names and every refusal are
 data inside a line, sanitized as `status` sanitizes them. The command exits non-zero, after the
-whole report, when any reply or question was refused or any question was left.
+whole report, when any reply or question was refused or any question was left; the exit says a
+reason is saved only for the proposals written, and that nothing is saved for a question refused
+before any agent was asked.
 
 `--dry-run` executes everything except agents: parse, route, and print task → kind → chain (with source of each decision: config/annotation/override) → gates → pool + strategy effect, at zero spend. It exists from day one; it is both the config-iteration loop and the sales demo.
 

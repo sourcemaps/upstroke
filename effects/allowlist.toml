@@ -867,10 +867,11 @@ through, `std::fs::File::create_new` 1, `std::io::Write::write_all` 1, \
 `util::fsync_file` 1 and `util::fsync_dir` 1. `admit`'s \
 `std::fs::canonicalize` and the `symlink_metadata` and `metadata` reads of \
 the chain's directories are not denied; nothing lists or reads the proposals \
-directory. The test region adds 61 more, counted the same way with \
-`--all-targets` on Linux (69 in all, on 2026-11-26): `std::fs::create_dir_all` \
-9 and `std::fs::write` 10, which build the fixture repository's plan file, pools \
-files, credential profile directory, private directory, a schema-3 run, an \
+directory. The test region adds 66 more, counted the same way with \
+`--all-targets` on Linux (74 in all, on 2026-11-27): `std::fs::create_dir_all` \
+9 and `std::fs::write` 12, which build the fixture repository's plan file, pools \
+files (one naming a profile whose path carries control characters), credential \
+profile directory, private directory, a schema-3 run, an \
 earlier claim of the run with its files, a directory of another mode or \
 elsewhere, stray files, the run's answers directory and a plan file edited \
 after the run started (the schema-4 run is written through the event \
@@ -880,7 +881,7 @@ proposal's raw-output reference still names its file; `std::fs::create_dir` \
 1, an earlier claim; on Unix, `std::fs::set_permissions` 1, which gives the \
 fixture's `.upstroke` the common umask's mode and each chain directory the mode \
 a case needs, and `std::os::unix::fs::symlink` 2, a link at the run's name and \
-at `.upstroke/proposals`; and 36 calls of the module's own denied entry point, \
+at `.upstroke/proposals`; and 39 calls of the module's own denied entry point, \
 `decide`. \
 `clippy::disallowed_types` and `clippy::disallowed_macros` are FORBIDDEN in this \
 file: it names no `std::process::Command` or `OpenOptions` and prints nothing. \

@@ -169,12 +169,19 @@ no agent was asked:
 
 ## `pub struct Decided {`
 
-The rendered report, the ids of the questions whose reply was refused (or that were refused
-before asking), and `left`, the questions the command stopped before proposing an answer to: the
-question whose call was in flight when a write failed, and every question after the one it
-stopped at. `outcome` makes the command an error when any was refused or left, naming them; the
-CLI prints the report first, so every question's line is shown before the command fails. The
-error's lists of ids are passed through `util::terminal::one_line`, as the report's lines are.
+The rendered report and four lists of question ids, each naming only what the command did:
+`saved`, the questions whose proposal it wrote, accepted or refused, in the order written;
+`refused`, the questions whose reply or call was refused, each of them in `saved` with its reason
+in its proposal; `unsaved`, the questions refused before any agent was asked because no file can
+be named after their id (`plain_id`), for which nothing is written; and `left`, the questions the
+command stopped before proposing an answer to: the question whose call was in flight when a write
+failed, and every question after the one it stopped at whose proposal is not saved already. So
+the exit says a reason is saved only for a proposal that was written, and says nothing is saved
+for a question refused before it was asked
+(`the_exit_report_names_only_the_records_this_command_wrote`). `outcome` makes the command an
+error when any was refused, unsaved or left, naming them; the CLI prints the report first, so
+every question's line is shown before the command fails. The error's lists of ids are passed
+through `util::terminal::one_line`, as the report's lines are.
 
 The report is built one whole line at a time with `util::terminal::TerminalLines`, the builder
 `status` uses. What the agent wrote (guidance, confidence, reasons, citations, and a refusal's
@@ -184,7 +191,18 @@ space and
 any other control character is shown escaped, so none can start a report line of its own, clear
 the screen or move the cursor (`agent_text_is_rendered_inside_its_own_line_with_its_controls_made_visible`,
 `a_decide_report_shows_agent_text_as_data_and_the_proposal_keeps_it_as_written`). The saved
-proposal keeps the text exactly as the agent wrote it.
+proposal keeps the text exactly as the agent wrote it. The report ends naming the proposals
+saved (`proposals saved:`, or `none`), and it points a person at `upstroke answer` only when one
+was.
+
+## `fn refused(message: String) -> UpstrokeError {`
+
+Every refusal this module builds is passed through `util::terminal::one_line`, and `decide` passes
+the refusals the pre-flights it runs build themselves (a signed-out account's, a pools file's
+profile) through the same function (`one_lined`). A refusal quotes a run's or a question's id, a
+path, an error, or what the reviewer's CLI printed when a probe failed; none of them can start a
+line of its own or reach the terminal as a control, as the report's lines cannot
+(`every_refusal_is_one_line_whatever_the_reviewer_answered`).
 
 ## `pub fn proposals_dir(repo_root: &Path, run_id: &str) -> PathBuf {`
 
@@ -212,9 +230,10 @@ an account that is signed out
 Each question's call is then built and checked by `prepare`, with what is left of
 the allowance as its ceiling, before anything is written for it; before the first call `claim`
 claims the run, and `ask` writes and starts the call. A question whose id is not a plain component
-(`plain_id`) is refused before anything is written for it, and one listed twice is asked once
-(`a_question_listed_twice_is_asked_once`). A run with no question to ask is never claimed
-(`a_binding_question_is_skipped_and_no_request_is_made_for_it`).
+(`plain_id`) is refused before anything is written for it, and counted as unsaved rather than
+refused; one listed twice is asked once (`a_question_listed_twice_is_asked_once`), and once its
+proposal is saved it is never named as left (`left_from`). A run with no question to ask is never
+claimed (`a_binding_question_is_skipped_and_no_request_is_made_for_it`).
 
 Until the claim, every refusal is the command's error, with nothing written and no agent asked.
 After it the command never returns an error: it stops, and the report says why and names the
@@ -288,7 +307,8 @@ what it spent is unknown and the next call's ceiling could not be what is left.
 ## `fn ask(`
 
 Writes the call's settings file new, starts the call through the Runner, saves its raw output
-new, and reads what it returned with `settle`. A Runner error (the process could not be started,
+new, and reads what it returned with `settle`. It takes the `Call` by value: the command and
+workspace `prepare` checked move into the request, uncopied. A Runner error (the process could not be started,
 was cancelled, or ended in a way the Runner reports as an error) is a returned outcome too: its
 words are saved in place of the raw output, and it does not settle. A launcher killed mid-call
 returns nothing, and leaves the claim and the settings file in place
@@ -398,34 +418,38 @@ raiser is unknown rather than guessing.
 
 ## `fn check_reply(question: &Question, text: &str) -> Result<Value, String> {`
 
-Exactly one fenced block, every block counted whatever its info string, and that one a closed
-`json` block; all six fields, their types, and a choice the run could apply as a person's answer.
-A second block of any kind beside the proposal is refused
-(`a_reply_with_a_second_fenced_block_is_refused`). A choice outside the options, a choice
-`interaction::answer_for_option` maps to a decline (or whose text `interaction::interpret` reads
-as one), and `null` where the question has options are refused
+Exactly one fenced `json` block, with no line outside it holding a fence (`fenced_json`); all six
+fields, their types, and a choice and guidance the run could apply as a person's answer. A choice
+outside the options, a choice `interaction::answer_for_option` maps to a decline (or whose text
+`interaction::interpret` reads as one), and `null` where the question has options are refused
 (`a_bad_reply_is_refused_with_its_reason`,
-`each_bad_reply_is_refused_saved_and_fails_the_command_after_the_others`).
+`each_bad_reply_is_refused_saved_and_fails_the_command_after_the_others`). So is guidance that
+`interaction::interpret` reads as declining, the reading `upstroke answer --text` gives it: `skip`,
+`decline`, `fail` or `abandon` alone in any case, or the number of an option that gives up.
+Guidance that merely mentions such a word, or names an option that does not give up, is advice
+(`guidance_read_as_declining_the_task_is_refused`). The prompt says the same of `guidance`.
 
 ## `fn fenced_json(text: &str) -> Result<&str, String> {`
 
-Fences are read as whole lines, as Markdown reads them: outside a block, a line that is ```` ``` ````
-and an info string with no backtick in it opens one, and inside, a line that is ```` ``` ```` alone
-closes it, each with nothing beside it but whitespace and a carriage return. So a fence the JSON
-mentions in a string never opens or closes anything (a JSON string holds no raw line break, so it
-is never a line of its own), a line that merely starts with inline code opens nothing, and a block
-is read whole, a ```` ```json ```` line inside it included. The prompt asks for the two fences on
-lines of their own
-(`a_fence_mentioned_in_the_guidance_is_text_and_only_a_whole_line_is_a_fence`).
+The reply's one block opens at the first line that is ```` ``` ```` and the info string `json`
+(a space between them allowed), and closes at the next line that is ```` ``` ```` alone, each with
+nothing beside it but whitespace and a carriage return. Nothing inside the block is read as a
+fence, so the JSON may mention ```` ``` ```` or `~~~` in a string: a JSON string holds no raw line
+break, so no line of valid JSON is ```` ``` ```` alone, and the closing line is never the JSON's
+own (`a_fence_mentioned_inside_the_json_block_is_its_text_and_only_a_line_alone_closes_it`).
 
-Every block is counted, whatever its info string (none included) and whether it is closed or left
-open, a block left open running to the end of the reply. A reply is accepted only when it holds
-exactly one block and that block is a closed `json` block, as the prompt asks for nothing fenced
-outside it; any other reply is refused, and the refusal says how many blocks it holds. A closed
-`text` block before or after the proposal, a block with no info string and a block left open
-after it each make two, and a `text` block quoting a ```` ```json ```` line is still one block
-(`a_reply_with_a_second_fenced_block_is_refused`). A lone `json` block left open, and a lone block
-of any other info string, are refused as such.
+Every line outside the block, before it opens or after it closes, is refused when it holds three
+backticks or three tildes anywhere in it, a fence of another block or a run within a line of
+prose alike: Markdown could read either as something fenced, and the prompt asks for nothing
+fenced outside the one block and says no line outside it may hold either run. The block's own
+closing line is the block's, never outside text, so a reply whose closing ```` ``` ```` is its
+last line is accepted, while a second ```` ``` ```` line after it is refused. The refusal names
+the line and whether it came before the block opened or after it closed at which line. A second
+`json` block, a block of any other info string or none, a block fenced with tildes, a block left
+open after the proposal and a line of inline code are each refused that way; a reply with no
+opening line, and a block whose closing line has text beside it or more backticks than three, and
+so is never closed, are refused as such (`a_reply_is_one_json_block_and_no_line_outside_it_holds_a_fence`,
+whose cases are replies written out in plain text).
 
 ## `fn create_durably(path: &Path, bytes: &[u8]) -> std::io::Result<()> {`
 

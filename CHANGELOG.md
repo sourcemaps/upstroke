@@ -4,9 +4,11 @@
 
 - `upstroke decide` is new: it asks the run's primary reviewer, read-only, to propose an answer to
   each open question of a run (one that chooses an agent is skipped), checks the reply (one fenced
-  `json` block, an offered option, never giving up), prints it and saves it under
+  `json` block and no three backticks or tildes on any line outside it, an offered option,
+  guidance that never gives up), prints it and saves it under
   `.upstroke/proposals/<run-id>/`, naming its raw output by a path from the repository root; any
-  refused reply, or a question it stopped before, makes it exit non-zero after the report. It
+  refused reply, or a question it stopped before, makes it exit non-zero after the report, whose
+  exit names a saved reason only for the proposals it wrote. Its refusals are one line each. It
   writes no answer and replaces no file. A run is decided once: immediately before its first call
   the command claims the run by creating its proposals directory exclusively, owner-only, and a
   run whose directory exists is refused with nothing written; the claim stays after a failure or

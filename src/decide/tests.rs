@@ -37,7 +37,14 @@ fn reply(body: &str) -> String {
     format!("here is my proposal\n```json\n{body}\n```\n")
 }
 
-const VALID: &str = r#"{"choice": 1, "guidance": "retry", "reasons": ["it flaked"], "confidence": "high", "needs_a_person": false, "citations": ["src/lib.rs:1"]}"#;
+/// A valid record, as a literal, so `concat!` can write whole replies around it as plain text.
+macro_rules! valid {
+    () => {
+        r#"{"choice": 1, "guidance": "retry", "reasons": ["it flaked"], "confidence": "high", "needs_a_person": false, "citations": ["src/lib.rs:1"]}"#
+    };
+}
+
+const VALID: &str = valid!();
 
 fn bad_replies() -> Vec<(String, &'static str)> {
     let outside = VALID.replace("\"choice\": 1", "\"choice\": 9");
@@ -49,9 +56,13 @@ fn bad_replies() -> Vec<(String, &'static str)> {
         (reply(&missing), "`guidance` is missing"),
         (
             format!("{}{}", reply(VALID), reply(VALID)),
-            "2 fenced blocks",
+            "line 6 of the reply holds ``` after the json block closed at line 4",
         ),
-        (VALID.to_owned(), "no fenced block"),
+        (VALID.to_owned(), "the reply holds no fenced json block"),
+        (
+            reply(&with_guidance("skip")),
+            "`guidance` gives up on the task",
+        ),
     ]
 }
 
@@ -119,12 +130,13 @@ fn with_guidance(guidance: &str) -> String {
 }
 
 #[test]
-fn a_fence_mentioned_in_the_guidance_is_text_and_only_a_whole_line_is_a_fence() {
+fn a_fence_mentioned_inside_the_json_block_is_its_text_and_only_a_line_alone_closes_it() {
     let asked = question(&[RETRY, crate::interaction::GIVE_UP_OPTION]);
     for guidance in [
         "close the block with ```",
         "wrap the patch in a ```json fence",
         "```\n```json\n```",
+        "or fence it with ~~~",
     ] {
         let body = with_guidance(guidance);
         let spread: Value = serde_json::from_str(&body).expect("JSON");
@@ -135,94 +147,221 @@ fn a_fence_mentioned_in_the_guidance_is_text_and_only_a_whole_line_is_a_fence() 
             assert_eq!(record["guidance"], guidance, "kept as written: {text}");
         }
     }
+}
 
-    let framed = |text: String| check_reply(&asked, &text);
-    assert!(
-        framed(format!(
-            "my proposal\r\n  ```json \t\r\n{VALID}\r\n```  \r\n"
-        ))
-        .is_ok(),
-        "a fence line may carry whitespace and a carriage return around it"
-    );
-    assert!(
-        framed(format!("```json\n{VALID}\n```")).is_ok(),
-        "the last line closes a block with no line break after it"
-    );
-    assert!(
-        framed(format!("```src/lib.rs``` holds it\n{}", reply(VALID))).is_ok(),
-        "a line opening with inline code opens no block"
-    );
-    for (text, needle) in [
-        (
-            format!("my proposal: ```json {VALID} ```"),
-            "no fenced block",
+/// Replies as a reviewer writes them, in plain text: what each is, the reply, and `None` where it
+/// is accepted or the words its refusal holds. Each is read against a question offering a retry
+/// and a give-up option.
+const FRAMINGS: [(&str, &str, Option<&str>); 26] = [
+    (
+        "the block alone",
+        concat!("```json\n", valid!(), "\n```\n"),
+        None,
+    ),
+    (
+        "prose around the block, with no fence in it",
+        concat!(
+            "Here is my proposal.\n```json\n",
+            valid!(),
+            "\n```\nA person decides.\n"
         ),
-        (format!("```json\n{VALID}\n"), "never closed"),
-        (
-            format!("```json\n{VALID}\n``` that is all\n"),
-            "never closed",
+        None,
+    ),
+    (
+        "single and double backticks outside the block are no fence",
+        concat!(
+            "Run `cargo test`, or ``cargo test -- `x` ``.\n```json\n",
+            valid!(),
+            "\n```\n"
         ),
-        (format!("```JSON\n{VALID}\n```\n"), "not a json block"),
-        (
-            format!("{}{}", reply(VALID), reply(VALID)),
-            "2 fenced blocks",
+        None,
+    ),
+    (
+        "whitespace and carriage returns around each fence",
+        concat!("my proposal\r\n  ```json \t\r\n", valid!(), "\r\n```  \r\n"),
+        None,
+    ),
+    (
+        "a space between the opening fence and its info string",
+        concat!("``` json\n", valid!(), "\n```\n"),
+        None,
+    ),
+    (
+        "the closing line ends the reply with no line break after it",
+        concat!("```json\n", valid!(), "\n```"),
+        None,
+    ),
+    (
+        "backticks and tildes inside the block are its JSON's text",
+        concat!(
+            "```json\n",
+            r#"{"choice": 1, "guidance": "fence it with ``` or ~~~", "reasons": ["```"], "confidence": "high", "needs_a_person": false, "citations": ["~~~"]}"#,
+            "\n```\n"
         ),
-    ] {
-        let refused = framed(text.clone()).expect_err("refused");
-        assert!(refused.contains(needle), "{needle}: {refused}\n{text}");
+        None,
+    ),
+    (
+        "inline code of three backticks before the block",
+        concat!("```src/lib.rs``` holds it\n```json\n", valid!(), "\n```\n"),
+        Some("line 1 of the reply holds ``` before the json block opens"),
+    ),
+    (
+        "three backticks within a line after the block",
+        concat!("```json\n", valid!(), "\n```\nsee ```notes``` too\n"),
+        Some("line 4 of the reply holds ``` after the json block closed at line 3"),
+    ),
+    (
+        "three tildes within a line before the block",
+        concat!("~~~ my proposal ~~~\n```json\n", valid!(), "\n```\n"),
+        Some("line 1 of the reply holds ~~~ before the json block opens"),
+    ),
+    (
+        "a line of three tildes after the block",
+        concat!("```json\n", valid!(), "\n```\n~~~\n"),
+        Some("line 4 of the reply holds ~~~ after the json block closed at line 3"),
+    ),
+    (
+        "a json block fenced with tildes",
+        concat!("~~~json\n", valid!(), "\n~~~\n"),
+        Some("line 1 of the reply holds ~~~ before the json block opens"),
+    ),
+    (
+        "a second json block",
+        concat!(
+            "```json\n",
+            valid!(),
+            "\n```\n```json\n",
+            valid!(),
+            "\n```\n"
+        ),
+        Some("line 4 of the reply holds ``` after the json block closed at line 3"),
+    ),
+    (
+        "a closed text block before the proposal",
+        concat!("```text\nmy notes\n```\n```json\n", valid!(), "\n```\n"),
+        Some("line 1 of the reply holds ``` before the json block opens"),
+    ),
+    (
+        "a block with no info string after the proposal",
+        concat!("```json\n", valid!(), "\n```\n```\nsome output\n```\n"),
+        Some("line 4 of the reply holds ``` after the json block closed at line 3"),
+    ),
+    (
+        "a block left open after the proposal",
+        concat!(
+            "```json\n",
+            valid!(),
+            "\n```\nand then:\n```sh\ncargo test\n"
+        ),
+        Some("line 5 of the reply holds ``` after the json block closed at line 3"),
+    ),
+    (
+        "a ```json line quoted in an earlier block",
+        concat!(
+            "an example:\n```text\n```json\n```\n```json\n",
+            valid!(),
+            "\n```\n"
+        ),
+        Some("line 2 of the reply holds ``` before the json block opens"),
+    ),
+    (
+        "the whole reply on one line",
+        concat!("my proposal: ```json ", valid!(), " ```"),
+        Some("line 1 of the reply holds ``` before the json block opens"),
+    ),
+    (
+        "an info string that is not `json`",
+        concat!("```JSON\n", valid!(), "\n```\n"),
+        Some("line 1 of the reply holds ``` before the json block opens"),
+    ),
+    (
+        "a bare carriage return ends no line",
+        concat!("```json\r", valid!(), "\r```\r"),
+        Some("line 1 of the reply holds ``` before the json block opens"),
+    ),
+    (
+        "the closing fence with text beside it closes nothing",
+        concat!("```json\n", valid!(), "\n``` that is all\n"),
+        Some("the json block opened at line 1 is never closed"),
+    ),
+    (
+        "a longer run of backticks closes nothing",
+        concat!("```json\n", valid!(), "\n````\n"),
+        Some("the json block opened at line 1 is never closed"),
+    ),
+    (
+        "a block never closed",
+        concat!("my proposal\n```json\n", valid!(), "\n"),
+        Some("the json block opened at line 2 is never closed"),
+    ),
+    (
+        "a ```json line inside the block is its text",
+        concat!("```json\n```json\n", valid!(), "\n```\n"),
+        Some("the json block does not parse"),
+    ),
+    (
+        "text after the JSON inside the block is its text",
+        concat!("```json\n", valid!(), "\nsee ```notes```\n```\n"),
+        Some("the json block does not parse"),
+    ),
+    (
+        "no block at all",
+        valid!(),
+        Some("the reply holds no fenced json block"),
+    ),
+];
+
+/// Framing: exactly one `json` block, and no line outside it holding three backticks or three
+/// tildes, while the block's own closing line is the block's and never outside text.
+#[test]
+fn a_reply_is_one_json_block_and_no_line_outside_it_holds_a_fence() {
+    let asked = question(&[RETRY, crate::interaction::GIVE_UP_OPTION]);
+    for (case, text, refusal) in FRAMINGS {
+        match (check_reply(&asked, text), refusal) {
+            (Ok(record), None) => assert_eq!(record["choice"], 1, "{case}"),
+            (Err(reason), Some(needle)) => {
+                assert!(reason.contains(needle), "{case}: {reason}\n{text}");
+            }
+            (verdict, _) => panic!("{case}: {verdict:?}\n{text}"),
+        }
     }
 }
 
+/// Guidance a person's `upstroke answer --text` would read as declining the task is refused,
+/// whatever the choice, while guidance merely mentioning a give-up word is advice.
 #[test]
-fn a_reply_with_a_second_fenced_block_is_refused() {
-    let asked = question(&[RETRY, crate::interaction::GIVE_UP_OPTION]);
-    let proposal = format!("```json\n{VALID}\n```\n");
-    assert!(
-        check_reply(&asked, &proposal).is_ok(),
-        "the proposal alone is accepted"
-    );
-    for (text, count, why) in [
-        (
-            format!("{proposal}```text\nmy notes\n```\n"),
-            2,
-            "a closed text block after the proposal",
-        ),
-        (
-            format!("```text\nmy notes\n```\n{proposal}"),
-            2,
-            "a closed text block before the proposal",
-        ),
-        (
-            format!("{proposal}```\nsome output\n```\n"),
-            2,
-            "a block with no info string",
-        ),
-        (
-            format!("{proposal}```text\nmy notes\n"),
-            2,
-            "a block left open, which runs to the end of the reply",
-        ),
-        (
-            format!("```text\nmy notes\n```\n{proposal}```\nsome output\n```\n"),
-            3,
-            "a block before the proposal and one after it",
-        ),
-        (
-            format!("an example:\n```text\n```json\n```\n{}", reply(VALID)),
-            2,
-            "a ```json line inside another block is that block's text, and the block is counted",
-        ),
-        (
-            format!("{}and then:\n```sh\ncargo test\n", reply(VALID)),
-            2,
-            "another block left open runs to the end and is counted",
-        ),
+fn guidance_read_as_declining_the_task_is_refused() {
+    let offered = question(&[RETRY, crate::interaction::GIVE_UP_OPTION]);
+    let open = question(&[]);
+    for (guidance, options, declines) in [
+        ("skip", &offered, true),
+        ("  Decline \n", &offered, true),
+        ("FAIL", &offered, true),
+        ("abandon", &offered, true),
+        ("2", &offered, true),
+        ("skip", &open, true),
+        ("retry", &offered, false),
+        ("1", &offered, false),
+        ("skip the flaky fixture and retry", &offered, false),
+        ("2", &open, false),
     ] {
-        let refused = check_reply(&asked, &text).expect_err(why);
-        assert!(
-            refused.contains(&format!("the reply holds {count} fenced blocks")),
-            "{why}: {refused}\n{text}"
+        let mut body = with_guidance(guidance);
+        if options.options.is_empty() {
+            body = body.replace("\"choice\": 1", "\"choice\": null");
+        }
+        assert_eq!(
+            crate::interaction::interpret(options, guidance) == Answer::Declined,
+            declines,
+            "{guidance:?}: as `upstroke answer --text` reads it"
         );
+        match check_reply(options, &reply(&body)) {
+            Err(reason) if declines => assert!(
+                reason.contains("`guidance` gives up on the task"),
+                "{guidance:?}: {reason}"
+            ),
+            Ok(record) if !declines => assert_eq!(record["guidance"], guidance),
+            verdict => panic!("{guidance:?}: {verdict:?}"),
+        }
     }
 }
 
@@ -418,12 +557,18 @@ fn agent_text_is_rendered_inside_its_own_line_with_its_controls_made_visible() {
 
     let decided = Decided {
         report,
+        saved: vec!["q-1".to_owned(), HOSTILE.to_owned()],
         refused: vec!["q-1".to_owned(), HOSTILE.to_owned()],
+        unsaved: vec![HOSTILE.to_owned()],
         left: vec![HOSTILE.to_owned()],
     };
     let message = decided.outcome().expect_err("refused").to_string();
     assert!(!message.chars().any(char::is_control), "{message:?}");
     assert!(message.contains(&format!("q-1, {SHOWN}")), "{message}");
+    assert!(
+        message.contains(&format!("refused before any agent was asked ({SHOWN})")),
+        "{message}"
+    );
     assert!(
         message.contains(&format!("left without a proposal ({SHOWN})")),
         "{message}"
@@ -1064,7 +1209,12 @@ fn a_decide_report_shows_agent_text_as_data_and_the_proposal_keeps_it_as_written
 #[test]
 fn each_bad_reply_is_refused_saved_and_fails_the_command_after_the_others() {
     let bad = bad_replies();
-    let ids = ["q-f", "q-e", "q-d", "q-c", "q-b", "q-a"];
+    let ids = ["q-g", "q-f", "q-e", "q-d", "q-c", "q-b", "q-a"];
+    assert_eq!(
+        ids.len(),
+        bad.len() + 1,
+        "one question per bad reply, and one valid"
+    );
     let fixture = fixture("decide-refused", ids.len(), reviewer(), |log| {
         for (key, id) in ids.iter().enumerate() {
             log.raise(id, u32::try_from(key).expect("a small key"));
@@ -1109,17 +1259,22 @@ fn each_bad_reply_is_refused_saved_and_fails_the_command_after_the_others() {
         );
     }
     assert_eq!(fixture.proposal("q-a")["status"], "accepted");
-    assert_eq!(decided.refused, ids[..5].to_vec());
-    assert!(decided.left.is_empty(), "{}", decided.report);
+    assert_eq!(decided.saved, ids.to_vec());
+    assert_eq!(decided.refused, ids[..bad.len()].to_vec());
     assert!(
-        decided.report.contains("total cost: $0.6000"),
+        decided.unsaved.is_empty() && decided.left.is_empty(),
+        "{}",
+        decided.report
+    );
+    assert!(
+        decided.report.contains("total cost: $0.7000"),
         "{}",
         decided.report
     );
     let error = decided
         .outcome()
         .expect_err("a refused reply makes the command an error");
-    assert!(error.to_string().contains("q-f"), "{error}");
+    assert!(error.to_string().contains("q-g"), "{error}");
 }
 
 #[test]
@@ -1213,6 +1368,8 @@ fn the_request_is_a_decide_request_for_the_runs_reviewer_with_no_overlay() {
         "(no settled attempt of this task failed)",
         "exactly one fenced ```json block",
         "Its opening ```json and its closing ``` are each a line of their own",
+        "no line outside the block holds three backticks or three tildes",
+        "which never gives up on it",
         "\"needs_a_person\"",
         "Giving up on the task is never an available answer here",
         "Nothing you write will be applied",
@@ -2260,6 +2417,15 @@ fn an_untrusted_proposals_directory_or_a_question_id_that_is_not_plain_is_refuse
         decided.report
     );
     assert!(!dotted.proposals_written());
+    assert_eq!(decided.unsaved, ["q.01A"]);
+    assert!(decided.saved.is_empty() && decided.refused.is_empty());
+    let message = decided.outcome().expect_err("refused").to_string();
+    assert!(
+        message.contains("refused before any agent was asked (q.01A)")
+            && message.contains("nothing is saved for them")
+            && !message.contains("each is saved"),
+        "the exit names no record it did not write: {message}"
+    );
 
     let filed = one_question("decide-filed");
     let proposals = filed.repo.join(".upstroke").join("proposals");
@@ -2764,6 +2930,303 @@ fn the_plan_is_forwarded_only_when_its_bytes_are_the_plan_the_run_recorded() {
             crate::ir::content_hash(PLAN_TEXT.as_bytes())
         )),
         "{prompt}"
+    );
+}
+
+/// An installed Claude Code whose `--version` probe exits with status 1, printing `HOSTILE` on
+/// its stderr, which the probe's error quotes.
+fn hostile_version(request: &RunnerRequest) -> Option<Result<ProcessOutput, RunnerError>> {
+    let versioned = request.command.args.iter().any(|arg| arg == "--version");
+    probe_reply(request, SIGNED_IN).map(|probed| {
+        Ok(if versioned {
+            ProcessOutput {
+                code: Some(1),
+                stderr: HOSTILE.to_owned(),
+                ..probed
+            }
+        } else {
+            probed
+        })
+    })
+}
+
+/// Whether `message` is one line, as `one_line` makes one: no line break, and no control
+/// character but escaped.
+fn is_one_line(message: &str) -> bool {
+    !message.chars().any(char::is_control) && one_line(message.to_owned()) == message
+}
+
+/// Refusals: every refusal the command returns is one line, its controls made visible, whatever
+/// the reviewer's CLI answered its pre-flight with and whichever module built the refusal.
+#[test]
+fn every_refusal_is_one_line_whatever_the_reviewer_answered() {
+    let statuses: [(&str, Probe, &str); 3] = [
+        (
+            "its version probe exits 1 printing hostile text",
+            hostile_version,
+            "--version exited with Some(1): retry q-02: decided by someone/else at max \
+             effort\\u{1b}[2J\\u{7}; nothing was written and no agent was asked",
+        ),
+        (
+            "signed out",
+            signed_out,
+            "is not signed in under pool `claude-max`'s account",
+        ),
+        (
+            "not installed",
+            not_installed,
+            "did not pass the pre-flight a run makes of it",
+        ),
+    ];
+    for (at, (case, probe, needle)) in statuses.into_iter().enumerate() {
+        let fixture = one_question(&format!("decide-one-line-{at}"));
+        let runner = Acting::priced(0.25).probing(probe);
+        let message = decide(&fixture.options(), &BuiltinAdapters, &runner)
+            .expect_err(case)
+            .to_string();
+        assert!(is_one_line(&message), "{case}: {message:?}");
+        assert!(message.contains(needle), "{case}: {message}");
+        assert!(runner.seen().is_empty(), "{case}: no agent was asked");
+        assert!(!fixture.proposals_written(), "{case}: nothing was written");
+    }
+
+    // A refusal the credential pre-flight builds itself, naming the pools file's profile.
+    let fixture = one_question("decide-one-line-profile");
+    let profile = fixture.profile.join(HOSTILE);
+    std::fs::write(
+        fixture.repo.join("pools.toml"),
+        format!(
+            "[pools.claude-max]\nkind = \"subscription-window\"\nagent = \"{}\"\nprofile = {}\n",
+            crate::agent::claude::ADAPTER_ID,
+            json!(profile.to_string_lossy())
+        ),
+    )
+    .expect("a pools file naming a hostile profile");
+    let message =
+        refused_before_anything(&fixture, &fixture.options(), &BuiltinAdapters, "profile");
+    assert!(is_one_line(&message), "{message:?}");
+    assert!(
+        message.contains("pre-flight: pool `claude-max` names the credential profile directory")
+            && message.contains("\\u{1b}[2J\\u{7}"),
+        "{message}"
+    );
+}
+
+/// The ids of the questions a recording Runner was asked about, in order, read from each call's
+/// prompt.
+fn asked_about(seen: &[RunnerRequest]) -> Vec<String> {
+    seen.iter()
+        .filter_map(|request| {
+            String::from_utf8_lossy(&request.command.stdin)
+                .lines()
+                .find_map(|line| line.strip_prefix("id: ").map(str::to_owned))
+        })
+        .collect()
+}
+
+/// One case of the exit report: the status the faked reviewer's adapter reads every call as
+/// (`None`: Claude Code's own reading), whether each reply is one `check_reply` refuses, and
+/// what the command must say it saved, refused and left.
+struct Exit {
+    case: &'static str,
+    status: Option<OutcomeStatus>,
+    refuse: bool,
+    saved: &'static [&'static str],
+    refused: &'static [&'static str],
+    left: &'static [&'static str],
+}
+
+/// After the first call reads as anything but completed, the command stops: `q-c` is saved
+/// refused, and the two questions after it are left.
+const STOPPED: [&str; 2] = ["q.dot", "q-a"];
+
+const EXITS: [Exit; 5] = [
+    Exit {
+        case: "every reply accepted",
+        status: None,
+        refuse: false,
+        saved: &["q-c", "q-a"],
+        refused: &[],
+        left: &[],
+    },
+    Exit {
+        case: "every reply refused",
+        status: None,
+        refuse: true,
+        saved: &["q-c", "q-a"],
+        refused: &["q-c", "q-a"],
+        left: &[],
+    },
+    Exit {
+        case: "an agent error",
+        status: Some(OutcomeStatus::AgentError),
+        refuse: false,
+        saved: &["q-c"],
+        refused: &["q-c"],
+        left: &STOPPED,
+    },
+    Exit {
+        case: "a timeout",
+        status: Some(OutcomeStatus::Timeout),
+        refuse: false,
+        saved: &["q-c"],
+        refused: &["q-c"],
+        left: &STOPPED,
+    },
+    Exit {
+        case: "rate limited",
+        status: Some(OutcomeStatus::RateLimited),
+        refuse: true,
+        saved: &["q-c"],
+        refused: &["q-c"],
+        left: &STOPPED,
+    },
+];
+
+/// Reports: the exit names a saved reason only for a proposal this command wrote, and the
+/// report's `proposals saved` line names exactly the proposals on disk. The reviewer is faked by
+/// the status its adapter reads each call as, and the Runner is the recording sink every call
+/// reaches: nothing is started, and each call it records is a question asked.
+#[test]
+fn the_exit_report_names_only_the_records_this_command_wrote() {
+    let refused_reply = || {
+        claude_output(
+            &reply(&VALID.replace("\"choice\": 1", "\"choice\": 9")),
+            Some(0.25),
+        )
+    };
+    for (at, exit) in EXITS.into_iter().enumerate() {
+        let Exit {
+            case,
+            status,
+            refuse,
+            saved,
+            refused,
+            left,
+        } = exit;
+        let fixture = fixture(&format!("decide-exit-{at}"), 3, reviewer(), |log| {
+            log.raise("q-c", 0);
+            log.raise("q.dot", 1);
+            log.raise("q-a", 2);
+        });
+        let runner = if refuse {
+            Acting::new(move |_| Ok(exited(refused_reply())))
+        } else {
+            Acting::priced(0.25)
+        };
+        let decided = match status {
+            Some(status) => decide(&fixture.options(), &Only(&Misread(status)), &runner),
+            None => decide(&fixture.options(), &BuiltinAdapters, &runner),
+        }
+        .expect("decided");
+        let report = &decided.report;
+
+        assert_eq!(
+            asked_about(&runner.seen()),
+            saved,
+            "{case}: each call saved"
+        );
+        assert_eq!(decided.saved, saved, "{case}: {report}");
+        assert_eq!(decided.refused, refused, "{case}: {report}");
+        assert_eq!(decided.left, left, "{case}: {report}");
+        let unsaved: &[&str] = if left.contains(&"q.dot") {
+            &[]
+        } else {
+            &["q.dot"]
+        };
+        assert_eq!(decided.unsaved, unsaved, "{case}: {report}");
+        for id in ["q-c", "q-a"] {
+            assert_eq!(
+                fixture.has_proposal(id),
+                saved.contains(&id),
+                "{case}: {id}'s proposal is on disk exactly when the command says it saved it"
+            );
+        }
+        for id in refused {
+            assert_eq!(fixture.proposal(id)["status"], "refused", "{case}: {id}");
+        }
+        let written: Vec<String> = snapshot(&proposals_dir(&fixture.repo, RUN))
+            .keys()
+            .filter_map(|path| path.file_name()?.to_str()?.strip_suffix(".json"))
+            .filter(|name| !name.ends_with(".settings"))
+            .map(str::to_owned)
+            .collect();
+        let mut listed = saved.to_vec();
+        listed.sort_unstable();
+        assert_eq!(written, listed, "{case}: the proposals on disk");
+        assert!(
+            report
+                .lines()
+                .any(|line| line == format!("proposals saved: {}", saved.join(", "))),
+            "{case}: {report}"
+        );
+
+        let message = decided.outcome().expect_err(case).to_string();
+        assert!(is_one_line(&message), "{case}: {message:?}");
+        assert!(
+            message.contains(&format!(
+                "{} repl(ies) were refused ({}); each is saved with its reason in its proposal",
+                refused.len(),
+                refused.join(", ")
+            )) || refused.is_empty(),
+            "{case}: {message}"
+        );
+        assert!(
+            !message.contains("each is saved") || !refused.is_empty(),
+            "{case}: {message}"
+        );
+        assert_eq!(
+            message.contains("(q.dot); no file can be named after their ids, so nothing is saved"),
+            !unsaved.is_empty(),
+            "{case}: {message}"
+        );
+        assert_eq!(
+            message.contains(&format!("left without a proposal ({})", left.join(", "))),
+            !left.is_empty(),
+            "{case}: {message}"
+        );
+    }
+
+    // A question listed again after its proposal was saved is not named as left when a later
+    // question stops the command: its record is written, and the exit says so.
+    let fixture = two_questions("decide-exit-again");
+    let observed = observe::observe(&fixture.repo, RUN)
+        .expect("readable")
+        .expect("schema 4");
+    let by_id = |id: &str| {
+        observed
+            .open_questions()
+            .into_iter()
+            .find(|asked| asked.question.id.as_str() == id)
+            .expect("an open question")
+    };
+    let listed = [by_id("q-b"), by_id("q-a"), by_id("q-b")];
+    let dir = proposals_dir(&fixture.repo, RUN);
+    let runner = Acting::new({
+        let dir = dir.clone();
+        move |request| {
+            if asked_about(std::slice::from_ref(request)) == ["q-a"] {
+                std::fs::write(dir.join("q-a.out"), "someone else's bytes").expect("a stray file");
+            }
+            Ok(exited(claude_output(&reply(VALID), Some(0.25))))
+        }
+    });
+    let decided = propose(
+        &fixture.options(),
+        &observed,
+        &listed,
+        &BuiltinAdapters,
+        &runner,
+    )
+    .expect("decided");
+    assert_eq!(asked_about(&runner.seen()), ["q-b", "q-a"]);
+    assert_eq!(decided.saved, ["q-b"], "{}", decided.report);
+    assert_eq!(decided.left, ["q-a"], "{}", decided.report);
+    assert!(fixture.has_proposal("q-b") && !fixture.has_proposal("q-a"));
+    let message = decided.outcome().expect_err("left").to_string();
+    assert!(
+        message.contains("1 question(s) left without a proposal (q-a)"),
+        "{message}"
     );
 }
 

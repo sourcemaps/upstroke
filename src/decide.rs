@@ -183,20 +183,37 @@ fn private_denials(private_dir: &str) -> Result<Vec<String>, String> {
 #[derive(Debug)]
 pub struct Decided {
     pub report: String,
+    /// The questions whose proposal this command saved, accepted or refused, in the order saved.
+    pub saved: Vec<String>,
+    /// The questions whose reply, or call, was refused: each is in `saved`, its proposal holding
+    /// the reason.
     pub refused: Vec<String>,
+    /// The questions refused before any agent was asked, because no file can be named after
+    /// their id: nothing is saved for them.
+    pub unsaved: Vec<String>,
     /// The questions this command stopped before proposing an answer to: the call in flight
-    /// when it stopped, and every question after it.
+    /// when it stopped, and every question after it whose proposal is not saved.
     pub left: Vec<String>,
 }
 
 impl Decided {
+    /// The command's exit: an error naming every refused, unsaved or left question, which says
+    /// a reason is saved only for the questions whose proposal was written.
     pub fn outcome(&self) -> Result<(), UpstrokeError> {
         let mut failures = Vec::new();
         if !self.refused.is_empty() {
             failures.push(format!(
-                "{} repl(ies) were refused ({}); each is saved with its reason",
+                "{} repl(ies) were refused ({}); each is saved with its reason in its proposal",
                 self.refused.len(),
                 self.refused.join(", ")
+            ));
+        }
+        if !self.unsaved.is_empty() {
+            failures.push(format!(
+                "{} question(s) were refused before any agent was asked ({}); no file can be named \
+                 after their ids, so nothing is saved for them",
+                self.unsaved.len(),
+                self.unsaved.join(", ")
             ));
         }
         if !self.left.is_empty() {
@@ -225,8 +242,22 @@ struct Decider<'a> {
     private_denials: Vec<String>,
 }
 
+/// A refusal of this command, as one line (`one_line`): what it quotes, a run's or question's id,
+/// a path, an error or what the reviewer's CLI printed, can start no line of its own and reach
+/// the terminal as no control.
 fn refused(message: String) -> UpstrokeError {
-    UpstrokeError::Refused { message }
+    UpstrokeError::Refused {
+        message: one_line(message),
+    }
+}
+
+/// `error`, a refusal made one line by `refused` wherever it was built: the pre-flights this
+/// command runs build some of theirs, a signed-out account's among them.
+fn one_lined(error: UpstrokeError) -> UpstrokeError {
+    match error {
+        UpstrokeError::Refused { message } => refused(message),
+        other => other,
+    }
 }
 
 pub fn proposals_dir(repo_root: &Path, run_id: &str) -> PathBuf {
@@ -243,7 +274,7 @@ pub fn decide(
 ) -> Result<Decided, UpstrokeError> {
     let observed = read_run(&opts.repo_root, &opts.run_id)?;
     let questions = chosen_questions(&observed, &opts.run_id, opts.question_id.as_deref())?;
-    propose(opts, &observed, &questions, adapters, runner)
+    propose(opts, &observed, &questions, adapters, runner).map_err(one_lined)
 }
 
 /// Asks the run's decider about each of `questions`, in order.
@@ -330,7 +361,9 @@ fn propose(
     // reply, the run's question text and the file names are data inside a line, so none of them
     // can start a line of its own or reach the terminal as a control.
     let mut out = TerminalLines::default();
+    let mut saved = Vec::new();
     let mut refusals = Vec::new();
+    let mut unsaved = Vec::new();
     let mut left = Vec::new();
     let mut spent = 0.0_f64;
     let mut unsettled = None;
@@ -349,9 +382,9 @@ fn propose(
             out.push(format_args!(
                 "{id:?}: refused — its id is not a plain file-name component (1 to \
                  {MAX_ID_BYTES} ASCII letters, digits, `-` or `_`, and no device name), so no \
-                 file is named after it; no agent was asked"
+                 file is named after it; no agent was asked, and nothing is saved for it"
             ));
-            refusals.push(id.clone());
+            unsaved.push(id.clone());
             continue;
         }
         if let Some(answer) = answered.get(&id) {
@@ -369,22 +402,9 @@ fn propose(
             ));
             continue;
         }
-        // The questions this command has not answered once it stops at `from`, each named once.
-        let rest = |from: usize| -> Vec<String> {
-            let mut named = BTreeSet::new();
-            questions
-                .iter()
-                .skip(from)
-                .filter(|later| {
-                    !later.binds_an_agent && !answered.contains_key(later.question.id.as_str())
-                })
-                .map(|later| later.question.id.as_str().to_owned())
-                .filter(|later| named.insert(later.clone()))
-                .collect()
-        };
         let remaining = opts.max_cost_usd - spent;
         if remaining <= 0.0 {
-            left = rest(index);
+            left = left_from(questions, index, &answered, &saved);
             out.push(format_args!(
                 "stopped: this command's calls have spent ${spent:.4}, which reaches the \
                  --max-cost-usd allowance of ${:.4} for the run, so no further call is started; \
@@ -406,7 +426,7 @@ fn propose(
             Ok(call) => call,
             Err(error) if !claimed => return Err(error),
             Err(error) => {
-                left = rest(index);
+                left = left_from(questions, index, &answered, &saved);
                 stopped(&mut out, &error, &left);
                 break;
             }
@@ -416,7 +436,7 @@ fn propose(
             claimed = true;
         }
         let ordinal = u32::try_from(index + 1).unwrap_or(u32::MAX);
-        let published = ask(&decider, runner, &call, &names, ordinal).and_then(|returned| {
+        let published = ask(&decider, runner, call, &names, ordinal).and_then(|returned| {
             let verdict = match &returned {
                 Returned::Settled { reply, .. } => check_reply(&asked.question, reply),
                 Returned::Unsettled { reason, .. } => Err(reason.clone()),
@@ -433,11 +453,12 @@ fn propose(
         let (returned, verdict) = match published {
             Ok(published) => published,
             Err(error) => {
-                left = rest(index);
+                left = left_from(questions, index, &answered, &saved);
                 stopped(&mut out, &error, &left);
                 break;
             }
         };
+        saved.push(id.clone());
         render_one(
             &mut out,
             &decider,
@@ -452,7 +473,7 @@ fn propose(
         match returned {
             Returned::Settled { cost_usd, .. } => spent += cost_usd,
             Returned::Unsettled { reason, .. } => {
-                left = rest(index + 1);
+                left = left_from(questions, index + 1, &answered, &saved);
                 out.push(format_args!(
                     "stopped: {id}'s call did not settle at a price ({reason}), so what it spent \
                      is unknown and no further call is started; left without a proposal: {}",
@@ -476,14 +497,43 @@ fn propose(
             dir.display()
         ));
     }
-    out.push(format_args!(
-        "nothing was answered: a person applies a proposal with `upstroke answer <question-id>`"
-    ));
+    out.push(format_args!("proposals saved: {}", listed(&saved)));
+    if saved.is_empty() {
+        out.push(format_args!("nothing was answered"));
+    } else {
+        out.push(format_args!(
+            "nothing was answered: a person applies a proposal with `upstroke answer \
+             <question-id>`"
+        ));
+    }
     Ok(Decided {
         report: out.into_string(),
+        saved,
         refused: refusals,
+        unsaved,
         left,
     })
+}
+
+/// The questions of `questions`, from the one at `from` on, that this command leaves without a
+/// proposal once it stops there, each named once: every one but those that bind an agent, those
+/// a person has answered, and those whose proposal is in `saved` already, which a question
+/// listed twice can be.
+fn left_from(
+    questions: &[OpenAsked],
+    from: usize,
+    answered: &BTreeMap<String, Answer>,
+    saved: &[String],
+) -> Vec<String> {
+    let mut named = BTreeSet::new();
+    questions
+        .iter()
+        .skip(from)
+        .filter(|later| !later.binds_an_agent)
+        .map(|later| later.question.id.as_str().to_owned())
+        .filter(|later| !answered.contains_key(later) && !saved.contains(later))
+        .filter(|later| named.insert(later.clone()))
+        .collect()
 }
 
 /// `ids` joined for a report line, or `none`.
@@ -859,10 +909,12 @@ fn build_prompt(observed: &Observed, asked: &OpenAsked, plan_text: &str) -> Stri
     prompt.push_str(
         "## Your reply\n\nReply with exactly one fenced ```json block holding an object with \
          these six fields and nothing else outside it that is fenced. Its opening ```json and \
-         its closing ``` are each a line of their own:\n\
+         its closing ``` are each a line of their own, and no line outside the block holds \
+         three backticks or three tildes, even within the line:\n\
          - \"choice\": the 1-based number of the option you propose, or null when the question \
          has no options\n\
-         - \"guidance\": text a person would give the task\n\
+         - \"guidance\": text a person would give the task, which never gives up on it (not \
+         `skip`, `decline`, `fail`, `abandon` or the number of an option that gives up)\n\
          - \"reasons\": a list of text\n\
          - \"confidence\": \"low\", \"medium\" or \"high\"\n\
          - \"needs_a_person\": true or false\n\
@@ -1283,20 +1335,26 @@ fn kept(guarantee: Guarantee, built: &Built<'_>) -> Result<(), String> {
 
 /// Starts one call of the claimed run: writes its settings file new, starts it through the
 /// Runner, saves its raw output new, and reads what it returned. A Runner error is a returned
-/// outcome too, saved in place of the raw output, and never settles.
+/// outcome too, saved in place of the raw output, and never settles. The call is taken whole:
+/// its command and workspace move into the request, so what starts is what `prepare` checked.
 fn ask(
     decider: &Decider<'_>,
     runner: &dyn Runner,
-    call: &Call,
+    call: Call,
     names: &Names,
     ordinal: u32,
 ) -> Result<Returned, UpstrokeError> {
-    if let Some(settings_path) = &call.task_run.settings_path {
-        write_new(settings_path, &pretty(&call.settings, settings_path)?)?;
+    let Call {
+        task_run,
+        command,
+        settings,
+    } = call;
+    if let Some(settings_path) = &task_run.settings_path {
+        write_new(settings_path, &pretty(&settings, settings_path)?)?;
     }
     let mut request = crate::runner::decide_request(
-        call.command.clone(),
-        call.task_run.workspace.clone(),
+        command,
+        task_run.workspace,
         AgentId::new(decider.adapter.id()),
         decider.timeout,
         InvocationId::Decide { ordinal },
@@ -1321,58 +1379,88 @@ fn ask(
 
 /// A fence: with an info string after it, a line that opens a block; alone, one that closes it.
 const FENCE: &str = "```";
+/// The other run of characters Markdown opens a fenced block with.
+const TILDE_FENCE: &str = "~~~";
 /// The info string of the block a reply answers in.
 const REPLY_INFO: &str = "json";
 
-/// The body of the one fenced block of `text` when that block is a closed `json` block, or why
-/// the reply is refused. A fence is a whole line, with nothing beside it but whitespace (a `\r`
-/// included): outside a block, "```" and an info string holding no backtick open one, and inside,
-/// "```" alone closes it. A fence written within a line opens and closes nothing, so the JSON may
-/// mention one in a string (a JSON string holds no raw line break, so it is never a line of its
-/// own), and a block is read whole, a "```json" line inside it included. Every block is counted,
-/// whatever its info string (none included) and whether it is closed or not: one left open runs
-/// to the end of the reply, as Markdown reads it. A reply is accepted only when it holds exactly
-/// one block and that block is a closed `json` block; a refusal says how many blocks it holds.
+/// Where the walk over a reply's lines is, against its one `json` block.
+enum Framing<'a> {
+    /// No line has opened the block yet.
+    Before,
+    /// The block opened at line `opened`, and its body starts at byte `body`.
+    Inside { opened: usize, body: usize },
+    /// The block closed at line `closed`, holding `body`.
+    After { closed: usize, body: &'a str },
+}
+
+/// The run of fence characters `line` holds anywhere in it, if any.
+fn fence_marker(line: &str) -> Option<&'static str> {
+    [FENCE, TILDE_FENCE]
+        .into_iter()
+        .find(|marker| line.contains(marker))
+}
+
+/// The body of the reply's one fenced `json` block, or why the reply is refused. The block opens
+/// at the first line that is "```" and the info string `json`, and closes at the next line that
+/// is "```" alone, each with nothing beside it but whitespace (a `\r` included); nothing inside
+/// it is read as a fence, so its JSON may mention one in a string (a JSON string holds no raw
+/// line break, so no line of valid JSON is "```" alone, and the closing line is never the JSON's
+/// own). Every line outside the block, before it opens or after it closes, is refused when it
+/// holds three backticks or three tildes anywhere: whether Markdown reads it as a fence of
+/// another block or as text, it is something fenced, or a fence-like run, outside the one block
+/// the reply is asked for. The closing line is the block's own and never outside text. A reply
+/// with no opening line, or a block never closed, is refused as such.
 fn fenced_json(text: &str) -> Result<&str, String> {
-    // Every block, in order: whether it is `json`, and its body once it is closed.
-    let mut blocks: Vec<(bool, Option<&str>)> = Vec::new();
-    // The block the walk is in, if any: whether it is `json`, and where its body starts.
-    let mut open: Option<(bool, usize)> = None;
+    let mut framing = Framing::Before;
     let mut end = 0;
-    for line in text.split_inclusive('\n') {
+    for (line, number) in text.split_inclusive('\n').zip(1_usize..) {
         let start = end;
         end += line.len();
         let bare = line.trim();
-        match open {
-            None => {
-                open = bare
+        framing = match framing {
+            Framing::Inside { body, .. } if bare == FENCE => Framing::After {
+                closed: number,
+                body: text.get(body..start).unwrap_or_default(),
+            },
+            inside @ Framing::Inside { .. } => inside,
+            Framing::Before
+                if bare
                     .strip_prefix(FENCE)
-                    .filter(|info| !info.contains('`'))
-                    .map(|info| (info.trim() == REPLY_INFO, end));
+                    .is_some_and(|info| info.trim() == REPLY_INFO) =>
+            {
+                Framing::Inside {
+                    opened: number,
+                    body: end,
+                }
             }
-            Some((json, body)) if bare == FENCE => {
-                blocks.push((json, Some(text.get(body..start).unwrap_or_default())));
-                open = None;
+            outside => {
+                if let Some(marker) = fence_marker(line) {
+                    let place = match &outside {
+                        Framing::After { closed, .. } => {
+                            format!("after the json block closed at line {closed}")
+                        }
+                        _ => "before the json block opens".to_owned(),
+                    };
+                    return Err(format!(
+                        "line {number} of the reply holds {marker} {place}; nothing outside the \
+                         reply's one json block may hold three backticks or three tildes"
+                    ));
+                }
+                outside
             }
-            Some(_) => {}
-        }
+        };
     }
-    if let Some((json, _)) = open {
-        blocks.push((json, None));
-    }
-    match blocks.as_slice() {
-        [(true, Some(body))] => Ok(body),
-        [(true, None)] => {
-            Err("the reply holds 1 fenced block, a json block that is never closed".to_owned())
-        }
-        [(false, _)] => {
-            Err("the reply holds 1 fenced block, and it is not a json block".to_owned())
-        }
-        [] => Err("the reply holds no fenced block; one json block is asked for".to_owned()),
-        several => Err(format!(
-            "the reply holds {} fenced blocks; exactly one, a json block, is asked for",
-            several.len()
+    match framing {
+        Framing::After { body, .. } => Ok(body),
+        Framing::Inside { opened, .. } => Err(format!(
+            "the json block opened at line {opened} is never closed: no later line is ``` alone"
         )),
+        Framing::Before => Err(
+            "the reply holds no fenced json block: no line is ```json, and one json block is \
+             asked for"
+                .to_owned(),
+        ),
     }
 }
 
@@ -1405,9 +1493,9 @@ fn check_reply(question: &Question, text: &str) -> Result<Value, String> {
             return Err(format!("the field `{field}` is missing"));
         }
     }
-    if !record["guidance"].is_string() {
+    let Some(guidance) = record["guidance"].as_str() else {
         return Err("`guidance` is not text".to_owned());
-    }
+    };
     text_list(&record, "reasons")?;
     text_list(&record, "citations")?;
     if !matches!(
@@ -1457,6 +1545,14 @@ fn check_reply(question: &Question, text: &str) -> Result<Value, String> {
                 }
             }
         }
+    }
+    if crate::interaction::interpret(question, guidance) == Answer::Declined {
+        return Err(
+            "`guidance` gives up on the task: given as `upstroke answer --text`, it is read as \
+             declining (`skip`, `decline`, `fail`, `abandon`, or the number of an option that \
+             gives up), and giving up is never an answer a decider may propose"
+                .to_owned(),
+        );
     }
     Ok(record)
 }
