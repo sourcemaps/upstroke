@@ -1329,8 +1329,8 @@ The roster is [`CREDENTIAL_LOCATIONS`]' own, so a fourth adapter appears in this
 The **program shape** dimension, over every shape the runner can be asked to spawn rather than the
 one the role grid carries. Every agent role in the five-role grid runs `std::env::current_exe()`, a
 native `.exe` on Windows, and `agent::bin::tests::a_batch_shim_runs_and_receives_its_argument` runs
-its `.cmd` with `build_command(&spec).output()`, bypassing `HostRunner` and its hooks. Without this
-test,
+its `.cmd` with `build_command(&spec).output()`, bypassing `HostRunner` and its hooks. Before this
+test existed,
 
 ```text
 let mut no_hooks = NoHooks;
@@ -1339,8 +1339,10 @@ let mut no_hooks = NoHooks;
    } else { &mut **hooks }
 ```
 
-would stay green while every npm-installed Windows agent CLI (`claude.cmd`, `codex.cmd`,
-`copilot.cmd`) ran with no containment observation and no fault injection.
+stayed green across the suite while every npm-installed Windows agent CLI (`claude.cmd`,
+`codex.cmd`, `copilot.cmd`) ran with no containment observation and no fault injection.
+`the_cli_roles_of_the_grid_run_a_shim_shaped_program_through_the_funnel` now covers the same
+mutation from the role side.
 
 The same two claims as every other axis in this file, that the points are reached and that the
 observer's answer is honoured, so a shape that is *observed* but not *injectable* fails too.
@@ -1359,7 +1361,9 @@ are two claims.
 Every role that runs an agent CLI (implement, review, `probe(claude-code)`), each built by its own
 production builder, carries a batch-shim program through the funnel to every per-spawn containment
 point. `every_production_program_shape_reaches_the_containment_points` varies the shape against one
-role; this varies the role, so a suppression keyed on a role-and-shape pair has nowhere to pass.
+role; this varies the role, each role carrying the same batch shim (a `.cmd` on Windows), so a
+suppression keyed on a CLI role with that shim, such as a `.cmd` in the reviewer's hands, fails
+here. A pair neither grid crosses, such as a reviewer's `.bat`, is not covered by either.
 `gate` and `probe(shell)` are left out because production runs the recorded shell for them
 (`the_role_grid_sends_the_shapes_production_sends`); the case count is asserted against that rule.
 
@@ -1595,11 +1599,14 @@ because the library's write coordinator establishes containment
 `expected_failures_refusals[1]` (the write command refuses at startup with a diagnostic).
 
 It is the function `engine::run_harness`, `engine::resume_harness` and `src/main.rs`'s dispatch
-reach, and the only place that mints `Contained`. The other simulated ambient failures go through
-`HostRunner::start_write_command` or a closure injected at `run_contained`, so a mint that discarded
-the join's outcome and returned `Ok(Contained::new())` would leave them green while every Windows run
-dispatched with no ambient job; a coordinator killed between `CreateProcessW` and private-job
-assignment would then leave an ownerless suspended stub, which the ambient job exists to prevent.
+reach, and the only place that mints `Contained`. When this test was written, the other simulated
+ambient failures went through `HostRunner::start_write_command` or a closure injected at
+`run_contained`, and a mint that discarded the join's outcome and returned `Ok(Contained::new())`
+left them green while every Windows run dispatched with no ambient job;
+`HostRunner::start_write_command` now delegates to this mint, so
+`windows_ambient_job_unavailable_refuses_before_effects` would also fail. Without the ambient job, a
+coordinator killed between `CreateProcessW` and private-job assignment would then leave an ownerless
+suspended stub, which the ambient job exists to prevent.
 
 Windows only, by invariant: on Unix `proc::join_ambient_job` returns `Ok` without consulting the
 observer, so a Linux cell cannot record a Windows containment point as executed, and there is no
