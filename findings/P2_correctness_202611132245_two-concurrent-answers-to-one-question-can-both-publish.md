@@ -117,3 +117,18 @@ The refusal should read as the existing "was already answered" refusal does. Wit
 - **Sequential, schema 1–3, engine stopped:** publisher A publishes and returns success. Then
   publisher B, for the same question and with a distinct answer, is refused, and
   `answers/<id>.json` still holds A's bytes.
+
+## Notes from round five's regression lens (2026-11-16)
+
+Two notes from round five's regression lens on #381 at `1bb1a677`
+(`/home/ubuntu/selfhost-g4bo9-20261113/evidence/review-regression-1bb1a67.md`, "Noted, not
+counted"), recorded for whoever takes this up. Neither changes the severity.
+
+- **The sequential case is narrower than "every fresh sequential run".** Outside test builds,
+  `upstroke run` creates only schema-4 runs (`src/topology/schema.rs:27`,
+  `src/engine/options.rs:72-79`, `src/engine/coordinator.rs:58`). The sequential overwrite arises
+  only for schema 1–3 runs that an older binary created and `upstroke resume` continues; for those
+  it is real.
+- **The fix should also update two sentences.** Once publication refuses an existing file,
+  `design/15_design_event_log_resume_run_layout.md:30-31` and `docs/internals/interaction.md:157-159`,
+  which say the file can be replaced, become false and should change with it.
