@@ -14431,8 +14431,14 @@ impl SampledChild {
     /// `fixture::KillableGitChild`, the other samplers' child), and CI's
     /// macOS leg at `869e336a` met that child still populating the checkout
     /// — `PR136`'s first fingerprint — at the forced removal.
+    ///
+    /// The `git` it runs is [`super::fixture::sampled_git`]'s, as
+    /// `fixture::KillableGitChild`'s is: on Windows the real
+    /// `mingw64\bin\git.exe` rather than Git for Windows' `cmd\git.exe`
+    /// launcher, whose kill would leave the real git running
+    /// (`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`); `git` everywhere else.
     fn spawn(cwd: &Path, args: &[String]) -> Self {
-        let mut command = Command::new("git");
+        let mut command = Command::new(super::fixture::sampled_git());
         command
             .arg("-C")
             .arg(cwd)
