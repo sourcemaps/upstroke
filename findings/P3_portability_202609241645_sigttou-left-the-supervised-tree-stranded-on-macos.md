@@ -138,14 +138,14 @@ request #360's head. The job ran from 06:57:36Z to 07:30:45Z on 2026-11-11.
 
 **What is recorded.**
 
-- Unlike the first sighting, the job was not cancelled, and libtest printed its failure block and
-  its summary: `3642 passed; 2 failed; 167 ignored`, finished in 1785.77 s.
+- Unlike the 2026-10-29 sighting, the job was not cancelled, and libtest printed its failure block
+  and its summary: `3642 passed; 2 failed; 167 ignored`, finished in 1785.77 s.
 - `agent::proc::tests::terminal_input_and_output_stops_cover_the_isolated_tree` panicked at
   `src/agent/proc/tests.rs:3027:28` with `signal 21 left the supervised tree stranded`. Signal 21
   on macOS is `SIGTTIN`. Line 3027 is the `unwrap_or_else` on the ten-second wait for the helper to
   exit after `finish` is written and `SIGCONT` is sent to the group, the step the failure sequence
-  above numbers 5. So this time the step that ran out was in the `SIGTTIN` pass, where the first
-  sighting's was in the `SIGTTOU` pass.
+  above numbers 5. So this time the step that ran out was in the `SIGTTIN` pass, where the original
+  sighting's, at `ac1cdfbf`, was in the `SIGTTOU` pass.
 - The other failure in the same job was
   `runner::host::tests::a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it`,
   which has its own finding, `G7-CI-MACOS-HOOK-COMMIT-FLAKE`.
