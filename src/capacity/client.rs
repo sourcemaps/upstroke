@@ -6,8 +6,10 @@
 //! and what a settled attempt says about the pools it drew on. It reads the
 //! fold and the frozen plans and hands the client plain values: candidate
 //! pools in file order, the run's events, the records of settled attempts.
-//! [`BuiltinClient`] answers from the pools the run's signals hold exhausted,
-//! as the engine did before the seam.
+//! Where the engine before the seam read a value only once a guard passed, or
+//! one task at a time, it hands a closure or an iterator instead, so the
+//! client reads it at the same point. [`BuiltinClient`] answers from the pools
+//! the run's signals hold exhausted, as the engine did before the seam.
 
 #![forbid(
     clippy::disallowed_methods,
@@ -27,33 +29,40 @@ pub(crate) use super::{Pool, drain_of, pool_for};
 
 /// The questions the engine asks about capacity while a run is live.
 pub(crate) trait CapacityClient {
+    /// The pools the client holds exhausted, each with its reset, and the
+    /// resets the run's `events` show spent read as none: the scan
+    /// [`CapacityClient::grant`] judges by.
+    ///
+    /// A value of its own, so the engine scans the log before it reads the
+    /// clock `grant` judges at, in one argument list, as it did before the
+    /// seam.
+    fn held_unspent(&self, events: &[TopologyEvent]) -> HeldUnspent;
+
     /// The pool an attempt binds, among its agent's pools in file order
-    /// (`candidates`), judged at `now_unix` against what the run's `events`
-    /// say of spent resets. `None` when the agent names no pool.
-    fn grant(
-        &self,
-        candidates: &[String],
-        events: &[TopologyEvent],
-        now_unix: u64,
-    ) -> Option<String>;
+    /// (`candidates`), judged at `now_unix` against `held`, the client's
+    /// [`CapacityClient::held_unspent`]. `None` when the agent names no pool.
+    fn grant(&self, candidates: &[String], held: &HeldUnspent, now_unix: u64) -> Option<String>;
 
     /// Whether a refused attempt is retried at once on another of its agent's
-    /// pools (`candidates`, in file order) instead of deferred: a worker's
-    /// rate limit, on a recorded pool, with some other candidate no signal
-    /// holds exhausted.
+    /// pools instead of deferred: a worker's rate limit, on a recorded pool,
+    /// with some other candidate no signal holds exhausted.
+    ///
+    /// `candidates` gives the agent's pools in file order, and is called only
+    /// once the failure is a worker's rate limit on a recorded pool.
     fn fails_over(
         &self,
         failure: &AttemptFailure,
         record: &AttemptRecord,
-        candidates: &[String],
+        candidates: &dyn Fn() -> Vec<String>,
     ) -> bool;
 
     /// The recorded reset a deferred run waits for, chosen among the resets
     /// the `limits` wait on, at `now_unix`, with spent resets read from the
-    /// run's `events`. `None` when the run backs off as before.
+    /// run's `events` before the first limit is drawn. `None` when the run
+    /// backs off as before.
     fn awaited_reset(
         &self,
-        limits: &[DeferredLimit<'_>],
+        limits: &mut dyn Iterator<Item = DeferredLimit<'_>>,
         events: &[TopologyEvent],
         now_unix: u64,
     ) -> Option<AwaitedReset>;
@@ -87,6 +96,16 @@ pub(crate) struct DeferredLimit<'a> {
     /// The pools of the agent bound on the task's rung, in file order, when
     /// the failure's origin is the worker. Empty for a reviewer's limit.
     pub(crate) worker_pools: Vec<String>,
+}
+
+/// What [`CapacityClient::held_unspent`] read: each pool held exhausted, with
+/// the reset [`CapacityClient::grant`] judges it by.
+///
+/// Its field is private, so only this file builds one or reads it: a client
+/// elsewhere hands on the one a built-in client scanned.
+#[derive(Debug)]
+pub(crate) struct HeldUnspent {
+    held: BTreeMap<String, Option<String>>,
 }
 
 /// What [`CapacityClient::awaited_reset`] chose: the pool and reset a
@@ -125,7 +144,7 @@ struct BuiltinClient {
 
 impl BuiltinClient {
     /// The client a resumed run starts from: the pools its `events` hold
-    /// exhausted, as `capacity::observe` reads them.
+    /// exhausted, as `capacity::exhausted_pools_of` reads them.
     #[must_use]
     fn replay(events: &[TopologyEvent]) -> Self {
         Self {
@@ -192,25 +211,21 @@ impl BuiltinClient {
 }
 
 impl CapacityClient for BuiltinClient {
-    fn grant(
-        &self,
-        candidates: &[String],
-        events: &[TopologyEvent],
-        now_unix: u64,
-    ) -> Option<String> {
-        serving_pool(
-            candidates,
-            &held_unspent(&self.exhausted_pools, events),
-            now_unix,
-        )
-        .cloned()
+    fn held_unspent(&self, events: &[TopologyEvent]) -> HeldUnspent {
+        HeldUnspent {
+            held: held_unspent(&self.exhausted_pools, events),
+        }
+    }
+
+    fn grant(&self, candidates: &[String], held: &HeldUnspent, now_unix: u64) -> Option<String> {
+        serving_pool(candidates, &held.held, now_unix).cloned()
     }
 
     fn fails_over(
         &self,
         failure: &AttemptFailure,
         record: &AttemptRecord,
-        candidates: &[String],
+        candidates: &dyn Fn() -> Vec<String>,
     ) -> bool {
         if failure.kind != crate::ladder::FailureKind::RateLimited
             || failure.origin != crate::ladder::FailureOrigin::Worker
@@ -220,21 +235,20 @@ impl CapacityClient for BuiltinClient {
         let Some(refused) = &record.pool else {
             return false;
         };
-        candidates
+        candidates()
             .iter()
             .any(|pool| pool != refused && !self.exhausted_pools.contains_key(pool))
     }
 
     fn awaited_reset(
         &self,
-        limits: &[DeferredLimit<'_>],
+        limits: &mut dyn Iterator<Item = DeferredLimit<'_>>,
         events: &[TopologyEvent],
         now_unix: u64,
     ) -> Option<AwaitedReset> {
         let spent = spent_resets(events);
         let known: Vec<(u64, &String, &String)> = limits
-            .iter()
-            .filter_map(|limit| self.resets_awaited_by(limit, &spent, now_unix))
+            .filter_map(|limit| self.resets_awaited_by(&limit, &spent, now_unix))
             .flatten()
             .collect();
         let margin = interaction::RESET_WAIT_MARGIN.as_secs();
@@ -277,8 +291,9 @@ impl CapacityClient for BuiltinClient {
 }
 
 /// `exhausted_pools` with each spent reset ([`spent_resets`], read from
-/// `events`) read as no reset: the held map [`CapacityClient::grant`] gives
-/// [`serving_pool`].
+/// `events`) read as no reset: the held map the built-in
+/// [`CapacityClient::held_unspent`] scans, which [`CapacityClient::grant`]
+/// gives [`serving_pool`].
 ///
 /// So a pool whose reset is spent is held with no known reset: it serves
 /// only when no pool is free and no other held pool's reset and margin have
@@ -414,8 +429,7 @@ fn serving_pool<'a>(
 pub(crate) mod test_support {
     use std::collections::BTreeMap;
 
-    use super::{BuiltinClient, CapacityClient};
-    use crate::topology::events::TopologyEvent;
+    use super::{BuiltinClient, CapacityClient, HeldUnspent};
 
     /// A client holding `exhausted_pools`, for a test that sets the map.
     pub(crate) fn holding(
@@ -424,37 +438,10 @@ pub(crate) mod test_support {
         Box::new(BuiltinClient { exhausted_pools })
     }
 
-    /// The client a resumed run starts from (`BuiltinClient::replay` of
-    /// `events`), with `pool` taken out of its map.
-    pub(crate) fn replayed_releasing(
-        events: &[TopologyEvent],
-        pool: &str,
-    ) -> Box<dyn CapacityClient> {
-        let mut client = BuiltinClient::replay(events);
-        client.exhausted_pools.remove(pool);
-        Box::new(client)
-    }
-
-    /// The client a resumed run starts from (`BuiltinClient::replay` of
-    /// `events`), with `pool` put in its map, held with `reset_at`.
-    pub(crate) fn replayed_holding(
-        events: &[TopologyEvent],
-        pool: String,
-        reset_at: Option<String>,
-    ) -> Box<dyn CapacityClient> {
-        let mut client = BuiltinClient::replay(events);
-        client.exhausted_pools.insert(pool, reset_at);
-        Box::new(client)
-    }
-
-    /// The map of the client a resumed run starts from
-    /// (`BuiltinClient::replay` of `events`), with each spent reset read from
-    /// `events` dropped, as [`super::CapacityClient::grant`] gives it to
-    /// `serving_pool`.
-    pub(crate) fn replayed_held_unspent(
-        events: &[TopologyEvent],
-    ) -> BTreeMap<String, Option<String>> {
-        super::held_unspent(&BuiltinClient::replay(events).exhausted_pools, events)
+    /// The map a client's [`CapacityClient::held_unspent`] scanned: each pool
+    /// held exhausted, with the reset [`CapacityClient::grant`] judges it by.
+    pub(crate) fn pools_held(scan: &HeldUnspent) -> BTreeMap<String, Option<String>> {
+        scan.held.clone()
     }
 
     /// The pool `serving_pool` binds among `candidates`, with `held` and

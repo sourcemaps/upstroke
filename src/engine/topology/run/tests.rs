@@ -2925,8 +2925,23 @@ fn a_retained_retry_resumes_on_the_pool_its_session_ran_on() {
         "{steps:?}"
     );
 
-    wide.run.capacity_client =
-        test_support::replayed_releasing(&wide.run.handle.events, "claude-max");
+    assert_eq!(
+        wide.run.held_unspent().get("claude-max"),
+        Some(&Some("2026-11-11T05:30:00Z".to_owned())),
+        "generation 0's limit holds `claude-max` in the run's own client"
+    );
+    let served_on_the_first_pool = AttemptRecord {
+        pool: Some("claude-max".to_owned()),
+        ..last_settled_record(&wide.run.handle.events, TaskKey(0))
+            .expect("generation 1's attempt settled")
+            .clone()
+    };
+    wide.run.capacity_client.served(&served_on_the_first_pool);
+    assert_eq!(
+        wide.run.held_unspent().get("claude-max"),
+        None,
+        "an attempt `claude-max` served releases it in the run's own client"
+    );
     let retried = served_steps_until_settled(&mut wide, TaskKey(0), &mut hooks);
     assert!(
         matches!(
@@ -3647,7 +3662,7 @@ impl TimeSource for ResumedAt {
 
 impl TopologyRun {
     fn held_unspent(&self) -> BTreeMap<String, Option<String>> {
-        test_support::replayed_held_unspent(&self.handle.events)
+        test_support::pools_held(&self.capacity_client.held_unspent(&self.handle.events))
     }
 }
 
@@ -3843,8 +3858,7 @@ fn a_reviewers_limit_whose_pool_resets_at_the_clock_backs_off_as_before() {
         &mut hooks,
     );
     assert_eq!(deferral_of(&wide, TaskKey(0)), (TaskState::Deferred, 1));
-    wide.run.capacity_client = test_support::replayed_holding(
-        &wide.run.handle.events,
+    wide.run.capacity_client.held(
         "copilot-pool".to_owned(),
         Some("2026-11-11T03:00:00Z".to_owned()),
     );
@@ -3853,6 +3867,272 @@ fn a_reviewers_limit_whose_pool_resets_at_the_clock_backs_off_as_before() {
     let sleeper = RecordingSleeper::default();
     let steps = stepped_until_waited(&mut wide, &RunClock, &sleeper, None, &mut hooks);
     assert_backs_off_as_before("reviewer", &steps, &sleeper);
+}
+
+/// A client that hands on every question to `builtin`, and sets `scanned`
+/// when the run asks for its scan ([`CapacityClient::held_unspent`]).
+struct ScanMovesTheClock {
+    builtin: Box<dyn CapacityClient>,
+    scanned: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl CapacityClient for ScanMovesTheClock {
+    fn held_unspent(&self, events: &[TopologyEvent]) -> crate::capacity::client::HeldUnspent {
+        self.scanned.set(true);
+        self.builtin.held_unspent(events)
+    }
+
+    fn grant(
+        &self,
+        candidates: &[String],
+        held: &crate::capacity::client::HeldUnspent,
+        now_unix: u64,
+    ) -> Option<String> {
+        self.builtin.grant(candidates, held, now_unix)
+    }
+
+    fn fails_over(
+        &self,
+        failure: &crate::ladder::AttemptFailure,
+        record: &AttemptRecord,
+        candidates: &dyn Fn() -> Vec<String>,
+    ) -> bool {
+        self.builtin.fails_over(failure, record, candidates)
+    }
+
+    fn awaited_reset(
+        &self,
+        limits: &mut dyn Iterator<Item = DeferredLimit<'_>>,
+        events: &[TopologyEvent],
+        now_unix: u64,
+    ) -> Option<AwaitedReset> {
+        self.builtin.awaited_reset(limits, events, now_unix)
+    }
+
+    fn served(&mut self, record: &AttemptRecord) {
+        self.builtin.served(record);
+    }
+
+    fn exhaustion(
+        &self,
+        failure: &crate::ladder::AttemptFailure,
+        record: &AttemptRecord,
+        agent: &str,
+        now_unix: u64,
+    ) -> Option<crate::events::PoolExhausted> {
+        self.builtin.exhaustion(failure, record, agent, now_unix)
+    }
+
+    fn held(&mut self, pool: String, reset_at: Option<String>) {
+        self.builtin.held(pool, reset_at);
+    }
+}
+
+/// 03:02:59 until the client is scanned, and 03:03:00 from then on.
+struct MovedByTheScan(std::rc::Rc<std::cell::Cell<bool>>);
+
+impl TimeSource for MovedByTheScan {
+    fn now_rfc3339(&self) -> String {
+        if self.0.get() {
+            "2026-11-11T03:03:00Z"
+        } else {
+            "2026-11-11T03:02:59Z"
+        }
+        .to_owned()
+    }
+}
+
+#[test]
+fn the_grant_judges_at_the_clock_read_after_its_scan() {
+    use crate::engine::topology::scaffold::ScaffoldAdapters;
+
+    let mut wide = on_primary_and_spare("grant-clock-after-scan", &[], false);
+    let scanned = std::rc::Rc::new(std::cell::Cell::new(false));
+    wide.run.capacity_client = Box::new(ScanMovesTheClock {
+        builtin: test_support::holding(
+            [
+                (
+                    "primary".to_owned(),
+                    Some("2026-11-11T05:30:00Z".to_owned()),
+                ),
+                ("spare".to_owned(), Some("2026-11-11T03:01:00Z".to_owned())),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        scanned: std::rc::Rc::clone(&scanned),
+    });
+    wide.env.adapters = std::sync::Arc::new(ScaffoldAdapters::new());
+    let mut hooks = wide.env.hooks();
+    let clock = MovedByTheScan(std::rc::Rc::clone(&scanned));
+    let progress = {
+        let seams = RunSeams {
+            clock: &clock,
+            ..wide.env.seams()
+        };
+        wide.run.step(&seams, &mut hooks).expect("a step")
+    };
+    assert!(
+        scanned.get(),
+        "the attempt's grant asked the run's client for its scan: {progress:?}"
+    );
+    assert_eq!(
+        pools_of_attempts(&wide),
+        [Some("spare".to_owned())],
+        "`primary` is held to 05:30 and `spare` to 03:01, and the scan moves the clock from \
+         03:02:59 to 03:03:00, two minutes past `spare`'s reset. The grant judges at the clock \
+         read after the scan, so the attempt starts on `spare`: {progress:?}"
+    );
+}
+
+#[test]
+fn a_pool_the_installed_client_holds_is_passed_over_on_a_log_holding_none() {
+    use crate::engine::topology::scaffold::{ScaffoldAdapters, WideTask};
+
+    let mut wide = on_two_claude_max_pools(
+        "grant-installed-holds",
+        &[WideTask::independent("alpha")],
+        &[],
+        &[],
+    );
+    assert!(
+        pools_exhausted(&wide).is_empty(),
+        "the log holds no pool exhausted"
+    );
+    wide.run.capacity_client =
+        test_support::holding([signal("2026-11-11T05:30:00Z")].into_iter().collect());
+    let mut hooks = wide.env.hooks();
+    let progress = step_answered_by(&mut wide, ScaffoldAdapters::new(), &mut hooks);
+    assert_eq!(
+        attempts_started(&wide, TaskKey(0))
+            .iter()
+            .map(|attempt| attempt.pool.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("claude-max-2")],
+        "the run's own client holds `claude-max`, so the attempt starts on the agent's second \
+         pool, though no event in the log holds the first: {progress:?}"
+    );
+}
+
+/// The scaffold's `plans`, with each agent [`AttemptPlans::pools_for`] is
+/// asked for listed in `asked`.
+struct AskedForPools<'a> {
+    plans: &'a dyn AttemptPlans,
+    asked: std::cell::RefCell<Vec<String>>,
+}
+
+impl AttemptPlans for AskedForPools<'_> {
+    fn inputs(
+        &self,
+        request: &crate::engine::topology::attempt::InputsRequest<'_>,
+    ) -> Result<crate::engine::topology::attempt::ReviewInputs, UpstrokeError> {
+        self.plans.inputs(request)
+    }
+
+    fn pool_for(&self, agent: &str) -> Option<String> {
+        self.plans.pool_for(agent)
+    }
+
+    fn pools_for(&self, agent: &str) -> Vec<String> {
+        self.asked.borrow_mut().push(agent.to_owned());
+        self.plans.pools_for(agent)
+    }
+
+    fn plan(
+        &self,
+        request: &crate::engine::topology::attempt::PlanRequest<'_>,
+    ) -> Result<crate::engine::topology::attempt::AttemptPlan, UpstrokeError> {
+        self.plans.plan(request)
+    }
+
+    fn verification(
+        &self,
+        request: &crate::engine::topology::attempt::VerificationRequest<'_>,
+    ) -> Result<crate::engine::topology::attempt::VerificationPlan, UpstrokeError> {
+        self.plans.verification(request)
+    }
+}
+
+#[test]
+fn a_reviewers_limit_never_calls_the_failovers_candidates() {
+    use crate::engine::topology::scaffold::{
+        AGENT, REVIEW_AGENT, RecordingRunner, ScaffoldAdapters, Wide, WidePlans, WideTask,
+        wide_responder,
+    };
+    use crate::ladder::{FailureKind, FailureOrigin};
+
+    let tasks = [WideTask::independent("alpha")];
+    let mut wide = Wide::started_with(
+        "reviewer-limit-failover-unasked",
+        &tasks,
+        1,
+        WidePlans {
+            reviewers: 2,
+            pools: vec![
+                (AGENT, Some("claude-max".to_owned())),
+                (AGENT, Some("claude-max-2".to_owned())),
+                (REVIEW_AGENT, Some("copilot-pool".to_owned())),
+                (REVIEW_AGENT, Some("copilot-pool-2".to_owned())),
+            ],
+            ..WidePlans::default()
+        },
+        RecordingRunner::new().answering(wide_responder(&tasks, &[])),
+    );
+    wide.env.adapters = std::sync::Arc::new(ScaffoldAdapters::rate_limiting_the_second_reviewer());
+    let mut hooks = wide.env.hooks();
+    let (progress, asked) = {
+        let seams = wide.env.seams();
+        let plans = AskedForPools {
+            plans: seams.plans,
+            asked: std::cell::RefCell::default(),
+        };
+        let seams = RunSeams {
+            clock: &RunClock,
+            plans: &plans,
+            ..seams
+        };
+        let progress = wide.run.step(&seams, &mut hooks).expect("a step");
+        (progress, plans.asked.into_inner())
+    };
+    assert_eq!(
+        deferral_of(&wide, TaskKey(0)),
+        (TaskState::Deferred, 1),
+        "the second reviewer's limit defers the task: {progress:?}"
+    );
+    assert_eq!(
+        asked,
+        [AGENT],
+        "the worker's pools are asked for once, by the grant the attempt started on, and not \
+         again for a failover a reviewer's limit never takes: {progress:?}"
+    );
+
+    let record = last_settled_record(&wide.run.handle.events, TaskKey(0))
+        .expect("the attempt settled")
+        .clone();
+    let recorded = record.failure.clone().expect("the attempt failed");
+    assert_eq!(
+        (recorded.kind, recorded.origin),
+        (FailureKind::RateLimited, FailureOrigin::Reviewer),
+        "{record:?}"
+    );
+    let failure =
+        crate::ladder::AttemptFailure::new(recorded.kind, recorded.reason).from_reviewer();
+    let called = std::cell::Cell::new(false);
+    let candidates = || {
+        called.set(true);
+        vec!["claude-max".to_owned(), "claude-max-2".to_owned()]
+    };
+    assert!(
+        !wide
+            .run
+            .capacity_client
+            .fails_over(&failure, &record, &candidates),
+        "a reviewer's limit does not fail over"
+    );
+    assert!(
+        !called.get(),
+        "the run's client answered a reviewer's limit without calling `candidates`"
+    );
 }
 
 #[test]

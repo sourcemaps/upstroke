@@ -1835,12 +1835,11 @@ impl TopologyRun {
         let len = self.handle.fold.registry().map_or(0, |registry| {
             u32::try_from(registry.len()).unwrap_or(u32::MAX)
         });
-        let limits: Vec<DeferredLimit<'_>> = (0..len)
+        let mut limits = (0..len)
             .map(TaskKey)
-            .filter_map(|key| self.deferred_limit(key, plans))
-            .collect();
+            .filter_map(|key| self.deferred_limit(key, plans));
         self.capacity_client
-            .awaited_reset(&limits, &self.handle.events, now_unix)
+            .awaited_reset(&mut limits, &self.handle.events, now_unix)
     }
 
     fn deferred_limit(&self, key: TaskKey, plans: &dyn AttemptPlans) -> Option<DeferredLimit<'_>> {
@@ -2555,7 +2554,7 @@ impl TopologyRun {
         } else {
             self.capacity_client.grant(
                 &seams.plans.pools_for(&binding.agent),
-                &self.handle.events,
+                &self.capacity_client.held_unspent(&self.handle.events),
                 unix_seconds(seams.clock),
             )
         };
@@ -2746,7 +2745,7 @@ impl TopologyRun {
         plans: &dyn AttemptPlans,
     ) -> bool {
         self.capacity_client
-            .fails_over(failure, record, &plans.pools_for(agent))
+            .fails_over(failure, record, &|| plans.pools_for(agent))
     }
 
     fn judged_tree(
