@@ -3007,7 +3007,10 @@ Docker-stub test in `src/runner/container/tests.rs`, and one Docker-stub test in
 `src/runner/container/exec/tests.rs`, recorded as finding
 `PR368-WRITER-HELPER-UNBOUNDED-CALLERS`.
 
-Nothing fails if the stand-in is written by `fs::write` again. The
+If the stand-in is written by `fs::write` again, the race this repair removes
+is possible again and the test can fail intermittently with "Text file busy",
+as it did twice in CI; no test in this tree fails deterministically, because
+the window can only be reached by racing. The
 inherited-writer technique of `runner::host::tests` needs a fork taken while the
 writer's descriptor is open. `fs::write` opens, writes and closes a regular file
 in one call. A write to a regular file can block when the device has to act, and
