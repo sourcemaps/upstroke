@@ -176,3 +176,18 @@ jobs:
             "$RUNNER_TEMP/findings/range-findings" \
             "$RUNNER_TEMP/changed/changed-paths" \
             "$RUNNER_TEMP/changed/added-findings"
+
+      # No commit this pull request adds may credit Claude: not as author or
+      # committer, not in a Co-Authored-By: or Claude-Session: trailer, not in a
+      # "Generated with Claude Code" footer. The owner's direction of 2026-11-25,
+      # recorded at .github/master-rewrite-2026-11-25.md. The commits judged are
+      # the pull request's own, bounded by every merge base, so master's older
+      # history is never judged; .github/scripts/validate-pr-commits.sh argues
+      # each rule. The head is the pull request's own head on both triggers, read
+      # from the API on a queue entry, as the branch step above explains.
+      - name: Refuse commits that credit Claude
+        shell: bash
+        env:
+          TARGET_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          bash .github/scripts/validate-pr-commits.sh "$TARGET_SHA" "$(tr -d '[:space:]' < "$RUNNER_TEMP/pr-head")"
