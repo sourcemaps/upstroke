@@ -1307,7 +1307,7 @@ fn the_fifo_writer_poll_answers_by_its_deadline_whatever_the_reads_say() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
     use std::os::unix::ffi::OsStrExt;
@@ -1356,8 +1356,14 @@ fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
     }
     let mut tree = ProcessTree::spawn(&mut command, &mut NoHooks).expect("spawn a group leader");
     let pgid = i32::try_from(tree.child.id()).expect("pid fits");
-    let published = readiness::await_signal(&ready, &mut tree.child, Duration::from_secs(10))
-        .or_fail("the grandchild never started");
+    let waited = readiness::await_signal(&ready, &mut tree.child, Duration::from_secs(10));
+    let published = match waited {
+        readiness::Waited::Ready(fields) => fields,
+        unready => {
+            let _ = std::fs::remove_file(&fifo);
+            unready.or_fail("the grandchild never started")
+        }
+    };
     let [marker, holder] = published.as_slice() else {
         panic!("the marker became visible with its content, not before it: {published:?}");
     };
@@ -1397,11 +1403,6 @@ fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
         &mut |buffer| writers.read(buffer),
         &mut Instant::now,
     );
-    // SAFETY: a negative pid names the group; this is cleanup for the
-    // failing case and a no-op for the passing one.
-    unsafe {
-        let _ = libc::kill(-pgid, libc::SIGKILL);
-    }
     drop(writers);
     drop(tree);
     assert!(

@@ -571,17 +571,37 @@ nobody else: the only processes that can hold it are that grandchild
 and what it starts. This process opens only the reading end, and a copy
 of a reading end held elsewhere keeps no EOF back.
 
+**No cleanup by group number once `kill_tree` has returned.** The body
+used to end with an unconditional `kill(-pgid, SIGKILL)`, after the
+poll, as cleanup for the failing case. By then `kill_tree` has reaped
+the leader, so `pgid` is only a number: once the group has no member
+left the system is free to issue it again, and a signal sent to it is
+not known to reach this fixture. That call is gone, and no signal
+replaces it. The fixture bounds its own lifetime instead. Once readiness
+is published every member is in a `sleep 60` or about to start one, so a
+member that a failing `kill_tree` left behind exits by itself within
+about a minute. A failure before `kill_tree` signals nothing either. The
+same minute bounds the group, though the leader then stays an unreaped
+zombie until the test binary exits. What cleanup remains acts on things
+this test still owns: the fifo's reading end, `tree` (whose leader
+`kill_tree` has already reaped), and the scratch guard.
+
+**Linux and macOS only.** The gate is
+`cfg(any(target_os = "linux", target_os = "macos"))`, not `cfg(unix)`.
+`test-linux` and `test-macos` run it natively, and `lint` and
+`lint (macos)` check it with Clippy. No CI leg builds for any other
+Unix.
+
 **What the recorded failures do and do not establish.**
 `findings/P2_correctness_202609131200_the-macos-kill-tree-settle-fingerprint.md`
-records this test's assertion failing on hosted macOS. That assertion
-established only that EOF was not observed by the five-second cutoff,
-and the output did not record the last errno: the old helper answered
-"not gone" for `EAGAIN`, `EINTR` and every other error alike, so the
-sightings show neither that a writer was still open nor which process
-held one. The fifo does not answer them either. The test keeps the
-stderr oracle's deadline and assertion, so a failure here still says
-only that much; what the fifo adds is that the writer such a failure is
-about can only be the fixture's. The finding stays open.
+records this test's assertion failing on hosted macOS. What those logs
+carry is the assertion's message, with no errno and no pid. They
+establish that the poll did not report the writers gone by its
+five-second cutoff. They do not establish why, whether a writer was
+still open, or which process held one. Neither the fifo nor the removal
+of the group-number cleanup answers those questions. The test keeps the
+original deadline and assertion, so a failure here still says only that
+much. The finding stays open.
 
 ## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `let parent = std::env::temp_dir();`
 
@@ -606,11 +626,22 @@ the path, and a path that is created and then filled is observable
 before the state it stands for (CODING_STANDARDS.md §12). The record
 carries the grandchild's pid as its second field.
 
-## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `let published = readiness::await_signal(&ready, &mut tree.child, Duration::from_secs(10))`
+## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `let waited = readiness::await_signal(&ready, &mut tree.child, Duration::from_secs(10));`
 
 Producer-aware: the direct child is the only liveness fact a file
 signal has, and a fixture whose `sh` never started would otherwise
 have spent the whole bound before saying so.
+
+## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `let _ = std::fs::remove_file(&fifo);`
+
+If the wait ends any other way, the fifo is unlinked before the panic
+unwinds through its reading end. Otherwise a grandchild that has not yet
+reached its `exec 3>` could open the fifo after the last reader has
+closed. An open for writing without `O_NONBLOCK` waits for a reader, and
+none would ever come, so that shell would outlive every bound this
+fixture sets. With the path gone, a later open fails and the shell's
+`&&` chain stops there. An open that wins the race against the unlink
+still finds the reading end open and returns at once.
 
 ## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `let holders_group = unsafe { libc::getpgid(holder) };`
 
