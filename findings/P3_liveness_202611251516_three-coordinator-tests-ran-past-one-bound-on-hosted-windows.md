@@ -40,11 +40,12 @@ At `50c11ded`, in `src/engine/topology/coordinator.rs`:
 
 - `f_bounded_case` (line 25873) bounds each case of a test on its own.
 
-## The sighting
+## The sightings
 
 | run | event | pull request | head | created |
 |---|---|---|---|---|
 | `45633405997` | `pull_request` | #428 | `4a3e2030` | 2026-11-25T14:22:49Z |
+| `45642925560` | `pull_request` | #427 | `498c09a8` | 2026-11-25T15:14:33Z |
 
 Both jobs checked out, at line 109:
 
@@ -81,6 +82,28 @@ Job `139272354772`, `test (windows-latest, 4 of 22)`, image version `20261116.31
 
 #428's diff from its base is six files under `docs/internals/agent/`.
 
+Run `45642925560` (#427 at `498c09a8`), job `139306121355`, `test (windows-latest, 4 of 22)`, image version
+`20261123.321.1` (line 18), log SHA-256 `08b41b91bd15c527691ac97e95e14e994e9f63d3fcf8e137e5ce75fa514be270`:
+
+- Line 109, the checkout:
+
+      HEAD is now at 16a781d Merge 498c09a83bac3a5cfed0bb6b345e9389508973f4 into 50c11ded63e3d4e5ea87b07d3fc25caff0c46bd3
+
+- Line 380:
+
+      a_verification_refused_after_its_passes_were_charged_records_them_under_o14b ... FAILED <120.885s>
+
+- Lines 485 and 486: it panicked at `src\engine\topology\coordinator.rs:11345:64` with
+  `f-o14b did not end within 120s: ...`.
+- Line 493:
+
+      test result: FAILED. 88 passed; 1 failed; 4 ignored; 0 measured; 3821 filtered out; finished in 262.90s
+
+#427's diff from its base is `docs/internals/agent/proc.md`, `src/agent/proc.rs`, `src/workspace_manager/fixture.rs`
+and `src/workspace_manager/tests.rs`; its earlier head `2113ba72` passed this test on the same shard in run
+`45615743035`, job `139210548361` (log SHA-256 `1e3e850856fe38c0fba04ca91ae624e1aac5b0107fdfe50fe0d8609fe03c8e4d`,
+line 380, `ok <118.213s>`; line 479, `finished in 248.93s`).
+
 ## The same shards passed
 
 Run `45610806016` (`pull_request`, #428 at `f5a4a13c`) checked out, at line 109:
@@ -109,8 +132,10 @@ logs are not copied here.
 ## What is and is not established
 
 **Established.** Three tests, each running four or eight runs under one 120 s bound, failed at that bound in two
-Windows jobs of one run. On the same shards one run earlier they passed in 74.5 to 97.4 s. #428's diff is notes
-only.
+Windows jobs of one run, and one of them,
+`a_verification_refused_after_its_passes_were_charged_records_them_under_o14b`, again in a second run.
+On the same shards one run earlier they passed in 74.5 to 97.4 s. #428's diff is notes only, and #427's reaches
+nothing under `src/engine/`.
 
 **Not established:**
 
