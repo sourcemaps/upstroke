@@ -497,8 +497,13 @@ jobs:
       # shard. Nothing is piped into `Tee-Object`: `Start-Process` sends each
       # process's two streams to files in `RUNNER_TEMP`, `WaitForExit()`
       # returns when that process ends, and the script prints the files and
-      # counts from them after the loop. Twice a hosted shard reported its
-      # tests and did not end. In run 43719719561, on 2026-11-15, the 1,669 s shard printed
+      # counts from them after the loop. The build's errors are read in a
+      # `try`, so a failed read cannot replace Cargo's code. A harness the
+      # step starts has the step's environment, without Cargo's run-time
+      # `CARGO_*` variables, its `[env]` table or its `PATH` additions, so a
+      # test reads those through `env!`, at compile time. Twice a hosted
+      # shard reported its tests and did not end. In run 43719719561, on
+      # 2026-11-15, the 1,669 s shard printed
       # every `test result: ok` line 31.6 minutes into its job and ran to the
       # job's limit, where the runner's clean-up killed a test process left
       # over. In run 44277078005, on 2026-11-18, `test (windows-latest, 3 of

@@ -2108,7 +2108,7 @@ on conforming input is one nobody has seen refuse anything -- the rule this
 file states in its own header and the reason `PR5-C-DOCTEST-FIXTURES-NEVER-RAN`
 exists.
 
-The ledger is 152 rows. It was 195 until 2026-11-20, when the guest's
+The ledger is 153 rows. It was 195 until 2026-11-20, when the guest's
 Windows job and the job that picked the suite's home were removed from the
 workflow. The rows written for either, and for the rule that ran exactly
 one of two Windows suite jobs, went with them, and ten were written for what
@@ -2126,7 +2126,9 @@ came with the legs' times, for the build and the harness loop (each under
 `ci_test_windows_hosted_job_complaints` in the workflow notes), and two
 when the loop came to keep each harness's code before it copies the
 harness's outputs: `MUT-TEST-WINDOWS-HOSTED-CODE-KEPT-AFTER-THE-COPIES` and
-`MUT-TEST-WINDOWS-HOSTED-OUTPUT-COPY-UNGUARDED`. The test asserts no
+`MUT-TEST-WINDOWS-HOSTED-OUTPUT-COPY-UNGUARDED`. One more came when the
+step read the build's errors in a `try`:
+`MUT-TEST-WINDOWS-HOSTED-BUILD-ERRORS-READ-UNGUARDED`. The test asserts no
 count. It requires every row to change the document and to be refused under
 the code the row names, and no two rows to share a name; a row taken out of
 the ledger is a claim nothing measures, and that is the diff's to show.
@@ -2466,7 +2468,11 @@ character: every message in the build's file whose `reason` is
 true and which names an `executable`, and a throw when there are none.
 Those three together are the test harnesses and nothing else Cargo built:
 a library and a build script name no executable, and a binary built to be
-run, not tested, is not in a test's profile.
+run, not tested, is not in a test's profile. A `harness = false` `[[test]]`
+or `[[bench]]` target built by `cargo test --no-run` reports `profile.test`
+true with an executable, so the collection selects it: a probe the operator
+ran on 2026-11-23 with Rust 1.97.1 (`evidence/harness-false-probe.json` in
+the operator's kit).
 
 A narrower filter runs some of the leg's harnesses and is judged by a count
 the rest can clear. With the throw gone the lines after it still fail a

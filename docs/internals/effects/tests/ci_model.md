@@ -306,7 +306,12 @@ Between the compiler check and the count is the suite itself, lines 3 to
 6. The harnesses: every message in the build's file whose `reason` is
    `compiler-artifact`, compared case-sensitively, whose profile is a
    test's and which names an executable, in the order Cargo reported them.
-   Nothing else Cargo built answers to all three. An empty list throws.
+   Nothing else Cargo built answers to all three. A `harness = false`
+   `[[test]]` or `[[bench]]` target built by `cargo test --no-run` reports
+   `profile.test` true with an executable, so the collection selects it: a
+   probe the operator ran on 2026-11-23 with Rust 1.97.1
+   (`evidence/harness-false-probe.json` in the operator's kit).
+   An empty list throws.
    With no harness run the lines after it would still fail the leg, on an
    output file that was never written or a count below the floor, but
    without naming the cause; the throw names it: Cargo's messages read
@@ -530,7 +535,7 @@ floors a leg tests. Line 14 is held by the oracle's pin alone.
 Measured, for the selection,
 `MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED` and
 `MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`, each now an edit to line 7.
-Each of the fifteen rows this section names edits the step in the workflow
+Each of the eighteen rows this section names edits the step in the workflow
 alone, and each is refused under `test-windows-hosted-command`.
 
 The step was the guest's first. Until 2026-11-20 this record stood under
