@@ -18,9 +18,10 @@ in shared code. Platform code is verified by running it natively, not by compili
 `cfg` region counts only on a leg that compiles that region, and each kind of claim needs the leg
 that evaluates it:
 
-- A Clippy lint or `#[expect]` is evidenced only by a Clippy leg for that platform. CI runs one on
+- A Clippy lint or `#[expect]` is evidenced only by a Clippy leg for that target. CI runs one for
   each of the three — `lint`, `lint (windows)`, `lint (macos)` — beside `test` and `msrv` matrices
-  that compile all three natively.
+  that compile all three, the `test` legs natively and `msrv` by target triple. `lint (macos)`
+  compiles the macOS target from Linux, since `cfg` follows the target, not the host.
 - A rustc lint is evaluated by any leg that compiles the region, but its `#[expect]` retires itself
   only where warnings are errors. `ci.yml` sets `RUSTFLAGS: -D warnings` at workflow scope, so
   today that is every leg; narrowing it to one job would silently remove the self-retirement
@@ -32,5 +33,5 @@ that evaluates it:
 
 A change that adds platform-gated code, tests or annotations names the leg that evaluates them.
 
-Enforced by: `unsafe_op_in_unsafe_fn` in `[lints]`; the three Clippy legs and native matrices; the
-`cfg` census; review for safety proofs.
+Enforced by: `unsafe_op_in_unsafe_fn` in `[lints]`; the three Clippy legs and the `test` and
+`msrv` matrices; the `cfg` census; review for safety proofs.
