@@ -26498,8 +26498,8 @@ fn assert_a_profile_refusal_created_nothing(
     );
     assert!(
         said.ends_with(
-            ". Nothing was created, spawned or appended; correct the pools file or the \
-             environment and run the same command again."
+            ". No agent CLI was started and no event was appended; correct the pools file or \
+             the environment and run the same command again."
         ),
         "a profile refusal ends in its own closing sentence, true of a fresh run: {said}"
     );
@@ -26532,6 +26532,43 @@ fn assert_a_profile_refusal_created_nothing(
         private_halves,
         Vec::<PathBuf>::new(),
         "no private half, committed or not: {said}"
+    );
+    let absent = |path: &Path| {
+        matches!(
+            fs::symlink_metadata(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+    };
+    let namespace = repo.join(".upstroke");
+    assert!(
+        absent(&namespace),
+        "no run exclusion and no public namespace: {} exists: {said}",
+        namespace.display()
+    );
+    let home = private_root_for(repo);
+    assert!(
+        fs::symlink_metadata(&home).is_ok_and(|metadata| metadata.is_dir()),
+        "the private root is still a directory: {}: {said}",
+        home.display()
+    );
+    let held: Vec<PathBuf> = fs::read_dir(&home)
+        .unwrap_or_else(|error| panic!("list {}: {error}", home.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|error| panic!("read an entry of {}: {error}", home.display()))
+                .path()
+        })
+        .collect();
+    assert_eq!(
+        held,
+        Vec::<PathBuf>::new(),
+        "the private root is an empty directory: no include was published under it: {said}"
+    );
+    let lease = worktree_lock_path(repo);
+    assert!(
+        absent(&lease),
+        "no worktree lease was taken: {} exists: {said}",
+        lease.display()
     );
     said
 }

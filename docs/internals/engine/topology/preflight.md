@@ -173,9 +173,9 @@ profile check and is the pre-flight it was before profiles existed.
 The run's pools, so `certify` can refuse a profile the run cannot honour.
 `entry` passes today's configured pools on the resume path, the same slice
 it hands `profiled`, so the pools the probes are stamped from are the pools
-checked here. A fresh run builds no `RunPreflight`. Its `FreshLeased::run`
-calls [`refuse_unusable_profiles`] itself, over the same slice it hands
-`profiled`. A builder rather than a fifth argument to `new`: a caller with
+checked here. A fresh run builds no `RunPreflight`. Its `prepare_fresh`
+calls [`refuse_unusable_profiles`] itself, before the lease, over the same
+slice `FreshLeased::run` later hands `profiled`. A builder rather than a fifth argument to `new`: a caller with
 no pools, which includes every test fixture that predates profiles, keeps
 the unprofiled pre-flight without having to say so.
 
@@ -242,9 +242,12 @@ Before either probe come the profile checks
 ([`refuse_unusable_profiles`], over the pools `with_pools` gave it and its
 `environment`), which spawn nothing. A profile the run cannot honour is
 refused before the shell probe registers or runs anything, so that refusal
-leaves an empty ledger behind it. With no profiled pool they are skipped. A
-fresh run makes the same call before its creation begins, so a profile is
-refused in the same words on both paths.
+leaves an empty ledger behind it. With no profiled pool they are skipped. On
+a resume this is recovery step (c): under the worktree lease and the run
+lock, after the run exclusion and the include `resume_harness` made, and
+before any probe or recovery event. A fresh run makes the same call in
+`entry`'s `prepare_fresh`, before its lease, so a profile is refused in the
+same words on both paths.
 
 `policy` decides one thing here: whether a profiled pool can run at all,
 which turns on its `kind`. Nothing else in it is consulted, and that is
@@ -286,13 +289,19 @@ rather than an argument here.
 What a profiled run must hold before anything is spawned for it. This is the
 one place the profile refusals are made, and both paths call it:
 
-- **A resume:** `RunPreflight::certify`, first, at recovery step (c). It
-  passes the pools `with_pools` gave it and its `environment`.
-- **A fresh run:** `entry`'s `FreshLeased::run`, right after the runner is
-  profiled and before the startup census, `create_run` or anything else the
-  run creates. It passes today's configured pools, the policy the run was
-  authorized under, and `RunOptions::profile_environment`, which is
-  [`coordinator_environment`] in production.
+- **A resume:** `RunPreflight::certify`, first, at recovery step (c): under
+  the resume's worktree lease and run lock, after its run exclusion and its
+  include, and before any probe or recovery event. It passes the pools
+  `with_pools` gave it and its `environment`.
+- **A fresh run:** `entry`'s `prepare_fresh`, directly after the runner
+  policy is resolved (and, for an explicit private root, authorized), before
+  the worktree lease. A refusal there has published, locked and created
+  nothing: no run exclusion, no include, no lease, nothing of the run;
+  the children it started are the read-only ones of the checks before it
+  (Git's, and a container selection's runtime inspection), and no agent CLI.
+  It passes today's configured pools, the policy the authorization holds, and
+  `RunOptions::profile_environment`, which is [`coordinator_environment`] in
+  production.
 
 So both paths refuse the same profiles in the same words. Only the pools that
 name a profile count (`ProfiledPool::of`). With none, it returns at once,
@@ -335,7 +344,18 @@ first profiled pool. 2, 3 and 4 are made pool by pool, in file order.
 Every one of these refusals ends in [`profile_refused`]'s one closing
 sentence, which is the same on a fresh run and a resume and true of both
 (`engine::tests::a_fresh_schema_4_run_whose_pool_names_a_missing_profile_is_refused_before_anything_is_created`
-and its relative-profile partner hold the two paths' texts equal).
+and its relative-profile partner hold the two paths' texts equal, and with the
+token test they hold that the fresh refusal left no `.upstroke`, an empty
+private root and no worktree lease file).
+
+Until the fresh call moved into `prepare_fresh`, it was `FreshLeased::run`'s,
+right after the runner was profiled. That was before the startup census and
+`create_run`, but after the worktree lease, the run exclusion and the
+include's publication, so a refused fresh run left the lease file,
+`<repo>/.upstroke` and the include behind, and the closing it ended in,
+"Nothing was created, spawned or appended", was false of it; on a resume the
+same sentence followed the resume's own exclusion and include. The closing
+now says only what holds on both paths.
 
 Until the relative check existed, `.` passed check 4 from the coordinator's
 working directory and was then handed to every agent process, each of which
@@ -357,17 +377,25 @@ measured exactly that before the repair: each run completed.
 ## `fn profile_refused(what: &str) -> UpstrokeError {`
 
 The refusal shape every profile refusal takes: `pre-flight: `, what is wrong,
-and one closing sentence of its own — nothing was created, spawned or appended;
-correct the pools file or the environment and run the same command again.
+and one closing sentence of its own — "No agent CLI was started and no event
+was appended; correct the pools file or the environment and run the same
+command again."
 
 Not [`refused`], whose closing describes a probe: what was probed and inside
 which boundary, and that the run is resumable. A profile refusal probes nothing,
-and on a fresh run it precedes `create_run`, so there is no run to resume. The
-sentence is true on both paths: a fresh run has created nothing, and a resume
-refuses at recovery step (c), before its shell probe and before any recovery
-event is appended. It takes no `policy`, so the wording cannot differ between
-the policy a fresh run was authorized under and the one a resume rebuilt from
-the record.
+and on a fresh run it precedes the lease and `create_run`, so there is no run to
+resume. The sentence is true on both paths, and says nothing that holds on one
+alone:
+- a fresh run refuses in `entry`'s `prepare_fresh`, before the lease, with
+  nothing published, locked or created; Git children ran, read-only, and no
+  agent CLI;
+- a resume refuses first in `certify`, under its locks and after its run
+  exclusion and include, before any probe or recovery event.
+
+So "nothing was created", which the closing said until the fresh call moved,
+is not claimed: a resume has made its exclusion and include by then. It takes
+no `policy`, so the wording cannot differ between the policy a fresh run was
+authorized under and the one a resume rebuilt from the record.
 
 ## `fn refused(policy: &RunnerPolicy, what: &str) -> UpstrokeError {`
 

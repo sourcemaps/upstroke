@@ -175,13 +175,23 @@ process environment (`RunPreflight::reading_environment`). `token_set` has
 ## `const PROFILE_REFUSAL_CLOSING: &str = concat!(`
 
 The sentence every profile refusal ends in, on a fresh run and on a resume
-alike: nothing was created, spawned or appended, and the operator corrects the
-pools file or the environment and runs the same command again. It carries the
-full stop that ends the sentence before it, so `ends_with` holds the closing to
-being a sentence of its own. Spelled out here rather than read from
-`profile_refused`, so a change of wording is a change to this test as well. It replaces `refused`'s closing, which said the
-run was resumable: on a fresh run the profile refusal comes before
+alike: no agent CLI was started and no event was appended, and the operator
+corrects the pools file or the environment and runs the same command again. It
+carries the full stop that ends the sentence before it, so `ends_with` holds the
+closing to being a sentence of its own. Spelled out here rather than read from
+`profile_refused`, so a change of wording is a change to this test as well, and
+to `engine::tests`' `assert_a_profile_refusal_created_nothing`, which spells the
+same closing for the fresh path. It replaces `refused`'s closing, which said the
+run was resumable: on a fresh run the profile refusal comes before the lease and
 `create_run`, so there is no run to resume (`PR386-FRESH-REFUSAL-NOT-RESUMABLE`).
+
+It says only what is true where each path refuses: a fresh run in `entry`'s
+`prepare_fresh`, before the lease, with nothing published, locked or created
+(Git children ran, read-only); a resume first in `certify`, under its locks and
+after its run exclusion and include, before any probe or recovery event. Until
+the fresh refusal moved into `prepare_fresh` the closing was "Nothing was
+created, spawned or appended", though the fresh refusal followed the lease, the
+exclusion and the include then, and the resume's follows its own.
 
 ## `fn refused_before_anything_ran(`
 

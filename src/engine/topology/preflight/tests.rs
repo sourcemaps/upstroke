@@ -538,7 +538,7 @@ fn profiled_preflight<'a>(
 }
 
 const PROFILE_REFUSAL_CLOSING: &str = concat!(
-    ". Nothing was created, spawned or appended; ",
+    ". No agent CLI was started and no event was appended; ",
     "correct the pools file or the environment and run the same command again."
 );
 

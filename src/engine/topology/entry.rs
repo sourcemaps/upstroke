@@ -179,6 +179,11 @@ pub fn prepare_fresh(
             }
         }
     };
+    refuse_unusable_profiles(
+        &analysis.config.pools,
+        authorization.runner_policy(),
+        opts.profile_environment(),
+    )?;
     let kind = authorization.runner_policy().kind;
     let image_environment = match kind {
         RunnerKind::Host => None,
@@ -334,11 +339,6 @@ impl FreshLeased {
             )?),
         };
         let runner = profiled(runner, &analysis.config.pools);
-        refuse_unusable_profiles(
-            &analysis.config.pools,
-            checked.runner_policy(),
-            opts.profile_environment(),
-        )?;
         let census = startup_census(
             WorktreeLocked::from(worktree),
             &mut hooks,

@@ -5282,12 +5282,31 @@ reviewer.
 What every fresh-run profile refusal shares, asserted once:
 - it is a `Refused` in the pre-flight's own shape (`pre-flight: `);
 - it ends in the one closing sentence every profile refusal takes, on this path and a resume's
-  alike: nothing was created, spawned or appended, so correct the pools file or the environment
-  and run the same command again;
+  alike: no agent CLI was started and no event was appended, so correct the pools file or the
+  environment and run the same command again;
 - it is not a creation's refusal (`stopped at`), so `create_run` never began;
 - the stub was neither probed nor built;
 - [`assert_a_refused_creation_left_nothing`] holds;
-- the private `runs` directory holds no entry at all, so there is no private half, committed or not.
+- the private `runs` directory holds no entry at all, so there is no private half, committed or not;
+- `<repo>/.upstroke` does not exist, so no run exclusion was made;
+- the private root is still a directory and an empty one, so no include was published under it;
+- the worktree Git directory holds no `upstroke-worktree.lock` ([`worktree_lock_path`]), so no
+  lease was taken.
+
+The last three are what make "before the lease" observable: a fresh run refuses a profile in
+`entry`'s `prepare_fresh`, before the lease, with nothing published, locked or created (the Git
+children of its checks ran, read-only). The fixture's checkout has no `.upstroke`, its private root
+is created empty ([`topology_options`]) and no earlier command took its lease, so each absence is
+this run's. A resume refuses the same profile first in `certify`, under its locks and after its
+exclusion and include, before any probe or recovery event, which is why the closing claims no more
+than the two paths share.
+
+Measured before the move, with these three assertions added and the call still in
+`FreshLeased::run` after the lease, the exclusion and the include (and the closing still the old
+one): all three tests that use this helper failed here and no other test failed. Each panicked at
+the first of the three, naming its checkout's `.upstroke` as existing, so the private root and lease
+assertions were not reached on that source; the refusal message each carried was the one its own
+test pins.
 
 Returns the message for the test's own pins.
 
@@ -5312,6 +5331,11 @@ Measured before the repair, on the source with only this test, its partner and t
 completed, `t1` and `t2` committed with four attempts on `claude-max`, all under a profile directory
 that did not exist.
 
+Measured again before the refusal moved into `prepare_fresh`, with the helper's three absence
+assertions added: the test panicked in the helper, "no run exclusion and no public namespace:
+…/repo/.upstroke exists", after a refusal that named the pool and the missing directory. The run
+had been refused after its lease, its exclusion and its include.
+
 ## `fn a_fresh_schema_4_run_whose_pool_names_a_relative_profile_is_refused_before_anything_is_created()`
 
 A fresh schema-4 run whose one pool's profile is `.` is refused through `run_with` before anything of
@@ -5325,6 +5349,9 @@ the same words, as for the missing profile above.
 `PR386-RELATIVE-PROFILE-CWD`: before the repair the pre-flight read a relative profile from the
 coordinator's working directory, while the host runner starts each agent process in its own task
 directory, so `.` passed the check and named a different directory for every process.
+
+Before the refusal moved into `prepare_fresh`, this test failed in the helper's first absence
+assertion as its partner did: `…/repo/.upstroke` existed beside the relative-profile refusal.
 
 ## `fn a_fresh_schema_4_run_whose_profile_an_oauth_token_would_override_is_refused_before_anything_is_created()`
 
@@ -5340,6 +5367,11 @@ profile, and never the token's value. Two controls follow in the same checkout:
 Measured before the repair, as its partner was: the `expect_err` panicked. The run had been created
 and had completed although the environment it was given held the token: the fresh path read no
 environment and made none of the profile checks.
+
+Before the refusal moved into `prepare_fresh`, this test failed in the helper's first absence
+assertion too, before its controls ran: `…/repo/.upstroke` existed beside the token refusal. The
+controls create runs, so they follow the helper; the helper's absences are those of the refused run
+alone.
 
 ## `const ABSENT_ALTERNATIVE_CLI: &str = "upstroke-absent-codex-alternative-cli";`
 

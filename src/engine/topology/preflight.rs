@@ -252,8 +252,8 @@ pub(super) fn refuse_unusable_profiles(
 fn profile_refused(what: &str) -> UpstrokeError {
     UpstrokeError::Refused {
         message: format!(
-            "pre-flight: {what}. Nothing was created, spawned or appended; correct the pools \
-             file or the environment and run the same command again."
+            "pre-flight: {what}. No agent CLI was started and no event was appended; correct \
+             the pools file or the environment and run the same command again."
         ),
     }
 }
