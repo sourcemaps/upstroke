@@ -8,7 +8,7 @@ reviewed_sha: b0f8fff544bf809f837a74cb1cf6df57899826d3
 location: src/answer.rs:323
 provenance: pre_existing
 first_bad:
-guard: make answer publication create-once — publish through a hard link, or `renameat2(RENAME_NOREPLACE)` where the platform has it with a fallback that refuses rather than replaces, or serialise `upstroke answer` per run under a lock — witnessed by two publishers for one question of which exactly one succeeds and the other is refused
+guard: have each publisher stage into a file of its own (unique per publisher, e.g. named with its process id and a random suffix, created exclusively) rather than the shared `<id>.json.partial`, then make answer publication create-once from that file — publish through a hard link, or `renameat2(RENAME_NOREPLACE)` where the platform has it with a fallback that refuses rather than replaces, or serialise `upstroke answer` per run under a lock — witnessed by two publishers for one question of which exactly one succeeds and the other is refused, and the retained `answers/<id>.json` holds the bytes of the publisher that was told it succeeded
 ---
 
 ## Failure sequence
@@ -52,10 +52,17 @@ answer applied that was not, and the answer file left on disk no longer matches 
 
 ## What the change that takes this up should do
 
-Make publication create-once, so the second publisher is refused instead of replacing the first:
-publish through a hard link from the staged file (which fails if the destination exists), or
-`renameat2(RENAME_NOREPLACE)` where the platform provides it with a fallback that refuses rather
-than replaces; or serialise `upstroke answer` per run under a lock held across the check and the
-publish. The refusal should read as the existing "was already answered" refusal does. Witness it
-with two publishers for one question, started together, of which exactly one succeeds and the
-other is refused, and the retained file holds the one that succeeded.
+First, have each publisher stage into a file of its own instead of the shared
+`answers/<id>.json.partial`: a name unique to the publisher (for instance carrying its process id
+and a random suffix), created exclusively so that two publishers can never write the same staged
+file. Create-once alone is not enough while staging is shared: A stages A, B overwrites the shared
+partial with B, A links or no-replace-renames the partial and reports success for A, B is refused,
+and the retained answer is B's. Then make publication create-once from that per-publisher file, so
+the second publisher is refused instead of replacing the first: publish through a hard link from
+the staged file (which fails if the destination exists), or `renameat2(RENAME_NOREPLACE)` where
+the platform provides it with a fallback that refuses rather than replaces; or serialise
+`upstroke answer` per run under a lock held across the check and the publish. The refusal should
+read as the existing "was already answered" refusal does. Witness it with two publishers for one
+question, started together and each writing a distinct answer, of which exactly one succeeds and
+the other is refused, and the retained `answers/<id>.json` holds the bytes of the publisher that
+was told it succeeded — not merely some answer.
