@@ -39,7 +39,44 @@ pub(super) fn request(secret: Secret) -> UsageRequest {
 pub enum Kind {
     Weekly,
     Session,
+    /// Resets both the session and weekly windows.
+    Full,
+    /// Restores Fable usage, taking precedence over the reported type.
+    Fable,
     Unknown,
+}
+
+fn grant_kind(grant: &Value) -> Kind {
+    if grant.get("gives_back_weekly").and_then(Value::as_bool) == Some(true) {
+        return Kind::Fable;
+    }
+    if let Some(kind) = grant.get("type") {
+        return match kind.as_str() {
+            Some("weekly") => Kind::Weekly,
+            Some("session") => Kind::Session,
+            Some("full") => Kind::Full,
+            _ => Kind::Unknown,
+        };
+    }
+    // Only an absent type permits inference; every cleared window must be known.
+    let Some(clears) = grant.get("clears").and_then(Value::as_array) else {
+        return Kind::Unknown;
+    };
+    let mut session = false;
+    let mut weekly = false;
+    for window in clears {
+        match window.as_str() {
+            Some("five_hour") => session = true,
+            Some("seven_day") => weekly = true,
+            _ => return Kind::Unknown,
+        }
+    }
+    match (session, weekly) {
+        (true, true) => Kind::Full,
+        (true, false) => Kind::Session,
+        (false, true) => Kind::Weekly,
+        (false, false) => Kind::Unknown,
+    }
 }
 
 /// A point-in-time assessment, never a capacity permit or a redemption.
@@ -164,11 +201,7 @@ pub fn parse(response: &UsageResponse, now_unix: u64) -> ResetReport {
             .get("ends_at")
             .and_then(Value::as_str)
             .and_then(crate::capacity::usage::unix_from_rfc3339);
-        let kind = match grant.get("type").and_then(Value::as_str) {
-            Some("weekly") => Kind::Weekly,
-            Some("session") => Kind::Session,
-            _ => Kind::Unknown,
-        };
+        let kind = grant_kind(grant);
         let paused = grant.get("paused").and_then(Value::as_bool);
         let usable_now = grant.get("usable_now").and_then(Value::as_bool);
         let availability = if eligible == Some(false)
@@ -238,6 +271,8 @@ impl ResetReport {
             let kind = match grant.kind {
                 Kind::Weekly => "weekly",
                 Kind::Session => "session",
+                Kind::Full => "full",
+                Kind::Fable => "fable",
                 Kind::Unknown => "unknown",
             };
             let use_by = grant
@@ -306,19 +341,185 @@ mod tests {
         let parsed = single(grant(), json!(true));
         assert_eq!(parsed.resets_left, Some(2));
         assert_eq!(parsed.ends_at_unix, Some(NOW + 3600));
-        assert_eq!(parsed.kind, Kind::Weekly);
+        assert_eq!(parsed.kind, Kind::Fable);
         assert_eq!(parsed.gives_back_weekly, Some(true));
         assert_eq!(parsed.availability, Availability::Usable);
         let report = read(json!({"eligible": true, "grants": [grant()]}));
         let rendered = report.render();
         for expected in [
             "count: 2",
-            "kind: weekly",
+            "kind: fable",
             "use-by: 2026-11-23T13:00:00Z",
             "expiry: not expired",
             "availability: usable",
         ] {
             assert!(rendered.contains(expected), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn known_grant_kinds_and_precedence_reach_the_cli_text() {
+        for (fields, kind, label, gives_back) in [
+            (json!({"type": "full"}), Kind::Full, "full", "unknown"),
+            (
+                json!({"type": "session"}),
+                Kind::Session,
+                "session",
+                "unknown",
+            ),
+            (json!({"type": "weekly"}), Kind::Weekly, "weekly", "unknown"),
+            (
+                json!({"type": "weekly", "gives_back_weekly": false}),
+                Kind::Weekly,
+                "weekly",
+                "no",
+            ),
+            (
+                json!({"type": "weekly", "gives_back_weekly": true}),
+                Kind::Fable,
+                "fable",
+                "yes",
+            ),
+            (
+                json!({"type": "session", "gives_back_weekly": true}),
+                Kind::Fable,
+                "fable",
+                "yes",
+            ),
+            (
+                json!({"type": "full", "gives_back_weekly": true}),
+                Kind::Fable,
+                "fable",
+                "yes",
+            ),
+            (
+                json!({"type": "future", "gives_back_weekly": true}),
+                Kind::Fable,
+                "fable",
+                "yes",
+            ),
+            (
+                json!({"type": null, "clears": [null], "gives_back_weekly": true}),
+                Kind::Fable,
+                "fable",
+                "yes",
+            ),
+            (
+                json!({"gives_back_weekly": true}),
+                Kind::Fable,
+                "fable",
+                "yes",
+            ),
+            (
+                json!({"clears": ["five_hour"]}),
+                Kind::Session,
+                "session",
+                "unknown",
+            ),
+            (
+                json!({"clears": ["seven_day"]}),
+                Kind::Weekly,
+                "weekly",
+                "unknown",
+            ),
+            (
+                json!({"clears": ["five_hour", "seven_day"]}),
+                Kind::Full,
+                "full",
+                "unknown",
+            ),
+            (
+                json!({"clears": ["seven_day", "five_hour", "seven_day"]}),
+                Kind::Full,
+                "full",
+                "unknown",
+            ),
+            (
+                json!({"type": "session", "clears": ["seven_day", null]}),
+                Kind::Session,
+                "session",
+                "unknown",
+            ),
+            (
+                json!({"type": "future"}),
+                Kind::Unknown,
+                "unknown",
+                "unknown",
+            ),
+        ] {
+            let mut wire = grant();
+            let object = wire.as_object_mut().expect("a grant object");
+            object.remove("type");
+            object.remove("gives_back_weekly");
+            // Keep the input fields as a diagnostic snapshot for each assertion.
+            object.extend(
+                fields
+                    .as_object()
+                    .expect("classification fields")
+                    .to_owned(),
+            );
+            let report = read(json!({"eligible": true, "grants": [&wire]}));
+            assert_eq!(single(wire, json!(true)).kind, kind, "{fields}");
+            // This is the complete text printed by capacity --reset-credits claude.
+            assert_eq!(
+                report.render(),
+                format!(
+                    "claude reset credits: advisory inventory; eligible: yes; grants: 1\n\
+                     \x20 count: 2; kind: {label}; use-by: 2026-11-23T13:00:00Z; \
+                     expiry: not expired; availability: usable; \
+                     gives back weekly: {gives_back}; paused: no\n"
+                ),
+                "{fields}"
+            );
+        }
+    }
+
+    #[test]
+    fn untrusted_classification_fields_never_guess_or_leak_into_output() {
+        let hostile = "secret-kind-\u{1b}[2J\nforged output";
+        let mut cases = vec![json!({})];
+        for value in [
+            Value::Null,
+            json!(false),
+            json!(5),
+            json!({}),
+            json!([]),
+            json!(""),
+            json!("full "),
+            json!("fable"),
+            json!("future"),
+            json!(hostile),
+        ] {
+            cases.push(json!({"type": value, "clears": ["five_hour", "seven_day"]}));
+        }
+        for clears in [
+            Value::Null,
+            json!("five_hour"),
+            json!({"five_hour": true}),
+            json!([]),
+            json!(["unknown"]),
+            json!(["five_hour", "seven_day", "unknown"]),
+            json!(["seven_day", null]),
+            json!([false, "five_hour"]),
+            json!(["five_hour", 7]),
+            json!(["seven_day", {}]),
+            json!(["five_hour", ["seven_day"]]),
+            json!(["five_hour", hostile]),
+        ] {
+            cases.push(json!({"clears": clears}));
+        }
+        for value in [Value::Null, json!("true"), json!(1), json!({}), json!([])] {
+            cases.push(json!({"gives_back_weekly": value}));
+        }
+        for wire in cases {
+            let report = read(json!({"eligible": true, "grants": [&wire]}));
+            assert_eq!(single(wire, json!(true)).kind, Kind::Unknown);
+            assert_eq!(
+                report.render(),
+                "claude reset credits: advisory inventory; eligible: yes; grants: 1\n\
+                 \x20 count: unknown; kind: unknown; use-by: unknown; expiry: unknown; \
+                 availability: unknown; gives back weekly: unknown; paused: unknown\n"
+            );
         }
     }
 
