@@ -38,6 +38,9 @@
 # A `findings/` pull request touches findings/ and nothing else, which is what makes its
 # `low` review safe -- the limit is enforced by validate-pr-branch.sh and not here. THE REVIEW OF A
 # `findings/` BRANCH ASKS ONE QUESTION: whether any finding it files duplicates one already filed.
+# The exception is a `findings/` pull request that records a red: each pass also checks every fact
+# the record gives against the logs and the source (MAINTAINING.md; `findings/PROCESS.md`
+# section 10).
 # That is the review's brief rather than an effort level, so it is stated here and carried by the
 # script that writes the brief; `effort_for findings` answers `low` and nothing more.
 #
