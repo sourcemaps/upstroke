@@ -18,21 +18,14 @@ use super::ci_model::{
     CLIPPY_GATE, CiTarget, DEFAULTS_FIELDS, DEFAULTS_RUN_FIELDS, ENCODED_RUSTFLAGS_KEY,
     GATE_JOB_FIELDS, GATE_SCRIPTS, GOLDEN_IMAGE_TOOLCHAIN, HOST_ACCEPTANCE_CAPTURE,
     HOST_ACCEPTANCE_WINDOWS_CAPTURE, KNOWN_SHELLS, MSRV_COMMAND, MSRV_JOB, MSRV_JOB_FIELDS,
-    OPTIONAL_DEFAULTS_FIELD, PICK_WINDOWS_HOME_JOB, PICK_WINDOWS_HOME_JOB_FIELDS,
-    PICK_WINDOWS_HOME_NAME, PICK_WINDOWS_HOME_OUTPUTS, PICK_WINDOWS_HOME_PERMISSIONS,
-    PICK_WINDOWS_HOME_RUNNER, PICK_WINDOWS_HOME_SCRIPT, PICK_WINDOWS_HOME_SHELL,
-    PICK_WINDOWS_HOME_STEP_ENV, PICK_WINDOWS_HOME_STEP_FIELDS, PICK_WINDOWS_HOME_STEP_ID,
-    PICK_WINDOWS_HOME_TIMEOUT_MINUTES, PINNED_ACTIONS, REQUIRED_CONTEXT, RUSTFLAGS_KEY,
-    RUSTFLAGS_VALUE, STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS, TEST_JOB_NAME,
-    TEST_LEGS, TEST_SCRIPTS, TEST_SHARD_COMMAND, TEST_STEP_ENV, TEST_STEP_FIELDS,
-    TEST_TIMEOUT_MINUTES, TEST_WINDOWS_CONDITION, TEST_WINDOWS_HOSTED_CONDITION,
+    OPTIONAL_DEFAULTS_FIELD, PINNED_ACTIONS, REQUIRED_CONTEXT, RUSTFLAGS_KEY, RUSTFLAGS_VALUE,
+    STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS, TEST_JOB_NAME, TEST_LEGS,
+    TEST_SCRIPTS, TEST_SHARD_COMMAND, TEST_STEP_ENV, TEST_STEP_FIELDS, TEST_TIMEOUT_MINUTES,
     TEST_WINDOWS_HOSTED_JOB, TEST_WINDOWS_HOSTED_JOB_FIELDS, TEST_WINDOWS_HOSTED_NAME,
-    TEST_WINDOWS_HOSTED_SCRIPTS, TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES, TEST_WINDOWS_JOB,
-    TEST_WINDOWS_JOB_FIELDS, TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM,
-    TEST_WINDOWS_SCRIPTS, TEST_WINDOWS_STEP_ENV, TEST_WINDOWS_TIMEOUT_MINUTES, TOOLCHAIN_ACTION,
-    TOOLCHAIN_COMPONENTS, WINDOWS_BUILD_WITNESS, WINDOWS_SHARD_FILTERS, WINDOWS_SHARD_FLOORS,
-    WINDOWS_SHARD_WITNESS, WINDOWS_TEST_WITNESS, WORKFLOW_ENV, WORKFLOW_FIELDS,
-    WORKFLOW_PERMISSIONS,
+    TEST_WINDOWS_HOSTED_SCRIPTS, TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES, TEST_WINDOWS_PLATFORM,
+    TEST_WINDOWS_STEP_ENV, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS, WINDOWS_BUILD_WITNESS,
+    WINDOWS_SHARD_FILTERS, WINDOWS_SHARD_FLOORS, WINDOWS_SHARD_WITNESS, WORKFLOW_ENV,
+    WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
 };
 use super::repo_root;
 
@@ -737,7 +730,7 @@ fn test_leg_matrix_complaints(job: &Yaml) -> Vec<String> {
              platform while the others are green -- the whole suite, or one shard of it -- a \
              narrowed one does the same for the tests it lost, a widened one runs another \
              shard's tests a second time, and a runner outside the table is a platform this \
-             job was not given: Windows has two suite jobs of its own."
+             job was not given: Windows has a suite job of its own, `{TEST_WINDOWS_HOSTED_JOB}`."
         ));
     }
     out
@@ -747,210 +740,6 @@ fn installs_a_toolchain(step: &Yaml) -> bool {
     scalar(step, "uses").is_some_and(|uses| uses.starts_with(TOOLCHAIN_ACTION))
 }
 
-pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
-    let mut out = Vec::new();
-    let Some(jobs) = field(doc, "jobs") else {
-        return vec!["[jobs] the workflow declares no `jobs:` mapping".to_owned()];
-    };
-    let Some(job) = field(jobs, TEST_WINDOWS_JOB) else {
-        return vec![format!(
-            "[test-windows-missing] no `{TEST_WINDOWS_JOB}` job, so nothing runs the Windows \
-             suite"
-        )];
-    };
-    let Some(platform) = CI_TARGETS
-        .iter()
-        .find(|target| target.runner == TEST_WINDOWS_PLATFORM)
-    else {
-        return vec![format!(
-            "[test-windows-platform] `{TEST_WINDOWS_PLATFORM}` is not a runner this \
-             contract models, so the shell its steps resolve to is undecidable here"
-        )];
-    };
-
-    for complaint in field_complaints(job, &TEST_WINDOWS_JOB_FIELDS, &OPTIONAL_DEFAULTS_FIELD) {
-        out.push(format!(
-            "[unexpected-job-field] `{TEST_WINDOWS_JOB}` {complaint}"
-        ));
-    }
-    for (index, step) in steps_of(job).iter().enumerate() {
-        let runs_the_suite = scalar(step, "run") == Some(WINDOWS_TEST_WITNESS);
-        let runs_the_capture = scalar(step, "run") == Some(HOST_ACCEPTANCE_WINDOWS_CAPTURE);
-        let runs_the_observation = scalar(step, "run") == Some(CAPABILITY_WINDOWS_OBSERVATION);
-        let allowed: &[&str] = if runs_the_suite || runs_the_capture {
-            &TEST_STEP_FIELDS
-        } else if runs_the_observation {
-            &CAPABILITY_STEP_FIELDS
-        } else {
-            &STEP_FIELDS
-        };
-        let strange = unexpected(&field_names(step), allowed);
-        if !strange.is_empty() {
-            out.push(format!(
-                "[unexpected-step-field] `{TEST_WINDOWS_JOB}` step {index} declares {strange:?}. \
-                 No step of this job may carry an `if:`: on the step that runs the suite it is \
-                 a job that reports success having run nothing for the events it excludes, \
-                 and on any other step it is a script or an action one event executes and \
-                 another never shows a reviewer."
-            ));
-        }
-        if runs_the_suite {
-            out.extend(step_env_complaints(
-                step,
-                &format!("`{TEST_WINDOWS_JOB}` step {index}"),
-                "test-windows-step-env",
-                &TEST_WINDOWS_STEP_ENV,
-            ));
-        }
-        if runs_the_capture {
-            out.extend(step_env_complaints(
-                step,
-                &format!("`{TEST_WINDOWS_JOB}` step {index}"),
-                "test-windows-capture-step-env",
-                &TEST_WINDOWS_STEP_ENV,
-            ));
-        }
-        if runs_the_observation {
-            out.extend(step_env_complaints(
-                step,
-                &format!("`{TEST_WINDOWS_JOB}` step {index}"),
-                "test-windows-capability-step-env",
-                &TEST_WINDOWS_STEP_ENV,
-            ));
-            out.extend(observation_step_complaints(
-                step,
-                &format!("`{TEST_WINDOWS_JOB}` step {index}"),
-                "test-windows-capability-step",
-            ));
-        }
-        if scalar(step, "run").is_some() {
-            out.extend(shell_complaints(
-                doc,
-                job,
-                step,
-                platform,
-                &format!("`{TEST_WINDOWS_JOB}` step {index}"),
-                platform.default_shell,
-            ));
-        }
-    }
-
-    for (index, step) in steps_of(job).iter().enumerate() {
-        if installs_a_toolchain(step) {
-            out.push(format!(
-                "[test-windows-toolchain] `{TEST_WINDOWS_JOB}` step {index} installs a \
-                 toolchain. The guest's image carries the compiler this leg runs, \
-                 `{GOLDEN_IMAGE_TOOLCHAIN}`, on every lane, and re-curation is how it moves; a \
-                 step here selects it from the workflow instead, running `rustup` over a \
-                 frozen image on every build. At the image's own version the suite step's \
-                 compiler check still passes, so this is what refuses it."
-            ));
-        }
-    }
-
-    let expected_labels: BTreeSet<String> = TEST_WINDOWS_LABELS
-        .iter()
-        .copied()
-        .map(str::to_owned)
-        .collect();
-    let labels = field(job, "runs-on").and_then(scalar_set);
-    if labels.as_ref() != Some(&expected_labels) {
-        out.push(format!(
-            "[test-windows-runner] `{TEST_WINDOWS_JOB}` runs on {:?}, not exactly the label \
-             set {expected_labels:?}, which names the curated guest for every lane the picker \
-             leaves with it; a run it sends away runs in `{TEST_WINDOWS_HOSTED_JOB}`. A scalar \
-             is a hosted runner, where no step installs the image's compiler; an expression \
-             routes some event to a machine this contract cannot name -- the merge queue's \
-             route to `{TEST_WINDOWS_PLATFORM}` from 2026-09-16 among them; and a subset of \
-             the labels admits any self-hosted Windows machine the account registers, since \
-             the third label is what names the curated image.",
-            field(job, "runs-on")
-        ));
-    }
-    out.extend(windows_home_complaints(
-        job,
-        TEST_WINDOWS_JOB,
-        "test-windows",
-        TEST_WINDOWS_CONDITION,
-        TEST_WINDOWS_TIMEOUT_MINUTES,
-    ));
-
-    let running = steps_of(job)
-        .iter()
-        .filter(|step| scalar(step, "run") == Some(WINDOWS_TEST_WITNESS))
-        .count();
-    if running != 1 {
-        out.push(format!(
-            "[test-windows-command] `{TEST_WINDOWS_JOB}` has {running} steps whose `run:` is \
-             exactly the pinned suite-and-witness script, not one. Its cargo line is \
-             `{TEST_COMMAND}`; the lines before it refuse to run the suite on any compiler \
-             but the image's `{GOLDEN_IMAGE_TOOLCHAIN}`, and the lines after it are the \
-             count that says the suite executed rather than compiling and being handed to \
-             something that exits zero."
-        ));
-    }
-    out.extend(capture_complaints(
-        job,
-        TEST_WINDOWS_JOB,
-        "test-windows-capture-command",
-        WINDOWS_TEST_WITNESS,
-        HOST_ACCEPTANCE_WINDOWS_CAPTURE,
-    ));
-    out.extend(observation_complaints(
-        job,
-        TEST_WINDOWS_JOB,
-        "test-windows-capability-command",
-        HOST_ACCEPTANCE_WINDOWS_CAPTURE,
-        CAPABILITY_WINDOWS_OBSERVATION,
-    ));
-    out.extend(checkout_complaints(
-        job,
-        TEST_WINDOWS_JOB,
-        "test-windows-checkout",
-    ));
-    out.extend(step_pin_complaints(
-        job,
-        TEST_WINDOWS_JOB,
-        "test-windows-run-script",
-        &TEST_WINDOWS_SCRIPTS,
-    ));
-    out
-}
-
-fn windows_home_complaints(
-    job: &Yaml,
-    named: &str,
-    code: &str,
-    condition: &str,
-    minutes: i64,
-) -> Vec<String> {
-    let mut out = Vec::new();
-    if scalar(job, "needs") != Some(PICK_WINDOWS_HOME_JOB) {
-        out.push(format!(
-            "[{code}-needs] `{named}` needs {:?}, not exactly `{PICK_WINDOWS_HOME_JOB}`. Its \
-             condition reads that job's answer, which is there to read only for a job that \
-             needs it.",
-            field(job, "needs")
-        ));
-    }
-    if scalar(job, "if") != Some(condition) {
-        out.push(format!(
-            "[{code}-condition] `{named}` runs under {:?}, not exactly `{condition}`. Each \
-             Windows suite job runs for one of the picker's two answers, so exactly one of \
-             them runs; a condition that admits both answers runs both, one that admits \
-             neither skips both, and either spends a run the aggregate then fails.",
-            field(job, "if")
-        ));
-    }
-    let found = field(job, "timeout-minutes").and_then(Yaml::as_i64);
-    if found != Some(minutes) {
-        out.push(format!(
-            "[{code}-timeout] `{named}` is bounded at {found:?} minutes, not exactly {minutes}"
-        ));
-    }
-    out
-}
-
 pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
     let mut out = Vec::new();
     let Some(jobs) = field(doc, "jobs") else {
@@ -958,8 +747,8 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
     };
     let Some(job) = field(jobs, TEST_WINDOWS_HOSTED_JOB) else {
         return vec![format!(
-            "[test-windows-hosted-missing] no `{TEST_WINDOWS_HOSTED_JOB}` job, so a run the \
-             picker sends off the guest runs no Windows suite"
+            "[test-windows-hosted-missing] no `{TEST_WINDOWS_HOSTED_JOB}` job, so no job then \
+             runs the Windows suite"
         )];
     };
     let Some(platform) = CI_TARGETS
@@ -991,18 +780,19 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
     if scalar(job, "runs-on") != Some(TEST_WINDOWS_PLATFORM) {
         out.push(format!(
             "[test-windows-hosted-runner] `{TEST_WINDOWS_HOSTED_JOB}` runs on {:?}, not \
-             `{TEST_WINDOWS_PLATFORM}`. It exists for the runs the guest cannot take; on any \
-             other runner it is not the twin the picker sends them to.",
+             `{TEST_WINDOWS_PLATFORM}`. The suite runs on GitHub's runner on every event: a \
+             label set names a self-hosted machine, and an expression a runner this contract \
+             cannot read.",
             field(job, "runs-on")
         ));
     }
-    out.extend(windows_home_complaints(
-        job,
-        TEST_WINDOWS_HOSTED_JOB,
-        "test-windows-hosted",
-        TEST_WINDOWS_HOSTED_CONDITION,
-        TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES,
-    ));
+    let minutes = field(job, "timeout-minutes").and_then(Yaml::as_i64);
+    if minutes != Some(TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES) {
+        out.push(format!(
+            "[test-windows-hosted-timeout] `{TEST_WINDOWS_HOSTED_JOB}` is bounded at {minutes:?} \
+             minutes, not exactly {TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES}"
+        ));
+    }
     out.extend(windows_shard_matrix_complaints(job));
 
     for (index, step) in steps_of(job).iter().enumerate() {
@@ -1021,7 +811,10 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
         if !strange.is_empty() {
             out.push(format!(
                 "[unexpected-step-field] {named} declares {strange:?}. No step of this job may \
-                 carry an `if:`, for the reason no step of the guest's job may."
+                 carry an `if:`: on the step that runs the suite it is a job that reports \
+                 success having run nothing for the events it excludes, and on any other step \
+                 it is a script or an action one event executes and the pull-request build \
+                 never shows."
             ));
         }
         if runs_the_suite {
@@ -1078,8 +871,8 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
              only if its `rustup default` took. The cargo line hands libtest the leg's \
              `matrix.tests`, without which every leg runs the whole suite. The lines after it \
              are the count of passing tests against the leg's `matrix.floor`, without which a \
-             shard that compiled and executed nothing is green here as the suite would be on \
-             the guest."
+             shard that compiled and executed nothing is green here as a whole suite that \
+             executed nothing would be."
         ));
     }
     out.extend(capture_complaints(
@@ -1121,16 +914,17 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
         if selected != Some(GOLDEN_IMAGE_TOOLCHAIN) {
             out.push(format!(
                 "[test-windows-hosted-toolchain] `{TEST_WINDOWS_HOSTED_JOB}` step {index} \
-                 installs toolchain {selected:?}, not `{GOLDEN_IMAGE_TOOLCHAIN}`, the guest's \
-                 image's. The twin runs the suite only when the guest is busy, so any other \
-                 compiler here makes a test whose outcome depends on the compiler -- a \
-                 version-gated test, a std behaviour change, a new lint in test code under \
-                 `-D warnings` -- pass or fail according to how busy the guest was. `stable` \
-                 floats ahead of the image and an older version omits what the image's \
-                 compiler enables; the pin keeps the two homes one compiler. With the suite \
-                 step intact its compiler questions throw on every run sent here, so this is \
-                 the drift between the two places the version is written, refused before it \
-                 is pushed."
+                 installs toolchain {selected:?}, not `{GOLDEN_IMAGE_TOOLCHAIN}`, the compiler \
+                 the guest's image carried when the guest was retired. The pin is kept so that \
+                 the suite's compiler moves by an edit -- the install, the two lines of the \
+                 suite step that refuse any other compiler and this contract's constant, \
+                 together -- and not with GitHub's stable: under `stable` a test whose outcome \
+                 depends on the compiler -- a version-gated test, a std behaviour change, a new \
+                 lint in test code under `-D warnings` -- moves with GitHub's image, and \
+                 `lint (windows)` already compiles, code-generates and links the tree on \
+                 current stable on every event. With the suite step intact its compiler \
+                 questions throw on every run, so this is the drift between the two places \
+                 the workflow writes the version, refused before it is pushed."
             ));
         }
     }
@@ -1138,12 +932,13 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
         if scalar(step, "uses").is_some_and(|uses| uses.starts_with(CACHE_ACTION)) {
             out.push(format!(
                 "[test-windows-hosted-cache] `{TEST_WINDOWS_HOSTED_JOB}` step {index} restores and \
-                 saves a cargo cache. A run reads caches from its own ref or the default branch: \
-                 a merge-queue entry's ref is a fresh `gh-readonly-queue/` branch, and `master` \
-                 saves a twin cache only on a push the picker itself sent here, so nearly every \
-                 run starts cold and then uploads, inside its \
-                 {TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES} minutes, a cache nothing later reads -- \
-                 the reason the hosted merge-queue lane carried none."
+                 saves a cargo cache. The job carries none. Until 2026-11-20 the reason was that \
+                 `master` saved a twin cache only on a push the picker sent here, so nearly \
+                 every run would upload a cache nothing later read. Every push to `master` now \
+                 runs these legs, so `master` would save one that pull requests and queue \
+                 entries could restore. Whether that pays inside a leg's \
+                 {TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES} minutes is not measured, and adding a \
+                 cache step is a change of its own, made together with this refusal."
             ));
         }
     }
@@ -1545,181 +1340,24 @@ fn workflow_permissions_complaints(doc: &Yaml) -> Vec<String> {
         "[workflow-permissions] the workflow's `permissions:` is {found:#?}, not exactly \
          {expected:#?}. `write-all`, or a scalar this contract cannot read as the pinned \
          mapping, hands every step a token a candidate's build scripts and tests can push \
-         with -- and the guest's destruction does not recall a push."
+         with -- and the runner's destruction after the job recalls nothing."
     )]
 }
 
-fn pinned_map(pinned: &[(&str, &str)]) -> BTreeMap<String, String> {
-    pinned
-        .iter()
-        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-        .collect()
-}
-
-pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {
+fn job_permissions_complaints(doc: &Yaml) -> Vec<String> {
     let mut out = Vec::new();
     let Some(jobs) = field(doc, "jobs") else {
-        return vec!["[jobs] the workflow declares no `jobs:` mapping".to_owned()];
+        return out;
     };
-
     for name in field_names(jobs) {
-        if name == PICK_WINDOWS_HOME_JOB {
-            continue;
-        }
         if field(jobs, &name).is_some_and(|job| field(job, "permissions").is_some()) {
             out.push(format!(
-                "[job-permissions] `{name}` declares its own `permissions:`. One job widens the \
-                 workflow's token, `{PICK_WINDOWS_HOME_JOB}`, by one read scope and with no \
-                 checkout; a block on any other job hands a job that runs the candidate's build \
-                 scripts and tests whatever the block names."
+                "[job-permissions] `{name}` declares its own `permissions:`. No job of this \
+                 workflow declares one: a block on a job replaces the workflow's for that job, \
+                 and hands whatever it names to a job that runs the candidate's build scripts \
+                 and tests."
             ));
         }
-    }
-
-    let counted = field(jobs, TEST_WINDOWS_JOB).and_then(|job| scalar(job, "name"));
-    if counted != Some(TEST_WINDOWS_NAME) {
-        out.push(format!(
-            "[pick-windows-home-counts] `{TEST_WINDOWS_JOB}` is named {counted:?}, not \
-             `{TEST_WINDOWS_NAME}`. The API lists a job by its `name:`, and that is the name \
-             `{PICK_WINDOWS_HOME_JOB}` counts: under any other the queue for the guest reads as \
-             empty whatever is waiting, and no run ever leaves a busy guest."
-        ));
-    }
-
-    let Some(job) = field(jobs, PICK_WINDOWS_HOME_JOB) else {
-        out.push(format!(
-            "[pick-windows-home-missing] no `{PICK_WINDOWS_HOME_JOB}` job, so nothing decides \
-             where the Windows suite runs"
-        ));
-        return out;
-    };
-
-    for complaint in field_complaints(job, &PICK_WINDOWS_HOME_JOB_FIELDS, &OPTIONAL_DEFAULTS_FIELD)
-    {
-        out.push(format!(
-            "[unexpected-job-field] `{PICK_WINDOWS_HOME_JOB}` {complaint}. An `if:` skips the \
-             job and `continue-on-error:` reports success over a script that wrote no answer; \
-             either leaves the output empty, which names neither home."
-        ));
-    }
-    if scalar(job, "name") != Some(PICK_WINDOWS_HOME_NAME) {
-        out.push(format!(
-            "[pick-windows-home-name] `{PICK_WINDOWS_HOME_JOB}` is named {:?}, not \
-             `{PICK_WINDOWS_HOME_NAME}`. The API lists a job by its `name:`, and that is the \
-             name every other run's picker reads to tell a run still choosing its home from \
-             one that has chosen: under any other, runs that start together read one another \
-             as having no picker and answer alike again.",
-            scalar(job, "name")
-        ));
-    }
-    if scalar(job, "runs-on") != Some(PICK_WINDOWS_HOME_RUNNER) {
-        out.push(format!(
-            "[pick-windows-home-runner] `{PICK_WINDOWS_HOME_JOB}` runs on {:?}, not \
-             `{PICK_WINDOWS_HOME_RUNNER}`. The question is asked from a hosted runner, whose \
-             image carries `gh` and `jq`: asked from the guest it would wait in the queue it \
-             is there to measure, holding a token that reads other runs.",
-            field(job, "runs-on")
-        ));
-    }
-    let minutes = field(job, "timeout-minutes").and_then(Yaml::as_i64);
-    if minutes != Some(PICK_WINDOWS_HOME_TIMEOUT_MINUTES) {
-        out.push(format!(
-            "[pick-windows-home-timeout] `{PICK_WINDOWS_HOME_JOB}` is bounded at {minutes:?} \
-             minutes, not exactly {PICK_WINDOWS_HOME_TIMEOUT_MINUTES}. The question is a few \
-             API reads; a stalled one holds every job that needs the answer, the required \
-             aggregate among them, for as long as this allows."
-        ));
-    }
-
-    let permissions = field(job, "permissions").and_then(scalar_map);
-    let expected_permissions = pinned_map(&PICK_WINDOWS_HOME_PERMISSIONS);
-    if permissions.as_ref() != Some(&expected_permissions) {
-        out.push(format!(
-            "[pick-windows-home-permissions] `{PICK_WINDOWS_HOME_JOB}`'s `permissions:` is \
-             {permissions:#?}, not exactly {expected_permissions:#?}. Listing other runs' jobs \
-             needs `actions: read` and nothing more; a job-level block replaces the workflow's \
-             for this job, so `actions: write` here can cancel or re-run any run, and a \
-             `contents: write` can push."
-        ));
-    }
-
-    let outputs = field(job, "outputs").and_then(scalar_map);
-    let expected_outputs = pinned_map(&PICK_WINDOWS_HOME_OUTPUTS);
-    if outputs.as_ref() != Some(&expected_outputs) {
-        out.push(format!(
-            "[pick-windows-home-output] `{PICK_WINDOWS_HOME_JOB}`'s `outputs:` is {outputs:#?}, \
-             not exactly {expected_outputs:#?}. The job's consumers read the one name: under \
-             another name, or bound to another step, they read an empty string, which is \
-             neither home."
-        ));
-    }
-
-    let steps = steps_of(job);
-    let [step] = steps else {
-        out.push(format!(
-            "[pick-windows-home-steps] `{PICK_WINDOWS_HOME_JOB}` has {} steps, not exactly one. \
-             The job holds a token that reads other runs and needs no checkout to ask its \
-             question; a second step is a checkout, an action or a script beside that token.",
-            steps.len()
-        ));
-        return out;
-    };
-    for complaint in field_complaints(step, &PICK_WINDOWS_HOME_STEP_FIELDS, &[]) {
-        out.push(format!(
-            "[unexpected-step-field] `{PICK_WINDOWS_HOME_JOB}`'s step {complaint}"
-        ));
-    }
-    if scalar(step, "id") != Some(PICK_WINDOWS_HOME_STEP_ID) {
-        out.push(format!(
-            "[pick-windows-home-output] `{PICK_WINDOWS_HOME_JOB}`'s step has id {:?}, not \
-             `{PICK_WINDOWS_HOME_STEP_ID}`, the step the job's output reads its answer from",
-            scalar(step, "id")
-        ));
-    }
-
-    let env = field(step, "env").and_then(scalar_map);
-    let expected_env = pinned_map(&PICK_WINDOWS_HOME_STEP_ENV);
-    if env.as_ref() != Some(&expected_env) {
-        out.push(format!(
-            "[pick-windows-home-env] `{PICK_WINDOWS_HOME_JOB}`'s step binds {env:#?}, not \
-             exactly {expected_env:#?}. The three repository variables reach the script as \
-             environment, never as text spliced into it, and each name reads its own variable; \
-             any other key is something the script was never written to be handed."
-        ));
-    }
-
-    let script = scalar(step, "run");
-    if script != Some(PICK_WINDOWS_HOME_SCRIPT) {
-        out.push(format!(
-            "[pick-windows-home-script] `{PICK_WINDOWS_HOME_JOB}`'s script is not the pinned \
-             one. `the_windows_home_picker_answers_from_canned_api_pages` executes the \
-             workflow's script against canned API pages, and the pin is what makes those \
-             answers this text's: only a pull request's run is moved by \
-             `WINGUEST_PR_HOSTED`, the queue is counted only under a limit the operator set, \
-             an unreadable API answers `guest`, a run both status queries list is counted \
-             once, every page is read, and runs that start together are told apart by run \
-             id, so a burst neither overfills the guest nor leaves it empty. \
-             Found:\n{script:?}\n\
-             Pinned:\n{PICK_WINDOWS_HOME_SCRIPT:?}"
-        ));
-    }
-
-    match CI_TARGETS
-        .iter()
-        .find(|target| target.runner == PICK_WINDOWS_HOME_RUNNER)
-    {
-        Some(target) => out.extend(shell_complaints(
-            doc,
-            job,
-            step,
-            target,
-            &format!("`{PICK_WINDOWS_HOME_JOB}`'s step"),
-            PICK_WINDOWS_HOME_SHELL,
-        )),
-        None => out.push(format!(
-            "[step-shell] `{PICK_WINDOWS_HOME_RUNNER}` is not a runner this contract models, so \
-             the shell `{PICK_WINDOWS_HOME_JOB}`'s script resolves to is undecidable here"
-        )),
     }
     out
 }
@@ -1755,8 +1393,8 @@ pub(super) fn ci_windows_build_witness_complaints(doc: &Yaml) -> Vec<String> {
              `{TEST_WINDOWS_PLATFORM}` and one of whose steps has `run:` equal to \
              `{WINDOWS_BUILD_WITNESS}`, found {carriers:?}. Without it no hosted leg \
              code-generates or links the Windows tree on current stable: `cargo check` and \
-             Clippy stop before codegen, and the self-hosted leg builds with the image's \
-             toolchain."
+             Clippy stop before codegen, and the Windows suite's shards build with the pinned \
+             `{GOLDEN_IMAGE_TOOLCHAIN}`."
         ));
         return out;
     };
@@ -2136,9 +1774,8 @@ fn rustflags_override_complaints(node: &Yaml, named: &str) -> Vec<String> {
 pub(super) fn workflow_complaints(doc: &Yaml) -> Vec<String> {
     let mut out = ci_gate_complaints(doc);
     out.extend(ci_test_job_complaints(doc));
-    out.extend(ci_test_windows_job_complaints(doc));
     out.extend(ci_test_windows_hosted_job_complaints(doc));
-    out.extend(ci_pick_windows_home_complaints(doc));
+    out.extend(job_permissions_complaints(doc));
     out.extend(ci_windows_build_witness_complaints(doc));
     out.extend(workflow_env_complaints(doc));
     out.extend(workflow_permissions_complaints(doc));
@@ -2300,8 +1937,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "a gate the aggregate does not depend on: branch protection settles green \
                  while the Windows denial gate is red. `PR5D-MSVC-CLIPPY-NEVER-RUN`.",
         job: Some("merge-gate"),
-        anchor: "    needs: [lint, lint-windows, lint-macos, msrv, pick-windows-home, test, test-windows, test-windows-hosted]\n",
-        replacement: "    needs: [lint, lint-macos, msrv, pick-windows-home, test, test-windows, test-windows-hosted]\n",
+        anchor: "    needs: [lint, lint-windows, lint-macos, msrv, test, test-windows-hosted]\n",
+        replacement: "    needs: [lint, lint-macos, msrv, test, test-windows-hosted]\n",
         refused_as: "aggregate-needs",
     },
     WorkflowEscape {
@@ -2322,8 +1959,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  `requires.split_whitespace().any(|word| word == looped)` passes on the \
                  trailing mention.",
         job: Some("merge-gate"),
-        anchor: "          for gate in LINT LINT_WINDOWS LINT_MACOS MSRV PICK_WINDOWS_HOME TEST TEST_WINDOWS TEST_WINDOWS_HOSTED; do\n",
-        replacement: "          for gate in LINT LINT_WINDOWS MSRV PICK_WINDOWS_HOME TEST TEST_WINDOWS TEST_WINDOWS_HOSTED; do : LINT_MACOS\n",
+        anchor: "          for gate in LINT LINT_WINDOWS LINT_MACOS MSRV TEST TEST_WINDOWS_HOSTED; do\n",
+        replacement: "          for gate in LINT LINT_WINDOWS MSRV TEST TEST_WINDOWS_HOSTED; do : LINT_MACOS\n",
         refused_as: "aggregate-loop",
     },
     WorkflowEscape {
@@ -2416,218 +2053,6 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-REHOSTED",
-        escape: "every lane on `windows-latest`, as a scalar `runs-on:`. Every step still \
-                 matches character for character; only the machine changed, and with it the \
-                 wait every pull request has on this leg. Nothing there installs the image's \
-                 compiler, so the suite step's compiler check throws on every build unless \
-                 GitHub's image happens to carry the same version: loud, but a workflow that \
-                 is red by construction is refused here before it is pushed.",
-        job: Some("test-windows"),
-        anchor: "    runs-on: [self-hosted, windows, winguest]\n",
-        replacement: "    runs-on: windows-latest\n",
-        refused_as: "test-windows-runner",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-LABEL-DROPPED",
-        escape: "the self-hosted labels loosened to `[self-hosted, windows]`, which any \
-                 Windows runner the account ever registers satisfies; the curated image is \
-                 named by the label this drops",
-        job: Some("test-windows"),
-        anchor: "    runs-on: [self-hosted, windows, winguest]\n",
-        replacement: "    runs-on: [self-hosted, windows]\n",
-        refused_as: "test-windows-runner",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-QUEUE-REHOSTED",
-        escape: "the merge queue routed back to `windows-latest` by expression, every other \
-                 build left on the guest: the route this job ran from 2026-09-16, under which \
-                 queue entries reached their 45- and then 55-minute timeouts in October 2026 \
-                 before the suite reported a complete result. Nothing in this job installs the \
-                 image's compiler, so the compiler check throws on every entry; restored with \
-                 its install step, it sends every queue entry off the guest by event, whatever \
-                 the guest's load and with no operator having asked. A run does now leave the \
-                 guest, but only by the picker's opt-in answer and into the hosted twin, which \
-                 is pinned whole by its own contract and runs on the guest image's compiler; \
-                 this job's labels stay a literal set, so it cannot be routed by event.",
-        job: Some("test-windows"),
-        anchor: "    runs-on: [self-hosted, windows, winguest]\n",
-        replacement: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
-        refused_as: "test-windows-runner",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-COMMAND-DELETED",
-        escape: "the self-hosted job checks out, configures git, and runs no suite. The \
-                 witness makes this one loud twice over -- the step is off its pin, and a \
-                 step that started no suite has no output to read or count -- but the pin is \
-                 what refuses it here.",
-        job: Some("test-windows"),
-        anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
-        replacement: "",
-        refused_as: "test-windows-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-DISABLED",
-        escape: "a step-level `if: false` on the self-hosted job's test step: the job reports \
-                 success having run nothing. A job-level `if:` is not this escape: the job's \
-                 condition is pinned to the picker's `guest` answer, and a skipped job is \
-                 accepted only beside a hosted twin that succeeded.",
-        job: Some("test-windows"),
-        anchor: "      - name: Test, and witness that the suite ran\n",
-        replacement: "      - name: Test, and witness that the suite ran\n\
-                      \x20       if: false\n",
-        refused_as: "unexpected-step-field",
-    },
-    WorkflowEscape {
-        name: "MUT-WINDOWS-WITNESS-COUNT-DROPPED",
-        escape: "the suite step keeps the pinned command and loses the count, which is the \
-                 shape this leg had before the witness and the shape `master` still has. A \
-                 `target.<triple>.runner` in the guest's Cargo home or environment then hands \
-                 every compiled harness to a wrapper that exits zero, the job is green, and \
-                 nothing on the hosted side can see the machine it happened on.",
-        job: Some("test-windows"),
-        anchor: "          $passed = [int](($log | Select-String -Pattern '^test result: ok\\. (\\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)\n          if ($passed -lt 1700) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n",
-        replacement: "",
-        refused_as: "test-windows-command",
-    },
-    WorkflowEscape {
-        name: "MUT-WINDOWS-WITNESS-COMPILER-CHECK-DROPPED",
-        escape: "the two lines that refuse any compiler but the image's are gone and the suite \
-                 runs on whatever Cargo resolves to on the guest. A `RUSTC` in the guest's \
-                 service environment, a rustup default that moved or a PATH naming another \
-                 install is read by nothing else here, so the suite can run on a compiler the \
-                 image does not carry with every other pin matching -- the image's-compiler \
-                 claim with nothing holding it.",
-        job: Some("test-windows"),
-        anchor: "          $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\n\
-                 \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\n",
-        replacement: "",
-        refused_as: "test-windows-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CACHE-BEFORE-CHECKOUT",
-        escape: "a pinned cache step placed above the checkout, everything else in order: the \
-                 checkout slips to step 1 and a Rust-aware action runs before the tree exists. \
-                 The job installs no toolchain, so no install position stands between the \
-                 two, and the checkout pin -- where the checkout is, not merely what it is \
-                 given -- is the one that refuses it.",
-        job: Some("test-windows"),
-        anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
-        replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
-                      \x20     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
-        refused_as: "test-windows-checkout",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-SECOND-CHECKOUT",
-        escape: "a second, input-free checkout after the identity step. The first still \
-                 matches; the second re-checks out the event's ref, which for this job is the \
-                 same tree today and is whatever the action's default becomes tomorrow, and \
-                 anything the identity step wrote to the tree is gone.",
-        job: Some("test-windows"),
-        anchor: "      - name: Test, and witness that the suite ran\n",
-        replacement: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\
-                      \x20     - name: Test, and witness that the suite ran\n",
-        refused_as: "test-windows-checkout",
-    },
-    WorkflowEscape {
-        name: "MUT-WINDOWS-WITNESS-FLOOR-DROPPED",
-        escape: "the count stays and its floor drops to zero, so a suite that executed no \
-                 test clears it. The step still reads as a witness; it witnesses nothing. \
-                 Only an equality over the whole script sees the number change.",
-        job: Some("test-windows"),
-        anchor: "          if ($passed -lt 1700) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n",
-        replacement: "          if ($passed -lt 0) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n",
-        refused_as: "test-windows-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-INSTALL-UNCONDITIONAL",
-        escape: "an unconditional install of the image's own `1.97.1`, with `clippy`, before \
-                 the suite. Every other pin holds -- the action, its input keys and its \
-                 components value are allowlisted -- and the suite step's compiler check \
-                 passes, because it asks for the version it gets. What changed is who chose \
-                 it: the workflow, through `rustup` over a frozen image on every build, instead \
-                 of the image re-curation moves. The escape this contract refused before the \
-                 job had a hosted lane, refused again now that it has none.",
-        job: Some("test-windows"),
-        anchor: "      - name: Test, and witness that the suite ran\n",
-        replacement: "      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
-                      \x20       with:\n\
-                      \x20         toolchain: 1.97.1\n\
-                      \x20         components: clippy\n\
-                      \x20     - name: Test, and witness that the suite ran\n",
-        refused_as: "test-windows-toolchain",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-HOSTED-INSTALL-RESTORED",
-        escape: "the hosted lane's install step put back as it stood, under \
-                 `github.event_name == 'merge_group'`, with `runs-on:` left on the guest. Every \
-                 merge-queue entry the guest takes then runs `rustup` over the image's compiler \
-                 on the machine pull requests share, and no pull-request build shows the step \
-                 running. \
-                 Refused by the field set too, since no step here may carry an `if:`; the \
-                 toolchain refusal is named because it reads the cause.",
-        job: Some("test-windows"),
-        anchor: "      - name: Configure git identity\n",
-        replacement: "      - name: Install the image's toolchain on the hosted lane\n\
-                      \x20       if: github.event_name == 'merge_group'\n\
-                      \x20       uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
-                      \x20       with:\n\
-                      \x20         toolchain: 1.97.1\n\
-                      \x20         components: clippy\n\n\
-                      \x20     - name: Configure git identity\n",
-        refused_as: "test-windows-toolchain",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-SUITE-ON-ONE-LANE",
-        escape: "the merge-queue condition on the step that runs the suite. A pull request or \
-                 a push checks out, configures git, and reports success having run nothing; \
-                 the queue still runs the suite, so the merge is still guarded, and every pull \
-                 request is green on Windows for free. No step of this job may carry an `if:`.",
-        job: Some("test-windows"),
-        anchor: "      - name: Test, and witness that the suite ran\n",
-        replacement: "      - name: Test, and witness that the suite ran\n\
-                      \x20       if: github.event_name == 'merge_group'\n",
-        refused_as: "unexpected-step-field",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-QUEUE-ONLY-RETARGET",
-        escape: "a `run:` step under the merge-queue condition that fetches `master` and checks \
-                 it out before the suite. The pull-request build, the one a reviewer watches, \
-                 never executes it; the queue tests `master` and lands the candidate. Refused \
-                 twice, by the field set and by the script pin, and the field set is the one \
-                 named here because it refuses the event-conditional script before reading it.",
-        job: Some("test-windows"),
-        anchor: "      - name: Test, and witness that the suite ran\n",
-        replacement: "      - if: github.event_name == 'merge_group'\n\
-                      \x20       run: git fetch origin master && git checkout --detach FETCH_HEAD\n\
-                      \x20     - name: Test, and witness that the suite ran\n",
-        refused_as: "unexpected-step-field",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-RENAMED-AWAY",
-        escape: "the job renamed: the pinned name has no job. Not a false green -- the \
-                 aggregate's derived `needs` refuses the renamed workflow too -- but a lost \
-                 handle: every pin above hangs from this name, so the contract must notice the \
-                 name going before it notices nothing else",
-        job: None,
-        anchor: "\n  test-windows:\n",
-        replacement: "\n  test-windows-renamed:\n",
-        refused_as: "test-windows-missing",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-RUN-RETARGETED",
-        escape: "the identity step of the self-hosted job fetches `master` and checks it out \
-                 detached before the pinned test command runs. Labels, fields, shell, the \
-                 input-free checkout and the exact command all still match; the suite tests \
-                 `master`.",
-        job: Some("test-windows"),
-        anchor: "          git config --global user.name \"upstroke CI\"\n",
-        replacement: "          git config --global user.name \"upstroke CI\"\n\
-                      \x20         git fetch origin master\n\
-                      \x20         git checkout --detach FETCH_HEAD\n",
-        refused_as: "test-windows-run-script",
-    },
-    WorkflowEscape {
         name: "MUT-TEST-RUN-RETARGETED",
         escape: "the same retarget on the hosted test matrix: two platforms test `master` \
                  while every pin still matches",
@@ -2688,18 +2113,6 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         refused_as: "test-step-env",
     },
     WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED",
-        escape: "the self-hosted step no longer declares that the guest's NTFS folds case, so \
-                 the alias test observes its native branch on Windows instead of requiring \
-                 it, with the witness script and every label still matching",
-        job: Some("test-windows"),
-        anchor: "      - name: Test, and witness that the suite ran\n\
-                 \x20       env:\n\
-                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
-        replacement: "      - name: Test, and witness that the suite ran\n",
-        refused_as: "test-windows-step-env",
-    },
-    WorkflowEscape {
         name: "MUT-GATE-RUN-RETARGETED",
         escape: "a step ahead of the Windows Clippy gate and the build witness checks out \
                  `master`; both pinned commands then run against a tree the candidate never \
@@ -2722,10 +2135,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-STEP-USES-UNPINNED",
-        escape: "the self-hosted job's checkout floats to `actions/checkout@v4`: the same \
+        escape: "the Windows suite job's checkout floats to `actions/checkout@v4`: the same \
                  action at whatever commit the tag points to, which is code nobody here \
                  reviewed with a checkout of its own",
-        job: Some("test-windows"),
+        job: Some("test-windows-hosted"),
         anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
         replacement: "      - uses: actions/checkout@v4\n",
         refused_as: "unpinned-action",
@@ -2744,11 +2157,11 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-DEFAULTS-WORKING-DIRECTORY",
         escape: "a job-level default working directory points every `run:` step at another \
-                 crate: the pinned test command tests an empty `ci-pass/` while the labels, \
+                 crate: the pinned test command tests an empty `ci-pass/` while the runner, \
                  shells, checkout and command all still match character for character",
-        job: Some("test-windows"),
-        anchor: "    timeout-minutes: 20\n",
-        replacement: "    timeout-minutes: 20\n\
+        job: Some("test-windows-hosted"),
+        anchor: "    timeout-minutes: 40\n",
+        replacement: "    timeout-minutes: 40\n\
                       \x20   defaults:\n\
                       \x20     run:\n\
                       \x20       working-directory: ci-pass\n",
@@ -2826,18 +2239,6 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                       \x20       with:\n\
                       \x20         ref: master\n",
         refused_as: "gate-checkout",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CHECKOUT-REF",
-        escape: "the Windows job's checkout points at `master`. Every other leg still reads \
-                 the candidate; this job, on every lane, tests a tree the candidate never \
-                 touched, and a Windows-only regression goes green.",
-        job: Some("test-windows"),
-        anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
-        replacement: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\
-                      \x20       with:\n\
-                      \x20         ref: master\n",
-        refused_as: "test-windows-checkout",
     },
     WorkflowEscape {
         name: "MUT-TEST-CHECKOUT-REF",
@@ -3330,96 +2731,6 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         refused_as: "test-capture-step-env",
     },
     WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPTURE-STEP-DELETED",
-        escape: "the guest's capture step is gone: the Windows suite is witnessed and no Windows \
-                 host acceptance record is made",
-        job: Some("test-windows"),
-        anchor: r#"      - name: Capture the native host acceptance record
-        env:
-          UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
-        run: |
-          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | Tee-Object -Variable capture
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not ($capture -ccontains 'test engine::tests::host_acceptance_record ... ok') -or -not ($capture -cmatch '^test result: ok\. 1 passed; 0 failed; 0 ignored; ')) { throw "the capture did not run exactly the one host acceptance test to a pass" }
-          $f = @($capture | Where-Object { $_ -cmatch '^UPSTROKE-HOST-ACCEPTANCE-RECORD ' } | ForEach-Object { ,($_ -split ' ') })
-          $ok = $f.Count -ge 3 -and $f[0].Count -eq 7 -and $f[-1].Count -eq 7 -and $f[0][1] -ceq 'v1' -and $f[0][2] -ceq 'BEGIN' -and $f[-1][1] -ceq 'v1' -and $f[-1][2] -ceq 'END' -and ($f[0][3..6] -join ' ') -ceq ($f[-1][3..6] -join ' ') -and $f[0][4] -ceq "$($f.Count - 2)"
-          for ($k = 1; $ok -and $k -lt $f.Count - 1; $k++) { $ok = $f[$k].Count -eq 5 -and $f[$k][1] -ceq 'v1' -and $f[$k][2] -ceq $f[0][3] -and $f[$k][3] -ceq "$k" -and $f[$k][4].Length -eq $(if ($k -lt $f.Count - 2) { 192 } else { 2 * ([long]$f[0][5] - ([long]$f[0][4] - 1) * 96) }) }
-          if (-not $ok) { throw "the host acceptance record is missing or its framing is incomplete" }
-"#,
-        replacement: "",
-        refused_as: "test-windows-capture-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPTURE-DISABLED",
-        escape: "a step-level `if: false` on the guest's capture: no step of this job may carry \
-                 one, and on this step it is a green Windows leg with no record",
-        job: Some("test-windows"),
-        anchor: "      - name: Capture the native host acceptance record\n",
-        replacement: "      - name: Capture the native host acceptance record\n\
-                      \x20       if: false\n",
-        refused_as: "unexpected-step-field",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPTURE-IGNORED-NOT-RUN",
-        escape: "`--ignored` dropped on the guest: the test is reported ignored and Cargo exits \
-                 zero having run nothing",
-        job: Some("test-windows"),
-        anchor: "          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n",
-        replacement: "          cargo test --all-features --lib engine::tests::host_acceptance_record -- --exact --nocapture | Tee-Object -Variable capture\n",
-        refused_as: "test-windows-capture-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPTURE-EXIT-SWALLOWED",
-        escape: "the explicit propagation of the capture's Cargo exit is gone. A failed Cargo \
-                 whose output still holds a pass line and a frame now fails the step only \
-                 because the runner appends `exit $LASTEXITCODE` and no native command happens \
-                 to follow Cargo: an accident of order the next edit of the script can undo",
-        job: Some("test-windows"),
-        anchor: "          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n\
-                 \x20         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
-        replacement: "          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n",
-        refused_as: "test-windows-capture-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPTURE-ZERO-TESTS-ADMITTED",
-        escape: "the guest's pass-line and `1 passed; 0 failed; 0 ignored` check is gone, so a \
-                 run of no test or of another test is judged by its frame alone",
-        job: Some("test-windows"),
-        anchor: "          if (-not ($capture -ccontains 'test engine::tests::host_acceptance_record ... ok') -or -not ($capture -cmatch '^test result: ok\\. 1 passed; 0 failed; 0 ignored; ')) { throw \"the capture did not run exactly the one host acceptance test to a pass\" }\n",
-        replacement: "",
-        refused_as: "test-windows-capture-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPTURE-FRAMING-UNENFORCED",
-        escape: "the guest still computes the frame check and never acts on it: the last line, \
-                 the only one that throws, is gone, so every frame passes",
-        job: Some("test-windows"),
-        anchor: "          if (-not $ok) { throw \"the host acceptance record is missing or its framing is incomplete\" }\n",
-        replacement: "",
-        refused_as: "test-windows-capture-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPTURE-SEPARATED-FROM-THE-WITNESS",
-        escape: "a pinned cache step between the suite-and-witness step and the capture: the \
-                 guest's record need not come from the harness the witness counted",
-        job: Some("test-windows"),
-        anchor: "      - name: Capture the native host acceptance record\n",
-        replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
-                      \x20     - name: Capture the native host acceptance record\n",
-        refused_as: "test-windows-capture-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPTURE-CASEFOLD-DROPPED",
-        escape: "the guest's capture no longer declares that NTFS folds case, so it runs under an \
-                 environment its suite step did not",
-        job: Some("test-windows"),
-        anchor: "      - name: Capture the native host acceptance record\n\
-                 \x20       env:\n\
-                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
-        replacement: "      - name: Capture the native host acceptance record\n",
-        refused_as: "test-windows-capture-step-env",
-    },
-    WorkflowEscape {
         name: "MUT-TEST-CAPABILITY-STEP-DELETED",
         escape: "the hosted observation step is gone (omitted). Every leg runs its suite and the \
                  host capture, reports success and leaves no container capability record, and \
@@ -3726,354 +3037,6 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         refused_as: "test-capability-step-env",
     },
     WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPABILITY-STEP-DELETED",
-        escape: "the guest's observation step is gone (omitted): the Windows suite is witnessed \
-                 and captured, and no Windows container capability record is made",
-        job: Some("test-windows"),
-        anchor: r##"      - name: Capture the container capability observation
-        timeout-minutes: 4
-        env:
-          UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
-        run: |
-          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not ($capture -ccontains 'test runner::container::tests::container_capability_record ... ok') -or -not ($capture -cmatch '^test result: ok\. 1 passed; 0 failed; 0 ignored; ')) { throw "the observation did not run exactly the one container capability test to a pass" }
-          $f = @($capture | Where-Object { $_ -cmatch '^UPSTROKE-CONTAINER-CAPABILITY-RECORD ' } | ForEach-Object { ,($_ -split ' ') })
-          $ok = $f.Count -ge 3 -and $f[0].Count -eq 7 -and $f[-1].Count -eq 7 -and $f[0][1] -ceq 'v1' -and $f[0][2] -ceq 'BEGIN' -and $f[-1][1] -ceq 'v1' -and $f[-1][2] -ceq 'END' -and ($f[0][3..6] -join ' ') -ceq ($f[-1][3..6] -join ' ') -and $f[0][4] -ceq "$($f.Count - 2)"
-          for ($k = 1; $ok -and $k -lt $f.Count - 1; $k++) { $ok = $f[$k].Count -eq 5 -and $f[$k][1] -ceq 'v1' -and $f[$k][2] -ceq $f[0][3] -and $f[$k][3] -ceq "$k" -and $f[$k][4].Length -eq $(if ($k -lt $f.Count - 2) { 192 } else { 2 * ([long]$f[0][5] - ([long]$f[0][4] - 1) * 96) }) }
-          if (-not $ok) { throw "the container capability record is missing or its framing is incomplete" }
-"##,
-        replacement: "",
-        refused_as: "test-windows-capability-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPABILITY-DISABLED",
-        escape: "a step-level `if: false` on the guest's observation (conditional): no step of \
-                 this job may carry one",
-        job: Some("test-windows"),
-        anchor: "      - name: Capture the container capability observation\n",
-        replacement: "      - name: Capture the container capability observation\n\
-                      \x20       if: false\n",
-        refused_as: "unexpected-step-field",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPABILITY-ABSOLVED",
-        escape: "`continue-on-error` on the guest's observation (failure-swallowing): a failed \
-                 observation ends the step red and the Windows leg green",
-        job: Some("test-windows"),
-        anchor: "      - name: Capture the container capability observation\n",
-        replacement: "      - name: Capture the container capability observation\n\
-                      \x20       continue-on-error: true\n",
-        refused_as: "unexpected-step-field",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPABILITY-IGNORED-NOT-RUN",
-        escape: "`--ignored` dropped on the guest (no-op): the test is reported ignored and Cargo \
-                 exits zero having asked nothing",
-        job: Some("test-windows"),
-        anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n",
-        replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --exact --nocapture | Tee-Object -Variable capture\n",
-        refused_as: "test-windows-capability-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPABILITY-FILTER-MOVED",
-        escape: "the guest's filter names a test that does not exist (filtered): `running 0 \
-                 tests`, exit zero, no record",
-        job: Some("test-windows"),
-        anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n",
-        replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_records -- --ignored --exact --nocapture | Tee-Object -Variable capture\n",
-        refused_as: "test-windows-capability-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPABILITY-EXIT-SWALLOWED",
-        escape: "the explicit propagation of the observation's Cargo exit is gone \
-                 (failure-swallowing): a failed Cargo whose output still holds a pass line and a \
-                 frame fails the step only by an accident of order",
-        job: Some("test-windows"),
-        anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n\
-                 \x20         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
-        replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture\n",
-        refused_as: "test-windows-capability-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPABILITY-ZERO-TESTS-ADMITTED",
-        escape: "the guest's pass-line and `1 passed; 0 failed; 0 ignored` check is gone, so a \
-                 run of no test or of another is judged by its frame alone",
-        job: Some("test-windows"),
-        anchor: "          if (-not ($capture -ccontains 'test runner::container::tests::container_capability_record ... ok') -or -not ($capture -cmatch '^test result: ok\\. 1 passed; 0 failed; 0 ignored; ')) { throw \"the observation did not run exactly the one container capability test to a pass\" }\n",
-        replacement: "",
-        refused_as: "test-windows-capability-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPABILITY-FRAMING-UNENFORCED",
-        escape: "the guest computes the frame check and never acts on it: the line that throws is \
-                 gone, so every frame passes",
-        job: Some("test-windows"),
-        anchor: "          if (-not $ok) { throw \"the container capability record is missing or its framing is incomplete\" }\n",
-        replacement: "",
-        refused_as: "test-windows-capability-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPABILITY-SEPARATED-FROM-THE-CAPTURE",
-        escape: "a pinned cache step between the guest's host capture and its observation \
-                 (misplaced): the record need not come from the harness the witness counted",
-        job: Some("test-windows"),
-        anchor: "      - name: Capture the container capability observation\n",
-        replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
-                      \x20     - name: Capture the container capability observation\n",
-        refused_as: "test-windows-capability-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPABILITY-TIMEOUT-DROPPED",
-        escape: "the guest's 4-minute bound is gone: a stalled question is held by the guest's \
-                 20-minute job, the tightest leg",
-        job: Some("test-windows"),
-        anchor: "        timeout-minutes: 4\n",
-        replacement: "",
-        refused_as: "test-windows-capability-step",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPABILITY-DOCKER-CONTEXT-INJECTED",
-        escape: "the guest's observation gains `DOCKER_CONTEXT` in its admitted `env:`: a \
-                 selector this file chose, not the leg's",
-        job: Some("test-windows"),
-        anchor: "      - name: Capture the container capability observation\n\
-                 \x20       timeout-minutes: 4\n\
-                 \x20       env:\n\
-                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
-        replacement: "      - name: Capture the container capability observation\n\
-                      \x20       timeout-minutes: 4\n\
-                      \x20       env:\n\
-                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n\
-                      \x20         DOCKER_CONTEXT: desktop-linux\n",
-        refused_as: "test-windows-capability-step-env",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-CAPABILITY-CASEFOLD-DROPPED",
-        escape: "the guest's observation no longer declares that NTFS folds case, so it runs \
-                 under an environment its suite step did not",
-        job: Some("test-windows"),
-        anchor: "        timeout-minutes: 4\n\
-                 \x20       env:\n\
-                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
-        replacement: "        timeout-minutes: 4\n",
-        refused_as: "test-windows-capability-step-env",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-OUTPUT-RENAMED",
-        escape: "the answer published under another name. The step still writes `home` and \
-                 the job is green; whatever reads `needs.pick-windows-home.outputs.home` reads \
-                 an empty string, which names neither home.",
-        job: Some("pick-windows-home"),
-        anchor: "      home: ${{ steps.pick.outputs.home }}\n",
-        replacement: "      where: ${{ steps.pick.outputs.home }}\n",
-        refused_as: "pick-windows-home-output",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-UNREADABLE-ANSWERS-HOSTED",
-        escape: "the fallback inverted: an API that cannot be read answers `hosted`. Fields, \
-                 permissions and output all still match, and an API outage or a token that \
-                 lost its scope moves every run off the guest every lane has run on.",
-        job: Some("pick-windows-home"),
-        anchor: "              echo \"The GitHub API could not be read, so the queue for the guest is unknown. A failed question does not move a run off the guest.\"\n",
-        replacement: "              home=hosted\n",
-        refused_as: "pick-windows-home-script",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-COUNTS-BY-DEFAULT",
-        escape: "a default limit of 2 put back by one parameter expansion: `:=` assigns 2 to an \
-                 unset or empty `WINGUEST_QUEUE_LIMIT`, the limit check then passes, and every \
-                 run counts the guest's queue unasked. One build and one queue entry reach it, \
-                 so ordinary concurrency sends runs, merge-queue entries among them, to the \
-                 hosted twin with no variable set -- the routing the operator made opt-in",
-        job: Some("pick-windows-home"),
-        anchor: "          elif [[ ! \"${WINGUEST_QUEUE_LIMIT:-}\" =~ ^0*[1-9][0-9]{0,5}$ ]]; then\n",
-        replacement: "          elif [[ ! \"${WINGUEST_QUEUE_LIMIT:=2}\" =~ ^0*[1-9][0-9]{0,5}$ ]]; then\n",
-        refused_as: "pick-windows-home-script",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-ROUTES-PULL-REQUESTS-BY-DEFAULT",
-        escape: "the pull-request rule loses its test of `WINGUEST_PR_HOSTED`, so the event \
-                 alone routes: every pull request's run goes to the hosted shards with no \
-                 variable set, and clearing the variable brings none back. The step's `env:` \
-                 still binds it and still matches its pin; nothing reads it -- the routing the \
-                 owner made opt-in, on for good",
-        job: Some("pick-windows-home"),
-        anchor: "          elif [[ \"${GITHUB_EVENT_NAME:-}\" == \"pull_request\" && \"${WINGUEST_PR_HOSTED:-}\" == \"1\" ]]; then\n",
-        replacement: "          elif [[ \"${GITHUB_EVENT_NAME:-}\" == \"pull_request\" ]]; then\n",
-        refused_as: "pick-windows-home-script",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-ROUTES-EVERY-EVENT",
-        escape: "the pull-request rule loses its test of the event, so the variable alone \
-                 routes: with `WINGUEST_PR_HOSTED` at `1` a merge-queue entry and a push leave \
-                 the guest as a pull request does. Those are the runs the rule keeps there, a \
-                 change's queue entry being its first run on the guest; with this no run of a \
-                 change is on the guest while the variable is set",
-        job: Some("pick-windows-home"),
-        anchor: "          elif [[ \"${GITHUB_EVENT_NAME:-}\" == \"pull_request\" && \"${WINGUEST_PR_HOSTED:-}\" == \"1\" ]]; then\n",
-        replacement: "          elif [[ \"${WINGUEST_PR_HOSTED:-}\" == \"1\" ]]; then\n",
-        refused_as: "pick-windows-home-script",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-PERMISSION-WIDENED",
-        escape: "`actions: write` where `actions: read` is enough. A job-level block replaces \
-                 the workflow's for that job, so the script's token can cancel or re-run any \
-                 run in the repository.",
-        job: Some("pick-windows-home"),
-        anchor: "      actions: read\n",
-        replacement: "      actions: write\n",
-        refused_as: "pick-windows-home-permissions",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-PERMISSION-ADDED",
-        escape: "a third scope beside the two the question needs: `pull-requests: write` is a \
-                 token that can edit a pull request, handed to a job that only reads",
-        job: Some("pick-windows-home"),
-        anchor: "      actions: read\n",
-        replacement: "      actions: read\n      pull-requests: write\n",
-        refused_as: "pick-windows-home-permissions",
-    },
-    WorkflowEscape {
-        name: "MUT-JOB-PERMISSIONS-ON-THE-GUEST-JOB",
-        escape: "the picker's read scope given to the guest's job too. That job runs the \
-                 candidate's build scripts and tests, so whatever the block names is theirs; \
-                 the field set refuses the key as well, and the permission scan is what names \
-                 the cause.",
-        job: Some("test-windows"),
-        anchor: "    timeout-minutes: 20\n",
-        replacement: "    timeout-minutes: 20\n\
-                      \x20   permissions:\n\
-                      \x20     actions: read\n\
-                      \x20     contents: read\n",
-        refused_as: "job-permissions",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-CONDITIONED",
-        escape: "an `if:` on the picker: on the lanes it excludes the job is skipped and its \
-                 output is empty, which names neither home",
-        job: Some("pick-windows-home"),
-        anchor: "    runs-on: ubuntu-latest\n",
-        replacement: "    runs-on: ubuntu-latest\n    if: github.event_name != 'merge_group'\n",
-        refused_as: "unexpected-job-field",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-SECOND-STEP",
-        escape: "a checkout ahead of the question. The script is unchanged and still matches \
-                 its pin, but the job now holds a token that reads other runs beside the \
-                 candidate's tree, which it never needed",
-        job: Some("pick-windows-home"),
-        anchor: "      - name: Pick where the Windows suite runs\n",
-        replacement: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\
-                      \x20     - name: Pick where the Windows suite runs\n",
-        refused_as: "pick-windows-home-steps",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-ENV-CROSSED",
-        escape: "`WINGUEST_BUSY` bound to the limit's variable. With the limit set to `1` every \
-                 run reads as busy, and with it unset none does, whatever the operator set",
-        job: Some("pick-windows-home"),
-        anchor: "          WINGUEST_BUSY: ${{ vars.WINGUEST_BUSY }}\n",
-        replacement: "          WINGUEST_BUSY: ${{ vars.WINGUEST_QUEUE_LIMIT }}\n",
-        refused_as: "pick-windows-home-env",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-PR-VARIABLE-CROSSED",
-        escape: "`WINGUEST_PR_HOSTED` bound to the busy flag's variable. The script still \
-                 matches its pin and the rule in it is dead: where `WINGUEST_BUSY` is `1` the \
-                 busy test has already answered, and where it is not the rule's variable is not \
-                 `1` either. The owner sets `WINGUEST_PR_HOSTED` and every pull request still \
-                 waits for the guest",
-        job: Some("pick-windows-home"),
-        anchor: "          WINGUEST_PR_HOSTED: ${{ vars.WINGUEST_PR_HOSTED }}\n",
-        replacement: "          WINGUEST_PR_HOSTED: ${{ vars.WINGUEST_BUSY }}\n",
-        refused_as: "pick-windows-home-env",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-COUNTS-A-RUN-TWICE",
-        escape: "the repeats are no longer removed from the two status listings. A run that \
-                 moves from queued to in progress between the two queries is listed by both, \
-                 its jobs are counted twice, and at a limit of 2 one waiting guest job sends \
-                 this run to the hosted runner. The first gap two reviews found in an \
-                 earlier attempt.",
-        job: Some("pick-windows-home"),
-        anchor: "            mapfile -t run_ids < <(sort -u <<<\"$seen\")\n",
-        replacement: "            mapfile -t run_ids <<<\"$seen\"\n",
-        refused_as: "pick-windows-home-script",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-FIRST-PAGE-ONLY",
-        escape: "a run's jobs read from the first page only. A guest job listed after it is \
-                 never counted, so a busy guest reads as free. The second gap two reviews found \
-                 in an earlier attempt.",
-        job: Some("pick-windows-home"),
-        anchor: "              jobs=\"$(gh api --paginate \"repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=latest&per_page=100\")\" || return 1\n",
-        replacement: "              jobs=\"$(gh api \"repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=latest&per_page=100\")\" || return 1\n",
-        refused_as: "pick-windows-home-script",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-LATER-PAGE-FAILURE-IGNORED",
-        escape: "a failed page read as a short one. `gh api --paginate` has already printed \
-                 the pages before the failure, so the jobs on them are counted and the run is \
-                 judged on part of the queue rather than answering `guest`",
-        job: Some("pick-windows-home"),
-        anchor: "              jobs=\"$(gh api --paginate \"repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=latest&per_page=100\")\" || return 1\n",
-        replacement: "              jobs=\"$(gh api --paginate \"repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=latest&per_page=100\")\" || true\n",
-        refused_as: "pick-windows-home-script",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-COUNTS-A-RENAMED-JOB",
-        escape: "the guest's job renamed. Nothing else pins its `name:`, and the picker counts \
-                 jobs by that name, so under any other the guest's queue reads as empty and no \
-                 run ever leaves a busy guest",
-        job: Some("test-windows"),
-        anchor: "    name: test (winguest)\n",
-        replacement: "    name: test (guest)\n",
-        refused_as: "pick-windows-home-counts",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-IGNORES-EARLIER-RUNS-STILL-CHOOSING",
-        escape: "the earlier runs that have not yet shown where their suite goes are no longer \
-                 counted, which is the count this job first had. Runs that start together each \
-                 read a guest nobody holds yet, so at a limit of 1 a whole burst answers \
-                 `guest` and queues on the one machine: `PR375-QUEUE-PICKERS-RACE`",
-        job: Some("pick-windows-home"),
-        anchor: "              if (( BASH_REMATCH[2] == 1 && 10#$id < 10#$GITHUB_RUN_ID )); then ahead=$((ahead + 1)); fi\n",
-        replacement: "",
-        refused_as: "pick-windows-home-script",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-COUNTS-LATER-RUNS-STILL-CHOOSING",
-        escape: "the run-id order dropped, so every run still choosing is counted, the later \
-                 ones too. Two runs that start together then each count the other, and at a \
-                 limit of 1 both answer `hosted` and leave the guest idle",
-        job: Some("pick-windows-home"),
-        anchor: "              if (( BASH_REMATCH[2] == 1 && 10#$id < 10#$GITHUB_RUN_ID )); then ahead=$((ahead + 1)); fi\n",
-        replacement: "              if (( BASH_REMATCH[2] == 1 )); then ahead=$((ahead + 1)); fi\n",
-        refused_as: "pick-windows-home-script",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-HOLDS-A-JOB-ITS-PICKER-HAS-NOT-RELEASED",
-        escape: "a queued guest job counted as holding the guest whatever its own run's picker \
-                 is doing. Where the API lists a job still waiting on its `needs` as `queued`, \
-                 two runs that start together each read the other's job as a held guest, and \
-                 both answer `hosted`",
-        job: Some("pick-windows-home"),
-        anchor: "                | ([$guest[] | select(. == \"in_progress\" or (. == \"queued\" and ($picking | not)))] | length) as $held\n",
-        replacement: "                | ([$guest[] | select(. == \"in_progress\" or . == \"queued\")] | length) as $held\n",
-        refused_as: "pick-windows-home-script",
-    },
-    WorkflowEscape {
-        name: "MUT-PICK-WINDOWS-HOME-RENAMED",
-        escape: "the picker's own job renamed. Its script still matches its pin and reads other \
-                 runs' pickers by the old name, so every run reads as having none: a run still \
-                 choosing is not counted, and runs that start together answer alike again",
-        job: Some("pick-windows-home"),
-        anchor: "    name: pick windows home\n",
-        replacement: "    name: pick the windows home\n",
-        refused_as: "pick-windows-home-name",
-    },
-    WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED",
         escape: "the hosted twin keeps the suite command and loses the count: the line that \
                  sums it, the line that holds it to the shard's floor and the line that prints \
@@ -4109,53 +3072,6 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\n",
         replacement: "",
         refused_as: "test-windows-hosted-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-HOSTED-RUNS-BESIDE-THE-GUEST",
-        escape: "a twin condition that holds whatever the picker answered, so both Windows jobs \
-                 run on every run the guest takes: ten hosted shards spent for nothing, and \
-                 the aggregate red over two green jobs",
-        job: Some("test-windows-hosted"),
-        anchor: "    if: needs.pick-windows-home.outputs.home == 'hosted'\n",
-        replacement: "    if: needs.pick-windows-home.result == 'success'\n",
-        refused_as: "test-windows-hosted-condition",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-RUNS-BESIDE-THE-TWIN",
-        escape: "the guest's condition widened to `always()`: the guest's job runs on a run the \
-                 picker sent away, waiting in the queue it was sent away from, and on a run whose \
-                 picker failed",
-        job: Some("test-windows"),
-        anchor: "    if: needs.pick-windows-home.outputs.home == 'guest'\n",
-        replacement: "    if: always()\n",
-        refused_as: "test-windows-condition",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-NEEDS-DROPPED",
-        escape: "the guest's job no longer needs the picker, so its condition reads an answer \
-                 that is not there and the job is skipped on every run",
-        job: Some("test-windows"),
-        anchor: "    needs: pick-windows-home\n",
-        replacement: "",
-        refused_as: "test-windows-needs",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-HOSTED-NEEDS-DROPPED",
-        escape: "the twin no longer needs the picker, so its condition reads an answer that is \
-                 not there and no run is ever sent to it",
-        job: Some("test-windows-hosted"),
-        anchor: "    needs: pick-windows-home\n",
-        replacement: "",
-        refused_as: "test-windows-hosted-needs",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-TIMEOUT-RAISED",
-        escape: "the guest's 20 minutes raised to the twin's 40: a stalled guest holds the build \
-                 machine, and every run queued behind it, twice as long",
-        job: Some("test-windows"),
-        anchor: "    timeout-minutes: 20\n",
-        replacement: "    timeout-minutes: 40\n",
-        refused_as: "test-windows-timeout",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-TIMEOUT-RAISED",
@@ -4393,26 +3309,6 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         refused_as: "test-windows-hosted-command",
     },
     WorkflowEscape {
-        name: "MUT-AGGREGATE-ACCEPTS-BOTH-WINDOWS-JOBS-SKIPPED",
-        escape: "the aggregate accepts both Windows suite jobs skipped. A picker output that \
-                 names neither home, or two conditions that both fail, then runs no Windows \
-                 suite at all and the required check is green",
-        job: Some("merge-gate"),
-        anchor: "            \"TEST_WINDOWS=success TEST_WINDOWS_HOSTED=skipped \" | \"TEST_WINDOWS=skipped TEST_WINDOWS_HOSTED=success \") ;;\n",
-        replacement: "            \"TEST_WINDOWS=success TEST_WINDOWS_HOSTED=skipped \" | \"TEST_WINDOWS=skipped TEST_WINDOWS_HOSTED=success \" | \"TEST_WINDOWS=skipped TEST_WINDOWS_HOSTED=skipped \") ;;\n",
-        refused_as: "aggregate-script",
-    },
-    WorkflowEscape {
-        name: "MUT-AGGREGATE-ACCEPTS-BOTH-WINDOWS-JOBS-RUN",
-        escape: "the aggregate accepts both Windows suite jobs run. The conditions are pinned to \
-                 exclude it, so it can only happen through a condition the pin has missed, and \
-                 the aggregate is the second line that refuses it",
-        job: Some("merge-gate"),
-        anchor: "            \"TEST_WINDOWS=success TEST_WINDOWS_HOSTED=skipped \" | \"TEST_WINDOWS=skipped TEST_WINDOWS_HOSTED=success \") ;;\n",
-        replacement: "            \"TEST_WINDOWS=success TEST_WINDOWS_HOSTED=skipped \" | \"TEST_WINDOWS=skipped TEST_WINDOWS_HOSTED=success \" | \"TEST_WINDOWS=success TEST_WINDOWS_HOSTED=success \") ;;\n",
-        refused_as: "aggregate-script",
-    },
-    WorkflowEscape {
         name: "MUT-TEST-MACOS-SHARD-NARROWED",
         escape: "the last macOS shard, the one with no filter, gains a `--skip effects::`. Every \
                  test of that shard whose name contains `effects::` then runs on no macOS leg, \
@@ -4512,37 +3408,6 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         anchor: "    timeout-minutes: 30\n",
         replacement: "    timeout-minutes: 45\n",
         refused_as: "test-job-timeout",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-SUITE-PIPED-AGAIN",
-        escape: "line 4 of the guest's suite step is a pipeline again, Cargo piped into \
-                 `Tee-Object -Variable log`, as it read before the step started Cargo as a \
-                 process and waited on that. A pipeline ends when every process holding its \
-                 pipe has ended; by the inference the step is written against, a test process \
-                 that outlives the suite with that pipe in hand holds the step open after the \
-                 last result line, and a suite that passed runs to the guest's 20 minutes and \
-                 is cancelled, on the one machine every lane waits for. Lines 5 and 7 still \
-                 read the files and the exit code line 4 no longer makes: the row is the wait \
-                 put back and no working step, and the pin refuses the text whatever the rest \
-                 of it would then do",
-        job: Some("test-windows"),
-        anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
-        replacement: "          cargo test --all-targets --all-features | Tee-Object -Variable log\n",
-        refused_as: "test-windows-command",
-    },
-    WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-SURVIVOR-ALLOWED",
-        escape: "line 8 of the guest's suite step, the throw for a test process left running, \
-                 is gone. Line 5 still lists each `upstroke*` process and asks Windows to stop \
-                 it, and the step goes on to its count: a suite that passed and left a process \
-                 is green. The listing is then a line in the log of a job nobody has a reason \
-                 to open, the process is forgotten whether or not it stopped, and which test \
-                 leaves it -- the one thing the two runs that did not end left unestablished \
-                 -- is looked for by no one",
-        job: Some("test-windows"),
-        anchor: "          if ($left.Count -gt 0) { throw \"$($left.Count) test process(es) outlived the suite, listed above: a test leaves a process running, which would hold this step open\" }\n",
-        replacement: "",
-        refused_as: "test-windows-command",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SUITE-PIPED-AGAIN",
