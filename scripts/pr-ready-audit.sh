@@ -359,6 +359,10 @@ frontmatter_has_id() {
 # `validate-pr-branch.sh` against the same defect, from the same source: what git records, never
 # what a checkout materialised or what a name suggests.
 #
+# The directory's own README.md and PROCESS.md, by exact path under either prefix, are not
+# candidates at all: they are the ledger's documents and never a finding, whatever their
+# frontmatter says -- the exemption validate-pr-branch.sh grants them, and the same four paths.
+#
 # Each file then gets exactly one of four answers: it carries the id alone, it carries the id
 # among others, it does not, or it could not be read. `frontmatter_has_id` PRINTS the first three
 # and keeps its status for the fourth, so that a blob bash could not open for it -- a redirection
@@ -407,6 +411,19 @@ finding_file_count() {
     case "${entry%% *}" in 100644|100755) ;; *) continue ;; esac
     cand="${entry#*$'\t'}"
     [[ "$cand" == *.md ]] || continue
+    # THE DIRECTORY'S OWN TWO DOCUMENTS ARE NOT FINDINGS, under either ledger prefix: README.md
+    # names and shapes the findings and PROCESS.md is the working process. Counted as candidates,
+    # `id: X` in findings/README.md's frontmatter was the one file filing X, and a P3 recorded
+    # `accepted-risk` read READY with no finding file for it at all
+    # (PR382-LEDGER-DOC-COUNTS-AS-FINDING). Exact path, exact case, as check_added_findings in
+    # .github/scripts/validate-pr-branch.sh exempts them: a lower-case readme, or the same name
+    # one directory down, is still a candidate. THE TWO LISTS MUST AGREE: a path only the
+    # validator exempts is a document that can file a finding here, and a path only this exempts
+    # is a file the validator holds to be a finding that is never counted as one.
+    case "$cand" in
+      findings/README.md|findings/PROCESS.md) continue ;;
+      reviews/findings/README.md|reviews/findings/PROCESS.md) continue ;;
+    esac
     if ! git show "$treeish:$cand" > "$blob_file" 2>/dev/null; then
       rm -f "$cand_file" "$blob_file"
       return 1

@@ -75,6 +75,17 @@
 #                                one file, or two findings each filed in a file of its own stopped
 #                                reading as before -- or a file that could not be read hid behind a
 #                                `multi` answer instead of refusing the count
+#   MUT-LEDGER-DOC-COUNTED-AS-FINDING  the finding count read the ledger directory's own documents
+#                                as findings, so an unwitnessed P3 recorded `accepted-risk` whose id
+#                                appeared only in findings/README.md's frontmatter -- or
+#                                findings/PROCESS.md's, or either under reviews/findings/ -- counted
+#                                one file and read READY (PR382-LEDGER-DOC-COUNTS-AS-FINDING) instead
+#                                of NOT-READY, `no-file:<id>`
+#   MUT-LEDGER-DOC-EXEMPTION-OVERREACH  the exemption reached past the four exact paths
+#                                validate-pr-branch.sh exempts: a README.md or PROCESS.md one
+#                                directory down, or a lower-case readme, stopped counting as a
+#                                file, or a proper finding file beside a README carrying the same
+#                                id stopped counting as the one file and reading READY
 #   MUT-DUPLICATE-REVIEW-ID-ACCEPTED  a review's findings were judged against the ledger by id
 #                                with no check that each id is given once, so two distinct
 #                                unwitnessed P3s sharing one id were both satisfied by its one
@@ -7941,6 +7952,57 @@ expect MUT-FINDING-SYMLINK-AS-FILE \
 expect MUT-FINDING-SYMLINK-AS-FILE "$( (cd "$link_repo" && finding_file_count REGULAR-ID HEAD) )" 1
 expect MUT-FINDING-SYMLINK-AS-FILE "$( (cd "$link_repo" && finding_file_count SYMLINK-ID HEAD) )" 0
 
+# THE LEDGER DIRECTORY'S OWN DOCUMENTS ARE NOT FINDINGS. findings/README.md and findings/PROCESS.md,
+# and the same two under reviews/findings/, are the four paths validate-pr-branch.sh exempts from
+# being findings, by exact path and exact case -- so a frontmatter `id:` in one of them files
+# nothing. Counted, `id: X` in findings/README.md alone was the one file filing X
+# (PR382-LEDGER-DOC-COUNTS-AS-FINDING). The exemption is those four paths and no others: the same
+# names one directory down, and a lower-case readme, are refused by the validator as non-findings
+# and are counted here, as any other file is. Each head is a root commit built through an index of
+# its own, so no case below depends on what a work tree, or a case-folding file system, would
+# have made of two names differing only in case.
+doc_repo="$tmp/doc-repo"
+git init -q "$doc_repo"
+doc_head_with() {  # doc_head_with PATH=ID...: a commit whose tree is those files, each filing its ID
+  local one blob
+  rm -f "$tmp/doc.index"
+  for one in "$@"; do
+    blob="$(printf -- '---\nid: %s\nseverity: P3\n---\n\nBody.\n' "${one#*=}" \
+      | git -C "$doc_repo" hash-object -w --stdin)"
+    GIT_INDEX_FILE="$tmp/doc.index" git -C "$doc_repo" update-index --add \
+      --cacheinfo "100644,$blob,${one%%=*}"
+  done
+  git -C "$doc_repo" -c user.email=t@example -c user.name=t commit-tree \
+    "$(GIT_INDEX_FILE="$tmp/doc.index" git -C "$doc_repo" write-tree)" -m "the ledger's files"
+}
+doc_count() { (cd "$doc_repo" && finding_file_count "$1" "$2"); }
+docs_only_head="$(doc_head_with findings/README.md=DOC-README findings/PROCESS.md=DOC-PROCESS \
+  reviews/findings/README.md=DOC-LEGACY-README reviews/findings/PROCESS.md=DOC-LEGACY-PROCESS)"
+# The tree is what it says, so a 0 below is the exemption's doing and not a head built empty.
+expect "MUT-LEDGER-DOC-COUNTED-AS-FINDING tree" \
+  "$(git -C "$doc_repo" ls-tree -r --name-only "$docs_only_head" | tr '\n' ' ')" \
+  "findings/PROCESS.md findings/README.md reviews/findings/PROCESS.md reviews/findings/README.md "
+expect "MUT-LEDGER-DOC-COUNTED-AS-FINDING README" "$(doc_count DOC-README "$docs_only_head")" 0
+expect "MUT-LEDGER-DOC-COUNTED-AS-FINDING PROCESS" "$(doc_count DOC-PROCESS "$docs_only_head")" 0
+expect "MUT-LEDGER-DOC-COUNTED-AS-FINDING legacy README" \
+  "$(doc_count DOC-LEGACY-README "$docs_only_head")" 0
+expect "MUT-LEDGER-DOC-COUNTED-AS-FINDING legacy PROCESS" \
+  "$(doc_count DOC-LEGACY-PROCESS "$docs_only_head")" 0
+# A proper finding file beside a README carrying the same id is still the one file, not two.
+doc_and_file_head="$(doc_head_with findings/README.md=DOC-FILED \
+  findings/P3_correctness_202611150001_filed-properly.md=DOC-FILED)"
+expect "MUT-LEDGER-DOC-EXEMPTION-OVERREACH beside a file" \
+  "$(doc_count DOC-FILED "$doc_and_file_head")" 1
+# Not the four paths, so not exempt: each is one file, as the validator refuses each as a finding.
+near_doc_head="$(doc_head_with findings/sub/README.md=DOC-NESTED-README \
+  findings/sub/PROCESS.md=DOC-NESTED-PROCESS reviews/findings/sub/README.md=DOC-LEGACY-NESTED \
+  findings/readme.md=DOC-LOWER-README findings/Process.md=DOC-MIXED-PROCESS)"
+for near_doc_id in DOC-NESTED-README DOC-NESTED-PROCESS DOC-LEGACY-NESTED DOC-LOWER-README \
+                   DOC-MIXED-PROCESS; do
+  expect "MUT-LEDGER-DOC-EXEMPTION-OVERREACH [$near_doc_id]" \
+    "$(doc_count "$near_doc_id" "$near_doc_head")" 1
+done
+
 # --- the state comes from the blockers, and from nothing that can fail --------------------------
 # THE SECOND OF THIS ROUND'S TWO P1s. `printf '%s\n' "${blockers[@]:-}" | grep -q '^manual:'` in
 # the `elif` gave a manual blocker two ways to be absent: it was not there, or the scan did not
@@ -8558,6 +8620,57 @@ for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
        || "$got" == *GH-UNSTUBBED* ]] \
       && error "MUT-MULTI-ID-FILE-OVERREACH: two findings filed separately blocked on [$accept_branch] ($shared_disposition): [$got]"
   done
+done
+
+# --- the ledger directory's own documents, through main ----------------------------------------------
+# PR382-LEDGER-DOC-COUNTS-AS-FINDING. A review reports one unwitnessed P3, DOC-P3, the body records it
+# P3 `accepted-risk`, and the head carries `id: DOC-P3` only in findings/README.md's frontmatter -- or
+# only in findings/PROCESS.md's. Counted as a finding file, that document was DOC-P3's one file and
+# the audit read READY with no finding filed for it. Neither document is a finding, so the head files
+# nothing, and the blocker is the one a missing file always gets: NOT-READY, `no-file:DOC-P3`.
+#
+# The control is the same review and row on a head that files DOC-P3 properly AND carries the id in
+# the README: one file, READY -- so the exemption takes the document out of the count and nothing
+# else with it.
+doc_readme_head="$(filed_head_with README.md=DOC-P3)"
+doc_process_head="$(filed_head_with PROCESS.md=DOC-P3)"
+doc_filed_head="$(filed_head_with README.md=DOC-P3 P3_correctness_202611150002_doc-p3.md=DOC-P3)"
+# The heads are what they say, counted by the audit's own helper.
+expect "MUT-LEDGER-DOC-COUNTED-AS-FINDING README head" \
+  "$(cd "$enqueue_repo" && finding_file_count DOC-P3 "$doc_readme_head")" 0
+expect "MUT-LEDGER-DOC-COUNTED-AS-FINDING PROCESS head" \
+  "$(cd "$enqueue_repo" && finding_file_count DOC-P3 "$doc_process_head")" 0
+expect "MUT-LEDGER-DOC-EXEMPTION-OVERREACH filed head" \
+  "$(cd "$enqueue_repo" && finding_file_count DOC-P3 "$doc_filed_head")" 1
+expect "MUT-LEDGER-DOC-EXEMPTION-OVERREACH filed tree" \
+  "$(git -C "$enqueue_repo" ls-tree -r --name-only "$doc_filed_head" -- findings/ | tr '\n' ' ')" \
+  "findings/P3_correctness_202611150002_doc-p3.md findings/README.md "
+accept_review "$tmp/doc-readme-p3.md" '{"id":"DOC-P3","severity":"P3"}' "$doc_readme_head"
+accept_review "$tmp/doc-process-p3.md" '{"id":"DOC-P3","severity":"P3"}' "$doc_process_head"
+accept_review "$tmp/doc-filed-p3.md" '{"id":"DOC-P3","severity":"P3"}' "$doc_filed_head"
+accept_ledger "$tmp/doc-p3-row.md" DOC-P3 P3 accepted-risk
+for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
+  for doc_name in readme process; do
+    case "$doc_name" in
+      readme)  doc_head="$doc_readme_head" ;;
+      process) doc_head="$doc_process_head" ;;
+    esac
+    # The id in the document alone: no file, so NOT-READY, `no-file`.
+    got="$(accept_run "$accept_branch" "$tmp/doc-$doc_name-p3.md" "$tmp/doc-p3-row.md" "$doc_head")"
+    [[ "$got" == *" READY "* ]] \
+      && error "MUT-LEDGER-DOC-COUNTED-AS-FINDING: an id filed only in the $doc_name read READY on [$accept_branch]: [$got]"
+    contains "MUT-LEDGER-DOC-COUNTED-AS-FINDING $doc_name [$accept_branch]" "$got" " NOT-READY "
+    contains "MUT-LEDGER-DOC-COUNTED-AS-FINDING $doc_name [$accept_branch]" "$got" "no-file:DOC-P3"
+    [[ "$got" == *GH-UNSTUBBED* ]] \
+      && error "MUT-LEDGER-DOC-COUNTED-AS-FINDING: the audit made a call this case does not model: [$got]"
+  done
+  # A proper file beside the README carrying the same id: one file, READY.
+  got="$(accept_run "$accept_branch" "$tmp/doc-filed-p3.md" "$tmp/doc-p3-row.md" "$doc_filed_head")"
+  contains "MUT-LEDGER-DOC-EXEMPTION-OVERREACH [$accept_branch]" "$got" " READY "
+  expect "MUT-LEDGER-DOC-EXEMPTION-OVERREACH status [$accept_branch]" "${got%%|*}" 0
+  [[ "$got" == *no-file:* || "$got" == *duplicate-file:* || "$got" == *NOT-READY* \
+     || "$got" == *GH-UNSTUBBED* ]] \
+    && error "MUT-LEDGER-DOC-EXEMPTION-OVERREACH: a properly filed P3 beside the README blocked on [$accept_branch]: [$got]"
 done
 
 # --- one id is one finding, in the review too, through main ------------------------------------------
