@@ -557,20 +557,13 @@ fn agent_text_is_rendered_inside_its_own_line_with_its_controls_made_visible() {
 
     let decided = Decided {
         report,
-        saved: vec!["q-1".to_owned(), HOSTILE.to_owned()],
-        refused: vec!["q-1".to_owned(), HOSTILE.to_owned()],
-        unsaved: vec![HOSTILE.to_owned()],
-        left: vec![HOSTILE.to_owned()],
+        question: HOSTILE.to_owned(),
+        refused: true,
     };
     let message = decided.outcome().expect_err("refused").to_string();
     assert!(!message.chars().any(char::is_control), "{message:?}");
-    assert!(message.contains(&format!("q-1, {SHOWN}")), "{message}");
     assert!(
-        message.contains(&format!("refused before any agent was asked ({SHOWN})")),
-        "{message}"
-    );
-    assert!(
-        message.contains(&format!("left without a proposal ({SHOWN})")),
+        message.contains(&format!("the reply to question {SHOWN} was refused")),
         "{message}"
     );
 }
@@ -850,6 +843,8 @@ fn run_started(
 struct Log {
     log: crate::events::EventLog,
     fold: crate::topology::fold::TopologyFold,
+    /// The ids of the questions raised, in order.
+    raised: Vec<String>,
 }
 
 impl Log {
@@ -872,7 +867,25 @@ impl Log {
         self.fold.apply_delta(delta);
     }
 
+    /// Ends the run parked, as its engine does once the fold says nothing else can run: the
+    /// `run_finished` the fold checks against its own derived outcome.
+    fn park(&mut self) {
+        let parked = self
+            .fold
+            .open_questions()
+            .map_or(0, |open| u32::try_from(open.len()).unwrap_or(u32::MAX));
+        self.push(TopologyEventBody::RunFinished {
+            data: crate::topology::events::RunFinished4 {
+                outcome: crate::events::RunOutcome::Parked,
+                halted_at: None,
+                merged: 0,
+                parked,
+            },
+        });
+    }
+
     fn raise(&mut self, id: &str, key: u32) {
+        self.raised.push(id.to_owned());
         self.push(TopologyEventBody::QuestionRaised {
             data: QuestionRaised4 {
                 question: FrozenQuestion {
@@ -910,6 +923,8 @@ struct Fixture {
     repo: PathBuf,
     private: PathBuf,
     profile: PathBuf,
+    /// The question `options` asks about: the first one the run raised.
+    question: String,
 }
 
 /// The coordinator environment of every fixture: no variable is set, so the credential
@@ -923,10 +938,18 @@ impl Fixture {
         DecideOptions {
             repo_root: self.repo.clone(),
             run_id: RUN.to_owned(),
-            question_id: None,
+            question_id: self.question.clone(),
             max_cost_usd: DEFAULT_MAX_COST_USD,
             pools_path: Some(self.repo.join("pools.toml")),
             environment: Some(no_variables),
+        }
+    }
+
+    /// `options`, asking about the question `id`.
+    fn asking(&self, id: &str) -> DecideOptions {
+        DecideOptions {
+            question_id: id.to_owned(),
+            ..self.options()
         }
     }
 
@@ -1048,17 +1071,33 @@ fn fixture_with(tag: &str, tasks: usize, setup: Setup, write: impl FnOnce(&mut L
             plan,
             normalized_plan_digest,
         }),
+        raised: Vec::new(),
     };
     log.push(TopologyEventBody::RunStarted {
         data: Box::new(started),
     });
     write(&mut log);
+    // A run whose fold derives it parked is ended parked, as its engine ends it; any other is
+    // left with no end, as an engine interrupted mid-run leaves it.
+    if log.fold.derived_outcome()
+        == crate::topology::events::DerivedOutcome::Ending(crate::events::RunOutcome::Parked)
+    {
+        log.park();
+    }
+    let question = log
+        .raised
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "q-01A".to_owned());
     drop(log);
+    // The run's lock files, as the engine that drove it leaves them: taken once and given back.
+    drop(crate::rundir::RunLock::acquire(&public).expect("the run's engine took its lock"));
     Fixture {
         _tree: tree,
         repo,
         private,
         profile,
+        question,
     }
 }
 
@@ -1108,7 +1147,6 @@ fn a_valid_proposal_is_accepted_printed_and_saved_with_its_cost() {
         "reason: it flaked",
         "citation: src/lib.rs:1",
         "cost: $0.2500",
-        "total cost: $0.2500",
         "nothing was answered",
         "upstroke answer <question-id>",
     ] {
@@ -1207,74 +1245,39 @@ fn a_decide_report_shows_agent_text_as_data_and_the_proposal_keeps_it_as_written
 }
 
 #[test]
-fn each_bad_reply_is_refused_saved_and_fails_the_command_after_the_others() {
-    let bad = bad_replies();
-    let ids = ["q-g", "q-f", "q-e", "q-d", "q-c", "q-b", "q-a"];
-    assert_eq!(
-        ids.len(),
-        bad.len() + 1,
-        "one question per bad reply, and one valid"
-    );
-    let fixture = fixture("decide-refused", ids.len(), reviewer(), |log| {
-        for (key, id) in ids.iter().enumerate() {
-            log.raise(id, u32::try_from(key).expect("a small key"));
-        }
-    });
-    let mut replies: Vec<String> = bad
-        .iter()
-        .map(|(text, _)| claude_output(text, Some(0.1)))
-        .collect();
-    replies.push(claude_output(&reply(VALID), Some(0.1)));
-    let runner = Scripted::answering(replies);
-    let decided = decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
-
-    assert_eq!(runner.seen().len(), ids.len(), "every question was asked");
-    let asked_in_order: Vec<String> = runner
-        .seen()
-        .iter()
-        .map(|request| String::from_utf8_lossy(&request.command.stdin).into_owned())
-        .collect();
-    for (prompt, id) in asked_in_order.iter().zip(ids) {
-        assert!(
-            prompt.contains(&format!("id: {id}\n")),
-            "asked in the order raised"
-        );
-    }
-    for ((_, reason), id) in bad.iter().zip(ids) {
-        let saved = fixture.proposal(id);
-        assert_eq!(saved["status"], "refused", "{id}: {saved}");
+fn each_bad_reply_is_refused_saved_and_fails_the_command() {
+    for (at, (text, reason)) in bad_replies().into_iter().enumerate() {
+        let fixture = one_question(&format!("decide-refused-{at}"));
+        let runner = Scripted::answering(vec![claude_output(&text, Some(0.1))]);
+        let decided = decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+        assert_eq!(runner.seen().len(), 1, "{reason}: one question, one call");
+        let saved = fixture.proposal("q-01A");
+        assert_eq!(saved["status"], "refused", "{reason}: {saved}");
         assert_eq!(
             saved["settled"], true,
-            "{id}: a clean, priced call is settled at its price whatever its reply"
+            "{reason}: a clean, priced call is settled at its price whatever its reply"
         );
         assert!(
             saved["reason"]
                 .as_str()
                 .is_some_and(|text| text.contains(reason)),
-            "{id}: {saved}"
+            "{reason}: {saved}"
         );
         assert!(
-            decided.report.contains(&format!("{id}: decided by")),
-            "{id} is printed"
+            decided.report.contains("q-01A: decided by"),
+            "{reason}: {}",
+            decided.report
+        );
+        assert!(decided.refused && decided.question == "q-01A", "{reason}");
+        let error = decided
+            .outcome()
+            .expect_err("a refused reply makes the command an error")
+            .to_string();
+        assert!(
+            error.contains("q-01A") && error.contains("saved with its reason"),
+            "{reason}: {error}"
         );
     }
-    assert_eq!(fixture.proposal("q-a")["status"], "accepted");
-    assert_eq!(decided.saved, ids.to_vec());
-    assert_eq!(decided.refused, ids[..bad.len()].to_vec());
-    assert!(
-        decided.unsaved.is_empty() && decided.left.is_empty(),
-        "{}",
-        decided.report
-    );
-    assert!(
-        decided.report.contains("total cost: $0.7000"),
-        "{}",
-        decided.report
-    );
-    let error = decided
-        .outcome()
-        .expect_err("a refused reply makes the command an error");
-    assert!(error.to_string().contains("q-g"), "{error}");
 }
 
 #[test]
@@ -1380,7 +1383,7 @@ fn the_request_is_a_decide_request_for_the_runs_reviewer_with_no_overlay() {
 }
 
 #[test]
-fn a_binding_question_is_skipped_and_no_request_is_made_for_it() {
+fn a_binding_question_is_refused_and_no_request_is_made_for_it() {
     let fixture = one_question("decide-binding");
     let observed = observe::observe(&fixture.repo, RUN)
         .expect("readable")
@@ -1388,72 +1391,40 @@ fn a_binding_question_is_skipped_and_no_request_is_made_for_it() {
     let mut binding = observed.open_questions().remove(0);
     binding.binds_an_agent = true;
     let runner = Scripted::answering(Vec::new());
-    let decided = propose(
+    let message = propose(
         &fixture.options(),
         &observed,
-        &[binding],
+        &binding,
         &BuiltinAdapters,
         &runner,
     )
-    .expect("decided");
+    .expect_err("a binding question is left to a person")
+    .to_string();
     assert!(runner.seen().is_empty(), "no agent was asked");
     assert!(
         runner.probes().is_empty(),
         "with no question to ask, the reviewer's CLI is not probed"
     );
     assert!(
-        decided
-            .report
-            .contains("q-01A: skipped — it chooses which agent runs a task, and binding questions are left to a person"),
-        "{}",
-        decided.report
+        message.contains(
+            "question q-01A chooses which agent runs a task, and binding questions are left to a \
+             person"
+        ) && message.contains(NOTHING_DONE),
+        "{message}"
     );
-    assert!(decided.outcome().is_ok());
     assert!(
         !fixture.repo.join(".upstroke").join("proposals").exists(),
         "with no call to make, the run is not claimed and nothing is created"
     );
 }
 
-/// At most one call per question in a command: a question listed twice is asked once.
-#[test]
-fn a_question_listed_twice_is_asked_once() {
-    let fixture = one_question("decide-twice");
-    let observed = observe::observe(&fixture.repo, RUN)
-        .expect("readable")
-        .expect("schema 4");
-    let mut twice = observed.open_questions();
-    twice.extend(observed.open_questions());
-    assert_eq!(twice.len(), 2, "the run's one question, listed twice");
-    let runner = Acting::priced(0.25);
-    let decided = propose(
-        &fixture.options(),
-        &observed,
-        &twice,
-        &BuiltinAdapters,
-        &runner,
-    )
-    .expect("decided");
-    assert_eq!(runner.seen().len(), 1, "{}", decided.report);
-    assert!(
-        decided.report.contains(
-            "q-01A: skipped — it was already asked in this command, and a question gets at most \
-             one call"
-        ),
-        "{}",
-        decided.report
-    );
-    assert!(decided.outcome().is_ok(), "{}", decided.report);
-}
-
 #[test]
 fn runs_and_questions_that_cannot_be_decided_are_refused_before_any_request() {
-    let refused = |fixture: &Fixture, question_id: Option<&str>, run_id: &str| {
+    let refused = |fixture: &Fixture, question_id: &str, run_id: &str| {
         let runner = Scripted::answering(Vec::new());
         let options = DecideOptions {
             run_id: run_id.to_owned(),
-            question_id: question_id.map(str::to_owned),
-            ..fixture.options()
+            ..fixture.asking(question_id)
         };
         let error = decide(&options, &BuiltinAdapters, &runner).expect_err("refused");
         assert!(runner.seen().is_empty(), "no request: {error}");
@@ -1461,7 +1432,7 @@ fn runs_and_questions_that_cannot_be_decided_are_refused_before_any_request() {
     };
 
     let unbound = fixture("decide-unbound", 1, None, |log| log.raise("q-01A", 0));
-    let message = refused(&unbound, None, RUN);
+    let message = refused(&unbound, "q-01A", RUN);
     assert!(
         message.contains("recorded no primary review binding"),
         "{message}"
@@ -1470,14 +1441,27 @@ fn runs_and_questions_that_cannot_be_decided_are_refused_before_any_request() {
     let settled = fixture("decide-settled", 1, reviewer(), |log| {
         log.raise("q-01A", 0);
         log.answer("q-01A", 0);
+        log.raise("q-01B", 0);
     });
-    let message = refused(&settled, Some("q-01A"), RUN);
+    let message = refused(&settled, "q-01A", RUN);
     assert!(
         message.contains("question q-01A of run 01DECIDERUN000000000000001 is no longer open"),
         "{message}"
     );
+    for unknown in ["q-01", "Q-01B", "q-01b", "q-01B "] {
+        let message = refused(&settled, unknown, RUN);
+        assert!(
+            message.contains(&format!("has no question {unknown:?}"))
+                && message.contains(NOTHING_DONE),
+            "{unknown:?}: no prefix is matched and no case folded: {message}"
+        );
+    }
+    assert!(
+        !settled.proposals_written(),
+        "nothing was claimed for a question the run does not have open"
+    );
 
-    let message = refused(&settled, None, "01NOSUCHRUN");
+    let message = refused(&settled, "q-01B", "01NOSUCHRUN");
     assert!(message.contains("no run `01NOSUCHRUN`"), "{message}");
 
     let legacy_run = "01DECIDELEGACY";
@@ -1491,7 +1475,7 @@ fn runs_and_questions_that_cannot_be_decided_are_refused_before_any_request() {
         ),
     )
     .expect("a schema-3 log");
-    let message = refused(&settled, None, legacy_run);
+    let message = refused(&settled, "q-01B", legacy_run);
     assert!(message.contains("is a schema 1-3 run"), "{message}");
 }
 
@@ -1522,29 +1506,15 @@ fn two_questions(tag: &str) -> Fixture {
     })
 }
 
-/// Spend: the allowance is the command's, so the run's (a run is asked once), and a settled
-/// call counts at its price, above its ceiling included. Once nothing is left the next question
-/// is not started, and the command names it and fails.
+/// Spend: the allowance is the run's (a run is asked once), and it is the ceiling of the one call
+/// the command makes, whole: nothing is subtracted from it. A settled call counts at its price,
+/// above its ceiling included. Another open question of the run is never asked.
 #[test]
-fn the_allowance_stops_the_next_question_and_the_command_names_it_and_fails() {
-    // The control: the same two questions and $1 cap, the first call priced under it.
-    let control = two_questions("decide-cap-control");
-    let options = DecideOptions {
-        max_cost_usd: 1.0,
-        ..control.options()
-    };
-    let runner = Acting::priced(0.5);
-    let decided = decide(&options, &BuiltinAdapters, &runner).expect("decided");
-    assert_eq!(
-        ceilings(&runner.seen()),
-        [Some("1".to_owned()), Some("0.5".to_owned())],
-        "each call is given what the earlier one left"
-    );
-    assert!(decided.outcome().is_ok(), "{}", decided.report);
-
-    for (tag, cap, cost, spent) in [
-        ("decide-cap-reached", 1.0, 1.0, "$1.0000"),
-        ("decide-cap-overrun", DEFAULT_MAX_COST_USD, 7.0, "$7.0000"),
+fn the_one_call_is_capped_at_the_allowance_and_counted_at_its_price() {
+    for (tag, cap, cost, ceiling) in [
+        ("decide-cap-under", 1.0, 0.5, "1"),
+        ("decide-cap-reached", 1.0, 1.0, "1"),
+        ("decide-cap-overrun", DEFAULT_MAX_COST_USD, 7.0, "5"),
     ] {
         let capped = two_questions(tag);
         let options = DecideOptions {
@@ -1553,32 +1523,64 @@ fn the_allowance_stops_the_next_question_and_the_command_names_it_and_fails() {
         };
         let runner = Acting::priced(cost);
         let decided = decide(&options, &BuiltinAdapters, &runner).expect("decided");
+        assert_eq!(asked_about(&runner.seen()), ["q-b"], "{tag}: one call");
         assert_eq!(
-            runner.seen().len(),
-            1,
-            "{tag}: the next question is not started"
+            ceilings(&runner.seen()),
+            [Some(ceiling.to_owned())],
+            "{tag}"
         );
-        assert_eq!(capped.proposal("q-b")["cost_usd"], cost, "{tag}");
-        assert!(!capped.has_proposal("q-a"), "{tag}");
+        let saved = capped.proposal("q-b");
+        assert_eq!(saved["cost_usd"], cost, "{tag}: settled at its price");
+        assert_eq!(saved["ceiling_usd"], cap, "{tag}");
+        assert!(!capped.has_proposal("q-a"), "{tag}: the other question");
         assert!(
-            decided.report.contains(&format!(
-                "stopped: this command's calls have spent {spent}, which reaches the \
-                 --max-cost-usd allowance of ${cap:.4} for the run, so no further call is \
-                 started; left without a proposal: q-a"
-            )),
+            decided.report.contains(&format!("cost: ${cost:.4}")),
             "{tag}: {}",
             decided.report
         );
+        assert!(decided.outcome().is_ok(), "{tag}: {}", decided.report);
+    }
+}
+
+/// `PR435-EXHAUSTED-DECIMAL-ALLOWANCE`: a $0.80 allowance and calls priced at $0.70 once left a
+/// float remainder that started a third call. A command now makes one call, capped at the whole
+/// allowance, and no remainder is computed: the run's other open questions are not asked, by
+/// this command or, the run claimed, by any later one.
+#[test]
+fn a_decimal_allowance_buys_one_call_and_no_remainder_starts_another() {
+    let fixture = fixture("decide-decimal", 3, reviewer(), |log| {
+        log.raise("q-c", 0);
+        log.raise("q-b", 1);
+        log.raise("q-a", 2);
+    });
+    let options = DecideOptions {
+        max_cost_usd: 0.8,
+        ..fixture.asking("q-b")
+    };
+    let runner = Acting::priced(0.7);
+    let decided = decide(&options, &BuiltinAdapters, &runner).expect("decided");
+    assert!(decided.outcome().is_ok(), "{}", decided.report);
+    assert_eq!(asked_about(&runner.seen()), ["q-b"]);
+    assert_eq!(ceilings(&runner.seen()), [Some("0.8".to_owned())]);
+    assert_eq!(fixture.proposal("q-b")["ceiling_usd"], 0.8);
+    assert!(!fixture.has_proposal("q-c") && !fixture.has_proposal("q-a"));
+
+    for id in ["q-a", "q-c"] {
+        let later = Acting::priced(0.1);
+        let message = decide(
+            &DecideOptions {
+                max_cost_usd: 0.8,
+                ..fixture.asking(id)
+            },
+            &BuiltinAdapters,
+            &later,
+        )
+        .expect_err("the run was decided once")
+        .to_string();
+        assert!(later.seen().is_empty(), "{id}: {message}");
         assert!(
-            decided.report.contains(&format!("total cost: {spent}")),
-            "{tag}: settled at its price: {}",
-            decided.report
-        );
-        assert_eq!(decided.left, ["q-a"], "{tag}");
-        let error = decided.outcome().expect_err("work was left").to_string();
-        assert!(
-            error.contains("1 question(s) left without a proposal (q-a)"),
-            "{error}"
+            message.contains(&format!("run `{RUN}` was claimed already")),
+            "{id}: {message}"
         );
     }
 }
@@ -2004,29 +2006,6 @@ fn a_private_directory_is_spelled_as_an_absolute_rule_or_not_at_all() {
     );
 }
 
-#[test]
-fn each_calls_ceiling_is_what_is_left_of_the_cap() {
-    let fixture = fixture("decide-ceiling", 2, reviewer(), |log| {
-        log.raise("q-b", 0);
-        log.raise("q-a", 1);
-    });
-    let runner = Scripted::answering(vec![
-        claude_output(&reply(VALID), Some(1.25)),
-        claude_output(&reply(VALID), Some(1.0)),
-    ]);
-    decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
-    let ceilings: Vec<Option<String>> = runner
-        .seen()
-        .iter()
-        .map(|request| flag_value(request, "--max-budget-usd"))
-        .collect();
-    assert_eq!(
-        ceilings,
-        [Some("5".to_owned()), Some("3.75".to_owned())],
-        "$5 for the first call, and the $3.75 the first left for the second"
-    );
-}
-
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -2181,15 +2160,17 @@ impl AgentAdapter for Misread {
 type Returns = fn(&RunnerRequest) -> Result<ProcessOutput, RunnerError>;
 
 /// Spend and interruption: only a clean, successful, priced call is settled, at its price. Every
-/// other outcome a call returns is saved as refused with what it reported, counts nothing, and
-/// ends the command, which names the questions it left and fails.
+/// other outcome a call returns is saved as refused with what it reported, and fails the
+/// command.
 #[test]
-fn only_a_clean_successful_priced_call_settles_and_any_other_ends_the_command() {
-    let priced = || claude_output(&reply(VALID), Some(0.25));
-    // The controls, the same two questions: a clean, priced call settles at its price whatever
-    // its reply, and the next question is asked with what is left.
+fn only_a_clean_successful_priced_call_settles_and_any_other_is_saved_refused() {
+    // The controls: a clean, priced call settles at its price whatever its reply.
     for (case, stdout, status) in [
-        ("an accepted reply", priced(), "accepted"),
+        (
+            "an accepted reply",
+            claude_output(&reply(VALID), Some(0.25)),
+            "accepted",
+        ),
         (
             "a refused reply",
             claude_output(
@@ -2199,20 +2180,17 @@ fn only_a_clean_successful_priced_call_settles_and_any_other_ends_the_command() 
             "refused",
         ),
     ] {
-        let fixture = two_questions(&format!("decide-settled-{status}"));
-        let runner = Scripted::answering(vec![stdout, priced()]);
+        let fixture = one_question(&format!("decide-settled-{status}"));
+        let runner = Scripted::answering(vec![stdout]);
         let decided = decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
-        assert_eq!(
-            ceilings(&runner.seen()),
-            [Some("5".to_owned()), Some("4.75".to_owned())],
-            "{case}: settled at its price"
-        );
-        let saved = fixture.proposal("q-b");
+        assert_eq!(ceilings(&runner.seen()), [Some("5".to_owned())], "{case}");
+        let saved = fixture.proposal("q-01A");
         assert_eq!(saved["status"], status, "{case}");
         assert_eq!(saved["settled"], true, "{case}");
-        assert_eq!(fixture.proposal("q-a")["status"], "accepted", "{case}");
-        assert!(decided.left.is_empty(), "{case}: {}", decided.report);
-        assert!(decided.report.contains("total cost: $0.5000"), "{case}");
+        assert_eq!(saved["cost_usd"], 0.25, "{case}");
+        assert!(decided.report.contains("cost: $0.2500"), "{case}");
+        assert_eq!(decided.refused, status == "refused", "{case}");
+        assert_eq!(decided.outcome().is_ok(), status == "accepted", "{case}");
     }
 
     // The one case read through an adapter that reads every call as an agent error.
@@ -2302,7 +2280,7 @@ fn only_a_clean_successful_priced_call_settles_and_any_other_ends_the_command() 
     ];
     let misread = Misread(OutcomeStatus::AgentError);
     for (at, (case, returns, reason, cost)) in cases.into_iter().enumerate() {
-        let fixture = two_questions(&format!("decide-unsettled-{at}"));
+        let fixture = one_question(&format!("decide-unsettled-{at}"));
         let runner = Acting::new(returns);
         let decided = if case == UNSUCCESSFUL {
             decide(&fixture.options(), &Only(&misread), &runner)
@@ -2310,8 +2288,8 @@ fn only_a_clean_successful_priced_call_settles_and_any_other_ends_the_command() 
             decide(&fixture.options(), &BuiltinAdapters, &runner)
         }
         .expect("decided");
-        assert_eq!(runner.seen().len(), 1, "{case}: the command ended");
-        let saved = fixture.proposal("q-b");
+        assert_eq!(runner.seen().len(), 1, "{case}: one call");
+        let saved = fixture.proposal("q-01A");
         assert_eq!(saved["status"], "refused", "{case}: {saved}");
         assert_eq!(saved["settled"], false, "{case}: {saved}");
         assert_eq!(
@@ -2326,27 +2304,28 @@ fn only_a_clean_successful_priced_call_settles_and_any_other_ends_the_command() 
             "{case}: {saved}"
         );
         assert!(
-            proposals_dir(&fixture.repo, RUN).join("q-b.out").is_file(),
+            proposals_dir(&fixture.repo, RUN)
+                .join("q-01A.out")
+                .is_file(),
             "{case}: the raw output, or the failure, is saved"
         );
-        assert!(!fixture.has_proposal("q-a"), "{case}");
         let report = &decided.report;
+        assert!(
+            report
+                .lines()
+                .any(|line| line.starts_with("  status: refused — ") && line.contains(reason)),
+            "{case}: {report}"
+        );
         for line in [
-            "stopped: q-b's call did not settle at a price (".to_owned(),
-            "so what it spent is unknown and no further call is started; left without a \
-             proposal: q-a"
-                .to_owned(),
-            "total cost: $0.0000".to_owned(),
-            "cost unknown for: q-b".to_owned(),
+            "  cost: unknown".to_owned(),
             format!("claimed: {}", proposals_dir(&fixture.repo, RUN).display()),
         ] {
             assert!(report.contains(&line), "{case}: {line}: {report}");
         }
-        assert_eq!(decided.refused, ["q-b"], "{case}");
-        assert_eq!(decided.left, ["q-a"], "{case}");
+        assert!(decided.refused, "{case}");
         let error = decided.outcome().expect_err("nonzero").to_string();
         assert!(
-            error.contains("(q-b)") && error.contains("left without a proposal (q-a)"),
+            error.contains("question q-01A was refused"),
             "{case}: {error}"
         );
         refused_as_claimed(&fixture, case);
@@ -2354,42 +2333,41 @@ fn only_a_clean_successful_priced_call_settles_and_any_other_ends_the_command() 
 }
 
 /// Publication: every file is created new and none is replaced. A name another hand took while
-/// the call was in flight ends the command with that file as it was, no proposal saved, and the
-/// question named as left.
+/// the call was in flight fails the command with that file as it was and no proposal saved.
 #[test]
-fn a_taken_name_is_never_replaced_and_ends_the_command_naming_the_questions_left() {
-    let fixture = two_questions("decide-taken");
+fn a_taken_name_is_never_replaced_and_fails_the_command() {
+    let fixture = one_question("decide-taken");
     let dir = proposals_dir(&fixture.repo, RUN);
     let runner = Acting::new({
         let dir = dir.clone();
         move |_| {
-            std::fs::write(dir.join("q-b.out"), "someone else's bytes").expect("a stray file");
+            std::fs::write(dir.join("q-01A.out"), "someone else's bytes").expect("a stray file");
             Ok(exited(claude_output(&reply(VALID), Some(0.25))))
         }
     });
-    let decided = decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
-    assert_eq!(runner.seen().len(), 1, "{}", decided.report);
+    let message = decide(&fixture.options(), &BuiltinAdapters, &runner)
+        .map(|decided| decided.report)
+        .expect_err("the raw output's name was taken")
+        .to_string();
+    assert_eq!(runner.seen().len(), 1, "{message}");
     assert_eq!(
-        std::fs::read_to_string(dir.join("q-b.out")).expect("the stray file"),
+        std::fs::read_to_string(dir.join("q-01A.out")).expect("the stray file"),
         "someone else's bytes"
     );
-    assert!(!fixture.has_proposal("q-b") && !fixture.has_proposal("q-a"));
+    assert!(!fixture.has_proposal("q-01A"));
     assert!(
-        decided.report.contains("q-b.out")
-            && decided
-                .report
-                .contains("the run stays claimed and no further call is started; left without a proposal: q-b, q-a"),
-        "{}",
-        decided.report
+        message.contains("no proposal for question q-01A was saved")
+            && message.contains("q-01A.out")
+            && message.contains("the run stays claimed"),
+        "{message}"
     );
-    assert_eq!(decided.left, ["q-b", "q-a"]);
-    assert!(decided.outcome().is_err());
+    assert!(is_one_line(&message), "{message:?}");
 
-    // The control: the same two questions, nothing in the way.
-    let control = two_questions("decide-untaken");
+    // The control: the same run, nothing in the way.
+    let control = one_question("decide-untaken");
     let runner = Acting::priced(0.25);
     let decided = decide(&control.options(), &BuiltinAdapters, &runner).expect("decided");
-    assert_eq!(runner.seen().len(), 2);
+    assert_eq!(runner.seen().len(), 1);
     assert!(decided.outcome().is_ok(), "{}", decided.report);
 }
 
@@ -2406,25 +2384,12 @@ fn an_untrusted_proposals_directory_or_a_question_id_that_is_not_plain_is_refuse
     }
 
     let dotted = fixture("decide-dotted", 1, reviewer(), |log| log.raise("q.01A", 0));
-    let runner = Acting::priced(0.25);
-    let decided = decide(&dotted.options(), &BuiltinAdapters, &runner).expect("decided");
-    assert!(runner.seen().is_empty());
+    let message = refused_before_anything(&dotted, &dotted.options(), &BuiltinAdapters, "dotted");
     assert!(
-        decided
-            .report
-            .contains("\"q.01A\": refused — its id is not a plain file-name component"),
-        "{}",
-        decided.report
-    );
-    assert!(!dotted.proposals_written());
-    assert_eq!(decided.unsaved, ["q.01A"]);
-    assert!(decided.saved.is_empty() && decided.refused.is_empty());
-    let message = decided.outcome().expect_err("refused").to_string();
-    assert!(
-        message.contains("refused before any agent was asked (q.01A)")
-            && message.contains("nothing is saved for them")
-            && !message.contains("each is saved"),
-        "the exit names no record it did not write: {message}"
+        message.contains("question \"q.01A\"'s id is not a plain file-name component")
+            && message.contains(NOTHING_DONE)
+            && !message.contains("saved"),
+        "the refusal names no record it did not write: {message}"
     );
 
     let filed = one_question("decide-filed");
@@ -2774,7 +2739,13 @@ fn a_driven_run_is_refused_before_anything_is_written_probed_or_asked() {
 
 /// Publishes a person's answer to `id` in the run's answers directory, as `upstroke answer` does.
 fn answered_by_a_person(fixture: &Fixture, id: &str, answer: Answer) {
-    let answers = fixture.public().join("answers");
+    publish_answer(&fixture.public(), id, answer);
+}
+
+/// Publishes a person's answer to `id` under the run's public directory `public`, through the
+/// production answer writer.
+fn publish_answer(public: &Path, id: &str, answer: Answer) {
+    let answers = public.join("answers");
     std::fs::create_dir_all(&answers).expect("the answers directory");
     let published = crate::interaction::write_answer(
         &answers,
@@ -2786,49 +2757,108 @@ fn answered_by_a_person(fixture: &Fixture, id: &str, answer: Answer) {
 }
 
 #[test]
-fn a_question_a_person_has_answered_is_skipped_and_never_asked() {
-    let fixture = two_questions("decide-answered");
-    answered_by_a_person(
-        &fixture,
-        "q-b",
-        Answer::Answered {
-            text: RETRY.to_owned(),
-        },
-    );
-    let runner = Acting::priced(0.25);
-    let decided = decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
-    assert!(decided.outcome().is_ok(), "{}", decided.report);
-    assert!(
-        decided.report.contains(
-            "q-b: skipped — a person has answered it already (\"retry on frontier\"), and the \
-             run applies that answer; no agent was asked"
+fn a_question_a_person_has_answered_is_refused_and_never_asked() {
+    for (at, answer, described) in [
+        (
+            0,
+            Answer::Answered {
+                text: RETRY.to_owned(),
+            },
+            "(\"retry on frontier\")",
         ),
-        "{}",
-        decided.report
-    );
-    let seen = runner.seen();
-    let [request] = seen.as_slice() else {
-        panic!("only the unanswered question is asked: {seen:?}");
-    };
-    let prompt = String::from_utf8_lossy(&request.command.stdin);
-    assert!(prompt.contains("id: q-a\n"), "{prompt}");
-    assert!(!fixture.has_proposal("q-b") && fixture.has_proposal("q-a"));
+        (1, Answer::Declined, "(declined)"),
+    ] {
+        let fixture = two_questions(&format!("decide-answered-{at}"));
+        answered_by_a_person(&fixture, "q-b", answer);
+        let runner = Acting::priced(0.25);
+        let message = decide(&fixture.asking("q-b"), &BuiltinAdapters, &runner)
+            .map(|decided| decided.report)
+            .expect_err("an answered question is not asked")
+            .to_string();
+        assert!(
+            message.contains(&format!(
+                "a person has answered question q-b already {described}, and the run applies \
+                 that answer; {NOTHING_DONE}"
+            )),
+            "{message}"
+        );
+        assert!(
+            runner.seen().is_empty() && runner.probes().is_empty(),
+            "nothing to ask, so nothing is probed or asked"
+        );
+        assert!(!fixture.proposals_written(), "the run is not claimed");
 
-    // Every question answered: nothing to ask, so nothing is probed, claimed or asked.
-    let fixture = one_question("decide-all-answered");
-    answered_by_a_person(&fixture, "q-01A", Answer::Declined);
-    let runner = Acting::priced(0.25);
-    let decided = decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
-    assert!(decided.outcome().is_ok(), "{}", decided.report);
+        // The control: the run's other, unanswered question is asked.
+        let decided = decide(&fixture.asking("q-a"), &BuiltinAdapters, &runner).expect("decided");
+        assert!(decided.outcome().is_ok(), "{}", decided.report);
+        assert_eq!(asked_about(&runner.seen()), ["q-a"]);
+        assert!(!fixture.has_proposal("q-b") && fixture.has_proposal("q-a"));
+    }
+}
+
+/// A Runner that answers the pre-flight's probes as a signed-in Claude Code and, at the first
+/// probe, publishes a person's answer to `question` through the production answer writer: an
+/// answer that arrives after the command read the answers directory at admission, and before its
+/// call. Every other request is a call, recorded and priced.
+struct AnsweredDuringPreflight {
+    public: PathBuf,
+    question: &'static str,
+    published: Mutex<bool>,
+    seen: Mutex<Vec<RunnerRequest>>,
+}
+
+impl Runner for AnsweredDuringPreflight {
+    fn run<'a>(&'a self, request: &'a RunnerRequest, _call: RunnerCall<'a>) -> RunFuture<'a> {
+        if let Some(probed) = probe_reply(request, SIGNED_IN) {
+            let mut published = lock(&self.published);
+            if !*published {
+                publish_answer(
+                    &self.public,
+                    self.question,
+                    Answer::Answered {
+                        text: RETRY.to_owned(),
+                    },
+                );
+                *published = true;
+            }
+            return Box::pin(async move { Ok(probed) });
+        }
+        lock(&self.seen).push(request.clone());
+        let answer = Ok(exited(claude_output(&reply(VALID), Some(0.25))));
+        Box::pin(async move { answer })
+    }
+}
+
+/// `PR435-ANSWER-AFTER-ADMISSION`: a person answers the question while the command is being
+/// admitted (here, during the reviewer's pre-flight). The command reads the answers directory
+/// again immediately before it claims the run and starts its call, so the answer is seen and no
+/// paid call is made.
+#[test]
+fn an_answer_published_after_admission_is_seen_before_the_call() {
+    let fixture = one_question("decide-answered-late");
+    let runner = AnsweredDuringPreflight {
+        public: fixture.public(),
+        question: "q-01A",
+        published: Mutex::new(false),
+        seen: Mutex::new(Vec::new()),
+    };
+    let message = decide(&fixture.options(), &BuiltinAdapters, &runner)
+        .map(|decided| decided.report)
+        .expect_err("the question was answered before its call")
+        .to_string();
     assert!(
-        decided
-            .report
-            .contains("q-01A: skipped — a person has answered it already (declined)"),
-        "{}",
-        decided.report
+        *lock(&runner.published),
+        "the answer was published mid-admission"
     );
-    assert!(runner.seen().is_empty() && runner.probes().is_empty());
-    assert!(!fixture.proposals_written(), "the run is not claimed");
+    assert!(lock(&runner.seen).is_empty(), "no call was made: {message}");
+    assert!(
+        message.contains("a person has answered question q-01A already"),
+        "{message}"
+    );
+    assert!(
+        !fixture.proposals_written(),
+        "the run is not claimed, so it can still be decided: {message}"
+    );
 }
 
 #[test]
@@ -3025,70 +3055,54 @@ fn asked_about(seen: &[RunnerRequest]) -> Vec<String> {
 }
 
 /// One case of the exit report: the status the faked reviewer's adapter reads every call as
-/// (`None`: Claude Code's own reading), whether each reply is one `check_reply` refuses, and
-/// what the command must say it saved, refused and left.
+/// (`None`: Claude Code's own reading), whether the reply is one `check_reply` refuses, and
+/// whether the command must say its proposal was refused.
 struct Exit {
     case: &'static str,
     status: Option<OutcomeStatus>,
     refuse: bool,
-    saved: &'static [&'static str],
-    refused: &'static [&'static str],
-    left: &'static [&'static str],
+    refused: bool,
 }
-
-/// After the first call reads as anything but completed, the command stops: `q-c` is saved
-/// refused, and the two questions after it are left.
-const STOPPED: [&str; 2] = ["q.dot", "q-a"];
 
 const EXITS: [Exit; 5] = [
     Exit {
-        case: "every reply accepted",
+        case: "the reply accepted",
         status: None,
         refuse: false,
-        saved: &["q-c", "q-a"],
-        refused: &[],
-        left: &[],
+        refused: false,
     },
     Exit {
-        case: "every reply refused",
+        case: "the reply refused",
         status: None,
         refuse: true,
-        saved: &["q-c", "q-a"],
-        refused: &["q-c", "q-a"],
-        left: &[],
+        refused: true,
     },
     Exit {
         case: "an agent error",
         status: Some(OutcomeStatus::AgentError),
         refuse: false,
-        saved: &["q-c"],
-        refused: &["q-c"],
-        left: &STOPPED,
+        refused: true,
     },
     Exit {
         case: "a timeout",
         status: Some(OutcomeStatus::Timeout),
         refuse: false,
-        saved: &["q-c"],
-        refused: &["q-c"],
-        left: &STOPPED,
+        refused: true,
     },
     Exit {
         case: "rate limited",
         status: Some(OutcomeStatus::RateLimited),
         refuse: true,
-        saved: &["q-c"],
-        refused: &["q-c"],
-        left: &STOPPED,
+        refused: true,
     },
 ];
 
-/// Reports: the exit names a saved reason only for a proposal this command wrote, and the
-/// report's `proposals saved` line names exactly the proposals on disk. The reviewer is faked by
-/// the status its adapter reads each call as, and the Runner is the recording sink every call
-/// reaches: nothing is started, and each call it records is a question asked.
+/// Reports: the exit names a saved reason only for the proposal this command wrote, and the
+/// report's `saved` line names exactly the proposal on disk. The reviewer is faked by the status
+/// its adapter reads the call as, and the Runner is the recording sink the call reaches: nothing
+/// is started, and the call it records is the question asked.
 #[test]
-fn the_exit_report_names_only_the_records_this_command_wrote() {
+fn the_exit_report_names_only_the_record_this_command_wrote() {
     let refused_reply = || {
         claude_output(
             &reply(&VALID.replace("\"choice\": 1", "\"choice\": 9")),
@@ -3100,14 +3114,11 @@ fn the_exit_report_names_only_the_records_this_command_wrote() {
             case,
             status,
             refuse,
-            saved,
             refused,
-            left,
         } = exit;
-        let fixture = fixture(&format!("decide-exit-{at}"), 3, reviewer(), |log| {
+        let fixture = fixture(&format!("decide-exit-{at}"), 2, reviewer(), |log| {
             log.raise("q-c", 0);
-            log.raise("q.dot", 1);
-            log.raise("q-a", 2);
+            log.raise("q-a", 1);
         });
         let runner = if refuse {
             Acting::new(move |_| Ok(exited(refused_reply())))
@@ -3121,113 +3132,192 @@ fn the_exit_report_names_only_the_records_this_command_wrote() {
         .expect("decided");
         let report = &decided.report;
 
-        assert_eq!(
-            asked_about(&runner.seen()),
-            saved,
-            "{case}: each call saved"
-        );
-        assert_eq!(decided.saved, saved, "{case}: {report}");
+        assert_eq!(asked_about(&runner.seen()), ["q-c"], "{case}: one call");
+        assert_eq!(decided.question, "q-c", "{case}: {report}");
         assert_eq!(decided.refused, refused, "{case}: {report}");
-        assert_eq!(decided.left, left, "{case}: {report}");
-        let unsaved: &[&str] = if left.contains(&"q.dot") {
-            &[]
-        } else {
-            &["q.dot"]
-        };
-        assert_eq!(decided.unsaved, unsaved, "{case}: {report}");
-        for id in ["q-c", "q-a"] {
-            assert_eq!(
-                fixture.has_proposal(id),
-                saved.contains(&id),
-                "{case}: {id}'s proposal is on disk exactly when the command says it saved it"
-            );
-        }
-        for id in refused {
-            assert_eq!(fixture.proposal(id)["status"], "refused", "{case}: {id}");
-        }
+        assert_eq!(
+            fixture.proposal("q-c")["status"],
+            if refused { "refused" } else { "accepted" },
+            "{case}"
+        );
         let written: Vec<String> = snapshot(&proposals_dir(&fixture.repo, RUN))
             .keys()
             .filter_map(|path| path.file_name()?.to_str()?.strip_suffix(".json"))
             .filter(|name| !name.ends_with(".settings"))
             .map(str::to_owned)
             .collect();
-        let mut listed = saved.to_vec();
-        listed.sort_unstable();
-        assert_eq!(written, listed, "{case}: the proposals on disk");
+        assert_eq!(written, ["q-c"], "{case}: the one proposal on disk");
         assert!(
-            report
-                .lines()
-                .any(|line| line == format!("proposals saved: {}", saved.join(", "))),
+            report.lines().any(|line| line
+                == format!(
+                    "  saved: {}",
+                    proposals_dir(&fixture.repo, RUN).join("q-c.json").display()
+                )),
             "{case}: {report}"
         );
 
-        let message = decided.outcome().expect_err(case).to_string();
-        assert!(is_one_line(&message), "{case}: {message:?}");
-        assert!(
-            message.contains(&format!(
-                "{} repl(ies) were refused ({}); each is saved with its reason in its proposal",
-                refused.len(),
-                refused.join(", ")
-            )) || refused.is_empty(),
-            "{case}: {message}"
-        );
-        assert!(
-            !message.contains("each is saved") || !refused.is_empty(),
-            "{case}: {message}"
-        );
-        assert_eq!(
-            message.contains("(q.dot); no file can be named after their ids, so nothing is saved"),
-            !unsaved.is_empty(),
-            "{case}: {message}"
-        );
-        assert_eq!(
-            message.contains(&format!("left without a proposal ({})", left.join(", "))),
-            !left.is_empty(),
-            "{case}: {message}"
-        );
-    }
-
-    // A question listed again after its proposal was saved is not named as left when a later
-    // question stops the command: its record is written, and the exit says so.
-    let fixture = two_questions("decide-exit-again");
-    let observed = observe::observe(&fixture.repo, RUN)
-        .expect("readable")
-        .expect("schema 4");
-    let by_id = |id: &str| {
-        observed
-            .open_questions()
-            .into_iter()
-            .find(|asked| asked.question.id.as_str() == id)
-            .expect("an open question")
-    };
-    let listed = [by_id("q-b"), by_id("q-a"), by_id("q-b")];
-    let dir = proposals_dir(&fixture.repo, RUN);
-    let runner = Acting::new({
-        let dir = dir.clone();
-        move |request| {
-            if asked_about(std::slice::from_ref(request)) == ["q-a"] {
-                std::fs::write(dir.join("q-a.out"), "someone else's bytes").expect("a stray file");
+        match decided.outcome() {
+            Ok(()) => assert!(!refused, "{case}: {report}"),
+            Err(error) => {
+                let message = error.to_string();
+                assert!(refused, "{case}: {message}");
+                assert!(is_one_line(&message), "{case}: {message:?}");
+                assert!(
+                    message.contains(
+                        "the reply to question q-c was refused; it is saved with its reason in \
+                         its proposal"
+                    ),
+                    "{case}: {message}"
+                );
             }
+        }
+    }
+}
+
+/// `PR435-RUN-LOCK-AFTER-ADMISSION`: the command holds the run's own lock, the one `resume`
+/// takes, from before admission until its proposal is written, so a resume that starts while the
+/// reviewer is asked cannot take the run; and once the command returns the lock is free again.
+#[test]
+fn a_resume_cannot_take_the_run_while_decide_holds_it() {
+    let fixture = one_question("decide-locked");
+    let public = fixture.public();
+    let resumed = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let runner = Acting::new({
+        let public = public.clone();
+        let resumed = std::sync::Arc::clone(&resumed);
+        move |_| {
+            // What `resume` takes first on the run, attempted while the call is in flight.
+            let taken = crate::rundir::RunLock::acquire(&public).map(drop);
+            lock(&resumed).push(taken.map_err(|error| error.to_string()));
             Ok(exited(claude_output(&reply(VALID), Some(0.25))))
         }
     });
-    let decided = propose(
-        &fixture.options(),
-        &observed,
-        &listed,
-        &BuiltinAdapters,
-        &runner,
-    )
-    .expect("decided");
-    assert_eq!(asked_about(&runner.seen()), ["q-b", "q-a"]);
-    assert_eq!(decided.saved, ["q-b"], "{}", decided.report);
-    assert_eq!(decided.left, ["q-a"], "{}", decided.report);
-    assert!(fixture.has_proposal("q-b") && !fixture.has_proposal("q-a"));
-    let message = decided.outcome().expect_err("left").to_string();
+    let decided = decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+    assert!(decided.outcome().is_ok(), "{}", decided.report);
+    let attempts = lock(&resumed).clone();
+    let [attempt] = attempts.as_slice() else {
+        panic!("one call, one resume attempted during it: {attempts:?}");
+    };
     assert!(
-        message.contains("1 question(s) left without a proposal (q-a)"),
+        attempt.is_err(),
+        "a resume took the run while decide was asking its reviewer"
+    );
+    assert!(
+        !crate::rundir::is_running(&public),
+        "decide gives the run's lock back when it returns"
+    );
+    drop(crate::rundir::RunLock::acquire(&public).expect("a resume can take the run now"));
+}
+
+/// `PR435-CASE-FOLDED-QUESTION-SELECTION`: two open questions whose ids differ only by case. The
+/// question asked, and the run's one claim spent, is the one named byte for byte.
+#[test]
+fn the_exact_question_is_asked_when_ids_differ_by_case() {
+    let fixture = fixture("decide-case", 2, reviewer(), |log| {
+        log.raise("q-A", 0);
+        log.raise("q-a", 1);
+    });
+    let runner = Acting::priced(0.25);
+    let decided = decide(&fixture.asking("q-a"), &BuiltinAdapters, &runner).expect("decided");
+    assert!(decided.outcome().is_ok(), "{}", decided.report);
+    assert_eq!(asked_about(&runner.seen()), ["q-a"]);
+    assert_eq!(decided.question, "q-a");
+    assert_eq!(fixture.proposal("q-a")["question_id"], "q-a");
+    let written: Vec<String> = snapshot(&proposals_dir(&fixture.repo, RUN))
+        .keys()
+        .filter_map(|path| path.file_name()?.to_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        written,
+        ["q-a.json", "q-a.out", "q-a.settings.json"],
+        "nothing is written for q-A"
+    );
+}
+
+/// `PR435-RUN-ID-VALIDATED-AFTER-LOOKUP`: a run id is checked as one before any path is built
+/// from it. An absolute directory, here an archived run's that holds a readable log, or a path
+/// that climbs out of the runs directory, is refused with its log unread and nothing done.
+#[test]
+fn a_run_id_that_is_not_one_is_refused_before_any_path_is_built() {
+    let fixture = one_question("decide-run-id");
+    let archived = one_question("decide-run-id-archived");
+    let elsewhere = archived.public();
+    let before = snapshot(&elsewhere);
+    for run_id in [
+        elsewhere.to_string_lossy().into_owned(),
+        format!("../runs/{RUN}"),
+        "..".to_owned(),
+        String::new(),
+    ] {
+        let runner = Acting::priced(0.25);
+        let options = DecideOptions {
+            run_id: run_id.clone(),
+            ..fixture.options()
+        };
+        let message = decide(&options, &BuiltinAdapters, &runner)
+            .map(|decided| decided.report)
+            .expect_err("not a run id")
+            .to_string();
+        assert!(
+            message.contains("is not a run id") && message.contains(NOTHING_DONE),
+            "{run_id}: {message}"
+        );
+        assert!(
+            !message.contains("schema-4") && !message.contains("run_started"),
+            "{run_id}: no log was read: {message}"
+        );
+        assert!(
+            runner.seen().is_empty() && runner.probes().is_empty(),
+            "{run_id}"
+        );
+    }
+    assert_eq!(
+        snapshot(&elsewhere),
+        before,
+        "the archived run is as it was"
+    );
+    assert!(!fixture.proposals_written() && !archived.proposals_written());
+}
+
+/// `PR435-INTERRUPTED-RUN-CLAIM`: a run with an open question and another runnable task, its lock
+/// free, is one `status` reports interrupted: the fold derives no end and its log records none.
+/// Only a run its log records parked is asked, so this one is refused with nothing spent.
+#[test]
+fn an_interrupted_run_with_an_open_question_is_refused_before_anything() {
+    let fixture = fixture("decide-interrupted-run", 2, reviewer(), |log| {
+        log.raise("q-01A", 0);
+    });
+    let observed = observe::observe(&fixture.repo, RUN)
+        .expect("readable")
+        .expect("schema 4");
+    assert_eq!(observed.open_questions().len(), 1, "an open question");
+    assert!(observed.outcome().is_none(), "no end is recorded");
+    let status = observed.render().expect("status renders");
+    assert!(status.contains("state: interrupted"), "{status}");
+
+    let runner = Acting::priced(0.25);
+    let message = decide(&fixture.options(), &BuiltinAdapters, &runner)
+        .map(|decided| decided.report)
+        .expect_err("an interrupted run is not parked")
+        .to_string();
+    assert!(
+        message.contains(&format!("run `{RUN}` is not parked"))
+            && message.contains("interrupted")
+            && message.contains(NOTHING_DONE),
         "{message}"
     );
+    assert!(runner.seen().is_empty() && runner.probes().is_empty());
+    assert!(!fixture.proposals_written(), "the run's claim is not spent");
+
+    // The control: the same question, its run ended parked, is asked.
+    let parked = one_question("decide-parked-run");
+    let observed = observe::observe(&parked.repo, RUN)
+        .expect("readable")
+        .expect("schema 4");
+    assert_eq!(observed.outcome(), Some(&crate::events::RunOutcome::Parked));
+    let runner = Acting::priced(0.25);
+    decide(&parked.options(), &BuiltinAdapters, &runner).expect("a parked run is asked");
+    assert_eq!(runner.seen().len(), 1);
 }
 
 /// The production region of a source file: everything before its trailing

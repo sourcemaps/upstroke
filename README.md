@@ -57,15 +57,15 @@ On Windows, Codex can review but not implement.
 | `upstroke run plan.md --budget 15` | Runs for real on a `upstroke/run-<id>` branch; needs a clean working tree. |
 | `upstroke status [<run-id>]` | The ledger: attempts, models, cost. |
 | `upstroke answer <question-id>` | Answers a question that parked a task. |
-| `upstroke decide <run-id> [<question-id>]` | The run's reviewer proposes an answer to a parked question, within `--max-cost-usd` (default $5 a run); it answers nothing. |
+| `upstroke decide <run-id> <question-id>` | The parked run's reviewer proposes an answer to that one question, with one call within `--max-cost-usd` (default $5 a run); it answers nothing. |
 | `upstroke resume <run-id> [--budget 30]` | Continues a stopped run from its event log. |
 | `upstroke export-decisions <run-id> [--format csv]` | Exports a finished run's routing decisions. |
 
 `run` and `resume` exit `0` when the run is complete, `2` when it is parked on unanswered
 questions, `3` when it stopped at its budget (raise it and `resume`), and `1` when it halted or
-the command failed. A command-line usage error also exits `2`. `decide` exits `1` when any reply
-or question was refused or it stopped with questions left, after its report; it decides a run
-once, and runs only for a host run whose reviewer is Claude Code
+the command failed. A command-line usage error also exits `2`. `decide` exits `1` when it was
+refused or the reply was, after its report; it decides a run once, under the run's own lock, and
+runs only for a parked host run whose reviewer is Claude Code
 ([design/18](design/18_design_cli_surface.md)).
 
 A run has no budget unless you set `--budget` or `[budgets]`. A budget stops new work once the

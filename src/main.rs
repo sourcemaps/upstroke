@@ -157,17 +157,15 @@ enum Command {
         decline: bool,
     },
     #[command(
-        about = "Ask a run's primary reviewer to propose answers to its open questions; it proposes and never answers"
+        about = "Ask a parked run's primary reviewer to propose an answer to one open question; it proposes and never answers"
     )]
     Decide {
         #[arg(help = "The run's exact id")]
         run_id: String,
+        #[arg(help = "The open question's exact id, byte for byte")]
+        question_id: String,
         #[arg(
-            help = "One open question's id, or an unambiguous prefix within the run; omit for every open question"
-        )]
-        question_id: Option<String>,
-        #[arg(
-            help = "The run's dollar allowance: a run is decided once, each call is capped at what is left, and no question is started once the calls have spent it"
+            help = "The run's dollar allowance: a run is decided once, by one call capped at this"
         )]
         #[arg(long, default_value_t = upstroke::decide::DEFAULT_MAX_COST_USD)]
         max_cost_usd: f64,
@@ -552,7 +550,7 @@ mod tests {
             ("answer", "Answer a question a run is parked on (§12)"),
             (
                 "decide",
-                "Ask a run's primary reviewer to propose answers to its open questions; it proposes and never answers",
+                "Ask a parked run's primary reviewer to propose an answer to one open question; it proposes and never answers",
             ),
         ];
         for flag in ["-h", "--help"] {
@@ -697,7 +695,7 @@ mod tests {
         ),
         (
             "decide",
-            &["upstroke", "decide", "01ABCDEF"],
+            &["upstroke", "decide", "01ABCDEF", "q-1"],
             CommandClass::Write,
         ),
     ];
@@ -793,6 +791,41 @@ mod tests {
             command_class(&refreshing),
             CommandClass::ReadOnly,
             "the tracker drives no run, so it joins no coordinator's ambient job"
+        );
+    }
+
+    /// `decide` decides one question per invocation: the question id is required, and it reaches
+    /// the decider as typed, its case kept.
+    #[test]
+    fn decide_takes_exactly_one_question_id_as_typed() {
+        assert!(
+            Cli::try_parse_from(["upstroke", "decide", "01ABCDEF"]).is_err(),
+            "a decide with no question id is a usage error, not every open question"
+        );
+        let Command::Decide {
+            run_id,
+            question_id,
+            max_cost_usd,
+        } = Cli::try_parse_from([
+            "upstroke",
+            "decide",
+            "01ABCDEF",
+            "q-A",
+            "--max-cost-usd",
+            "0.8",
+        ])
+        .expect("parse")
+        .command
+        else {
+            panic!("`decide 01ABCDEF q-A` did not parse as a decide");
+        };
+        assert_eq!(
+            (
+                run_id.as_str(),
+                question_id.as_str(),
+                max_cost_usd.to_string().as_str()
+            ),
+            ("01ABCDEF", "q-A", "0.8")
         );
     }
 

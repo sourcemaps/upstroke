@@ -78,17 +78,18 @@ do, so that their tests have a design sentence to be held to.
 
 **A proposal is advice, and no run reads it.** `upstroke decide` (§18) writes
 only under `<repo>/.upstroke/proposals/<run-id>/`, never into a run's public or
-private half or its answers, and appends no event. The directory is the run's
-one spending claim, made as a fresh run claims its execution root: the command
-creates it with one exclusive `create_dir`, immediately before the run's first
-call, and whatever is at that name already (an earlier decide's directory
+private half or its answers, and appends no event; it holds the run's own lock
+(`run.lock`, the one `resume` takes) while it decides, and gives it back. The
+directory is the run's one spending claim, made as a fresh run claims its
+execution root: the command creates it with one exclusive `create_dir`,
+immediately before the run's one call, and whatever is at that name already (an earlier decide's directory
 complete, partial or of an older format, an empty directory, a link, anything)
 is refused, never adopted: nothing in it is read, replaced or removed, and the
 command is refused with nothing written and no agent asked. Every file in it is
 created new and synced with its directory, and none is replaced or deleted; the
 directory stays after a failure or an interruption, so a run is decided once,
-and every call decide makes for a run is made by the one command that created
-its directory. The chain `.upstroke`, `proposals`, `<run-id>` must carry no
+about one question, and the one call decide makes for a run is made by the
+command that created its directory. The chain `.upstroke`, `proposals`, `<run-id>` must carry no
 symlink or reparse point and no regular file: each is read without following a
 link, and a symlink, junction or other reparse point at any of them is refused
 on every platform. On Unix each is also the repository owner's, `.upstroke` is
@@ -102,8 +103,8 @@ digits, `-` and `_`, so a question's three files never collide with another's.
 A proposal records the run, the question, the decider's agent, model and effort,
 `status` (`accepted` with the parsed `record`, or `refused` with a `reason`),
 the `cost_usd` the agent reported or `null`, `settled` (whether the call was
-clean, successful and priced, and so counted at that price), the call's
-`ceiling_usd`, and `raw_output`, the raw output's path from the repository root
+clean, successful and priced, and so settled at that price), the call's
+`ceiling_usd` (the run's whole allowance), and `raw_output`, the raw output's path from the repository root
 with `/` separators, so it names the same file in any checkout. This paragraph
 was added on 2026-11-26 with `upstroke decide`.
 

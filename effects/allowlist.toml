@@ -849,9 +849,11 @@ path = "src/decide.rs"
 allows = ["clippy::disallowed_methods"]
 packet = "none: not a module the retired packet names. Added on 2026-11-25 with `upstroke decide`, as CODING_STANDARDS.md §2 requires of a new effect: reviewed into this file in the change that introduces it"
 review = """
-The decider. It reads one schema-4 run through `engine::topology::observe` and, \
-for each open question that binds no agent, asks the run's recorded primary \
-reviewer for a proposal, read-only, through the Runner. It is not the engine: no \
+The decider. It reads one parked schema-4 run through \
+`engine::topology::observe`, under the run's own lock, and, for the one open \
+question it is named (exactly, byte for byte) when that binds no agent, asks the \
+run's recorded primary reviewer once for a proposal, read-only, through the \
+Runner. It is not the engine: no \
 engine module names it, and it never answers -- it calls no `write_answer`, no \
 `AnswerSource` and no coordinator. \
 WHAT IT NEEDS THE ALLOWANCE FOR, counted on the library target on Linux: \
@@ -867,9 +869,11 @@ through, `std::fs::File::create_new` 1, `std::io::Write::write_all` 1, \
 `util::fsync_file` 1 and `util::fsync_dir` 1. `admit`'s \
 `std::fs::canonicalize` and the `symlink_metadata` and `metadata` reads of \
 the chain's directories are not denied; nothing lists or reads the proposals \
-directory. The test region adds 66 more, counted the same way with \
-`--all-targets` on Linux (74 in all, on 2026-11-27): `std::fs::create_dir_all` \
-9 and `std::fs::write` 12, which build the fixture repository's plan file, pools \
+directory. `rundir::RunLock::acquire`, the run's own lock, is the engine's \
+facility and not denied. The test region adds 70 more, counted the same way \
+with `--all-targets` on Linux (78 in all, re-measured on 2026-11-27 when the \
+command was narrowed to one question): `std::fs::create_dir_all` \
+9 and `std::fs::write` 11, which build the fixture repository's plan file, pools \
 files (one naming a profile whose path carries control characters), credential \
 profile directory, private directory, a schema-3 run, an \
 earlier claim of the run with its files, a directory of another mode or \
@@ -881,7 +885,7 @@ proposal's raw-output reference still names its file; `std::fs::create_dir` \
 1, an earlier claim; on Unix, `std::fs::set_permissions` 1, which gives the \
 fixture's `.upstroke` the common umask's mode and each chain directory the mode \
 a case needs, and `std::os::unix::fs::symlink` 2, a link at the run's name and \
-at `.upstroke/proposals`; and 39 calls of the module's own denied entry point, \
+at `.upstroke/proposals`; and 44 calls of the module's own denied entry point, \
 `decide`. \
 `clippy::disallowed_types` and `clippy::disallowed_macros` are FORBIDDEN in this \
 file: it names no `std::process::Command` or `OpenOptions` and prints nothing. \
@@ -891,29 +895,37 @@ environment overlay, composed for the started checkout it runs in), which the \
 CLI passes as a `HostRunner` inside the write command's containment; the \
 recorded reviewer's pre-flight probes (`preflight::certify_agent`, the \
 adapter's `probe` and `discover`) go through the same Runner. Nothing is \
-written and nothing is started before `admit` has refused a run an engine is \
-driving (`rundir::is_running`), a run recorded on the container runner, a run \
+written and nothing is started before `decide` has refused a run id that is not \
+a plain component (before any path is built from it), taken the run's own lock \
+(`rundir::RunLock::acquire`, the lock `resume` takes, held until the proposal is \
+written or the command has failed; a run another holder has is refused), and \
+refused a run the fold of its log does not record parked, and before `admit` \
+has refused a run recorded on the container runner, a run \
 whose pools the credential pre-flight refuses, a reviewer whose adapter does \
 not claim every guarantee (cost reporting, a per-call dollar ceiling, no web \
 access, the run's private directory unreadable; only Claude Code claims them), \
 a `--max-cost-usd` that is not a positive number and a private directory no \
 permission rule can name; nothing but those probes is started before the \
 answers directory has been read (`interaction::read_answer`, which writes \
-nothing) and the pre-flight has passed, and no call before `prepare` has \
+nothing) and the pre-flight has passed, the answers directory is read again \
+immediately before the claim and the call, and no call before `prepare` has \
 refused a command that carries an environment overlay, is not the recorded \
 reviewer's model and effort, or does not keep each guarantee as built. \
 CONTAINMENT. Every file is written under `<repo>/.upstroke/proposals/<run-id>/`, \
-which the run's first call claims by creating it exclusively, immediately \
+which the run's one call claims by creating it exclusively, immediately \
 before that call: anything already at the name refuses the command with \
 nothing written and no agent asked, and the directory is never removed, so a \
 run is asked once. The chain is real directories (no link, no reparse point; \
 on Unix the repository owner's, `.upstroke` writable by no other user, and \
 `proposals` and `<run-id>` created owner-only and open to no other user), \
 checked before anything is created under each, with each one's parent synced \
-whoever created it. The run id is the exact name of an existing run directory \
-and the question id is one the run's own log froze; each is written into a \
+whoever created it. The run id is a plain component, checked before any path \
+is built from it, and the exact name of an existing run directory; the question \
+id is matched byte for byte against the run's open questions and written into a \
 file name only when it is a plain component. Nothing is written under a run's \
-public or private directory or an answers directory, no file is overwritten \
+public or private directory or an answers directory (the run lock's own files, \
+which `RunLock::acquire` opens, are created only where the run's engine never \
+created them), no file is overwritten \
 (every file, the call's settings file included, is `create_new`), and nothing \
 is deleted. \
 HANDLES: no item returns a `File`, an `OpenOptions` or a `Command`. \

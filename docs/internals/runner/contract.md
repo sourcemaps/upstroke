@@ -862,8 +862,8 @@ resume) while the site it is recorded under says event-before-effect in
 T-ATTEMPT.
 
 Since 2026-11-25 `Decide` is a sixth role, and the third outside. `upstroke
-decide` starts it from the CLI against a run that is parked or finished,
-never from a coordinator: no `attempt_started` precedes it, and it appends
+decide` starts it from the CLI against a run its log records parked, under
+that run's lock, never from a coordinator: no `attempt_started` precedes it, and it appends
 nothing to any run's event log, so there is no event for its spawn to
 follow at all.
 

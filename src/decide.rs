@@ -5,7 +5,7 @@
 #![allow(clippy::disallowed_methods)]
 #![forbid(clippy::disallowed_types, clippy::disallowed_macros)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -33,13 +33,15 @@ pub const DEFAULT_MAX_COST_USD: f64 = 5.0;
 /// The repository's own directory, which the proposals directory is under.
 const UPSTROKE_DIR: &str = ".upstroke";
 const PROPOSALS_DIR: &str = "proposals";
-/// The longest question id this command names a file after.
+/// The longest run or question id this command builds a path from.
 const MAX_ID_BYTES: usize = 128;
 
 pub struct DecideOptions {
     pub repo_root: PathBuf,
+    /// The run's exact id, checked as a plain file-name component before any path is built.
     pub run_id: String,
-    pub question_id: Option<String>,
+    /// The one open question to decide, matched exactly, byte for byte.
+    pub question_id: String,
     pub max_cost_usd: f64,
     pub pools_path: Option<PathBuf>,
     pub environment: Option<fn(&str) -> Option<OsString>>,
@@ -58,9 +60,9 @@ impl DecideOptions {
 /// each one on the command actually built for the call, before it is started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Guarantee {
-    /// The call reports what it cost in dollars, so `--max-cost-usd` can sum what was spent.
+    /// The call reports what it cost in dollars, so its proposal can record what was spent.
     CostReporting,
-    /// The call stops at a dollar ceiling of its own: what is left of `--max-cost-usd`.
+    /// The call stops at a dollar ceiling of its own: the run's `--max-cost-usd` allowance.
     PerCallCeiling,
     /// The call can fetch no web page and run no web search.
     NoWebAccess,
@@ -180,55 +182,28 @@ fn private_denials(private_dir: &str) -> Result<Vec<String>, String> {
     Ok(rules)
 }
 
+/// What a decide that saved its question's proposal did. Every other end of the command is an
+/// error, and saves no proposal.
 #[derive(Debug)]
 pub struct Decided {
     pub report: String,
-    /// The questions whose proposal this command saved, accepted or refused, in the order saved.
-    pub saved: Vec<String>,
-    /// The questions whose reply, or call, was refused: each is in `saved`, its proposal holding
-    /// the reason.
-    pub refused: Vec<String>,
-    /// The questions refused before any agent was asked, because no file can be named after
-    /// their id: nothing is saved for them.
-    pub unsaved: Vec<String>,
-    /// The questions this command stopped before proposing an answer to: the call in flight
-    /// when it stopped, and every question after it whose proposal is not saved.
-    pub left: Vec<String>,
+    /// The one question whose proposal this command saved, accepted or refused.
+    pub question: String,
+    /// Whether its reply, or its call, was refused: its proposal then holds the reason.
+    pub refused: bool,
 }
 
 impl Decided {
-    /// The command's exit: an error naming every refused, unsaved or left question, which says
-    /// a reason is saved only for the questions whose proposal was written.
+    /// The command's exit: an error when the question's reply was refused, which says its reason
+    /// is saved in its proposal.
     pub fn outcome(&self) -> Result<(), UpstrokeError> {
-        let mut failures = Vec::new();
-        if !self.refused.is_empty() {
-            failures.push(format!(
-                "{} repl(ies) were refused ({}); each is saved with its reason in its proposal",
-                self.refused.len(),
-                self.refused.join(", ")
-            ));
-        }
-        if !self.unsaved.is_empty() {
-            failures.push(format!(
-                "{} question(s) were refused before any agent was asked ({}); no file can be named \
-                 after their ids, so nothing is saved for them",
-                self.unsaved.len(),
-                self.unsaved.join(", ")
-            ));
-        }
-        if !self.left.is_empty() {
-            failures.push(format!(
-                "the command stopped with {} question(s) left without a proposal ({})",
-                self.left.len(),
-                self.left.join(", ")
-            ));
-        }
-        if failures.is_empty() {
+        if !self.refused {
             return Ok(());
         }
-        Err(UpstrokeError::Refused {
-            message: one_line(failures.join("; ")),
-        })
+        Err(refused(format!(
+            "the reply to question {} was refused; it is saved with its reason in its proposal",
+            self.question
+        )))
     }
 }
 
@@ -272,19 +247,78 @@ pub fn decide(
     adapters: &dyn AdapterSource,
     runner: &dyn Runner,
 ) -> Result<Decided, UpstrokeError> {
-    let observed = read_run(&opts.repo_root, &opts.run_id)?;
-    let questions = chosen_questions(&observed, &opts.run_id, opts.question_id.as_deref())?;
-    propose(opts, &observed, &questions, adapters, runner).map_err(one_lined)
+    let run = &opts.run_id;
+    // A run id names a directory under the repository's runs, so it is checked before any path
+    // is built from it: an absolute path or a `..` would name a directory elsewhere.
+    if !plain_id(run) {
+        return Err(refused(format!(
+            "`{run}` is not a run id: a run id is a plain file-name component (1 to \
+             {MAX_ID_BYTES} ASCII letters, digits, `-` or `_`, and no device name), so no path \
+             is built from it; {NOTHING_DONE}"
+        )));
+    }
+    let public = crate::rundir::public_dir(&opts.repo_root, run);
+    if !public.join(crate::rundir::EVENT_LOG).is_file() {
+        return Err(refused(format!(
+            "no run `{run}` under {} (the run id must be exact)",
+            crate::rundir::runs_root(&opts.repo_root).display()
+        )));
+    }
+    // The run's own lock, the one `resume` takes, held from before the run is read until this
+    // command returns: no resume can start while it is admitted and asked, and nothing is asked
+    // of a run a coordinator holds.
+    let _lock = crate::rundir::RunLock::acquire(&public).map_err(|error| {
+        refused(format!(
+            "run `{run}` is being driven: its lock, the one `resume` takes, cannot be taken \
+             ({error}), and decide asks nothing of a run a coordinator holds; {NOTHING_DONE}"
+        ))
+    })?;
+    let observed = read_run(&opts.repo_root, run)?;
+    parked(&observed, run)?;
+    let asked = chosen_question(&observed, run, &opts.question_id)?;
+    propose(opts, &observed, &asked, adapters, runner).map_err(one_lined)
 }
 
-/// Asks the run's decider about each of `questions`, in order.
+/// Refuses a run the fold of its log does not report parked: one still running, interrupted
+/// (no end recorded, so a resume would carry it on with its open question aside), or ended any
+/// other way. An open question and a free lock are not enough.
+fn parked(observed: &Observed, run: &str) -> Result<(), UpstrokeError> {
+    use crate::events::RunOutcome;
+    let state = match observed.outcome() {
+        Some(RunOutcome::Parked) => return Ok(()),
+        None => "records no end, so `status` reports it interrupted and a resume would carry it on",
+        Some(RunOutcome::Complete) => "records it complete",
+        Some(RunOutcome::Halted) => "records it halted",
+        Some(RunOutcome::BudgetExceeded) => "records it ended over its budget",
+    };
+    Err(refused(format!(
+        "run `{run}` is not parked: its log {state}, and decide asks only about a run its log \
+         records parked; {NOTHING_DONE}"
+    )))
+}
+
+/// Asks the run's decider about `asked`, once.
 fn propose(
     opts: &DecideOptions,
     observed: &Observed,
-    questions: &[OpenAsked],
+    asked: &OpenAsked,
     adapters: &dyn AdapterSource,
     runner: &dyn Runner,
 ) -> Result<Decided, UpstrokeError> {
+    let id = asked.question.id.as_str();
+    if asked.binds_an_agent {
+        return Err(refused(format!(
+            "question {id} chooses which agent runs a task, and binding questions are left to a \
+             person; {NOTHING_DONE}"
+        )));
+    }
+    if !plain_id(id) {
+        return Err(refused(format!(
+            "question {id:?}'s id is not a plain file-name component (1 to {MAX_ID_BYTES} ASCII \
+             letters, digits, `-` or `_`, and no device name), so no file is named after it; \
+             {NOTHING_DONE}"
+        )));
+    }
     let Some(started) = observed.started() else {
         return Err(refused(format!(
             "run `{}` has no schema-4 run_started, so it cannot be read as one",
@@ -327,238 +361,89 @@ fn propose(
         credential,
         private_denials,
     };
-    if !plain_id(&opts.run_id) {
-        return Err(refused(format!(
-            "the run id `{}` is not a plain file-name component, so no proposals directory is \
-             named after it; {NOTHING_DONE}",
-            opts.run_id
-        )));
-    }
-    let answered = answered(&observed.paths().answers(), questions)?;
-    let askable = |asked: &OpenAsked| {
-        let id = asked.question.id.as_str();
-        !asked.binds_an_agent && plain_id(id) && !answered.contains_key(id)
-    };
-    if questions.iter().any(askable) {
-        crate::engine::topology::preflight::certify_agent(
-            &primary.agent,
-            adapter,
-            &config.pools,
-            runner,
-            &|what| {
-                refused(format!(
-                    "run `{}`'s recorded reviewer did not pass the pre-flight a run makes of it: \
-                     {what}; {NOTHING_DONE}",
-                    opts.run_id
-                ))
-            },
-        )?;
-    }
+    let answers = observed.paths().answers();
+    unanswered(&answers, asked)?;
+    crate::engine::topology::preflight::certify_agent(
+        &primary.agent,
+        adapter,
+        &config.pools,
+        runner,
+        &|what| {
+            refused(format!(
+                "run `{}`'s recorded reviewer did not pass the pre-flight a run makes of it: \
+                 {what}; {NOTHING_DONE}",
+                opts.run_id
+            ))
+        },
+    )?;
     let plan_text = recorded_plan(&opts.repo_root.join(&started.plan_path), &started.plan_hash);
     let dir = proposals_dir(&opts.repo_root, &opts.run_id);
+    let names = Names::of(&dir, id);
+    let prompt = build_prompt(observed, asked, &plan_text);
+    let call = prepare(
+        &decider,
+        &opts.repo_root,
+        &names.settings,
+        &prompt,
+        opts.max_cost_usd,
+    )?;
+    // Read again immediately before the run is claimed and its one call started: a person may
+    // have answered while the pre-flight ran, and an answered question is never asked.
+    unanswered(&answers, asked)?;
+    claim(&opts.repo_root, &opts.run_id, &dir)?;
+    let claimed = |error: UpstrokeError| {
+        refused(format!(
+            "no proposal for question {id} was saved: {error}; the run stays claimed (`{}`), so a \
+             later decide of it writes nothing and asks no agent",
+            dir.display()
+        ))
+    };
+    let returned = ask(&decider, runner, call, &names).map_err(claimed)?;
+    let verdict = match &returned {
+        Returned::Settled { reply, .. } => check_reply(&asked.question, reply),
+        Returned::Unsettled { reason, .. } => Err(reason.clone()),
+    };
+    let record = SaveRecord {
+        run_id: &opts.run_id,
+        decider: &decider,
+        verdict: &verdict,
+        returned: &returned,
+        ceiling_usd: opts.max_cost_usd,
+    };
+    save(&names, &record).map_err(claimed)?;
 
     // Every line of the report is pushed whole through the terminal line builder: the agent's
     // reply, the run's question text and the file names are data inside a line, so none of them
     // can start a line of its own or reach the terminal as a control.
     let mut out = TerminalLines::default();
-    let mut saved = Vec::new();
-    let mut refusals = Vec::new();
-    let mut unsaved = Vec::new();
-    let mut left = Vec::new();
-    let mut spent = 0.0_f64;
-    let mut unsettled = None;
-    let mut claimed = false;
-    let mut called = BTreeSet::new();
-    for (index, asked) in questions.iter().enumerate() {
-        let id = asked.question.id.as_str().to_owned();
-        if asked.binds_an_agent {
-            out.push(format_args!(
-                "{id}: skipped — it chooses which agent runs a task, and binding questions are \
-                 left to a person; no agent was asked"
-            ));
-            continue;
-        }
-        if !plain_id(&id) {
-            out.push(format_args!(
-                "{id:?}: refused — its id is not a plain file-name component (1 to \
-                 {MAX_ID_BYTES} ASCII letters, digits, `-` or `_`, and no device name), so no \
-                 file is named after it; no agent was asked, and nothing is saved for it"
-            ));
-            unsaved.push(id.clone());
-            continue;
-        }
-        if let Some(answer) = answered.get(&id) {
-            out.push(format_args!(
-                "{id}: skipped — a person has answered it already ({}), and the run applies that \
-                 answer; no agent was asked",
-                described(answer)
-            ));
-            continue;
-        }
-        if !called.insert(id.clone()) {
-            out.push(format_args!(
-                "{id}: skipped — it was already asked in this command, and a question gets at \
-                 most one call"
-            ));
-            continue;
-        }
-        let remaining = opts.max_cost_usd - spent;
-        if remaining <= 0.0 {
-            left = left_from(questions, index, &answered, &saved);
-            out.push(format_args!(
-                "stopped: this command's calls have spent ${spent:.4}, which reaches the \
-                 --max-cost-usd allowance of ${:.4} for the run, so no further call is started; \
-                 left without a proposal: {}",
-                opts.max_cost_usd,
-                listed(&left)
-            ));
-            break;
-        }
-        let names = Names::of(&dir, &id);
-        let prompt = build_prompt(observed, asked, &plan_text);
-        let call = match prepare(
-            &decider,
-            &opts.repo_root,
-            &names.settings,
-            &prompt,
-            remaining,
-        ) {
-            Ok(call) => call,
-            Err(error) if !claimed => return Err(error),
-            Err(error) => {
-                left = left_from(questions, index, &answered, &saved);
-                stopped(&mut out, &error, &left);
-                break;
-            }
-        };
-        if !claimed {
-            claim(&opts.repo_root, &opts.run_id, &dir)?;
-            claimed = true;
-        }
-        let ordinal = u32::try_from(index + 1).unwrap_or(u32::MAX);
-        let published = ask(&decider, runner, call, &names, ordinal).and_then(|returned| {
-            let verdict = match &returned {
-                Returned::Settled { reply, .. } => check_reply(&asked.question, reply),
-                Returned::Unsettled { reason, .. } => Err(reason.clone()),
-            };
-            let record = SaveRecord {
-                run_id: &opts.run_id,
-                decider: &decider,
-                verdict: &verdict,
-                returned: &returned,
-                ceiling_usd: remaining,
-            };
-            save(&names, &record).map(|()| (returned, verdict))
-        });
-        let (returned, verdict) = match published {
-            Ok(published) => published,
-            Err(error) => {
-                left = left_from(questions, index, &answered, &saved);
-                stopped(&mut out, &error, &left);
-                break;
-            }
-        };
-        saved.push(id.clone());
-        render_one(
-            &mut out,
-            &decider,
-            &asked.question,
-            &verdict,
-            returned.settled_usd(),
-            &names.proposal,
-        );
-        if verdict.is_err() {
-            refusals.push(id.clone());
-        }
-        match returned {
-            Returned::Settled { cost_usd, .. } => spent += cost_usd,
-            Returned::Unsettled { reason, .. } => {
-                left = left_from(questions, index + 1, &answered, &saved);
-                out.push(format_args!(
-                    "stopped: {id}'s call did not settle at a price ({reason}), so what it spent \
-                     is unknown and no further call is started; left without a proposal: {}",
-                    listed(&left)
-                ));
-                unsettled = Some(id);
-                break;
-            }
-        }
-    }
-    out.push(format_args!("total cost: ${spent:.4}"));
-    if let Some(id) = &unsettled {
-        out.push(format_args!(
-            "cost unknown for: {id} (its call did not settle at a price, so the total is a floor)"
-        ));
-    }
-    if claimed {
-        out.push(format_args!(
-            "claimed: {}; decide asks a run once, so a later decide of this run writes nothing \
-             and asks no agent",
-            dir.display()
-        ));
-    }
-    out.push(format_args!("proposals saved: {}", listed(&saved)));
-    if saved.is_empty() {
-        out.push(format_args!("nothing was answered"));
-    } else {
-        out.push(format_args!(
-            "nothing was answered: a person applies a proposal with `upstroke answer \
-             <question-id>`"
-        ));
-    }
+    render_one(
+        &mut out,
+        &decider,
+        &asked.question,
+        &verdict,
+        returned.settled_usd(),
+        &names.proposal,
+    );
+    out.push(format_args!(
+        "claimed: {}; decide asks a run once, so a later decide of this run writes nothing and \
+         asks no agent",
+        dir.display()
+    ));
+    out.push(format_args!(
+        "nothing was answered: a person applies a proposal with `upstroke answer <question-id>`"
+    ));
     Ok(Decided {
         report: out.into_string(),
-        saved,
-        refused: refusals,
-        unsaved,
-        left,
+        question: id.to_owned(),
+        refused: verdict.is_err(),
     })
-}
-
-/// The questions of `questions`, from the one at `from` on, that this command leaves without a
-/// proposal once it stops there, each named once: every one but those that bind an agent, those
-/// a person has answered, and those whose proposal is in `saved` already, which a question
-/// listed twice can be.
-fn left_from(
-    questions: &[OpenAsked],
-    from: usize,
-    answered: &BTreeMap<String, Answer>,
-    saved: &[String],
-) -> Vec<String> {
-    let mut named = BTreeSet::new();
-    questions
-        .iter()
-        .skip(from)
-        .filter(|later| !later.binds_an_agent)
-        .map(|later| later.question.id.as_str().to_owned())
-        .filter(|later| !answered.contains_key(later) && !saved.contains(later))
-        .filter(|later| named.insert(later.clone()))
-        .collect()
-}
-
-/// `ids` joined for a report line, or `none`.
-fn listed(ids: &[String]) -> String {
-    if ids.is_empty() {
-        "none".to_owned()
-    } else {
-        ids.join(", ")
-    }
-}
-
-/// The report's line for a command that stopped on `error` once the run was claimed.
-fn stopped(out: &mut TerminalLines, error: &UpstrokeError, left: &[String]) {
-    out.push(format_args!(
-        "stopped: {error}; the run stays claimed and no further call is started; left without a \
-         proposal: {}",
-        listed(left)
-    ));
 }
 
 const NOTHING_DONE: &str = "nothing was written and no agent was asked";
 
 /// Refuses a run whose recorded reviewer environment a decide call cannot keep its promises in,
 /// before anything is written or any agent asked. Returns the deny rules that keep the run's
-/// private directory unreadable.
+/// private directory unreadable. The run is held under its own lock already (`decide`).
 fn admit(
     opts: &DecideOptions,
     started: &RunStarted4,
@@ -566,13 +451,6 @@ fn admit(
     pools: &[Pool],
 ) -> Result<Vec<String>, UpstrokeError> {
     let run = &opts.run_id;
-    if crate::rundir::is_running(&crate::rundir::public_dir(&opts.repo_root, run)) {
-        return Err(refused(format!(
-            "run `{run}` is being driven: an engine holds its lock (or whether one does cannot be \
-             told), and decide proposes answers only for a run nothing is driving, so the run's \
-             own questions are not read while it may be settling them; {NOTHING_DONE}"
-        )));
-    }
     if started.runner.kind != RunnerKind::Host {
         return Err(refused(format!(
             "run `{run}` was recorded on the container runner, and decide starts a reviewer on \
@@ -614,31 +492,25 @@ fn admit(
         .map_err(|reason| refused(format!("run `{run}`: {reason}; {NOTHING_DONE}")))
 }
 
-/// The questions of `questions` a person has answered already, each with its answer: an answer
-/// `upstroke answer` published in the run's answers directory `answers` that the run's log has
-/// not settled yet. Read for every question this command could ask, before anything is written
-/// or any agent asked, so a question the run will apply a person's answer to is never asked.
-fn answered(
-    answers: &Path,
-    questions: &[OpenAsked],
-) -> Result<BTreeMap<String, Answer>, UpstrokeError> {
-    let mut answered = BTreeMap::new();
-    for asked in questions {
-        let id = asked.question.id.as_str();
-        if asked.binds_an_agent || !plain_id(id) || answered.contains_key(id) {
-            continue;
-        }
-        let read =
-            crate::interaction::read_answer(answers, &asked.question.id).map_err(|error| {
-                refused(format!(
-                    "whether question {id} was answered cannot be told: {error}; {NOTHING_DONE}"
-                ))
-            })?;
-        if let Some(answer) = read {
-            answered.insert(id.to_owned(), answer);
-        }
+/// Refuses `asked` when a person has answered it already: an answer `upstroke answer` published
+/// in the run's answers directory `answers` that the run's log has not settled yet. Read at
+/// admission and again immediately before the run is claimed and its call started, so a question
+/// the run will apply a person's answer to is never asked.
+fn unanswered(answers: &Path, asked: &OpenAsked) -> Result<(), UpstrokeError> {
+    let id = asked.question.id.as_str();
+    let read = crate::interaction::read_answer(answers, &asked.question.id).map_err(|error| {
+        refused(format!(
+            "whether question {id} was answered cannot be told: {error}; {NOTHING_DONE}"
+        ))
+    })?;
+    match read {
+        None => Ok(()),
+        Some(answer) => Err(refused(format!(
+            "a person has answered question {id} already ({}), and the run applies that answer; \
+             {NOTHING_DONE}",
+            described(&answer)
+        ))),
     }
-    Ok(answered)
 }
 
 /// A person's answer, as the report names it.
@@ -650,14 +522,8 @@ fn described(answer: &Answer) -> String {
     }
 }
 
+/// The run's log, read under its lock (`decide`), from a run directory known to hold one.
 fn read_run(repo_root: &Path, run_id: &str) -> Result<Observed, UpstrokeError> {
-    let public = crate::rundir::public_dir(repo_root, run_id);
-    if !public.join(crate::rundir::EVENT_LOG).is_file() {
-        return Err(refused(format!(
-            "no run `{run_id}` under {} (the run id must be exact)",
-            crate::rundir::runs_root(repo_root).display()
-        )));
-    }
     match observe::observe(repo_root, run_id) {
         Ok(Some(observed)) => Ok(observed),
         Ok(None) => Err(refused(format!(
@@ -669,73 +535,34 @@ fn read_run(repo_root: &Path, run_id: &str) -> Result<Observed, UpstrokeError> {
     }
 }
 
-fn chosen_questions(
+/// The open question whose id is `wanted`, byte for byte: no case is folded and no prefix
+/// matched, so the question asked, and the claim spent, is the one the operator named.
+fn chosen_question(
     observed: &Observed,
     run_id: &str,
-    wanted: Option<&str>,
-) -> Result<Vec<OpenAsked>, UpstrokeError> {
-    let mut open = observed.open_questions();
-    let order: Vec<String> = observed
+    wanted: &str,
+) -> Result<OpenAsked, UpstrokeError> {
+    if let Some(asked) = observed
+        .open_questions()
+        .into_iter()
+        .find(|asked| asked.question.id.as_str() == wanted)
+    {
+        return Ok(asked);
+    }
+    if observed
         .raised_questions()
         .iter()
-        .map(|(question, _)| question.id.as_str().to_owned())
-        .collect();
-    open.sort_by_key(|asked| {
-        order
-            .iter()
-            .position(|id| id == asked.question.id.as_str())
-            .unwrap_or(usize::MAX)
-    });
-    let Some(wanted) = wanted else {
-        return Ok(open);
-    };
-    let upper = wanted.to_ascii_uppercase();
-    if let Some(at) = open
-        .iter()
-        .position(|asked| asked.question.id.as_str().eq_ignore_ascii_case(wanted))
+        .any(|(question, _)| question.id.as_str() == wanted)
     {
-        return Ok(vec![open.swap_remove(at)]);
+        return Err(refused(format!(
+            "question {wanted} of run {run_id} is no longer open: the run's log has settled it, \
+             so an answer now would be applied to nothing; {NOTHING_DONE}"
+        )));
     }
-    let settled = |id: &str| {
-        refused(format!(
-            "question {id} of run {run_id} is no longer open: the run's log has settled it, so \
-             an answer now would be applied to nothing. Nothing was written"
-        ))
-    };
-    if let Some(id) = order.iter().find(|id| id.eq_ignore_ascii_case(wanted)) {
-        return Err(settled(id));
-    }
-    let prefixed: Vec<usize> = open
-        .iter()
-        .enumerate()
-        .filter(|(_, asked)| {
-            asked
-                .question
-                .id
-                .as_str()
-                .to_ascii_uppercase()
-                .starts_with(&upper)
-        })
-        .map(|(at, _)| at)
-        .collect();
-    let settled_prefixed: Vec<&String> = order
-        .iter()
-        .filter(|id| id.to_ascii_uppercase().starts_with(&upper))
-        .filter(|id| {
-            !open
-                .iter()
-                .any(|asked| asked.question.id.as_str() == id.as_str())
-        })
-        .collect();
-    match (prefixed.as_slice(), settled_prefixed.as_slice()) {
-        ([at], []) => Ok(vec![open.swap_remove(*at)]),
-        ([], [id]) => Err(settled(id)),
-        ([], []) => Err(refused(format!("no question with that id in run {run_id}"))),
-        _ => Err(refused(format!(
-            "that prefix matches {} questions in run {run_id}; use more characters",
-            prefixed.len() + settled_prefixed.len()
-        ))),
-    }
+    Err(refused(format!(
+        "run {run_id} has no question {wanted:?} (the question id must be exact, byte for byte); \
+         {NOTHING_DONE}"
+    )))
 }
 
 /// Who raised a question: the task's worker, or the coordinator.
@@ -1308,8 +1135,8 @@ fn kept(guarantee: Guarantee, built: &Built<'_>) -> Result<(), String> {
             match value.parse::<f64>() {
                 Ok(usd) if usd.is_finite() && usd > 0.0 && usd <= built.ceiling_usd => Ok(()),
                 _ => Err(format!(
-                    "`--max-budget-usd {value}` is not a ceiling above $0 and at most the ${} \
-                     left of --max-cost-usd",
+                    "`--max-budget-usd {value}` is not a ceiling above $0 and at most the run's \
+                     --max-cost-usd allowance of ${}",
                     built.ceiling_usd
                 )),
             }
@@ -1333,7 +1160,10 @@ fn kept(guarantee: Guarantee, built: &Built<'_>) -> Result<(), String> {
     }
 }
 
-/// Starts one call of the claimed run: writes its settings file new, starts it through the
+/// The identity of the command's one call: the first and only decider of the run.
+const CALL_ORDINAL: u32 = 1;
+
+/// Starts the one call of the claimed run: writes its settings file new, starts it through the
 /// Runner, saves its raw output new, and reads what it returned. A Runner error is a returned
 /// outcome too, saved in place of the raw output, and never settles. The call is taken whole:
 /// its command and workspace move into the request, so what starts is what `prepare` checked.
@@ -1342,7 +1172,6 @@ fn ask(
     runner: &dyn Runner,
     call: Call,
     names: &Names,
-    ordinal: u32,
 ) -> Result<Returned, UpstrokeError> {
     let Call {
         task_run,
@@ -1357,7 +1186,9 @@ fn ask(
         task_run.workspace,
         AgentId::new(decider.adapter.id()),
         decider.timeout,
-        InvocationId::Decide { ordinal },
+        InvocationId::Decide {
+            ordinal: CALL_ORDINAL,
+        },
     );
     if let Some(credential) = &decider.credential {
         request = request.with_credential_profile(credential.clone());
@@ -1701,7 +1532,7 @@ fn ensure_dir(repo_root: &Path, dir: &Path, privacy: Privacy) -> Result<(), Upst
     sync_parent(dir).map_err(|reason| unclaimed(&reason))
 }
 
-/// Claims the run, once, immediately before its first call: `.upstroke` and
+/// Claims the run, once, immediately before its one call: `.upstroke` and
 /// `.upstroke/proposals` are made sure of (`ensure_dir`), and then the run's own directory `dir`
 /// is created exclusively. Whatever stands at its name already, an earlier decide's directory
 /// complete, partial or of an older format, or anything else, refuses the command with nothing
@@ -1809,7 +1640,7 @@ struct SaveRecord<'a> {
     decider: &'a Decider<'a>,
     verdict: &'a Result<Value, String>,
     returned: &'a Returned,
-    /// The call's own `--max-budget-usd`: what was left of the allowance when it started.
+    /// The call's own `--max-budget-usd`: the run's whole allowance, for its one call.
     ceiling_usd: f64,
 }
 

@@ -1,22 +1,31 @@
 # Decide
 
-[`src/decide.rs`](../../src/decide.rs) is `upstroke decide <run-id> [<question-id>]`: it asks a
-run's recorded primary reviewer to propose an answer to each of the run's open questions, saves
-each reply under `.upstroke/proposals/<run-id>/`, and answers nothing. A person applies a
-proposal with `upstroke answer`.
+[`src/decide.rs`](../../src/decide.rs) is `upstroke decide <run-id> <question-id>`: it asks a
+parked run's recorded primary reviewer to propose an answer to one open question, saves the reply
+under `.upstroke/proposals/<run-id>/`, and answers nothing. A person applies a proposal with
+`upstroke answer`.
+
+One invocation decides exactly one question of one run, with one call. The question id is
+required and matched exactly, byte for byte: no case is folded and no prefix matched
+(`chosen_question`). The run id is checked as a plain file-name component before any path is
+built from it (`decide`). The command takes the run's own lock, the `rundir::RunLock` `resume`
+takes, before the run is read or admitted, and holds it until the proposal is written or the
+command has failed, so no resume can start while the reviewer is asked and nothing is asked of a
+run a coordinator holds. Under the lock it requires the run to be parked as the fold of its log
+reports it (`parked`), and it reads whether the question has an answer at admission and again
+immediately before the call (`unanswered`).
 
 A run is decided once. The command claims it by creating `.upstroke/proposals/<run-id>/`
-exclusively, immediately before its first call, and never reads that directory or removes it: a
-run whose directory exists, from a complete, partial or older decide or anything else, is
-refused, never adopted, with nothing written and no agent asked (`claim`), as a fresh run's
-execution root is (`workspace_manager::FreshExecutionRoot`). That directory is the run's one
-spending claim: every call decide makes for the run is made by the command that created it, so a
-later decide, or one started beside it that loses the `create_dir`, spends nothing. So the
-accounting is this command's own, in memory: each question gets at most one call, each call is
-capped at what is left of `--max-cost-usd`, the run's allowance, and only a clean, successful,
-priced call is counted, at its price (`settle`). Any other outcome a call returns ends the
-command, and a command that stops with questions left names them and exits non-zero
-(`Decided::outcome`).
+exclusively, immediately before its call, and never reads that directory or removes it: a run
+whose directory exists, from a complete, partial or older decide or anything else, is refused,
+never adopted, with nothing written and no agent asked (`claim`), as a fresh run's execution root
+is (`workspace_manager::FreshExecutionRoot`). That directory is the run's one spending claim:
+the one call decide makes for the run is made by the command that created it, so a later decide,
+of the same question or another, or one started beside it that loses the `create_dir`, spends
+nothing. The call is capped at `--max-cost-usd`, the run's allowance, whole; nothing is
+subtracted from it and no other call follows, so there is no remainder to compute. Only a clean,
+successful, priced call is settled, at its price (`settle`); any other outcome is saved as
+refused, and a refused proposal makes the command exit non-zero (`Decided::outcome`).
 
 ## Module
 
@@ -27,24 +36,30 @@ chosen. Its profile is `review::profile_for`'s, which is read-only. Because that
 read `.upstroke/**`, and a decide call cannot read the run's private directory either, every
 input the decider needs is handed to it in the prompt.
 
-Admission comes before the run is claimed, anything is written or any agent is asked, in these
-steps:
+Admission comes under the run's lock and before the run is claimed, anything is written or any
+agent is asked, in these steps:
 
-- Once per command, `admit` refuses a run an engine is driving (`rundir::is_running`), a run
-  recorded on the container runner, a run whose pools the credential pre-flight a resume runs
-  (`preflight::refuse_unusable_profiles`) refuses, a reviewer whose adapter does not claim every
-  `Guarantee`, a `--max-cost-usd` that is not a positive number, and a private directory no
-  permission rule can name exactly.
-- Once per command, `answered` reads each question's answer file (`interaction::read_answer`), so
-  a question a person has answered already is skipped and never asked.
-- Once per command, when a question is left to ask, the recorded reviewer passes the pre-flight a
-  run makes of each recorded agent (`preflight::certify_agent`, which `RunPreflight::certify`
-  runs too): its CLI probed through the Runner, and every account the pools file configures for
-  its agent found signed in.
-- Once per call, `prepare` builds the command and refuses it unless it carries no environment
-  overlay, its `--model` and `--effort` are exactly the recorded reviewer's, and `kept` finds
-  every guarantee on the command and settings actually built. A claim is never enough on its
-  own: the check reads the arguments and the settings, not the adapter's word.
+- `decide` refuses a run id that is not a plain component, a run with no log, a run whose lock
+  another holder has (a coordinator, a resume, another decide, or a reaper still cleaning up),
+  a run that is not schema 4, a run the fold does not report parked (`parked`), and a question
+  id that names no open question exactly (`chosen_question`).
+- `propose` refuses a question that binds an agent and a question id that is not a plain
+  component.
+- `admit` refuses a run recorded on the container runner, a run whose pools the credential
+  pre-flight a resume runs (`preflight::refuse_unusable_profiles`) refuses, a reviewer whose
+  adapter does not claim every `Guarantee`, a `--max-cost-usd` that is not a positive number,
+  and a private directory no permission rule can name exactly.
+- `unanswered` reads the question's answer file (`interaction::read_answer`), so a question a
+  person has answered already is refused and never asked.
+- The recorded reviewer passes the pre-flight a run makes of each recorded agent
+  (`preflight::certify_agent`, which `RunPreflight::certify` runs too): its CLI probed through
+  the Runner, and every account the pools file configures for its agent found signed in.
+- `prepare` builds the command and refuses it unless it carries no environment overlay, its
+  `--model` and `--effort` are exactly the recorded reviewer's, and `kept` finds every guarantee
+  on the command and settings actually built. A claim is never enough on its own: the check
+  reads the arguments and the settings, not the adapter's word.
+- `unanswered` reads the answer file again, immediately before the run is claimed and the call
+  started, so an answer a person published while the pre-flight ran is seen and nothing is spent.
 
 The plan file is forwarded in the prompt only when its bytes hash to the run's recorded
 `plan_hash` (`recorded_plan`). The Runner composes the call's environment for the checkout it
@@ -62,7 +77,8 @@ What this module never does, and the reasons:
 
 - It never answers. It calls no `interaction::write_answer`, no `AnswerSource` and no
   coordinator, and writes nothing under a run's public or private directory or an answers
-  directory (`a_decide_leaves_every_file_of_the_run_as_it_was_and_writes_no_answer`). A proposal
+  directory; the run lock it takes is `RunLock`'s own, whose files the run's engine created
+  already (`a_decide_leaves_every_file_of_the_run_as_it_was_and_writes_no_answer`). A proposal
   is advice for a person; applying it stays `upstroke answer`'s job, which checks the reply
   against the run as it is when the person applies it.
 - No engine code calls it, and only the CLI names it
@@ -70,7 +86,12 @@ What this module never does, and the reasons:
   `clippy.toml`, so a module that states no allowance cannot reach it.
 - It asks no agent about a question that binds one (`OpenAsked::binds_an_agent`). Which agent
   runs a task is chosen only through an option the run froze, and an agent choosing agents is
-  not a decision this command delegates.
+  not a decision this command delegates
+  (`a_binding_question_is_refused_and_no_request_is_made_for_it`).
+- It asks nothing of a run it does not hold. The lock is the engine's `RunLock`, not a second
+  copy of it, so a resume and a decide of one run exclude each other exactly as two resumes do
+  (`a_resume_cannot_take_the_run_while_decide_holds_it`,
+  `a_driven_run_is_refused_before_anything_is_written_probed_or_asked`).
 
 Effects and their containment are stated in `effects/allowlist.toml`'s funnel row.
 
@@ -84,20 +105,19 @@ input keeps a long input from crowding out the others.
 ## `pub const DEFAULT_MAX_COST_USD: f64 = 5.0;`
 
 The default of `--max-cost-usd`: the dollar allowance of the run. A run is decided by one command
-(`claim`), so the command's allowance is the run's aggregate cap, and it is kept in memory: no
-file is read back to learn what was spent. Each call is given what is left as its own
-`--max-budget-usd` (`call_args`), checked on the command as built (`kept`), so the adapter itself
-stops a call at the allowance rather than after it
-(`each_calls_ceiling_is_what_is_left_of_the_cap`). A clean, successful, priced call is counted at
-its price, above its ceiling included; once nothing is left the next question is not started, and
-the report names it and every question after it
-(`the_allowance_stops_the_next_question_and_the_command_names_it_and_fails`). Any other outcome
-ends the command before another call, since what it spent is unknown (`settle`). The report's
-`total cost` is what the settled calls cost; when a call did not settle it is named, and the total
-is a floor.
+(`claim`) with one call, so the allowance is that call's own `--max-budget-usd` (`call_args`),
+whole, checked on the command as built (`kept`), and the adapter itself stops the call at the
+allowance rather than after it. A clean, successful, priced call is recorded at its price, above
+its ceiling included (`the_one_call_is_capped_at_the_allowance_and_counted_at_its_price`). No
+spend is summed and nothing is subtracted, so no floating-point remainder can start a call an
+exhausted allowance should not (`a_decimal_allowance_buys_one_call_and_no_remainder_starts_another`).
+The report's `cost` is what the call settled at, or `unknown` when it did not settle.
 
 ## `pub struct DecideOptions {`
 
+`question_id` is required: the CLI takes it as a positional argument, as typed
+(`decide_takes_exactly_one_question_id_as_typed` in `main.rs`). `run_id` is the run's exact id,
+and nothing is built from it until `plain_id` admits it.
 `pools_path` is `None` from the CLI, which reads the pools file `upstroke capacity` reads by
 default; the tests name a pools file in their scratch tree. `environment` is `None` from the CLI,
 so the credential pre-flight reads this process's environment through
@@ -114,14 +134,14 @@ is something `kept` can see on the built command and its settings.
 
 The explicit claim per adapter: all four for Claude Code, none for any other id, which `admit`
 refuses. Copilot and Codex report no dollar cost (`Caps::cost_reporting` is false for both), so
-neither could be summed against `--max-cost-usd` or stopped at a ceiling. A claim admits the
+neither could be recorded at its price or stopped at a ceiling. A claim admits the
 adapter only as far as `kept` then finds it true of the command
 (`each_built_in_adapter_is_admitted_only_when_it_keeps_every_guarantee`).
 
 ## `fn call_args(ceiling_usd: f64) -> Vec<String> {`
 
 The flags a decide call appends to the read-only profile's command, as `extra_args` of a profile
-built for that call alone: `--max-budget-usd` with what is left of the cap, written as Rust's
+built for that call alone: `--max-budget-usd` with the run's allowance, written as Rust's
 shortest round-tripping decimal so `kept` reads back exactly the ceiling it was given, and
 `--strict-mcp-config`, which with no `--mcp-config` starts no MCP server. The pre-flight probes the
 CLI as a run's does, for the flags every worker is built with, and not for these two; a Claude
@@ -151,13 +171,10 @@ read-only profile allows no other tool.
 
 ## `fn admit(`
 
-The once-per-command admission, in this order, each refusal saying that nothing was written and
-no agent was asked:
+The admission of the run's recorded reviewer environment, under the run's lock (`decide`), in
+this order, each refusal saying that nothing was written and no agent was asked. A run something
+else holds never reaches it: `decide` could not take the lock.
 
-0. A run an engine is driving: `rundir::is_running` on its public directory, which also answers
-   yes when whether one is cannot be told. A driven run settles its own questions, so it is not
-   read for questions to ask while it may be settling them, and nothing is probed
-   (`a_driven_run_is_refused_before_anything_is_written_probed_or_asked`).
 1. A run recorded on the container runner (`RunStarted4.runner.kind`). Decide starts its
    reviewer on this host only, which is not where that run's reviewers ran
    (`a_container_run_is_refused_before_anything_is_written_or_asked`).
@@ -166,26 +183,21 @@ no agent was asked:
    (`a_run_the_credential_preflight_refuses_is_refused_before_anything_is_written_or_asked`).
 3. An adapter that does not claim every `Guarantee`, naming the ones it lacks.
 4. A `--max-cost-usd` that is zero, negative, infinite or not a number, which could be no call's
-   ceiling and, as NaN, would never stop the loop
-   (`a_cap_that_is_not_a_positive_number_of_dollars_is_refused_before_anything`).
+   ceiling (`a_cap_that_is_not_a_positive_number_of_dollars_is_refused_before_anything`).
 5. A private directory `private_denials` cannot name
    (`a_private_directory_that_cannot_be_spelled_in_a_rule_is_refused_before_anything`).
 
 ## `pub struct Decided {`
 
-The rendered report and four lists of question ids, each naming only what the command did:
-`saved`, the questions whose proposal it wrote, accepted or refused, in the order written;
-`refused`, the questions whose reply or call was refused, each of them in `saved` with its reason
-in its proposal; `unsaved`, the questions refused before any agent was asked because no file can
-be named after their id (`plain_id`), for which nothing is written; and `left`, the questions the
-command stopped before proposing an answer to: the question whose call was in flight when a write
-failed, and every question after the one it stopped at whose proposal is not saved already. So
-the exit says a reason is saved only for a proposal that was written, and says nothing is saved
-for a question refused before it was asked
-(`the_exit_report_names_only_the_records_this_command_wrote`). `outcome` makes the command an
-error when any was refused, unsaved or left, naming them; the CLI prints the report first, so
-every question's line is shown before the command fails. The error's lists of ids are passed
-through `util::terminal::one_line`, as the report's lines are.
+What a command that saved its question's proposal returns: the rendered report, the `question`
+whose proposal it wrote, and whether that proposal is `refused`, its reply or its call refused
+and its reason saved in it. Every other end of the command is an error and saves no proposal, so
+the exit says a reason is saved only for a proposal that was written
+(`the_exit_report_names_only_the_record_this_command_wrote`). `outcome` makes the command an
+error when the proposal was refused; the CLI prints the report first, so the question's lines are
+shown before the command fails. The error passes through `util::terminal::one_line`, as the
+report's lines do. The lists of saved, unsaved and left questions a multi-question command
+needed are gone with the loop that filled them.
 
 The report is built one whole line at a time with `util::terminal::TerminalLines`, the builder
 `status` uses. What the agent wrote (guidance, confidence, reasons, citations, and a refusal's
@@ -195,9 +207,8 @@ space and
 any other control character is shown escaped, so none can start a report line of its own, clear
 the screen or move the cursor (`agent_text_is_rendered_inside_its_own_line_with_its_controls_made_visible`,
 `a_decide_report_shows_agent_text_as_data_and_the_proposal_keeps_it_as_written`). The saved
-proposal keeps the text exactly as the agent wrote it. The report ends naming the proposals
-saved (`proposals saved:`, or `none`), and it points a person at `upstroke answer` only when one
-was.
+proposal keeps the text exactly as the agent wrote it. The report names the proposal saved
+(`saved:`) and the claim, and points a person at `upstroke answer`.
 
 ## `fn refused(message: String) -> UpstrokeError {`
 
@@ -214,41 +225,61 @@ line of its own or reach the terminal as a control, as the report's lines cannot
 
 ## `pub fn decide(`
 
-Reads the run, chooses its questions and hands them to `propose`. The run is found by its exact
-id; an unknown run, a schema 1-3 run and a run that cannot be read are refused with a message
-saying which, before any agent is asked.
+Checks the run id, takes the run's lock, reads the run, requires it parked, chooses the question
+and hands it to `propose`. The run id is admitted by `plain_id` before any path is built from
+it, so an absolute path (an archived run's directory elsewhere, say) or a `..` never replaces the
+repository's runs prefix and no log outside it is read
+(`a_run_id_that_is_not_one_is_refused_before_any_path_is_built`). An unknown run, a run whose
+lock cannot be taken, a schema 1-3 run, a run that cannot be read and a run that is not parked
+are refused with a message saying which, before any agent is asked.
+
+The lock is `rundir::RunLock::acquire` on the run's public directory, the call `resume` makes;
+nothing of it is reimplemented here. It is taken before the log is read, so what admission reads
+is what a coordinator cannot change under it, and it is held, as a local, until `decide` returns:
+after the proposal is written or the command has failed, panics included. A resume that starts
+while the reviewer is asked is refused as a second engine would be
+(`a_resume_cannot_take_the_run_while_decide_holds_it`), and a run a coordinator holds is refused
+before anything is read, written, probed or asked
+(`a_driven_run_is_refused_before_anything_is_written_probed_or_asked`). Because this process
+holds the run, `observe` reads it as running; nothing here reads that flag.
+
+## `fn parked(observed: &Observed, run: &str) -> Result<(), UpstrokeError> {`
+
+The run must be parked as the fold of its log reports it: `Observed::outcome`, the
+`run_finished` outcome the fold replayed, is `Parked`. An open question and a free lock are not
+that: a run interrupted with an open question and another runnable task has no recorded end,
+`status` calls it interrupted, and a resume would carry it on, so it is refused with nothing
+spent (`an_interrupted_run_with_an_open_question_is_refused_before_anything`). A run that ended
+complete, halted or over its budget is refused as well.
 
 ## `fn propose(`
 
-At most one invocation per question through `runner::decide_request`, with
-`InvocationId::Decide { ordinal }` numbered by the question's place in this command's order, the
-adapter's built command with its stdin payload and settings file, and no environment overlay
-(`the_request_is_a_decide_request_for_the_runs_reviewer_with_no_overlay`). `admit` runs first,
-after the pools file is read and before anything else, and a run id that is not a plain component
-is refused next. `answered` then reads which questions a person has answered; each is skipped with
-its answer named, and with none left to ask nothing is probed or claimed
-(`a_question_a_person_has_answered_is_skipped_and_never_asked`). When one is left, the recorded
-reviewer's pre-flight runs (`preflight::certify_agent`) and refuses a CLI that cannot be probed or
-an account that is signed out
-(`the_recorded_reviewer_passes_the_runs_own_preflight_before_anything_is_written_or_asked`).
-Each question's call is then built and checked by `prepare`, with what is left of
-the allowance as its ceiling, before anything is written for it; before the first call `claim`
-claims the run, and `ask` writes and starts the call. A question whose id is not a plain component
-(`plain_id`) is refused before anything is written for it, and counted as unsaved rather than
-refused; one listed twice is asked once (`a_question_listed_twice_is_asked_once`), and once its
-proposal is saved it is never named as left (`left_from`). A run with no question to ask is never
-claimed (`a_binding_question_is_skipped_and_no_request_is_made_for_it`).
+One invocation through `runner::decide_request`, with `InvocationId::Decide { ordinal: 1 }`
+(`CALL_ORDINAL`), the adapter's built command with its stdin payload and settings file, and no
+environment overlay (`the_request_is_a_decide_request_for_the_runs_reviewer_with_no_overlay`). A
+question that binds an agent, and one whose id is not a plain component (`plain_id`), are refused
+first. `admit` runs after the pools file is read. `unanswered` then refuses a question a person
+has answered, with nothing probed or claimed
+(`a_question_a_person_has_answered_is_refused_and_never_asked`). The recorded reviewer's
+pre-flight runs (`preflight::certify_agent`) and refuses a CLI that cannot be probed or an account
+that is signed out
+(`the_recorded_reviewer_passes_the_runs_own_preflight_before_anything_is_written_or_asked`). The
+call is built and checked by `prepare`, with the allowance as its ceiling, before anything is
+written. `unanswered` reads the answer file again, immediately before `claim` claims the run and
+`ask` writes and starts the call, so an answer published during admission is seen and no paid
+call is made (`an_answer_published_after_admission_is_seen_before_the_call`).
 
 Until the claim, every refusal is the command's error, with nothing written and no agent asked.
-After it the command never returns an error: it stops, and the report says why and names the
-questions left. It stops when the allowance is spent, when a call returns an outcome that does
-not settle (saved as refused first), and when a file cannot be written or a later call cannot be
-built, the question in hand counted as left
-(`a_taken_name_is_never_replaced_and_ends_the_command_naming_the_questions_left`). The claim stays
-in every case. The credential profile is the first pool of the reviewer's agent
-(`capacity::pool_for`), as a review pass of the run would use; the timeout is the run's recorded
-review pass timeout, or the review default. Split from `decide` so a test can hand it a binding
-question or a list naming one question twice.
+After it, a call that returns an outcome that does not settle is saved as refused, and a file that
+cannot be written fails the command naming the question, with no proposal saved
+(`a_taken_name_is_never_replaced_and_fails_the_command`). The claim stays in every case. The
+credential profile is the first pool of the reviewer's agent (`capacity::pool_for`), as a review
+pass of the run would use; the timeout is the run's recorded review pass timeout, or the review
+default. Split from `decide` so a test can hand it a binding question.
+
+The per-question loop is gone, and with it what it needed: the running spend and the
+remaining-allowance subtraction, the set of questions already called, and the lists of
+questions left, unsaved and saved.
 
 ## `fn prepare(`
 
@@ -258,11 +289,9 @@ nothing, and refuses the call unless the built command carries no environment ov
 overlay's keys and never their values), carries exactly the recorded reviewer's `--model` and the
 run's recorded review effort as `--effort` (another model, another effort or none is refused, and
 the refusal names the recorded pair), and `kept` holds for every `Guarantee`. The settings
-path is `<id>.settings.json` beside the proposal (`Names`). The first question's call is
-prepared before the run is claimed, so its refusal leaves nothing written
-(`a_mocked_adapter_whose_command_breaks_a_promise_is_refused_before_anything`); the command's
-shape does not vary by question, so a later refusal would mean the adapter changed between calls,
-and it still refuses that call before it is written or started and stops the command.
+path is `<id>.settings.json` beside the proposal (`Names`). The call is prepared before the run
+is claimed, so its refusal leaves nothing written
+(`a_mocked_adapter_whose_command_breaks_a_promise_is_refused_before_anything`).
 
 ## `struct Built<'a> {`
 
@@ -281,8 +310,8 @@ the allow list to be `Read`, `Glob` and `Grep` at most.
 What each guarantee requires of the built command:
 
 - Cost reporting: `-p` and `--output-format json`, whose result carries `total_cost_usd`.
-- A per-call dollar ceiling: `--max-budget-usd` with a finite value above zero and at most what
-  is left of the cap.
+- A per-call dollar ceiling: `--max-budget-usd` with a finite value above zero and at most the
+  run's `--max-cost-usd` allowance.
 - No web access: `--permission-mode dontAsk`, which denies every tool the settings do not allow;
   `--setting-sources ""`, so no user, project or local settings widen them; `--strict-mcp-config`;
   settings that allow reading only; and `WebFetch` and `WebSearch` denied by name.
@@ -292,9 +321,9 @@ What each guarantee requires of the built command:
 
 ## `enum Returned {`
 
-What one call returned. `Settled` is a clean, successful, priced call, and only it is counted,
+What the call returned. `Settled` is a clean, successful, priced call, and only it is settled,
 at its price; `Unsettled` is every other outcome, with any cost it reported, which the proposal
-records and the command never counts.
+records as reported and unsettled.
 
 ## `fn settle(adapter: &dyn AgentAdapter, output: &ProcessOutput) -> Returned {`
 
@@ -303,19 +332,20 @@ read the outcome as `Completed`, and the outcome reports a finite cost of $0 or 
 else does not, and the reason names the first thing missing: a timeout, an output limit, a
 non-zero exit or a signal, an outcome the adapter read as an agent error, a timeout or a rate
 limit, a cost that is no price, or no cost at all; a Runner error is read in `ask`
-(`only_a_clean_successful_priced_call_settles_and_any_other_ends_the_command`). A settled call
-whose reply `check_reply` refuses is still settled: what it cost is known, and the next question
-is asked with what is left. An unsettled one is saved as refused and ends the command, because
-what it spent is unknown and the next call's ceiling could not be what is left.
+(`only_a_clean_successful_priced_call_settles_and_any_other_is_saved_refused`). A settled call
+whose reply `check_reply` refuses is still settled: what it cost is known. An unsettled one is
+saved as refused, its cost `unknown` in the report.
 
 ## `fn ask(`
 
-Writes the call's settings file new, starts the call through the Runner, saves its raw output
+Writes the call's settings file new, starts the command's one call through the Runner as
+`CALL_ORDINAL`, saves its raw output
 new, and reads what it returned with `settle`. It takes the `Call` by value: the command and
 workspace `prepare` checked move into the request, uncopied. A Runner error (the process could not be started,
 was cancelled, or ended in a way the Runner reports as an error) is a returned outcome too: its
 words are saved in place of the raw output, and it does not settle. A launcher killed mid-call
-returns nothing, and leaves the claim and the settings file in place
+returns nothing, and leaves the claim and the settings file in place; the run's lock is given
+back as the stack unwinds, or by the OS when the process dies
 (`the_run_is_claimed_owner_only_before_its_first_call_and_the_claim_outlives_an_interruption`).
 
 ## `fn plain_id(id: &str) -> bool {`
@@ -324,7 +354,8 @@ A question id is written into a file name only when it is 1 to `MAX_ID_BYTES` AS
 digits, `-` or `_` and no Windows device name (`CON`, `NUL`, `COM1`, ...): no separator, no `.`,
 no `..`. Without a `.` in an id, `<id>.json`, `<id>.out` and `<id>.settings.json` name one
 question's files exactly, and no question's file is spelled like another's. The run id is held to
-the same rule before the run's directory is named after it. Ids the engine mints are `q-<ulid>`
+the same rule first of all, before any path is built from it: the run's public directory, its
+lock and its proposals directory are each named after it. Ids the engine mints are `q-<ulid>`
 (`an_untrusted_proposals_directory_or_a_question_id_that_is_not_plain_is_refused`).
 
 ## `enum Privacy {`
@@ -362,7 +393,7 @@ each directory's entry is durable before anything is created under it
 
 ## `fn claim(repo_root: &Path, run_id: &str, dir: &Path) -> Result<(), UpstrokeError> {`
 
-The run's one claim, made immediately before its first call: `ensure_dir` for the two
+The run's one claim, made immediately before its call: `ensure_dir` for the two
 directories above, then `create_dir` of `.upstroke/proposals/<run-id>`, which is exclusive.
 Whatever stands at the name already is refused, never adopted, and refuses the command with
 nothing written and no agent asked: an earlier decide's directory, complete, partial or of an
@@ -373,7 +404,7 @@ directory is read: its existence is the whole answer, so a person settles what i
 nothing is inferred from it. The new directory is made owner-only on Unix, checked, and its parent
 synced;
 a failure there still leaves it in place, and the run claimed. The directory is never removed,
-after a failure, a stop or an interruption, so a run is asked once.
+after a failure or an interruption, so a run is asked once, about one question.
 
 ## `fn reference(run_id: &str, name: &str) -> String {`
 
@@ -392,14 +423,15 @@ records the run, the question, the decider, `status` with its `record` or `reaso
 `cost_usd` reported, whether the call `settled`, its `ceiling_usd` and the `raw_output`
 reference.
 
-## `fn answered(`
+## `fn unanswered(answers: &Path, asked: &OpenAsked) -> Result<(), UpstrokeError> {`
 
-The questions a person has answered already: an answer `upstroke answer` published in the run's
-answers directory that the run's log has not settled yet, read with `interaction::read_answer`,
-which writes nothing. Every question this command could ask is read before the run is claimed, so
-the check never follows a write; an answer file that cannot be read refuses the command with
-nothing written. A question with an answer is skipped, its answer named in the report, and it is
-neither asked nor counted as left: the run applies the person's answer when it next reads it.
+Refuses the question when a person has answered it already: an answer `upstroke answer`
+published in the run's answers directory that the run's log has not settled yet, read with
+`interaction::read_answer`, which writes nothing. It is read twice, both before the run is
+claimed, so the check never follows a write: at admission, so an answered question is not even
+probed for, and again immediately before the claim and the call, so an answer published while the
+pre-flight ran is not paid for. An answer file that cannot be read refuses the command with
+nothing written. The refusal names the answer, which the run applies when it next reads it.
 
 ## `fn recorded_plan(path: &Path, plan_hash: &str) -> String {`
 
@@ -409,11 +441,14 @@ not the plan the run is executing, so the prompt carries a line saying it is not
 naming both hashes instead
 (`the_plan_is_forwarded_only_when_its_bytes_are_the_plan_the_run_recorded`).
 
-## `fn chosen_questions(`
+## `fn chosen_question(`
 
-Without an id, every open question in the order raised (`Observed::raised_questions`). With one,
-the open question of that exact id or of an unambiguous prefix within the run; a question the
-run's log has settled is refused in `upstroke answer`'s words.
+The open question whose id is the one given, compared byte for byte: no case is folded and no
+prefix matched, so of two open questions `q-A` and `q-a` the one named is the one asked, and the
+run's one claim is spent on it (`the_exact_question_is_asked_when_ids_differ_by_case`). A
+question the run's log has settled is refused as no longer open, and any other id as one the run
+does not have, each with nothing done
+(`runs_and_questions_that_cannot_be_decided_are_refused_before_any_request`).
 
 ## `enum RaisedBy {`
 
@@ -436,7 +471,7 @@ fields, their types, and a choice and guidance the run could apply as a person's
 outside the options, a choice `interaction::answer_for_option` maps to a decline (or whose text
 `interaction::interpret` reads as one), and `null` where the question has options are refused
 (`a_bad_reply_is_refused_with_its_reason`,
-`each_bad_reply_is_refused_saved_and_fails_the_command_after_the_others`). So is guidance that
+`each_bad_reply_is_refused_saved_and_fails_the_command`). So is guidance that
 `interaction::interpret` reads as declining, the reading `upstroke answer --text` gives it: `skip`,
 `decline`, `fail` or `abandon` alone in any case, or the number of an option that gives up.
 Guidance that merely mentions such a word, or names an option that does not give up, is advice
@@ -468,6 +503,6 @@ whose cases are replies written out in plain text).
 
 Every file this command writes, each settings file, raw output and proposal, is created new
 (`File::create_new`), written, and synced with its directory; it never overwrites, and a name that
-is taken is an error rather than a replacement, which stops the command with the file as it was
-(`a_taken_name_is_never_replaced_and_ends_the_command_naming_the_questions_left`). `write_new` is
+is taken is an error rather than a replacement, which fails the command with the file as it was
+(`a_taken_name_is_never_replaced_and_fails_the_command`). `write_new` is
 the same with the error naming the path.

@@ -2,27 +2,31 @@
 
 ## Unreleased
 
-- `upstroke decide` is new: it asks the run's primary reviewer, read-only, to propose an answer to
-  each open question of a run (one that chooses an agent is skipped), checks the reply (one fenced
-  `json` block and no three backticks or tildes on any line outside it, an offered option,
-  guidance that never gives up), prints it and saves it under
-  `.upstroke/proposals/<run-id>/`, naming its raw output by a path from the repository root; any
-  refused reply or question, or a question it stopped before, makes it exit non-zero after the
-  report, whose exit names a saved reason only for the proposals it wrote. Its refusals are one
-  line each. It writes no answer and replaces no file. A run is decided once: immediately before
-  its first call the command claims the run by creating its proposals directory exclusively
-  (owner-only on Unix; on Windows it carries the repository directory's access list), and a run
-  whose directory exists is refused with nothing written; the claim stays after a failure or an
-  interruption, and no other decide of the run spends anything. Each question gets at most one
-  call, each call is capped at what is left of the run's `--max-cost-usd` allowance (default 5),
-  and only a clean, successful, priced call is counted, at its price; any other outcome is saved
-  as refused and ends the command, naming the questions left. It asks only a Claude Code reviewer of a host run that no engine is driving,
-  whose pools pass the credential pre-flight a resume would run and whose CLI passes the probe and
-  sign-in checks a run makes of it, giving each call the recorded model and review effort, that
-  remainder as its own `--max-budget-usd`, no web access, no read of the run's private directory
+- `upstroke decide <run-id> <question-id>` is new: it asks a parked run's primary reviewer,
+  read-only, to propose an answer to one open question, named by its exact id, byte for byte (a
+  question that chooses an agent is refused), checks the reply (one fenced `json` block and no
+  three backticks or tildes on any line outside it, an offered option, guidance that never gives
+  up), prints it and saves it under `.upstroke/proposals/<run-id>/`, naming its raw output by a
+  path from the repository root; a refused reply makes it exit non-zero after the report, whose
+  exit says the reason is saved in the proposal. Its refusals are one line each. It writes no
+  answer and replaces no file. The run id is checked as a plain id before any path is built from
+  it. The command holds the run's own lock, the one `resume` takes, from before the run is read
+  until the proposal is written or the command fails, so no resume starts while it asks and
+  nothing is asked of a run a coordinator holds; it asks only about a run whose log records it
+  parked, and refuses an interrupted one. A run is decided once: immediately before its one call
+  the command claims the run by creating its proposals directory exclusively (owner-only on Unix;
+  on Windows it carries the repository directory's access list), and a run whose directory exists
+  is refused with nothing written; the claim stays after a failure or an interruption, and no
+  other decide of the run spends anything. The call is capped at the run's `--max-cost-usd`
+  allowance (default 5), and only a clean, successful, priced call is settled, at its price; any
+  other outcome is saved as refused. It asks only a Claude Code reviewer of a host run, whose
+  pools pass the credential pre-flight a resume would run and whose CLI passes the probe and
+  sign-in checks a run makes of it, giving the call the recorded model and review effort, the
+  allowance as its own `--max-budget-usd`, no web access, no read of the run's private directory
   and no environment overlay, each checked on the command as built; any other run or command is
-  refused before anything is written or asked. A question a person has answered already is
-  skipped, and the plan goes into the prompt only when it is the plan the run recorded.
+  refused before anything is written or asked. A question a person has answered already, checked
+  at admission and again immediately before the call, is refused and never asked, and the plan
+  goes into the prompt only when it is the plan the run recorded.
 - Capacity is now tracked for the machine rather than for a repository; `[capacity] scope = "repo"`
   or `upstroke capacity --scope repo` folds only this repository. Nothing routes on any of this yet.
   Only an attempt that passed, in a run of any schema, clears another run's rate limit on its pool,

@@ -80,6 +80,15 @@ probes per attempt. A rewrite under the committed bytes, or a run that changed
 hands between the probes, retries; one that keeps doing so refuses rather than
 reporting a prefix it could not hold still.
 
+## `impl Observed` › `pub fn outcome(&self) -> Option<&crate::events::RunOutcome> {`
+
+The outcome the fold replayed the run's `run_finished` with, the one `status`
+reports through `TopologyReport`; `None` where the committed log holds no end
+the fold kept, which `render` prints as interrupted when nothing holds the run.
+`upstroke decide` asks only about a run this reports `Parked`: an open question
+and a free lock are not that, since an interrupted run can have both. It reads
+the fold and writes nothing.
+
 ## `impl Observed` › `pub fn raised_questions(&self) -> Vec<(&FrozenQuestion, &TopologyEvent)> {`
 
 A read-only view over the committed events, for `upstroke decide`

@@ -185,6 +185,14 @@ impl Observed {
         self.fold.finished().is_some()
     }
 
+    /// The outcome the fold replayed the run's `run_finished` with, the one `status` reports:
+    /// `None` while the committed log holds no end the fold kept, as for a run `status` calls
+    /// interrupted.
+    #[must_use]
+    pub fn outcome(&self) -> Option<&crate::events::RunOutcome> {
+        self.fold.finished()
+    }
+
     pub fn report(&self) -> Result<TopologyReport, UpstrokeError> {
         TopologyReport::derive(&self.run_id, &self.fold, &self.events)
     }
