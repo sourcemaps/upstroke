@@ -6578,10 +6578,13 @@ fn slow_docker_start_child() {
         format!(
             "#!/bin/sh\n\
              fail() {{ echo \"stand-in docker: $1\" >&2; exit 1; }}\n\
+             clock() {{ if [ -r /proc/uptime ]; then read -r up _ </proc/uptime && echo \"${{up%%.*}}\"; \
+             else /bin/date +%s; fi; }}\n\
              if [ \"$1\" = start ]; then\n\
-             \x20 PATH=\"${SLOW_START_ORIGINAL_PATH}\" sleep {SLOW_START_HOLD_SECONDS} \
-             || fail 'the delay failed'\n\
-             \x20 echo 'delayed {SLOW_START_HOLD_SECONDS}' >>\"${SLOW_START_MARK}\" || fail 'no mark'\n\
+             \x20 began=$(clock) || fail 'no clock before the delay'\n\
+             \x20 /bin/sleep {SLOW_START_HOLD_SECONDS} || fail 'the delay failed'\n\
+             \x20 ended=$(clock) || fail 'no clock after the delay'\n\
+             \x20 echo \"delayed $((ended - began))\" >>\"${SLOW_START_MARK}\" || fail 'no mark'\n\
              fi\n\
              PATH=\"${SLOW_START_ORIGINAL_PATH}\" exec docker \"$@\"\n"
         ),
@@ -6646,13 +6649,15 @@ fn slow_docker_start_child() {
          was reached without the slow start this test exists to hold",
         mark.display()
     );
-    let held = format!("delayed {SLOW_START_HOLD_SECONDS}");
     for line in delayed.lines() {
-        assert_eq!(
-            line,
-            held.as_str(),
-            "a mark line that is not the {held:?} the stand-in writes only after its `sleep \
-             {SLOW_START_HOLD_SECONDS}` succeeded: {line:?}"
+        let measured = line
+            .strip_prefix("delayed ")
+            .and_then(|seconds| seconds.parse::<u64>().ok());
+        assert!(
+            measured.is_some_and(|seconds| seconds >= SLOW_START_HOLD_SECONDS),
+            "a mark line that is not `delayed <seconds>` with at least the \
+             {SLOW_START_HOLD_SECONDS} seconds the stand-in's `/bin/sleep \
+             {SLOW_START_HOLD_SECONDS}` asked for, as its clock measured them: {line:?}"
         );
     }
 }

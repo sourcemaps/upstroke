@@ -2352,7 +2352,8 @@ What it shows holds while the runner starts a container with `start` as `docker`
 argument, as it does today (`docker start --attach --interactive` for an invocation with input):
 a start spelled any other way would pass through the stand-in unheld, and this test would no
 longer fail at three seconds. That case, and a hold that never happened, no longer pass
-silently: the helper fails when the stand-in left no mark of a delayed `start`.
+silently: the helper fails when the stand-in left no mark of a delayed `start`, and when a mark
+measures a hold shorter than the one asked for.
 
 Two mutations were applied, observed and restored before the commit. With
 `ROOM_FOR_A_SLOW_CONTAINER_START` at three seconds this test failed, the helper's `expect`
@@ -2364,6 +2365,11 @@ refusal of a `start` whose client "ended (exit code 1)": the stand-in's own fail
 invocation's deadline passed"); with `sleep` replaced by a program name that does not exist, the
 refusal of a `start` whose attached client "ended (exit code 1)", the stand-in failing when the
 command search found no such program, before it wrote the mark and without running `docker`.
+Once the hold ran `/bin/sleep` and the mark carried the measured delay
+(`PR366-SLOW-START-NOOP-SLEEP`), one more was applied and restored: with the stand-in's
+`/bin/sleep 5` made `/bin/sleep 0`, a hold that succeeds at once as the ambient `sleep` the finding
+describes would, the helper failed at the mark, on `"delayed 0"`, and the other six
+`real_docker_a_contain` tests passed.
 
 ## `fn slow_docker_start_child() {`
 
@@ -2378,25 +2384,36 @@ stand-in `docker` into the `bin` its parent put first on its `PATH`, and make it
 (five) seconds and then, whatever the arguments, replaces itself with
 `PATH="$UPSTROKE_TEST_SLOW_START_ORIGINAL_PATH" exec docker "$@"`.
 
-The hold runs `sleep 5` and then appends one fixed line, `delayed 5`, one `start` to a line, to
-the file `$UPSTROKE_TEST_SLOW_START_MARK` names. If either does not succeed, the script prints why
-on its standard error and exits 1 without running `docker`, so a hold that fails is a refused
-`start`, never a start that ran at once. The evidence that the start was held is `sleep`'s own exit
-status and the mark written after it: a `sleep` that is missing or fails ends the script before the
-mark is written and before `docker` runs, so a mark line exists only for a `sleep 5` that
-succeeded. `sleep` runs with `PATH="$UPSTROKE_TEST_SLOW_START_ORIGINAL_PATH"` for that one command,
-the parent's `PATH`, so it is found where the parent's `docker` is found, by the same command
-search. No fixed path is named: a fixed `PATH=/bin:/usr/bin` is not portable, and on NixOS, a
-supported Linux, those directories hold only `sh` and `env`, so the stand-in failed there. A
-`PATH` that finds `docker` and no `sleep` fails this test loudly, never holding nothing unnoticed.
+The hold reads a clock, runs `/bin/sleep 5`, reads the clock again, and appends one line,
+`delayed <seconds>` with the seconds between the two readings, one `start` to a line, to the file
+`$UPSTROKE_TEST_SLOW_START_MARK` names. If a reading, the sleep or the append does not succeed,
+the script prints why on its standard error and exits 1 without running `docker`, so a hold that
+fails is a refused `start`, never a start that ran at once.
+
+`sleep` is named by its absolute path, `/bin/sleep`, so no `PATH` can supply another
+(`PR366-SLOW-START-NOOP-SLEEP`). It used to run under the parent's `PATH`, so it was found where the
+parent's `docker` is. That let a `sleep` on that `PATH` that succeeded at once write the mark with
+no delay, and the mark was then a fixed `delayed 5`, so this test passed with the deadline put back
+to three seconds. A host with no `/bin/sleep`, such as NixOS, whose `/bin` holds only `sh` and
+`env`, fails the stand-in before its mark: loudly, never holding nothing unnoticed. Nor is
+`sleep`'s exit status the evidence of the hold any more: the mark carries the delay as measured,
+and the helper asserts it (below), so a hold that returned early fails whichever program held it.
+
 `/bin/sh` has no waiting of its own (`read -t` is not POSIX and `dash` lacks it), so the external
-`sleep` is the hold. The script reads no clock: two `date +%s` readings are wall-clock times, and a
-clock that steps back or slews during the sleep made a correct five-second hold, five seconds by a
-monotonic clock, read as three and fail the test; the mark therefore carries no time at all. It
-runs `docker` by name under the parent's original `PATH`, so the system's own command
+`sleep` is the hold, and it has no clock of its own either (`dash` has no `SECONDS`). Where
+`/proc/uptime` is readable the clock is the whole seconds of its first field, read with the `read`
+builtin: the kernel's time since boot, which a step of the wall clock does not move, so it cannot
+read a correct five-second hold as three. Elsewhere, the macOS hosts among them, it is
+`/bin/date +%s`, the wall clock, where a clock stepped back during the hold can still read it short
+and fail the test, the reason the script once read no clock at all; it is the one clock those
+hosts' `/bin/sh` reaches without a program found on a `PATH`. Whole seconds lose nothing the
+assertion needs: the whole-second parts of two readings at least five seconds apart differ by at
+least five.
+
+It runs `docker` by name under the parent's original `PATH`, so the system's own command
 search picks the program exactly as it would with no stand-in, skipping a `docker` that is not
 executable as that search does; the test never decides which program that is. The script's
-text holds the variable's name and no path: the parent set the variable, as an `OsStr`, on this
+text holds the variable's name and not the `PATH` itself: the parent set the variable, as an `OsStr`, on this
 process, which is the process whose runner runs the stand-in, and the runner starts `docker`
 (`docker_command`) with the environment it inherits, so the stand-in reads the `PATH`'s bytes as
 they are, with nothing to quote. Every other
@@ -2420,9 +2437,10 @@ timed out: a start the deadline overtakes is an error, which fails the `expect`.
 
 After the invocation, the helper reads the mark. A mark that is missing or empty fails with "no
 `docker start` was delayed": the timeout was reached without the slow start this test exists to
-hold. Every line must be exactly `delayed 5`, formatted from `SLOW_START_HOLD_SECONDS`, the line
-the stand-in writes only after its `sleep` succeeded; a line that is anything else fails, naming
-the line. The helper does no arithmetic on times: `sleep`'s success is the proof of the hold.
+hold. Every line must be `delayed` and a whole number of seconds no smaller than
+`SLOW_START_HOLD_SECONDS`: the hold as the stand-in's clock measured it, at least as long as the
+`/bin/sleep` it asked for. A line that is anything else, a shorter delay among them, fails, naming
+the line.
 
 ## `fn every_gated_test_of_this_lane_is_counted() {`
 
