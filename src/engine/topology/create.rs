@@ -577,10 +577,13 @@ pub trait Probes: sealed::Sealed {
 /// `RunPreflight::certify` calls), through the same [`AgentProbe`], under each
 /// account the agent's pools in [`Self::with_pools`]'s pools use, once each and
 /// in file order: a pool's profile, or the agent's default account for a pool
-/// that names none, or the default account alone when the agent has no pool. A
-/// signed-out account refuses P4 in the same words a resume refuses it in,
-/// unless one of the agent's environment credentials is set in `environment`
-/// (`preflight::ENVIRONMENT_CREDENTIALS`).
+/// that names none, or the default account alone when the agent has no pool.
+/// Only Claude Code's sign-in is checked (`preflight::SIGN_IN_CHECKED`); for
+/// any other agent no discovery runs. The check stops at the first account
+/// whose discovery fails or answers signed out, and a signed-out account
+/// refuses P4 in the same words a resume refuses it in. An agent whose pools
+/// use more than `preflight::MAX_ACCOUNTS_PER_AGENT` distinct accounts is
+/// refused before any discovery, in the same words on both paths.
 pub struct RunnerProbes<'a> {
     /// The recorded shell.
     pub shell: ShellKind,
@@ -604,18 +607,10 @@ pub struct RunnerProbes<'a> {
     /// The run's pools, in file order: whose accounts each agent's sign-in
     /// discovery runs under (`preflight::Account::of_agent`,
     /// `preflight::refuse_signed_out`). Empty unless the caller supplied them
-    /// with [`Self::with_pools`]; with none, an agent's discovery runs once,
-    /// under its default account. A value, like `probed`: nothing here can run
+    /// with [`Self::with_pools`]; with none, a checked agent's discovery runs
+    /// once, under its default account. A value, like `probed`: nothing here can run
     /// anything.
     pools: Vec<Pool>,
-    /// Where the sign-in check looks for an agent's environment credentials
-    /// when a discovery answers that its account is signed out:
-    /// `preflight::coordinator_environment`, the environment the host runner
-    /// composes each child's from, as [`Self::new`] sets it, and a fixture in
-    /// tests ([`Self::reading_environment`]). Only whether a variable is set
-    /// is read, never its value, and only for an agent that has such a
-    /// variable (Codex).
-    environment: fn(&str) -> Option<std::ffi::OsString>,
 }
 
 impl<'a> RunnerProbes<'a> {
@@ -634,7 +629,6 @@ impl<'a> RunnerProbes<'a> {
             policy_digest,
             probed: Mutex::new(Vec::new()),
             pools: Vec::new(),
-            environment: super::preflight::coordinator_environment,
         }
     }
 
@@ -646,23 +640,6 @@ impl<'a> RunnerProbes<'a> {
     #[must_use]
     pub fn with_pools(mut self, pools: &[Pool]) -> Self {
         self.pools = pools.to_vec();
-        self
-    }
-
-    /// For the tests: the sign-in check reads `environment` instead of the
-    /// process environment, as `RunPreflight::reading_environment` does on a
-    /// resume, because a test that changed a real variable would race every
-    /// other test in the binary that reads it. No production path calls it.
-    /// Not `#[cfg(test)]`, for the reason that one is not: a `#[cfg(test)]`
-    /// item inside the impl would end the file's production region there.
-    /// `pub(super)` rather than private, because the tests that call it are
-    /// pre-flight's (`preflight/tests.rs`), beside the resume's.
-    #[must_use]
-    pub(super) fn reading_environment(
-        mut self,
-        environment: fn(&str) -> Option<std::ffi::OsString>,
-    ) -> Self {
-        self.environment = environment;
         self
     }
 
@@ -712,16 +689,11 @@ impl Probes for RunnerProbes<'_> {
         let caps = adapter.probe(through)?;
         // **Then its sign-in, under each account the run would use for it,**
         // through the same boundary: the check a resume makes in
-        // `RunPreflight::certify`, the same function and the same refusal.
-        super::preflight::refuse_signed_out(
-            agent,
-            adapter,
-            &caps,
-            through,
-            &super::preflight::Account::of_agent(&self.pools, agent),
-            self.environment,
-        )
-        .map_err(super::preflight::SignIn::into_error)?;
+        // `RunPreflight::certify`, the same function and the same refusal. The
+        // account cap refuses before any discovery runs.
+        let accounts = super::preflight::Account::of_agent(&self.pools, agent)?;
+        super::preflight::refuse_signed_out(agent, adapter, &caps, through, &accounts)
+            .map_err(super::preflight::SignIn::into_error)?;
         self.probed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

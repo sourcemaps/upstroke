@@ -36,24 +36,9 @@ impl Probed {
 
 const CLAUDE_CODE_OAUTH_TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 
-const ENVIRONMENT_CREDENTIALS: &[(&str, &[&str])] = &[(
-    crate::agent::codex::ADAPTER_ID,
-    &["CODEX_API_KEY", "OPENAI_API_KEY", "CODEX_ACCESS_TOKEN"],
-)];
+const SIGN_IN_CHECKED: &[&str] = &[crate::agent::claude::ADAPTER_ID];
 
-fn environment_credentials(agent: &str) -> &'static [&'static str] {
-    ENVIRONMENT_CREDENTIALS
-        .iter()
-        .find(|(id, _)| *id == agent)
-        .map(|&(_, variables)| variables)
-        .unwrap_or_default()
-}
-
-fn credentials_in_environment(agent: &str, environment: fn(&str) -> Option<OsString>) -> bool {
-    environment_credentials(agent)
-        .iter()
-        .any(|variable| environment(variable).is_some_and(|value| !value.is_empty()))
-}
+pub(super) const MAX_ACCOUNTS_PER_AGENT: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProfiledPool {
@@ -80,29 +65,30 @@ pub(super) enum Account {
 }
 
 impl Account {
-    pub(super) fn of_agent(pools: &[Pool], agent: &str) -> Vec<Self> {
+    pub(super) fn of_agent(pools: &[Pool], agent: &str) -> Result<Vec<Self>, UpstrokeError> {
         let mut accounts: Vec<Self> = Vec::new();
         for pool in pools.iter().filter(|pool| pool.agent == agent) {
-            let account = match &pool.profile {
+            let profile = pool.profile.as_deref().map(Path::new);
+            if accounts.iter().any(|listed| listed.profile() == profile) {
+                continue;
+            }
+            if accounts.len() >= MAX_ACCOUNTS_PER_AGENT {
+                return Err(too_many_accounts(agent));
+            }
+            accounts.push(match profile {
                 Some(profile) => Self::Profile {
                     pool: pool.name.clone(),
-                    profile: PathBuf::from(profile),
+                    profile: profile.to_path_buf(),
                 },
                 None => Self::Default {
                     pool: Some(pool.name.clone()),
                 },
-            };
-            if accounts
-                .iter()
-                .all(|listed| listed.profile() != account.profile())
-            {
-                accounts.push(account);
-            }
+            });
         }
         if accounts.is_empty() {
             accounts.push(Self::Default { pool: None });
         }
-        accounts
+        Ok(accounts)
     }
 
     fn profile(&self) -> Option<&Path> {
@@ -233,21 +219,16 @@ impl RunnerPreflight for RunPreflight<'_> {
             let probed = adapter
                 .probe(&registering)
                 .map_err(|error| refused(policy, &format!("the `{agent}` CLI: {error}")))?;
-            refuse_signed_out(
-                agent,
-                adapter,
-                &probed,
-                &registering,
-                &Account::of_agent(&self.pools, agent),
-                self.environment,
-            )
-            .map_err(|failure| match failure {
-                SignIn::SignedOut(refusal) => refusal,
-                SignIn::Undiscovered(error) => refused(
-                    policy,
-                    &format!("the `{agent}` CLI's sign-in discovery: {error}"),
-                ),
-            })?;
+            let accounts = Account::of_agent(&self.pools, agent)?;
+            refuse_signed_out(agent, adapter, &probed, &registering, &accounts).map_err(
+                |failure| match failure {
+                    SignIn::SignedOut(refusal) => refusal,
+                    SignIn::Undiscovered(error) => refused(
+                        policy,
+                        &format!("the `{agent}` CLI's sign-in discovery: {error}"),
+                    ),
+                },
+            )?;
             caps.push((agent.clone(), probed));
         }
 
@@ -370,9 +351,10 @@ pub(super) fn refuse_signed_out(
     caps: &Caps,
     through: &dyn Runner,
     accounts: &[Account],
-    environment: fn(&str) -> Option<OsString>,
 ) -> Result<(), SignIn> {
-    let mut first_signed_out = None;
+    if !SIGN_IN_CHECKED.contains(&agent) {
+        return Ok(());
+    }
     for (further, account) in (0..).zip(accounts) {
         let discovered = if further == 0 && account.profile().is_none() {
             adapter.discover(through, caps)
@@ -384,28 +366,29 @@ pub(super) fn refuse_signed_out(
             };
             adapter.discover(&under, caps)
         };
-        let discovery = match discovered {
-            Ok(discovery) => discovery,
-            Err(error) => return Err(first_signed_out.unwrap_or(SignIn::Undiscovered(error))),
-        };
-        if first_signed_out.is_none() {
-            first_signed_out = signed_in(agent, account, discovery.auth, environment).err();
-        }
+        let discovery = discovered.map_err(SignIn::Undiscovered)?;
+        signed_in(agent, account, discovery.auth)?;
     }
-    first_signed_out.map_or(Ok(()), Err)
+    Ok(())
 }
 
-fn signed_in(
-    agent: &str,
-    account: &Account,
-    auth: AuthState,
-    environment: fn(&str) -> Option<OsString>,
-) -> Result<(), SignIn> {
+fn too_many_accounts(agent: &str) -> UpstrokeError {
+    UpstrokeError::Refused {
+        message: format!(
+            "pre-flight: agent `{agent}`'s pools use more than {MAX_ACCOUNTS_PER_AGENT} distinct \
+             accounts (credential profiles, with the default account counting as one), and \
+             pre-flight checks the sign-in of at most {MAX_ACCOUNTS_PER_AGENT} accounts per \
+             agent. Nothing was spawned for the run and no event was appended; give the agent's \
+             pools at most {MAX_ACCOUNTS_PER_AGENT} distinct accounts and run the same command \
+             again"
+        ),
+    }
+}
+
+fn signed_in(agent: &str, account: &Account, auth: AuthState) -> Result<(), SignIn> {
     match auth {
-        AuthState::NotAuthenticated if !credentials_in_environment(agent, environment) => {
-            Err(SignIn::SignedOut(signed_out(agent, account)))
-        }
-        AuthState::NotAuthenticated | AuthState::Authenticated | AuthState::Unknown => Ok(()),
+        AuthState::NotAuthenticated => Err(SignIn::SignedOut(signed_out(agent, account))),
+        AuthState::Authenticated | AuthState::Unknown => Ok(()),
     }
 }
 
@@ -445,31 +428,12 @@ fn signed_out(agent: &str, account: &Account) -> UpstrokeError {
             default_login(),
         ),
     };
-    let login = match environment_credentials(agent) {
-        [] => login,
-        variables => format!(
-            "{login}, or by setting {} in the environment upstroke runs in",
-            one_of(variables)
-        ),
-    };
     UpstrokeError::Refused {
         message: format!(
             "pre-flight: agent `{agent}` is not signed in under {account}; its sign-in discovery \
              reported no signed-in account. Nothing was spawned for the run and no event was \
              appended; run the same command again once that account is signed in ({login})"
         ),
-    }
-}
-
-fn one_of(variables: &[&str]) -> String {
-    let named: Vec<String> = variables
-        .iter()
-        .map(|variable| format!("`{variable}`"))
-        .collect();
-    match named.split_last() {
-        Some((last, [])) => last.clone(),
-        Some((last, rest)) => format!("one of {} or {last}", rest.join(", ")),
-        None => String::new(),
     }
 }
 

@@ -91,55 +91,54 @@ passes the coordinator's environment to the child (it reserves `PATH`,
 `HOME`, `USERPROFILE` and the credential-location keys, not this one), so a
 token in the coordinator's environment reaches every profiled process.
 
-## `const ENVIRONMENT_CREDENTIALS: &[(&str, &[&str])] = &[(`
+## `const SIGN_IN_CHECKED: &[&str] = &[crate::agent::claude::ADAPTER_ID];`
 
-The environment variables an agent's CLI authenticates from that its sign-in
-discovery does not see, by agent: for Codex (`crate::agent::codex::ADAPTER_ID`)
-`CODEX_API_KEY`, `OPENAI_API_KEY` and `CODEX_ACCESS_TOKEN`, and none for any
-other agent. [`refuse_signed_out`] reads it when a discovery answers
-`AuthState::NotAuthenticated`: if any of that agent's variables is set to a
-non-empty value in the environment pre-flight reads, the discovery does not
-refuse. Only whether a variable is set is read, never what it holds: no
-refusal, note or log carries a value, and the refusal names the variables
-alone ([`signed_out`]).
+The agents whose sign-in pre-flight checks: Claude Code
+(`crate::agent::claude::ADAPTER_ID`) alone. For any other agent
+[`refuse_signed_out`] returns at once, so pre-flight never calls its adapter's
+`discover` and runs no discovery process for it
+(`tests::certifies_codex_without_asking_its_sign_in_on_a_resume_and_a_fresh_run`).
 
-The evidence is codex-cli 0.153.4's. `codex login status` reports the login
-Codex has stored, not its environment: with no stored login it prints
-`Not logged in`, which the adapter's discovery reads as `NotAuthenticated`
-(`agent/codex.md`, `discover`), while one of these variables is set; and the
-CLI's runs authenticate from the variable all the same. So a Codex set up with
-a key in the environment and no stored login answers its discovery signed out
-and works. Without this table pre-flight refused it, on a fresh run and on a
-resume, because a `NotAuthenticated` answer refused whatever the environment
-held
-(`tests::certifies_a_signed_out_codex_account_while_one_of_its_environment_credentials_is_set`
-is the reviewer's witness, ported).
-
-The environment read is the coordinator's ([`coordinator_environment`]), and
-that is the environment a worker's CLI runs in on the host runner: the host
-runner composes each child's environment from the coordinator's own
-(`HostEnvironment::from_process`), reserving `PATH`, `HOME`, `USERPROFILE` and
-the credential-location keys, none of which is one of these. A variable the
-coordinator has is therefore one the Codex worker has.
-
-Claude Code has no row. Its discovery, `claude auth status --json`, already
-reports an API key in its environment as signed in: with no login and
-`ANTHROPIC_API_KEY` set it answers `loggedIn: true`, `authMethod: api_key`
-(measured when `PR386-PROFILE-AUTH-NOT-PREFLIGHTED` was resolved), and
+Claude Code's discovery, `claude auth status --json`, sees the routes its CLI
+authenticates through: with no login and `ANTHROPIC_API_KEY` set it answers
+`loggedIn: true`, `authMethod: api_key` (measured when
+`PR386-PROFILE-AUTH-NOT-PREFLIGHTED` was resolved), and
 `CLAUDE_CODE_OAUTH_TOKEN` is the profile checks' concern
-([`refuse_unusable_profiles`], check 5). The variables are per agent: a Codex
-variable never excuses another agent's signed-out account
-(`tests::refuses_a_signed_out_claude_code_account_whatever_codex_variable_is_set`).
+([`refuse_unusable_profiles`], check 5). So when it answers signed out, the run
+would meet that account signed out at its first attempt.
 
-## `fn environment_credentials(agent: &str) -> &'static [&'static str] {`
+Codex's does not. `codex login status` reports the credentials Codex has
+stored, and nothing else: with no stored login it prints `Not logged in`, which
+the adapter's discovery reads as `NotAuthenticated` (`agent/codex.md`,
+`discover`). Codex authenticates through routes that command cannot see: an
+API key in its environment, and a model provider's configurable `env_key`,
+which names whatever variable the user's configuration chose. A Codex set up
+that way answers its discovery signed out and works, so a `NotAuthenticated`
+answer is not evidence that the run would fail, and no fixed list of variables
+read beside it could be complete. Codex's sign-in is therefore not checked at
+all. A Codex that really is signed out fails its run's first attempt, as every
+agent's signed-out account did before this check existed. That gap is recorded
+as `PR408-CODEX-SIGN-IN-NOT-PREFLIGHTED`.
 
-`agent`'s row of [`ENVIRONMENT_CREDENTIALS`], or no variables.
+Until this list, every agent's discovery ran, and a Codex `NotAuthenticated`
+answer was excused only while one of `CODEX_API_KEY`, `OPENAI_API_KEY` or
+`CODEX_ACCESS_TOKEN` was set in the coordinator's environment (a table,
+`ENVIRONMENT_CREDENTIALS`, that the sign-in check read through each path's
+`environment`). A Codex that authenticated through a configured `env_key`, or
+any route the table did not name, was refused though it worked.
 
-## `fn credentials_in_environment(agent: &str, environment: fn(&str) -> Option<OsString>) -> bool {`
+## `pub(super) const MAX_ACCOUNTS_PER_AGENT: usize = 16;`
 
-Whether any of `agent`'s environment credentials is set, to a non-empty value,
-in `environment`. A variable that is present but empty does not count: the CLI
-has nothing to authenticate with. For an agent with no row it reads nothing.
+The most distinct accounts [`Account::of_agent`] lists for one agent, the
+default account counting as one. A pools file that gives an agent one more is
+refused ([`too_many_accounts`]) before any of that agent's discoveries runs.
+
+The cap bounds what pre-flight does for an agent: at most this many
+discoveries, each a CLI process run in turn before the run starts, and a
+listing that compares each pool against at most this many accounts, so it is
+linear in the number of pools however many there are. Many pools naming the
+same account are one account and one discovery
+(`tests::discovers_once_for_a_thousand_pools_naming_one_profile`).
 
 ## `struct ProfiledPool {`
 
@@ -171,7 +170,7 @@ refusal cites, and `Default` carries none when the agent has no pool in the
 run. An enum rather than a pool with an optional profile, so a profile with no
 pool to name it cannot be written.
 
-## `impl Account` › `pub(super) fn of_agent(pools: &[Pool], agent: &str) -> Vec<Self> {`
+## `impl Account` › `pub(super) fn of_agent(pools: &[Pool], agent: &str) -> Result<Vec<Self>, UpstrokeError> {`
 
 The accounts `agent`'s pools use, in pools-file order: the accounts
 [`refuse_signed_out`] checks the agent's sign-in under.
@@ -186,11 +185,25 @@ The accounts `agent`'s pools use, in pools-file order: the accounts
   discovery of the same account could only repeat the first's answer.
 - An agent with no pool in the run uses its default account alone, named by no
   pool.
+- At most [`MAX_ACCOUNTS_PER_AGENT`] distinct accounts. A pool whose account
+  is already listed adds nothing, however many are listed. A pool that would
+  list one more distinct account refuses with [`too_many_accounts`], and the
+  scan stops there: no pool after it is read. Each pool is compared against at
+  most the accounts already listed, never more than the cap, so the work is
+  linear in the number of pools.
 
-So the list is never empty. Both paths build it here, from the run's pools —
-`RunPreflight::certify` from the pools `with_pools` gave it,
-`RunnerProbes::agent` from the pools `RunnerProbes::with_pools` gave it — so
-the list cannot differ between them.
+So the list is never empty and never longer than the cap. Both paths build it
+here, from the run's pools — `RunPreflight::certify` from the pools
+`with_pools` gave it, `RunnerProbes::agent` from the pools
+`RunnerProbes::with_pools` gave it — so the list cannot differ between them.
+Both build it before [`refuse_signed_out`] and return its refusal with `?`, so
+an agent over the cap is refused before any discovery, in the same words on
+both paths (`tests::refuses_seventeen_profiles_with_no_discovery_and_certifies_sixteen`,
+`tests::lists_sixteen_accounts_and_refuses_a_seventeenth_distinct_one`). It is
+built for every agent, Claude Code or not, since it reads no CLI; in a run
+that passed the profile checks, an agent other than Claude Code has its default
+account alone, as a profile is refused for it ([`refuse_unusable_profiles`],
+check 2).
 
 Until it listed accounts, this was `ProfiledPool::of_agent`, the agent's
 profiled pools alone. An agent with a profiled pool then had its default
@@ -206,20 +219,20 @@ under this account carries, and what two accounts are told apart by.
 
 ## `pub(in crate::engine) fn coordinator_environment(key: &str) -> Option<OsString> {`
 
-The coordinator's own environment, read when the profile checks run and when
-a sign-in discovery answers signed out: the one the host runner composes each
-child's environment from (`HostEnvironment::from_process`). A function rather
-than a snapshot so that a run with no profiled pool and no signed-out
-discovery reads nothing, and so that tests can stand in for it without
-changing the process environment, which every test in the binary shares.
+The coordinator's own environment, read when the profile checks run: the one
+the host runner composes each child's environment from
+(`HostEnvironment::from_process`). A function rather than a snapshot so that a
+run with no profiled pool reads nothing, and so that tests can stand in for it
+without changing the process environment, which every test in the binary
+shares.
 
 Two readers hand it to [`refuse_unusable_profiles`]: a `RunPreflight`, as its
 default `environment`, on a resume; and `RunOptions::profile_environment` on a
 fresh run. That is why it is visible to `engine` and not only here: the fresh
-path's reader is `RunOptions`', in `engine::options`. Two hand it to
-[`refuse_signed_out`], for [`ENVIRONMENT_CREDENTIALS`]: the same
-`RunPreflight` field on a resume, and `RunnerProbes`' `environment`, which
-`RunnerProbes::new` sets to it, on a fresh run.
+path's reader is `RunOptions`', in `engine::options`. The sign-in check reads
+no environment. Until it stopped checking Codex ([`SIGN_IN_CHECKED`]), it read
+this one too, through the same `RunPreflight` field on a resume and through a
+`RunnerProbes` field of its own on a fresh run, which is gone with it.
 
 ## `pub struct RunPreflight<'a> {`
 
@@ -240,9 +253,9 @@ use, or once under its default account when it has no pool
 
 ## `pub struct RunPreflight<'a>` › `environment: fn(&str) -> Option<OsString>,`
 
-Where the token check looks, and where the sign-in check looks for an agent's
-environment credentials ([`ENVIRONMENT_CREDENTIALS`]): [`coordinator_environment`]
-in production, and a fixture in tests (`reading_environment`).
+Where the token check looks ([`refuse_unusable_profiles`], check 5):
+[`coordinator_environment`] in production, and a fixture in tests
+(`reading_environment`).
 
 ## `pub struct RunPreflight<'a>` › `ledger: Mutex<InvocationLedger>,`
 
@@ -291,11 +304,13 @@ the unprofiled pre-flight without having to say so.
 
 ## `impl<'a> RunPreflight<'a>` › `fn reading_environment(mut self, environment: fn(&str) -> Option<OsString>) -> Self {`
 
-For the tests: the token check, and the sign-in check's look for environment
-credentials, read `environment` instead of the process environment. A test
-that changed the real variable would race every other test in the binary that
-reads it. It is private and no production path calls it.
-`RunnerProbes::reading_environment` (`create.rs`) is its fresh-path partner. It is not `#[cfg(test)]`, because a `#[cfg(test)]` item inside the impl
+For the tests: the token check reads `environment` instead of the process
+environment. A test that changed the real variable would race every other test
+in the binary that reads it. It is private and no production path calls it.
+It had a fresh-path partner, `RunnerProbes::reading_environment`
+(`create.rs`), while the sign-in check read the environment; that went with the
+check's environment read, and a fresh run's token check reads
+`RunOptions::profile_environment`, as it did before. It is not `#[cfg(test)]`, because a `#[cfg(test)]` item inside the impl
 would end the file's production region there
 (`effects::tests::every_production_region_that_stops_early_stops_at_a_module`)
 and hide the rest of the file from every census that reads that region.
@@ -374,22 +389,25 @@ wraps, so a profiled pool's Claude Code CLI is probed under that pool's
 profile (`tests::the_claude_code_probe_of_a_profiled_pool_runs_under_that_profile`).
 
 After each agent's probe, and before its capabilities are kept, that agent's
-sign-in is checked under every account the run would use for it
-([`refuse_signed_out`], through the same `registering` boundary, over
-[`Account::of_agent`] of the pools `with_pools` gave it, reading its
-`environment` for the agent's environment credentials). A fresh run makes the
-same call in `RunnerProbes::agent`, so a signed-out account is refused in the
-same words on both paths
+accounts are listed ([`Account::of_agent`] of the pools `with_pools` gave it,
+which refuses an agent over [`MAX_ACCOUNTS_PER_AGENT`] before any discovery),
+and then, for Claude Code alone ([`SIGN_IN_CHECKED`]), its sign-in is checked
+under those accounts in order until one fails ([`refuse_signed_out`], through
+the same `registering` boundary). A fresh run makes the same two calls in
+`RunnerProbes::agent`, so a signed-out account, and an agent over the cap, is
+refused in the same words on both paths
 (`tests::a_fresh_runs_probes_refuse_a_signed_out_pool_in_the_resumes_words`,
-`tests::refuses_a_signed_out_default_account_on_a_fresh_run_in_the_resumes_words`).
+`tests::refuses_a_signed_out_default_account_on_a_fresh_run_in_the_resumes_words`,
+`tests::refuses_seventeen_profiles_with_no_discovery_and_certifies_sixteen`).
 
 ### Errors
 
 [`UpstrokeError::Refused`] naming the pool whose profile cannot be
-honoured, the shell, the agent whose CLI did not answer, or the agent and the
-account it is not signed in under ([`signed_out`]'s refusal, as it stands; a
-discovery that did not run to an answer takes [`refused`]'s shape, like a
-failed probe). A profile
+honoured, the shell, the agent whose CLI did not answer, the agent whose pools
+use more accounts than the cap ([`too_many_accounts`]'s refusal, as it
+stands), or the agent and the account it is not signed in under
+([`signed_out`]'s refusal, as it stands; a discovery that did not run to an
+answer takes [`refused`]'s shape, like a failed probe). A profile
 refusal precedes every registration. Every invocation registered before
 any other refusal is settled —
 completed, or cancelled with its slot pair released — so the ledger
@@ -408,11 +426,17 @@ rather than an argument here.
 
 (2) One probe per recorded agent, sequentially, in recorded order.
 
-## `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `refuse_signed_out(`
+## `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `let accounts = Account::of_agent(&self.pools, agent)?;`
 
-(3) Each agent's sign-in, after its probe: [`refuse_signed_out`] with the caps
-the probe just returned, the agent's accounts and this pre-flight's
-`environment`. A [`SignIn::SignedOut`] refusal is returned as it
+(3) Each agent's accounts, after its probe: [`Account::of_agent`] over the
+pools `with_pools` gave it. Its cap refusal is returned as it stands, with `?`,
+before any discovery runs: its wording is shared with the fresh path and true
+here.
+
+## `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `refuse_signed_out(agent, adapter, &probed, &registering, &accounts).map_err(`
+
+(4) Each agent's sign-in, under those accounts: [`refuse_signed_out`] with the
+caps the probe just returned. A [`SignIn::SignedOut`] refusal is returned as it
 stands, because its wording is shared with the fresh path and its closing is
 already true here. A [`SignIn::Undiscovered`] error is a discovery process that
 did not run to an answer, the same kind of failure as a probe's, so it takes
@@ -549,9 +573,8 @@ differently.
 
 ## `pub(super) enum SignIn` › `SignedOut(UpstrokeError),`
 
-An account the run would use reports itself signed out, and none of the
-agent's environment credentials is set: [`signed_out`]'s refusal, which both
-paths return as it stands.
+An account the run would use reports itself signed out: [`signed_out`]'s
+refusal, which both paths return as it stands.
 
 ## `pub(super) enum SignIn` › `Undiscovered(UpstrokeError),`
 
@@ -573,7 +596,11 @@ its adapter's sign-in discovery (`AgentAdapter::discover`, with the caps that
 probe returned), run through `through`, the agent probe's own registering
 boundary, once for each of `accounts` ([`Account::of_agent`]: every account
 the agent's pools use, the default account included, once each, in file
-order).
+order), until one fails.
+
+For an agent not in [`SIGN_IN_CHECKED`], that is every agent but Claude Code,
+it returns `Ok` at once: no discovery runs and `accounts` is not read
+(`tests::certifies_codex_without_asking_its_sign_in_on_a_resume_and_a_fresh_run`).
 
 - **The first account, the default account**: through the boundary as it is.
   The first account is the default one only when the agent's first pool names
@@ -588,23 +615,20 @@ order).
   discovery's identities with fixed ordinals and the ledger refuses a second
   registration of one identity (`InvocationLedger::open`).
 
-Every account's discovery runs, in order, so each account's answer is
-registered and settled whichever of them is signed out. The check refuses for
-the first account, in that order, that failed: one whose discovery answered
-`AuthState::NotAuthenticated` while none of the agent's environment
-credentials is set in `environment` ([`ENVIRONMENT_CREDENTIALS`]), refused
-with [`signed_out`]'s refusal for that account; or one whose discovery did not
-run to an answer, which also stops the check, since a later discovery through
-the same boundary would most likely fail the same way.
-`Authenticated` passes, and so does `Unknown`: a CLI whose `auth status`
-returns no JSON, or times out, has said nothing about the account, and this
-check refuses only an account that reports itself signed out
+The accounts are discovered in order, and the check stops at the first that
+fails: one whose discovery answered `AuthState::NotAuthenticated`, refused with
+[`signed_out`]'s refusal for that account; or one whose discovery did not run
+to an answer, returned as that discovery's error. No later account is
+discovered: the run is refused either way, so a later answer could not change
+the outcome, and a later discovery through the same boundary as a failed one
+would most likely fail the same way
+(`tests::refuses_a_first_pools_signed_out_default_account_though_its_profiled_spare_is_signed_in`,
+`tests::returns_a_first_discoverys_unresolved_error_and_discovers_no_second_account`).
+`Authenticated` passes, and so does `Unknown`, and the check goes on to the
+next account: a CLI whose `auth status` returns no JSON, or times out, has said
+nothing about the account, and this check refuses only an account that reports
+itself signed out
 (`tests::a_discovery_that_cannot_say_whether_the_account_is_signed_in_certifies`).
-An adapter that does not override `discover` answers `Unknown` and runs
-nothing, so for it this check adds no process. And a `NotAuthenticated`
-answer passes for an agent one of whose environment credentials is set: its
-discovery does not see them, and its CLI authenticates from them
-([`ENVIRONMENT_CREDENTIALS`]).
 
 **Why the first pool's discovery carries its profile too.** On both paths the
 boundary is over `profiled`'s runner, which stamps a probe of the agent with
@@ -631,12 +655,15 @@ or its pass, named it
 
 **What it does not check.** An account no pool of this run uses: a profile in
 another agent's pool, or the default account of an agent every one of whose
-pools names a profile, since no request of this run reaches either. Whether an
-environment credential that is set works: the variable's presence is read,
-never its value, and a CLI that rejects it fails the run's first attempt. And
-the environment of any boundary but the host's: [`ENVIRONMENT_CREDENTIALS`] is
-read from the coordinator's environment, which is the worker's on the host
-runner (`HostEnvironment::from_process`).
+pools names a profile, since no request of this run reaches either. The
+sign-in of any agent but Claude Code ([`SIGN_IN_CHECKED`];
+`PR408-CODEX-SIGN-IN-NOT-PREFLIGHTED`). And any account after the first that
+fails, which a run refused at that account never reaches.
+
+Until it stopped at the first failing account, every account's discovery ran,
+so each account's answer was registered and settled whichever of them was
+signed out, and the refusal came after the last: a first pool's signed-out
+default account was refused only once its spare's discovery had run too.
 
 Until the default account was listed, an agent with a profiled pool had only
 its profiled pools checked, and its default account was checked by no one,
@@ -656,21 +683,46 @@ is the witness, which certified on the code before it).
 
 ### Errors
 
-[`SignIn::SignedOut`] for the first account, in order, that reports itself
-signed out with no environment credential set; [`SignIn::Undiscovered`] for a
-discovery that returned an error before any account was found signed out,
-which stops the check there. A discovery error after an account was found
-signed out stops the check too, and the signed-out refusal is returned. Every
-process a discovery ran was registered through `through` and is settled by it,
-on every outcome.
+The first failure, in account order, and nothing after it:
+[`SignIn::SignedOut`] when that account's discovery reported it signed out, and
+[`SignIn::Undiscovered`], carrying the discovery's own error, when its
+discovery returned an error. Either stops the check there.
 
-## `fn signed_in(`
+Every process a discovery ran was registered through `through`, and it settles
+each one that ended — completed, or cancelled with its slot pair released —
+but not one whose process the Runner could not establish as ended
+(`ProcessFate::Unresolved`). `InvocationLedger::end` keeps that registration
+running, with its pair, until this process exits, so after its refusal the
+ledger names that discovery as running and does not balance
+(`tests::returns_a_first_discoverys_unresolved_error_and_discovers_no_second_account`).
+Until this was corrected, this section said every discovery's process was
+settled "on every outcome", which an unresolved one is not.
+
+## `fn too_many_accounts(agent: &str) -> UpstrokeError {`
+
+The cap's refusal, worded once for both paths: `pre-flight: `, the agent whose
+pools use more than [`MAX_ACCOUNTS_PER_AGENT`] distinct accounts (credential
+profiles, with the default account counting as one), that pre-flight checks the
+sign-in of at most that many accounts per agent, then one closing sentence:
+"Nothing was spawned for the run and no event was appended", and the same
+command runs again once the agent's pools use at most that many. Like
+[`refused`]'s, [`profile_refused`]'s and [`signed_out`]'s, it ends without a
+full stop.
+
+The closing is [`signed_out`]'s, for the same reason: it is true on both paths.
+The shell and capability probes have run by then, and they were pre-flight's,
+not the run's; a fresh run refuses at P4, before P5 opens the event log, and a
+resume at recovery step (c), before any recovery event. [`refused`]'s closing
+says the run was probed inside a boundary and is resumable, true of a resume
+alone, and [`profile_refused`]'s says no agent CLI was started, false once the
+probes ran.
+
+## `fn signed_in(agent: &str, account: &Account, auth: AuthState) -> Result<(), SignIn> {`
 
 One discovery's answer read as the check reads it: only `NotAuthenticated`
-refuses, and not when one of `agent`'s environment credentials is set in
-`environment` ([`credentials_in_environment`]). The environment is read only
-on that answer, so a run whose discoveries answer anything else, or whose
-agent has no environment credentials, reads nothing from it.
+refuses. It reads no environment: an agent whose discovery cannot see how its
+CLI authenticates is not checked at all ([`SIGN_IN_CHECKED`]), rather than
+excused by variables read beside its answer.
 
 ## `fn signed_out(agent: &str, account: &Account) -> UpstrokeError {`
 
@@ -682,11 +734,14 @@ agent, its default account — then one closing sentence: "Nothing was spawned
 for the run and no event was appended; run the same command again once that
 account is signed in", with how to sign it in in parentheses (for Claude Code,
 `claude auth login`, with `CLAUDE_CONFIG_DIR` set to the profile when there is
-one; for the default account it is unset, and the hint names none). For an
-agent with environment credentials ([`ENVIRONMENT_CREDENTIALS`]) the hint also
-says it may set one of them, by name, in the environment upstroke runs in; it
-never carries a value. Like [`refused`]'s and [`profile_refused`]'s, it ends
-without a full stop.
+one; for the default account it is unset, and the hint names none). Like
+[`refused`]'s and [`profile_refused`]'s, it ends without a full stop.
+
+While Codex's sign-in was checked, the hint for an agent with environment
+credentials also named them ("or by setting one of `CODEX_API_KEY`,
+`OPENAI_API_KEY` or `CODEX_ACCESS_TOKEN` in the environment upstroke runs
+in"). Only Claude Code's sign-in is checked now ([`SIGN_IN_CHECKED`]), so that
+clause is gone, with the helper that listed the variables.
 
 The default-account wording was "its default account, as no pool of this run
 names a credential profile for it" for every default account, true when it was
@@ -704,11 +759,6 @@ that ran were pre-flight's, not the run's; a fresh run refuses at P4, before P5
 opens the event log; a resume refuses at recovery step (c), before any recovery
 event; and on either the same command runs again once the account is signed
 in.
-
-## `fn one_of(variables: &[&str]) -> String {`
-
-The variables named for the hint, each in backticks: one alone, or "one of
-`A`, `B` or `C`". Names only; [`signed_out`] has no value to give it.
 
 ## `struct UnderPool<'a> {`
 
