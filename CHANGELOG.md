@@ -13,7 +13,9 @@
 - `upstroke capacity` and `validate` now show the usage-limit signals and spend of a schema-4 run
   when it is the repository's latest.
 - A schema-4 run's pre-flight, on `upstroke run` and `resume`, now refuses it when Claude Code's
-  account or a Claude Code pool's `profile` is not signed in (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`).
+  account or a Claude Code pool's `profile` is not signed in, as `claude --setting-sources ""
+  auth status --json` reports it; a CLI that cannot say whether it is signed in still passes
+  (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`).
 - When a usage limit stops a schema-4 worker and its agent has another pool the run has not seen
   exhausted, the task now runs again at once on that pool instead of waiting for the reset.
 - A schema-4 run whose remaining tasks are deferred on a usage limit now waits until two minutes
@@ -33,13 +35,18 @@
   coordinator's effective uid and gid, so the image and any credential volume must be usable by that
   user, and a command's stdin now reaches its container.
 - `[runner] mounts` now takes effect on Unix and Windows, as part of the run's recorded execution
-  identity; a config accepted while mounts were inert may now be refused.
+  identity; a config accepted while mounts were inert may now be refused. On Windows a source must
+  be on a drive letter, and a link, junction or other reparse point is refused.
 - A decline, or a lineage member's failed settlement, meeting an open verification of its lineage
   now cancels it instead of releasing it, ending in `merge_verification_interrupted` (INV-07, L13).
 - A schema-4 integration verification that ends with no terminal carrying the review passes it paid
   for, now records those passes in a new `merge_verification_charged` event (`DESIGN.md` §26).
-- The four endings that give up on a Unix helper now bound their wait; the acknowledged-exit wait
-  is deliberately unbounded (`DESIGN.md` §15, `PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES`).
+- The four endings that give up on a Unix helper, and the end of a cleanup reaper that did not
+  acknowledge CLEANUP, now bound their wait: a two-second `WNOHANG` poll, `waitpid(pid, …,
+  WNOHANG)` by number where it passed `0`, and with `UPSTROKE_HELPER_IDENTITY=1` `waitid(P_PIDFD,
+  fd, WEXITED | WNOHANG)` where it passed `WEXITED`, so a syscall policy for the identity path must
+  permit both sets of `waitid` options. The wait after an acknowledged CLEANUP or CANCEL is
+  deliberately still unbounded (`DESIGN.md` §15, `PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES`).
 - Ending a Unix job-control guard the launch gives up on now reports what `kill` and `waitpid`
   answered, instead of discarding both answers (`PR125-CLOSE-DISCARDED-KILL-RESULT`).
 - A schema-4 integration verification that ends unavailable now records the review passes it paid
