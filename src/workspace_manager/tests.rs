@@ -14929,6 +14929,204 @@ fn kill_git_child(cwd: &Path, args: &[String], after: std::time::Duration) -> Sa
     SampleKill { launch, child }
 }
 
+/// How close to its rung [`wait_out_rung`] stops sleeping and spins on the
+/// clock. It is wider than the lateness measured: on hosted macOS on
+/// 2026-11-27 (run 46020861627, job 140579863888) the wait before each of
+/// the 32 kills of `sampled_git_child_kills_every_residue_classified_and_recovered`
+/// was `std::thread::sleep(after)`, those sleeps returned late, and every
+/// kill fired late: the latest of the 32 fired 148.31 ms after its rung.
+/// Why the sleeps returned late, timer delivery or no free core, is not
+/// established.
+const RUNG_SPIN_WITHIN: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Return once `elapsed()` reads `after` or later: the rung a sampled kill
+/// is aimed at, waited out on the clock rather than on a sleep's return.
+///
+/// While more than [`RUNG_SPIN_WITHIN`] is left it sleeps for what is left
+/// less that margin, so a sleep that returns up to the margin late still
+/// returns short of the rung. Inside the margin it spins, on
+/// `std::hint::spin_loop` and not on `std::thread::yield_now`, which hands
+/// the core away and gets it back when the scheduler pleases, as a sleep
+/// does. It reads `elapsed()` afresh after every sleep and every spin, and
+/// returns at the first reading at or past `after`.
+///
+/// What it cannot do. A thread preempted inside the margin, while it spins
+/// or between its last reading and the kill, still fires late: the spin
+/// keeps the core only for as long as the scheduler leaves it there. And on
+/// one core the spin delays the child it times: for up to the whole margin
+/// on every rung, the parent spins on the core the child needs.
+///
+/// `fixture::KillableGitChild::run_until` is not this wait. It reaps before
+/// it decides and sends no kill to a child already gone, which the
+/// sampler's exact per-command firing count forbids, and it sleeps to
+/// within 4 ms of its aim, less than the 148.31 ms by which the macOS job's
+/// latest kill was late. `elapsed` and `sleep` are arguments so that the
+/// tests below can hand this a fake clock and a fake sleeper.
+fn wait_out_rung(
+    after: std::time::Duration,
+    mut elapsed: impl FnMut() -> std::time::Duration,
+    mut sleep: impl FnMut(std::time::Duration),
+) {
+    loop {
+        let now = elapsed();
+        if now >= after {
+            return;
+        }
+        let left = after - now;
+        if left > RUNG_SPIN_WITHIN {
+            sleep(left - RUNG_SPIN_WITHIN);
+        } else {
+            std::hint::spin_loop();
+        }
+    }
+}
+
+/// How far each reading of the [`wait_out_rung`] tests' fake clock moves it
+/// on, so that a spin ends: 1 µs, the unit the sampler prints its ladder
+/// in, and far under the 2.48 ms by which the least late of the macOS job's
+/// 32 kills fired after its rung.
+const RUNG_TEST_TICK: std::time::Duration = std::time::Duration::from_micros(1);
+
+/// How late the fake clock's sleeps return: 148.311690 ms. The latest of
+/// the macOS job's 32 kills fired 148.31 ms after its rung.
+const RUNG_TEST_OVERSHOOT: std::time::Duration = std::time::Duration::from_nanos(148_311_690);
+
+/// What [`wait_out_rung`] did on the fake clock of
+/// [`wait_out_rung_on_a_fake_clock`].
+struct RungWait {
+    /// Every reading it took of the clock, in order.
+    readings: Vec<std::time::Duration>,
+    /// Every sleep it asked for, in order.
+    sleeps: Vec<std::time::Duration>,
+}
+
+impl RungWait {
+    /// Assert that the wait returned at its first reading at or past
+    /// `rung`. The fake clock refuses a reading taken after one at or past
+    /// the rung, so every reading before the last was short of it; this
+    /// asserts that there was a last reading, and that it was at or past
+    /// the rung.
+    #[track_caller]
+    fn assert_returned_at_first_reading_past(&self, rung: std::time::Duration) {
+        let Some(last) = self.readings.last() else {
+            panic!(
+                "the wait for {rung:?} returned without reading the clock, after asking for \
+                 the sleeps {:?}",
+                self.sleeps
+            );
+        };
+        assert!(
+            *last >= rung,
+            "the wait for {rung:?} returned at its reading {last:?}, short of the rung, after \
+             {} readings and the sleeps {:?}",
+            self.readings.len(),
+            self.sleeps
+        );
+    }
+}
+
+/// Run [`wait_out_rung`] for `rung` on a fake clock whose first reading is
+/// `start`. The `elapsed` it hands in reads the clock, then moves it on by
+/// [`RUNG_TEST_TICK`]; the `sleep` records each duration it is asked for
+/// and moves the clock on by that much plus `overshoot`, how late the sleep
+/// returns. A reading taken after one at or past the rung panics: the wait
+/// should have returned, and one that never does would read for ever.
+fn wait_out_rung_on_a_fake_clock(
+    rung: std::time::Duration,
+    start: std::time::Duration,
+    overshoot: std::time::Duration,
+) -> RungWait {
+    let clock = std::cell::Cell::new(start);
+    let mut readings: Vec<std::time::Duration> = Vec::new();
+    let mut sleeps: Vec<std::time::Duration> = Vec::new();
+    wait_out_rung(
+        rung,
+        || {
+            let now = clock.get();
+            if let Some(passed) = readings.last().filter(|last| **last >= rung) {
+                panic!(
+                    "the wait read the clock again, at {now:?}, after its reading {passed:?} \
+                     was at or past its rung {rung:?}"
+                );
+            }
+            readings.push(now);
+            clock.set(now + RUNG_TEST_TICK);
+            now
+        },
+        |asked| {
+            sleeps.push(asked);
+            clock.set(clock.get() + asked + overshoot);
+        },
+    );
+    RungWait { readings, sleeps }
+}
+
+/// A rung inside [`RUNG_SPIN_WITHIN`], from a clock at zero, is spun out
+/// and never slept: a sleep there could return as late as the macOS job's,
+/// with no margin left to take it up.
+#[test]
+fn a_rung_inside_the_spin_margin_is_never_slept() {
+    // A number, not a fraction of `RUNG_SPIN_WITHIN`: a rung taken from the
+    // margin would shrink with it, and a margin of zero would leave this
+    // test nothing to wait.
+    let rung = std::time::Duration::from_millis(200);
+    let wait = wait_out_rung_on_a_fake_clock(rung, std::time::Duration::ZERO, RUNG_TEST_OVERSHOOT);
+    assert!(
+        wait.sleeps.is_empty(),
+        "a rung of {rung:?} from a clock at zero is inside the {RUNG_SPIN_WITHIN:?} margin, \
+         and the wait asked for the sleeps {:?}",
+        wait.sleeps
+    );
+    wait.assert_returned_at_first_reading_past(rung);
+}
+
+/// A sleep that returns 148.311690 ms late, inside the margin, does not
+/// make the kill late: the wait sleeps only to the margin short of the
+/// rung, the overshoot ends inside that margin, and the spin carries the
+/// clock the rest of the way. Behind `std::thread::sleep(after)`, the
+/// latest of the macOS job's 32 kills fired 148.31 ms after its rung.
+#[test]
+fn a_sleep_that_overshoots_inside_the_margin_does_not_make_the_kill_late() {
+    let rung = std::time::Duration::from_nanos(735_527_593);
+    let wait = wait_out_rung_on_a_fake_clock(rung, std::time::Duration::ZERO, RUNG_TEST_OVERSHOOT);
+    // What was left at the first reading, the whole rung, less the 250 ms
+    // margin; a number, for the reason the test above gives.
+    assert_eq!(
+        wait.sleeps,
+        [std::time::Duration::from_nanos(485_527_593)],
+        "the wait for {rung:?} from a clock at zero sleeps once, for the rung less the 250 ms \
+         margin"
+    );
+    wait.assert_returned_at_first_reading_past(rung);
+    let returned = *wait.readings.last().expect("the wait read the clock");
+    let late = returned.saturating_sub(rung);
+    assert!(
+        late < RUNG_TEST_TICK,
+        "the wait for {rung:?} returned at {returned:?}, {late:?} after the rung: the kill \
+         after it would fire that late, as the macOS job's did"
+    );
+}
+
+/// A rung the clock has already passed at the wait's first reading is
+/// neither slept nor spun: the wait reads the clock once and returns.
+#[test]
+fn a_rung_already_passed_returns_without_waiting() {
+    let rung = std::time::Duration::from_millis(1);
+    let start = std::time::Duration::from_millis(3);
+    let wait = wait_out_rung_on_a_fake_clock(rung, start, RUNG_TEST_OVERSHOOT);
+    assert!(
+        wait.sleeps.is_empty(),
+        "the clock read {start:?}, past the rung {rung:?}, and the wait asked for the sleeps {:?}",
+        wait.sleeps
+    );
+    // A spin is followed by a reading, so a single reading is no spin.
+    assert_eq!(
+        wait.readings,
+        [start],
+        "the wait reads the clock once, finds it past the rung and returns"
+    );
+}
+
 /// Which of [`recover_sample`]'s two removals refused, with its error.
 ///
 /// Returned rather than panicked on inside the recovery, so that the panic
