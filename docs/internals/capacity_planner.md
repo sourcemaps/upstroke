@@ -351,7 +351,9 @@ allowances (`Setup::coverage`). The initial `Snapshot` seeds the windows and inv
 The state is small and plain: the accepted readings (which `recommend` hands to `plan`), the
 latest accepted inventory, one `WindowView` per window with the plan its reading named, every plan
 the account's readings have named and the second each was read, the `GrantState`, the registered
-claims, the outstanding permits and a `generation` that every accepted change advances. Nothing is
+claims, the outstanding permits, the draws of returned permits that no newer reading has yet
+covered (with the second each was returned) and a `generation` that every accepted change
+advances. Nothing is
 derived from the wall clock: `apply(now_unix, event)` moves the ledger's clock forward and refuses
 an earlier one (`Refusal::ClockBehind`).
 
@@ -440,15 +442,28 @@ not advance the generation.
 ### `impl Ledger` › `pub fn usable(&self, window: WindowId) -> Result<f64, Blocked> {`
 
 The percent a new permit may draw: `100` less the window's observed use, less what outstanding
-permits draw from it. It is `Blocked` when the window was never read (`NoReading`), its reports
-conflict (`Conflicting`), any reading of the account at or after the window's reading names a plan
-other than the one the window was read under (`PlanChanged`: its balance is the previous plan's
-allowance, even after a change back, until the window is read again), its view is older than the
-freshness bound (`Stale`), or its reported reset has passed (`Refilled`: the refill is real but
-unread, and is not credited). A window read with no plan is `PlanChanged` once any plan is reported
-at or after it. A permit
+permits draw from it, less what returned permits drew from it that the window's reading does not
+yet show (below), floored at `0`. It is `Blocked` when the window was never read (`NoReading`),
+its reports conflict (`Conflicting`), any reading of the account at or after the window's reading
+names a plan other than the one the window was read under (`PlanChanged`: its balance is the
+previous plan's allowance, even after a change back, until the window is read again), its view is
+older than the freshness bound (`Stale`), or its reported reset has passed (`Refilled`: the refill
+is real but unread, and is not credited). A window read with no plan is `PlanChanged` once any
+plan is reported at or after it. A permit
 (`Event::Permit`) is issued only when every window it draws has the balance; the first window in
-`WindowId` order that lacks it is named in `Refusal::Blocked`. `Event::Release` returns a permit.
+`WindowId` order that lacks it is named in `Refusal::Blocked`. A draw may exceed the balance by
+`PERCENT_EPSILON`, to absorb rounding, but only where some balance is left: an exhausted window
+(`usable` of `0`) refuses every positive draw, however small, so the tolerance never issues quota
+the reading does not report.
+
+`Event::Release` returns a permit whose work has ended, and a second release of it is
+`Refused(UnknownPermit)`. Returning it frees nothing at once: the work spent its draws, and the
+reading the balance came from does not show that use. Each draw stays debited from its window
+until a reading of that window observed after the release second is adopted, whose use then
+stands for the work; `observe` drops the debit then. A reading of the release second itself, or
+one that is delayed, missing, repeated or conflicting, leaves it in place. Release cannot tell
+finished work from cancelled work, so either keeps its draws until that re-read.
+
 A permit outlives the grant: expiry (below) removes no balance and no permit.
 
 ### `impl Ledger` › `fn expire(&mut self) {`
@@ -469,8 +484,8 @@ slice leaves out:
    pass the `Recommendation` back in `Event::Claim`. Only `Transition::Claimed` authorises the
    holder to redeem.
 3. Apply the redemption's response as `Event::Reply`, and each later read as `Event::Observe`.
-4. Issue work only through `Event::Permit`, and read `usable`, `window` and `grant_state` for
-   display.
+4. Issue work only through `Event::Permit`, return the permit with `Event::Release` when the work
+   ends, and read `usable`, `window` and `grant_state` for display.
 
 Everything the ledger refuses comes back as a value (`Transition::Refused`, `Ignored`), never a
 panic, so a handler can log it. What it would add around this is outside the slice: persisting
@@ -513,6 +528,8 @@ All are synthetic (`Source::Fixture` or the planner fixtures above) and timed fr
 | Claude weekly grant, weekly exhausted until 30 min; the re-read reports no reset | the weekly keeps `At(NOW + 30 min)`, the same report again is `repeated`, and a draw a second past the boundary is `Refilled` |
 | Codex `pro`, full grant, weekly full until 30 min; the re-read omits the weekly's reset | the unrestarted weekly keeps `At(NOW + 30 min)` and is `Refilled` a second past it, while the session draws on its reported refresh |
 | weekly at 0% and session under `max`; a session reading under `pro`; another under `max`; then the weekly at 20% under `max` | the weekly is `PlanChanged` after each change; once read again it serves 80, and a 100% draw is refused |
+| weekly at 0%; a 100% permit released; the weekly read at 30% in the release second, then at 60% a minute later | after the release the weekly is still 0 and a second 100% draw is refused; a second release is `UnknownPermit`; the 30% reading keeps the draw debited; the 60% one lifts it and serves 40 |
+| weekly at 100% and session at 70% | a `1e-9` draw on the weekly is refused twice at 0; the session serves 30 plus that tolerance, then refuses the same dust at 0 |
 
 A planner test pins the history rule above: weekly readings under `max` two hours apart, with a
 session reading under `pro` between them, are two segments (`First`, `PlanChange`) and the weekly

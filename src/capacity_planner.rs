@@ -1462,6 +1462,7 @@ pub struct Ledger {
     settle_after: Option<u64>,
     claims: Vec<(ClaimId, RequestId)>,
     permits: BTreeMap<PermitId, Permit>,
+    consumed: Vec<(u64, (WindowId, f64))>,
     issued: u32,
 }
 
@@ -1482,6 +1483,7 @@ impl Ledger {
             settle_after: None,
             claims: Vec::new(),
             permits: BTreeMap::new(),
+            consumed: Vec::new(),
             issued: 0,
         };
         ledger.observe(initial);
@@ -1504,10 +1506,7 @@ impl Ledger {
             Event::Reply { claim, reply } => self.reply(claim, reply),
             Event::Observe(snapshot) => Transition::Observed(self.observe(snapshot)),
             Event::Permit { request, draws } => self.permit(request, draws),
-            Event::Release(permit) => match self.permits.remove(&permit) {
-                Some(_) => Transition::Released,
-                None => Transition::Refused(Refusal::UnknownPermit),
-            },
+            Event::Release(permit) => self.release(permit),
             Event::Tick => Transition::Ticked,
         };
         self.expire();
@@ -1574,6 +1573,7 @@ impl Ledger {
             .permits
             .values()
             .flat_map(|permit| &permit.draws)
+            .chain(self.consumed.iter().map(|(_, draw)| draw))
             .filter(|(id, _)| *id == window)
             .map(|(_, amount)| amount)
             .sum();
@@ -1751,6 +1751,12 @@ impl Ledger {
             };
             *counter += 1;
         }
+        let windows = &self.windows;
+        self.consumed.retain(|(released_at, (window, _))| {
+            windows
+                .get(window)
+                .is_none_or(|held| held.view.observed_at_unix <= *released_at)
+        });
         if seen.adopted + seen.conflicting > 0 {
             self.bump();
         }
@@ -1924,7 +1930,7 @@ impl Ledger {
         }
         for (window, amount) in needed {
             match self.usable(window) {
-                Ok(usable) if usable + PERCENT_EPSILON >= amount => {}
+                Ok(usable) if usable > 0.0 && usable + PERCENT_EPSILON >= amount => {}
                 Ok(usable) => {
                     return Transition::Refused(Refusal::Blocked(
                         window,
@@ -1944,6 +1950,16 @@ impl Ledger {
             },
         );
         Transition::Permitted(id)
+    }
+
+    fn release(&mut self, permit: PermitId) -> Transition {
+        let Some(returned) = self.permits.remove(&permit) else {
+            return Transition::Refused(Refusal::UnknownPermit);
+        };
+        let released_at = self.now_unix;
+        let draws = returned.draws.into_iter().map(|draw| (released_at, draw));
+        self.consumed.extend(draws);
+        Transition::Released
     }
 }
 
@@ -4448,5 +4464,81 @@ mod tests {
             ),
             Transition::Permitted(_)
         ));
+    }
+
+    #[test]
+    fn returning_a_used_permit_cannot_reallocate_the_same_reading() {
+        let weekly = |at, used| claude_at(WindowId::Weekly, at, used, Some(NOW + 72 * HOUR));
+        let mut ledger = claude_ledger(GrantKind::Weekly, 240 * HOUR, vec![weekly(NOW, 0.0)]);
+        let whole = [(WindowId::Weekly, 100.0)];
+        let Transition::Permitted(first) = ledger.apply(NOW + MIN, permit(ALPHA, &whole)) else {
+            panic!("the observed balance covers the work");
+        };
+        let returned = NOW + 2 * MIN;
+        assert_eq!(
+            ledger.apply(returned, Event::Release(first)),
+            Transition::Released
+        );
+        assert!(ledger.permits().is_empty());
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(0.0));
+        assert_eq!(
+            ledger.apply(returned, permit(BETA, &whole)),
+            insufficient(WindowId::Weekly, 0.0)
+        );
+        assert_eq!(
+            ledger.apply(returned, Event::Release(first)),
+            Transition::Refused(Refusal::UnknownPermit)
+        );
+        let read = |at, used| observe(vec![weekly(at, used)], InventoryEvidence::Unknown);
+        let seen_once = observed(Observation {
+            adopted: 1,
+            missing: 1,
+            ..Observation::default()
+        });
+        assert_eq!(ledger.apply(returned, read(returned, 30.0)), seen_once);
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(0.0));
+        assert_eq!(
+            ledger.apply(returned, permit(BETA, &[(WindowId::Weekly, 10.0)])),
+            insufficient(WindowId::Weekly, 0.0)
+        );
+        let later = returned + MIN;
+        assert_eq!(ledger.apply(later, read(later, 60.0)), seen_once);
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(40.0));
+        assert!(matches!(
+            ledger.apply(later, permit(BETA, &[(WindowId::Weekly, 40.0)])),
+            Transition::Permitted(_)
+        ));
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(0.0));
+    }
+
+    #[test]
+    fn an_exhausted_window_cannot_issue_positive_dust_permits() {
+        let dust = 0.000_000_001;
+        let mut ledger = claude_ledger(
+            GrantKind::Weekly,
+            240 * HOUR,
+            vec![
+                claude_at(WindowId::Weekly, NOW, 100.0, Some(NOW + 72 * HOUR)),
+                claude_at(WindowId::Session, NOW, 70.0, Some(NOW + 4 * HOUR)),
+            ],
+        );
+        assert_eq!(ledger.usable(WindowId::Weekly), Ok(0.0));
+        for request in [ALPHA, BETA] {
+            assert_eq!(
+                ledger.apply(NOW + MIN, permit(request, &[(WindowId::Weekly, dust)])),
+                insufficient(WindowId::Weekly, 0.0)
+            );
+        }
+        let brim = 30.0 + dust;
+        assert!(matches!(
+            ledger.apply(NOW + MIN, permit(ALPHA, &[(WindowId::Session, brim)])),
+            Transition::Permitted(_)
+        ));
+        assert_eq!(ledger.usable(WindowId::Session), Ok(0.0));
+        assert_eq!(
+            ledger.apply(NOW + MIN, permit(BETA, &[(WindowId::Session, dust)])),
+            insufficient(WindowId::Session, 0.0)
+        );
+        assert_eq!(ledger.permits().len(), 1);
     }
 }
