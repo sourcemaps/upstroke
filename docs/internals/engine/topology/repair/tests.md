@@ -42,11 +42,11 @@ admissible shape for an over-limit rejection with no tier left.
 The evidence is not written into the record here. It is produced by the
 production classification of a failing gate and of a rejecting reviewer, and
 carried through `integrate::code_record` — the conversion that used to keep
-`reason` and drop `feedback`. The version before round six handed
-`code_rejection_record` its own `detail`, which sits **downstream** of that
-conversion, so it proved the spec carries what it was given and nothing about
-what gives it anything; it passed on a head where the evidence was being lost,
-which is how the defect reached a green branch.
+`reason` and drop `feedback`. The version before the cover review of
+`9ee9784e` handed `code_rejection_record` its own `detail`, which sits
+**downstream** of that conversion, so it proved the spec carries what it was
+given and nothing about what gives it anything; it passed on a head where the
+evidence was being lost, which is how the defect reached a green branch.
 
 The needle is one line of the evidence, because the spec is asserted against its
 JSON encoding and a newline is `\n` there; the fixture keeps a second line so

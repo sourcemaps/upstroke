@@ -2856,10 +2856,10 @@ The control: everything the release has to remove is really there.
 The daemon's three transcribed answers, each **naming the container it is
 about**, which is how a reclaimer tells an answer about its own container from
 an answer — or a path — that merely spells the phrase. They were literals until
-round six; a literal `upstroke-c` beside a fixture whose container has a
-generated name is a fixture the repaired normalizers correctly refuse, and
-making them functions of the name is what keeps the doubles honest rather than
-what works around the check.
+the cover review of `9ee9784e`; a literal `upstroke-c` beside a fixture whose
+container has a generated name is a fixture the repaired normalizers correctly
+refuse, and making them functions of the name is what keeps the doubles honest
+rather than what works around the check.
 
 ## `const SETTLED_TARGET: &str = "upstroke-c";`
 
