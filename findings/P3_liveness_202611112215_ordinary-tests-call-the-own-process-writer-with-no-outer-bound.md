@@ -58,7 +58,12 @@ The other three are the pattern to follow: `src/runner/host/tests.rs:4979` in `r
 `write_the_gate_probe_stand_in`, each made inside an isolated child its parent test starts through
 `run_test_isolated` under a deadline (180, 120 and 300 seconds).
 
-No such hold has been observed at these nine sites; this is a recorded exposure, not a sighting.
+No such hold has been observed at these nine sites; this is a recorded exposure, not a sighting. In pull
+request #368's first round of review, the regression lens reproduced the hold through this same helper from
+an ordinary test thread: with the helper's reaper held at its exit, the call waited past sixty-five seconds.
+The same mechanism was rated P2 in `FUA-I4-RELAY` and in that round. It is filed here at P3 because no hold
+has been seen in CI at any of the nine sites and the reproduction needed a reaper stopped by hand; that is a
+judgement the owner may revise.
 
 **Found by** the frontier review of pull request #368 at `7201f8b7`. #368 bounded one caller, the gate-probe
 test's `write_the_gate_probe_stand_in`, by moving its write into an isolated child under a deadline, and left
