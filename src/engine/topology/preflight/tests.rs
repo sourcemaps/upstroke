@@ -348,6 +348,7 @@ fn a_slotted_invocation_without_an_agent_binding_is_refused() {
         timeout: Duration::from_secs(1),
         agent: None,
         invocation: PreflightIdentities::agent(AGENT, 0).expect("a slotted probe identity"),
+        credential_profile: None,
     };
     let error = registering
         .run_blocking(&request)
@@ -376,6 +377,7 @@ fn one_identity_cannot_be_registered_twice() {
         timeout: Duration::from_secs(1),
         agent: None,
         invocation: PreflightIdentities::shell(0).expect("the shell identity"),
+        credential_profile: None,
     };
     registering.run_blocking(&request).expect("the first runs");
     let error = registering
@@ -406,6 +408,7 @@ fn a_gate_invocation_through_the_boundary_takes_no_slot() {
         timeout: Duration::from_secs(1),
         agent: None,
         invocation: gate,
+        credential_profile: None,
     };
     registering
         .run_blocking(&request)
@@ -453,6 +456,7 @@ fn the_boundary_forwards_its_runners_report_and_keeps_one_per_admitted_request()
             AttemptRole::Gate(0),
             0,
         ),
+        credential_profile: None,
     };
     assert_eq!(
         registering.composed_common_dir(&gate),
@@ -469,6 +473,7 @@ fn the_boundary_forwards_its_runners_report_and_keeps_one_per_admitted_request()
         timeout: Duration::from_secs(1),
         agent: None,
         invocation: PreflightIdentities::agent(AGENT, 0).expect("a slotted probe identity"),
+        credential_profile: None,
     };
     registering
         .run_blocking(&unbound)

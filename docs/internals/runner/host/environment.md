@@ -556,6 +556,19 @@ A reserved key the base does not carry is **not** supplied: setting an
 absent variable to the empty string is a different environment from not
 setting it, and several CLIs read "set but empty" as an instruction.
 
+`profile` is the request's credential profile
+([`RunnerRequest::credential_profile`](../../../../src/runner/contract.rs)),
+and it changes one value. Where a role that `supplies_credentials` is
+handed its bound agent's credential-location key, a `Some` profile is the
+value handed, in place of the base's — the coordinator's own — and it is
+handed whether or not the base carries the key, because it is the
+request's value and not a reading of the base. `None` is exactly the
+supply described here, from the base or not at all. Nothing else reads
+`profile`: the role scoping below decides whether the key is supplied, so
+a gate or the shell probe carrying a profile is told no credential
+location, and an agent with no known location (`credential_location`
+returns `None`) is handed nothing under any key.
+
 DESIGN.md:259-262 — "the host runner starts from the Upstroke environment
 and the container runner from the image environment; **each** supplies
 role-scoped `HOME`, `PATH`, and credential locations" — resolved for
@@ -608,9 +621,11 @@ role-scoped `HOME`, `PATH`, and credential locations" — resolved for
   a `host-v1` that ever does scope `HOME` has to change a passage
   first, rather than a count.
 
-A reserved key the base does not carry is **not** supplied: setting an
-absent variable to the empty string is a different environment from not
-setting it, and several CLIs read "set but empty" as an instruction.
+A reserved key the base does not carry is **not** supplied — the
+credential profile above, which is the request's value rather than the
+base's, aside: setting an absent variable to the empty string is a
+different environment from not setting it, and several CLIs read "set but
+empty" as an instruction.
 
 ## `impl HostEnvironment` › `pub fn compose(`
 
@@ -628,6 +643,14 @@ also make this step *output-equivalent to deleting it*, because
 [`Self::reserved_values`] reads the values back out of the same base.
 So the reserved keys arrive from one place — this function's supply
 step, which is role-scoped — or not at all.
+
+`profile` goes to that step unchanged: `HostRunner` passes the request's
+`credential_profile`, and a `Some` one is the value of the bound agent's
+credential-location key where [`Self::reserved_values`] supplies that key.
+It arrives through the supply step and not through the overlay, so the
+overlay's refusal of a reserved key is unchanged: an overlay naming
+`CLAUDE_CONFIG_DIR` is refused whether or not the request carries a
+profile.
 
 Then the object graph, **after** the overlay and not before it. Under
 [`ObjectGraph::Recorded`], the schema-4 runners' reading,

@@ -4483,6 +4483,7 @@ fn kill_during_recovery_repeats_recovery() {
         agent: None,
         invocation: crate::runner::InvocationId::probe(crate::runner::ProbeTarget::Shell, 7)
             .expect("a probe identity for the spawned child"),
+        credential_profile: None,
     };
     let output = crate::runner::host::HostRunner::new()
         .run_blocking(&request)
@@ -21055,6 +21056,7 @@ fn kill_inside_closure_recovers() {
             agent: None,
             invocation: crate::runner::InvocationId::probe(crate::runner::ProbeTarget::Shell, 9)
                 .expect("a probe identity for the spawned child"),
+            credential_profile: None,
         };
         let output = crate::runner::host::HostRunner::new()
             .run_blocking(&request)

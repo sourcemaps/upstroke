@@ -195,6 +195,36 @@ The agent whose slot pair and credential location this process uses.
 R4: "invocation registration (all Runner processes incl. gates, agent
 probes, and the shell probe)". Not optional — that is the invariant.
 
+## `pub struct RunnerRequest` › `pub credential_profile: Option<PathBuf>,`
+
+The directory to hand this request's agent as its credential location,
+or `None` for the coordinator's own value. It is a pool's profile: the
+request names *where* the bound agent's credentials live, and the runner
+still decides *whether* the process is told at all.
+
+`None` is what every builder below sets and what every request had before
+the field existed, so a request that does not ask for a profile composes
+exactly the environment it did. `Some` changes one value and nothing else:
+
+* **`host-v1`** supplies it under the bound agent's credential-location
+  key ([`host::CREDENTIAL_LOCATIONS`]) in place of the coordinator's
+  value, for a role that `supplies_credentials` and only for one
+  ([`host::HostEnvironment::reserved_values`]). A gate or the shell probe
+  carrying a profile is told nothing, the same as one carrying none, and
+  the overlay still may not set the key.
+* **`container-v1`** refuses the request before it plans a container:
+  its credential location is the agent's volume, and a host directory
+  is not something it mounts in that volume's place. The refusal says
+  that a pool's profile is supported on the host runner only.
+
+## `impl RunnerRequest` › `pub fn with_credential_profile(self, profile: PathBuf) -> Self {`
+
+The request, carrying `profile` as its credential profile. A builder
+method rather than a parameter of [`worker_request`] and
+[`review_request`], so the one-construction-point-per-role shape those
+keep is unchanged and a caller that wants a profile adds it to the
+request it already built.
+
 ## `pub fn worker_request(`
 
 The worker process of one attempt: `ExecutionRole::Implement`, bound to the
@@ -1062,6 +1092,11 @@ names no variant and would slip past the first needle entirely — the
 grid in this very file writes one that way. So the type's own name is
 counted beside it, and that count includes the declaration and the
 builders' return types, which is why the numbers are what they are.
+`contract.rs`'s count also includes the header of the `impl RunnerRequest`
+that carries `with_credential_profile`. That method only sets the profile
+on a request a builder already made (`..self`): it names no role, so the
+first needle's count of three is unchanged. The second needle counts its
+header as one mention, the same as the declaration.
 
 ## `fn every_production_runner_request_is_built_by_its_roles_builder() {` › `const EXPECTED: &[(&str, usize, usize, &str)] = &[`
 

@@ -290,6 +290,7 @@ impl HostRunner {
         let mut composed = self.environment.compose(
             &request.role,
             request.agent.as_ref(),
+            request.credential_profile.as_deref(),
             &request.command.env,
         )?;
         if !starts_in_the_started_checkout(&request.role, self.worker_in_checkout) {
@@ -472,6 +473,7 @@ pub fn shell_probe_request(
         timeout: SHELL_PROBE_TIMEOUT,
         agent: None,
         invocation,
+        credential_profile: None,
     }
 }
 

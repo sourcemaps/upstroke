@@ -14505,6 +14505,7 @@ mod tests {
             timeout: Duration::from_secs(600),
             agent,
             invocation: invocation.expect("a probe identity"),
+            credential_profile: None,
         }
     }
 

@@ -587,6 +587,16 @@ impl ContainerRunner {
     }
 
     pub fn plan(&self, request: &RunnerRequest) -> Result<InvocationPlan, UpstrokeError> {
+        if let Some(profile) = &request.credential_profile {
+            return Err(UpstrokeError::Refused {
+                message: format!(
+                    "the container runner cannot run `{}` with the credential profile {}: a \
+                     pool's profile is supported on the host runner only",
+                    request.invocation.render(),
+                    profile.display()
+                ),
+            });
+        }
         let name = ContainerName::new(
             &self.identity.repo_key,
             &self.identity.run_id,

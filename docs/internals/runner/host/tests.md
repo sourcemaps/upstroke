@@ -658,6 +658,58 @@ The capacity module's credential-profile documentation, `src/capacity.rs`
 and its notes pointer where present, supplies `COPILOT_HOME` and
 `CLAUDE_CONFIG_DIR`. The Codex fixture separately names `CODEX_HOME`.
 
+## `fn handed_config_dirs(environment: &[String]) -> Vec<&str> {`
+
+Every value a dumped child environment carries under `CLAUDE_CONFIG_DIR`,
+in order. A list rather than the first match, so a child handed the key
+twice — once from the profile and once from the base — fails the
+comparisons below instead of passing on whichever entry came first.
+
+## `fn a_worker_request_with_a_profile_hands_its_agent_that_directory_as_claude_config_dir() {`
+
+A worker request carrying a credential profile hands its agent that
+directory as its credential location, and not the coordinator's.
+
+Asserted on the **child's environment** (`environment_dump_helper`
+through `HostRunner::run`), not on `reserved_values` or `compose`: the
+profile has to travel from the request through `child_environment` to
+the spawned process, and a runner that composed it correctly but read
+the request's fields in the wrong place would pass a composition-level
+test. The request is production's `worker_request` with
+`with_credential_profile` added, so the shape is the one a caller sends.
+
+The base is `synthetic_base`, which carries the coordinator's own
+`CLAUDE_CONFIG_DIR` (`/home/upstroke/.claude`), so "not the coordinator's
+value" is a claim about a value that was there to leak: the child carries
+exactly one `CLAUDE_CONFIG_DIR`, the profile, and the coordinator's
+directory appears nowhere in its environment. The profile is a scratch
+directory of its own, apart from the workspace, so no other entry can
+contain its path by accident.
+
+## `fn the_same_worker_request_with_no_profile_hands_its_agent_the_coordinators_claude_config_dir() {`
+
+The control, and today's behaviour: the same worker request with no
+profile hands its agent the coordinator's own value, exactly once. It
+also pins that production's `worker_request` carries no profile, which
+is what makes `None` the behaviour every existing request keeps.
+Without this test, a runner that dropped `CLAUDE_CONFIG_DIR` whenever
+the base's value was involved would pass the test above.
+
+## `fn a_gate_request_carrying_a_profile_hands_its_child_no_credential_location() {`
+
+A gate, which `supplies_credentials` does not cover, carrying a profile
+is handed neither the profile nor any credential location.
+
+Two shapes, because the gate production builds names no agent and so
+has no credential-location key to supply a profile under at all — a
+runner that ignored the role and keyed only on the agent would pass it.
+The second shape binds the claude agent to the gate (the
+`hostile_bindings` shape the container suite uses), so the role check
+is the only thing standing between the profile and the child. For each,
+the child received the base (`LANG`) — so the absences are not those of
+an empty environment — and none of the three credential keys, and no
+entry contains the profile's path.
+
 ## `struct ParityFixture {`
 
 -----------------------------------------------------------------------
