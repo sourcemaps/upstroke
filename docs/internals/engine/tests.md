@@ -5256,8 +5256,18 @@ its absence, and the check fails rather than reading it as holding no commit rec
 [`stub_pool_file`]'s pool, `claude-max` for the topology stub's agent (`claude-code`), naming
 `profile` as its credential profile. The file sits in the scratch tree, outside the checkout, under
 a name of its own, so the run's tree stays clean and a test can switch between this file and
-[`stub_pool_file`]'s. The path is written as a TOML literal string, so a Windows path's
-backslashes are taken as written.
+[`stub_pool_file`]'s. The `toml` crate encodes the path, as a `toml::Value::String`, so a
+backslash, a quotation mark or an apostrophe in it is read back as written.
+
+## `fn the_profiled_pool_fixture_writes_a_profile_toml_reads_back() {`
+
+[`profiled_pool_file`] writes a profile whose path holds an apostrophe, quotation marks and a
+backslash (`/tmp/O'Brien/a "b"/c\d`), and the file it writes, parsed by the `toml` crate, gives
+`pools.claude-max.profile` back as that text.
+
+Measured before the repair, when the fixture wrote the path between apostrophes as a TOML literal
+string: the file did not parse. The `toml` crate stopped at line 4, column 19, the apostrophe in
+`O'Brien` that closed the literal early, expecting a newline or `#`.
 
 ## `const FIXTURE_OAUTH_TOKEN: &str = "sk-ant-oat01-engine-fixture-token-value";`
 

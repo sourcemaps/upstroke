@@ -26413,12 +26413,28 @@ fn profiled_pool_file(tree: &ScratchTree, profile: &Path) -> PathBuf {
         &path,
         format!(
             "[pools.claude-max]\nkind = \"subscription-window\"\nagent = \"claude-code\"\n\
-             profile = '{}'\n",
-            profile.display()
+             profile = {}\n",
+            toml::Value::String(profile.display().to_string())
         ),
     )
     .expect("the profiled pools file");
     path
+}
+
+#[test]
+fn the_profiled_pool_fixture_writes_a_profile_toml_reads_back() {
+    let (tree, _repo) = temp_engine_repo("profiled-pool-fixture-encoding");
+    let profile = Path::new("/tmp/O'Brien/a \"b\"/c\\d");
+    let path = profiled_pool_file(&tree, profile);
+    let text = fs::read_to_string(&path).expect("read the profiled pools file");
+    let table: toml::Table = toml::from_str(&text)
+        .unwrap_or_else(|error| panic!("the fixture's file is not TOML: {error}\n{text}"));
+    let read_back = table
+        .get("pools")
+        .and_then(|pools| pools.get("claude-max"))
+        .and_then(|pool| pool.get("profile"))
+        .and_then(toml::Value::as_str);
+    assert_eq!(read_back, Some("/tmp/O'Brien/a \"b\"/c\\d"), "{text}");
 }
 
 const FIXTURE_OAUTH_TOKEN: &str = "sk-ant-oat01-engine-fixture-token-value";
