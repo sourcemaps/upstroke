@@ -184,9 +184,18 @@ by that text everywhere this function asks for it: for the step's field set
 and case-fold map here, for the count of exactly one suite step
 (`test-job-command`), and for the capture's place immediately after it
 ([`capture_complaints`]). A step that ran the bare [`TEST_COMMAND`] instead
-would be an unpinned script, and the count of suite steps would be zero.
-Measured, `MUT-CI-CARGO-TEST-STEP-DELETED` and
-`MUT-TEST-SHARD-SELECTION-DROPPED`.
+would be an unpinned script, and the count of suite steps would be zero; so
+would one whose line named a filter of its own where the pinned text reads
+the leg's `matrix.tests`. Measured, `MUT-CI-CARGO-TEST-STEP-DELETED`,
+`MUT-TEST-SHARD-SELECTION-DROPPED` and `MUT-TEST-FILTER-HARDCODED`.
+
+`MUT-TEST-FILTER-HARDCODED` writes its line as a double-quoted scalar,
+`- run: "cargo test --all-targets --all-features -- engine::"`. A plain
+scalar cannot end in a colon. Measured on 2026-11-17 with the row's
+replacement unquoted: the parser refused the document, `mapping values are
+not allowed in this context`, and the row failed as refused under `parse`
+and not under `test-job-command`. Quoted, the step's script is the cargo
+line with `engine::` in the selection's place and nothing else.
 
 The step that runs the suite, and the host acceptance capture step after it
 ([`HOST_ACCEPTANCE_CAPTURE`]), are the two steps in this job that may carry
@@ -269,7 +278,9 @@ The job's limit, exactly [`TEST_TIMEOUT_MINUTES`] and an integer: one number
 for every leg. The expression the job carried while the macOS suite ran
 whole, 45 minutes on macOS and 30 on ubuntu, reads as a string here and is
 refused as no number at all. Code `test-job-timeout`. Measured,
-`MUT-TEST-TIMEOUT-RAISED-FOR-MACOS`.
+`MUT-TEST-TIMEOUT-RAISED-FOR-MACOS` and `MUT-TEST-TIMEOUT-RAISED`: the
+expression, and the plain integer 45, which reads as a number and is refused
+by the equality alone.
 
 ## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let toolchains: Vec<&Yaml> = steps_of(job)`
 
@@ -366,8 +377,9 @@ leg, since every later leg only skips that filter. That holds while every
 macOS leg's arguments are the table's, which is this equality.
 
 Measured, `MUT-TEST-MATRIX-EXCLUDED`, `MUT-CI-TEST-MATRIX-NARROWED`,
-`MUT-TEST-MATRIX-KEEPS-WINDOWS` and `MUT-TEST-MACOS-SHARD-NARROWED`. The
-first three were written for the `os:` axis and were re-spelled for the
+`MUT-TEST-MATRIX-KEEPS-WINDOWS`, `MUT-TEST-MACOS-SHARD-NARROWED`,
+`MUT-TEST-MACOS-LAST-SHARD-SKIPS-MORE` and `MUT-TEST-UBUNTU-LEG-FILTERED`.
+The first three were written for the `os:` axis and were re-spelled for the
 list: an `exclude:` beside `include:`, the Linux leg's entry deleted, and a
 Windows entry added. Of an `include:` list GitHub documents that its entries
 are processed after `exclude:`, so by that rule the first removes no leg
@@ -375,6 +387,17 @@ today, and the row says so; it is refused as a key the contract does not
 read. The second deletes the Linux leg rather than the macOS three because
 their anchor would spell the shards' arguments, which are written out in the
 oracle in one test and nowhere else.
+
+The last three change what a leg is handed, and the fifth check refuses
+each. `MUT-TEST-MACOS-SHARD-NARROWED` puts a `--skip effects::` first in the
+last macOS leg's arguments and `MUT-TEST-MACOS-LAST-SHARD-SKIPS-MORE` puts
+it last, after every word the table derives. The appended skip's anchor is
+the end of the last entry's `tests:` value and the `steps:` line after it,
+so it spells that leg's last skip and not its whole arguments, and the
+sentence above still holds of the macOS shards.
+`MUT-TEST-UBUNTU-LEG-FILTERED` gives the Linux leg, whose `tests:` is the
+empty string, the filter `engine::`: the leg that runs the suite whole runs
+a subset, and the tests that run on Linux alone run nowhere.
 
 A deleted macOS leg and the first check were measured by hand instead, on
 2026-11-17, each in the tree and then restored. With the third macOS entry's
@@ -521,7 +544,12 @@ wherever the guest's check uses [`WINDOWS_TEST_WITNESS`]: for the step's
 field set and case-fold map, for the count of suite steps, and for the
 capture's place after it. A twin step that carried the guest's script
 instead would be an unpinned script here, and the count of suite steps
-would be zero.
+would be zero. So would one whose cargo line dropped the selection, or named
+a filter of its own where the pinned text reads `matrix.tests`. Measured,
+`MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED` and
+`MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`. The second is the one no floor
+refuses: every leg runs the tests whose names contain `engine::`, and by the
+counts the floors were set from that subset clears all five.
 
 Where the guest's job refuses a toolchain install, this one requires one:
 the toolchain action at step 1, with `clippy` among its components, since
@@ -628,15 +656,38 @@ table's, each leg skipping the filters of the legs before it, and an
 equality over an ordered list is the plain way to hold every leg to its own
 row.
 
-Measured, `MUT-TEST-WINDOWS-HOSTED-SHARD-NARROWED`,
-`MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED`,
-`MUT-TEST-WINDOWS-HOSTED-FAIL-FAST-ENABLED` and
-`MUT-TEST-WINDOWS-HOSTED-MATRIX-AXIS-ADDED`. No row deletes a leg: its
-anchor would be the leg's three lines, and a leg's arguments are written
-out in the oracle in one test and nowhere else. A deleted leg was measured
-by hand instead, on 2026-11-17, in `ci.yml` itself and then restored: with
-the fifth entry's three lines removed, three tests of `super` failed, each
-with the fourth complaint and both tables printed --
+Measured, for the second check, `MUT-TEST-WINDOWS-HOSTED-FAIL-FAST-ENABLED`.
+
+Measured, for the third, `MUT-TEST-WINDOWS-HOSTED-MATRIX-AXIS-ADDED` and
+`MUT-TEST-WINDOWS-HOSTED-SHARD-EXCLUDED`: an axis beside the list, and an
+`exclude:` beside it. Of a list with no axis GitHub documents that its
+entries are processed after `exclude:`, so by that rule the second removes
+no leg today, and the row says so; it is refused as a key the contract does
+not read, as `MUT-TEST-MATRIX-EXCLUDED` is in the `test` job.
+
+Measured, for the fourth:
+
+- `MUT-TEST-WINDOWS-HOSTED-SHARD-DROPPED`, the second leg's entry deleted;
+- `MUT-TEST-WINDOWS-HOSTED-SHARD-NARROWED` and
+  `MUT-TEST-WINDOWS-HOSTED-LAST-SHARD-SKIPS-MORE`, a `--skip effects::` put
+  first in the last leg's arguments and put last, after every word the
+  table derives;
+- `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED` and
+  `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-ZEROED`, the last leg's floor at 1
+  and at 0. At 1 the leg must still execute a test; at 0 it is green having
+  executed none.
+
+The deleted leg's anchor is that entry's three lines, so the second leg's
+arguments are written out there as well as in the one test that holds the
+table's strings to literals. A change to the table has to re-spell that
+row; until it does, the row fails saying the workflow moved. The appended
+skip's anchor is the end of the last entry's `tests:` value and its `floor:`
+line, which spells that leg's last skip and not its whole arguments.
+
+Before that row a deleted leg was measured by hand, on 2026-11-17, in
+`ci.yml` itself and then restored: with the fifth entry's three lines
+removed, three tests of `super` failed, each with the fourth complaint and
+both tables printed --
 `the_workflow_shape_oracle_refuses_every_escape_the_ledger_names` at its
 clean-workflow check,
 `the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler` and
@@ -933,7 +984,10 @@ empty string to the jobs that read it. Measured,
 Exactly one step, a script: no checkout, no action. Then its id, its
 environment, its script and its resolved shell. Measured,
 `MUT-PICK-WINDOWS-HOME-SECOND-STEP`, `MUT-PICK-WINDOWS-HOME-ENV-CROSSED`,
+`MUT-PICK-WINDOWS-HOME-PR-VARIABLE-CROSSED`,
 `MUT-PICK-WINDOWS-HOME-COUNTS-BY-DEFAULT`,
+`MUT-PICK-WINDOWS-HOME-ROUTES-PULL-REQUESTS-BY-DEFAULT`,
+`MUT-PICK-WINDOWS-HOME-ROUTES-EVERY-EVENT`,
 `MUT-PICK-WINDOWS-HOME-UNREADABLE-ANSWERS-HOSTED`,
 `MUT-PICK-WINDOWS-HOME-COUNTS-A-RUN-TWICE`,
 `MUT-PICK-WINDOWS-HOME-FIRST-PAGE-ONLY`,
@@ -943,6 +997,17 @@ environment, its script and its resolved shell. Measured,
 `MUT-PICK-WINDOWS-HOME-HOLDS-A-JOB-ITS-PICKER-HAS-NOT-RELEASED`. The pin
 refuses any other text; what each of the last three does to runs that start
 together is executed, in `super`'s two-picker fixtures.
+
+The two `ROUTES` rows are the pull-request rule's one `elif` with one of its
+two tests removed: without the variable's, every pull request leaves the
+guest with nothing set; without the event's, a merge-queue entry and a push
+leave it when the variable is `1`. Those are the two lanes `super`'s picker
+fixtures answer every case in, a pull request with the variable empty and a
+merge-queue entry with it `1`, so what the script answers there is executed
+as well as pinned. `MUT-PICK-WINDOWS-HOME-PR-VARIABLE-CROSSED` leaves the
+script alone and binds the rule's name to the busy flag's variable, under
+`pick-windows-home-env`: the rule then never routes a run, whatever the
+owner set.
 
 ## `pub(super) fn ci_windows_build_witness_complaints(doc: &Yaml) -> Vec<String> {`
 

@@ -65,7 +65,8 @@ step by this text, and
 `the_workflow_that_runs_these_tests_installs_the_compiler_they_need` holds
 it to [`TEST_COMMAND`] with the selection appended and nothing else, so the
 two constants cannot drift apart with each pin holding. Measured,
-`MUT-CI-CARGO-TEST-STEP-DELETED` and `MUT-TEST-SHARD-SELECTION-DROPPED`.
+`MUT-CI-CARGO-TEST-STEP-DELETED`, `MUT-TEST-SHARD-SELECTION-DROPPED` and
+`MUT-TEST-FILTER-HARDCODED`.
 
 ## `pub(super) const WINDOWS_BUILD_WITNESS: &str = "cargo build --all-targets --all-features";`
 
@@ -290,8 +291,9 @@ selection reaches them the same way. A shard's floor also refuses what the
 whole suite's cannot see, a leg whose filter matched almost nothing.
 Measured, `MUT-TEST-WINDOWS-HOSTED-COMPILER-CHECK-DROPPED`,
 `MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED`,
-`MUT-TEST-WINDOWS-HOSTED-FLOOR-DROPPED` and
-`MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED`.
+`MUT-TEST-WINDOWS-HOSTED-FLOOR-DROPPED`,
+`MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED` and
+`MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`.
 
 No PowerShell runs on the build box ([`HOST_ACCEPTANCE_WINDOWS_CAPTURE`]),
 so this text was not executed where it was written. Its execution is the
@@ -719,8 +721,10 @@ loses no test and repeats none, and the matrix is derived from it rather
 than written beside it: `windows_shard_matrix_complaints` in
 `super::workflow` requires each leg's `tests:` in `ci.yml` to be the string
 `shard_selections` makes of this list for that shard, in order. The five
-strings are written out in one place in the oracle, the test named below,
-and nowhere else.
+strings are written out in one test of the oracle, the one named below. The
+second is written out once more, in the anchor of the ledger row that
+deletes that leg, `MUT-TEST-WINDOWS-HOSTED-SHARD-DROPPED`; the other rows
+are under `windows_shard_matrix_complaints` in the workflow notes.
 
 The rule is `shard_selections`' in `super::workflow`. Shard `k` runs the tests
 whose names contain filter `k` and none of the filters before it, and one
@@ -757,7 +761,10 @@ They sum to that floor, 1700, and
 entry for each shard, and every entry above zero. The hosted shards together
 must not accept fewer passing tests than the guest's one job does; and a
 shard whose floor is zero passes having executed nothing, which is the
-arrival the count exists to refuse ([`WINDOWS_TEST_WITNESS`]).
+arrival the count exists to refuse ([`WINDOWS_TEST_WITNESS`]). That test
+holds this list; the oracle holds each leg's `floor:` in `ci.yml` to it.
+Measured, `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED` and
+`MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-ZEROED`.
 
 Each floor is about half of its shard's passing count as the sharding
 measurement gives it: 193, 59, 684, 304 and 2,188. Those are 3,428 together,
@@ -821,7 +828,7 @@ leg. The whole leg has taken 27 to 37 minutes since. No shard was timed at
 the suite the shards landed on; the CI run of the pull request that landed
 them is that measurement. 30 minutes is about twice the slowest shard
 expected, and the limit the Linux leg already had. Code `test-job-timeout`.
-Measured, `MUT-TEST-TIMEOUT-RAISED-FOR-MACOS`.
+Measured, `MUT-TEST-TIMEOUT-RAISED-FOR-MACOS` and `MUT-TEST-TIMEOUT-RAISED`.
 
 ## `pub(super) const TEST_LEGS: [(&str, &[&str]); 2] = [`
 
@@ -916,7 +923,8 @@ resolved, the way the aggregate's is.
 The step's environment, whole: the job's token for `gh`, and the three
 repository variables. They reach the script as environment, never spliced
 into its text, and each name reads its own variable. Measured,
-`MUT-PICK-WINDOWS-HOME-ENV-CROSSED`.
+`MUT-PICK-WINDOWS-HOME-ENV-CROSSED` and
+`MUT-PICK-WINDOWS-HOME-PR-VARIABLE-CROSSED`.
 
 The event the script tests is not here. `GITHUB_EVENT_NAME` is set by the
 runner for every step, like `GITHUB_RUN_ID` and `GITHUB_REPOSITORY`, which
@@ -953,7 +961,9 @@ end after its tests passed. The owner sets the variable when hosted runs are
 trusted and clears it again without a workflow change.
 `the_windows_home_is_picked_by_the_one_job_the_contract_pins` holds the one
 `elif` and its place, and `the_windows_home_picker_answers_from_canned_api_pages`
-executes it for all three events.
+executes it for all three events. Measured,
+`MUT-PICK-WINDOWS-HOME-ROUTES-PULL-REQUESTS-BY-DEFAULT` and
+`MUT-PICK-WINDOWS-HOME-ROUTES-EVERY-EVENT`.
 
 Routing on the queue is opt-in. With `WINGUEST_QUEUE_LIMIT` unset, empty or
 anything but a whole number from 1 to 999999 the script counts nothing, calls no API
