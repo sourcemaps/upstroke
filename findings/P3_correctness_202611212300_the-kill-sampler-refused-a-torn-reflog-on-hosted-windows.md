@@ -178,6 +178,15 @@ commit, then read the reflog after Git had appended the entry naming it.
 **Not established: the rate.** Four sightings, on 2026-11-20, 2026-11-23 (two) and 2026-11-24,
 each followed by a pass of the same tree. The runs of this test in that period were not counted.
 
+**The test's rate across this row and PR249-KILL-SAMPLER-WINDOWS-WRAPPER, counted 2026-11-24.** Of
+the 110 CI runs that completed (success or failure, superseded runs excluded) from 2026-11-22 00:00Z
+to 2026-11-24 10:50Z,
+`workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered` failed
+six: runs 44970652323 and 45019915010 and 45376131057 under PR249's fingerprints, and 45232814168,
+45282352517 and 45355876016 under this row's. Of the 46 completed from 2026-11-23 12:00Z, it failed
+four. Every one was its job's only failure. Each cost a CI re-run, and the one in a merge-queue run
+ejected that pull request from the queue: the test now costs merge throughput, not only a rare red.
+
 ## Related, not the same
 
 - **`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`**
