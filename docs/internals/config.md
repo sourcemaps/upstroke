@@ -742,8 +742,9 @@ reads only those sections and that a run created now would refuse the file.
 The warning names the settings file read, and the machine-level file too when
 it has content, because a refusal's own text may not: an unknown pinned
 model's says only "fix the pin in upstroke.toml", which is not the file an
-explicit `--config` named. The paths are taken before the narrowing consumes
-the capture. When the narrowed reading
+explicit `--config` named. Those names are formatted from the capture's own
+paths, borrowed, before the narrowing consumes the capture, so no owned path
+is made. When the narrowed reading
 refuses too, the original refusal is returned rather than the narrowed one.
 The narrowed text is re-serialised, so its line numbers belong to no file.
 

@@ -518,13 +518,13 @@ pub fn load_for_report(
         }
         Err(refusal) => refusal,
     };
-    let repo_path = captured.repo.path().to_path_buf();
+    let repo_path = captured.repo.path();
     let machine_path = captured
         .machine
         .as_ref()
         .filter(|machine| matches!(machine.content, Ok(Some(_))))
-        .map(|machine| machine.path().to_path_buf());
-    let files = match &machine_path {
+        .map(FileSnapshot::path);
+    let files = match machine_path {
         Some(machine_path) => format!(
             "the settings in {} and the machine-level settings in {}",
             repo_path.display(),
