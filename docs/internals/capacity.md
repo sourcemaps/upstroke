@@ -322,6 +322,28 @@ on then showed its dollars as complete, while the same run's report
 (`RunReport::from_topology`) showed that pool's drain as a floor. The
 legacy `attempt_interrupted` carries a record, and `observe` counts it.
 
+`self_spend` also counts every integration review pass once. A schema-4
+log records a verification's passes in one of four carriers: a verified
+`merge_prepared` (`verification.reviews`), a `CodeRejected`
+`merge_rejected` (`disposition.verification.reviews`),
+`merge_verification_unavailable` (`reviews`) and
+`merge_verification_charged` (`reviews`). After the attempt arms, the fold
+reads them through `IntegrationReviews::replay(events).all()`, the replay
+`RunReport::from_topology` adds to its pool rows, and adds each pass to the
+pool it names through `Spend::add`: its amount summed when known, counted
+unpriced when not. Reading all four carriers counts each pass once, because
+the fold admits one record of a sequence's passes, so no two carriers hold
+the same pass.
+
+A pass naming no pool adds nothing, as in `accumulate`. An interrupted
+verification (`merge_verification_interrupted`) records no pass and names
+no pool, so only the passes its `merge_verification_charged` recorded are
+counted, as in the run report's pool rows.
+
+Integration review passes used to add nothing here. `upstroke capacity` and
+`validate` then omitted spend the same run's report counts on its pools,
+and printed that draw as exact.
+
 It is effect-free in `effects/wrappers.toml`.
 
 ## `pub(crate) fn exhausted_pools_of(events: &[TopologyEvent]) -> BTreeMap<String, Option<String>> {`
@@ -990,6 +1012,20 @@ directory. In the first, no `attempt_started` names the interrupted
 attempt; the other task's start is in the log, on a pool, and is not taken
 for it. In the second, its start names no pool. Each leaves every pool's
 `Spend` as the settled attempt alone left it: $1.00 over one attempt.
+
+## `fn a_schema_4_logs_integration_review_passes_count_once_on_the_pools_they_drew_on() {`
+
+The four carriers, folded from plain events; the run directory supplies
+only the started fold the report reads. A $1.00 attempt settles on
+`claude-max`. On `reviewer-pool`: a verified `merge_prepared` holding a
+$2.00 pass and an unpriced one, a `CodeRejected` `merge_rejected` holding
+$1.00, a started `merge_verification_unavailable` holding $0.50, a started
+`merge_verification_charged` holding $0.25 whose verification is then
+interrupted, and an unstarted `merge_verification_unavailable` holding
+$0.125, attributed to no task. `reviewer-pool` reads $3.875 over six
+passes, one unpriced, and `claude-max` still reads $1.00 over one attempt.
+The map equals `RunReport::from_topology`'s `pool_drain`, row for row. A
+fold reading only attempt settlements reports no `reviewer-pool` at all.
 
 ## `fn the_latest_run_reader_folds_a_legacy_log_as_observe_over_read_all_does() {`
 

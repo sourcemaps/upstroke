@@ -251,6 +251,15 @@ pub fn observe_topology(events: &[TopologyEvent]) -> Observations {
             _ => {}
         }
     }
+    let integration = crate::engine::topology::select::IntegrationReviews::replay(events);
+    for review in integration.all() {
+        if let Some(pool) = &review.pool {
+            self_spend
+                .entry(pool.clone())
+                .or_default()
+                .add(review.cost_usd);
+        }
+    }
     Observations {
         exhausted: exhausted_pools_of(events),
         self_spend,
@@ -2186,6 +2195,190 @@ pub(crate) mod tests {
             observe_topology(&no_pool).self_spend,
             before,
             "its `attempt_started` names no pool"
+        );
+    }
+
+    #[test]
+    fn a_schema_4_logs_integration_review_passes_count_once_on_the_pools_they_drew_on() {
+        use crate::events::ReviewRecord;
+        use crate::topology::events::{
+            CandidateRef, CommitSha, FrozenSpawn, GenerationId, GitRef, InfrastructureKind,
+            MergePrepared, MergeRejected, MergeVerificationCharged, MergeVerificationInterrupted,
+            MergeVerificationStarted, MergeVerificationUnavailable, PreparedDisposition,
+            RejectionDisposition, RejectionLeaseEffect, SequenceId, SpawnAdmission,
+            UnavailableCause, UnavailableOutcome, VerificationBasis, VerificationRecord,
+            VerificationSource, VerificationVerdict,
+        };
+        use crate::topology::paths::PathSet;
+        use crate::topology::registry::TaskKey;
+
+        const REPAIR: TaskKey = TaskKey(2);
+        let tree = crate::workspace_manager::fixture::scratch("capacity-schema4-integration");
+        let run = Schema4Run::started(tree.path(), SCHEMA_4_RUN);
+
+        let sha = |digit: &str| CommitSha(digit.repeat(40));
+        let candidate = |key: TaskKey| CandidateRef {
+            key,
+            generation: GenerationId(0),
+            commit_sha: sha("c"),
+            candidate_ref: GitRef(format!("refs/upstroke/candidates/k{}", key.0)),
+        };
+        let pooled = |cost_usd: Option<f64>| ReviewRecord {
+            cost_usd,
+            outcome: ReviewPassOutcome::Passed,
+            ..review_on("copilot", Some("reviewer-pool"))
+        };
+        let verification =
+            |verdict: VerificationVerdict, reviews: Vec<ReviewRecord>| VerificationRecord {
+                verdict,
+                gates_passed: true,
+                reviews,
+                detail: "judged".to_owned(),
+            };
+        let verification_started = |sequence: u32, key: TaskKey| {
+            topology(TopologyEventBody::MergeVerificationStarted {
+                data: MergeVerificationStarted {
+                    sequence: SequenceId(sequence),
+                    candidate: candidate(key),
+                    basis: VerificationBasis::StaleClean {
+                        prepared_ref: GitRef(format!("refs/upstroke/select/prepared/{sequence}")),
+                    },
+                    expected_head: sha("d"),
+                    proposed_sha: sha("e"),
+                },
+            })
+        };
+        let unavailable = |sequence: u32, reviews: Vec<ReviewRecord>| {
+            topology(TopologyEventBody::MergeVerificationUnavailable {
+                data: MergeVerificationUnavailable {
+                    sequence: SequenceId(sequence),
+                    cause: UnavailableCause::Infrastructure {
+                        kind: InfrastructureKind::ReviewerTimeout,
+                    },
+                    outcome: UnavailableOutcome::Deferred { defers: 1 },
+                    reviews,
+                },
+            })
+        };
+        let prepared = topology(TopologyEventBody::MergePrepared {
+            data: Box::new(MergePrepared {
+                sequence: SequenceId(1),
+                disposition: PreparedDisposition::StaleClean,
+                expected_head: sha("d"),
+                proposed_sha: sha("e"),
+                key: ALPHA,
+                generation: GenerationId(0),
+                candidate_sha: candidate(ALPHA).commit_sha,
+                candidate_ref: candidate(ALPHA).candidate_ref,
+                prepared_ref: Some(GitRef("refs/upstroke/select/prepared/1".to_owned())),
+                verification_source: VerificationSource::Verification {
+                    sequence: SequenceId(1),
+                },
+                verification: Some(verification(
+                    VerificationVerdict::Passed,
+                    vec![pooled(Some(2.0)), pooled(None)],
+                )),
+                satisfies: vec![ALPHA],
+            }),
+        });
+        let repair_entry = {
+            let mut entry = run
+                .fold
+                .registry()
+                .and_then(|registry| registry.get(BETA))
+                .expect("the run has started and registers beta")
+                .clone();
+            entry.key = REPAIR;
+            entry
+        };
+        let rejected = topology(TopologyEventBody::MergeRejected {
+            data: Box::new(MergeRejected {
+                sequence: SequenceId(2),
+                candidate: candidate(BETA),
+                rejecting_head: sha("d"),
+                disposition: RejectionDisposition::CodeRejected {
+                    verification: verification(
+                        VerificationVerdict::Rejected,
+                        vec![pooled(Some(1.0))],
+                    ),
+                },
+                repair: FrozenSpawn {
+                    key: REPAIR,
+                    entry: repair_entry,
+                    admission: SpawnAdmission::Runnable,
+                },
+                lease_effect: RejectionLeaseEffect::CreatesLineage {
+                    root: BETA,
+                    paths: PathSet::RepoWide,
+                },
+            }),
+        });
+        let events = vec![
+            started(ALPHA, Some("claude-max")),
+            finished(failed(
+                priced(settled(Some("claude-max"), Vec::new()), 1.0),
+                FailureKind::RateLimited,
+                FailureOrigin::Worker,
+            )),
+            prepared,
+            rejected,
+            verification_started(3, REPAIR),
+            unavailable(3, vec![pooled(Some(0.5))]),
+            verification_started(4, ALPHA),
+            topology(TopologyEventBody::MergeVerificationCharged {
+                data: MergeVerificationCharged {
+                    sequence: SequenceId(4),
+                    reviews: vec![pooled(Some(0.25))],
+                },
+            }),
+            topology(TopologyEventBody::MergeVerificationInterrupted {
+                data: MergeVerificationInterrupted {
+                    sequence: SequenceId(4),
+                    detail: "the coordinator that held this verification did not survive it"
+                        .to_owned(),
+                },
+            }),
+            unavailable(9, vec![pooled(Some(0.125))]),
+        ];
+
+        let observed = observe_topology(&events).self_spend;
+        assert_eq!(
+            observed,
+            BTreeMap::from([
+                (
+                    "claude-max".to_owned(),
+                    Spend {
+                        usd: Some(1.0),
+                        attempts: 1,
+                        unpriced: 0,
+                    },
+                ),
+                (
+                    "reviewer-pool".to_owned(),
+                    Spend {
+                        usd: Some(3.875),
+                        attempts: 6,
+                        unpriced: 1,
+                    },
+                ),
+            ]),
+            "every pass of the four carriers once on the pool it drew on, and the attempt's pool \
+             as its settlement alone left it"
+        );
+
+        let report = crate::engine::RunReport::from_topology(&run.fold, &events, Vec::new());
+        let as_rows: Vec<crate::engine::PoolDrainRow> = observed
+            .iter()
+            .map(|(pool, spend)| crate::engine::PoolDrainRow {
+                pool: pool.clone(),
+                attempts: spend.attempts,
+                cost_usd: spend.usd,
+                unpriced: spend.unpriced,
+            })
+            .collect();
+        assert_eq!(
+            as_rows, report.pool_drain,
+            "the capacity fold and the run report's pool rows read the same log alike"
         );
     }
 
