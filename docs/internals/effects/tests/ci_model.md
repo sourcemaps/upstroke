@@ -577,7 +577,7 @@ guest's job ([`TEST_WINDOWS_HOSTED_JOB`]).
 
 ## `pub(super) const HOST_ACCEPTANCE_CAPTURE: &str = r#"set -o pipefail`
 
-The hosted `test` job's capture of the native HOST acceptance record (G7,
+The hosted `test-linux` and `test-macos` jobs' capture of the native HOST acceptance record (G7,
 root direction `087fea89`), character for character. It runs on every leg in
 GitHub's default `bash -e` and must stand immediately after the suite step;
 each of the five macOS legs and the two Linux legs runs it after its own
@@ -656,7 +656,7 @@ those edits are measured on the capture of `test-linux` and `test-macos`
 
 ## `pub(super) const CAPABILITY_OBSERVATION: &str = r#"set -eo pipefail`
 
-The hosted `test` job's container capability observation (G7, root direction
+The hosted `test-linux` and `test-macos` jobs' container capability observation (G7, root direction
 `ecf15a9c`, contract version 2 under its root audit 2), character for
 character. It runs on every leg in GitHub's default `bash -e`, the three
 macOS legs each, and must stand immediately after
@@ -731,8 +731,8 @@ on `test-macos`' observation ([`CAPABILITY_OBSERVATION`]).
 
 ## `pub(super) const CAPABILITY_STEP_FIELDS: [&str; 4] = ["env", "name", "run", "timeout-minutes"];`
 
-The observation step's exact field set, on both jobs that run it, `test`
-and `test-windows-hosted`, every field required.
+The observation step's exact field set, on the three jobs that run it,
+`test-linux`, `test-macos` and `test-windows-hosted`, every field required.
 
 - It has no `if:` and no `continue-on-error:`: the contract places it
   success-only, so a failed suite or capture stops it before it runs.
@@ -753,7 +753,7 @@ The step's bound. The questions request at most 135 s (10 + 60 + 20 +
 3 x 15), and Cargo's start comes on top. That sum is the requested bounds,
 not a proved wall-clock maximum, and the four minutes are an operational
 limit, not a guarantee that every future job fits. The tightest leg is a
-`test` leg, at 30 minutes ([`TEST_TIMEOUT_MINUTES`]); until 2026-11-20 it
+`test-linux` or `test-macos` leg, at 30 minutes ([`TEST_TIMEOUT_MINUTES`]); until 2026-11-20 it
 was the guest's 20-minute job. Measured, `MUT-TEST-CAPABILITY-TIMEOUT-DROPPED`,
 `MUT-TEST-CAPABILITY-TIMEOUT-WIDENED` and
 `MUT-TEST-WINDOWS-HOSTED-CAPABILITY-TIMEOUT-DROPPED`.
@@ -1594,8 +1594,8 @@ legs the row derives, and the steps' scripts by [`TEST_SCRIPTS`].
 
 ## `pub(super) const TEST_WINDOWS_HOSTED_JOB_FIELDS: [&str; 5] =`
 
-The fields [`TEST_WINDOWS_HOSTED_JOB`] declares: the same five as the `test`
-job, each pinned by value as well. `name` is held to
+The fields [`TEST_WINDOWS_HOSTED_JOB`] declares: the same five as `test-linux`
+and `test-macos`, each pinned by value as well. `name` is held to
 [`TEST_WINDOWS_HOSTED_NAME`], `runs-on` to [`TEST_WINDOWS_PLATFORM`] and
 `timeout-minutes` to [`TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES`]. `strategy`
 carries the fourteen legs and is required, not admitted: without it the job is
