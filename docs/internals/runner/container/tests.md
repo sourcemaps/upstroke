@@ -363,6 +363,24 @@ with one global boolean could not express it. The intersection here is
 The whole daemon down is the other end of the same toggle, and every
 operation reports it.
 
+## `fn an_unarmed_inspection_runtime_answers_as_an_absent_runtime() {`
+
+On an unarmed thread, every question of the inspection runtime of the
+engine's test-mode seam `engine::topology::entry::container_runtime` is
+answered `RuntimeError::Unreachable` under the question's own operation, with
+the seam's one detail, `UNARMED`. Each `ContainerRuntime` method that can
+answer with an error, which is all of them but `reaper_program`, is called
+once, the four effects last, so a runtime that is there fails the test
+before it is asked to act.
+
+It lives in this module and not in `engine::tests` because it calls those
+four effects, `ContainerRuntime::create`, `start`, `stop` and `remove`.
+Clippy denies them outside the modules `effects/allowlist.toml` lists, and
+the funnel census `every_container_effect_in_the_tree_goes_through_the_funnel`
+lets only the funnel and this subtree's named test modules spell them.
+`engine::tests` is on the allowlist, as this module is, but the census does
+not name it.
+
 ## `fn a_seeded_container_carries_owner_labels_and_an_incarnation() {`
 
 (6) owner **labels**, **incarnations**, and the two image ids as separate

@@ -1001,7 +1001,9 @@ Unarmed, or on any other thread, neither function records anything.
 `for_inspection` returns `AbsentRuntime`, the absent-runtime double: it asks
 no container runtime, and answers every question as an absent runtime answers
 it, `RuntimeError::Unreachable` under the question's own operation with the
-one detail `UNARMED`. It is there so that tests that are not about a
+one detail `UNARMED`. It is held to that by the test
+`runner::container::tests::an_unarmed_inspection_runtime_answers_as_an_absent_runtime`.
+It is there so that tests that are not about a
 container runtime no longer depend on the CI machine's runtime answering the
 census's listing inside its bound (the Windows Docker-listing flake,
 `CI-FLAKE-WINDOWS-CENSUS-LISTING-PAST-ITS-QUESTION-BOUND`). With no container
