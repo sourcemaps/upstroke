@@ -222,15 +222,33 @@ fn variable_as_printed(variable: &str) -> String {
 ///
 /// Atomic, not durable: the bytes are written to a staging file beside the
 /// destination, named with a fresh ULID so that two refreshes cannot stage
-/// over each other, and renamed into place. If the rename fails the staging
-/// file is removed; it is this call's own, by its name. A report the reader
-/// would refuse is refused here first and nothing is written.
+/// over each other, and renamed into place. If the write or the rename fails,
+/// the staging file is removed: it is this call's own, by its name, and a
+/// write that fails part way, at a full disk or a file-size limit, leaves part
+/// of the report in it. A write that fails before creating it leaves nothing
+/// to remove, so the removal's `NotFound` is no failure to clean up. A report
+/// the reader would refuse is refused here first and nothing is written.
 ///
 /// # Errors
 ///
 /// [`UpstrokeError::Refused`] for a report outside the schema's bounds, and
-/// [`UpstrokeError::Filesystem`] naming the step that failed.
+/// [`UpstrokeError::Filesystem`] naming the step that failed, or
+/// [`UpstrokeError::WithCleanup`] holding it when the staging file could not
+/// then be removed either.
 pub fn publish(store: &Path, report: &UsageReport) -> Result<PathBuf, UpstrokeError> {
+    publish_with(store, report, |staged, encoded| {
+        std::fs::write(staged, encoded)
+    })
+}
+
+/// [`publish`], with the staging file written by `write`, so that a test can
+/// make the write leave part of the report and then fail, on every platform
+/// and with no file-size limit.
+fn publish_with(
+    store: &Path,
+    report: &UsageReport,
+    write: impl FnOnce(&Path, &[u8]) -> std::io::Result<()>,
+) -> Result<PathBuf, UpstrokeError> {
     let encoded = report.encode().map_err(|defect| UpstrokeError::Refused {
         message: format!(
             "the report for pool `{}` is not storable: {defect}",
@@ -246,14 +264,21 @@ pub fn publish(store: &Path, report: &UsageReport) -> Result<PathBuf, UpstrokeEr
     std::fs::create_dir_all(store)
         .map_err(|source| failed("create the usage report directory", store, source))?;
     let staged = store.join(format!(".staged-{}.tmp", crate::ulid::ulid()));
-    std::fs::write(&staged, encoded)
-        .map_err(|source| failed("stage the usage report", &staged, source))?;
-    if let Err(source) = std::fs::rename(&staged, &destination) {
-        let renamed = failed("publish the usage report", &destination, source);
-        return Err(renamed.with_cleanup(
-            std::fs::remove_file(&staged)
-                .map_err(|source| failed("remove the staged usage report", &staged, source)),
-        ));
+    let published = write(&staged, encoded.as_bytes())
+        .map_err(|source| failed("stage the usage report", &staged, source))
+        .and_then(|()| {
+            std::fs::rename(&staged, &destination)
+                .map_err(|source| failed("publish the usage report", &destination, source))
+        });
+    if let Err(unpublished) = published {
+        let removed = std::fs::remove_file(&staged).or_else(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(failed("remove the staged usage report", &staged, source))
+            }
+        });
+        return Err(unpublished.with_cleanup(removed));
     }
     Ok(destination)
 }
@@ -1102,6 +1127,136 @@ agent = \"claude-code\"
             .filter(|name| name.starts_with(".staged-"))
             .collect();
         assert!(staged.is_empty(), "{staged:?}");
+    }
+
+    /// The names in the report directory `store`.
+    fn names_in(store: &Path) -> Vec<String> {
+        std::fs::read_dir(store)
+            .expect("the store lists")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    /// The witness of a failed staging write, ported into the crate. Under a
+    /// 100-byte file-size limit, writing the staged report failed with
+    /// `FileTooLarge` and `publish` returned before its one cleanup, which
+    /// covered a failed rename alone, so a 100-byte `.staged-*.tmp` stayed in
+    /// the store, and another for every refresh that failed the same way. The
+    /// writer here leaves half of the report in the staging file and then
+    /// fails as that write did, with no limit set.
+    #[test]
+    fn a_write_that_fails_part_way_leaves_nothing_staged_and_the_published_report_whole() {
+        let tree = scratch("tracker-publish-partial");
+        let store = usage::store_dir(tree.path());
+        let mut report = UsageReport {
+            pool: "p".to_owned(),
+            provider: "anthropic-cost".to_owned(),
+            account: None,
+            token_env: Some("ANTHROPIC_ADMIN_KEY".to_owned()),
+            fetched_at: NOON,
+            windows: vec![UsageWindow {
+                label: "month".to_owned(),
+                used: 1.0,
+                resets_at: None,
+            }],
+        };
+        let destination = publish(&store, &report).expect("the report already published");
+        let published = std::fs::read(&destination).expect("the published report reads");
+
+        report.fetched_at = NOON + 600;
+        report.windows[0].used = 2.0;
+        let mut staged = None;
+        let error = publish_with(&store, &report, |path, encoded| {
+            staged = Some(path.to_path_buf());
+            std::fs::write(path, &encoded[..encoded.len() / 2])?;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "the file-size limit, met half way through the report",
+            ))
+        })
+        .expect_err("a write that fails is the publication's failure");
+        let staged = staged.expect("the writer was given the staging file's path");
+        match &error {
+            UpstrokeError::Filesystem {
+                operation,
+                path,
+                source,
+            } => {
+                assert_eq!(*operation, "stage the usage report", "{error}");
+                assert_eq!(*path, staged, "{error}");
+                assert_eq!(source.kind(), std::io::ErrorKind::FileTooLarge, "{error}");
+            }
+            other => panic!("the write's own error, and no cleanup failure: {other:?}"),
+        }
+        assert!(
+            !staged.exists(),
+            "the partial staging file is removed: {}",
+            staged.display()
+        );
+        let names = names_in(&store);
+        assert!(
+            !names.iter().any(|name| name.starts_with(".staged-")),
+            "{names:?}"
+        );
+        assert_eq!(
+            std::fs::read(&destination).expect("the published report still reads"),
+            published,
+            "the report already published is as it was, byte for byte"
+        );
+    }
+
+    #[test]
+    fn a_write_that_fails_before_creating_the_file_is_its_own_error_and_no_cleanup_failure() {
+        let tree = scratch("tracker-publish-uncreated");
+        let store = usage::store_dir(tree.path());
+        let report = UsageReport {
+            pool: "p".to_owned(),
+            provider: "anthropic-cost".to_owned(),
+            account: None,
+            token_env: Some("ANTHROPIC_ADMIN_KEY".to_owned()),
+            fetched_at: NOON,
+            windows: Vec::new(),
+        };
+        let mut staged = None;
+        let error = publish_with(&store, &report, |path, _| {
+            staged = Some(path.to_path_buf());
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "the staging file was refused before it was created",
+            ))
+        })
+        .expect_err("a write that fails is the publication's failure");
+        let staged = staged.expect("the writer was given the staging file's path");
+        assert!(
+            !staged.exists(),
+            "the write created nothing: {}",
+            staged.display()
+        );
+        match &error {
+            UpstrokeError::Filesystem {
+                operation,
+                path,
+                source,
+            } => {
+                assert_eq!(*operation, "stage the usage report", "{error}");
+                assert_eq!(*path, staged, "{error}");
+                assert_eq!(
+                    source.kind(),
+                    std::io::ErrorKind::PermissionDenied,
+                    "{error}"
+                );
+            }
+            other => panic!(
+                "a staging file that was never created is no failure to remove it: {other:?}"
+            ),
+        }
+        assert!(names_in(&store).is_empty(), "{:?}", names_in(&store));
     }
 
     #[test]
