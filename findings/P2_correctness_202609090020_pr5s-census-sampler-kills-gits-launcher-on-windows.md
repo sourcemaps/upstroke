@@ -156,7 +156,7 @@ stripped.
   `318 passed; 1 failed; 19 ignored`. #400 changes `src/workspace_manager.rs`,
   `src/workspace_manager/fixture.rs` and `src/workspace_manager/hooks.rs`. The test passed on
   #400's next head, `c0f60b7b` (the same tree as `c3908c6e`), in run 44978559642; that run checked
-  out `8c6e32bb`, a merge into a later `master` (`fe2b9bc5`), so it did not test the same tree.
+  out `8c6e32b1`, a merge into a later `master` (`fe2b9bc5`), so it did not test the same tree.
 - CI run 45019915010, job 137200313603, `push` to `master` at `cffdb983`, 2026-11-22 11:58:41Z.
   Log `evidence/job-45019915010-137200313603.log`, SHA-256
   `b4402384b52bedb30ea62316728c4df664a7f5369e636af99ce14fc7184126fb`. Line 722 reports the test
