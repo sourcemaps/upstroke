@@ -65,7 +65,9 @@
 #
 # The P3 rule (owner, 2026-09-08) replaces `verdict-not-pass`, which is gone: a P3 lane is ready
 # when its review carries no P0, P1 or P2 and three P3s or fewer. A P3 carrying a witness is fixed
-# whatever the count -- that is the `witnessed:` blocker below, which fires in every lane -- so the
+# whatever the count -- that is the `witnessed:` blocker below, which fires in every lane, and is
+# lifted only for a witnessed finding whose row is `fixed` and whose repair a person reads: a
+# repair push (NEEDS-ATTEST), or `body-fixed:<id>` for a finding located in the body -- so the
 # tolerance is three UNWITNESSED P3s, and a fourth blocks as `unwitnessed-p3s`. Nothing loops
 # reviews to reach a PASS any more.
 #
@@ -80,10 +82,13 @@
 #     the head itself, or a commit the head differs from only by clean merge commits (git's own
 #     merge of the two parents, the branch diff byte-identical before and after, and no gate
 #     edited by the pull request) and ledger pushes (MAINTAINING step 5 keeps the review across
-#     both). A push keeps the review only if it adds files under findings/ (or reviews/findings/
-#     on a head cut before 2026-09-12), or changes reviews/FINDINGS.md; one that modifies, deletes
-#     or renames a finding file is a repair (NEEDS-ATTEST), because it can rewrite or unfile an
-#     open finding (PR382-ACCEPTED-P3-REPURPOSES-FINDING-FILE)
+#     both). A push keeps the review only if it adds files under findings/, or -- on a head cut
+#     before 2026-09-12 -- adds files under reviews/findings/ or edits reviews/FINDINGS.md in
+#     place, each only where the reviewed commit's tree carries that archived ledger
+#     (PR433-ARCHIVED-LEDGER-KEEPS-REVIEW); one that modifies, deletes or renames a finding file
+#     is a repair (NEEDS-ATTEST), because it can rewrite or unfile an open finding
+#     (PR382-ACCEPTED-P3-REPURPOSES-FINDING-FILE), and so is one that adds or deletes
+#     reviews/FINDINGS.md, or adds under reviews/findings/ on a branch that never carried it
 #   - the review is against the pull request's own base: the workflow form must record its base
 #     commit, which must lie on the current base branch (and, for a base other than master, not
 #     on master); no base change may be recorded on the pull request after the review was
@@ -102,8 +107,10 @@
 #     and a row recording the review's own severity: a row whose severity differs is
 #     `severity-mismatch`, NOT-READY. Every other accepted-risk row, and every rejected row, is
 #     the owner's call and sends the pull request to MANUAL. A witnessed or MUST P3 is never
-#     deferred or accepted on its row: both are blocked first, whatever the row says (the two hard
-#     rules, below); a witnessed one's `fixed` row is at best NEEDS-ATTEST, for a person to read
+#     deferred or accepted on its row: both are blocked first (the two hard rules, below), a MUST
+#     one whatever the row says; a witnessed one's block is lifted only when its row is `fixed`
+#     and a person reads the repair -- a repair push (NEEDS-ATTEST), or `body-fixed:<id>` for a
+#     finding located in the body -- so that row is at best NEEDS-ATTEST
 #   - the audit's OWN run of .github/scripts/validate-pr-body.sh, on the pull request's title and
 #     on the very bytes the ledger is parsed from -- the body is fetched once and both read that one
 #     copy -- exits 0; any other status is `body-policy-failed:<status>`. A green
@@ -121,7 +128,8 @@
 # unreadable as `body-policy-failed:127`, a body the parser refused or that did not arrive whole
 # as `ledger-parse-failed` and `ledger-parse-incomplete`, a review that records no reviewed commit as
 # `review-records-no-reviewed-sha`, a finding-file listing that errored as
-# `finding-file-lookup-failed`, a push whose per-path statuses could not be read as
+# `finding-file-lookup-failed`, a push whose per-path statuses could not be read -- or came back in
+# a line the walk cannot parse, or short of a path the push touched -- as
 # `ledger-status-read-failed`, and a gate-edit check that could not run as
 # `gate-edit-check-failed`; an unreadable ruleset list or open-pull-request list refuses the whole
 # run before the first pull request is judged. Every list request is paginated, because a first
@@ -193,11 +201,13 @@
 #
 # Limits, stated so nobody reads more into READY than it says: the audit sees severities and the
 # fields the review JSON carries. A finding whose object carries a witness, reproduction, repro,
-# failing_test or mutation field that is not null, false or empty blocks in every lane, and so
-# does one whose fields name a MUST deviation (a field named mandatory/deviation/must_*, or the
-# word MUST in any string field); a witness or deviation that exists only in prose does not
-# reach the audit, and the deferring implementor's row asserts there is none (MAINTAINING step 5
-# binds them). A merge-in is checked on step 5's terms: git's own merge of its parents, the
+# failing_test or mutation field that is not null, false or empty blocks in every lane, lifted
+# only when its row is `fixed` and a person reads the repair -- a repair push (NEEDS-ATTEST), or
+# `body-fixed:<id>` for a finding located in the body -- and one whose fields name a MUST
+# deviation (a field named mandatory/deviation/must_*, or the word MUST in any string field)
+# blocks in every lane whatever its row says; a witness or deviation that exists only in prose
+# does not reach the audit, and the deferring implementor's row asserts there is none
+# (MAINTAINING step 5 binds them). A merge-in is checked on step 5's terms: git's own merge of its parents, the
 # branch diff byte-identical before and after, no gate edited by the pull request, and no branch
 # commit outside the ledger. Of the policy validators the `upstroke-pr-policy` check runs, the
 # audit runs validate-pr-body.sh and, as before, no other: validate-pr-ledger-evidence.sh and
@@ -239,7 +249,9 @@ fi
 # THE P3 RULE'S TOLERANCE (owner, 2026-09-08). A P3 lane is ready when its review carries no P0, P1
 # or P2 and three P3s or fewer. A P3 carrying a failing test, reproduction or mutation witness is
 # fixed whatever the count -- that is the `witnessed:` blocker below, and it fires in every lane and
-# at every severity -- so what is counted here is the P3s with no witness. It is a count and not a
+# at every severity, lifted only for a witnessed finding whose row is `fixed` and whose repair a
+# person reads: a repair push (NEEDS-ATTEST), or `body-fixed:<id>` for a finding located in the
+# body -- so what is counted here is the P3s with no witness. It is a count and not a
 # severity, which is why it is not in `must_fix_for`'s answer; scripts/lane.sh states the rule and
 # this is the only place it is applied.
 p3_tolerance=3
@@ -1170,7 +1182,9 @@ audit_one() {
       # resolution or a third parent is a new change that `--no-merges` below would hide), the
       # branch's diff against its base is byte-identical before and after the merge, and the pull
       # request edits no gate. Anything wider is reviewed again.
-      local merge_edits="" merges m expected before after touched t rest outside statuses line st walked
+      local merge_edits="" merges m expected before after touched t rest outside statuses line st
+      local status_read_failed shaped carried carries_closed carries_legacy
+      local -A status_paths=()
       merges="$(git rev-list --merges "$reviewed..$head" --not "origin/$base")"
       for m in $merges; do
         local parents
@@ -1212,43 +1226,98 @@ audit_one() {
         blockers+=("ledger-status-read-failed")
         moved="repairs"
       else
-        # A PUSH KEEPS THE REVIEW ONLY IF IT ADDS FILES UNDER findings/ (or reviews/findings/ on a
-        # head cut before 2026-09-12), OR CHANGES reviews/FINDINGS.md. One that modifies, deletes or
-        # renames a finding file is a repair, NEEDS-ATTEST: judged by name alone, a push rewriting an
-        # open finding's `id:` to a new P3's unfiled the old one and filed the new, and an `rm`
-        # unfiled it outright, each READY (PR382-ACCEPTED-P3-REPURPOSES-FINDING-FILE). So the
-        # status is read per commit: `--no-renames` makes a rename the deletion it contains, and a
-        # file added then edited in the range has an `M` line, which is a repair too.
+        # A PUSH KEEPS THE REVIEW ONLY IF IT ADDS FILES UNDER findings/, OR -- WHERE THE REVIEWED
+        # TREE CARRIES THE ARCHIVED LEDGER -- ADDS THEM UNDER reviews/findings/ OR EDITS
+        # reviews/FINDINGS.md IN PLACE. One that modifies, deletes or renames a finding file is a
+        # repair, NEEDS-ATTEST: judged by name alone, a push rewriting an open finding's `id:` to a
+        # new P3's unfiled the old one and filed the new, and an `rm` unfiled it outright, each READY
+        # (PR382-ACCEPTED-P3-REPURPOSES-FINDING-FILE). So the status is read per commit:
+        # `--no-renames` makes a rename the deletion it contains, and a file added then edited in the
+        # range has an `M` line, which is a repair too.
         #
         # Walked by expansion. Written as `! grep -vE ... <<< "$touched"` this was the exemption
         # granted by a read that did not happen: a here-string bash could not spill returns grep's
         # 1, "every path is in the ledger", with grep never run -- a repair audited as READY.
+        #
+        # THE ARCHIVED LEDGER KEEPS THE REVIEW ONLY ON A BRANCH THAT CARRIES IT
+        # (PR433-ARCHIVED-LEDGER-KEEPS-REVIEW). reviews/FINDINGS.md kept it whatever its status, so a
+        # push ADDING that file to a head cut after the move -- a tree that never held it -- read
+        # `ledger-only`, READY, and called merge; reviews/findings/ was the same door one directory
+        # down. The closed ledger now keeps it only as an edit (`M`) of the file the reviewed tree
+        # holds, and the old prefix only as an addition under the directory the reviewed tree holds.
+        # Each is asked once for this pull request, its status read into a variable, and any answer
+        # but 0 -- the path absent, or a read that failed -- is "not carried": a repair, never the
+        # ledger.
+        carried=0
+        git cat-file -e "$reviewed:reviews/FINDINGS.md" 2>/dev/null || carried=$?
+        carries_closed=0
+        if ((carried == 0)); then carries_closed=1; fi
+        carried=0
+        git cat-file -e "$reviewed:reviews/findings" 2>/dev/null || carried=$?
+        carries_legacy=0
+        if ((carried == 0)); then carries_legacy=1; fi
         outside=0
-        walked=0
+        status_read_failed=0
+        status_paths=()
         rest="$statuses"
         while [[ -n "$rest" ]]; do
           line="${rest%%$'\n'*}"
           if [[ "$rest" == *$'\n'* ]]; then rest="${rest#*$'\n'}"; else rest=""; fi
           [[ -n "$line" ]] || continue   # git's blank line between one commit's paths and the next's
-          walked=1
-          # A status, a tab and a path, or the line is outside the ledger: what this cannot parse
-          # fails toward another pass, never toward keeping the review. A path git quoted (`"`
-          # first) is one whose bytes the name test below cannot see.
-          if [[ "$line" != *$'\t'* ]]; then outside=1; break; fi
-          st="${line%%$'\t'*}"
-          t="${line#*$'\t'}"
-          if [[ -z "$st" || -z "$t" || "$t" == '"'* ]]; then outside=1; break; fi
-          # The closed ledger FILE, edited in place on a branch cut before 2026-09-12, whatever the
-          # status, as before. It differs from the moved directory only in case.
-          [[ "$t" == reviews/FINDINGS.md ]] && continue
-          # Either ledger prefix, for the reason finding_file_count gives: `$reviewed..$head` is
-          # the caller's range, and a pre-move head carries the ledger at reviews/findings/.
-          [[ "$st" == A && ( "$t" == findings/* || "$t" == reviews/findings/* ) ]] && continue
+          # A STATUS RECORD THE WALK CANNOT READ IS A FAILED READ, NOT A REPAIR
+          # (PR433-MALFORMED-LEDGER-STATUS). Read as "outside", a line with no tab in it, or with a
+          # status git never prints, made the push `repairs` -- NEEDS-ATTEST, no blocker -- out of a
+          # read that never said what the push did. Exactly a status (capitals, then digits if any,
+          # as git's `R100`), one tab and a path that is not empty, or the read failed and the walk
+          # stops. The shape is tested for and not against, so a test that cannot answer fails
+          # toward the blocker; the set is spelled out for the reason valid_login spells its own.
+          st=""; t=""; shaped=0
+          if [[ "$line" == *$'\t'* ]]; then
+            st="${line%%$'\t'*}"
+            t="${line#*$'\t'}"
+            if [[ -n "$t" && "$t" != *$'\t'* \
+                  && "$st" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZ]+[0123456789]*$ ]]; then
+              shaped=1
+            fi
+          fi
+          if ((shaped == 0)); then status_read_failed=1; break; fi
+          # Keyed `:<path>`, so that no key is `@` or `*`, which a subscript reads as the whole set.
+          status_paths[":$t"]=1
+          # A path git quoted (`"` first) is a record of a path whose bytes the names below cannot
+          # see: it matches none of them and is outside, as before.
+          if [[ "$t" == reviews/FINDINGS.md ]]; then
+            # The closed ledger FILE, edited in place on a branch cut before 2026-09-12. It differs
+            # from the moved directory only in case.
+            if [[ "$st" == M ]] && ((carries_closed == 1)); then continue; fi
+          elif [[ "$st" == A && "$t" == findings/* ]]; then
+            continue
+          elif [[ "$st" == A && "$t" == reviews/findings/* ]] && ((carries_legacy == 1)); then
+            # Either ledger prefix, for the reason finding_file_count gives: `$reviewed..$head` is
+            # the caller's range, and a pre-move head carries the ledger at reviews/findings/.
+            continue
+          fi
+          # Not a `break`: every record's path is wanted by the check below.
           outside=1
-          break
         done
-        # `touched` named paths, so a status read with no line in it did not read this range.
-        if ((walked == 0)); then
+        # THE STATUS READ MUST COVER EVERY TOUCHED PATH. A read that came back short -- a mixed
+        # push's ledger addition and nothing else -- was walked whole and read `ledger-only`: the
+        # source file beside it was never seen, and "not in the read" is not "not in the push". So
+        # each path `touched` names must be the path of some record above; `--name-only` quotes a
+        # path as `--name-status` does, so a quoted path compares as itself. Checked only after a
+        # walk that read every record, since one that stopped has failed already. A read with no
+        # record in it fails here too: `touched` named paths, and none was recorded.
+        if ((status_read_failed == 0)); then
+          rest="$touched"
+          while [[ -n "$rest" ]]; do
+            t="${rest%%$'\n'*}"
+            if [[ "$rest" == *$'\n'* ]]; then rest="${rest#*$'\n'}"; else rest=""; fi
+            [[ -n "$t" ]] || continue   # `--format=`'s blank line, which `sort -u` keeps once
+            [[ "${status_paths[":$t"]+recorded}" == recorded ]] && continue
+            status_read_failed=1
+            break
+          done
+        fi
+        if ((status_read_failed)); then
           blockers+=("ledger-status-read-failed")
           moved="repairs"
         elif ((outside)); then
@@ -1379,11 +1448,16 @@ audit_one() {
     # a push of repairs (NEEDS-ATTEST from `moved`) or a body finding on a head nothing but the
     # ledger or clean merges moved (`body-fixed`, from the `fixed` arm). It then goes on as an
     # unwitnessed one would, so the must-fix set still asks a serious P1 for a fresh pass.
+    #
+    # A MERGE THAT EDITS CLEARS NO WITNESS. `merge-edits:*` is a merge that is not git's own merge
+    # of its parents -- a conflict resolved by hand, or one whose check could not be made -- and it
+    # is NEEDS-ATTEST for that, not for repairing anything: read as a repair, it let a witnessed
+    # finding's `fixed` row through on a head no repair had moved. Only `repairs` is one.
     if (( wit & 1 )); then
       read_by_a_person=0
       if [[ "$disposition" == fixed ]]; then
         case "$moved" in
-          repairs | merge-edits:*) read_by_a_person=1 ;;
+          repairs) read_by_a_person=1 ;;
           "" | ledger-only | merges-only) if (( wit & 4 )); then read_by_a_person=1; fi ;;
         esac
       fi
@@ -1465,8 +1539,10 @@ audit_one() {
 
   # THE P3 RULE, and the whole of what `verdict-not-pass` used to be. That blocker demanded a PASS
   # from a lane whose reviews file P3s, so it could only be reached by looping reviews until one
-  # returned nothing; it is deleted. A witnessed P3 is already blocked above, in every lane, so the
-  # tolerance below is over the UNWITNESSED ones alone.
+  # returned nothing; it is deleted. A witnessed P3 is already blocked above, in every lane -- lifted
+  # only when its row is `fixed` and a person reads the repair: a repair push (NEEDS-ATTEST), or
+  # `body-fixed:<id>` for a finding located in the body -- so the tolerance below is over the
+  # UNWITNESSED ones alone.
   if [[ "$lane" == fix-p3 ]] && ((unwitnessed_p3 > p3_tolerance)); then
     blockers+=("unwitnessed-p3s:$unwitnessed_p3-over-$p3_tolerance")
   fi
