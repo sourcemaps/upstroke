@@ -166,9 +166,13 @@ answer's staged file is removed. A caller tells "already answered" from an
 I/O error, and from the uncited-conviction refusal, by type. Every failure
 leaves at most the staged `.partial`, which readers ignore.
 
-Atomic is not create-once: the rename replaces an answer file that already
-exists, and this writer never refuses to publish over one
-(`PR381-ANSWER-PUBLISH-RACE`).
+Atomic and create-once: each publisher stages its answer in a file of its
+own, `<qid>.json.<pid>-<ulid>.partial`, created exclusively, and publishes it
+by a hard link to `<qid>.json` that fails when `<qid>.json` exists. That
+failure becomes `AnswerPublication::AlreadyAnswered`, which `upstroke answer`
+refuses with the same "already answered" sentence as its check before the
+write, naming the answer that was kept. This closes
+`PR381-ANSWER-PUBLISH-RACE`.
 
 ## `pub fn read_answer_record(`
 

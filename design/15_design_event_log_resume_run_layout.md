@@ -26,13 +26,13 @@ upstroke.toml                       # repo-root config, checked in
 
 **An answer file is read, never taken.** Ingesting `answers/<question-id>.json`
 reads it, and no reader of answers removes or rewrites it, so an ingestion
-leaves the file exactly as it found it. Publication is outside this rule:
-nothing here says a published answer file is never replaced, and `upstroke
-answer` can replace one, which is the finding `PR381-ANSWER-PUBLISH-RACE`. The
-answer file is part of the run-scoped run-directory contents that the effects
-vocabulary's resource row R21 accounts for. This paragraph was added on 2026-11-13 to record
-what the answer readers already do, so that their tests have a design sentence
-to be held to.
+leaves the file exactly as it found it. Publication is create-once: each
+publisher stages its answer in a file of its own and publishes it only where
+no answer file exists, so a second answer to a question is refused and never
+replaces the first. The answer file is part of the run-scoped run-directory
+contents that the effects vocabulary's resource row R21 accounts for. This
+paragraph was added on 2026-11-13 to record what the answer readers already
+do, so that their tests have a design sentence to be held to.
 
 A fresh sequential run reserves the global private root and its repository's
 public root with exclusive directory creation before creating skeleton files,

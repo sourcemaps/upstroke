@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `upstroke answer` now refuses a second answer to a question that already has one published,
+  however the two are timed. Two answers started together, or, on a run an older binary created
+  (schema 1–3), a second answer to a parked question while no engine drove it, used to both report
+  success while only one took effect (`PR381-ANSWER-PUBLISH-RACE`).
 - A `[routing.strategy]` table with an unknown key is now refused at load, naming the key and the
   accepted `mode` and `spend_down_after`. It used to load with the key silently dropped, so a
   misspelled `spend_down_afer = 0.7` left `spend_down_after` unset with nothing said. An
