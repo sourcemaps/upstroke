@@ -232,30 +232,20 @@ The production adapter with an error return at the after phase of both process s
 (#292's fate fix). The timeout witnesses above reach `kill_tree` only on Windows: on Unix a timeout
 terminates through `terminate_supervised`, which stores the fate itself, so a `kill_tree` that
 stored it only on Windows kept the Linux suite green (#292's round-1 fix-check lens, finding 3).
-This reaches `kill_tree` on Linux and Windows through the path that calls it when the spawn's after
-phase fails: the child is created (recorded once), the spawn's after phase returns the injected error,
-the cleanup termination runs its before phase and its primitive, and its after phase returns the
-second error. The failure is the spawn's error with the termination's beside it, the child is gone
-when the funnel returns, and the fate is `Gone`. Its scratch directory is the same kind of guard as
-the witness above.
-
-Not on macOS. On every Unix that error path drops the Supervisor before it calls `kill_tree`, and
-the drop's `finish` has the reaper kill the group and wait until it holds no non-zombie member, so
-the leader, this process's unreaped child, is a zombie when the primitive signals its group. On
-macOS that signal failed with `EPERM` (#292's CI, `test (macos-latest)`, job 104258732193:
-"terminating the agent process group did not establish it gone: the group signal failed (Operation
-not permitted (os error 1))"); `signal_group_kill` treats only `ESRCH` as gone, so the primitive
-fails before the fate store this witness is about and the fate stays `Unresolved`. That answer is
-the primitive's, not the store's: `PR292-MACOS-ZOMBIE-ONLY-GROUP-EPERM-FAILS-KILL-TREE`, deferred,
-whose repair runs this witness on macOS again. The direct witness below guards the store on every
-Unix.
+This reaches `kill_tree` on Linux, macOS and Windows through the path that calls it when the spawn's
+after phase fails: the child is created (recorded once), the spawn's after phase returns the injected
+error, the cleanup termination runs its before phase and its primitive, and its after phase returns
+the second error. The failure is the spawn's error with the termination's beside it, the child is
+gone when the funnel returns, and the fate is `Gone`. Its scratch directory is the same kind of guard
+as the witness above.
 
 ## `fn kill_tree_stores_a_terminated_groups_fate_before_its_after_phase_errs() {`
 
 `kill_tree` called directly on a live process group of its own, on every Unix host, with an error
 answered at `Process.Terminate`'s after phase: the primitive kills the group and reaps its leader,
 the error returned is the after phase's, the leader is gone, and the fate is `Gone`. The group is
-live when it is signalled, so the macOS answer above does not arise. With the store made
+live when it is signalled, so macOS's `EPERM` for a group of zombies
+(`PR292-MACOS-ZOMBIE-ONLY-GROUP-EPERM-FAILS-KILL-TREE`) does not arise. With the store made
 Windows-only, the fate stays `Unresolved` and this fails.
 
 ## `fn a_child_registered_pre_exec_is_settled_when_the_parent_never_registers_it() {`
@@ -536,13 +526,62 @@ Producer-aware: the direct child is the only liveness fact a file
 signal has, and a fixture whose `sh` never started would otherwise
 have spent the whole bound before saying so.
 
-## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `let deadline = Instant::now() + Duration::from_secs(5);`
+## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `let settled = every_pipe_writer_is_gone(fd);`
 
-Bounded rather than instantaneous, and the bound is the kernel's:
-`kill(-pgid, SIGKILL)` returns as soon as the signals are queued, so
-a member can still be tearing down when this line runs. What the
-bound cannot absorb is a member that was never signalled — the
-fixture's survivors sleep for a minute.
+One read, and no wait before it. A 5 s poll stood here because
+`kill(-pgid, SIGKILL)` returns as soon as the signals are queued, so a
+member could still be tearing down when `kill_tree` returned. The
+primitive now observes the group itself until no running member remains
+(`settle_signalled_group` over `settle_group`,
+`PR281-MACOS-KILL-TREE-SETTLE-ONLY-THE-DIRECT-CHILD`), and returns its
+error when it cannot establish that. A process that has exited has
+closed its descriptors, zombie or not, so once `kill_tree` answers `Ok`
+the read end is at EOF at once. A member still holding the pipe here is
+the defect this witness names, not a kernel that has yet to act: the
+fixture's survivors sleep for a minute. The settlement exists on Linux
+and macOS, where the termination module's scanner does; no CI runner
+compiles another Unix.
+
+## `fn a_group_signals_error_is_settled_only_by_esrch_or_by_eperm_beside_no_running_member() {`
+
+`group_signal_settled`, the judgement `kill_tree_primitive` passes on its
+group signal's error, read as a table on every Unix, with no group and
+no zombie to build: each errno its doc comment names (`None` for a delivered
+signal, `ESRCH`, `EPERM`, and `EINVAL` standing for every other errno)
+beside each scanner answer (`None`, `Some(false)`, `Some(true)`). A
+delivered signal and `ESRCH` are settled under every answer, and
+`EINVAL` under none. `EPERM` is settled only beside `Some(false)`,
+macOS's answer for a group of zombies
+(`PR292-MACOS-ZOMBIE-ONLY-GROUP-EPERM-FAILS-KILL-TREE`). Beside
+`Some(true)` it is a refusal of a signal to a live process, and beside
+`None`, which is how `signal_group_kill` asks before anything has looked
+at the group, nothing established otherwise.
+
+## `fn the_settle_loop_settles_at_the_first_look_that_finds_no_running_member() {`
+
+`settle_group` under a scripted probe that finds a member running twice
+and then none, and a signaller that counts. The loop answers
+`Some(false)`, looks three times and no more (a fourth look would
+exhaust the script and fail), and signals the group at least twice, once
+after each look that found a member. The bound is the production
+`GROUP_SETTLE_BOUND`, which a loop that settles never reaches: nothing
+here waits but the loop's own millisecond pauses.
+
+## `fn a_settle_loop_whose_probe_always_finds_a_member_answers_members_still_running() {`
+
+The failsafe, with a 10 ms bound passed in rather than the production
+const. A probe that always finds a member is answered `Some(true)` at
+the bound, which `settle_signalled_group` reports as members still
+running. The group is signalled after every look but the last, so the
+signals are one fewer than the looks however many looks a loaded runner
+fits into the bound.
+
+## `fn a_settle_loop_whose_probe_never_answers_answers_that_nothing_was_observed() {`
+
+The same bound and counting, with a probe that answers `None`
+throughout. The loop answers `None`, which `settle_signalled_group`
+reports as a membership that could not be observed, and a look that
+could not answer is followed by a signal as one that found a member is.
 
 ## `fn a_successful_direct_exit_settles_its_group_before_the_transcript_is_collected() {`
 

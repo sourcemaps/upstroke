@@ -508,13 +508,11 @@ fn a_fault_after_the_terminate_primitive_reports_the_child_gone() {
     );
 }
 
-#[cfg(not(target_os = "macos"))]
 struct SpawnAfterThenTerminateAfterFault {
     inner: crate::runner::HarnessHooks,
     created: Vec<(u32, u64)>,
 }
 
-#[cfg(not(target_os = "macos"))]
 impl SpawnHooks for SpawnAfterThenTerminateAfterFault {
     fn point(&mut self, point: SubEffectPoint) -> Injection {
         self.inner.point(point)
@@ -548,7 +546,6 @@ impl SpawnHooks for SpawnAfterThenTerminateAfterFault {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_spawn_fault_whose_cleanup_termination_faults_after_its_primitive_reports_the_child_gone() {
     use std::sync::{Arc, Mutex, PoisonError};
@@ -1246,12 +1243,7 @@ fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
         &std::cell::Cell::new(ProcessFate::Unresolved),
     )
     .expect("settle the group");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut settled = every_pipe_writer_is_gone(fd);
-    while !settled && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-        settled = every_pipe_writer_is_gone(fd);
-    }
+    let settled = every_pipe_writer_is_gone(fd);
     // SAFETY: a negative pid names the group; this is cleanup for the
     // failing case and a no-op for the passing one.
     unsafe {
@@ -1264,6 +1256,130 @@ fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
         settled,
         "kill_tree returned while a member of the child's process group was still \
          running and still holding its pipes: only the direct child was killed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_group_signals_error_is_settled_only_by_esrch_or_by_eperm_beside_no_running_member() {
+    // (the signal's errno, the scanner's answer, settled)
+    let table = [
+        // A delivered signal, whatever was observed.
+        (None, None, true),
+        (None, Some(false), true),
+        (None, Some(true), true),
+        // ESRCH: no member was left, whatever was observed.
+        (Some(libc::ESRCH), None, true),
+        (Some(libc::ESRCH), Some(false), true),
+        (Some(libc::ESRCH), Some(true), true),
+        // EPERM for a group observed with no running member: macOS's answer
+        // for a zombie-only group (PR292), not a refusal.
+        (Some(libc::EPERM), Some(false), true),
+        // EPERM beside a running member: a refusal of a signal to a live
+        // process.
+        (Some(libc::EPERM), Some(true), false),
+        // EPERM for a group nothing observed: `signal_group_kill`'s own
+        // judgement, which keeps it an error.
+        (Some(libc::EPERM), None, false),
+        // Any other errno, whatever was observed.
+        (Some(libc::EINVAL), None, false),
+        (Some(libc::EINVAL), Some(false), false),
+        (Some(libc::EINVAL), Some(true), false),
+    ];
+    for (error, members, settled) in table {
+        assert_eq!(
+            group_signal_settled(error, members),
+            settled,
+            "errno {error:?} (None: delivered) beside a scanner answer of {members:?}: settled \
+             only when delivered, by ESRCH, or by EPERM beside no running member"
+        );
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn the_settle_loop_settles_at_the_first_look_that_finds_no_running_member() {
+    let mut answers = [Some(true), Some(true), Some(false)].into_iter();
+    let mut looks = 0_u32;
+    let mut signals = 0_u32;
+    let established = settle_group(
+        4242,
+        |_| {
+            looks += 1;
+            answers
+                .next()
+                .expect("the loop looks again only while the group is not settled")
+        },
+        |_| signals += 1,
+        GROUP_SETTLE_BOUND,
+    );
+    assert_eq!(
+        established,
+        Some(false),
+        "the group was observed with no running member"
+    );
+    assert_eq!(
+        looks, 3,
+        "the look that found the group settled is the last"
+    );
+    assert!(
+        signals >= 2,
+        "the group was signalled again after each look that found a member running: {signals}"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_settle_loop_whose_probe_always_finds_a_member_answers_members_still_running() {
+    let bound = Duration::from_millis(10);
+    let mut looks = 0_u32;
+    let mut signals = 0_u32;
+    let established = settle_group(
+        4242,
+        |_| {
+            looks += 1;
+            Some(true)
+        },
+        |_| signals += 1,
+        bound,
+    );
+    assert_eq!(
+        established,
+        Some(true),
+        "a group never seen settled by the bound is answered as members still running, which \
+         `settle_signalled_group` reports as its error"
+    );
+    assert_eq!(
+        signals + 1,
+        looks,
+        "the group was signalled again after every look but the one at the bound"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_settle_loop_whose_probe_never_answers_answers_that_nothing_was_observed() {
+    let bound = Duration::from_millis(10);
+    let mut looks = 0_u32;
+    let mut signals = 0_u32;
+    let established = settle_group(
+        4242,
+        |_| {
+            looks += 1;
+            None
+        },
+        |_| signals += 1,
+        bound,
+    );
+    assert_eq!(
+        established, None,
+        "a probe that never answered established nothing, which `settle_signalled_group` \
+         reports as a membership that could not be observed"
+    );
+    assert_eq!(
+        signals + 1,
+        looks,
+        "a look that could not answer is followed by a signal as a running member is"
     );
 }
 
