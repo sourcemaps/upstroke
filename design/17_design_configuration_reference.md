@@ -51,6 +51,21 @@ pools, and `connect` itself on its next run — and it has this shape:
   line per line with forbidden control characters replaced, so a discovery note cannot become a
   setting or make the file malformed.
 
+**What `profile` does.** A pool's `profile` is the directory handed to the pool's agent as its
+credential location: `CLAUDE_CONFIG_DIR` for Claude Code, so the CLI runs on the account logged
+in there, and the engine handles no token. The host runner sets it from the pool a task attempt
+is bound to, which is the first pool in the file naming the attempt's agent. It applies to that
+agent's work, review and probe processes, and a gate gets no credential location. The value is
+used as written, with no `~` expansion. Pre-flight probes the agent's CLI under the profile. A
+profile is supported for Claude Code on the host runner only. A resume's pre-flight refuses,
+before anything runs, a profile on the container runner, a profile for another agent, or one
+whose directory is missing or not a directory, checking every pool that names one. It also
+refuses any profile while `CLAUDE_CODE_OAUTH_TOKEN` is set, because that token overrides a
+profile's credentials. A fresh run's pre-flight (P4) does not yet make those checks. The
+container runner refuses a profiled probe, so a profile there still stops the run's creation,
+but the other three cases are not caught. The legacy (schema 1–3) coordinator refuses any pool
+that names a profile.
+
 **When it is rewritten.** Two comparisons against the file already there, because two questions
 are asked. *May* it be replaced: only if both complete TOML documents parse to equal tables, or
 `--force` is given; otherwise `connect` refuses, prints the file it would have written, and exits
@@ -69,10 +84,12 @@ replaces everything else; a file that does not parse carries nothing. Invalid al
 omitted with the warning described above. Repeated connects using the same writer leave an
 unchanged machine's file alone once its settings and nonvolatile content match.
 
-**Not decided here:** whether the keys above and the default pool name are frozen across versions.
-Today the reader warns on an unknown key and refuses an unknown value, no key or name has been
-renamed, and nothing migrates one; a renamed default pool name would stop the carrying by name.
-That rule is owed and is the owner's to state.
+**Frozen across versions** (the owner's rule, r6 answer 4). The pool keys listed above — `kind`,
+`agent`, `window`, `weekly`, `sources`, `safety_margin`, `reserve`, `profile`,
+`monthly_allowance` and `endpoint` — and the default pool name, the agent's id, are frozen. A
+change adds a new key beside the old one, which is still read. The default pool name never
+changes, so carrying an operator's keys by pool name keeps working from one version to the next.
+The reader still warns on an unknown key and refuses an unknown value.
 
 Repo-level `upstroke.toml` — overrides only; everything below has a derived default:
 

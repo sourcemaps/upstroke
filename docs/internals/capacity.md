@@ -47,21 +47,34 @@ Three properties hold by construction and are pinned by tests:
 
 ### Credential profiles
 
-The v0.2 sketch in DESIGN.md §13 calls for one vendor backing several
-pools (two Claude Max accounts, say), selected per attempt "through the
-provider's own profile mechanism, an environment variable on the subprocess
-rather than a token the engine ever handles". That mechanism is real on both
-vendors and is a config-*directory* variable: `COPILOT_HOME` (documented) and
-`CLAUDE_CONFIG_DIR` (works, undocumented as of Aug 2026). The shape that
-fits is upstroke-defined profile directories — `~/.upstroke/profiles/<name>` —
-handed to the CLI through that variable, with login staying a user-driven
-interactive step the engine never automates. "Does this CLI honour profile
-selection" then becomes a `probe()` axis like any other, verified at
-pre-flight instead of discovered mid-spend. v0.1 stops at [`Pool::profile`]:
-the field is parsed, displayed, and attributed through, and **nothing sets
-any environment variable**, because everything multi-profile actually buys
-(per-profile attribution, asymmetric reserve, rebind-instead-of-wait) is
-capacity-*driven* behaviour, which is v0.2 by sequencing.
+DESIGN.md §13 calls for one vendor backing several pools (two Claude Max
+accounts, say), told apart "through the provider's own profile mechanism, an
+environment variable on the subprocess rather than a token the engine ever
+handles". That mechanism is real on both vendors and is a config-*directory*
+variable: `COPILOT_HOME` (documented) and `CLAUDE_CONFIG_DIR` (works,
+undocumented as of Aug 2026). Login stays a user-driven interactive step the
+engine never automates.
+
+[`Pool::profile`] is that directory, and it is acted on for Claude Code on the
+host runner (§17). On a schema-4 run, each agent's bound pool, which
+[`pool_for`] says is the first pool in the file naming it, supplies the
+`profile`. The host runner then sets it as `CLAUDE_CONFIG_DIR` on that agent's
+work, review and probe processes (`src/engine/topology/profiled.rs` stamps the
+request, and `src/runner/host/environment.rs` composes it). The value is the
+configured string used as a path, with no `~/` expansion. A resume's
+pre-flight refuses a profile the run cannot honour
+(`src/engine/topology/preflight.rs`). A fresh run's pre-flight does not yet
+make those checks, and the legacy coordinator refuses any profiled pool.
+Nothing routes on a profile: the binder still binds each agent to one pool,
+because everything multi-profile actually buys (per-profile attribution,
+asymmetric reserve, rebind-instead-of-wait) is capacity-*driven* behaviour,
+which is v0.2 by sequencing.
+
+A resume reads today's configuration. A profile changed between a run's
+start and its resume is therefore used from the resume on, both in the
+resume's pre-flight and by every later attempt, because the run's record does
+not carry the profile it started under. Whether to record it is an owner
+question.
 
 ## `pub enum PoolKind {`
 

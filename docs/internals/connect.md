@@ -245,6 +245,12 @@ also put a per-agent alias table here, so adding an adapter meant editing
 `connect`. Renaming the pool is the operator's call, and the file is
 hand-editable precisely so they can make it.
 
+The name this returns is frozen (§17): it never changes across versions.
+`--force` carries `profile`, `monthly_allowance` and `endpoint` over by pool
+name, so a default that changed would stop carrying an operator's keys into
+the pool it now names. `the_pool_keys_and_the_default_pool_names_are_frozen`
+pins each agent's name.
+
 ## `pub fn render_report(report: &ConnectReport) -> String {`
 
 What the CLI prints.
@@ -283,7 +289,21 @@ The round trip is the whole contract: a file this command writes must
 be one `config::load` accepts, or `upstroke capacity` reports on
 something `connect` cannot produce.
 
-## `let tree = scratch("clobber");`
+## `fn the_pool_keys_and_the_default_pool_names_are_frozen() {`
+
+§17's frozen rule, pinned with every value spelled out rather than derived
+from the code it checks. One pool sets all ten keys the configuration reader
+accepts, each to a value the reader could not have supplied as a default, and
+`config::load` must read every one back without a warning. Each agent's
+default pool name is listed beside the agent. The test sits here because
+`default_pool_name` is private to this module, and the keys go through the
+same public reader as `upstroke capacity` and `upstroke run`.
+
+A failure is a change the rule forbids. The rule lets a new key be added
+beside the old ones, and an added key leaves this test passing, since it
+names only the frozen keys. A renamed or dropped key fails it, and so does a
+changed default name, which would break `--force`'s carrying by pool name.
+
 
 §17 says the file is hand-editable, so silently overwriting a hand
 edit destroys the operator's own record of their subscriptions.

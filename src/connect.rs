@@ -836,6 +836,81 @@ mod tests {
     }
 
     #[test]
+    fn the_pool_keys_and_the_default_pool_names_are_frozen() {
+        let tree = scratch("frozen");
+        let path = tree.path().join("pools.toml");
+        fs::write(
+            &path,
+            "[pools.frozen]\n\
+             kind = \"subscription-window\"\n\
+             agent = \"claude-code\"\n\
+             window = \"5h\"\n\
+             weekly = true\n\
+             sources = [\"signals\"]\n\
+             safety_margin = 0.25\n\
+             reserve = 0.1\n\
+             monthly_allowance = 300\n\
+             endpoint = \"http://homeserver:11434/v1\"\n\
+             profile = \"/profiles/frozen\"\n",
+        )
+        .expect("write a pool that sets every frozen key");
+        let rule = "DESIGN.md §17 freezes the pool keys and the default pool name: a change adds \
+                    a new key beside the old one, which is still read, and the default pool name \
+                    never changes";
+        let mut warnings = Vec::new();
+        let cfg = crate::config::load(None, tree.path(), Some(&path), &mut warnings)
+            .unwrap_or_else(|error| panic!("{rule}; the reader refused the frozen keys: {error}"));
+        let pool = cfg.pools.first().expect("the one pool");
+        let read = [
+            ("kind", pool.kind == PoolKind::SubscriptionWindow),
+            ("agent", pool.agent == "claude-code"),
+            (
+                "window",
+                pool.window == Some(std::time::Duration::from_secs(5 * 3600)),
+            ),
+            ("weekly", pool.weekly),
+            ("sources", pool.sources == [Source::Signals]),
+            ("safety_margin", pool.safety_margin == 0.25),
+            ("reserve", pool.reserve == 0.1),
+            (
+                "monthly_allowance",
+                pool.monthly_allowance == crate::capacity::Allowance::Units(300.0),
+            ),
+            (
+                "endpoint",
+                pool.endpoint.as_deref() == Some("http://homeserver:11434/v1"),
+            ),
+            (
+                "profile",
+                pool.profile.as_deref() == Some("/profiles/frozen"),
+            ),
+        ];
+        let unread: Vec<&str> = read
+            .iter()
+            .filter(|(_, held)| !held)
+            .map(|(key, _)| *key)
+            .collect();
+        let names: Vec<(&str, &str)> = ["claude-code", "copilot", "codex"]
+            .map(|agent| (agent, default_pool_name(agent)))
+            .to_vec();
+
+        assert_eq!(
+            (unread, warnings, names),
+            (
+                Vec::<&str>::new(),
+                Vec::<String>::new(),
+                vec![
+                    ("claude-code", "claude-code"),
+                    ("copilot", "copilot"),
+                    ("codex", "codex"),
+                ],
+            ),
+            "{rule}: (pool keys the reader no longer reads, its warnings, the default pool \
+             name for each agent)"
+        );
+    }
+
+    #[test]
     fn an_existing_file_that_differs_is_never_clobbered() {
         let tree = scratch("clobber");
         let path = tree.path().join("pools.toml");
