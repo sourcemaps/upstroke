@@ -3817,7 +3817,7 @@ impl GroupHold {
 
     fn release(&mut self) -> Result<std::process::ExitStatus, String> {
         self.released = true;
-        // SAFETY: only `end_and_collect` below reaps the member, so this
+        // SAFETY: only `end_and_poll` below reaps the member, so this
         // test's own child, running or exited, still keeps the group in
         // being: its number names that group and no other. A negative pid
         // signals every member, the test's own included.
@@ -3825,7 +3825,7 @@ impl GroupHold {
             let _ = libc::kill(-self.pgid, libc::SIGKILL);
         }
         let pgid = self.pgid;
-        end_and_collect(&mut self.member)
+        end_and_poll(&mut self.member)
             .map_err(|reason| format!("the hold on process group {pgid}: {reason}"))
     }
 }
@@ -3838,7 +3838,7 @@ impl Drop for GroupHold {
         }
         if let Err(failure) = self.release() {
             if thread::panicking() {
-                eprintln!("{failure}");
+                let _ = writeln!(std::io::stderr(), "{failure}");
             } else {
                 panic!("{failure}");
             }
@@ -4756,14 +4756,18 @@ fn a_guard_unwinding_with_no_process_to_spare_helper() {
         rlim_max: ceiling.rlim_max,
     };
     let mut earlier = None;
+    let mut held = None;
     let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let first = group_member(0);
+        let mut first = group_member(0);
         earlier = Some(first.id());
         let group = i32::try_from(first.id()).expect("a pid fits an i32");
+        let hold = GroupHold::join(group, || matches!(first.try_wait(), Ok(None)));
+        held = Some(hold.member.id());
         // SAFETY: `setrlimit` reads one `rlimit` through a pointer that
         // outlives the call. A soft limit of zero refuses every new process
         // and thread of this user with `EAGAIN`; it stays in force while the
-        // refused spawn's panic unwinds through `first`'s guard.
+        // refused spawn's panic unwinds through `hold` and then `first`'s
+        // guard.
         let lowered = unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &none_to_spare) };
         assert_eq!(
             lowered,
@@ -4813,6 +4817,17 @@ fn a_guard_unwinding_with_no_process_to_spare_helper() {
         "pid {pid}, spawned before the spawn refused for want of a process, is still this \
          process's child, running or exited and unreaped, after the failure unwound with the \
          limit still at zero: {after}"
+    );
+    let Some(member) = held else {
+        panic!("the group of pid {pid} was not held before the spawn that failed");
+    };
+    let after = observe_child_group(member);
+    assert_eq!(
+        after.exited_before,
+        Err(libc::ECHILD),
+        "pid {member}, the hold's member in process group {pid}, is still this process's child, \
+         running or exited and unreaped, after the failure unwound with the limit still at zero: \
+         {after}"
     );
     println!(
         "ended and collected the child spawned before a spawn refused with no process to spare"

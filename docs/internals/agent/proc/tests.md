@@ -1452,16 +1452,19 @@ when the signal is sent; SIGKILL ends it even while a group stop has
 suspended it, where an end of file would wait for it to run. Past the
 bound the answer is an error naming the pid, and the child stays the
 test's unreaped child, so its number is not issued again while the test
-process lives. It is how a `GroupHold` ends its member and how the
-controls end and collect a process they end themselves. It is not how a
-`ChildGuard` ends its child: `await_exit_without_reaping` waits on a
-thread it starts, and a guard dropped because no thread or process
-could be created cannot start one (`end_and_poll`).
+process lives. It is how `GroupHold::join` ends a member whose join it
+refuses, before any unwind has begun, and how the controls end and
+collect a process they end themselves. It is not how a `ChildGuard`
+ends its child, nor how a `GroupHold`'s release ends its member:
+`await_exit_without_reaping` waits on a thread it starts, and a guard or
+hold dropped because no thread or process could be created cannot start
+one (`end_and_poll`).
 
 ## `fn end_and_poll(child: &mut Child) -> Result<std::process::ExitStatus, String> {`
 
-How a `ChildGuard` ends the child it still owns, with no new thread and
-no new process. It sends SIGKILL to the child's own pid (`Child::kill`),
+How a `ChildGuard` ends the child it still owns, and how a `GroupHold`'s
+release ends its member once the group has had its SIGKILL, with no new
+thread and no new process. It sends SIGKILL to the child's own pid (`Child::kill`),
 then polls `try_wait` every ten milliseconds until the child is
 collected, or until `MEMBER_END_BOUND` has passed since the signal. The
 child is unreaped until that `try_wait` collects it, so its pid is its
@@ -1469,8 +1472,9 @@ and no other's when the signal is sent, and SIGKILL ends it even while a
 group stop has suspended it. Past the bound the answer is an error
 naming the pid, and the child stays the test's unreaped child, as with
 `end_and_collect`. Nothing in it needs a thread, a process or a new
-descriptor, so it works when the failure that dropped the guard was a
-spawn refused for want of one (`EAGAIN` under `RLIMIT_NPROC`).
+descriptor, so it works when the failure that dropped the guard or the
+hold was a spawn refused for want of one (`EAGAIN` under
+`RLIMIT_NPROC`).
 
 ## `fn close_and_collect(child: &mut Child) -> Result<std::process::ExitStatus, String> {`
 
@@ -1618,8 +1622,13 @@ before the join is ended and collected by the caller's own guards.
 The release: once, on every path, and the same on each. The whole group
 gets SIGKILL first, while the member, unreaped whether it runs or has
 exited, still keeps the group's number the test's; then the member is
-ended by its own pid and collected (`end_and_collect`), and after that
-the test holds nothing of the group and sends nothing to its number. The
+ended by its own pid and collected (`end_and_poll`), and after that
+the test holds nothing of the group and sends nothing to its number.
+The collection polls `try_wait` rather than waiting on a thread
+(`end_and_collect`), because the release also runs from the hold's
+drop while a spawn refused under `RLIMIT_NPROC` unwinds, and then no
+thread can be started: `thread::spawn` would panic during that unwind
+and abort the test process before the remaining guards ran. The
 signal's answer is not read: whatever it is, it is about this group.
 Nothing decides whether the group is ended, because nothing the test
 can see shows that the group's other members have ended: not the
@@ -1650,7 +1659,9 @@ reparenting test's hold on the coordinator's group, whose pipe holder
 never ends by itself. A release that has already run is not repeated.
 A member not collected within its bound fails the test here, or, while
 another failure is already unwinding, is written to stderr instead,
-since a second panic there would abort the whole test process.
+since a second panic there would abort the whole test process. The
+report is written with `writeln!` to `std::io::stderr()` and its error
+is dropped, where `eprintln!` would panic if the write failed.
 
 ## `fn settle_agent_group(mut hold: GroupHold, bound: Duration) -> bool {`
 
@@ -2125,13 +2136,18 @@ where `Err(ECHILD)` is required. With the body restored, it passes.
 
 ## `fn a_guard_unwinding_with_no_process_to_spare_helper() {`
 
-The isolated half of the regression test for a guard whose own cleanup
-runs while no thread or process can be created. Under `catch_unwind` it
-spawns a first shell (`group_member`), lowers `RLIMIT_NPROC`'s soft
-limit to zero, and spawns a second into the first one's group, which
-the kernel refuses with `EAGAIN`. The limit stays at zero while that
-panic unwinds through the first shell's guard, and is restored only
-once `catch_unwind` has returned; the hard limit is never touched, so
+The isolated half of the regression test for a guard and a group hold
+whose own cleanup runs while no thread or process can be created. Under
+`catch_unwind` it spawns a first shell (`group_member`), holds the first
+shell's group with a `GroupHold` (`GroupHold::join`, with
+`matches!(first.try_wait(), Ok(None))`: the first shell leads the group
+and is this test's unreaped child), lowers `RLIMIT_NPROC`'s soft limit
+to zero, and spawns a second shell into that group, which the kernel
+refuses with `EAGAIN`. The limit stays at zero while that panic unwinds
+through the hold, dropped first since it was declared later, whose
+release sends the group SIGKILL and collects its member, and then
+through the first shell's guard; it is restored only once
+`catch_unwind` has returned. The hard limit is never touched, so
 the restore asks for nothing the process did not already have. The
 panic it catches is identified: its message must be `group_member`'s own
 refusal for the first shell's group, with `EAGAIN`'s text, so a setup
@@ -2141,8 +2157,10 @@ that failed for another reason, or did not fail, fails here instead.
 fails saying so rather than passing without a refusal. Then the first
 shell must no longer be this process's child:
 `observe_child_group(pid).exited_before` must be `Err(ECHILD)`, as in
-`children_spawned_before_a_failing_spawn_helper`. It prints that it
-found the child ended and collected.
+`children_spawned_before_a_failing_spawn_helper`, and so must the hold's
+member, whose pid the setup recorded when the hold was joined. It
+prints that it found the child ended and collected, the same line as
+before the hold was added.
 
 Without `UPSTROKE_NO_PROCESS_TO_SPARE` it returns at once, so a run of
 the ignored tests inside a shared test process never lowers that
@@ -2160,12 +2178,13 @@ helper now runs, and not on Unix in general.
 
 ## `fn a_guard_unwinding_with_no_process_to_spare_ends_and_collects_its_child() {`
 
-The regression test for `ChildGuard`'s cleanup with no process to
-spare. It runs the helper above in a process of its own
+The regression test for the cleanup of `ChildGuard` and of `GroupHold`
+with no process to spare: the helper above unwinds a hold as well as a
+guard. It runs the helper in a process of its own
 (`run_test_isolated`), because `RLIMIT_NPROC` is the whole process's,
 and requires the helper to have exited successfully and to report the
-child ended and collected. An abort of the helper, or a child left
-uncollected, fails it.
+child ended and collected. An abort of the helper, or a child or a
+hold's member left uncollected, fails it.
 
 MEASURED, because a test that passes is not evidence that it detects.
 With `ChildGuard`'s `Drop` calling `end_and_collect` again, its
@@ -2177,6 +2196,17 @@ member into process group …: Resource temporarily unavailable (os error
 ("failed to spawn thread"), and the panic in a destructor during
 cleanup aborted the helper, wait status 134 (SIGABRT). With
 `end_and_poll` restored, it passes.
+
+MEASURED for the hold as well, once the helper joined one. With
+`GroupHold::release` calling `end_and_collect` again after the group's
+SIGKILL, this test failed and every other test of this module passed
+(82 passed, 1 failed): the helper's second spawn met a real `EAGAIN`
+("spawn a member into process group …: Resource temporarily unavailable
+(os error 11)"), then, from `GroupHold`'s drop through `release`,
+`thread::spawn` failed with the same error ("failed to spawn thread"),
+and "panic in a destructor during cleanup" aborted the helper, wait
+status 134 (SIGABRT), before it printed its line. With `end_and_poll`
+restored, it passes.
 
 The witness runs on Linux only (`#[cfg(target_os = "linux")]`, with the
 helper above). On macOS, in CI run 43112671690, the helper's restoring
