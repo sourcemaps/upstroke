@@ -29,7 +29,7 @@ pub(super) fn read_repo_config(
         Ok(raw) => Ok((raw, path)),
         Err(e) => Err(UpstrokeError::Config {
             path,
-            message: e.to_string(),
+            message: toml_error_message(&e, Some(&text)),
         }),
     }
 }
@@ -47,12 +47,15 @@ pub(super) fn read_machine_settings(
     let Some(text) = snapshot.text()? else {
         return Ok(None);
     };
-    let refused = |error: toml::de::Error| UpstrokeError::Config {
-        path: path.clone(),
-        message: format!(
-            "{error} (this is the machine-level settings file, read for every repository on \
-             this machine)"
-        ),
+    let refused = |error: toml::de::Error| {
+        let error = toml_error_message(&error, Some(&text));
+        UpstrokeError::Config {
+            path: path.clone(),
+            message: format!(
+                "{error} (this is the machine-level settings file, read for every repository on \
+                 this machine)"
+            ),
+        }
     };
     let raw: RawRepoConfig = toml::from_str(&text).map_err(refused)?;
     let table: toml::Table = toml::from_str(&text).map_err(refused)?;
@@ -65,7 +68,7 @@ pub(super) fn settings_table(snapshot: &FileSnapshot) -> Result<toml::Table, Ups
     };
     toml::from_str(&text).map_err(|error: toml::de::Error| UpstrokeError::Config {
         path: snapshot.path().to_path_buf(),
-        message: error.to_string(),
+        message: toml_error_message(&error, Some(&text)),
     })
 }
 
@@ -92,7 +95,7 @@ pub(super) fn read_pools(
         Err(e) => {
             return Err(UpstrokeError::Config {
                 path,
-                message: e.to_string(),
+                message: toml_error_message(&e, Some(&text)),
             });
         }
     };
@@ -130,6 +133,7 @@ fn parse_pool(
         ));
     }
     let raw: RawPool = value.try_into().map_err(|e| {
+        let e = toml_error_message(&e, None);
         config_error(format!(
             "[pools.{name}]: {e} (expected `kind` and `agent` strings, with optional `window`, \
              `weekly`, `sources`, `safety_margin`, `reserve`, `monthly_allowance`, `endpoint`, \
@@ -283,6 +287,124 @@ fn converts_exactly(units: i64) -> bool {
             <= f64::MANTISSA_DIGITS
 }
 
+pub(super) fn toml_error_message(error: &toml::de::Error, text: Option<&str>) -> String {
+    let message = redact_quoted(error.message());
+    match (error.span(), text) {
+        (Some(span), Some(text)) => {
+            let (line, column) = position(text, span.start);
+            format!("line {line}, column {column}: {message}")
+        }
+        (Some(_), None) | (None, _) => message,
+    }
+}
+
+fn position(text: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut column = 1;
+    for (at, character) in text.char_indices() {
+        if at >= offset {
+            break;
+        }
+        if character == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
+}
+
+const LONGEST_QUOTED_VALUE: usize = 16;
+
+const LONGEST_QUOTED_NAME: usize = 64;
+
+const NAME_FOLLOWS: [&str; 5] = [
+    "unknown field ",
+    "missing field ",
+    "duplicate field ",
+    "duplicate key ",
+    "dotted key ",
+];
+
+const LIST_FOLLOWS: [&str; 2] = ["unknown field ", "unknown variant "];
+
+#[derive(Clone, Copy)]
+enum Previous {
+    Other,
+    Subject,
+    Entry,
+}
+
+fn redact_quoted(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut plain = String::new();
+    let mut previous = Previous::Other;
+    let mut characters = message.chars();
+    while let Some(character) = characters.next() {
+        if !matches!(character, '"' | '\'' | '`') {
+            plain.push(character);
+            continue;
+        }
+        let quote = character;
+        let mut quoted = String::new();
+        let mut closed = false;
+        while let Some(inner) = characters.next() {
+            if inner == quote {
+                closed = true;
+                break;
+            }
+            quoted.push(inner);
+            if quote == '"' && inner == '\\' {
+                if let Some(escaped) = characters.next() {
+                    quoted.push(escaped);
+                }
+            }
+        }
+        let (longest, next) = slot(quote, &plain, previous);
+        previous = next;
+        out.push_str(&plain);
+        plain.clear();
+        out.push(quote);
+        let count = quoted.chars().count();
+        if count > longest {
+            out.push_str(&format!("<redacted: {count} characters>"));
+        } else {
+            out.push_str(&quoted);
+        }
+        if closed {
+            out.push(quote);
+        }
+    }
+    out.push_str(&plain);
+    out
+}
+
+fn slot(quote: char, plain: &str, previous: Previous) -> (usize, Previous) {
+    if quote != '`' {
+        return (LONGEST_QUOTED_VALUE, Previous::Other);
+    }
+    let continues_list = match previous {
+        Previous::Subject => plain == ", expected " || plain == ", expected one of ",
+        Previous::Entry => plain == ", " || plain == " or ",
+        Previous::Other => false,
+    };
+    if continues_list {
+        return (LONGEST_QUOTED_NAME, Previous::Entry);
+    }
+    let longest = if NAME_FOLLOWS.iter().any(|lead| plain.ends_with(lead)) {
+        LONGEST_QUOTED_NAME
+    } else {
+        LONGEST_QUOTED_VALUE
+    };
+    let next = if LIST_FOLLOWS.iter().any(|lead| plain.ends_with(lead)) {
+        Previous::Subject
+    } else {
+        Previous::Other
+    };
+    (longest, next)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +422,22 @@ mod tests {
             path: PathBuf::from(format!("absent-{tag}.toml")),
             required,
             content: Ok(None),
+        }
+    }
+
+    fn holding(name: &str, text: &str) -> FileSnapshot {
+        FileSnapshot {
+            path: PathBuf::from(name),
+            required: true,
+            content: Ok(Some(text.as_bytes().to_vec())),
+        }
+    }
+
+    fn refusal_of_repo_file(text: &str) -> String {
+        match read_repo_config(&holding("upstroke.toml", text)) {
+            Err(UpstrokeError::Config { message, .. }) => message,
+            Err(_) => panic!("the refusal is a configuration error"),
+            Ok(_) => panic!("the file is refused"),
         }
     }
 
@@ -583,5 +721,235 @@ mod tests {
         .expect("an unknown key degrades to a warning, not a refusal");
         assert!(pool.usable);
         assert!(warnings.iter().any(|w| w.contains("frobnicate")));
+    }
+
+    #[test]
+    fn unquoted_pasted_token_is_not_echoed_by_configuration_error() {
+        use crate::config::{CapturedConfig, EngineLimits, load_captured};
+
+        let token = format!("github_pat_{}", "Z".repeat(82));
+        let pasted = format!("usage_token_env = {token}\n");
+        for (file, captured, at) in [
+            (
+                "pools.toml",
+                CapturedConfig {
+                    repo: absent("witness", false),
+                    machine: None,
+                    pools: Some(holding(
+                        "pools.toml",
+                        &format!("[pools.p]\nkind = \"credits\"\n{pasted}"),
+                    )),
+                },
+                "line 3, column 19: ",
+            ),
+            (
+                "upstroke.toml",
+                CapturedConfig {
+                    repo: holding("upstroke.toml", &format!("[engine]\n{pasted}")),
+                    machine: None,
+                    pools: None,
+                },
+                "line 2, column 19: ",
+            ),
+        ] {
+            let mut warnings = Vec::new();
+            let loaded = load_captured(&captured, EngineLimits::Topology, &mut warnings);
+            let Err(refused) = loaded else {
+                panic!("{file}: a value that is not TOML is refused");
+            };
+            assert!(
+                !refused.to_string().contains(&token),
+                "{file}: the refusal must not repeat the pasted token"
+            );
+            let UpstrokeError::Config { path, message } = &refused else {
+                panic!("{file}: the refusal is a configuration error");
+            };
+            assert_eq!(path, Path::new(file), "the refusal names the file");
+            assert!(
+                message.starts_with(at),
+                "{file}: the refusal names the line and the column, {at:?}"
+            );
+            assert!(
+                message.contains("invalid string"),
+                "{file}: the refusal still says what is wrong"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_quoted_value_in_a_type_error_is_redacted_and_a_short_one_is_kept() {
+        for (written, said) in [
+            ("abcdefghijklmnop", "\"abcdefghijklmnop\""),
+            ("abcdefghijklmnopq", "\"<redacted: 17 characters>\""),
+        ] {
+            assert_eq!(
+                refusal_of_repo_file(&format!("pins = \"{written}\"\n")),
+                format!("line 1, column 8: invalid type: string {said}, expected a sequence")
+            );
+            let mut warnings = Vec::new();
+            let refused = parse_pool(
+                "p",
+                pool_value(&format!(
+                    "kind = \"credits\"\nagent = \"claude-code\"\nreserve = \"{written}\"\n"
+                )),
+                Path::new("pools.toml"),
+                &any_adapter,
+                &mut warnings,
+            )
+            .expect_err("a string where a fraction belongs is refused");
+            let expected = format!("[pools.p]: invalid type: string {said}, expected f64 (");
+            assert!(
+                refused.to_string().contains(&expected),
+                "{expected:?}: {refused}"
+            );
+        }
+
+        let token = format!("ghp_{}", "Z".repeat(36));
+        let mut warnings = Vec::new();
+        let Err(refused) = parse_pool(
+            "p",
+            pool_value(&format!(
+                "kind = \"credits\"\nagent = \"claude-code\"\nreserve = \"{token}\"\n"
+            )),
+            Path::new("pools.toml"),
+            &any_adapter,
+            &mut warnings,
+        ) else {
+            panic!("a string where a fraction belongs is refused");
+        };
+        let refused = refused.to_string();
+        assert!(
+            !refused.contains(&token),
+            "the refusal must not repeat a pasted token"
+        );
+        assert!(
+            refused.contains("invalid type: string \"<redacted: 40 characters>\", expected f64"),
+            "the refusal still says what is wrong"
+        );
+    }
+
+    #[test]
+    fn a_seventeen_character_unknown_key_is_named() {
+        for key in ["interaction_modes".to_owned(), "k".repeat(64)] {
+            let message = refusal_of_repo_file(&format!("{key} = 1\n"));
+            assert!(
+                message.starts_with(&format!("line 1, column 1: unknown field `{key}`, ")),
+                "{message}"
+            );
+            assert!(
+                message.contains("`interaction`") && message.contains("`capacity`"),
+                "the refusal lists the accepted sections: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sixty_five_character_unknown_key_is_redacted() {
+        let key = format!("github_pat_{}", "Z".repeat(54));
+        let message = refusal_of_repo_file(&format!("{key} = 1\n"));
+        assert!(
+            !message.contains(&key),
+            "a pasted credential used as a key must not be repeated"
+        );
+        assert!(
+            message.starts_with(
+                "line 1, column 1: unknown field `<redacted: 65 characters>`, expected one of "
+            ),
+            "the refusal still says what is wrong and where"
+        );
+        assert!(
+            message.contains("`interaction`") && message.contains("`capacity`"),
+            "the refusal still lists the accepted sections"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_syntax_error_says_what_is_wrong_and_where() {
+        let message = refusal_of_repo_file("[engine]\nmax_parallel = 2\n[gates\n");
+        assert!(message.starts_with("line 3, column 7: "), "{message}");
+        assert!(message.contains("table header"), "{message}");
+        assert!(
+            !message.contains("[gates"),
+            "the refusal never repeats the file: {message}"
+        );
+    }
+
+    #[test]
+    fn a_machine_level_file_error_keeps_its_suffix() {
+        let snapshot = holding(
+            "machine/upstroke.toml",
+            "[engine]\nmax_parallel = 2\n[gates\n",
+        );
+        let Err(refused) = read_machine_settings(&snapshot) else {
+            panic!("a machine-level file that is not TOML is refused");
+        };
+        let UpstrokeError::Config { path, message } = &refused else {
+            panic!("a configuration error: {refused}");
+        };
+        assert_eq!(path, snapshot.path());
+        assert!(message.starts_with("line 3, column 7: "), "{message}");
+        assert!(message.contains("table header"), "{message}");
+        assert!(
+            message.ends_with(
+                " (this is the machine-level settings file, read for every repository on this \
+                 machine)"
+            ),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_quoted_run_is_measured_by_where_it_stands() {
+        for (message, expected) in [
+            (
+                "invalid type: string \"ab\\\"cdefghijklmnopqr\", expected u64",
+                "invalid type: string \"<redacted: 20 characters>\", expected u64",
+            ),
+            (
+                "invalid value: integer `-1`, expected u64",
+                "invalid value: integer `-1`, expected u64",
+            ),
+            (
+                "unknown variant `abcdefghijklmnopq`, expected one of `small`, `mid`, `frontier`",
+                "unknown variant `<redacted: 17 characters>`, expected one of `small`, `mid`, \
+                 `frontier`",
+            ),
+            (
+                "unknown field `frontier_escalation`, expected `frontier_escalation_over_usd`",
+                "unknown field `frontier_escalation`, expected `frontier_escalation_over_usd`",
+            ),
+            (
+                "unknown field `notify_channels`, expected `notify` or `wait_on_block_secs`",
+                "unknown field `notify_channels`, expected `notify` or `wait_on_block_secs`",
+            ),
+            (
+                "missing field `frontier_escalation_over_usd`",
+                "missing field `frontier_escalation_over_usd`",
+            ),
+            (
+                "duplicate key `frontier_escalation` in table `interaction.ask_before`",
+                "duplicate key `frontier_escalation` in table `<redacted: 22 characters>`",
+            ),
+            (
+                "dotted key `routing.strategy.mode` attempted to extend non-table type (string)",
+                "dotted key `routing.strategy.mode` attempted to extend non-table type (string)",
+            ),
+            (
+                "invalid type: string \"wait_on_block_secs\", expected `wait_on_block_secs`",
+                "invalid type: string \"<redacted: 18 characters>\", expected \
+                 `<redacted: 18 characters>`",
+            ),
+            (
+                "invalid string\nexpected `\"`, `'`",
+                "invalid string\nexpected `\"`, `'`",
+            ),
+            ("expected '`'", "expected '`'"),
+            (
+                "unexpected `abcdefghijklmnopqrst",
+                "unexpected `<redacted: 20 characters>",
+            ),
+        ] {
+            assert_eq!(redact_quoted(message), expected, "{message:?}");
+        }
     }
 }

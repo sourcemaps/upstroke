@@ -572,7 +572,7 @@ pub fn load_captured_with(
                 .try_into()
                 .map_err(|error: toml::de::Error| UpstrokeError::Config {
                     path: repo_path.clone(),
-                    message: error.to_string(),
+                    message: toml_error_message(&error, None),
                 })
                 .map_err(layered)?;
             let mut merged_warnings = Vec::new();
@@ -647,6 +647,7 @@ fn interpret(
             let policy: RawRoleEffort = match value.try_into() {
                 Ok(policy) => policy,
                 Err(e) => {
+                    let e = toml_error_message(&e, None);
                     return Err(UpstrokeError::Config {
                         path: repo_path,
                         message: format!(
@@ -669,6 +670,7 @@ fn interpret(
                     let rr: RawKindRouting = match value.try_into() {
                         Ok(rr) => rr,
                         Err(e) => {
+                            let e = toml_error_message(&e, None);
                             return Err(UpstrokeError::Config {
                                 path: repo_path,
                                 message: format!(
@@ -714,6 +716,7 @@ fn interpret(
             let kr: RawKindRouting = match value.try_into() {
                 Ok(kr) => kr,
                 Err(e) => {
+                    let e = toml_error_message(&e, None);
                     return Err(UpstrokeError::Config {
                         path: repo_path,
                         message: format!("routing entry `{key}`: {e}"),
@@ -1066,7 +1069,9 @@ impl CapturedConfig {
 pub const MACHINE_SETTINGS: &str = "upstroke.toml";
 
 mod read;
-use self::read::{read_machine_settings, read_pools, read_repo_config, settings_table};
+use self::read::{
+    read_machine_settings, read_pools, read_repo_config, settings_table, toml_error_message,
+};
 
 fn discovered_pools_path() -> Option<PathBuf> {
     Some(util::user_upstroke_dir()?.join("pools.toml"))
