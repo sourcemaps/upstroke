@@ -8568,7 +8568,10 @@ fn a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it()
             .unwrap_or_else(|error| panic!("{label}: the commit ran: {error}"));
         report_hook_commit_trace(label, &trace);
         if output.code != Some(0) {
-            failures.push(format!("{label}: the commit failed: {output:?}"));
+            failures.push(format!(
+                "{label}: the commit failed{}: {output:?}",
+                hook_commit_signal(&output)
+            ));
             continue;
         }
         let paths = fixture_git(
@@ -8602,6 +8605,44 @@ fn a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it()
         "{} launcher(s) changed the user's commit:\n{}",
         failures.len(),
         failures.join("\n")
+    );
+}
+
+/// What the hook test's failure message adds about how the commit ended: the
+/// signal the funnel recorded when it reaped a commit that has no exit code,
+/// and nothing when the commit exited with a code.
+#[cfg(unix)]
+fn hook_commit_signal(output: &proc::ProcessOutput) -> String {
+    if output.code.is_some() {
+        return String::new();
+    }
+    match proc::test_support::last_reaped_signal() {
+        Some(signal) => format!(", ended by signal {signal}"),
+        None => ", with no exit code and no signal recorded at the reap".to_owned(),
+    }
+}
+
+/// The witness for [`hook_commit_signal`]: a child that ends itself by
+/// `SIGTERM` (15), run through the same funnel as the hook test's commit,
+/// is reported as ended by that signal. Named so that the quick gate's filter
+/// `runner::host::tests::a_hook_started` selects it.
+#[cfg(unix)]
+#[test]
+fn a_hook_started_commit_failure_names_the_signal_a_child_ended_itself_by() {
+    let mut child = Command::new("sh");
+    child.args(["-c", "kill -TERM $$"]);
+    let output = proc::test_support::run_with_timeout(child, "", Duration::from_secs(30))
+        .expect("the funnel runs a child that ends itself by a signal");
+    assert_eq!(output.code, None, "{output:?}");
+    assert_eq!(
+        proc::test_support::last_reaped_signal(),
+        Some(15),
+        "{output:?}"
+    );
+    assert_eq!(
+        hook_commit_signal(&output),
+        ", ended by signal 15",
+        "{output:?}"
     );
 }
 

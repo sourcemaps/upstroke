@@ -42,6 +42,13 @@ pub struct ProcessOutput {
     pub output_limited: bool,
 }
 
+// Test builds only: the signal that ended the child this thread's funnel last
+// reaped, `None` for a normal exit or a run the funnel ended itself.
+#[cfg(all(test, unix))]
+thread_local! {
+    static LAST_REAPED_SIGNAL: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
+
 const DRAIN_GRACE_EXIT: Duration = Duration::from_secs(2);
 const DRAIN_GRACE_KILL: Duration = Duration::from_millis(500);
 const OUTPUT_LIMIT_BYTES: usize = 16 * 1024 * 1024;
@@ -198,6 +205,8 @@ fn run_with_timeout_and_limit(
 ) -> Result<ProcessOutput, ProcessFailure> {
     #[cfg(not(unix))]
     let _ = leases;
+    #[cfg(all(test, unix))]
+    LAST_REAPED_SIGNAL.with(|last| last.set(None));
     let fate = std::cell::Cell::new(ProcessFate::NeverStarted);
     validate_process_sites(spawn_site, terminate_site).map_err(|error| ProcessFailure {
         fate: fate.get(),
@@ -327,6 +336,10 @@ fn run_with_timeout_and_limit(
                     let status = child.wait().map_err(|e| UpstrokeError::Agent {
                         message: format!("reaping agent process: {e}"),
                     })?;
+                    #[cfg(test)]
+                    LAST_REAPED_SIGNAL.with(|last| {
+                        last.set(std::os::unix::process::ExitStatusExt::signal(&status));
+                    });
                     break status.code();
                 }
                 Ok(false) => {
@@ -10412,6 +10425,13 @@ pub(crate) mod test_support {
             timeout,
             &mut NoHooks,
         )
+    }
+
+    /// The signal that ended the child the funnel last reaped on this thread,
+    /// or `None` when it exited normally or the funnel ended the run itself.
+    #[cfg(unix)]
+    pub(crate) fn last_reaped_signal() -> Option<i32> {
+        super::LAST_REAPED_SIGNAL.with(std::cell::Cell::get)
     }
 
     #[cfg(unix)]

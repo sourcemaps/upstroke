@@ -121,6 +121,21 @@ Wall clock from spawn to process exit (not including pipe drain).
 The child exceeded the bounded stdout or stderr capture allowance and
 its owned process tree was terminated.
 
+## `thread_local! {` › `static LAST_REAPED_SIGNAL: std::cell::Cell<Option<i32>>`
+
+Test builds on Unix only (`#[cfg(all(test, unix))]`; a production build has
+none of it). The funnel clears it when a run begins and sets it, where the
+Unix supervision loop reaps a child that exited by itself, to
+`ExitStatusExt::signal` of that status. `code` is `None` both for a run the
+funnel ended and for a child a signal ended, and the signal number is dropped
+at that reap. A test that sees `code: None` needs the number to tell which
+signal it was: the hook test's macOS failure printed `code: None`, and the
+leading explanation of that failure predicts one particular signal. A
+thread-local is enough because the funnel reaps on the thread that called it
+(the supervising closure runs inline). There is no field on `ProcessOutput`,
+because some twenty files construct that struct. The Windows reap records
+nothing: a Windows exit has no signal.
+
 ## `const DRAIN_GRACE_EXIT: Duration = Duration::from_secs(2);`
 
 How long to keep draining pipes after the process is gone. Normally EOF is
@@ -3295,6 +3310,17 @@ it was reproduced out of tree for PR #328's record (§3).
 ## `pub(crate) mod test_support` › `pub(crate) fn run_with_timeout(`
 
 Test-only convenience entry. Production passes both sites explicitly.
+
+## `pub(crate) mod test_support` › `pub(crate) fn last_reaped_signal() -> Option<i32> {`
+
+Reads `LAST_REAPED_SIGNAL` for the calling thread: the signal that ended the
+child this thread's last funnel run reaped, or `None` for a normal exit or a
+run the funnel ended itself. Unix only. Its witness is
+`a_hook_started_commit_failure_names_the_signal_a_child_ended_itself_by` in
+`src/runner/host/tests.rs`, not this module's tests. It runs
+`sh -c 'kill -TERM $$'` through `run_with_timeout` and asserts this reports
+`Some(15)`. The quick gate,
+`cargo test --all-features --lib runner::host::tests::a_hook_started`, runs it.
 
 ## `pub(crate) mod test_support` › `pub(crate) const ISOLATED_CHILD_COLLECTION_BOUND: Duration = Duration::from_secs(10);`
 

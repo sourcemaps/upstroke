@@ -3542,6 +3542,34 @@ These are unchanged:
 This is a diagnostic. It is not a fix, and it does not claim the red is
 explained or closed.
 
+**The signal.** When the commit's code is `None`, its failure message now
+also names the signal the commit ended by: `the commit failed, ended by signal
+N: ...`. It reads this through [`hook_commit_signal`] from
+`proc::test_support::last_reaped_signal`, which the funnel sets in test builds
+when it reaps the child. The leading explanation of the macOS red predicts one
+particular signal, and the number confirms or refutes it. The rest of this test
+is unchanged: how the commit is launched, its control flow and its assertions.
+
+## `fn hook_commit_signal(output: &proc::ProcessOutput) -> String {`
+
+The clause the test above adds to its `the commit failed` message. It is empty
+when the commit has an exit code. Otherwise it is `, ended by signal N`, or a
+note that no signal was recorded at the reap, which is the case for a run the
+funnel ended itself. It must be called on the thread that ran the commit,
+before that thread runs anything else through the funnel: the record is a
+thread-local holding the last reap's value.
+
+## `fn a_hook_started_commit_failure_names_the_signal_a_child_ended_itself_by() {`
+
+The witness for `proc::test_support::last_reaped_signal` and
+[`hook_commit_signal`]. It runs `sh -c 'kill -TERM $$'` through
+`run_with_timeout`, the funnel the hook test's commit goes through. It asserts
+that the code is `None`, that the helper reports `Some(15)` (`SIGTERM`) and that
+the clause reads `, ended by signal 15`. It lives here rather than in
+`src/agent/proc.rs` so that its name falls under the quick gate's filter,
+`runner::host::tests::a_hook_started`, and
+`cargo test --all-features --lib runner::host::tests::a_hook_started` runs it.
+
 ## `const HOOK_COMMIT_TRACE_HEAD: u64 = 64 * 1024;`
 
 The read bound of [`report_hook_commit_trace`], together with
