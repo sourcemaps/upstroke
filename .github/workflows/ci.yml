@@ -446,11 +446,12 @@ jobs:
       # effect instead of the causes: a suite that did not execute has no
       # `test result: ok.` line to count. On each leg the line that starts
       # the harnesses hands libtest the leg's `matrix.tests`, the count of
-      # passing tests is held
-      # to the leg's `matrix.floor`, and a last line prints the count. The
-      # count stays now that the suite runs on GitHub's machines, because a
-      # Cargo target runner or a `[workspace]` selection reaches them the
-      # same way, and a leg's floor also refuses a shard whose filter matched
+      # passing tests is held to the leg's `matrix.floor`, and a last line
+      # prints the count. The count stays now that the suite runs on
+      # GitHub's machines. A Cargo target runner no longer reaches a leg,
+      # since Cargo only builds and the step starts each harness itself, but
+      # a `[workspace]` selection reaches GitHub's machines as it reached the
+      # guest, and a leg's floor also refuses a shard whose filter matched
       # almost nothing. Each leg's floor is its share of 1700, the floor the
       # whole suite was held to as one job on the guest. Removing that many
       # tests is a deliberate act, and it edits the floors in the same
@@ -480,8 +481,8 @@ jobs:
       # starts waited on. Cargo builds once, with `--no-run`, and runs
       # nothing; the script takes the test harnesses from the build's own
       # messages and starts each in turn over the leg's `matrix.tests`, with
-      # `-Z unstable-options --report-time` after it, so that every test's
-      # line in the log carries its time. On a stable compiler libtest takes
+      # `-Z unstable-options --report-time` after it, so that libtest writes
+      # each test's time after its result. On a stable compiler libtest takes
       # those flags only where `RUSTC_BOOTSTRAP` is set, and the variable is
       # kept away from Cargo: the build scripts of three crates this one
       # builds, `anyhow`, `thiserror` and `proc-macro2`, each probe for a

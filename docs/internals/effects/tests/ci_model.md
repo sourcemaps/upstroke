@@ -311,13 +311,15 @@ Between the compiler check and the count is the suite itself, lines 3 to
 7. The run. `RUSTC_BOOTSTRAP` is set in the step's process, and each
    harness is started in turn with `${{ matrix.tests }}` and then
    `-Z unstable-options --report-time` as its one quoted argument list, its
-   two streams sent to two `.part` files beside the suite's, waited on as
-   the build is, and the two files appended to the suite's once it has
-   ended. The selection is the leg's filter, if it has one, and a `--skip`
-   for each filter of the legs before it; without it every leg runs the
-   whole suite. `$code` keeps each harness's exit, and the loop stops at
-   the first that is not zero, as Cargo's own `test` stops at the first
-   harness that fails.
+   two streams sent to two `.part` files beside the suite's, and waited on
+   as the build is. The selection is the leg's filter, if it has one, and a
+   `--skip` for each filter of the legs before it; without it every leg
+   runs the whole suite. `$code` keeps each harness's exit as soon as it
+   has ended, and only then are the two files appended to the suite's, each
+   copy in a `try` of its own: a copy that fails is printed, and its `catch`
+   throws again only where the harness passed, so a failed copy cannot end
+   the step in place of a failed harness's code. The loop stops at the first harness whose exit is not zero, as Cargo's
+   own `test` stops at the first harness that fails.
 8. One `try` block, which reads and then lists. It prints the two files
    and keeps standard output as `$log` for the count; the job log carries
    the suite's output once the loop has ended, not as it runs. It then lists
@@ -352,11 +354,14 @@ Lines 4 to 7 were one line until the legs reported each test's time:
 running each in turn. libtest reports a test's time only under
 `--report-time`, which it takes only after `-Z unstable-options`, and on a
 stable compiler it takes that only where `RUSTC_BOOTSTRAP` is set in the
-harness's own environment. Each test's line then ends with its time, as
-`test <name> ... ok <0.123s>`, so each leg's log carries the duration of
-every test it ran on the hosted runner, and the packing of tests into legs
-([`WINDOWS_SHARD_FILTERS`]) is weighed by those times (`MAINTAINING.md`
-step 3). The `test result:` lines the count reads are the same with the
+harness's own environment. Each test's result line then ends with its
+time, as `test <name> ... ok <0.123s>`. libtest writes the time apart from
+the result, so a child a test starts on the harness's console can write
+between them and move the time to the next line; the `mklink` that
+`link_dir` in `src/rundir/tests.rs` starts was one, and `link_dir` now
+captures its output. The packing of tests into legs
+([`WINDOWS_SHARD_FILTERS`]) is to be weighed by those times in a later
+change (`MAINTAINING.md` step 3). The `test result:` lines the count reads are the same with the
 times as without them.
 
 `RUSTC_BOOTSTRAP` reaches only the harnesses the build made, and what they
@@ -430,7 +435,8 @@ and exits on the build's failure on the next line; sets `RUSTC_BOOTSTRAP`
 only after the build and before the harnesses; collects every harness the
 build reported on the line before it starts them, refusing none; hands each
 the times after the selection; stops at the first harness that fails and
-exits with its code before it counts; lists the processes before that exit
+exits with its code before it counts, having kept the code before it
+copies the harness's outputs, each copy in a `try` of its own; lists the processes before that exit
 and throws for them after it; opens with lines 1 and 2 whole and holds
 `cargo` after them once, on the line that builds, with two processes
 started in all; and reads and lists inside the `try` whose `catch` keeps
@@ -446,6 +452,10 @@ removed; `MUT-TEST-WINDOWS-HOSTED-HARNESS-TIMES-DROPPED`, line 7 without
 the times; `MUT-TEST-WINDOWS-HOSTED-LOOP-PASSES-A-FAILED-HARNESS` and
 `MUT-TEST-WINDOWS-HOSTED-LOOP-DROPS-THE-FAILED-CODE`, line 7's loop going
 on past a failed harness, and stopping without keeping its code;
+`MUT-TEST-WINDOWS-HOSTED-CODE-KEPT-AFTER-THE-COPIES` and
+`MUT-TEST-WINDOWS-HOSTED-OUTPUT-COPY-UNGUARDED`, line 7 keeping the code
+only after it copies the two outputs, and copying the standard output
+outside a `try`;
 `MUT-TEST-WINDOWS-HOSTED-BOOTSTRAP-BEFORE-THE-BUILD` and
 `MUT-TEST-WINDOWS-HOSTED-BOOTSTRAP-ON-THE-BUILD-LINE`, the variable set
 above the build and on its line; and
@@ -453,8 +463,8 @@ above the build and on its line; and
 Each is under `ci_test_windows_hosted_job_complaints` in the workflow notes.
 Measured against this text itself, each an edit a pin cannot refuse because
 the workflow and the constant move together: the suite run a second time,
-the `try` and its `catch` removed, and an edit for each complaint that came
-with the build and the loop
+the `try` and its `catch` removed, an edit for each complaint that came
+with the build and the loop, and two for the code kept before the copies
 (`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit` in the
 test notes).
 

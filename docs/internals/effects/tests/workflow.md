@@ -618,6 +618,22 @@ drops the code: `$code` still holds the build's zero, with the same result.
 Cargo's own `test` stops at the first harness that fails, and the loop is
 held to doing the same and keeping that harness's code.
 
+`MUT-TEST-WINDOWS-HOSTED-CODE-KEPT-AFTER-THE-COPIES` keeps a harness's code
+only after the loop copies its two outputs. Under
+`$ErrorActionPreference = 'stop'` a harness that exits 101 and whose
+standard output cannot be read then ends the step on the copy's error,
+which the copy's `catch` throws again because `$code` still holds the
+build's zero or the last harness's. Not a false green, since the step still
+fails, but the failing harness's code is never kept and its standard error
+never printed.
+
+`MUT-TEST-WINDOWS-HOSTED-OUTPUT-COPY-UNGUARDED` takes the `try` and `catch`
+away from the copy of a harness's standard output: a `.part` file that
+cannot be read ends the step on PowerShell's error, with the same result
+for a harness that failed. The loop is held to keeping the code as soon as
+`WaitForExit()` returns, and to a `try` for each copy whose `catch` throws
+only for a harness that passed.
+
 `MUT-TEST-WINDOWS-HOSTED-BOOTSTRAP-BEFORE-THE-BUILD` sets
 `RUSTC_BOOTSTRAP` on a line of its own above the build, where the loop's
 line still sets it again. The build then runs in bootstrap mode, and the

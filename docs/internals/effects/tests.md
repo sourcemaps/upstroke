@@ -2108,7 +2108,7 @@ on conforming input is one nobody has seen refuse anything -- the rule this
 file states in its own header and the reason `PR5-C-DOCTEST-FIXTURES-NEVER-RAN`
 exists.
 
-The ledger is 142 rows. It was 195 until 2026-11-20, when the guest's
+The ledger is 152 rows. It was 195 until 2026-11-20, when the guest's
 Windows job and the job that picked the suite's home were removed from the
 workflow. The rows written for either, and for the rule that ran exactly
 one of two Windows suite jobs, went with them, and ten were written for what
@@ -2121,7 +2121,12 @@ capture: `MUT-TEST-WINDOWS-HOSTED-CAPTURE-STEP-DELETED` and
 `MUT-TEST-WINDOWS-HOSTED-CAPTURE-EXIT-SWALLOWED`. Nothing reached the
 `checkout_complaints` guard that a job checks out exactly once, at step 0,
 whose deletion left all 138 green: `MUT-TEST-WINDOWS-HOSTED-CHECKOUT-TWICE`
-and `MUT-TEST-WINDOWS-HOSTED-CHECKOUT-NOT-FIRST`. The test asserts no
+and `MUT-TEST-WINDOWS-HOSTED-CHECKOUT-NOT-FIRST`. That made 142. Eight
+came with the legs' times, for the build and the harness loop (each under
+`ci_test_windows_hosted_job_complaints` in the workflow notes), and two
+when the loop came to keep each harness's code before it copies the
+harness's outputs: `MUT-TEST-WINDOWS-HOSTED-CODE-KEPT-AFTER-THE-COPIES` and
+`MUT-TEST-WINDOWS-HOSTED-OUTPUT-COPY-UNGUARDED`. The test asserts no
 count. It requires every row to change the document and to be refused under
 the code the row names, and no two rows to share a name; a row taken out of
 the ledger is a claim nothing measures, and that is the diff's to show.
@@ -2208,11 +2213,14 @@ this check read and how each was shown a spelling it missed.
 ## `const WINDOWS_SUITE_TIMES: &str = "-Z unstable-options --report-time";`
 
 What the Windows shards hand each test harness after the leg's selection,
-so that libtest ends each test's line with the time it took, as
-`test <name> ... ok <0.123s>`. Each leg's log then carries the duration of
-every test it ran on the hosted runner, and the packing of tests into legs
-(`WINDOWS_SHARD_FILTERS`) is weighed by those times (`MAINTAINING.md` step
-3). `--report-time` is unstable: libtest takes it only after
+so that libtest ends each test's result line with the time it took, as
+`test <name> ... ok <0.123s>`. libtest writes the time apart from the
+result, so a child a test starts on the harness's console can write between
+them and move the time to the next line; the `mklink` that `link_dir` in
+`src/rundir/tests.rs` starts was one, and `link_dir` now captures its
+output. The packing of tests into legs (`WINDOWS_SHARD_FILTERS`) is to be
+weighed by those times in a later change (`MAINTAINING.md` step 3).
+`--report-time` is unstable: libtest takes it only after
 `-Z unstable-options`, and on a stable compiler takes that only where
 `RUSTC_BOOTSTRAP` is set in the harness's own environment, which line 7 of
 the shards' script sets after the build. The `test result:` lines the count
@@ -2268,9 +2276,10 @@ then each harness in `$harnesses` started in turn as a process, with
 `selection` and then [`WINDOWS_SUITE_TIMES`] as its one quoted argument
 list. The shards' line is the one made of `${{ matrix.tests }}`. The rest
 of the line is fixed text: the two streams sent to `.part` files beside the
-suite's, the handle taken, `WaitForExit()`, the two files appended to the
-suite's, the harness's exit kept as `$code`, and the loop left at the first
-harness whose exit is not zero.
+suite's, the handle taken, `WaitForExit()`, the harness's exit kept as
+`$code`, the two files appended to the suite's, each in a `try` of its own
+whose `catch` prints the failure and throws again only where `$code` is
+zero, and the loop left at the first harness whose exit is not zero.
 
 [`the_windows_leg_counts_the_tests_it_ran`] compares a whole line of the
 script with this one, so nothing can be added to the harnesses' arguments,
@@ -2300,7 +2309,10 @@ from its text, as the ones it does not do. Ten:
    reported, and refuses to go on with none.
 6. It hands each harness [`WINDOWS_SUITE_TIMES`] after the leg's selection.
 7. Its loop stops at the first harness that fails and keeps that harness's
-   code, and the script exits with it before it counts.
+   code, and the script exits with it before it counts. The loop keeps
+   each harness's code as soon as `WaitForExit()` returns, before it copies
+   the harness's two outputs, each copy in a `try` of its own whose `catch`
+   throws only for a harness that passed.
 8. It lists the `upstroke*` processes still running before that exit, and
    throws for them after it and before the count. So a failed suite's
    processes are listed too, and Windows is asked to stop them, and a suite
@@ -2465,17 +2477,22 @@ selection is, is the exact line's to hold
 
 The times are the one thing this step does that nothing downstream judges.
 Without them every leg runs its shard, clears its floor and is green; what
-is lost is the record the legs are packed from, on all ten at once, and no
-check would fail to say so. Measured by one edit in
+is lost is the record a later change is to pack the legs from, on all ten
+at once, and no check would fail to say so. Measured by one edit in
 [`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`], the
 two arguments removed; in the workflow alone,
 `MUT-TEST-WINDOWS-HOSTED-HARNESS-TIMES-DROPPED`.
 
 ## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {` › `if !follows(stops, exits) || !follows(exits, counts) {`
 
-The seventh complaint: a failed harness's code kept. The loop's end,
-`; $code = $suite.ExitCode; if ($code -ne 0) { break } }`, must come before
-the script's `if ($code -ne 0) { exit $code }`, and that before the count.
+The seventh complaint: a failed harness's code kept, and kept first. The
+loop's text from `$suite.WaitForExit();` to its end (`stops`), whole, must
+come before the script's `if ($code -ne 0) { exit $code }`, and that before
+the count. That text keeps the harness's exit as `$code` as soon as
+`WaitForExit()` returns, then appends the harness's standard output and
+then its standard error to the suite's files, each copy in a `try` of its
+own whose `catch` prints the failure and throws again only where `$code` is
+zero, and then leaves the loop where `$code` is not zero.
 
 Cargo's own `test` stops at the first harness that fails, and so does the
 loop. Going on past it, a harness that passes afterwards overwrites `$code`
@@ -2485,12 +2502,29 @@ its count alone, which the harnesses that passed can clear. Until the build
 was split from the run, the same complaint asked that the line keeping
 Cargo's exit as `$code` come before that exit.
 
-Measured by two edits in
+The code comes before the copies because GitHub runs a `pwsh` step with
+`$ErrorActionPreference = 'stop'`, so a copy that fails ends the script
+where it fails unless something catches it. Until the loop kept the code
+first, the two copies stood bare before it, and this complaint read the
+loop's end from `; $code = $suite.ExitCode;` on: a harness that exited 101
+and whose output could not be copied ended the step on PowerShell's error.
+Not a false green, since the step failed, but the harness's code was never
+kept and its standard error never printed, so the leg's log said that a
+file could not be read, not which test failed. That is read from the text;
+no run showed it. Now a copy that fails is printed, and for a harness that
+failed the loop goes on and stops on the harness's code; for a harness that
+passed the copy's `catch` throws again, since there is then nothing to
+count from.
+
+Measured by four edits in
 [`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`]: the
-`break` taken away, and the `break` kept with the harness's code read for
-it and not kept. In the workflow alone,
-`MUT-TEST-WINDOWS-HOSTED-LOOP-PASSES-A-FAILED-HARNESS` and
-`MUT-TEST-WINDOWS-HOSTED-LOOP-DROPS-THE-FAILED-CODE`.
+`break` taken away; the `break` kept with the harness's code read for it
+and not kept; the code kept only after the two copies; and the standard
+output copied outside a `try` of its own. In the workflow alone,
+`MUT-TEST-WINDOWS-HOSTED-LOOP-PASSES-A-FAILED-HARNESS`,
+`MUT-TEST-WINDOWS-HOSTED-LOOP-DROPS-THE-FAILED-CODE`,
+`MUT-TEST-WINDOWS-HOSTED-CODE-KEPT-AFTER-THE-COPIES` and
+`MUT-TEST-WINDOWS-HOSTED-OUTPUT-COPY-UNGUARDED`.
 
 ## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {` › `let holds_cargo = |line: &str| {`
 
@@ -2616,10 +2650,17 @@ lines 5 and 6 of the script as it then stood, and Cargo's exit was line 7.
 A listing that failed after Cargo exited 101 would then have ended the step
 with PowerShell's error in place of 101. A frontier review read that from
 the text; no run showed it. With the two inside the `try` and the exit on
-the line after the `catch`, a failed suite exits with its failing harness's
-code whatever the reading and the listing did. A suite that passed is not
-excused: the `catch` throws again, because nothing was read or listed, so
-nothing can be counted.
+the line after the `catch`, the reading and the listing cannot replace the
+failing harness's code. Nor can the loop's copies, but that is the seventh
+complaint's to hold, not this one's: the loop keeps a harness's code
+before it copies the harness's logs, each copy has its own `try`, and a
+copy that fails is printed, and is fatal only for a harness that passed.
+Until the loop kept the code first, a copy that failed after a harness
+exited 101 ended the step on PowerShell's error before the code was kept,
+so a failed suite did not then exit with its failing harness's code
+whatever the reading did. A suite that passed is not excused: the `catch`
+throws again, because nothing was read or listed, so nothing can be
+counted, and so does a copy's `catch` for a harness that passed.
 
 The closing brace of the `try` is not read. PowerShell accepts a `catch`
 only straight after a `try` block, so a line 8 that closed its `try` early
@@ -2715,7 +2756,7 @@ eleven lines, nor since it became fourteen, when the floor moved to line
 The complaints of [`windows_suite_wait_complaints`] that the oracle's pin
 cannot refuse, executed on the shards' script, `WINDOWS_SHARD_WITNESS`:
 every one but the second and the eighth. The script as the workflow runs it
-draws no complaint, and each of twenty-one edits to it draws exactly one,
+draws no complaint, and each of twenty-three edits to it draws exactly one,
 the one the edit is made for. The test's name is for the ninth and the
 tenth, which were all it executed until the legs reported their tests'
 times. Until 2026-11-20 its edits, eight then, were made to the guest's
@@ -2767,6 +2808,11 @@ written for it:
   `-Z unstable-options --report-time`;
 - the seventh, two: the loop going on past a harness that failed, and
   stopping at it without keeping its code.
+
+Two more, each drawing the seventh, came when the loop came to keep each
+harness's code before it copies the harness's two outputs: the code kept
+only after the copies, and the standard output copied outside a `try` of
+its own.
 
 Exactly one complaint, not at least one. So the test also shows that each
 edit is refused by the complaint written for it and by no other: a second
