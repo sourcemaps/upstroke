@@ -13765,14 +13765,15 @@ fn sampled_git_child_runs_the_resolved_real_git_on_windows() {
 }
 
 /// A sampled git's own children die with its kill, on every platform: git
-/// runs an alias whose shell writes `started`, sleeps three seconds and then
-/// writes `late`; once `started` exists the child is killed and waited for,
-/// and five seconds later `late` does not exist. On Unix the process-group
-/// kill passes it and a kill of the direct child alone (`Child::kill`) fails
-/// it, because the shell runs on and writes `late`; on Windows it is what
-/// shows the job's kill reaches what git started.
+/// runs an alias whose shell writes `started`, then waits on its stdin, then
+/// writes `late`; once `started` exists the child is killed, its stdin is
+/// then closed, and after the wait `late` does not exist. On Unix the
+/// process-group kill passes it and a kill of the direct child alone
+/// (`Child::kill`) fails it, because the surviving shell reads end-of-file
+/// and writes `late` before the group empties, and the wait awaits that; on
+/// Windows it is what shows the job's kill reaches what git started.
 ///
-/// The alias holds no quote of its own: bare words, `>` and `&&` mean the
+/// The alias holds no quote of its own: bare words, `;` and `>` mean the
 /// same to Git for Windows' `sh` and to a Unix `sh`, and an argument with no
 /// quote in it passes through Windows' command line back to git unchanged.
 #[test]
@@ -13782,30 +13783,35 @@ fn a_sampled_childs_own_children_die_with_its_kill() {
     git(repository, &["init", "-q"]);
     let started = repository.join("started");
     let late = repository.join("late");
-    let mut child = SampledChild::spawn(
+    let mut command = SampledChild::command(
+        SampledChild::program(),
         repository,
         &[
             "-c".to_owned(),
-            "alias.hold=!echo started > started && sleep 3 && echo late > late".to_owned(),
+            "alias.hold=!echo started > started; read hold; echo late > late".to_owned(),
             "hold".to_owned(),
         ],
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    command.stdin(Stdio::piped());
+    let mut child = SampledChild::spawn_command(command);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let mut seen = started.exists();
     while !seen && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(10));
         seen = started.exists();
     }
     // Killed and reaped whether or not the shell got going, so a failure
-    // below leaves nothing running.
+    // below leaves nothing running. Its stdin is closed between the two: a
+    // shell the kill missed reads end-of-file there and writes `late`, and
+    // the wait does not end until every process git started is gone.
     let killed = child.kill();
+    drop(child.child.stdin.take());
     let status = child.wait().expect("reap the sampled git child");
     assert!(
         seen,
-        "the alias's shell never wrote {} within 10 s; git ended {status:?}",
+        "the alias's shell never wrote {} within 60 s; git ended {status:?}",
         started.display()
     );
-    std::thread::sleep(std::time::Duration::from_secs(5));
     assert!(
         !late.exists(),
         "{} exists: a process the sampled git started outlived its kill (the kill answered \
@@ -15107,14 +15113,20 @@ fn head_reflog(slot: &Path) -> String {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    let Ok(located) = String::from_utf8(output.stdout) else {
+    // Git's answer stays bytes, less the run of `\r` and `\n` that ends it: a
+    // path is never assumed to be UTF-8 (§8), and on Unix any bytes are one.
+    let mut located = output.stdout.as_slice();
+    while let [rest @ .., b'\r' | b'\n'] = located {
+        located = rest;
+    }
+    let Ok(located) = super::parsers::decode_path(located) else {
         return "not located: `git rev-parse --git-path logs/HEAD` printed a path that is not \
                 UTF-8"
             .to_owned();
     };
     // Relative to the directory it ran in when it is not absolute, and
     // `join` keeps an absolute one as it is.
-    let file = slot.join(located.trim_end_matches(['\r', '\n']));
+    let file = slot.join(located);
     match fs::read(&file) {
         Ok(bytes) => {
             let shown = &bytes[bytes.len().saturating_sub(REPORTED_REFLOG_BYTES)..];
@@ -15350,6 +15362,104 @@ fn the_census_sample_report_names_what_a_failed_sample_left() {
             path.display()
         )),
         "a slot the recovery removed is reported absent: {gone}"
+    );
+}
+
+/// [`head_reflog`] reads a reflog whose path holds a byte no UTF-8 spells:
+/// it keeps `git rev-parse --git-path logs/HEAD`'s answer as bytes and
+/// decodes it with `parsers::decode_path`, so the report holds the reflog's
+/// bytes where reading the answer as UTF-8 said "not UTF-8" and lost them
+/// (§8: a path is never assumed to be UTF-8).
+///
+/// The worktree asked is a linked one at an ASCII path, not the byte-named
+/// repository's main worktree: there Git answers the relative
+/// `.git/logs/HEAD`, which reaches the file with no byte of the name in it,
+/// while a linked worktree's answer is the absolute path of its reflog inside
+/// the byte-named repository's `.git/worktrees/<name>/`. Unix, where such a
+/// path exists at all, and skipped where the filesystem refuses the name
+/// with `EILSEQ`, as
+/// `an_absent_add_target_in_a_byte_named_repository_still_classifies` is.
+#[cfg(unix)]
+#[test]
+fn the_report_reads_a_reflog_whose_path_is_not_utf8() {
+    use std::os::unix::ffi::OsStringExt as _;
+    let tree = scratch("byte-named-reflog");
+    let root = tree.path();
+    let repo = root.join(std::ffi::OsString::from_vec(b"repo-\xff".to_vec()));
+    match fs::create_dir_all(&repo) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
+            eprintln!(
+                "skipped: this filesystem refuses a directory name that is not UTF-8 — {error} \
+                 (errno {:?}, EILSEQ) — so the byte-named repository whose reflog is read cannot \
+                 exist here, and neither can the path this test reads it by",
+                error.raw_os_error()
+            );
+            return;
+        }
+        Err(error) => panic!("a repository directory Git can name and UTF-8 cannot: {error}"),
+    }
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["config", "user.email", "tests@upstroke.local"],
+        &["config", "user.name", "upstroke tests"],
+    ] {
+        let output = git_out(&repo, args);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    fs::write(repo.join("a.txt"), "one\n").expect("seed file");
+    for args in [&["add", "-A"][..], &["commit", "-q", "-m", "seed"]] {
+        let output = git_out(&repo, args);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let worktree = root.join("linked");
+    git_os(
+        &repo,
+        &[
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("-q"),
+            worktree.as_os_str(),
+            OsStr::new("-b"),
+            OsStr::new("linked"),
+        ],
+    );
+
+    // The worktree's administrative directory, the one entry Git made under
+    // the repository's `.git/worktrees/`.
+    let admins = fs::read_dir(repo.join(".git").join("worktrees"))
+        .expect("the repository's .git/worktrees")
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .expect("the entries of .git/worktrees");
+    let [admin] = admins.as_slice() else {
+        panic!("one linked worktree is registered: {admins:?}");
+    };
+    let head = git(&worktree, &["rev-parse", "HEAD"]);
+    let zero = "0".repeat(40);
+    // The last line is torn mid-entry, without its newline.
+    let bytes = format!(
+        "{zero} {head} upstroke tests <tests@upstroke.local> 1700000000 +0000\tbranch: Created \
+         from HEAD\n{head} {zero} upstroke tests <tests@upstr"
+    )
+    .into_bytes();
+    // `write_file` makes `logs/` when it is absent.
+    write_file(&admin.join("logs").join("HEAD"), &bytes);
+
+    let answered = head_reflog(&worktree);
+    assert!(
+        answered.contains(&format!("all {} bytes of ", bytes.len()))
+            && answered.contains(&format!(": \"{}\"", bytes.escape_ascii())),
+        "the reflog of a worktree whose repository's path is not UTF-8 is read, its torn last \
+         line exactly as it is: {answered}"
     );
 }
 
