@@ -1173,42 +1173,177 @@ fn timeout_kills_a_background_grandchild_before_it_can_escape() {
 }
 
 #[cfg(unix)]
-fn every_pipe_writer_is_gone(fd: libc::c_int) -> bool {
+fn every_fifo_writer_is_gone_by(
+    deadline: Instant,
+    read: &mut dyn FnMut(&mut [u8]) -> std::io::Result<usize>,
+    now: &mut dyn FnMut() -> Instant,
+) -> bool {
     let mut buffer = [0_u8; 256];
     loop {
-        // SAFETY: `fd` is a live non-blocking read end owned by this test
-        // and `buffer` is a writable buffer of the length passed.
-        let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
-        match read {
-            0 => return true,
-            1.. => (),
-            _ => return false,
+        let ask_again_at_once = match read(&mut buffer) {
+            Ok(0) => return true,
+            Ok(_) => true,
+            Err(error) => error.kind() == std::io::ErrorKind::Interrupted,
+        };
+        let reading = now();
+        if reading >= deadline {
+            return false;
+        }
+        if !ask_again_at_once {
+            crate::workspace_manager::fixture::rest_within(
+                Duration::from_millis(10),
+                deadline.saturating_duration_since(reading),
+            );
         }
     }
 }
 
 #[cfg(unix)]
 #[test]
+fn the_fifo_writer_poll_answers_by_its_deadline_whatever_the_reads_say() {
+    struct Case {
+        name: &'static str,
+        script: &'static [Result<usize, i32>],
+        then: Result<usize, i32>,
+        deadline_after: Duration,
+        settled: bool,
+        reads: usize,
+    }
+    let five = Duration::from_secs(5);
+    let cases = [
+        Case {
+            name: "end of file at once",
+            script: &[],
+            then: Ok(0),
+            deadline_after: five,
+            settled: true,
+            reads: 1,
+        },
+        Case {
+            name: "bytes drained, then end of file",
+            script: &[Ok(3)],
+            then: Ok(0),
+            deadline_after: five,
+            settled: true,
+            reads: 2,
+        },
+        Case {
+            name: "an interrupted read asked again, then end of file",
+            script: &[Err(libc::EINTR)],
+            then: Ok(0),
+            deadline_after: five,
+            settled: true,
+            reads: 2,
+        },
+        Case {
+            name: "a writer held past the deadline",
+            script: &[],
+            then: Err(libc::EAGAIN),
+            deadline_after: five,
+            settled: false,
+            reads: 5,
+        },
+        Case {
+            name: "every read interrupted",
+            script: &[],
+            then: Err(libc::EINTR),
+            deadline_after: five,
+            settled: false,
+            reads: 5,
+        },
+        Case {
+            name: "bytes without end",
+            script: &[],
+            then: Ok(1),
+            deadline_after: five,
+            settled: false,
+            reads: 5,
+        },
+        Case {
+            name: "a read that fails otherwise",
+            script: &[],
+            then: Err(libc::EBADF),
+            deadline_after: five,
+            settled: false,
+            reads: 5,
+        },
+        Case {
+            name: "the deadline already passed, end of file",
+            script: &[],
+            then: Ok(0),
+            deadline_after: Duration::ZERO,
+            settled: true,
+            reads: 1,
+        },
+        Case {
+            name: "the deadline already passed, a writer held",
+            script: &[],
+            then: Err(libc::EAGAIN),
+            deadline_after: Duration::ZERO,
+            settled: false,
+            reads: 1,
+        },
+    ];
+    for case in cases {
+        let start = Instant::now();
+        let mut readings = 0_u32;
+        let mut clock = || {
+            readings += 1;
+            start + Duration::from_secs(u64::from(readings))
+        };
+        let mut outcomes = case.script.iter().copied();
+        let mut reads = 0_usize;
+        let mut read = |_: &mut [u8]| {
+            reads += 1;
+            outcomes
+                .next()
+                .unwrap_or(case.then)
+                .map_err(std::io::Error::from_raw_os_error)
+        };
+        let settled =
+            every_fifo_writer_is_gone_by(start + case.deadline_after, &mut read, &mut clock);
+        assert_eq!(settled, case.settled, "{}", case.name);
+        assert_eq!(reads, case.reads, "{}", case.name);
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
-    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::process::CommandExt;
 
-    let scratch = std::env::temp_dir().join(format!(
-        "upstroke-kill-tree-{}-{}",
-        std::process::id(),
-        crate::ulid::ulid()
-    ));
-    std::fs::create_dir_all(&scratch).expect("scratch directory");
-    let ready = scratch.join("ready");
+    let parent = std::env::temp_dir();
+    let scratch = match crate::rundir::scratch_tree::acquire(&parent, "kill-tree") {
+        Ok(scratch) => scratch,
+        Err(refusal) => panic!(
+            "a scratch tree for `kill-tree` under {}: {refusal:?}",
+            parent.display()
+        ),
+    };
+    let ready = scratch.path().join("ready");
+    let fifo = scratch.path().join("writer");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).expect("a path without NUL");
+    // SAFETY: `name` is a NUL-terminated string that outlives the call.
+    let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+    assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    let mut writers = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&fifo)
+        .expect("open the fifo's reading end");
     let mut command = shell(
-        "sh -c 'printf \"ready\\n\" > \"$UPSTROKE_READY.publishing\"; \
-         mv \"$UPSTROKE_READY.publishing\" \"$UPSTROKE_READY\"; sleep 60' & sleep 60",
+        "sh -c 'exec 3>\"$UPSTROKE_FIFO\" && \
+         printf \"ready\\n%s\\n\" \"$$\" > \"$UPSTROKE_READY.publishing\" && \
+         mv \"$UPSTROKE_READY.publishing\" \"$UPSTROKE_READY\" && sleep 60' & sleep 60",
     );
     command
+        .env("UPSTROKE_FIFO", &fifo)
         .env("UPSTROKE_READY", &ready)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::null());
     // SAFETY: the closure calls one async-signal-safe syscall. The group is
     // what `kill_tree` targets, so the fixture must have one of its own.
     unsafe {
@@ -1221,22 +1356,32 @@ fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
     }
     let mut tree = ProcessTree::spawn(&mut command, &mut NoHooks).expect("spawn a group leader");
     let pgid = i32::try_from(tree.child.id()).expect("pid fits");
-    let stderr = tree.child.stderr.take().expect("piped stderr");
-    let fd = stderr.as_raw_fd();
-    // SAFETY: `fd` is owned by `stderr`, which outlives this call.
-    unsafe {
-        libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK);
-    }
     let published = readiness::await_signal(&ready, &mut tree.child, Duration::from_secs(10))
         .or_fail("the grandchild never started");
+    let [marker, holder] = published.as_slice() else {
+        panic!("the marker became visible with its content, not before it: {published:?}");
+    };
     assert_eq!(
-        published,
-        ["ready"],
+        marker, "ready",
         "the marker became visible with its content, not before it"
     );
+    let holder: i32 = holder.parse().expect("the grandchild published its pid");
+    // SAFETY: `getpgid` reads process-table state for the pid the fixture
+    // published; it delivers nothing and borrows nothing.
+    let holders_group = unsafe { libc::getpgid(holder) };
     assert!(
-        !every_pipe_writer_is_gone(fd),
-        "the fixture holds no pipe, so this test would pass vacuously"
+        holder != pgid && holders_group == pgid,
+        "the fifo's writer is not a non-leading member of the child's group: pid {holder} \
+         answered group {holders_group}, the child leads {pgid}"
+    );
+    let mut byte = [0_u8; 1];
+    let held_before = matches!(
+        writers.read(&mut byte),
+        Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock
+    );
+    assert!(
+        held_before,
+        "the grandchild holds no writer of the fifo, so this test would pass vacuously"
     );
 
     kill_tree(
@@ -1247,19 +1392,18 @@ fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
     )
     .expect("settle the group");
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut settled = every_pipe_writer_is_gone(fd);
-    while !settled && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-        settled = every_pipe_writer_is_gone(fd);
-    }
+    let settled = every_fifo_writer_is_gone_by(
+        deadline,
+        &mut |buffer| writers.read(buffer),
+        &mut Instant::now,
+    );
     // SAFETY: a negative pid names the group; this is cleanup for the
     // failing case and a no-op for the passing one.
     unsafe {
         let _ = libc::kill(-pgid, libc::SIGKILL);
     }
-    drop(stderr);
+    drop(writers);
     drop(tree);
-    let _ = std::fs::remove_dir_all(&scratch);
     assert!(
         settled,
         "kill_tree returned while a member of the child's process group was still \
