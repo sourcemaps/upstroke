@@ -1411,8 +1411,6 @@ pub enum Progress {
     BudgetExceeded,
 }
 
-/// The reset a back-off waits toward: the pool whose limit named it, the reset as its
-/// `pool_exhausted` recorded it, and the Unix second the wait ends, two minutes past it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AwaitedReset {
     pool: String,
@@ -1841,8 +1839,6 @@ impl TopologyRun {
         Ok(Progress::Waited { waited_ms, round })
     }
 
-    /// The earliest known reset among the pools the deferred tasks' limits named, when one is
-    /// ahead within [`interaction::RESET_WAIT_BOUND`].
     fn awaited_reset(&self, now_unix: u64) -> Option<AwaitedReset> {
         let fold = &self.handle.fold;
         let len = fold.registry().map_or(0, |registry| {
@@ -1872,8 +1868,6 @@ impl TopologyRun {
         })
     }
 
-    /// Tell each notifier once that the run waits for `awaited`'s reset
-    /// ([`interaction::reset_wait_line`]); the CLI's prints it to standard error.
     fn announce_reset_wait(&self, awaited: &AwaitedReset, now_unix: u64) {
         let wait = std::time::Duration::from_secs(awaited.until_unix.saturating_sub(now_unix));
         let line = interaction::reset_wait_line(&awaited.pool, &awaited.reset_at, wait);
@@ -3015,7 +3009,6 @@ fn escalated_onto(settlement: &AttemptSettlement) -> Option<u32> {
     }
 }
 
-/// The record of `key`'s latest settled attempt: its last `attempt_finished`.
 fn last_settled_record(events: &[TopologyEvent], key: TaskKey) -> Option<&AttemptRecord> {
     events.iter().rev().find_map(|event| match &event.body {
         TopologyEventBody::AttemptFinished { data } if data.key == key => Some(&*data.record),

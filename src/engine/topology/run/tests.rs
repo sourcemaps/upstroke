@@ -2169,7 +2169,6 @@ fn a_deferred_rate_limit_naming_a_reset_is_waited_out_to_two_minutes_past_it() {
     }
 }
 
-/// The back-off with no known reset to wait for: one minute, then `defer_wait_elapsed`.
 fn assert_backs_off_as_before(tag: &str, steps: &[Stepped], sleeper: &RecordingSleeper) {
     assert_eq!(
         sleeper.slept(),

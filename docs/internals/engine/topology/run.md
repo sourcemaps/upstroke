@@ -1502,8 +1502,10 @@ memory of exhausted pools:
    chooses it (`capacity::limited_pool`);
 4. that pool's recorded reset in `exhausted_pools`, read as Unix seconds
    by [`unix_seconds_of`];
-5. the earliest of those resets that `interaction::reset_wait_until` waits
-   for, given the run's clock.
+5. the earliest of those resets that is ahead of the run's clock by at
+   most `interaction::RESET_WAIT_BOUND`, the one
+   `interaction::reset_wait_until` waits for. With none ahead within the
+   bound it answers `None`.
 
 The pool and reset text come back with the target, for the line
 [`Self::announce_reset_wait`] prints. A pool a later attempt proved serving
@@ -1518,7 +1520,19 @@ A notifier named twice in `[interaction] notify` is told once.
 
 ## `struct AwaitedReset {`
 
-What [`TopologyRun::awaited_reset`] chose. `until_unix` is the target
+What [`TopologyRun::awaited_reset`] chose.
+
+## `struct AwaitedReset` › `pool: String,`
+
+The pool whose limit named the reset.
+
+## `struct AwaitedReset` › `reset_at: String,`
+
+The reset as the pool's `pool_exhausted` recorded it.
+
+## `struct AwaitedReset` › `until_unix: u64,`
+
+The Unix second the wait ends, two minutes past the reset: the target
 `Deferral::wait_toward` is given, and `Progress::Waiting` reports it.
 
 ## `fn last_settled_record(events: &[TopologyEvent], key: TaskKey) -> Option<&AttemptRecord> {`
