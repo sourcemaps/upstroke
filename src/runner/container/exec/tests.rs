@@ -6262,8 +6262,13 @@ fn real_docker_withholds_an_image_credential_variable_from_a_role_that_takes_non
 fn real_docker_a_container_contains_a_daemonised_descendant() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    const LEADER_MARKER: &str = "903222";
-    const DESCENDANT_MARKER: &str = "903111";
+    struct SetOnDrop<'flag>(&'flag AtomicBool);
+
+    impl Drop for SetOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
 
     fn pids_with(marker: &str) -> Vec<String> {
         let mut found = Vec::new();
@@ -6288,6 +6293,15 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
         }
         found
     }
+
+    let clock = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let pid = std::process::id();
+    let namespace = std::fs::metadata("/proc/self/ns/pid")
+        .map_or(0, |found| std::os::unix::fs::MetadataExt::ino(&found));
+    let leader_marker = format!("1{pid:07}.{namespace:020}{clock:039}");
+    let descendant_marker = format!("2{pid:07}.{namespace:020}{clock:039}");
 
     let trace = ContainerTrace::recording();
     let docker = match docker_gate(
@@ -6329,11 +6343,11 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
     let mut request = gate_request(
         ShellKind::Sh.spec(&format!(
             "if command -v setsid >/dev/null 2>&1; then \
-               setsid sleep {DESCENDANT_MARKER} >/dev/null 2>&1 & \
+               setsid sleep {descendant_marker} >/dev/null 2>&1 & \
              else \
-               sleep {DESCENDANT_MARKER} >/dev/null 2>&1 & \
+               sleep {descendant_marker} >/dev/null 2>&1 & \
              fi; \
-             sleep {LEADER_MARKER}"
+             sleep {leader_marker}"
         )),
         workspace,
         Duration::from_secs(120),
@@ -6347,14 +6361,16 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
             let mut leader = false;
             let mut descendant = false;
             while !(returned.load(Ordering::SeqCst) || (leader && descendant)) {
-                leader |= !pids_with(LEADER_MARKER).is_empty();
-                descendant |= !pids_with(DESCENDANT_MARKER).is_empty();
+                leader |= !pids_with(&leader_marker).is_empty();
+                descendant |= !pids_with(&descendant_marker).is_empty();
                 std::thread::sleep(Duration::from_millis(50));
             }
             (leader, descendant)
         });
-        let ran = runner.run_blocking(&request);
-        returned.store(true, Ordering::SeqCst);
+        let ran = {
+            let _returned = SetOnDrop(&returned);
+            runner.run_blocking(&request)
+        };
         let output = ran.expect("runs");
         assert!(output.timed_out, "the fixture did not reach its timeout");
         sampler.join().expect("the sampler panicked")
@@ -6366,8 +6382,8 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
          containment assertion below would hold vacuously"
     );
 
-    let leader = pids_with(LEADER_MARKER);
-    let descendant = pids_with(DESCENDANT_MARKER);
+    let leader = pids_with(&leader_marker);
+    let descendant = pids_with(&descendant_marker);
     assert!(
         descendant.is_empty(),
         "a `setsid`-detached descendant survived its container, so \

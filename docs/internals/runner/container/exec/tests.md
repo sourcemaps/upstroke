@@ -2136,31 +2136,66 @@ host process-group kill (`agent::proc`'s whole subject), and it is
 observed **in the host's own process table** rather than by timing: a
 container's processes are ordinary host processes in another namespace,
 so `/proc/<pid>/cmdline` can name them. Each `sleep` carries a marker
-argument nothing else on the machine uses.
+argument this run computes from its own pid, pid namespace and clock,
+so another run sharing it is ruled out by construction rather than left
+to chance, short of a wall clock set back to the nanosecond (see the
+markers below; `CONTAINER-DESCENDANT-TEST-SCANS-THE-WHOLE-HOST`).
 
 The intersection: {leader, detached descendant} × {container running,
 container reclaimed}. The two "running" cells are the control — without
 them a test in which nothing ever started would pass.
 
-## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `const LEADER_MARKER: &str = "903222";`
+## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `let clock = std::time::SystemTime::now()`
 
-Distinct markers, so the leader and the descendant are told apart by
-value and not by order.
+The two markers, the run's own. `pids_with` reads every process on the
+host, so a fixed pair (it was `903222` and `903111`) was shared by every
+run of the suite on one machine: a run that had removed its container
+found another run's live `sleep` and reported it as its own leaked
+descendant (`CONTAINER-DESCENDANT-TEST-SCANS-THE-WHOLE-HOST`).
+
+Each marker is a decimal number. Its integer part is one role digit
+(`1` the leader, `2` the descendant) and this process's id in seven
+digits (the kernel's ceiling, 4 194 304, fits). Its fraction is the
+inode of this process's pid namespace (`/proc/self/ns/pid`) in twenty
+digits and the wall clock's whole reading, nanoseconds since the epoch,
+untruncated, in thirty-nine. Every field has a fixed width, so no two
+(role, pid, namespace, clock) tuples spell the same string.
+
+- Two runs alive at once differ by construction: in one pid namespace
+  their pids differ, and in two live namespaces the namespace inodes
+  differ, so the local pid each sees may be the same without the
+  markers being so.
+- A run and a `sleep` left by an earlier run whose pid and namespace it
+  reuses differ by the clock, which is kept whole rather than wrapped,
+  so they meet only if the wall clock has been set back to the very
+  nanosecond the earlier run read.
+
+That last case is the one the construction does not rule out; nothing
+else shares the markers. Distinct roles, so the leader and the
+descendant are told apart by value and not by order.
 
 They are the **durations** the two `sleep` calls are given, so they
 have to be numbers — `sleep 999111r3b` answers `invalid number` and
 exits 1, which is a container that ends before its timeout and a
-fixture that measures nothing. Two implausible second counts, far
-apart in value, are what makes them recognisable in `/proc` without
-making them unrunnable.
+fixture that measures nothing. The fraction is where the identity
+goes so that the duration itself stays an ordinary one: the integer
+part is at most about 3·10⁷ seconds, far beyond the thirty-second
+timeout, and a `sleep` that parses fractions reads the long tail as a
+fraction of a second. A `sleep` that refused it would exit at once, and
+the controls in `let seen` would fail rather than pass vacuously. Where
+`/proc` is missing the namespace reads as zero, but there `pids_with`
+finds nothing either and those controls fail the same way.
 
 ## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `fn pids_with(marker: &str) -> Vec<String> {`
 
 Every pid whose argv contains `marker`, read from `/proc`.
 
-`contains` over argv entries rather than a substring of the whole
-buffer, so this process's own command line — which carries the
-marker as a literal in the binary, not in argv — cannot match.
+Equality with whole argv entries rather than a substring of the whole
+buffer, so the `sh -c` that runs the fixture, whose single script
+argument mentions both markers, cannot match; only the `sleep`s, which
+take a marker as an argument of its own, do. It reads the whole host on purpose: the
+container's processes are host processes in another namespace, and the
+markers being the run's own is what makes the whole host safe to read.
 
 ## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `let mut request = gate_request(`
 
@@ -2180,15 +2215,18 @@ The controls, sampled from another thread while the invocation is in
 flight: both processes really are on this machine.
 
 The sampler polls every 50 ms until it has seen both or `returned` is
-set. The main thread sets it as soon as `run_blocking` returns, before
-unwrapping or asserting on the result and before the join, so an
-invocation that fails cannot leave the scope waiting on a sampler with
-nothing to see. It has no deadline of its own because the invocation's
-return already bounds it, and one of its own could expire during a slow
-Docker start the thirty-second timeout still allows, failing the
-controls although both processes ran (`CI-FLAKE-REAL-DOCKER-START-DEADLINE`).
+set. A `SetOnDrop` guard held across `run_blocking` sets it when the
+call ends either way: on return, before unwrapping or asserting on the
+result and before the join, and on unwind, when the guard is dropped as
+the panic leaves its block. So neither an invocation that fails nor one
+that panics can leave the scope waiting on a sampler with nothing to
+see; the scope joins the sampler and the panic carries on. It has no
+deadline of its own because the invocation's end already bounds it,
+and one of its own could expire during a slow Docker start the
+thirty-second timeout still allows, failing the controls although both
+processes ran (`CI-FLAKE-REAL-DOCKER-START-DEADLINE`).
 
-## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `let leader = pids_with(LEADER_MARKER);`
+## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `let leader = pids_with(&leader_marker);`
 
 The container is gone, and so is everything it contained. The
 descendant left the leader's session, so a cancellation that killed
