@@ -755,6 +755,34 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_attempt_whose_result_says_you_hit_your_limit_is_rate_limited() {
+        let stdout = r#"{"type":"result","is_error":true,
+            "result":"You've hit your 5-hour limit · resets 5:30am (UTC)","session_id":"s1"}"#;
+        let outcome = parse_output(&output(Some(1), stdout, ""));
+        assert_eq!(outcome.status, OutcomeStatus::RateLimited);
+        assert_eq!(
+            outcome.detail.as_deref(),
+            Some("You've hit your 5-hour limit · resets 5:30am (UTC)")
+        );
+    }
+
+    #[test]
+    fn you_hit_your_limit_on_stderr_is_rate_limited() {
+        let stderr = "You've hit your 5-hour limit · resets 5:30am (UTC)";
+        let outcome = parse_output(&output(Some(1), "", stderr));
+        assert_eq!(outcome.status, OutcomeStatus::RateLimited);
+    }
+
+    #[test]
+    fn a_successful_task_about_hitting_a_limit_is_not_rate_limited() {
+        let stdout = r#"{"type":"result","subtype":"success","is_error":false,
+            "result":"Handled the case where you've hit your 5-hour limit.",
+            "session_id":"s1","total_cost_usd":0.2}"#;
+        let outcome = parse_output(&output(Some(0), stdout, ""));
+        assert_eq!(outcome.status, OutcomeStatus::Completed);
+    }
+
+    #[test]
     fn json_error_failures_carry_a_reportable_detail() {
         let stdout = r#"{"type":"result","subtype":"error_max_turns","is_error":true,
             "session_id":"s1","result":"Reached the maximum number of turns."}"#;

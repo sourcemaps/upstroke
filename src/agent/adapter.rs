@@ -218,6 +218,9 @@ pub fn looks_rate_limited(text: &str) -> bool {
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+        || lower
+            .split_once("hit your")
+            .is_some_and(|(_, after)| after.contains("limit"))
 }
 
 #[cfg(test)]
@@ -456,6 +459,33 @@ mod tests {
             assert!(looks_rate_limited(phrase), "should signal: {phrase}");
         }
         assert!(!looks_rate_limited("wrote the pagination cursor encoder"));
+    }
+
+    #[test]
+    fn the_observed_hit_your_five_hour_limit_message_signals() {
+        assert!(looks_rate_limited(
+            "You've hit your 5-hour limit · resets 5:30am (UTC)"
+        ));
+    }
+
+    #[test]
+    fn a_hit_your_weekly_limit_message_signals() {
+        assert!(looks_rate_limited("You've hit your weekly limit"));
+    }
+
+    #[test]
+    fn limit_before_hit_your_and_none_after_does_not_signal() {
+        for text in [
+            "no limit was hit; your change is in",
+            "lifted the request limit before the patch hit your branch",
+        ] {
+            assert!(!looks_rate_limited(text), "should not signal: {text}");
+        }
+    }
+
+    #[test]
+    fn hit_your_without_limit_does_not_signal() {
+        assert!(!looks_rate_limited("the patch hit your branch cleanly"));
     }
 
     #[test]

@@ -300,6 +300,28 @@ Phrases cover the subscription-window wording Claude Code prints ("5-hour
 limit reached", "Weekly limit reached"), Copilot's credit and premium-request
 wording (§13's two billing shapes), and API-level errors underneath either.
 
+Claude Code has since changed that wording. In run
+`01M740JX5N8HB94RNC7W2MM777` (2026-11-11), the CLI exited with code 1 and
+the event log recorded `You've hit your 5-hour limit · resets 5:30am (UTC)`.
+None of the twelve phrases matches that text. Before this rule existed,
+twenty-one attempts in that run were read as `AgentError` and spent an
+attempt each, when they should have been read as `RateLimited` and deferred.
+Twelve tasks parked without a commit.
+
+So one rule sits beside the phrases: the text, in lower case, contains
+"hit your" and then contains "limit" somewhere after it. The order matters.
+"limit" only before "hit your" does not signal, and neither does "hit your"
+with no "limit". The rule takes the text after the first "hit your". If any
+later "hit your" is followed by "limit", the first one is too, so checking
+the first is enough. The rule uses `split_once` and `contains` on the string
+that is already lower-cased, so it allocates nothing more and cannot panic.
+
+Only the five-hour form has been observed. The rule is written to also cover
+the likely siblings, "You've hit your weekly limit" and "You've hit your
+session limit", without one phrase per window. Neither sibling has been seen
+from the CLI. If Claude Code prints them some other way, this rule will not
+match them.
+
 Only ever consulted for a FAILED attempt: a successful task *about* rate
 limiting ("added backoff for 429 responses") must never be read as the pool
 being exhausted, or verified work gets rolled back.
@@ -393,6 +415,38 @@ An id that could not survive a container name is refused rather than
 carried. `decisions.pr_sequence[7].scope` puts an invocation id inside
 `<R>/containers/<name>.intent`, and `.` is the identity's own field
 separator.
+
+## `mod tests` › `fn the_observed_hit_your_five_hour_limit_message_signals() {`
+
+This is the message Claude Code printed when an account reached its limit,
+copied verbatim from the event log of run `01M740JX5N8HB94RNC7W2MM777`
+(2026-11-11, exit code 1), middle dot included. None of the twelve phrases
+matches it, so only the "hit your … limit" rule can make it signal. Remove
+the rule and this test fails.
+
+## `mod tests` › `fn a_hit_your_weekly_limit_message_signals() {`
+
+The weekly window in the same wording. Nobody has seen this text from the
+CLI. Only the five-hour form has been observed. The test pins what the rule
+claims to cover: the wording, not one particular window.
+
+## `mod tests` › `fn limit_before_hit_your_and_none_after_does_not_signal() {`
+
+"limit" before "hit your", with no "limit" after it, does not signal. The
+order is the rule.
+
+The first text, "no limit was hit; your change is in", is the example from
+the task that added the rule. Its semicolon means it never contains "hit
+your" as a substring. That makes it a fair negative, but it cannot catch a
+rule that ignores order. The second text has a real "hit your" with "limit"
+only before it, and that one does catch it. If the rule were changed to
+match "limit" anywhere in a text that contains "hit your", the second text
+would signal and this test would fail.
+
+## `mod tests` › `fn hit_your_without_limit_does_not_signal() {`
+
+"hit your" alone is ordinary English, as in a patch that hit your branch. It
+is not a limit message, so the rule also needs "limit".
 
 ## `mod built_program_tests` › `struct Boundary {`
 
