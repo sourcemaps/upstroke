@@ -12446,7 +12446,7 @@ fn a_call_census_needle_is_not_satisfied_by_a_longer_name_ending_in_it() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let source =
         std::fs::read_to_string(manifest.join("src/workspace_manager.rs")).expect("a source file");
-    let moved = std::fs::read_to_string(manifest.join("src/workspace_manager/tests.rs"))
+    let moved = std::fs::read_to_string(manifest.join("src/workspace_manager/tests/refs.rs"))
         .expect("a source file");
     let code = crate::effects::production_code(&source);
     let whole = source.matches("expected_refs(").count() + moved.matches("expected_refs(").count();

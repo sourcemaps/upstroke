@@ -4411,10 +4411,11 @@ line** of `refuse_unexpected_refs`, which the "calls, not definitions"
 filter does not catch: the text before the match is `pub fn refuse_un`,
 and that does not end in `fn`.
 
-The three that `production_code` blanks now sit in the sibling file
-`mod tests;` declares, so the module is two files and `whole` is read
-from both. The comparison is the one it always was: every occurrence the
-module carries, against the one the production region keeps.
+The three excluded test calls now sit in `workspace_manager/tests/refs.rs`,
+declared by `tests.rs` through `mod refs;`. `whole` reads that topic file and
+`workspace_manager.rs`; `production_code` still reads only the production
+file. The comparison is the one it always was: every occurrence the module
+carries, against the one the production region keeps.
 
 ## `fn every_packet_named_recovery_action_has_a_production_caller() {`
 

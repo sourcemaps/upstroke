@@ -8638,14 +8638,17 @@ const REAPER_TESTS: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "src/engine/topology/coordinator.rs",
+        "src/engine/topology/coordinator/tests.rs",
+        &["stranded_child"],
+    ),
+    (
+        "src/engine/topology/coordinator/tests/runners.rs",
         &[
             "reaper_finished",
             "reclaimed_by_its_reaper",
             "a_resume_killed_inside_its_pre_flight_probe",
             "a_resuming_incarnations_pre_flight_probe_container_is_killed_by_its_reaper_when_the_coordinator_dies_inside_it",
             "the_reapers_scope_is_the_runners_identity_and_selects_its_first_probe",
-            "stranded_child",
             "a_runner_whose_containers_are_unresolved_keeps_its_reaper_armed_past_its_last_handle_until_the_process_exits",
             "a_contained_run_with_its_reaper_relayed",
             "released_by_their_own_runner_and_never_reaped",
