@@ -722,6 +722,23 @@ which can differ and would load another repo's config.
 `pools_file`: explicit pools path (tests) or `None` to discover
 `~/.upstroke/pools.toml` (missing = silent).
 
+## `pub fn load_for_report(`
+
+[`load`] for `upstroke capacity`, which reads only the pools file,
+`[routing.strategy]`, `[capacity]` and the machine directory. A refusal in a
+section the report never reads becomes a warning, and the report is still
+produced.
+
+It captures once and reads the capture the way [`load`] does. If that reading
+accepts the file, the result and its warnings are exactly [`load`]'s. If it
+refuses, the same reading runs again over
+[`CapturedConfig::narrowed_to_report`]. When that reading accepts, the
+original refusal leads the warnings, followed by the note that the report
+reads only those sections and that a run created now would refuse the file.
+The refusal's own text names the file and the key. When the narrowed reading
+refuses too, the original refusal is returned rather than the narrowed one.
+The narrowed text is re-serialised, so its line numbers belong to no file.
+
 ## `pub fn load_limits(`
 
 [`load`] for a caller that is not creating a run.
@@ -951,6 +968,22 @@ Capture what a [`load_with`] with these arguments would read.
 ## `pub fn files(&self) -> impl Iterator<Item = &FileSnapshot> {`
 
 The captured files, for a caller that has to name them.
+
+## `fn narrowed_to_report(&self) -> Self {`
+
+The capture as [`load_for_report`] reads it after a refusal. The repository
+file and the machine-level file are each narrowed to what the report reads.
+The pools file is kept unchanged, because the report reads all of it.
+
+## `fn narrowed_to_report(snapshot: &FileSnapshot) -> FileSnapshot {`
+
+One snapshot, reduced to the top-level `capacity` value and a `routing` table
+that holds only `strategy`, each present only if the file had it. The result
+is re-serialised with `toml::to_string`, keeping the snapshot's path and
+`required`. A snapshot that cannot be narrowed is returned unchanged: a file
+that is absent, unreadable, not UTF-8 or not TOML, or a table that does not
+serialise. The narrowed reading then refuses as the full one did, and
+[`load_for_report`] returns the original refusal.
 
 ## `mod read;`
 

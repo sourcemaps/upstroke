@@ -497,6 +497,47 @@ pub fn load(
     )
 }
 
+pub fn load_for_report(
+    repo_config: Option<&Path>,
+    discover_in: &Path,
+    pools_file: Option<&Path>,
+    warnings: &mut Vec<String>,
+) -> Result<Config, UpstrokeError> {
+    let captured = CapturedConfig::capture(repo_config, discover_in, pools_file);
+    let has_adapter = |agent: &str| crate::agent::by_id(agent).is_some();
+    let mut full_warnings = Vec::new();
+    let refusal = match load_captured_with(
+        &captured,
+        &has_adapter,
+        EngineLimits::Topology,
+        &mut full_warnings,
+    ) {
+        Ok(config) => {
+            warnings.append(&mut full_warnings);
+            return Ok(config);
+        }
+        Err(refusal) => refusal,
+    };
+    let mut narrowed_warnings = Vec::new();
+    match load_captured_with(
+        &captured.narrowed_to_report(),
+        &has_adapter,
+        EngineLimits::Topology,
+        &mut narrowed_warnings,
+    ) {
+        Ok(config) => {
+            warnings.push(format!(
+                "{refusal} — `upstroke capacity` reads only `[routing.strategy]` and \
+                 `[capacity]` from this configuration (with the pools file), so it reports \
+                 from those; a run created now would refuse the file"
+            ));
+            warnings.append(&mut narrowed_warnings);
+            Ok(config)
+        }
+        Err(_) => Err(refusal),
+    }
+}
+
 pub fn load_limits(
     repo_config: Option<&Path>,
     discover_in: &Path,
@@ -1063,6 +1104,45 @@ impl CapturedConfig {
             .as_ref()
             .and_then(|pools| pools.path().parent())
             .map(Path::to_path_buf)
+    }
+
+    fn narrowed_to_report(&self) -> Self {
+        Self {
+            repo: narrowed_to_report(&self.repo),
+            machine: self.machine.as_ref().map(narrowed_to_report),
+            pools: self.pools.clone(),
+        }
+    }
+}
+
+fn narrowed_to_report(snapshot: &FileSnapshot) -> FileSnapshot {
+    let Ok(Some(bytes)) = &snapshot.content else {
+        return snapshot.clone();
+    };
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return snapshot.clone();
+    };
+    let Ok(mut table) = text.parse::<toml::Table>() else {
+        return snapshot.clone();
+    };
+    let mut narrowed = toml::Table::new();
+    if let Some(capacity) = table.remove("capacity") {
+        narrowed.insert("capacity".to_owned(), capacity);
+    }
+    if let Some(toml::Value::Table(mut routing)) = table.remove("routing") {
+        if let Some(strategy) = routing.remove("strategy") {
+            let mut kept = toml::Table::new();
+            kept.insert("strategy".to_owned(), strategy);
+            narrowed.insert("routing".to_owned(), toml::Value::Table(kept));
+        }
+    }
+    match toml::to_string(&narrowed) {
+        Ok(serialised) => FileSnapshot {
+            path: snapshot.path.clone(),
+            required: snapshot.required,
+            content: Ok(Some(serialised.into_bytes())),
+        },
+        Err(_) => snapshot.clone(),
     }
 }
 

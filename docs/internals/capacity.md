@@ -1067,6 +1067,15 @@ and the self-metered draw of every run in scope, legacy or schema 4, the
 provider reports the tracker stored, and a live probe per agent. It reads
 files and starts each agent's probe; it writes nothing and asks no provider.
 
+## `let config = crate::config::load_for_report(`
+
+The configuration is read through `config::load_for_report` and not
+`config::load`. The report uses only the pools file, `[routing.strategy]`,
+`[capacity]` and the machine directory. A file refused over any other section
+(a `[[gates]]` entry, `[engine]`, `[interaction]`) still gives a report, and
+the refusal becomes one warning that says a run created now would refuse the
+file. A refusal in the sections the report reads still fails it.
+
 ## `let gathered = machine::gather(`
 
 Until 2026-11-23 this was `latest_run_observations`: the latest run of this
@@ -1597,6 +1606,40 @@ The other side of the same line: with no run directory at all the gatherer
 answers nothing folded and nothing unread, its own line reads "no run in
 this repository yet" for the repository scope it was asked for, and "no run
 on this machine yet" is what `report`, which folds the machine, renders.
+
+## `fn report_under(`
+
+`report` over a repository whose `upstroke.toml` holds the given text,
+discovered rather than named, with the `claude-max` pools file and
+`FIXTURE_NOW`: `capacity_report` without its `expect`, so that a refusal can
+be asserted on.
+
+## `fn a_capacity_report_reads_past_settings_it_never_uses_and_warns_what_a_run_would_refuse() {`
+
+Four files a run refuses, each in a section the report never reads: a
+`[[gates]]` entry with a misspelled key, two `[[gates]]` entries both named
+`fmt`, a misspelled `[engine]` key and a misspelled `[interaction]` key. Each
+still gives a report with the file's `value-max` strategy, and exactly one
+warning that says a run created now would refuse the file. That warning names
+the file and, in backticks, the key or name that was refused. Before
+`load_for_report` the report refused all four.
+
+## `fn a_capacity_report_on_a_refused_file_keeps_its_capacity_scope() {`
+
+The narrowed reading keeps `[capacity]`. A file refused over a gate key still
+reports at the `repo` scope it sets and not at the default `machine` scope.
+
+## `fn a_capacity_report_still_refuses_the_settings_it_reads() {`
+
+The other side. A misspelled `[routing.strategy]` key, or a `[capacity]`
+scope that is not one, is refused by the narrowed reading too. The report
+fails with the full reading's refusal, which names the key or the value, and
+not with a warning.
+
+## `fn a_capacity_report_on_an_accepted_file_warns_of_no_refusal() {`
+
+A file the full reading accepts gives the full reading's result, and no
+warning says a run would refuse it.
 
 ## `fn on_the_machine(`
 
