@@ -5138,9 +5138,18 @@ false }`. The run is created and completes with both tasks committed. Its first 
 reviewed each task its own model implemented. The run's warnings hold exactly one that mentions
 `cross_family = false`, and it names the primary.
 
-The pair was measured before commit against two changes to the probe set in
-`engine::topology::entry::prepare_fresh`. With `codex` added whenever the harness has it, this test
-fails with the refusal the finding observed ("creating run … stopped at P3c", naming the absent
-CLI), and its partner still passes. With the probe set taken from `review_plan.required_agents()`,
-which leaves the alternative out, the partner fails because creation no longer refuses, and this
-test still passes.
+The pair was measured on 2026-11-14 with the gate `cargo test --all-features --lib
+engine::tests::an_absent_alternative_reviewer_cli`, against two changes to the probe set in
+`engine::topology::entry::prepare_fresh`. Each change was applied alone and reverted before the
+next, and on the unchanged source both tests pass. With `codex` pushed onto the probe set whenever
+the harness has an adapter of that id, whatever `cross_family` says, this test fails. Its `expect`
+panics with "with cross_family = false, the alternative's absent CLI does not refuse creation",
+and the refusal it carries reads "creating run `…` stopped at P3c: agent error:
+`upstroke-absent-codex-alternative-cli` could not be executed by the runner this run uses". Its
+partner, `an_absent_alternative_reviewer_cli_refuses_creation_while_cross_family_is_unset`, still
+passes. With the probe set taken from `review_plan.required_agents()`, which leaves the
+alternative out, the partner fails because creation no longer refuses. Its `expect_err` panics
+with "with cross_family unset, the alternative's absent CLI refuses creation" and carries the
+report of a run that went ahead: `t1` parked after four attempts, each failing with "reviewer
+unavailable: review command setup failed: agent error: an absent CLI is never built", and `t2`
+stayed queued. This test still passes.
