@@ -835,9 +835,9 @@ The filters of [`WINDOWS_SHARD_FILTERS`] are the re-split of 2026-11-20,
 made from that run. Each test's sequential Linux duration is scaled so that
 the leg it ran in sums to that leg's measured harness, and blended half and
 half with a uniform per-test model; the filters were then chosen by a
-search for the slowest leg. The slowest of the ten is predicted at about
-14.4 minutes. The re-split was not timed before it landed: the CI run of the
-pull request that landed it is its first measurement.
+search for the slowest leg. The slowest of the ten was predicted at about
+14.4 minutes. Run 44736631711 measured the re-split for the first time: its
+slowest leg, the fifth, took 18.1 minutes.
 
 Single tests set the floor under that prediction. A leg takes no less than
 its longest test and the fixed minutes, and two tests are each estimated at
@@ -1014,9 +1014,10 @@ those ten divided the five, the estimate agreed with what the five legs
 reported in run 44614925593: the first three counts are that run's 193, the
 fourth its 59, and the fifth and sixth its 719.
 
-No run has counted the ten of the re-split. Each leg prints its count
-beside its floor (line 11 of [`WINDOWS_SHARD_WITNESS`]), and the first run
-sent to the twin after the re-split is that measurement.
+Run 44736631711 was the first to count the ten of the re-split: 50, 27, 99,
+76, 235, 199, 416, 325, 117 and 2,014, which are 3,558 together. Each leg
+prints its count beside its floor (line 11 of [`WINDOWS_SHARD_WITNESS`]), so
+every run sent to the twin counts them again.
 
 ## `pub(super) const MACOS_SHARD_FILTERS: [&str; 4] = [`
 
@@ -1048,8 +1049,9 @@ run, as the Windows one is ([`TEST_WINDOWS_HOSTED_JOB`]), and changes the
 first filter alone: `engine::topology::coordinator::tests::a_` where it was
 `engine::topology::coordinator::`, so the rest of the coordinator's tests
 run in the second shard, with the rest of `engine::topology::`. The slowest
-of the five legs is now predicted at about 11.8 minutes
-([`TEST_TIMEOUT_MINUTES`]), and the re-split was not timed before it landed.
+of the five legs was predicted at about 11.8 minutes
+([`TEST_TIMEOUT_MINUTES`]). Run 44736631711 measured the re-split for the
+first time: its slowest leg, the second, took 16.0 minutes.
 
 The table has no floors beside it, where the Windows one has
 [`WINDOWS_SHARD_FLOORS`]. The `test` job's legs held no count of passing
@@ -1125,10 +1127,10 @@ measured time, macOS into five legs and Linux into two
 had its slowest leg predicted at about 14 to 15 minutes on macOS and about
 8 to 9 on Linux, and run 44667503206 measured it for the first time: 15.8
 minutes for the slowest macOS leg and 8.2 for the slower Linux one. The
-macOS table was divided again on 2026-11-20, from that run, and its slowest
-leg is predicted at about 11.8 minutes; the CI run of the pull request that
-landed the re-split is its first measurement. 30 minutes is about two and a
-half times the slowest shard expected, and the limit the Linux leg already
+macOS table was divided again on 2026-11-20, from that run, with its slowest
+leg predicted at about 11.8 minutes and measured at 16.0 in run 44736631711.
+30 minutes is about two and a half times the slowest shard expected and a
+little under twice the one measured, and the limit the Linux leg already
 had. Code `test-job-timeout`.
 Measured, `MUT-TEST-TIMEOUT-RAISED-FOR-MACOS` and `MUT-TEST-TIMEOUT-RAISED`.
 

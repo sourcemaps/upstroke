@@ -72,10 +72,10 @@ source, documentation, workflows, release machinery and this file.
    `engine::topology::recover::`, `engine::tests::a`, `runner::`, `workspace_manager::`, the
    rest of `engine::tests::`, and everything else. The five macOS legs are
    `engine::topology::coordinator::tests::a_`, the rest of `engine::topology::`, the rest of
-   `engine::`, `runner::`, and everything else. The slowest shard is predicted at about 14.4
-   minutes and the slowest macOS leg at about 11.8, and neither re-split was timed before it
-   landed: the CI run of the pull request that landed them is their first measurement. Single
-   tests set the floor under the Windows prediction: a leg takes no less than its longest test
+   `engine::`, `runner::`, and everything else. The slowest shard was predicted at about 14.4
+   minutes and the slowest macOS leg at about 11.8. Run 44736631711 measured both re-splits for
+   the first time: the slowest Windows leg took 18.1 minutes and the slowest macOS leg 16.0.
+   Single tests set the floor under the Windows prediction: a leg takes no less than its longest test
    and the fixed minutes, and two tests are each estimated at about 9 minutes of their leg's
    harness, neither changed by the re-split:
    `engine::topology::recover::tests::a_kill_at_every_cell_of_a_complete_finalization_converges_on_the_next_resume`
