@@ -72,9 +72,16 @@ open finding. This one fails *closed*.
 - #433 (a draft, parked at `9740f686`, not merged) carried two routes from its first reviewed head,
   `c0a81fd3`, that would have let the audit clear rows this finding names; `223c8670` withdrew both
   under ruling R73, and neither is on `master`.
-- **The body route** (`a186f377`, with its validator exception `f2be3822`): a `fixed` row located at
-  `pr.md:<line>` read `body-fixed:<id>`.
-- **The witness lift:** a `fixed` row lifted `witnessed:<id>`.
+- **The body route** (`a186f377`, with its validator exception `f2be3822`): at `c0a81fd3`, before
+  that exception, on a head the audit read as unmoved, `ledger-only` or `merges-only`, its `fixed`
+  arm printed `body-fixed:<id>` in place of `fixed-but-head-unmoved:<id>` where the review, not the
+  row, located the finding at `pr.md:<line>` (`scripts/pr-ready-audit.sh:1454-1459`; the flag is set
+  from the review's location, `scripts/pr-review-parse.py:552-558`, and the row gave its disposition
+  and severity alone, `scripts/pr-ready-audit.sh:1363`).
+- **The witness lift:** at `c0a81fd3`, a `fixed` row lifted `witnessed:<id>` on a head the audit
+  read as `repairs` or `merge-edits`, and on one it read as unmoved, `ledger-only` or `merges-only`
+  only where the review located the finding at `pr.md:<line>`
+  (`scripts/pr-ready-audit.sh:1382-1393`).
 - The body route's findings, as ruling R73 lists them: `PR433-LEDGER-BODY-LOCATION-MISMATCH`,
   `PR433-BODY-PATH-CASE-FOLD`, `PR433-R3-TRACKED-BODY-EVIDENCE`, `PR433-R3-NONFIXED-ROW-LOCATION`.
 - The witness lift's findings: `PR433-MERGE-EDITS-CLEAR-WITNESS`,
