@@ -8,7 +8,7 @@ reviewed_sha: 681f429f8f3dba7c19ed248f69711b59a1fe17b1
 location: src/engine/topology/coordinator.rs:25926
 provenance: undetermined
 first_bad:
-guard: the change that gives each of the four F_MATRIX runs in a_genuinely_failing_gate_in_a_whole_snapshot_is_judged and a_gate_reading_a_whole_index_fails_on_the_forbidden_file its own bound, as f_bounded_case gives each case of their refusal siblings, with no retry, skip or weaker assertion, on branch fix-P3/liveness_two-gate-control-tests-ran-past-one-bound-on-hosted-windows; a_gate_launch_failing_in_a_whole_snapshot_is_the_outage_it_was (95.492 s in run 45542041793, one bound at src/engine/topology/coordinator.rs:26512) is the next nearest
+guard: the change that gives each of the four F_MATRIX runs in a_genuinely_failing_gate_in_a_whole_snapshot_is_judged and a_gate_reading_a_whole_index_fails_on_the_forbidden_file its own bound, as f_bounded_case gives each case of three refusal siblings (src/engine/topology/coordinator.rs lines 25904, 26430 and 26642), with no retry, skip or weaker assertion, on branch fix-P3/liveness_two-gate-control-tests-ran-past-one-bound-on-hosted-windows; a_gate_launch_failing_in_a_whole_snapshot_is_the_outage_it_was (95.492 s in run 45542041793, one bound at src/engine/topology/coordinator.rs:26512) is the next nearest
 ---
 
 # Two gate-control tests ran past their single 120 s bound on one hosted Windows leg
@@ -34,7 +34,7 @@ At `681f429f`, in `src/engine/topology/coordinator.rs`:
   > `<name>` did not end within 120s: the coordinator waited on its inbox for a pipeline that was itself waiting
   > on the coordinator
 
-- Their refusal siblings bound each case on its own through `f_bounded_case` (line 25873).
+- Three refusal siblings bound each case on its own through `f_bounded_case` (line 25873): `a_gate_verdict_read_in_a_snapshot_whose_registration_is_not_whole_is_refused` (line 25904), `a_gate_run_failing_in_a_snapshot_whose_registration_is_not_whole_is_refused` (line 26430) and `a_review_verdict_read_in_a_snapshot_whose_registration_is_not_whole_is_refused` (line 26642). `a_gate_that_passes_through_a_deleted_index_is_refused_not_published` runs all four `F_MATRIX` runs under one `bounded` (line 25962), as these two tests do.
 
 ## The sighting
 
@@ -134,4 +134,4 @@ the same panic site, `src/engine/topology/coordinator.rs:11345`, for two other t
 
 It keeps both tests' assertions and a 120 s bound, applied to each scenario, with no retry, skip or weaker assertion, and it
 makes each of the four `F_MATRIX` runs observable on its own: each run gets its own bound, as `f_bounded_case` gives
-each case of the refusal siblings. The guard names the change.
+each case of three refusal siblings. The guard names the change.
