@@ -7407,6 +7407,30 @@ impl crate::engine::topology::seams::IdSource for FixedIds {
     }
 }
 
+#[derive(Default)]
+struct CountingIds {
+    questions: AtomicU32,
+}
+
+impl crate::engine::topology::seams::IdSource for CountingIds {
+    fn run_id(&self) -> String {
+        FixedIds.run_id()
+    }
+
+    fn incarnation(&self) -> crate::topology::events::IncarnationId {
+        FixedIds.incarnation()
+    }
+
+    fn pid(&self) -> u32 {
+        FixedIds.pid()
+    }
+
+    fn question_id(&self) -> crate::ir::QuestionId {
+        let minted = self.questions.fetch_add(1, Ordering::SeqCst) + 1;
+        crate::ir::QuestionId(format!("q-counted-{minted}"))
+    }
+}
+
 fn durable_kinds(fixture: &Fixture) -> Vec<String> {
     TopologyFold::parse_log(&fixture.log_bytes())
         .expect("the log parses")
@@ -8623,6 +8647,7 @@ struct DriveSeams {
     /// Answers come from the run directory's `answers/` through the production
     /// `EventLogAnswers` with a zero wait, not from `answer`.
     answers_from_run_dir: bool,
+    counting_question_ids: bool,
 }
 
 /// How [`DrivenAnswers`] delivers the seam's answer. PR #249's refusals
@@ -9146,6 +9171,12 @@ fn drive_handle_observing(
     } else {
         &driven_answers
     };
+    let counting_ids = CountingIds::default();
+    let ids: &dyn crate::engine::topology::seams::IdSource = if seams.counting_question_ids {
+        &counting_ids
+    } else {
+        &FixedIds
+    };
     let run_seams = RunSeams {
         manager: &manager,
         clock: &Frozen,
@@ -9157,7 +9188,7 @@ fn drive_handle_observing(
         reviews: &reviews,
         input_policy: &input_policy,
         answers,
-        ids: &FixedIds,
+        ids,
         halts_run: seams.halts_run,
     };
     let spend_before = run.spend().run_total();
@@ -13449,6 +13480,166 @@ fn one_off_binding_answer_activates_the_repair(delivery: AnswerDelivery) {
     assert_eq!(fold.task_state(repair), Some(TaskState::Merged));
     assert!(driven.invocations_balance);
     assert_eq!(driven.entitlements_held, 0);
+}
+
+#[test]
+fn an_overridden_repair_that_exhausts_its_one_rung_parks_on_a_fresh_unblock_question() {
+    let fixture = Fixture::build(
+        "one-off-binding-exhausted",
+        Damage {
+            two_tasks: true,
+            small_only: true,
+            ..Damage::default()
+        },
+    );
+    let (rejection, repair) = plant_rejected_repair(&fixture);
+    let crate::topology::events::SpawnAdmission::HumanBinding { question, .. } =
+        &rejection.repair.admission
+    else {
+        panic!(
+            "a Small-only root leaves the repair's Mid floor with no rung: {:?}",
+            rejection.repair.admission
+        );
+    };
+
+    let driven = drive(
+        &fixture,
+        &DriveSeams {
+            answer: Some(crate::ir::Answer::Answered {
+                text: AGENT.to_owned(),
+            }),
+            gate_exit_code: Some(1),
+            counting_question_ids: true,
+            ..DriveSeams::default()
+        },
+        3,
+    );
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Answered {
+                key,
+                declined: false,
+                ..
+            })) if *key == repair
+        ),
+        "step 1 ingests the binding answer: {:?}",
+        driven.progress
+    );
+    let answers = answers_of(&driven.log, repair);
+    assert!(
+        matches!(
+            answers.as_slice(),
+            [answered] if matches!(
+                &answered.answer,
+                crate::topology::events::Answer4::Answered {
+                    binding_override: Some(_),
+                    ..
+                }
+            )
+        ),
+        "the one answer carries the one-off binding: {answers:?}"
+    );
+    assert!(
+        replayed(&fixture).binding_override(repair).is_some(),
+        "the override is recorded, so the repair's ladder is the one rung"
+    );
+    for step in [1, 2] {
+        assert!(
+            matches!(
+                driven.progress.get(step),
+                Some(Ok(Progress::Settled {
+                    key,
+                    accepted: false,
+                    ..
+                })) if *key == repair
+            ),
+            "step {}: the repair runs under the override and its gate fails: {:?}",
+            step + 1,
+            driven.progress
+        );
+    }
+
+    let starts = attempt_starts_of(&driven.log, repair);
+    assert_eq!(
+        starts
+            .iter()
+            .map(|started| (started.rung, started.binding.tier, started.binding.pinned))
+            .collect::<Vec<_>>(),
+        vec![(0, Tier::Mid, true); 2],
+        "both attempts ran on the override's one rung"
+    );
+    let finished: Vec<&AttemptFinished4> = driven
+        .log
+        .iter()
+        .filter_map(|event| match &event.body {
+            TopologyEventBody::AttemptFinished { data } if data.key == repair => Some(&**data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(finished.len(), 2, "{finished:?}");
+    assert!(
+        finished.iter().all(|data| {
+            data.record
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.kind == crate::ladder::FailureKind::GateFailed)
+        }),
+        "each attempt failed at the gate: {finished:?}"
+    );
+    assert!(
+        matches!(
+            &finished[0].settlement,
+            AttemptSettlement::Closed {
+                transition: SettlementTransition::Retry,
+                ..
+            }
+        ),
+        "the first failure retries on the one rung, inside its `attempts_per`: {:?}",
+        finished[0].settlement
+    );
+    let AttemptSettlement::Closed {
+        transition: SettlementTransition::Parked { question: parked },
+        ..
+    } = &finished[1].settlement
+    else {
+        panic!(
+            "the second failure exhausts the one rung and parks for a person rather than \
+             failing the lineage: {:?}",
+            finished[1].settlement
+        );
+    };
+    assert_eq!(parked.key, repair);
+    assert_eq!(parked.kind, crate::ir::QuestionKind::Unblock);
+    assert_ne!(
+        parked.id, question.id,
+        "a fresh question, not the admission question the binding answered"
+    );
+    assert!(
+        parked.context.contains("2 attempt(s) across 1 rung(s)"),
+        "the exhaustion is counted on one rung: {}",
+        parked.context
+    );
+
+    let fold = replayed(&fixture);
+    assert_eq!(fold.task_state(repair), Some(TaskState::AwaitingInput));
+    assert_ne!(
+        fold.task_state(ALPHA),
+        Some(TaskState::Failed),
+        "the lineage waits on the person; it is not failed"
+    );
+    let open: Vec<(crate::ir::QuestionId, crate::ir::QuestionKind)> = fold
+        .open_questions()
+        .expect("started")
+        .values()
+        .filter(|open| open.question.key == repair)
+        .map(|open| (open.question.id.clone(), open.question.kind))
+        .collect();
+    assert_eq!(
+        open,
+        vec![(parked.id.clone(), crate::ir::QuestionKind::Unblock)],
+        "the parked question is the repair's one open question"
+    );
 }
 
 /// PR #249's conformance review, finding 1: with two agents offered, the
