@@ -926,7 +926,7 @@ mod tests {
             let arriving = ArrivingSleeper {
                 dir: dir.clone(),
                 id: question().id,
-                record: record.clone(),
+                record,
                 after: std::cell::Cell::new(1),
             };
             let answers = EventLogAnswers::with_poll(
@@ -941,7 +941,7 @@ mod tests {
             );
             assert_eq!(
                 answers.resolve(&question()).expect("resolve"),
-                record.answer
+                arriving.record.answer
             );
             assert_read_never_took(&path, &published, "`resolve`'s waiting read");
         }
