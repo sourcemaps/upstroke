@@ -1788,6 +1788,75 @@ fn the_availability_toggle_is_per_operation_so_ps_can_answer_while_inspect_canno
     assert_eq!(RuntimeOp::ALL.len(), 11);
 }
 
+/// Unarmed, the inspection runtime of the seam
+/// `engine::topology::entry::container_runtime` asks no container runtime: every
+/// question is answered as an absent runtime answers it, under the question's own
+/// operation and the seam's one detail.
+#[test]
+fn an_unarmed_inspection_runtime_answers_as_an_absent_runtime() {
+    use crate::engine::topology::entry::container_runtime;
+
+    #[track_caller]
+    fn absent<T: std::fmt::Debug>(operation: RuntimeOp, answer: Result<T, RuntimeError>) {
+        assert_eq!(
+            answer.map(|answered| format!("{answered:?}")),
+            Err(RuntimeError::Unreachable {
+                operation,
+                detail: container_runtime::UNARMED.to_owned(),
+            }),
+            "the unarmed inspection runtime answers `{operation}` as an absent runtime"
+        );
+    }
+
+    let name = "upstroke-unarmed-seam-question";
+    let image = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+    let spec = CreateSpec {
+        name: name.to_owned(),
+        image_id: image.to_owned(),
+        labels: std::collections::BTreeMap::new(),
+        mounts: Vec::new(),
+        env: Vec::new(),
+        command: Vec::new(),
+        workdir: None,
+        read_only_root: true,
+        user: None,
+        open_stdin: false,
+    };
+    let runtime = container_runtime::for_inspection();
+    // Each question is asked only once the one before it was answered as absent,
+    // and the effects come last, so a runtime that answers is never asked to act.
+    absent(RuntimeOp::Probe, runtime.probe());
+    absent(
+        RuntimeOp::InspectImageByReference,
+        runtime.image_by_reference(name),
+    );
+    absent(RuntimeOp::InspectImageById, runtime.image_by_id(image));
+    absent(
+        RuntimeOp::InspectImageById,
+        runtime.image_environment(image),
+    );
+    absent(RuntimeOp::InspectVolume, runtime.volume_present(name));
+    absent(
+        RuntimeOp::ListByLabel,
+        runtime.containers_with_label(name, name),
+    );
+    absent(
+        RuntimeOp::Observe,
+        runtime.observe(name, QuestionBound::Runtime),
+    );
+    absent(RuntimeOp::Collect, runtime.collect(name));
+    absent(
+        RuntimeOp::Create,
+        runtime.create(CoveredCreate::without_a_reaper(&spec)),
+    );
+    absent(
+        RuntimeOp::Start,
+        runtime.start(CoveredStart::without_a_reaper(name)),
+    );
+    absent(RuntimeOp::Stop, runtime.stop(name, StopMode::Graceful));
+    absent(RuntimeOp::Remove, runtime.remove(name));
+}
+
 #[test]
 fn a_seeded_container_carries_owner_labels_and_an_incarnation() {
     let runtime = FakeRuntime::new(ContainerTrace::recording());
