@@ -1807,9 +1807,13 @@ Root's D-C on a real runtime, three containers:
   sent;
 - a program that reads 16 bytes of a mebibyte and exits 7: the run reports
   exit 7, promptly, and the undelivered rest holds nothing;
-- a program that never reads a mebibyte of input, with a three-second
+- a program that never reads a mebibyte of input, with a thirty-second
   timeout: the timeout path stops and removes it, with the write still
   pending, within a bound.
+
+The timeout also covers Docker creating and starting the container, so it is
+thirty seconds: room for a slow daemon to start it, and still far below the
+program's six-hundred-second `sleep` (`CI-FLAKE-REAL-DOCKER-START-DEADLINE`).
 
 ## `struct MountedReal {`
 
@@ -2144,6 +2148,11 @@ The leader spawns a detached descendant and then blocks. The runner's
 own timeout is what stops the container, which is
 `slice_contract.cancellation`: "timeout or shutdown stops and removes
 the container".
+
+The timeout also covers Docker creating and starting the container, so it
+is thirty seconds: room for a slow daemon to start it, and still far below
+the two `sleep`s, each more than ten days long
+(`CI-FLAKE-REAL-DOCKER-START-DEADLINE`).
 
 ## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `let seen = std::thread::scope(|scope| {`
 

@@ -5446,7 +5446,7 @@ fn real_docker_a_containerized_program_reads_its_exact_stdin_then_eof() {
             .stdin(prompt("never-read", 1024 * 1024)),
         workspace,
         claude,
-        Duration::from_secs(3),
+        Duration::from_secs(30),
         worker_id(2),
     );
     let started = Instant::now();
@@ -5455,7 +5455,7 @@ fn real_docker_a_containerized_program_reads_its_exact_stdin_then_eof() {
         .expect("a timeout is an output, not an error");
     assert!(output.timed_out, "{}{}", output.stdout, output.stderr);
     assert!(
-        started.elapsed() < Duration::from_secs(90),
+        started.elapsed() < Duration::from_secs(120),
         "a pending input write held the timeout: {:?}",
         started.elapsed()
     );
@@ -6334,7 +6334,7 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
         Duration::from_secs(120),
         gate_id(0),
     );
-    request.timeout = Duration::from_secs(3);
+    request.timeout = Duration::from_secs(30);
 
     let seen = std::thread::scope(|scope| {
         let sampler = scope.spawn(|| {
