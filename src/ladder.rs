@@ -41,6 +41,7 @@ pub struct AttemptFailure {
     pub reason: String,
     pub feedback: Option<String>,
     pub never_started: bool,
+    pub limit_message: Option<String>,
 }
 
 impl AttemptFailure {
@@ -51,12 +52,19 @@ impl AttemptFailure {
             reason: reason.into(),
             feedback: None,
             never_started: false,
+            limit_message: None,
         }
     }
 
     #[must_use]
     pub fn from_a_process_that_never_started(mut self) -> Self {
         self.never_started = true;
+        self
+    }
+
+    #[must_use]
+    pub fn with_limit_message(mut self, text: String) -> Self {
+        self.limit_message = Some(text);
         self
     }
 

@@ -474,10 +474,17 @@ pub(super) fn evaluate_outcome(
                 util::tail(&outcome.detail.clone().unwrap_or_default(), 2000)
             )),
         ),
-        OutcomeStatus::RateLimited => Some(AttemptFailure::new(
-            FailureKind::RateLimited,
-            format!("pool rate-limited: {}", detail()),
-        )),
+        OutcomeStatus::RateLimited => {
+            let failure = AttemptFailure::new(
+                FailureKind::RateLimited,
+                format!("pool rate-limited: {}", detail()),
+            );
+            Some(if crate::agent::looks_rate_limited(&output.stderr) {
+                failure.with_limit_message(output.stderr.clone())
+            } else {
+                failure
+            })
+        }
     }
 }
 

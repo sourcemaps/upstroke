@@ -840,7 +840,8 @@ to hang it on would put a fact about nothing into the estimator.
 ## `impl Run<'_>` › `let reset_at = if agent == claude::ADAPTER_ID {`
 
 The reset time the limit message gave, where it gave one.
-`agent::reset_at_from_limit_message` reads the failure's text for Claude
+`agent::reset_at_from_limit_message` reads the failure's reason, and then its
+`limit_message` (below), for Claude
 Code's `· resets 5:30am (UTC)` or `· resets Nov 14, 9am (UTC)`, completes
 the missing date or year against now, and returns the time as RFC 3339 UTC;
 it returns `None` for any text without a reset in exactly that form,
@@ -866,6 +867,25 @@ time changes is what the estimate reports, a reset time instead of
 "unknown". A reset from Codex or Copilot, in whatever shape, or in a
 wording Claude Code has not been seen to print, stays `None`, as every reset
 was before.
+
+## `impl Run<'_>` › `.chain(failure.limit_message.as_deref())`
+
+The reason first, then the stderr that signalled the limit, and the first
+that names a reset wins (`PR380-RESET-SIGNAL-CHANNEL-DROPPED`). Claude Code
+can exit 1 with a JSON result that has nothing to do with the limit, such as
+`request failed`, and print `You've hit your 5-hour limit · resets 5:30am
+(UTC)` on stderr. `claude::parse_output` reads the limit from stderr and
+classifies the attempt `RateLimited`, but the detail it keeps is the JSON
+result, so the reason is `pool rate-limited: request failed`. Parsing only
+the reason recorded that outage with no reset. `evaluate_outcome` now hands
+the stderr over as the failure's `limit_message`, and it is read here only
+when the reason names no reset, so a reset that was read before is still
+read from the same text. The event's `detail` is still the reason; the
+stderr is not stored anywhere new.
+
+A reviewer's rate limit carries no `limit_message`: `review_failure` builds
+its failure from `ReviewResult::Unavailable`'s detail, which holds no
+stderr, so a reviewer whose limit was only on stderr still records `None`.
 
 ## `impl Run<'_>` › `.is_some_and(|recorded| reset_at.is_none() || *recorded == reset_at);`
 

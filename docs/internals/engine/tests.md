@@ -138,9 +138,24 @@ weekly one — sets this. Past the script's end the last entry repeats,
 and an empty script (both constructors' default) leaves every refusal
 saying `worker_rate_limit`.
 
+## `worker_limit_on_stderr: Option<&'static str>,`
+
+A limit Claude Code printed on stderr beside an unrelated JSON result. When
+set, a worker's `Effect::RateLimited` runs a real process that prints
+[`CLAUDE_REQUEST_FAILED`] on stdout and this text on stderr and exits 1, and
+`parse` hands that output to the real `ClaudeCodeAdapter::parse`, so
+`claude::parse_output` decides the outcome and its detail. Both constructors
+leave it `None`, and then the scripted detail above is used, as before.
+
 ## `const FIVE_HOUR_LIMIT_REACHED: &str = "5-hour limit reached";`
 
 The older Claude Code wording, which names no reset.
+
+## `const CLAUDE_REQUEST_FAILED: &str =`
+
+A Claude Code JSON result that failed for a reason the result does not
+name: `request failed`, with `is_error` set. Nothing in it signals a rate
+limit, so any limit has to come from stderr.
 
 ## `const REVIEW_MARKER: &str = "UPSTROKE-FAKE-REVIEW";`
 
@@ -5157,6 +5172,26 @@ estimate folded from the log up to the signal reports the pool exhausted with th
 `attempt_finished` comes first and marks the pool with no reset, and `pool_exhausted` after it
 supplies the time. The run still completes, as the test above does, so the reset changes what is
 recorded and nothing about how the attempt is deferred or retried.
+
+## `fn a_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_pool_exhausted() {`
+
+`PR380-RESET-SIGNAL-CHANNEL-DROPPED`, end to end. With `worker_limit_on_stderr` set, the fake's
+rate-limited worker runs as Claude Code did: it prints `CLAUDE_REQUEST_FAILED`, a JSON result
+reading `request failed`, on stdout, prints `You've hit your 5-hour limit · resets 5:30am (UTC)` on
+stderr, and exits 1. The fake hands that output to the real `ClaudeCodeAdapter::parse` rather than
+building the outcome itself, so the classification is `claude::parse_output`'s own. The
+rate-limited `attempt_finished` still reads `pool rate-limited: request failed`, and the one
+`pool_exhausted` carries that same reason as its detail, as before. Its `reset_at` ends
+`T05:30:00Z`. Before the failure carried the stderr, the reset was read from the reason alone and
+was `None`.
+
+## `fn a_rate_limited_failure_carries_a_limit_from_stderr_without_changing_its_reason() {`
+
+The same defect one level down, at `evaluate_outcome`. The output `ClaudeCodeAdapter::parse` reads
+as `RateLimited` from its stderr becomes a failure whose kind, reason (`pool rate-limited: request
+failed`) and feedback are what they were, and whose `limit_message` is that stderr. Then a
+rate-limited outcome whose stderr signals nothing: the reason is the outcome's detail, as before,
+and no `limit_message` is carried, because the stderr did not classify the attempt.
 
 ## `fn a_deferral_rate_limit_keeps_the_reset_pool_exhausted_recorded() {`
 

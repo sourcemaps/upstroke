@@ -95,11 +95,16 @@ struct FakeAdapter {
     worker_rate_limit: &'static str,
 
     worker_rate_limits: Vec<&'static str>,
+
+    worker_limit_on_stderr: Option<&'static str>,
     calls: Mutex<Calls>,
     role_probe: Option<RoleProbe>,
 }
 
 const FIVE_HOUR_LIMIT_REACHED: &str = "5-hour limit reached";
+
+const CLAUDE_REQUEST_FAILED: &str =
+    r#"{"type":"result","is_error":true,"result":"request failed","session_id":"s-limit"}"#;
 
 #[derive(Default)]
 struct Calls {
@@ -129,6 +134,7 @@ impl FakeAdapter {
             reports_cost: true,
             worker_rate_limit: FIVE_HOUR_LIMIT_REACHED,
             worker_rate_limits: Vec::new(),
+            worker_limit_on_stderr: None,
             calls: Mutex::new(Calls::default()),
             role_probe: None,
         }
@@ -143,6 +149,7 @@ impl FakeAdapter {
             reports_cost: true,
             worker_rate_limit: FIVE_HOUR_LIMIT_REACHED,
             worker_rate_limits: Vec::new(),
+            worker_limit_on_stderr: None,
             calls: Mutex::new(Calls::default()),
             role_probe: None,
         }
@@ -424,6 +431,14 @@ impl AgentAdapter for FakeAdapter {
             probe.read_as_the_operator_does(&run.workspace);
             return Ok(probe.worker.clone());
         }
+        if let (Effect::RateLimited, Some(limit)) = (
+            scripted(&self.effects, index, Effect::EditFile),
+            self.worker_limit_on_stderr,
+        ) {
+            return Ok(shell_spec(&format!(
+                "printf '%s' '{CLAUDE_REQUEST_FAILED}'; printf '%s\\n' \"{limit}\" >&2; exit 1"
+            )));
+        }
         Ok(shell_spec("exit 0"))
     }
 
@@ -491,6 +506,9 @@ impl AgentAdapter for FakeAdapter {
             .map(|c| c.worker.saturating_sub(1))
             .unwrap_or(0);
         let effect = scripted(&self.effects, index, Effect::EditFile);
+        if effect == Effect::RateLimited && self.worker_limit_on_stderr.is_some() {
+            return crate::agent::claude::ClaudeCodeAdapter.parse(out);
+        }
         let status = match effect {
             Effect::Error => OutcomeStatus::AgentError,
             Effect::RateLimited => OutcomeStatus::RateLimited,
@@ -4550,6 +4568,45 @@ fn an_outage_is_never_reclassified_as_a_question() {
 }
 
 #[test]
+fn a_rate_limited_failure_carries_a_limit_from_stderr_without_changing_its_reason() {
+    const LIMIT: &str = "You've hit your 5-hour limit · resets 5:30am (UTC)\n";
+    let output = |stderr: &str| crate::agent::ProcessOutput {
+        stdout: CLAUDE_REQUEST_FAILED.to_owned(),
+        stderr: stderr.to_owned(),
+        code: Some(1),
+        timed_out: false,
+        output_limited: false,
+        duration: Duration::ZERO,
+    };
+
+    let limited = output(LIMIT);
+    let outcome = crate::agent::claude::ClaudeCodeAdapter
+        .parse(&limited)
+        .expect("parses");
+    assert_eq!(outcome.status, OutcomeStatus::RateLimited);
+    let failure = evaluate_outcome(&outcome, &limited).expect("a rate limit is a failure");
+    assert_eq!(failure.kind, FailureKind::RateLimited);
+    assert_eq!(failure.reason, "pool rate-limited: request failed");
+    assert_eq!(failure.feedback, None);
+    assert_eq!(failure.limit_message.as_deref(), Some(LIMIT));
+
+    let quiet = output("warning: telemetry disabled\n");
+    let outcome = fake_outcome(
+        OutcomeStatus::RateLimited,
+        Some("5-hour limit reached".to_owned()),
+        "s0",
+        None,
+        Duration::ZERO,
+    );
+    let failure = evaluate_outcome(&outcome, &quiet).expect("a rate limit is a failure");
+    assert_eq!(failure.reason, "pool rate-limited: 5-hour limit reached");
+    assert_eq!(
+        failure.limit_message, None,
+        "stderr that did not signal the limit is not carried"
+    );
+}
+
+#[test]
 fn a_halted_run_stops_asking_and_keeps_naming_the_real_cause() {
     let (_tree, repo) = temp_engine_repo("haltpark");
     seed(
@@ -8113,6 +8170,66 @@ fn a_rate_limit_that_names_its_reset_records_it_on_pool_exhausted() {
         "{}",
         at_the_signal[0].describe()
     );
+}
+
+#[test]
+fn a_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_pool_exhausted() {
+    let (_tree, repo) = temp_engine_repo("poolexhaustedstderrreset");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    opts.pools_path = Some(pools_file(&repo, CLAUDE_POOL));
+    let mut source = source(
+        vec![Effect::RateLimited, Effect::EditFile],
+        vec![ReviewBehavior::Pass],
+    );
+    source.adapter.worker_limit_on_stderr =
+        Some("You've hit your 5-hour limit · resets 5:30am (UTC)");
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let events = events_of(&repo, &report.run_id);
+    let reasons: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::AttemptFinished { data, .. } => data
+                .failure
+                .as_ref()
+                .filter(|f| f.kind == FailureKind::RateLimited)
+                .map(|f| f.reason.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        ["pool rate-limited: request failed"],
+        "stderr classified the attempt and the JSON result is still its reason"
+    );
+
+    let signals: Vec<&events::PoolExhausted> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signals.len(), 1, "{signals:?}");
+    assert_eq!(signals[0].pool, "claude-max");
+    assert_eq!(signals[0].agent, "claude-code");
+    assert_eq!(
+        signals[0].detail, "pool rate-limited: request failed",
+        "{signals:?}"
+    );
+    let reset_at = signals[0]
+        .reset_at
+        .as_deref()
+        .expect("the limit on stderr named its reset");
+    assert!(reset_at.ends_with("T05:30:00Z"), "{reset_at}");
+    assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
 }
 
 #[test]
