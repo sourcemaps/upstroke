@@ -104,8 +104,9 @@ cmd = "cargo test"
 - **Ground truth is the diff, not the transcript.** Gates and reviewers get the diff the engine
   captured.
 - **An empty diff can never pass.**
-- **Narrow permissions; reviewers are read-only.** Workers get file tools plus exactly your gate
-  commands (on Codex, its workspace sandbox), never a skip-all-permissions flag.
+- **Narrow permissions; reviewers are read-only.** Claude Code and Copilot workers get file tools
+  plus exactly your gate commands. A Codex worker runs in Codex's workspace-write sandbox, which
+  limits what it writes, not which commands it runs. No worker gets a skip-all-permissions flag.
 - **Review is independent unless you configure otherwise** ([design/11](design/11_design_verification_ladder.md)).
   A task that ran on the reviewer's own CLI and model is reviewed by a model from another family;
   the same model pinned through a different CLI is not detected. A fresh run is not created if
