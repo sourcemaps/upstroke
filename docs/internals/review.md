@@ -313,22 +313,52 @@ That is the point: when the other family's account is out of capacity,
 the operator can keep reviewing on one family rather than turning review
 off.
 
-The alternative is opportunistic, so switching it off is a warning and not
-a refusal. Exactly one warning is pushed, naming the primary: the
-catalog-miss warning is about choosing an alternative nobody wants here,
-and [`ReviewPlan::self_review_warning`] is skipped below because its
-remedy, installing the other family's CLI, does not apply to an operator who
-turned that reviewer off. The per-task `second_opinion` loop is not touched
-— an override's second opinion is an explicit request, still resolved
-from the primary's family and still refused when it cannot resolve.
+The alternative is opportunistic, so switching it off can at most warn,
+never refuse. This branch pushes nothing. The catalog-miss warning is about
+choosing an alternative nobody wants here. The switch's own warning waits
+until the plan is resolved, because whether any task is at risk depends on
+the per-task second opinions resolved below. The per-task `second_opinion`
+loop is not touched. An override's second opinion is an explicit request,
+still resolved from the primary's family and still refused when it cannot
+resolve. A plan refused there pushes no switch warning; the refusal already
+says what to do.
 
 ## `if let Some(warning) = resolved.self_review_warning(plan, chains, tier) {`
 
 The carried step-6 item, now visible: say when a task will be judged by
-the model that wrote it and nothing in this build can prevent it. Not
-said when the configuration turned the alternative off — the enclosing
-`if cfg.review_cross_family {` skips it — because the
-`cross_family = false` warning above already says it, once.
+the model that wrote it and nothing in this build can prevent it. Reached
+only with the switch on. Its remedy is installing the other family's CLI,
+which does not help an operator who turned that reviewer off; the branch
+below speaks for them instead.
+
+## `} else if let Some((primary, at_risk)) = resolved.self_review_risk(plan, chains) {`
+
+The switch's warning, pushed once and only when at least one task is at
+risk:
+
+> `[routing] review sets cross_family = false, so no alternative reviewer is named: task(s) {ids} can run on {primary}, which also reviews them — a model reviewing its own work is a weaker check (§11.3)`
+
+`{ids}` is the at-risk task ids, sorted and joined with `, `. `{primary}` is
+the primary's `agent/model`.
+
+At risk means exactly the tasks whose reviewer the switch changes. The
+anti-self-review rebind in [`passes_for`] applies only to a task with no
+explicit second opinion that the primary's exact `(agent, model)` can
+implement. A task whose chain never reaches that binding is reviewed by a
+different model with or without the switch: docs tasks on Haiku or Sonnet
+with Opus reviewing, say. A task with a second opinion keeps its
+other-family pass either way. Warning about either kind would claim a
+self-review that cannot happen. That is the noise the
+`a_task_that_never_runs_at_the_review_tier_is_not_warned_about` note below
+calls out, and `cross_family_off_warns_only_for_tasks_that_can_run_on_the_primary`
+pins it with the switch off.
+
+`ReviewPlan::self_review_risk` is that test, written once. It is private,
+and it returns the primary and the sorted at-risk ids, or `None` when there
+is no primary or nothing is at risk. [`ReviewPlan::self_review_warning`]
+asks the same helper, so the two warnings cannot disagree about which tasks
+are at risk. They differ only in wording and in whether there is a remedy
+to name.
 
 ## `pub struct ReviewSubject<'a> {`
 

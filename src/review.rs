@@ -171,6 +171,22 @@ impl ReviewPlan {
         if self.alternative.is_some() {
             return None;
         }
+        let (primary, at_risk) = self.self_review_risk(plan, chains)?;
+        Some(format!(
+            "task(s) {} can run on {}, which is also the reviewer — a model reviewing its own work \
+             is a weak check. No {tier}-tier model from another family is usable here; independent \
+             review needs the other-family {tier}-tier reviewer this build selects, with its CLI \
+             installed and passing its probe where the run executes (§11.3).",
+            at_risk.join(", "),
+            primary.describe()
+        ))
+    }
+
+    fn self_review_risk(
+        &self,
+        plan: &Plan,
+        chains: &[ResolvedChain],
+    ) -> Option<(&PassBinding, Vec<String>)> {
         let primary = self.primary.as_ref()?;
         let mut at_risk: Vec<String> = plan
             .tasks
@@ -192,14 +208,7 @@ impl ReviewPlan {
             return None;
         }
         at_risk.sort();
-        Some(format!(
-            "task(s) {} can run on {}, which is also the reviewer — a model reviewing its own work \
-             is a weak check. No {tier}-tier model from another family is usable here; independent \
-             review needs the other-family {tier}-tier reviewer this build selects, with its CLI \
-             installed and passing its probe where the run executes (§11.3).",
-            at_risk.join(", "),
-            primary.describe()
-        ))
+        Some((primary, at_risk))
     }
 
     pub fn passes_for(&self, index: usize, implementer: &PassBinding) -> Vec<ReviewPass> {
@@ -322,12 +331,6 @@ pub fn plan_for(
         }
         primary_family.and_then(cross)
     } else {
-        warnings.push(format!(
-            "[routing] review sets cross_family = false, so {} reviews every task, including \
-             the tasks its own model implements — a model reviewing its own work is a weaker \
-             check (§11.3)",
-            primary.describe()
-        ));
         None
     };
 
@@ -370,6 +373,14 @@ pub fn plan_for(
         if let Some(warning) = resolved.self_review_warning(plan, chains, tier) {
             warnings.push(warning);
         }
+    } else if let Some((primary, at_risk)) = resolved.self_review_risk(plan, chains) {
+        warnings.push(format!(
+            "[routing] review sets cross_family = false, so no alternative reviewer is named: \
+             task(s) {} can run on {}, which also reviews them — a model reviewing its own work \
+             is a weaker check (§11.3)",
+            at_risk.join(", "),
+            primary.describe()
+        ));
     }
     Ok(resolved)
 }
@@ -2251,6 +2262,7 @@ mod tests {
                 && warnings[0].contains("claude-code/claude-opus-5"),
             "says why and names the primary: {warnings:?}"
         );
+        assert!(warnings[0].contains("t1"), "names the task: {warnings:?}");
     }
 
     #[test]
@@ -2345,6 +2357,51 @@ mod tests {
         let error = plan_for(&plan, &chains, &cfg, claude_only, &mut Vec::new())
             .expect_err("an explicit second opinion still refuses when it cannot resolve");
         assert!(error.to_string().contains("Copilot CLI"), "{error}");
+    }
+
+    #[test]
+    fn cross_family_off_warns_only_for_tasks_that_can_run_on_the_primary() {
+        let cfg = scratch_config(
+            "lowrungoff.toml",
+            "[routing]\nimplement = { tier = \"mid\" }\nreview = { cross_family = false }\n",
+        );
+        assert!(!cfg.review_cross_family);
+        let mut task = task();
+        task.path_hints = vec!["src/api/list.rs".to_owned()];
+        let plan = Plan {
+            source: crate::ir::PlanSource {
+                adapter: "markdown".to_owned(),
+                hash: "test".to_owned(),
+            },
+            tasks: vec![task],
+            artifacts: Vec::new(),
+        };
+        let chains: Vec<ResolvedChain> = plan
+            .tasks
+            .iter()
+            .map(|t| crate::route::resolve(t, &cfg))
+            .collect();
+        let mut warnings = Vec::new();
+        plan_for(&plan, &chains, &cfg, claude_only, &mut warnings).expect("resolves");
+        assert!(
+            warnings.is_empty(),
+            "no chain reaches the primary's model: {warnings:?}"
+        );
+
+        let cfg = scratch_config(
+            "crossoffsoquiet.toml",
+            "[routing]\nreview = { cross_family = false }\n\n\
+             [[routing.overrides]]\npaths = [\"src/auth/**\"]\nsecond_opinion = \
+             \"different-vendor\"\n",
+        );
+        assert!(!cfg.review_cross_family);
+        let (plan, chains) = auth_plan(&cfg);
+        let mut warnings = Vec::new();
+        plan_for(&plan, &chains, &cfg, both_vendors, &mut warnings).expect("resolves");
+        assert!(
+            warnings.is_empty(),
+            "the only task has an explicit second opinion: {warnings:?}"
+        );
     }
 
     #[test]
