@@ -21780,14 +21780,6 @@ fn assert_objects_kept(planted: &FinishedPlanting, tag: &str) {
     );
 }
 
-/// One cell of the error-return finalization matrix, driven over `planted`: the fault
-/// injected at the cell ends the resume with the log untouched and exactly the effects before
-/// the fault done; the next resume finalizes the rest and refuses; a third finds the report
-/// current, takes its directory barrier through the report's two sites, writes nothing and
-/// runs no other site again. The candidate-prepared pin's two readings follow the planting's
-/// own declaration (`surplus_candidate_pin`): one stands before the fault, and the next resume
-/// deletes one when the fault came before its deletion, only where the planting declared the
-/// damage.
 fn fault_at_a_finalization_cell_and_converge(
     planted: &FinishedPlanting,
     outcome: &RunOutcome,
@@ -21958,12 +21950,6 @@ fn fault_at_every_finalization_cell(part: HookPhase) {
                 continue;
             }
             if site == EffectSiteId::Ref(RefSite::DeleteCandidatePin) {
-                // Not a cell of this matrix. A finished run's planting completes alpha's
-                // promotion, so finalization finds no candidate-prepared pin to sweep, and a
-                // cell that faults the sweep has to plant a pin no crash leaves: the declared-pin
-                // test below does, by name, and claims no prefix by it. This site's two cells
-                // are the two kills inside the promotion, which the two tests that run this
-                // matrix's parts run after it.
                 continue;
             }
             let tag = format!("{outcome:?}/{site}/{phase}");
@@ -22008,25 +21994,12 @@ fn fault_at_every_finalization_cell(part: HookPhase) {
 #[test]
 fn kill_after_report_before_each_cleanup_step_before_the_effect() {
     fault_at_every_finalization_cell(HookPhase::Before);
-    // `Ref.DeleteCandidatePin` before, registry row 41 (`fault_row: t_cand_ref`), constructed
-    // where a candidate-prepared pin stands by production's own hand: a real kill inside
-    // `reclaim_after_creation` during a real `promote_candidate`, resumed by the next
-    // incarnation. `coverage.rs` and the registry cite this test for the site's before phase,
-    // so it runs under its name.
     a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume(HookPhase::Before);
 }
 
 #[test]
 fn kill_after_report_before_each_cleanup_step_after_the_effect() {
     fault_at_every_finalization_cell(HookPhase::After);
-    // `Ref.DeleteCandidatePin` after, registry row 42 (`fault_row: t_cand_ref`), constructed
-    // where a candidate-prepared pin stands by production's own hand: a real kill inside
-    // `reclaim_after_creation` during a real `promote_candidate`, resumed by the next
-    // incarnation. `coverage.rs` and the registry cite this test for the site's after phase,
-    // so it runs under its name. The kill before the deletion runs under it too: the resume
-    // after that kill is the one that enters the site in this process, at both phases, where
-    // the resume after the kill past the deletion enters it at neither, and the merge check
-    // reads the after phase from this test's own observation record.
     a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume(HookPhase::Before);
     a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume(HookPhase::After);
 }
@@ -23734,11 +23707,6 @@ fn a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_t
     );
 }
 
-/// One cell of the kill matrix, driven over `planted`: a child killed at the cell inside a
-/// real finalization, what its death left read against the cleanup order, and the next resume
-/// in a fresh process finalizing the rest and refusing. The candidate-prepared pin's readings
-/// follow the planting's own declaration (`surplus_candidate_pin`), as in the error-return
-/// matrix's cell.
 fn kill_at_a_finalization_cell_and_converge(
     planted: &FinishedPlanting,
     outcome: &RunOutcome,
@@ -23827,9 +23795,6 @@ fn kill_at_every_finalization_cell(outcome: &RunOutcome, part: HookPhase) {
             continue;
         }
         if site == EffectSiteId::Ref(RefSite::DeleteCandidatePin) {
-            // Not a cell of this matrix, for the reason the error-return matrix gives: the
-            // planting leaves no candidate-prepared pin, and a kill inside the sweep is driven
-            // over a declared one by the declared-pin test below.
             continue;
         }
         let tag = format!("{outcome:?}/{site}/{phase}");
