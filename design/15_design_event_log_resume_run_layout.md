@@ -37,7 +37,9 @@ marker and reciprocal-owner protocol.
 **A marker-less run directory is reclaimed only on a complete listing.** At
 startup the census may reclaim a public run directory that has no marker only
 when listing it completed and showed it bare or holding only the staged
-`.creating.tmp`. A listing that fails retains the directory and reports it
+`.creating.tmp`. An entry of that name that is not a regular file is contents,
+and the directory is retained. A listing that fails retains the directory and
+reports it
 unreadable, with the error, because a failed listing is no evidence that
 nothing is there. Reclamation removes the directory by the shape that listing
 showed, never by a fresh one, so a directory that gained contents since is
