@@ -169,8 +169,12 @@ succeeded or found `<qid>.json` existing, the outcome is decided, and a
 failure removing the staged name does not change it: that name stays as
 `.partial` residue, which readers ignore, and the outcome is still returned.
 An I/O error means the link failed for another reason and the answer was not
-published; the staged file is removed then too. Every path leaves at most the
-staged `.partial`, and only when its removal fails.
+published; the staged file is removed then too. Staging can fail before
+there is anything to link: an I/O error creating the staged file leaves
+nothing, and one writing it (a full disk, a file-size limit) removes the
+staged file `stage_answer` just created and returns the write's error, so
+`publish_answer` is never reached and nothing is published. Every path
+leaves at most the staged `.partial`, and only when its removal fails.
 
 Atomic and create-once: each publisher stages its answer in a file of its
 own, `<qid>.json.<pid>-<ulid>.partial`, created exclusively, and publishes it

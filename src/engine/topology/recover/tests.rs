@@ -24028,8 +24028,6 @@ fn late_answer_after_finalization_is_inert_and_reported_not_live() {
     let answers = fixture.public().join("answers");
     mkdir(&answers);
     let id = crate::ir::QuestionId(PARKED_QUESTION.to_owned());
-    // The plant published an answer before finalization; publication is
-    // create-once, so the late one arrives at a name that is free again.
     crate::workspace_manager::fixture::remove_file(&planted.answer_files.published);
     publish_answer_file(&answers, &id, "go ahead");
     assert!(

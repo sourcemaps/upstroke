@@ -12879,6 +12879,104 @@ fn the_commit_records_digest_is_over_the_exact_line_bytes() {
     );
 }
 
+/// The file-size limit the child of
+/// [`a_failed_staging_write_removes_its_staged_file`] stages under, below the
+/// staged answer's size, so every staging write fails part-way.
+#[cfg(unix)]
+const STAGING_WRITE_LIMIT: libc::rlim_t = 16;
+
+/// The child of [`a_failed_staging_write_removes_its_staged_file`]: ignores
+/// `SIGXFSZ`, lowers `RLIMIT_FSIZE` below the staged answer's size, and stages
+/// one answer three times into the answers directory the parent names. Each
+/// staging write fails with `EFBIG`, and each call must say so as an I/O error.
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned as a subprocess by a_failed_staging_write_removes_its_staged_file"]
+fn failed_staging_write_child() {
+    let answers = PathBuf::from(std::env::var("UPSTROKE_TEST_ANSWERS_DIR").expect("answers dir"));
+    let answer = serde_json::json!({"text": "an answer longer than the file-size limit"});
+    let size = serde_json::to_string_pretty(&answer)
+        .expect("serializable")
+        .len()
+        + 1;
+    assert!(
+        libc::rlim_t::try_from(size).expect("a size") > STAGING_WRITE_LIMIT,
+        "the staged answer ({size} bytes) must exceed the limit"
+    );
+
+    // SAFETY: `signal` takes a signal number and a disposition by value;
+    // `SIG_IGN` installs no handler, so nothing runs on the signal.
+    let ignored = unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
+    assert_ne!(
+        ignored,
+        libc::SIG_ERR,
+        "ignoring SIGXFSZ: {}",
+        std::io::Error::last_os_error()
+    );
+    let lowered = libc::rlimit {
+        rlim_cur: STAGING_WRITE_LIMIT,
+        rlim_max: STAGING_WRITE_LIMIT,
+    };
+    // SAFETY: `setrlimit` reads one `rlimit` through the pointer and
+    // `lowered` is live for the call.
+    let narrowed = unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &lowered) };
+    assert_eq!(
+        narrowed,
+        0,
+        "narrowing RLIMIT_FSIZE to {STAGING_WRITE_LIMIT}: {}",
+        std::io::Error::last_os_error()
+    );
+
+    for attempt in 1..=3 {
+        match stage_answer(&answers, "q-1", &answer, &mut NoHooks) {
+            Err(UpstrokeError::Io { .. }) => {}
+            other => panic!("attempt {attempt}: the staging write must fail as I/O: {other:?}"),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_staging_write_removes_its_staged_file() {
+    let tree = scratch("failed-staging-write");
+    let answers = tree.path().join("answers");
+    create_dir(&answers).expect("answers");
+
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "rundir::tests::failed_staging_write_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("UPSTROKE_TEST_ANSWERS_DIR", &answers)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn the staging child");
+    assert!(
+        output.status.success(),
+        "the child's three staging calls each returned an I/O error: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let partials: Vec<String> = fs::read_dir(&answers)
+        .expect("list answers")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.ends_with(".partial"))
+        .collect();
+    assert!(
+        partials.is_empty(),
+        "a failed staging write removes the staged file it created: {partials:?}"
+    );
+}
+
 /// A `.partial` is writer-owned staging residue that **no reader ingests**
 /// and no ingestion consumes (`PR5-RUNDIR-060`, `PR5-RUNDIR-061`).
 ///

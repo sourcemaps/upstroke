@@ -333,10 +333,7 @@ fn answer_open(open: FoundOpen, reply: Reply) -> Result<Answered, UpstrokeError>
     })
 }
 
-/// Publish `record`, or refuse exactly as the check before it does when
-/// another answer was published first: publication is create-once, so the
-/// check and the publication racing a second `upstroke answer` ends with one
-/// answer kept and the other refused, never two successes.
+/// Publish `record`, refusing as already answered if another was published first.
 fn publish(
     answers: &Path,
     id: &QuestionId,

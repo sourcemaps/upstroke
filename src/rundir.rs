@@ -2000,8 +2000,9 @@ impl StagedAnswer {
 /// # Errors
 ///
 /// A serialization failure stages nothing. An I/O error creating the file
-/// leaves nothing; one writing it leaves the staged file, partly written, as
-/// `.partial` residue.
+/// leaves nothing; one writing it removes the staged file, or leaves it,
+/// partly written, as `.partial` residue only if that removal fails too. The
+/// error is the write's, naming the staged file.
 pub fn stage_answer<T: Serialize>(
     answers: &Path,
     component: &str,
@@ -2026,8 +2027,14 @@ pub fn stage_answer<T: Serialize>(
             .create_new(true)
             .open(&staged)
             .map_err(io_error)?;
-        file.write_all((json + "\n").as_bytes()).map_err(io_error)?;
+        let written = file.write_all((json + "\n").as_bytes());
         drop(file);
+        if let Err(source) = written {
+            // Cleanup that never changes the outcome: a staged name that
+            // cannot be removed stays as `.partial` residue.
+            let _ = fs::remove_file(&staged);
+            return Err(io_error(source));
+        }
         Ok(StagedAnswer {
             staged,
             published: answers.join(format!("{component}.json")),
