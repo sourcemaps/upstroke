@@ -53,12 +53,12 @@ where a refusal can be reported before any agent CLI is started: a fresh run
 refuses in `prepare_fresh`, before its lease, and a resume in its pre-flight,
 under its locks. The profile must be an absolute path and an existing
 directory. The agent's capability probe then runs under the profile, through
-this wrapper, and its sign-in discovery runs once under each of its profiled
-pools, so a profile that is not signed in is refused there
-(`preflight.md`, `refuse_signed_out`). Until then nothing checked sign-in, and
-such a profile passed pre-flight and failed at its first attempt
-(`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`). It does not expand `~/`: the
-configuration has no helper for that (the only home lookup is
+this wrapper. Its sign-in check (`claude auth status --json` for Claude Code)
+runs next, on a fresh run and on a resume, under the profile of each of the
+agent's pools that names one, or under its default account when none does
+(`preflight.md`, `refuse_signed_out`). A signed-out account refuses the run
+before it starts or resumes; a CLI that cannot say passes. It does not expand
+`~/`: the configuration has no helper for that (the only home lookup is
 `util::user_upstroke_dir`, which finds the home but does not rewrite paths),
 so the profile is the string written in the pools file,
 `~/.upstroke/pools.toml`, used as a path, and pre-flight refuses a `~/` one

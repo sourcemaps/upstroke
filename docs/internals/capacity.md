@@ -83,8 +83,11 @@ its creation begins, so nothing of the run exists, and a resume at its
 pre-flight. What pre-flight checks of a profile is that it is an absolute
 path and an existing directory (besides the host runner, Claude Code and no
 `CLAUDE_CODE_OAUTH_TOKEN`). The agent's capability probe then runs under the
-profile. Nothing checks sign-in, so a profile that is not signed in passes
-pre-flight and fails at its first attempt (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`).
+profile. Its sign-in check (`claude auth status --json` for Claude Code) runs
+next, on a fresh run and on a resume, under the profile of each of the agent's
+pools that names one, or under its default account when none does. A
+signed-out account refuses the run before it starts or resumes; a CLI that
+cannot say passes.
 The legacy coordinator refuses any profiled pool.
 A rate limit moves a task between pools, and so between profiles. When a
 schema-4 worker's limit would defer its task and another pool of its agent is
