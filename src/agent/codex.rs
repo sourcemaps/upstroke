@@ -1053,7 +1053,7 @@ mod tests {
     #[test]
     fn model_catalog_requires_every_effort_for_each_known_codex_model() {
         let known = catalog::known_models(ADAPTER_ID);
-        for slug in ["gpt-6-astra", "gpt-5.6-sol"] {
+        for slug in ["gpt-6-astra", "gpt-5.6-sol", "gpt-6.2-sol", "gpt-6.2-astra"] {
             assert!(known.contains(&slug), "`{slug}` is checked: {known:?}");
         }
         let required: Vec<String> = Effort::ALL.into_iter().map(|e| e.to_string()).collect();
