@@ -544,6 +544,20 @@ this loop is what guarantees that.
 
 Returns whether the task ended deferred.
 
+It reads the plan's task, its resolved chain and its row of the run's progress
+by position, every one through `get` (`progress_of` for the progress row). The
+scheduler handing it a position one of them does not hold is an engine defect,
+and it is refused with `UpstrokeError::Refused` naming the position, which
+table lacks it and how many rows that table has (`unscheduled_position`). That
+is the variant the schema-4 scheduler uses for a task its fold or registry does
+not hold. It used to index all three and panic instead
+(`PR380-STEP-TASK-PANICKING-INDEX`). A function-local
+`#[deny(clippy::indexing_slicing)]` keeps indexing out of the body. Every
+progress field the attempt and its ladder decision read comes from the one row
+borrowed after `attempt_started` is appended. The borrow checker holds that
+borrow until `attempt_finished`, so nothing can change the row in between,
+and no new error path opens after the worker has run.
+
 ## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `let analysis = self.analysis;`
 
 Copied out of `self` so they carry the run's lifetime rather than
@@ -604,7 +618,7 @@ engine cannot write a record of its own death afterwards.
 Scoped so every borrow the attempt takes on `self` is released
 before the ladder updates this task's progress below.
 
-## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `feedback: self.state.progress[index].feedback.clone(),`
+## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `feedback: progress.feedback.clone(),`
 
 Owned: the ladder appends to this task's feedback the
 moment the attempt returns, and one clone per attempt
@@ -616,7 +630,7 @@ The legacy engine's own scope for an invocation
 identity: this task's position in the plan. See
 `AttemptCx::invocation`.
 
-## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `decisions: self.state.progress[index]`
+## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `decisions: progress`
 
 The same entries the worker prompt quotes as operator
 instruction, routed to the judge as well (§12).

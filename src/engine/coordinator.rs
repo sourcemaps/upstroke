@@ -478,13 +478,21 @@ impl Run<'_> {
         })
     }
 
+    #[deny(clippy::indexing_slicing)]
     fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {
         let analysis = self.analysis;
         let adapters = self.adapters;
         let workspace = self.workspace;
-        let task = &analysis.plan.tasks[index];
+        let task = analysis
+            .plan
+            .tasks
+            .get(index)
+            .ok_or_else(|| unscheduled_position(index, "plan", analysis.plan.tasks.len()))?;
         let task_id = task.id.to_string();
-        let chain = &analysis.chains[index];
+        let chain = analysis
+            .chains
+            .get(index)
+            .ok_or_else(|| unscheduled_position(index, "resolved chains", analysis.chains.len()))?;
         let policy = LadderPolicy {
             attempts_per: chain.attempts_per,
             rungs: chain.rungs.len(),
@@ -493,7 +501,7 @@ impl Run<'_> {
         let stem = format!("{index:02}-{}", util::filename_component(task.id.as_str()));
 
         loop {
-            let rung_index = self.state.progress[index].rung;
+            let rung_index = self.progress_of(index)?.rung;
             let Some(rung) = chain.rungs.get(rung_index) else {
                 self.fail_task(
                     index,
@@ -526,10 +534,11 @@ impl Run<'_> {
                     message: format!("no adapter registered for agent `{}`", profile.agent),
                 })?;
 
-            let attempt = self.state.progress[index].attempts + 1;
-            let resume = self.state.progress[index]
+            let progress = self.progress_of(index)?;
+            let attempt = progress.attempts + 1;
+            let resume = progress
                 .resume_next
-                .then(|| self.state.progress[index].session.clone())
+                .then(|| progress.session.clone())
                 .flatten();
 
             let rung_number = u32::try_from(rung_index).unwrap_or(u32::MAX);
@@ -558,10 +567,11 @@ impl Run<'_> {
                 },
             })?;
 
+            let progress = self.progress_of(index)?;
             let result = {
                 let retry = (attempt > 1).then(|| RetryBrief {
                     resumed: resume.is_some(),
-                    feedback: self.state.progress[index].feedback.clone(),
+                    feedback: progress.feedback.clone(),
                 });
                 let attempt_cx = AttemptCx {
                     task,
@@ -578,7 +588,7 @@ impl Run<'_> {
                     timeout: self.attempt_timeout,
                     review_pass_timeout: self.review_pass_timeout,
                     retry,
-                    decisions: self.state.progress[index]
+                    decisions: progress
                         .feedback
                         .iter()
                         .filter(|entry| entry.human)
@@ -651,9 +661,9 @@ impl Run<'_> {
                 ladder::next_step(
                     failure,
                     &LadderState {
-                        rung: self.state.progress[index].rung,
-                        attempts_on_rung: self.state.progress[index].attempts_on_rung,
-                        defers: self.state.progress[index].defers,
+                        rung: progress.rung,
+                        attempts_on_rung: progress.attempts_on_rung,
+                        defers: progress.defers,
                         resumable,
                     },
                     &policy,
@@ -714,16 +724,13 @@ impl Run<'_> {
                         transition = Some(Box::new(events::AttemptTransition::Defer(
                             events::TaskDeferred {
                                 reason: failure.reason.clone(),
-                                defers: self.state.progress[index].defers.saturating_add(1),
+                                defers: progress.defers.saturating_add(1),
                             },
                         )));
                     }
                     Next::AskHuman(kind) => {
-                        let context = question_context(
-                            ParkSubject::of(task, &self.state.progress[index]),
-                            kind,
-                            failure,
-                        );
+                        let context =
+                            question_context(ParkSubject::of(task, progress), kind, failure);
                         let question = self.build_question(index, kind, context);
                         parking = Some(Box::new(events::AttemptParking {
                             question: question.clone(),
@@ -973,6 +980,13 @@ impl Run<'_> {
 
     fn pool_name_for(&self, agent: &str) -> Option<String> {
         capacity::pool_for(agent, &self.analysis.config.pools).map(|pool| pool.name.clone())
+    }
+
+    fn progress_of(&self, index: usize) -> Result<&Progress, UpstrokeError> {
+        self.state
+            .progress
+            .get(index)
+            .ok_or_else(|| unscheduled_position(index, "state", self.state.progress.len()))
     }
 
     fn reported_spend(&self, task: Option<usize>) -> f64 {
@@ -1293,6 +1307,15 @@ impl Run<'_> {
             &self.analysis.plan,
             &self.state,
         )
+    }
+}
+
+fn unscheduled_position(index: usize, table: &str, held: usize) -> UpstrokeError {
+    UpstrokeError::Refused {
+        message: format!(
+            "the scheduler picked task position {index}, which this run's {table} does not hold \
+             (it holds {held})"
+        ),
     }
 }
 
