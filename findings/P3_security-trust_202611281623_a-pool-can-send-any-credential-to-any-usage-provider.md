@@ -21,9 +21,13 @@ guard: the change that refuses a usage_token_env naming a variable on a list the
    one of nine token prefixes (`src/capacity.rs:173-185`, `:250-255`, `:299-304`). So
    `CLAUDE_CODE_OAUTH_TOKEN`, or another provider's key variable, passes: read, not run.
 3. `upstroke capacity --refresh` resolves that variable from the process environment
-   (`src/main.rs:302`; `src/tracker.rs:171`) and sends its value in the request for whichever
-   provider the pool names (`src/tracker.rs:181-186`): one of four, at three hosts
-   (`src/tracker/provider.rs:119-123`, `:137-189`).
+   (`src/main.rs:302`; `src/tracker.rs:171`) and sends its value, trimmed, in the request for
+   whichever provider the pool names (`src/tracker.rs:171`, `:181-186`): one of four, at three hosts
+   (`src/tracker/provider.rs:119-123`, `:137-189`). It sends nothing for a value that is empty once
+   trimmed, or that still holds a control character, such as a line break, which is refused before
+   `curl` starts (`src/tracker.rs:171-179`; `src/tracker/transport.rs:150-153`, `:180-190`, `:247`),
+   nor for a pool of either GitHub provider that names no `usage_account`, which is skipped before
+   the variable is read (`src/tracker.rs:165-170`; `src/capacity.rs:145-150`).
 4. So the value of `CLAUDE_CODE_OAUTH_TOKEN`, or one provider's key, can be sent to another
    provider.
 
