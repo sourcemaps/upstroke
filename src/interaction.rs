@@ -480,10 +480,30 @@ impl Sleeper for RealSleeper {
 
 pub const DEFAULT_DEFER_BACKOFF: Duration = Duration::from_secs(60);
 pub const MAX_DEFER_BACKOFF: Duration = Duration::from_secs(600);
+pub const RESET_WAIT_BOUND: Duration = Duration::from_secs(5 * 60 * 60 + 15 * 60);
+pub const RESET_WAIT_MARGIN: Duration = Duration::from_secs(120);
 
 pub fn defer_backoff(base: Duration, round: u32) -> Duration {
     base.saturating_mul(2u32.saturating_pow(round.min(16)))
         .min(MAX_DEFER_BACKOFF)
+}
+
+pub fn reset_wait_until(now_unix: u64, resets_unix: impl IntoIterator<Item = u64>) -> Option<u64> {
+    let bound = RESET_WAIT_BOUND.as_secs();
+    resets_unix
+        .into_iter()
+        .filter(|&reset| now_unix < reset && reset - now_unix <= bound)
+        .min()
+        .map(|reset| reset.saturating_add(RESET_WAIT_MARGIN.as_secs()))
+}
+
+pub fn reset_wait_line(pool: &str, reset_at: &str, wait: Duration) -> String {
+    let whole_minutes = wait.as_secs().div_ceil(60);
+    let (hours, minutes) = (whole_minutes / 60, whole_minutes % 60);
+    format!(
+        "waiting for pool {pool}'s usage limit to reset at {reset_at}: {hours}h {minutes}m, to \
+         two minutes past it"
+    )
 }
 
 #[cfg(test)]
@@ -1079,6 +1099,102 @@ mod tests {
             Duration::ZERO,
             "tests can opt out of waiting entirely"
         );
+    }
+
+    const NOW: u64 = 1_794_366_000;
+
+    #[test]
+    fn the_reset_wait_bound_and_margin_are_the_owners_ruling() {
+        assert_eq!(RESET_WAIT_BOUND, Duration::from_secs(18_900));
+        assert_eq!(
+            RESET_WAIT_BOUND,
+            Duration::from_secs(5 * 3600 + 15 * 60),
+            "five hours and a quarter"
+        );
+        assert_eq!(RESET_WAIT_MARGIN, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn a_reset_two_and_a_half_hours_ahead_is_waited_for_until_two_minutes_past_it() {
+        let reset = NOW + 2 * 3600 + 30 * 60;
+        assert_eq!(reset_wait_until(NOW, [reset]), Some(reset + 120));
+    }
+
+    #[test]
+    fn of_several_resets_the_earliest_in_range_wins() {
+        let past = NOW - 60;
+        let early = NOW + 3600;
+        let later = NOW + 2 * 3600;
+        let beyond = NOW + RESET_WAIT_BOUND.as_secs() + 1;
+        assert_eq!(
+            reset_wait_until(NOW, [later, beyond, early, past]),
+            Some(early + 120),
+            "the reset already past is earlier but out of range, and order does not matter"
+        );
+        assert_eq!(
+            reset_wait_until(NOW, [beyond, later]),
+            Some(later + 120),
+            "a reset past the bound never wins, even alongside one in range"
+        );
+    }
+
+    #[test]
+    fn a_reset_exactly_at_the_bound_is_waited_for_and_one_second_past_it_is_not() {
+        let at_bound = NOW + 18_900;
+        assert_eq!(reset_wait_until(NOW, [at_bound]), Some(at_bound + 120));
+        assert_eq!(reset_wait_until(NOW, [at_bound + 1]), None);
+    }
+
+    #[test]
+    fn a_reset_at_or_before_now_is_not_waited_for() {
+        assert_eq!(reset_wait_until(NOW, [NOW]), None);
+        assert_eq!(reset_wait_until(NOW, [NOW - 1]), None);
+        assert_eq!(reset_wait_until(NOW, [0]), None);
+        assert_eq!(
+            reset_wait_until(NOW, [NOW + 1]),
+            Some(NOW + 1 + 120),
+            "one second ahead is ahead"
+        );
+    }
+
+    #[test]
+    fn no_resets_is_no_wait() {
+        assert_eq!(reset_wait_until(NOW, std::iter::empty()), None);
+        assert_eq!(reset_wait_until(NOW, Vec::new()), None);
+    }
+
+    #[test]
+    fn the_reset_wait_line_names_the_pool_the_reset_and_the_wait() {
+        assert_eq!(
+            reset_wait_line(
+                "claude-max",
+                "2026-11-11T05:30:00Z",
+                Duration::from_secs(2 * 3600 + 32 * 60)
+            ),
+            "waiting for pool claude-max's usage limit to reset at 2026-11-11T05:30:00Z: 2h 32m, \
+             to two minutes past it"
+        );
+        assert_eq!(
+            RESET_WAIT_MARGIN,
+            Duration::from_secs(120),
+            "the line spells the margin out in words"
+        );
+        let line = reset_wait_line(
+            "codex-plus",
+            "2026-11-11T05:30:00Z",
+            Duration::from_secs(2 * 3600 + 31 * 60 + 1),
+        );
+        assert!(
+            line.contains(": 2h 32m,"),
+            "a part minute rounds up, so the line never promises the run back early: {line}"
+        );
+        let line = reset_wait_line(
+            "codex-plus",
+            "2026-11-11T05:30:00Z",
+            Duration::from_secs(45 * 60),
+        );
+        assert!(line.contains("pool codex-plus's"), "{line}");
+        assert!(line.contains(": 0h 45m,"), "{line}");
     }
 
     #[test]

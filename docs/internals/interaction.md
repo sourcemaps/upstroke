@@ -389,6 +389,47 @@ Cap on the wait. Past this, waiting longer is worse than asking a human.
 Doubling backoff, capped. `round` counts consecutive waits where deferred
 tasks were the *only* runnable work.
 
+## `pub const RESET_WAIT_BOUND: Duration = Duration::from_secs(5 * 60 * 60 + 15 * 60);`
+
+The furthest reset a run waits for: 5 h 15 min, 18 900 s. A recorded reset further ahead than
+this is not waited for. The value is the owner's ruling r6 (question 1); the test
+`the_reset_wait_bound_and_margin_are_the_owners_ruling` pins it.
+
+## `pub const RESET_WAIT_MARGIN: Duration = Duration::from_secs(120);`
+
+How far past the reset the wait ends: 120 s, so a run resumes two minutes after the time the
+usage-limit message named rather than at it. The value is the owner's ruling r6 (question 1),
+and the same test pins it. `reset_wait_line` spells the margin out as "two minutes", so changing
+this value fails that test and `the_reset_wait_line_names_the_pool_the_reset_and_the_wait`
+until the wording follows.
+
+## `pub fn reset_wait_until(now_unix: u64, resets_unix: impl IntoIterator<Item = u64>) -> Option<u64> {`
+
+The reset-wait rule, as one pure function over Unix seconds: of the resets given, it takes the
+earliest `r` with `now_unix < r` and `r - now_unix <= RESET_WAIT_BOUND`, and answers
+`Some(r + RESET_WAIT_MARGIN)`, the Unix second the wait ends. A reset at or before `now_unix` has
+already happened and one further ahead than the bound is too far to wait for; both are ignored,
+not clamped, and when nothing is left the answer is `None`. "Earliest in range" is not "earliest":
+a reset already past is earlier than every reset in range and never wins. The bound is inclusive
+in whole seconds, so a reset exactly 18 900 s ahead is waited for and one 18 901 s ahead is not.
+The function reads no clock and parses no timestamp; the caller supplies both, which is what lets
+the tests pin every edge with plain numbers. The margin is added saturating, so a reset near
+`u64::MAX` cannot overflow under the release profile's overflow checks.
+
+## `pub fn reset_wait_line(pool: &str, reset_at: &str, wait: Duration) -> String {`
+
+The one line a run prints when it starts a reset wait. It names the pool, the reset exactly as
+recorded (`reset_at` is passed through, not reparsed), the margin in words, and the wait in hours
+and minutes:
+
+```text
+waiting for pool claude-max's usage limit to reset at 2026-11-11T05:30:00Z: 2h 32m, to two minutes past it
+```
+
+Hours and minutes are formatted here because `capacity::render_duration` prints a single unit,
+and 2 h 32 min would come out as `152m`. Both units are always printed, `0h 45m` included. A part
+minute rounds up, so the line never promises the run back sooner than it will be.
+
 ## `fn picking_the_last_agent_offered_by_number_names_that_agent_and_declines_nothing() {`
 
 PR #249's conformance review, finding 1, at the parser: a `HumanBinding`

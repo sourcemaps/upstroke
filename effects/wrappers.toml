@@ -694,6 +694,8 @@ effect_free = [
     "read_answer",
     "read_answer_record",
     "render_question",
+    "reset_wait_line",
+    "reset_wait_until",
     "sleep",
     "unattributed",
     "with_poll",
