@@ -106,10 +106,22 @@ In the first, the log's per-site summary showed:
     Object.ProposalCherryPick   n=8 none=0 internal=3 after=5 unclassified=0
     Worktree.Add                n=8 none=1 internal=0 after=7 unclassified=0
 
-Which site's recovery failed the log does not say. No rate is given: the number of guest jobs that
-ran this test that day was not counted for this record.
+The failing site was `Worktree.Add`, the site of this row's second fingerprint. The test loops over
+`SAMPLED_SITES` in the order `CandidateStage`, `CandidateWriteTree`, `ProposalCherryPick`,
+`Worktree.Add` (`src/workspace_manager/tests.rs`, near line 14125); each iteration runs
+`sample_site`, prints that site's `n=… none=…` line (near line 13201), and then asserts on that
+site, ending with `record.recovered` (near line 13274), so a failing `record.recovered` ends the
+loop. The log holds all four summary lines, so the first three sites passed their assertions and
+the fourth, `Worktree.Add`, failed. The test file is byte-identical at `583e7e6b`, `72ebee2f`,
+`11328197` and `9992447b`. No rate is given: the number of guest jobs that ran this test that day
+was not counted for this record.
 
 This is a third fingerprint of this row, not a new row: a recovery that fails is consistent with
 this file's failure sequence — a real `git` still running after the kill ended its launcher — and
-that reading is not established by the logs. The guest was heavily loaded that day.
+that reading is not established by the logs. The guest was heavily loaded that day. Reasoned from
+the code and not run: on Windows the kill reaches only the direct child
+(`kill_process_group` is `child.kill()`, `src/workspace_manager/fixture.rs`, near lines 3596-3599)
+and `await_group_end` returns at once (near lines 3636-3639), so the children `git worktree add`
+itself starts are neither killed nor waited for, and routing the spawn through
+`fixture::sampled_git`, the change prescribed above, is not shown to cure this fingerprint.
 
