@@ -357,7 +357,10 @@ impl RunDirHooks for HarnessHooks {
 /// [`Injection::Kill`] aborts rather than panicking or exiting, for the same
 /// reason [`crate::agent::proc`] aborts: the claim under test is what a
 /// coordinator that runs **no** cleanup leaves behind, and both of the other
-/// two run destructors.
+/// two run some. `panic!` unwinds and runs the stack's destructors.
+/// `std::process::exit` runs no stack destructors, but it is the orderly exit
+/// and runs the process-exit handlers registered with the platform.
+/// `std::process::abort` runs neither.
 fn apply(injection: Injection, site: EffectSiteId, phase: HookPhase) -> Result<(), UpstrokeError> {
     match injection {
         Injection::Proceed => Ok(()),
