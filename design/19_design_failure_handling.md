@@ -45,7 +45,9 @@ refused it for a reviewer's limit; every pool of the worker's agent for a
 worker's limit, while all of them are held exhausted) has a recorded reset at
 most 5 h 15 min ahead, the run waits until two minutes past the earliest such
 reset, as one deferral, and prints once the pool, the reset and how long it
-will wait. It sleeps in slices of at most ten minutes and chooses its next
+will wait. A held pool whose recorded reset has already passed ends the wait
+instead: once the clock is two minutes past that reset there is no wait, and
+before that the run waits only until two minutes past it. It sleeps in slices of at most ten minutes and chooses its next
 step again between them, so an answer that arrives meanwhile is taken first,
 and it records one `defer_wait_elapsed`, for the whole wait, when the wait
 ends. Otherwise the back-off is unchanged: 60 s, doubling to at most 600 s

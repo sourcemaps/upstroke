@@ -31,10 +31,18 @@ first, and a plan knows the pool its attempt is on. If the wrapper stamped a
 worker, an attempt planned on a later pool for its agent would run under the
 first pool's `CLAUDE_CONFIG_DIR`, a different account from the one it was
 planned on. So a request whose role is `ExecutionRole::Implement` goes through
-as it arrived, with the plan's profile or with none. Today a plan's pool is
-still its agent's first pool (`FrozenPlans::plan` asks `pool_for`), so a
-worker gets the same directory it got when this wrapper stamped it. What has
-moved is where that directory comes from.
+as it arrived, with the plan's profile or with none.
+
+A plan's pool is the one its request names (`PlanRequest::pool`):
+`FrozenPlans::plan` takes it as given and does not ask `pool_for`. The run
+chooses it (`TopologyRun::prepare_attempt`). A new attempt binds the first
+pool of its agent, in file order, that no signal holds exhausted; with every
+one held, the first whose recorded reset is two minutes past, or else the
+first (`serving_pool`). A retry that resumes its session keeps the pool its
+session ran on. So a worker can run under a later pool's directory, which
+this wrapper would never have stamped. Only on a run with one pool per agent
+is a plan's pool always its agent's first, and there a worker gets the same
+directory it got when this wrapper stamped it.
 
 It is engine-side and private (`mod profiled;`, not `pub mod`) because it is
 an assembly detail of `entry`: nothing outside the topology engine builds a

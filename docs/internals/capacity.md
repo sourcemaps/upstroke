@@ -375,7 +375,10 @@ no pool.
 toward, so the two cannot disagree about which subscription refused. For
 a worker's limit it reads every pool of the worker's agent instead
 (`TopologyRun::resets_awaited_by`): the task can run again on whichever of
-them resets first, and that need not be the one that refused last.
+them resets first, and that need not be the one that refused last. A
+held pool among them whose reset has already passed ends the wait
+(`TopologyRun::awaited_reset`): there is none once the clock is two
+minutes past that reset, and before that the wait runs only until then.
 `limited_pool` is effect-free in `effects/wrappers.toml`.
 
 ## `pub(crate) fn retire_served_pools(`
