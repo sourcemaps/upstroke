@@ -188,3 +188,12 @@ polls (`<public>/answers/<id>.json`, through the `Answer.StageWrite` and
 already there refuses, whether or not the run has ingested it yet. A
 question that binds an agent accepts only one of its options
 (`observe::check_reply`).
+
+## `fn publish(`
+
+Both paths write through here. Publication is create-once, so an answer
+published between the "already answered" check and this write comes back as
+`AnswerPublication::AlreadyAnswered`. That is refused with the same sentence
+as the check, and it names the answer that was kept. Two racing `upstroke
+answer` commands therefore end with one answer kept and the other refused,
+never two successes.

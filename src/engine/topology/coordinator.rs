@@ -20739,7 +20739,11 @@ git cat-file -e 'HEAD^{tree}'
                     })
                     .unwrap_or_else(|| crate::ir::QuestionId("q-after-the-end".to_owned()));
                 let published = crate::interaction::answer_path(&answers, &question);
-                let partial = answers.join("q-another.json.partial");
+                let partial = answers.join(format!(
+                    "q-another.json.{}-{}.partial",
+                    std::process::id(),
+                    crate::ulid::ulid()
+                ));
                 crate::workspace_manager::fixture::write_file(
                     &published,
                     b"{\"answer\":\"answered\",\"text\":\"go ahead\"}",

@@ -45,14 +45,7 @@ pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, 
     })?;
 
     if let Some(existing) = &record.answer {
-        return Err(UpstrokeError::Refused {
-            message: format!(
-                "question {} was already answered ({}). Answers are applied once; if the task \
-                 needs different guidance it will raise a new question.",
-                found.question_id,
-                describe(existing)
-            ),
-        });
+        return Err(already_answered(&found.question_id, Some(existing)));
     }
 
     let answer = reply_answer(&record.question, reply)?;
@@ -63,7 +56,7 @@ pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, 
         source,
     })?;
     let record = interaction::AnswerRecord::unattributed(answer);
-    interaction::write_answer(&answers, &id, &record)?;
+    publish(&answers, &id, &record)?;
 
     let run_is_live = rundir::is_running(&found.public);
     Ok(Answered {
@@ -321,14 +314,7 @@ fn answer_open(open: FoundOpen, reply: Reply) -> Result<Answered, UpstrokeError>
     let question = &open.asked.question;
     let answers = open.paths.answers();
     if let Some(existing) = interaction::read_answer(&answers, &question.id)? {
-        return Err(UpstrokeError::Refused {
-            message: format!(
-                "question {} was already answered ({}). Answers are applied once; if the task \
-                 needs different guidance it will raise a new question.",
-                question.id,
-                describe(&existing)
-            ),
-        });
+        return Err(already_answered(question.id.as_str(), Some(&existing)));
     }
     let answer = reply_answer(question, reply)?;
     observe::check_reply(&open.asked, &answer)?;
@@ -337,7 +323,7 @@ fn answer_open(open: FoundOpen, reply: Reply) -> Result<Answered, UpstrokeError>
         source,
     })?;
     let record = interaction::AnswerRecord::unattributed(answer);
-    interaction::write_answer(&answers, &question.id, &record)?;
+    publish(&answers, &question.id, &record)?;
     let run_is_live = rundir::is_running(&open.paths.public);
     Ok(Answered {
         run_id: open.run_id.clone(),
@@ -345,6 +331,34 @@ fn answer_open(open: FoundOpen, reply: Reply) -> Result<Answered, UpstrokeError>
         answer: record.answer,
         run_is_live,
     })
+}
+
+/// Publish `record`, or refuse exactly as the check before it does when
+/// another answer was published first: publication is create-once, so the
+/// check and the publication racing a second `upstroke answer` ends with one
+/// answer kept and the other refused, never two successes.
+fn publish(
+    answers: &Path,
+    id: &QuestionId,
+    record: &interaction::AnswerRecord,
+) -> Result<(), UpstrokeError> {
+    match interaction::write_answer(answers, id, record)? {
+        interaction::AnswerPublication::Published => Ok(()),
+        interaction::AnswerPublication::AlreadyAnswered => {
+            let existing = interaction::read_answer(answers, id)?;
+            Err(already_answered(id.as_str(), existing.as_ref()))
+        }
+    }
+}
+
+fn already_answered(id: &str, existing: Option<&Answer>) -> UpstrokeError {
+    let existing = existing.map_or_else(String::new, |answer| format!(" ({})", describe(answer)));
+    UpstrokeError::Refused {
+        message: format!(
+            "question {id} was already answered{existing}. Answers are applied once; if the task \
+             needs different guidance it will raise a new question."
+        ),
+    }
 }
 
 fn describe(answer: &Answer) -> String {

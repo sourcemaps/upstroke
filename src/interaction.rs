@@ -138,14 +138,26 @@ pub fn answer_path(dir: &Path, id: &QuestionId) -> PathBuf {
     dir.join(format!("{}.json", util::filename_component(id.as_str())))
 }
 
-// The answer writer stages complete JSON before publishing it by rename; engine
-// readers may poll concurrently and must never see a partial payload. Failed
-// staging or publication can leave writer-owned .partial residue, which readers ignore.
+/// What [`write_answer`] did with an answer it was allowed to write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnswerPublication {
+    /// This answer is the published `<qid>.json`.
+    Published,
+    /// `<qid>.json` already existed and is untouched; this answer was not
+    /// published.
+    AlreadyAnswered,
+}
+
+// The answer writer stages complete JSON in a file of its own, created
+// exclusively, then publishes it create-once by hard link; engine readers may
+// poll concurrently and must never see a partial payload, and an answer
+// already published is never replaced (`AlreadyAnswered`). Failed staging or
+// publication can leave writer-owned .partial residue, which readers ignore.
 pub fn write_answer(
     dir: &Path,
     id: &QuestionId,
     record: &AnswerRecord,
-) -> Result<(), UpstrokeError> {
+) -> Result<AnswerPublication, UpstrokeError> {
     if record.attribution == Some(QuestionAttribution::DesignDefect)
         && !record.citation.as_deref().is_some_and(cited)
     {
@@ -155,8 +167,8 @@ pub fn write_answer(
     }
     let component = util::filename_component(id.as_str());
     let hooks = &mut crate::rundir::NoHooks;
-    crate::rundir::stage_answer(dir, &component, record, hooks)?;
-    crate::rundir::publish_answer(dir, &component, hooks)
+    let staged = crate::rundir::stage_answer(dir, &component, record, hooks)?;
+    crate::rundir::publish_answer(staged, hooks)
 }
 
 pub fn read_answer_record(
@@ -716,20 +728,24 @@ mod tests {
     fn answers_survive_the_trip_through_a_file() {
         let tree = scratch("answer-io");
         let dir = tree.path().to_path_buf();
-        let id = QuestionId::from("q-TEST");
-
-        assert_eq!(
-            read_answer(&dir, &id).expect("absent is not an error"),
-            None
-        );
-        for answer in [
-            Answer::Answered {
-                text: "use base64 cursors".to_owned(),
-            },
-            Answer::Declined,
+        for (id, answer) in [
+            (
+                QuestionId::from("q-TEST"),
+                Answer::Answered {
+                    text: "use base64 cursors".to_owned(),
+                },
+            ),
+            (QuestionId::from("q-TEST-DECLINED"), Answer::Declined),
         ] {
+            assert_eq!(
+                read_answer(&dir, &id).expect("absent is not an error"),
+                None
+            );
             let record = AnswerRecord::unattributed(answer);
-            write_answer(&dir, &id, &record).expect("write");
+            assert_eq!(
+                write_answer(&dir, &id, &record).expect("write"),
+                AnswerPublication::Published
+            );
             assert_eq!(read_answer(&dir, &id).expect("read"), Some(record.answer));
         }
         let leftovers: Vec<String> = std::fs::read_dir(&dir)

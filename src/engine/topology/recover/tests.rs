@@ -1971,7 +1971,11 @@ impl PlantedAnswerFiles {
         let id = crate::ir::QuestionId(PARKED_QUESTION.to_owned());
         publish_answer_file(&answers, &id, "go ahead");
         let published = crate::interaction::answer_path(&answers, &id);
-        let partial = answers.join("q-another.json.partial");
+        let partial = answers.join(format!(
+            "q-another.json.{}-{}.partial",
+            std::process::id(),
+            crate::ulid::ulid()
+        ));
         crate::workspace_manager::fixture::write_file(
             &partial,
             b"{\"answer\":\"answered\",\"text\":\"half",
@@ -14096,7 +14100,7 @@ fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnatio
         &fixture.private_root,
     );
     let component = crate::util::filename_component(question.id.as_str());
-    crate::rundir::stage_answer(
+    let stage = crate::rundir::stage_answer(
         &paths.answers(),
         &component,
         &crate::ir::Answer::Answered {
@@ -14105,7 +14109,7 @@ fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnatio
         &mut crate::rundir::NoHooks,
     )
     .expect("the answer is staged");
-    let partial = paths.answers().join(format!("{component}.json.partial"));
+    let partial = stage.path().to_path_buf();
     let staged = std::fs::read(&partial).expect("the staged answer");
     let unpublished = drive_observing(
         &fixture,
@@ -14137,8 +14141,10 @@ fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnatio
         staged,
         "the incarnation that ingested nothing left the partial byte-identical"
     );
-    crate::rundir::publish_answer(&paths.answers(), &component, &mut crate::rundir::NoHooks)
-        .expect("and published");
+    assert_eq!(
+        crate::rundir::publish_answer(stage, &mut crate::rundir::NoHooks).expect("and published"),
+        crate::interaction::AnswerPublication::Published
+    );
     let answer_file = crate::interaction::answer_path(&paths.answers(), &question.id);
     let published = std::fs::read(&answer_file).expect("the published answer");
 
@@ -14380,7 +14386,7 @@ fn a_kill_at_the_answer_ingestion_converges_on_the_next_incarnation(phase: HookP
     );
     paths.create().expect("the run directories are creatable");
     let component = crate::util::filename_component(question.id.as_str());
-    crate::rundir::stage_answer(
+    let stage = crate::rundir::stage_answer(
         &paths.answers(),
         &component,
         &crate::ir::Answer::Answered {
@@ -14389,8 +14395,10 @@ fn a_kill_at_the_answer_ingestion_converges_on_the_next_incarnation(phase: HookP
         &mut crate::rundir::NoHooks,
     )
     .expect("the answer is staged");
-    crate::rundir::publish_answer(&paths.answers(), &component, &mut crate::rundir::NoHooks)
-        .expect("and published");
+    assert_eq!(
+        crate::rundir::publish_answer(stage, &mut crate::rundir::NoHooks).expect("and published"),
+        crate::interaction::AnswerPublication::Published
+    );
     let published = paths.answers().join(format!("{component}.json"));
     let answer_bytes = std::fs::read(&published).expect("the published answer");
     let before = fixture.log_bytes();
@@ -14627,7 +14635,7 @@ fn an_answer_left_on_disk_under_a_budget_stop_is_ingested_once_by_the_resume_in_
     );
     paths.create().expect("the run directories are creatable");
     let component = crate::util::filename_component(question.id.as_str());
-    crate::rundir::stage_answer(
+    let stage = crate::rundir::stage_answer(
         &paths.answers(),
         &component,
         &crate::ir::Answer::Answered {
@@ -14636,8 +14644,10 @@ fn an_answer_left_on_disk_under_a_budget_stop_is_ingested_once_by_the_resume_in_
         &mut crate::rundir::NoHooks,
     )
     .expect("the answer is staged");
-    crate::rundir::publish_answer(&paths.answers(), &component, &mut crate::rundir::NoHooks)
-        .expect("and published");
+    assert_eq!(
+        crate::rundir::publish_answer(stage, &mut crate::rundir::NoHooks).expect("and published"),
+        crate::interaction::AnswerPublication::Published
+    );
     let published = crate::interaction::answer_path(&paths.answers(), &question.id);
     let bytes = std::fs::read(&published).expect("the published answer");
     let stopped = replayed(&fixture);
@@ -23920,7 +23930,7 @@ impl FinishedPlanting {
 
 fn publish_answer_file(answers: &Path, id: &crate::ir::QuestionId, text: &str) {
     let component = crate::util::filename_component(id.as_str());
-    crate::rundir::stage_answer(
+    let staged = crate::rundir::stage_answer(
         answers,
         &component,
         &crate::ir::Answer::Answered {
@@ -23929,8 +23939,10 @@ fn publish_answer_file(answers: &Path, id: &crate::ir::QuestionId, text: &str) {
         &mut NoHooks,
     )
     .expect("the answer is staged");
-    crate::rundir::publish_answer(answers, &component, &mut NoHooks)
-        .expect("the answer is published");
+    assert_eq!(
+        crate::rundir::publish_answer(staged, &mut NoHooks).expect("the answer is published"),
+        crate::interaction::AnswerPublication::Published
+    );
 }
 
 #[test]
@@ -24016,6 +24028,9 @@ fn late_answer_after_finalization_is_inert_and_reported_not_live() {
     let answers = fixture.public().join("answers");
     mkdir(&answers);
     let id = crate::ir::QuestionId(PARKED_QUESTION.to_owned());
+    // The plant published an answer before finalization; publication is
+    // create-once, so the late one arrives at a name that is free again.
+    crate::workspace_manager::fixture::remove_file(&planted.answer_files.published);
     publish_answer_file(&answers, &id, "go ahead");
     assert!(
         !crate::rundir::is_running(&fixture.public()),

@@ -625,6 +625,9 @@ effect_free = [
     "ledger",
     "lock_file",
     "new",
+    # `StagedAnswer::path`: the staged answer file's path, for a caller that
+    # inspects the residue. A path; nothing is opened.
+    "path",
     "permits_deletion",
     "plan_json",
     "public_dir",

@@ -4711,8 +4711,12 @@ fn every_site_this_module_owns_is_reached_through_a_funnel_in_both_phases() {
         .expect("question payload");
     let answers = public.join("answers");
     fs::create_dir_all(&answers).expect("answers");
-    stage_answer(&answers, "q-1", &serde_json::json!({}), &mut hooks).expect("stage answer");
-    publish_answer(&answers, "q-1", &mut hooks).expect("publish answer");
+    let staged =
+        stage_answer(&answers, "q-1", &serde_json::json!({}), &mut hooks).expect("stage answer");
+    assert_eq!(
+        publish_answer(staged, &mut hooks).expect("publish answer"),
+        crate::interaction::AnswerPublication::Published
+    );
     ingest_answer(&answers, "q-1", &mut hooks).expect("ingest answer");
 
     // The commit record goes to a private half of its own, so publishing
@@ -12615,14 +12619,14 @@ fn a_staged_partial_is_never_ingested_and_a_published_answer_survives_ingestion(
     create_dir(&answers).expect("answers");
 
     // (a) A valid partial, and nothing published.
-    stage_answer(
+    let staged = stage_answer(
         &answers,
         "q-1",
         &serde_json::json!({"text": "staged"}),
         &mut NoHooks,
     )
     .expect("stage");
-    let partial = answers.join("q-1.json.partial");
+    let partial = staged.path().to_path_buf();
     let staged_bytes = fs::read(&partial).expect("the partial exists");
     assert!(
         serde_json::from_slice::<serde_json::Value>(&staged_bytes).is_ok(),
@@ -12645,7 +12649,10 @@ fn a_staged_partial_is_never_ingested_and_a_published_answer_survives_ingestion(
     );
 
     // (b) Published, ingested — and still there afterwards.
-    publish_answer(&answers, "q-1", &mut NoHooks).expect("publish");
+    assert_eq!(
+        publish_answer(staged, &mut NoHooks).expect("publish"),
+        crate::interaction::AnswerPublication::Published
+    );
     let published = answers.join("q-1.json");
     let published_bytes = fs::read(&published).expect("the published answer");
     let first = ingest_answer(&answers, "q-1", &mut NoHooks).expect("ingest");

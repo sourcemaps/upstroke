@@ -142,17 +142,29 @@ shape is written as it is; the reader's rule (a citation-less conviction
 reads as a discovery) covers a file something other than this writer
 produced.
 
-Write an answer atomically.
+Write an answer atomically, and say what happened to it:
+`Result<AnswerPublication, UpstrokeError>`.
 
-Temp file plus rename, because the engine may be reading this directory at
-any moment. That atomicity is what lets [`read_answer`] be strict: it
-refuses a file it cannot parse rather than skipping it, which is only a
-safe policy because a half-written file can never be observed. A corrupt
-one therefore means something outside upstroke wrote here, and silently
-ignoring what might be an operator's answer is worse than stopping to say
-so.
+A staged file of the publisher's own plus a create-once hard link, because
+the engine may be reading this directory at any moment. The answer is staged
+in `<qid>.json.<pid>-<ulid>.partial`, created exclusively, so no two
+publishers share a staging file; then it is hard-linked to `<qid>.json`, and
+the staged name removed. That atomicity is what lets [`read_answer`] be
+strict: it refuses a file it cannot parse rather than skipping it, which is
+only a safe policy because a half-written file can never be observed. A
+corrupt one therefore means something outside upstroke wrote here, and
+silently ignoring what might be an operator's answer is worse than stopping
+to say so.
 Through `Answer.StageWrite` then `Answer.PublishRename` — the two sites the
 frozen inventory gives the answer command. Same two steps, same bytes.
+
+The link fails if `<qid>.json` exists, and there is no fallback to a
+replacing rename. So `AnswerPublication::Published` means this answer is the
+published file, and `AnswerPublication::AlreadyAnswered` means another was
+published first: it is untouched, this answer is not published, and this
+answer's staged file is removed. A caller tells "already answered" from an
+I/O error, and from the uncited-conviction refusal, by type. Every failure
+leaves at most the staged `.partial`, which readers ignore.
 
 Atomic is not create-once: the rename replaces an answer file that already
 exists, and this writer never refuses to publish over one
