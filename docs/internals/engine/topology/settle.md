@@ -308,6 +308,78 @@ The first wait, doubled per round and capped.
 
 Consecutive waits where deferred work was the only runnable work.
 
+A wait toward a target counts **once**, when it elapses, however many
+slices [`Deferral::wait_toward`] slept it in. A slice is not a deferral:
+counting slices would make a five-hour wait read, in
+`DeferWaitElapsed4.round`, as thirty consecutive backoffs.
+
+## `pub struct Deferral` › `toward: Option<HeldWait>,`
+
+The target being waited toward, if a wait toward one is in progress.
+
+`None` before the first [`Deferral::wait_toward`], after a wait toward a
+target elapses, and after [`Deferral::progressed`]. [`Deferral::wait`]
+neither reads nor writes it.
+
+## `struct HeldWait {`
+
+One wait toward an absolute target, held across the slices it is slept in.
+
+## `struct HeldWait` › `until_unix: u64,`
+
+The target, in Unix seconds. A call naming a different target starts a
+new wait rather than continuing this one.
+
+## `struct HeldWait` › `started_unix: u64,`
+
+The Unix second the caller passed when this wait started. The wait's whole
+length is `until_unix - started_unix`, fixed when it starts.
+
+## `struct HeldWait` › `slept: Duration,`
+
+The time slept toward this target so far.
+
+**The clock and the sleeps are both evidence, and the greater one wins.**
+The elapsed part of the wait is `max(now - started, slept)`. The clock alone
+would never finish in a test, whose clock does not move. The sleeps alone
+would oversleep in a run, where the clock also moves while the coordinator
+works between slices, or while the host is suspended. Taking the greater of
+the two finishes when either says the target has been reached.
+
+## `pub enum ResetWaited {`
+
+What one call of [`Deferral::wait_toward`] did.
+
+**Only `Elapsed` is an event.** A `Slept` is one slice of a wait still in
+progress, and nothing in it is durable: appending a `defer_wait_elapsed` per
+slice would wake the deferred task, through the fold, after the first slice
+rather than at the target.
+
+### Why `allow` and not `#[expect]`
+
+Nothing in the driver calls [`Deferral::wait_toward`] yet, so outside tests
+the method and this enum are dead code. The method carries
+`#[cfg_attr(not(test), expect(dead_code, …))]`, which retires itself when a
+caller lands. The enum carries `allow` rather than the `#[expect]` §2
+prefers, because the two toolchains CI runs disagree about it. Stable reports
+the enum dead beside the method that returns it. The 1.85 MSRV counts the
+method's expectation as a use of the enum and reports nothing, and
+`cargo +1.85.0 check` then gives `unfulfilled_lint_expectations` on the
+enum's expectation (measured). An expectation cannot be fulfilled on both,
+the same split `src/workspace_manager.rs` records for its walk table. Remove
+this `allow` together with the method's expectation.
+
+## `pub enum ResetWaited` › `Slept { slept: Duration },`
+
+One slice was slept and the target is still ahead. `slept` is this slice,
+not the total.
+
+## `pub enum ResetWaited` › `Elapsed(DeferWaitElapsed4),`
+
+The target is reached. This is the event that records the wait: `waited_ms`
+is everything slept toward the target, and `round` is the deferral this wait
+was, one-based as with [`Deferral::wait`].
+
 ## `impl Deferral` › `pub const fn new(base: Duration) -> Self {`
 
 A backoff starting from `base`.
@@ -324,9 +396,41 @@ The sleep happens first because the event is the *record of a wait that
 elapsed*: appending it before sleeping would put a claim in the log
 that a kill during the sleep would make false.
 
+It does not touch a wait held by [`Deferral::wait_toward`]: the backoff
+and a wait toward a target share `round` and nothing else.
+
+## `impl Deferral` › `pub fn wait_toward(`
+
+Sleep one slice of a wait toward `until_unix`, and return the event once
+the target is reached.
+
+`now_unix` is the caller's clock. The first call, or one naming a different
+target, starts a wait at `now_unix` with nothing slept. Each call then:
+
+1. takes the elapsed part as the greater of `now_unix - started` and the
+   time slept so far, and the remaining part as the wait's length minus that,
+   never negative;
+2. sleeps `min(remaining, MAX_DEFER_BACKOFF)` and adds it to the time slept.
+   Nothing is slept when nothing remains;
+3. answers `Slept` with that slice if time still remains, and otherwise
+   drops the held wait, adds one to `round`, and answers `Elapsed` with the
+   total slept.
+
+**One deferral, however many slices.** A slice is capped at the backoff's
+own ceiling, so no single sleep is longer than the longest one
+[`Deferral::wait`] takes, and the caller gets control back between slices.
+The wait is still recorded once, by the call that reaches the target.
+
+The sleep comes before the answer for the reason `wait` gives: `Elapsed` is
+the record of a wait that has elapsed.
+
 ## `impl Deferral` › `pub fn progressed(&mut self) {`
 
 Reset the doubling: work other than a wait made progress.
+
+It also drops a held wait toward a target. Progress means the deferred
+work may now have something else to do, and the next wait toward a target,
+even the same one, starts again from the clock.
 
 ## `impl Deferral` › `pub const fn round(&self) -> u32 {`
 

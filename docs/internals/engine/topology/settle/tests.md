@@ -291,6 +291,58 @@ occurrences. `DeferWaitElapsed4.round` is documented on the wire, a
 frontier reviewer reads it there, and until this line nothing asserted
 the value a run actually writes.
 
+## `const RESET_NOW: u64 = 1_790_000_000;`
+
+The clock the wait-toward-a-target tests start from, in Unix seconds. Any
+fixed value serves. These tests pass the clock in, and none of them reads
+the host's.
+
+## `fn slices(seconds: &[u64]) -> Vec<Duration> {`
+
+Whole seconds as the durations a [`Recorded`] sleeper holds.
+
+## `fn a_wait_toward_a_target_sleeps_in_slices_and_elapses_once() {`
+
+A target 9 120 s ahead, with a clock that never moves: fifteen 600 s slices
+and one of 120 s. Every call but the last answers `Slept`, and the last
+answers the one `Elapsed`, with all 9 120 000 ms and round 1. A frozen clock
+is what a test has, and the wait finishes on it because the sleeps count as
+elapsed time.
+
+## `fn a_wait_toward_a_target_sleeps_in_slices_and_elapses_once()` › `deferral.wait_toward(&sleeper, RESET_NOW, until),`
+
+The elapsed wait is no longer held. A wait that stayed held would
+answer `Elapsed` again at once, with nothing slept.
+
+## `fn a_wait_toward_a_target_ends_when_the_clock_reaches_it() {`
+
+A clock that moves is passed as the true elapsed time, and the wait ends
+when that clock reaches the target, not when the sleeps add up to it. 250 s
+of work between two slices leaves 150 s of a 1 000 s wait, not 400 s.
+
+The other two cases: a target the clock has already reached sleeps nothing
+and answers `Elapsed` with what was slept, and a target already in the past
+is elapsed on the first call, with nothing slept.
+
+## `fn a_changed_target_restarts_the_wait() {`
+
+A call naming a different target starts a new wait. The 600 s slept toward
+the first target counts toward neither the second target's remaining time
+nor its `waited_ms`.
+
+## `fn progress_drops_a_held_wait_and_resets_the_round() {`
+
+`progressed` drops a held wait, so the same target is waited toward again
+from the start, and it resets `round`, so the wait that then elapses is round
+1 even though a backoff had already been recorded. A slice in progress does
+not move `round` either.
+
+## `fn a_held_wait_leaves_the_backoff_as_it_was() {`
+
+`wait` behaves exactly as before. A deferral holding a wait toward a target
+records the same six backoffs, and sleeps the same six durations, as one that
+never waited toward anything.
+
 ## `fn deferred_task_does_not_block_halted_or_budget_exceeded_closure() {`
 
 `deferred_task_does_not_block_halted_or_budget_exceeded_closure`.

@@ -844,6 +844,211 @@ fn the_defer_backoff_doubles_caps_and_resets() {
     );
 }
 
+const RESET_NOW: u64 = 1_790_000_000;
+
+fn slices(seconds: &[u64]) -> Vec<Duration> {
+    seconds.iter().copied().map(Duration::from_secs).collect()
+}
+
+#[test]
+fn a_wait_toward_a_target_sleeps_in_slices_and_elapses_once() {
+    let sleeper = Recorded::default();
+    let mut deferral = Deferral::default_backoff();
+    let until = RESET_NOW + 9_120;
+
+    let mut answers = Vec::new();
+    for _ in 0..16 {
+        answers.push(deferral.wait_toward(&sleeper, RESET_NOW, until));
+    }
+
+    let mut expected = vec![600; 15];
+    expected.push(120);
+    assert_eq!(
+        sleeper.waits(),
+        slices(&expected),
+        "a clock that does not move still finishes, because the sleeps count"
+    );
+    let (last, slept) = answers.split_last().expect("sixteen answers");
+    for (index, answer) in slept.iter().enumerate() {
+        assert_eq!(
+            *answer,
+            ResetWaited::Slept {
+                slept: crate::interaction::MAX_DEFER_BACKOFF
+            },
+            "slice {index} is one sleep toward the target, not the end of the wait"
+        );
+    }
+    assert_eq!(
+        *last,
+        ResetWaited::Elapsed(DeferWaitElapsed4 {
+            waited_ms: 9_120_000,
+            round: 1,
+        }),
+        "sixteen slices are one deferral, recorded once with the whole wait"
+    );
+    assert_eq!(deferral.round(), 1);
+
+    assert_eq!(
+        deferral.wait_toward(&sleeper, RESET_NOW, until),
+        ResetWaited::Slept {
+            slept: crate::interaction::MAX_DEFER_BACKOFF
+        },
+        "an elapsed wait is no longer held, so the same target is waited toward afresh"
+    );
+}
+
+#[test]
+fn a_wait_toward_a_target_ends_when_the_clock_reaches_it() {
+    let sleeper = Recorded::default();
+    let mut deferral = Deferral::default_backoff();
+    let until = RESET_NOW + 1_000;
+
+    assert_eq!(
+        deferral.wait_toward(&sleeper, RESET_NOW, until),
+        ResetWaited::Slept {
+            slept: Duration::from_secs(600)
+        }
+    );
+    assert_eq!(
+        deferral.wait_toward(&sleeper, RESET_NOW + 850, until),
+        ResetWaited::Elapsed(DeferWaitElapsed4 {
+            waited_ms: 750_000,
+            round: 1,
+        })
+    );
+    assert_eq!(
+        sleeper.waits(),
+        slices(&[600, 150]),
+        "the clock stood at 850 s of a 1 000 s wait, so 150 s remained and not 400"
+    );
+
+    let sleeper = Recorded::default();
+    let until = RESET_NOW + 3_000;
+    assert_eq!(
+        deferral.wait_toward(&sleeper, RESET_NOW, until),
+        ResetWaited::Slept {
+            slept: Duration::from_secs(600)
+        }
+    );
+    assert_eq!(
+        deferral.wait_toward(&sleeper, until, until),
+        ResetWaited::Elapsed(DeferWaitElapsed4 {
+            waited_ms: 600_000,
+            round: 2,
+        }),
+        "a target the clock has already reached is elapsed, and what it records is the sleep"
+    );
+    assert_eq!(
+        sleeper.waits(),
+        slices(&[600]),
+        "a target already reached sleeps nothing more"
+    );
+
+    let sleeper = Recorded::default();
+    assert_eq!(
+        deferral.wait_toward(&sleeper, RESET_NOW, RESET_NOW - 1),
+        ResetWaited::Elapsed(DeferWaitElapsed4 {
+            waited_ms: 0,
+            round: 3,
+        }),
+        "a target in the past is a wait that has already elapsed"
+    );
+    assert!(sleeper.waits().is_empty(), "{:?}", sleeper.waits());
+}
+
+#[test]
+fn a_changed_target_restarts_the_wait() {
+    let sleeper = Recorded::default();
+    let mut deferral = Deferral::default_backoff();
+
+    assert_eq!(
+        deferral.wait_toward(&sleeper, RESET_NOW, RESET_NOW + 9_120),
+        ResetWaited::Slept {
+            slept: Duration::from_secs(600)
+        }
+    );
+    let moved = RESET_NOW + 1_000;
+    assert_eq!(
+        deferral.wait_toward(&sleeper, RESET_NOW, moved),
+        ResetWaited::Slept {
+            slept: Duration::from_secs(600)
+        },
+        "the 600 s slept toward the first target counted toward the second"
+    );
+    assert_eq!(
+        deferral.wait_toward(&sleeper, RESET_NOW, moved),
+        ResetWaited::Elapsed(DeferWaitElapsed4 {
+            waited_ms: 1_000_000,
+            round: 1,
+        }),
+        "the wait records only what was slept toward the target it ended at"
+    );
+    assert_eq!(sleeper.waits(), slices(&[600, 600, 400]));
+}
+
+#[test]
+fn progress_drops_a_held_wait_and_resets_the_round() {
+    let sleeper = Recorded::default();
+    let mut deferral = Deferral::default_backoff();
+    deferral.wait(&sleeper);
+    let until = RESET_NOW + 900;
+    assert_eq!(
+        deferral.wait_toward(&sleeper, RESET_NOW, until),
+        ResetWaited::Slept {
+            slept: Duration::from_secs(600)
+        }
+    );
+    assert_eq!(deferral.round(), 1, "a slice is not a round");
+
+    deferral.progressed();
+    assert_eq!(deferral.round(), 0);
+    assert_eq!(
+        deferral.wait_toward(&sleeper, RESET_NOW, until),
+        ResetWaited::Slept {
+            slept: Duration::from_secs(600)
+        },
+        "progress left the 600 s already slept held, so the wait went on where it was"
+    );
+    assert_eq!(
+        deferral.wait_toward(&sleeper, RESET_NOW, until),
+        ResetWaited::Elapsed(DeferWaitElapsed4 {
+            waited_ms: 900_000,
+            round: 1,
+        }),
+        "progress reset the round, so this deferral is the first since"
+    );
+    assert_eq!(sleeper.waits(), slices(&[60, 600, 600, 300]));
+}
+
+#[test]
+fn a_held_wait_leaves_the_backoff_as_it_was() {
+    let plain_sleeper = Recorded::default();
+    let holding_sleeper = Recorded::default();
+    let mut plain = Deferral::new(Duration::from_secs(60));
+    let mut holding = Deferral::new(Duration::from_secs(60));
+    let until = RESET_NOW + 9_120;
+    assert_eq!(
+        holding.wait_toward(&holding_sleeper, RESET_NOW, until),
+        ResetWaited::Slept {
+            slept: Duration::from_secs(600)
+        }
+    );
+
+    for _ in 0..6 {
+        assert_eq!(holding.wait(&holding_sleeper), plain.wait(&plain_sleeper));
+    }
+    assert_eq!(
+        plain_sleeper.waits(),
+        slices(&[60, 120, 240, 480, 600, 600])
+    );
+    assert_eq!(
+        holding_sleeper.waits().get(1..),
+        Some(plain_sleeper.waits().as_slice()),
+        "a held wait changed what `wait` sleeps"
+    );
+    assert_eq!(holding.round(), plain.round());
+}
+
 #[test]
 fn deferred_task_does_not_block_halted_or_budget_exceeded_closure() {
     let mut fold = started();
