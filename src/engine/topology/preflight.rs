@@ -216,19 +216,9 @@ impl RunnerPreflight for RunPreflight<'_> {
             let adapter = self.adapters.get(agent).ok_or_else(|| {
                 refused(policy, &format!("no adapter is registered for `{agent}`"))
             })?;
-            let probed = adapter
-                .probe(&registering)
-                .map_err(|error| refused(policy, &format!("the `{agent}` CLI: {error}")))?;
-            let accounts = Account::of_agent(&self.pools, agent)?;
-            refuse_signed_out(agent, adapter, &probed, &registering, &accounts).map_err(
-                |failure| match failure {
-                    SignIn::SignedOut(refusal) => refusal,
-                    SignIn::Undiscovered(error) => refused(
-                        policy,
-                        &format!("the `{agent}` CLI's sign-in discovery: {error}"),
-                    ),
-                },
-            )?;
+            let probed = certify_agent(agent, adapter, &self.pools, &registering, &|what| {
+                refused(policy, what)
+            })?;
             caps.push((agent.clone(), probed));
         }
 
@@ -239,6 +229,33 @@ impl RunnerPreflight for RunPreflight<'_> {
         *self.probed.lock().unwrap_or_else(PoisonError::into_inner) = Some(probed);
         Ok(())
     }
+}
+
+/// One recorded agent's half of the pre-flight: its CLI probed through `through`, then every
+/// account its pools configure (`Account::of_agent`) checked signed in. `certify` runs it for
+/// each recorded agent of a run, and `decide` for the run's recorded reviewer, so both admit an
+/// agent by the same probe and the same sign-in checks. `refuse` words a failed probe or sign-in
+/// discovery for the caller; a signed-out account is refused in `signed_out`'s own words.
+pub(crate) fn certify_agent(
+    agent: &str,
+    adapter: &dyn AgentAdapter,
+    pools: &[Pool],
+    through: &dyn Runner,
+    refuse: &dyn Fn(&str) -> UpstrokeError,
+) -> Result<Caps, UpstrokeError> {
+    let probed = adapter
+        .probe(through)
+        .map_err(|error| refuse(&format!("the `{agent}` CLI: {error}")))?;
+    let accounts = Account::of_agent(pools, agent)?;
+    refuse_signed_out(agent, adapter, &probed, through, &accounts).map_err(
+        |failure| match failure {
+            SignIn::SignedOut(refusal) => refusal,
+            SignIn::Undiscovered(error) => {
+                refuse(&format!("the `{agent}` CLI's sign-in discovery: {error}"))
+            }
+        },
+    )?;
+    Ok(probed)
 }
 
 pub(crate) fn refuse_unusable_profiles(

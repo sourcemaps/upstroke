@@ -23,16 +23,29 @@ chosen. Its profile is `review::profile_for`'s, which is read-only. Because that
 read `.upstroke/**`, and a decide call cannot read the run's private directory either, every
 input the decider needs is handed to it in the prompt.
 
-Admission comes before anything is written or any agent is asked, in two steps:
+Admission comes before the run is claimed, anything is written or any agent is asked, in these
+steps:
 
-- Once per command, `admit` refuses a run recorded on the container runner, a run whose pools the
-  credential pre-flight a resume runs (`preflight::refuse_unusable_profiles`) refuses, a reviewer
-  whose adapter does not claim every `Guarantee`, a `--max-cost-usd` that is not a positive
-  number, and a private directory no permission rule can name exactly.
+- Once per command, `admit` refuses a run an engine is driving (`rundir::is_running`), a run
+  recorded on the container runner, a run whose pools the credential pre-flight a resume runs
+  (`preflight::refuse_unusable_profiles`) refuses, a reviewer whose adapter does not claim every
+  `Guarantee`, a `--max-cost-usd` that is not a positive number, and a private directory no
+  permission rule can name exactly.
+- Once per command, `answered` reads each question's answer file (`interaction::read_answer`), so
+  a question a person has answered already is skipped and never asked.
+- Once per command, when a question is left to ask, the recorded reviewer passes the pre-flight a
+  run makes of each recorded agent (`preflight::certify_agent`, which `RunPreflight::certify`
+  runs too): its CLI probed through the Runner, and every account the pools file configures for
+  its agent found signed in.
 - Once per call, `prepare` builds the command and refuses it unless it carries no environment
-  overlay and `kept` finds every guarantee on the command and settings actually built. A claim
-  is never enough on its own: the check reads the arguments and the settings, not the adapter's
-  word.
+  overlay, its `--model` and `--effort` are exactly the recorded reviewer's, and `kept` finds
+  every guarantee on the command and settings actually built. A claim is never enough on its
+  own: the check reads the arguments and the settings, not the adapter's word.
+
+The plan file is forwarded in the prompt only when its bytes hash to the run's recorded
+`plan_hash` (`recorded_plan`). The Runner composes the call's environment for the checkout it
+starts in, the one the command was run in, as it does a probe's
+(`host::starts_in_the_started_checkout`).
 
 Only Claude Code claims the guarantees (`guarantees_of`). Copilot and Codex report no dollar
 cost, so a run whose primary reviewer is either is refused. What the decide call adds to an
@@ -106,10 +119,10 @@ adapter only as far as `kept` then finds it true of the command
 The flags a decide call appends to the read-only profile's command, as `extra_args` of a profile
 built for that call alone: `--max-budget-usd` with what is left of the cap, written as Rust's
 shortest round-tripping decimal so `kept` reads back exactly the ceiling it was given, and
-`--strict-mcp-config`, which with no `--mcp-config` starts no MCP server. Decide starts no process
-before the call, so the CLI is not probed for either flag; a Claude Code too old to know one is
-expected to reject it as an unknown option rather than run without it. No test here starts a
-real CLI.
+`--strict-mcp-config`, which with no `--mcp-config` starts no MCP server. The pre-flight probes the
+CLI as a run's does, for the flags every worker is built with, and not for these two; a Claude
+Code too old to know one is expected to reject it as an unknown option rather than run without
+it. No test here starts a real CLI: the probes are answered by inert recording Runners.
 
 ## `fn call_settings(profile: &WorkerProfile, private_denials: &[String]) -> Value {`
 
@@ -137,6 +150,10 @@ read-only profile allows no other tool.
 The once-per-command admission, in this order, each refusal saying that nothing was written and
 no agent was asked:
 
+0. A run an engine is driving: `rundir::is_running` on its public directory, which also answers
+   yes when whether one is cannot be told. A driven run settles its own questions, so it is not
+   read for questions to ask while it may be settling them, and nothing is probed
+   (`a_driven_run_is_refused_before_anything_is_written_probed_or_asked`).
 1. A run recorded on the container runner (`RunStarted4.runner.kind`). Decide starts its
    reviewer on this host only, which is not where that run's reviewers ran
    (`a_container_run_is_refused_before_anything_is_written_or_asked`).
@@ -186,7 +203,13 @@ At most one invocation per question through `runner::decide_request`, with
 adapter's built command with its stdin payload and settings file, and no environment overlay
 (`the_request_is_a_decide_request_for_the_runs_reviewer_with_no_overlay`). `admit` runs first,
 after the pools file is read and before anything else, and a run id that is not a plain component
-is refused next. Each question's call is then built and checked by `prepare`, with what is left of
+is refused next. `answered` then reads which questions a person has answered; each is skipped with
+its answer named, and with none left to ask nothing is probed or claimed
+(`a_question_a_person_has_answered_is_skipped_and_never_asked`). When one is left, the recorded
+reviewer's pre-flight runs (`preflight::certify_agent`) and refuses a CLI that cannot be probed or
+an account that is signed out
+(`the_recorded_reviewer_passes_the_runs_own_preflight_before_anything_is_written_or_asked`).
+Each question's call is then built and checked by `prepare`, with what is left of
 the allowance as its ceiling, before anything is written for it; before the first call `claim`
 claims the run, and `ask` writes and starts the call. A question whose id is not a plain component
 (`plain_id`) is refused before anything is written for it, and one listed twice is asked once
@@ -209,7 +232,9 @@ question or a list naming one question twice.
 Builds one call: the read-only profile with `call_args`, the settings `call_settings` gives, and
 the adapter's command with its stdin payload and the settings file named. It writes and starts
 nothing, and refuses the call unless the built command carries no environment overlay (naming the
-overlay's keys and never their values) and `kept` holds for every `Guarantee`. The settings
+overlay's keys and never their values), carries exactly the recorded reviewer's `--model` and the
+run's recorded review effort as `--effort` (another model, another effort or none is refused, and
+the refusal names the recorded pair), and `kept` holds for every `Guarantee`. The settings
 path is `<id>.settings.json` beside the proposal (`Names`). The first question's call is
 prepared before the run is claimed, so its refusal leaves nothing written
 (`a_mocked_adapter_whose_command_breaks_a_promise_is_refused_before_anything`); the command's
@@ -333,6 +358,23 @@ settings; `<id>.out`, its raw output or the Runner's error; `<id>.json`, the pro
 records the run, the question, the decider, `status` with its `record` or `reason`, the
 `cost_usd` reported, whether the call `settled`, its `ceiling_usd` and the `raw_output`
 reference.
+
+## `fn answered(`
+
+The questions a person has answered already: an answer `upstroke answer` published in the run's
+answers directory that the run's log has not settled yet, read with `interaction::read_answer`,
+which writes nothing. Every question this command could ask is read before the run is claimed, so
+the check never follows a write; an answer file that cannot be read refuses the command with
+nothing written. A question with an answer is skipped, its answer named in the report, and it is
+neither asked nor counted as left: the run applies the person's answer when it next reads it.
+
+## `fn recorded_plan(path: &Path, plan_hash: &str) -> String {`
+
+The plan file is forwarded only when its bytes hash (`ir::content_hash`, the hash the markdown
+adapter froze it under) to the run's recorded `plan_hash`. A plan edited since the run started is
+not the plan the run is executing, so the prompt carries a line saying it is not forwarded and
+naming both hashes instead
+(`the_plan_is_forwarded_only_when_its_bytes_are_the_plan_the_run_recorded`).
 
 ## `fn chosen_questions(`
 

@@ -430,11 +430,39 @@ fn agent_text_is_rendered_inside_its_own_line_with_its_controls_made_visible() {
     );
 }
 
+/// `claude --help` as the probe reads it: every flag the adapter requires, and every effort.
+const CLAUDE_HELP: &str = "Usage: claude [options]\n  -p, --print\n  --output-format <format>\n  \
+                           --model <model>\n  --settings <file>\n  --setting-sources <sources>\n  \
+                           --permission-mode <mode>\n  \
+                           --effort <level> (low, medium, high, xhigh, max)\n";
+const SIGNED_IN: &str = r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}"#;
+const SIGNED_OUT: &str = r#"{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}"#;
+
+/// What an installed Claude Code answers a pre-flight probe with, its sign-in reported as
+/// `auth_status`: `None` for a request that is no probe. No process is started.
+fn probe_reply(request: &RunnerRequest, auth_status: &str) -> Option<ProcessOutput> {
+    if !matches!(request.role, ExecutionRole::Probe(_)) {
+        return None;
+    }
+    let args = &request.command.args;
+    let stdout = if args.iter().any(|arg| arg == "--version") {
+        "2.1.226 (Claude Code)\n".to_owned()
+    } else if args.iter().any(|arg| arg == "--help") {
+        CLAUDE_HELP.to_owned()
+    } else {
+        auth_status.to_owned()
+    };
+    Some(exited(stdout))
+}
+
 /// A Runner that records what it was asked to run and answers from a table,
-/// in order, so `decide` is driven with no process and no network.
+/// in order, so `decide` is driven with no process and no network. It answers
+/// the pre-flight's probes as a signed-in Claude Code, apart from the table, and
+/// records them apart from the calls.
 struct Scripted {
     replies: Mutex<VecDeque<String>>,
     seen: Mutex<Vec<RunnerRequest>>,
+    probes: Mutex<Vec<RunnerRequest>>,
 }
 
 impl Scripted {
@@ -442,6 +470,7 @@ impl Scripted {
         Self {
             replies: Mutex::new(replies.into()),
             seen: Mutex::new(Vec::new()),
+            probes: Mutex::new(Vec::new()),
         }
     }
 
@@ -451,10 +480,18 @@ impl Scripted {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
+
+    fn probes(&self) -> Vec<RunnerRequest> {
+        lock(&self.probes).clone()
+    }
 }
 
 impl Runner for Scripted {
     fn run<'a>(&'a self, request: &'a RunnerRequest, _call: RunnerCall<'a>) -> RunFuture<'a> {
+        if let Some(probed) = probe_reply(request, SIGNED_IN) {
+            lock(&self.probes).push(request.clone());
+            return Box::pin(async move { Ok(probed) });
+        }
         self.seen
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -518,9 +555,11 @@ fn plan(tasks: usize) -> crate::ir::Plan {
         }
     };
     Plan {
+        // The hash the markdown adapter gives the fixture's plan file, so the run recorded
+        // the plan that file holds.
         source: PlanSource {
             adapter: "markdown".to_owned(),
-            hash: "decide-plan-hash".to_owned(),
+            hash: crate::ir::content_hash(PLAN_TEXT.as_bytes()),
         },
         tasks: (0..tasks).map(task).collect(),
         artifacts: Vec::new(),
@@ -1152,6 +1191,14 @@ fn the_request_is_a_decide_request_for_the_runs_reviewer_with_no_overlay() {
         args.iter().any(|arg| arg == "--strict-mcp-config"),
         "{args:?}"
     );
+    assert_eq!(
+        (
+            flag_value(request, "--model").as_deref(),
+            flag_value(request, "--effort").as_deref()
+        ),
+        (Some("opus"), Some("medium")),
+        "the recorded reviewer's model, at the run's recorded review effort: {args:?}"
+    );
 
     let prompt = String::from_utf8_lossy(&request.command.stdin);
     for fragment in [
@@ -1193,6 +1240,10 @@ fn a_binding_question_is_skipped_and_no_request_is_made_for_it() {
     )
     .expect("decided");
     assert!(runner.seen().is_empty(), "no agent was asked");
+    assert!(
+        runner.probes().is_empty(),
+        "with no question to ask, the reviewer's CLI is not probed"
+    );
     assert!(
         decided
             .report
@@ -1837,11 +1888,39 @@ fn exited(stdout: String) -> ProcessOutput {
 
 type Act = Box<dyn Fn(&RunnerRequest) -> Result<ProcessOutput, RunnerError> + Send + Sync>;
 
+/// How an inert Runner answers a request: `None` when the request is not a pre-flight probe.
+type Probe = fn(&RunnerRequest) -> Option<Result<ProcessOutput, RunnerError>>;
+
+/// An installed Claude Code, signed in.
+fn signed_in(request: &RunnerRequest) -> Option<Result<ProcessOutput, RunnerError>> {
+    probe_reply(request, SIGNED_IN).map(Ok)
+}
+
+/// An installed Claude Code, signed out.
+fn signed_out(request: &RunnerRequest) -> Option<Result<ProcessOutput, RunnerError>> {
+    probe_reply(request, SIGNED_OUT).map(Ok)
+}
+
+/// No Claude Code installed: no probe's process could be started.
+fn not_installed(request: &RunnerRequest) -> Option<Result<ProcessOutput, RunnerError>> {
+    probe_reply(request, SIGNED_IN).map(|_| {
+        Err(RunnerError::never_started(
+            &request.invocation,
+            UpstrokeError::Refused {
+                message: "no `claude` program was found on PATH".to_owned(),
+            },
+        ))
+    })
+}
+
 /// An inert Runner that records each request and answers it with what `act` does while the
-/// call is in flight: no process is started.
+/// call is in flight: no process is started. It answers the pre-flight's probes as `probe` says,
+/// apart from `act` (by default as a signed-in Claude Code), and records them apart.
 struct Acting {
     act: Act,
+    probe: Probe,
     seen: Mutex<Vec<RunnerRequest>>,
+    probes: Mutex<Vec<RunnerRequest>>,
 }
 
 impl Acting {
@@ -1850,7 +1929,9 @@ impl Acting {
     ) -> Self {
         Self {
             act: Box::new(act),
+            probe: signed_in,
             seen: Mutex::new(Vec::new()),
+            probes: Mutex::new(Vec::new()),
         }
     }
 
@@ -1858,13 +1939,26 @@ impl Acting {
         Self::new(move |_| Ok(exited(claude_output(&reply(VALID), Some(cost_usd)))))
     }
 
+    /// The same Runner, answering the pre-flight's probes as `probe` says.
+    fn probing(self, probe: Probe) -> Self {
+        Self { probe, ..self }
+    }
+
     fn seen(&self) -> Vec<RunnerRequest> {
         lock(&self.seen).clone()
+    }
+
+    fn probes(&self) -> Vec<RunnerRequest> {
+        lock(&self.probes).clone()
     }
 }
 
 impl Runner for Acting {
     fn run<'a>(&'a self, request: &'a RunnerRequest, _call: RunnerCall<'a>) -> RunFuture<'a> {
+        if let Some(probed) = (self.probe)(request) {
+            lock(&self.probes).push(request.clone());
+            return Box::pin(async move { probed });
+        }
         lock(&self.seen).push(request.clone());
         let answer = (self.act)(request);
         Box::pin(async move { answer })
@@ -1893,7 +1987,7 @@ fn ended(
 }
 
 /// Claude Code's own adapter, whose reading of every output is given `status`: what an adapter
-/// that reads a call as failed returns.
+/// that reads a call as failed returns. It is probed and its sign-in discovered as Claude Code's.
 struct Misread(OutcomeStatus);
 
 impl AgentAdapter for Misread {
@@ -1901,10 +1995,16 @@ impl AgentAdapter for Misread {
         crate::agent::claude::ADAPTER_ID
     }
 
-    fn probe(&self, _runner: &dyn Runner) -> Result<Caps, UpstrokeError> {
-        Err(UpstrokeError::Refused {
-            message: "a mocked adapter is never probed".to_owned(),
-        })
+    fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError> {
+        crate::agent::claude::ClaudeCodeAdapter.probe(runner)
+    }
+
+    fn discover(
+        &self,
+        runner: &dyn Runner,
+        caps: &Caps,
+    ) -> Result<crate::agent::Discovery, UpstrokeError> {
+        crate::agent::claude::ClaudeCodeAdapter.discover(runner, caps)
     }
 
     fn build(&self, run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
@@ -2294,8 +2394,8 @@ fn a_decide_call_adds_only_its_own_flags_to_an_ordinary_reviewers_command() {
     );
 }
 
-/// A mocked adapter: Claude Code's own `build` and `parse` under the id `id`, with each built
-/// command passed through `doctor`. It is never probed.
+/// A mocked adapter: Claude Code's own probe, sign-in discovery, `build` and `parse` under the id
+/// `id`, with each built command passed through `doctor`.
 struct Doctored {
     id: &'static str,
     doctor: fn(CommandSpec) -> CommandSpec,
@@ -2306,10 +2406,16 @@ impl AgentAdapter for Doctored {
         self.id
     }
 
-    fn probe(&self, _runner: &dyn Runner) -> Result<Caps, UpstrokeError> {
-        Err(UpstrokeError::Refused {
-            message: "a mocked adapter is never probed".to_owned(),
-        })
+    fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError> {
+        crate::agent::claude::ClaudeCodeAdapter.probe(runner)
+    }
+
+    fn discover(
+        &self,
+        runner: &dyn Runner,
+        caps: &Caps,
+    ) -> Result<crate::agent::Discovery, UpstrokeError> {
+        crate::agent::claude::ClaudeCodeAdapter.discover(runner, caps)
     }
 
     fn build(&self, run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
@@ -2353,7 +2459,25 @@ fn drop_flag(mut command: CommandSpec, flag: &str, values: usize) -> CommandSpec
 fn a_mocked_adapter_whose_command_breaks_a_promise_is_refused_before_anything() {
     type Doctor = fn(CommandSpec) -> CommandSpec;
     let fixture = one_question("decide-mocked");
-    let cases: [(&str, Doctor, &str); 12] = [
+    let cases: [(&str, Doctor, &str); 15] = [
+        (
+            "another model",
+            |command| set_value(command, "--model", "sonnet"),
+            "is not the recorded reviewer's, claude-code/opus at medium effort: it carries \
+             `--model \"sonnet\"`, not `--model \"opus\"`",
+        ),
+        (
+            "another effort",
+            |command| set_value(command, "--effort", "max"),
+            "is not the recorded reviewer's, claude-code/opus at medium effort: it carries \
+             `--effort \"max\"`, not `--effort \"medium\"`",
+        ),
+        (
+            "no effort",
+            |command| drop_flag(command, "--effort", 1),
+            "is not the recorded reviewer's, claude-code/opus at medium effort: it does not \
+             carry `--effort`",
+        ),
         (
             "no ceiling",
             |command| drop_flag(command, "--max-budget-usd", 1),
@@ -2457,6 +2581,190 @@ fn a_mocked_adapter_whose_command_breaks_a_promise_is_refused_before_anything() 
     decide(&fixture.options(), &Only(&faithful), &runner)
         .expect("the undoctored command keeps every promise");
     assert_eq!(runner.seen().len(), 1, "and only that one is started");
+}
+
+#[test]
+fn a_driven_run_is_refused_before_anything_is_written_probed_or_asked() {
+    let fixture = one_question("decide-driven");
+    let held = crate::rundir::RunLock::acquire(&fixture.public()).expect("an engine's run lock");
+    let runner = Acting::priced(0.25);
+    let message = decide(&fixture.options(), &BuiltinAdapters, &runner)
+        .expect_err("a driven run")
+        .to_string();
+    assert!(
+        message.contains(&format!("run `{RUN}` is being driven")),
+        "{message}"
+    );
+    assert!(message.contains(NOTHING_DONE), "{message}");
+    assert!(runner.seen().is_empty() && runner.probes().is_empty());
+    assert!(!fixture.proposals_written());
+
+    // The control: the same run, once nothing drives it, is asked.
+    drop(held);
+    let decided = decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+    assert!(decided.outcome().is_ok(), "{}", decided.report);
+    assert_eq!(runner.seen().len(), 1, "{}", decided.report);
+}
+
+/// Publishes a person's answer to `id` in the run's answers directory, as `upstroke answer` does.
+fn answered_by_a_person(fixture: &Fixture, id: &str, answer: Answer) {
+    let answers = fixture.public().join("answers");
+    std::fs::create_dir_all(&answers).expect("the answers directory");
+    let published = crate::interaction::write_answer(
+        &answers,
+        &QuestionId::from(id),
+        &crate::interaction::AnswerRecord::unattributed(answer),
+    )
+    .expect("the answer is published");
+    assert_eq!(published, crate::interaction::AnswerPublication::Published);
+}
+
+#[test]
+fn a_question_a_person_has_answered_is_skipped_and_never_asked() {
+    let fixture = two_questions("decide-answered");
+    answered_by_a_person(
+        &fixture,
+        "q-b",
+        Answer::Answered {
+            text: RETRY.to_owned(),
+        },
+    );
+    let runner = Acting::priced(0.25);
+    let decided = decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+    assert!(decided.outcome().is_ok(), "{}", decided.report);
+    assert!(
+        decided.report.contains(
+            "q-b: skipped — a person has answered it already (\"retry on frontier\"), and the \
+             run applies that answer; no agent was asked"
+        ),
+        "{}",
+        decided.report
+    );
+    let seen = runner.seen();
+    let [request] = seen.as_slice() else {
+        panic!("only the unanswered question is asked: {seen:?}");
+    };
+    let prompt = String::from_utf8_lossy(&request.command.stdin);
+    assert!(prompt.contains("id: q-a\n"), "{prompt}");
+    assert!(!fixture.has_proposal("q-b") && fixture.has_proposal("q-a"));
+
+    // Every question answered: nothing to ask, so nothing is probed, claimed or asked.
+    let fixture = one_question("decide-all-answered");
+    answered_by_a_person(&fixture, "q-01A", Answer::Declined);
+    let runner = Acting::priced(0.25);
+    let decided = decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+    assert!(decided.outcome().is_ok(), "{}", decided.report);
+    assert!(
+        decided
+            .report
+            .contains("q-01A: skipped — a person has answered it already (declined)"),
+        "{}",
+        decided.report
+    );
+    assert!(runner.seen().is_empty() && runner.probes().is_empty());
+    assert!(!fixture.proposals_written(), "the run is not claimed");
+}
+
+#[test]
+fn the_recorded_reviewer_passes_the_runs_own_preflight_before_anything_is_written_or_asked() {
+    // Admitted: its CLI probed and the pools' one account found signed in, each probe under the
+    // run's own probe identities, and only then the call.
+    let fixture = one_question("decide-preflight-admitted");
+    let runner = Acting::priced(0.25);
+    let decided = decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+    assert!(decided.outcome().is_ok(), "{}", decided.report);
+    let probes: Vec<String> = runner
+        .probes()
+        .iter()
+        .map(|probe| probe.invocation.to_string())
+        .collect();
+    let claude = crate::agent::claude::ADAPTER_ID;
+    let expected: Vec<String> = [0, 1, 2]
+        .into_iter()
+        .map(|ordinal| {
+            InvocationId::probe(
+                crate::runner::ProbeTarget::Agent(AgentId::new(claude)),
+                ordinal,
+            )
+            .expect("a probe identity")
+            .to_string()
+        })
+        .collect();
+    assert_eq!(probes, expected, "--version, --help, auth status");
+    let auth = runner.probes().pop().expect("the sign-in discovery");
+    assert_eq!(
+        auth.credential_profile,
+        Some(fixture.profile.clone()),
+        "the account the pools file configures for the reviewer's agent"
+    );
+    assert_eq!(runner.seen().len(), 1);
+
+    // Refused: signed out, or no CLI to probe. Nothing is written and no agent asked.
+    for (case, probe, needle) in [
+        (
+            "signed out",
+            signed_out as Probe,
+            format!(
+                "agent `{claude}` is not signed in under pool `claude-max`'s account, the \
+                 credential profile directory `"
+            ),
+        ),
+        (
+            "not installed",
+            not_installed,
+            format!(
+                "run `{RUN}`'s recorded reviewer did not pass the pre-flight a run makes of it: \
+                 the `{claude}` CLI:"
+            ),
+        ),
+    ] {
+        let fixture = one_question(&format!("decide-preflight-{}", case.replace(' ', "-")));
+        let runner = Acting::priced(0.25).probing(probe);
+        let message = decide(&fixture.options(), &BuiltinAdapters, &runner)
+            .expect_err(case)
+            .to_string();
+        assert!(message.contains(&needle), "{case}: {message}");
+        assert!(
+            case != "signed out" || message.contains(&format!("{}`", fixture.profile.display())),
+            "{case}: the account checked is the one the pools file configures: {message}"
+        );
+        assert!(!runner.probes().is_empty(), "{case}: the CLI was probed");
+        assert!(runner.seen().is_empty(), "{case}: no agent was asked");
+        assert!(!fixture.proposals_written(), "{case}: nothing was written");
+    }
+}
+
+#[test]
+fn the_plan_is_forwarded_only_when_its_bytes_are_the_plan_the_run_recorded() {
+    let prompt_of = |fixture: &Fixture| {
+        let runner = Scripted::answering(vec![claude_output(&reply(VALID), Some(0.25))]);
+        decide(&fixture.options(), &BuiltinAdapters, &runner).expect("decided");
+        let seen = runner.seen();
+        let [request] = seen.as_slice() else {
+            panic!("one request: {seen:?}");
+        };
+        String::from_utf8_lossy(&request.command.stdin).into_owned()
+    };
+
+    let fixture = one_question("decide-plan-recorded");
+    let prompt = prompt_of(&fixture);
+    assert!(prompt.contains(PLAN_TEXT), "{prompt}");
+    assert!(!prompt.contains("is not forwarded"), "{prompt}");
+
+    let fixture = one_question("decide-plan-edited");
+    let edited = "# The plan\n\nThe widget task makes a gadget instead.\n";
+    std::fs::write(fixture.repo.join("docs").join("plan.md"), edited).expect("edit the plan");
+    let prompt = prompt_of(&fixture);
+    assert!(!prompt.contains("makes a gadget instead"), "{prompt}");
+    assert!(!prompt.contains(PLAN_TEXT), "{prompt}");
+    assert!(
+        prompt.contains(&format!(
+            "is not forwarded: its bytes hash to {}, not to the {} the run recorded",
+            crate::ir::content_hash(edited.as_bytes()),
+            crate::ir::content_hash(PLAN_TEXT.as_bytes())
+        )),
+        "{prompt}"
+    );
 }
 
 /// The production region of a source file: everything before its trailing

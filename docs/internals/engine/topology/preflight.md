@@ -430,23 +430,37 @@ rather than an argument here.
 
 ## `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `let mut caps = Vec::with_capacity(self.agents.len());`
 
-(2) One probe per recorded agent, sequentially, in recorded order.
+(2) One probe per recorded agent, sequentially, in recorded order, each
+through [`certify_agent`] with the pools `with_pools` gave it, the
+`registering` boundary, and [`refused`] for the run's `policy` as its wording.
 
-## `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `let accounts = Account::of_agent(&self.pools, agent)?;`
+## `pub(crate) fn certify_agent(`
+
+One recorded agent's half of the pre-flight, shared by `certify` and by
+`upstroke decide`, which admits the run's recorded reviewer through it before
+it claims the run, writes anything or asks any agent: the agent's probe, then
+(3) and (4) below, in that order. `refuse` is the caller's wording for a failed
+probe or sign-in discovery: `certify` passes [`refused`] for the run's policy,
+so a run's pre-flight is refused in the same words as before the split; decide
+passes its own, which says nothing was written and no agent asked. The probe's
+capabilities are returned for `certify` to keep.
+
+## `pub(crate) fn certify_agent(` › `let accounts = Account::of_agent(pools, agent)?;`
 
 (3) Each agent's accounts, after its probe: [`Account::of_agent`] over the
-pools `with_pools` gave it. Its cap refusal is returned as it stands, with `?`,
+pools the caller gave it. Its cap refusal is returned as it stands, with `?`,
 before any discovery runs: its wording is shared with the fresh path and true
 here.
 
-## `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `refuse_signed_out(agent, adapter, &probed, &registering, &accounts).map_err(`
+## `pub(crate) fn certify_agent(` › `refuse_signed_out(agent, adapter, &probed, through, &accounts).map_err(`
 
 (4) Each agent's sign-in, under those accounts: [`refuse_signed_out`] with the
-caps the probe just returned. A [`SignIn::SignedOut`] refusal is returned as it
-stands, because its wording is shared with the fresh path and its closing is
-already true here. A [`SignIn::Undiscovered`] error is a discovery process that
-did not run to an answer, the same kind of failure as a probe's, so it takes
-[`refused`]'s shape, naming the agent's sign-in discovery.
+caps the probe just returned, through the same boundary the probe ran in. A
+[`SignIn::SignedOut`] refusal is returned as it stands, because its wording is
+shared with the fresh path and its closing is already true here. A
+[`SignIn::Undiscovered`] error is a discovery process that did not run to an
+answer, the same kind of failure as a probe's, so it takes `refuse`'s shape,
+naming the agent's sign-in discovery.
 
 ## `pub(crate) fn refuse_unusable_profiles(`
 

@@ -160,20 +160,23 @@ contract adds.
 A decider: an agent CLI asked to read and answer, which writes nothing —
 a read-only agent invocation, as a review pass is.
 
-It is `Review` in every answer the runner keys on a role, written beside
-`Review` in each `match` rather than as an arm of its own, so the two
+It is `Review` in every answer the runner keys on a role but one, written
+beside `Review` in each `match` rather than as an arm of its own, so the two
 cannot drift apart without one of those lines changing: slotted (R3,
 [`ExecutionRole::is_slotted`]); told its agent's credential location on the
 host (`host::supplies_credentials`) and in a container
-(`container::env::supplies_credential_location`); started outside the
-started checkout (`host::starts_in_the_started_checkout`); given the
-worktree, mounted read-only, with every configured mount forced read-only
+(`container::env::supplies_credential_location`); given the worktree,
+mounted read-only, with every configured mount forced read-only
 (`container::exec::receives_a_worktree`,
 `container::exec::forces_configured_mounts_read_only`, and the workspace
 mount's own `read_only`); and its settings file mounted the way a
-reviewer's is. What differs is its label, `decide`, and its identity:
-[`InvocationId::Decide`], a form no attempt, sequence or pre-flight
-renders, and one the topology selector never admits to a slot pair.
+reviewer's is. The one is where it starts: a review pass starts in a work
+tree the engine made, and a decider in the checkout `upstroke decide` was
+run in, so the host composes it for the started checkout, beside `Probe`
+(`host::starts_in_the_started_checkout`). What else differs is its label,
+`decide`, and its identity: [`InvocationId::Decide`], a form no attempt,
+sequence or pre-flight renders, and one the topology selector never admits
+to a slot pair.
 
 Declared, and listed in [`ExecutionRole::all`], after `Review`, so every
 earlier role keeps its place in the derived order and in every grid built

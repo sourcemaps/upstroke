@@ -75,9 +75,11 @@ const fn supplies_credentials(role: &ExecutionRole) -> bool {
 
 const fn starts_in_the_started_checkout(role: &ExecutionRole, worker_in_checkout: bool) -> bool {
     match role {
-        ExecutionRole::Probe(_) => true,
+        // `decide` starts its reviewer in the checkout the command was run in, which is the
+        // started checkout, not a work tree the engine made.
+        ExecutionRole::Probe(_) | ExecutionRole::Decide => true,
         ExecutionRole::Implement => worker_in_checkout,
-        ExecutionRole::Gate | ExecutionRole::Review | ExecutionRole::Decide => false,
+        ExecutionRole::Gate | ExecutionRole::Review => false,
     }
 }
 

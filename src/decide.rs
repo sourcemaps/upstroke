@@ -303,7 +303,27 @@ fn propose(
             opts.run_id
         )));
     }
-    let plan_text = read_bounded(&opts.repo_root.join(&started.plan_path));
+    let answered = answered(&observed.paths().answers(), questions)?;
+    let askable = |asked: &OpenAsked| {
+        let id = asked.question.id.as_str();
+        !asked.binds_an_agent && plain_id(id) && !answered.contains_key(id)
+    };
+    if questions.iter().any(askable) {
+        crate::engine::topology::preflight::certify_agent(
+            &primary.agent,
+            adapter,
+            &config.pools,
+            runner,
+            &|what| {
+                refused(format!(
+                    "run `{}`'s recorded reviewer did not pass the pre-flight a run makes of it: \
+                     {what}; {NOTHING_DONE}",
+                    opts.run_id
+                ))
+            },
+        )?;
+    }
+    let plan_text = recorded_plan(&opts.repo_root.join(&started.plan_path), &started.plan_hash);
     let dir = proposals_dir(&opts.repo_root, &opts.run_id);
 
     // Every line of the report is pushed whole through the terminal line builder: the agent's
@@ -334,6 +354,14 @@ fn propose(
             refusals.push(id.clone());
             continue;
         }
+        if let Some(answer) = answered.get(&id) {
+            out.push(format_args!(
+                "{id}: skipped — a person has answered it already ({}), and the run applies that \
+                 answer; no agent was asked",
+                described(answer)
+            ));
+            continue;
+        }
         if !called.insert(id.clone()) {
             out.push(format_args!(
                 "{id}: skipped — it was already asked in this command, and a question gets at \
@@ -347,7 +375,9 @@ fn propose(
             questions
                 .iter()
                 .skip(from)
-                .filter(|later| !later.binds_an_agent)
+                .filter(|later| {
+                    !later.binds_an_agent && !answered.contains_key(later.question.id.as_str())
+                })
                 .map(|later| later.question.id.as_str().to_owned())
                 .filter(|later| named.insert(later.clone()))
                 .collect()
@@ -486,6 +516,13 @@ fn admit(
     pools: &[Pool],
 ) -> Result<Vec<String>, UpstrokeError> {
     let run = &opts.run_id;
+    if crate::rundir::is_running(&crate::rundir::public_dir(&opts.repo_root, run)) {
+        return Err(refused(format!(
+            "run `{run}` is being driven: an engine holds its lock (or whether one does cannot be \
+             told), and decide proposes answers only for a run nothing is driving, so the run's \
+             own questions are not read while it may be settling them; {NOTHING_DONE}"
+        )));
+    }
     if started.runner.kind != RunnerKind::Host {
         return Err(refused(format!(
             "run `{run}` was recorded on the container runner, and decide starts a reviewer on \
@@ -525,6 +562,42 @@ fn admit(
     }
     private_denials(&started.private_dir)
         .map_err(|reason| refused(format!("run `{run}`: {reason}; {NOTHING_DONE}")))
+}
+
+/// The questions of `questions` a person has answered already, each with its answer: an answer
+/// `upstroke answer` published in the run's answers directory `answers` that the run's log has
+/// not settled yet. Read for every question this command could ask, before anything is written
+/// or any agent asked, so a question the run will apply a person's answer to is never asked.
+fn answered(
+    answers: &Path,
+    questions: &[OpenAsked],
+) -> Result<BTreeMap<String, Answer>, UpstrokeError> {
+    let mut answered = BTreeMap::new();
+    for asked in questions {
+        let id = asked.question.id.as_str();
+        if asked.binds_an_agent || !plain_id(id) || answered.contains_key(id) {
+            continue;
+        }
+        let read =
+            crate::interaction::read_answer(answers, &asked.question.id).map_err(|error| {
+                refused(format!(
+                    "whether question {id} was answered cannot be told: {error}; {NOTHING_DONE}"
+                ))
+            })?;
+        if let Some(answer) = read {
+            answered.insert(id.to_owned(), answer);
+        }
+    }
+    Ok(answered)
+}
+
+/// A person's answer, as the report names it.
+fn described(answer: &Answer) -> String {
+    match answer {
+        Answer::Answered { text } => format!("\"{text}\""),
+        Answer::Declined => "declined".to_owned(),
+        Answer::Unanswered => "left parked".to_owned(),
+    }
 }
 
 fn read_run(repo_root: &Path, run_id: &str) -> Result<Observed, UpstrokeError> {
@@ -669,9 +742,21 @@ fn bounded(text: &str) -> (&str, bool) {
     (text.get(..end).unwrap_or_default(), true)
 }
 
-fn read_bounded(path: &Path) -> String {
+/// The plan file's text for the prompt, forwarded only when its bytes hash to the run's recorded
+/// `plan_hash` (`ir::content_hash`, the hash the run froze the plan under); otherwise a line
+/// saying why it is not, so a plan edited since the run started never reaches the reviewer as
+/// the run's own.
+fn recorded_plan(path: &Path, plan_hash: &str) -> String {
     match crate::util::read_file_bounded(path) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Ok(bytes) if crate::ir::content_hash(&bytes) == plan_hash => {
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+        Ok(bytes) => format!(
+            "(the plan file {} is not forwarded: its bytes hash to {}, not to the {plan_hash} \
+             the run recorded, so it is not the plan this run froze)",
+            path.display(),
+            crate::ir::content_hash(&bytes)
+        ),
         Err(error) => format!(
             "(the plan file {} could not be read: {error})",
             path.display()
@@ -982,6 +1067,15 @@ fn prepare(
         &decider.private_denials,
     )
     .map_err(refuse)?;
+    built
+        .value_is("--model", &decider.model)
+        .and_then(|()| built.value_is("--effort", &decider.effort.to_string()))
+        .map_err(|reason| {
+            refuse(format!(
+                "is not the recorded reviewer's, {}/{} at {} effort: {reason}",
+                decider.agent, decider.model, decider.effort
+            ))
+        })?;
     for guarantee in Guarantee::ALL {
         kept(guarantee, &built)
             .map_err(|reason| refuse(format!("does not keep {}: {reason}", guarantee.named())))?;

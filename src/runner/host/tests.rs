@@ -1532,7 +1532,7 @@ fn the_reserved_values_every_role_gets_are_the_host_boundarys_own() {
 }
 
 #[test]
-fn decide_answers_every_role_keyed_predicate_exactly_as_review_does() {
+fn decide_answers_every_role_keyed_predicate_as_review_does_but_where_it_starts() {
     use crate::runner::container::env::supplies_credential_location;
     use crate::runner::container::exec::{
         ImageIdMismatch, forces_configured_mounts_read_only, receives_a_worktree,
@@ -1542,14 +1542,6 @@ fn decide_answers_every_role_keyed_predicate_exactly_as_review_does() {
     let predicates: &[(&str, RolePredicate)] = &[
         ("ExecutionRole::is_slotted", ExecutionRole::is_slotted),
         ("host::supplies_credentials", supplies_credentials),
-        (
-            "host::starts_in_the_started_checkout, the worker in the checkout",
-            |role| starts_in_the_started_checkout(role, true),
-        ),
-        (
-            "host::starts_in_the_started_checkout, the worker in its own worktree",
-            |role| starts_in_the_started_checkout(role, false),
-        ),
         (
             "container::env::supplies_credential_location",
             supplies_credential_location,
@@ -1562,9 +1554,30 @@ fn decide_answers_every_role_keyed_predicate_exactly_as_review_does() {
     ];
     assert_eq!(
         predicates.len(),
-        7,
-        "every role-keyed predicate the decider touched"
+        5,
+        "every role-keyed predicate the decider touched, but where it starts"
     );
+    // The one predicate a decider does not answer as a review pass does: a review pass starts
+    // in a work tree the engine made, and `decide` in the checkout it was run in, so its
+    // environment is composed as a probe's, for the started checkout.
+    for worker_in_checkout in [true, false] {
+        assert!(
+            starts_in_the_started_checkout(&ExecutionRole::Decide, worker_in_checkout),
+            "a decider starts in the started checkout"
+        );
+        assert!(
+            !starts_in_the_started_checkout(&ExecutionRole::Review, worker_in_checkout),
+            "a review pass starts in a work tree the engine made"
+        );
+        assert_eq!(
+            starts_in_the_started_checkout(&ExecutionRole::Decide, worker_in_checkout),
+            starts_in_the_started_checkout(
+                &ExecutionRole::Probe(ProbeTarget::Agent(fixture_agent())),
+                worker_in_checkout
+            ),
+            "a decider is composed for the checkout the probe that admitted it ran in"
+        );
+    }
     for (name, predicate) in predicates {
         assert_eq!(
             predicate(&ExecutionRole::Decide),
@@ -7811,11 +7824,14 @@ fn dumped_value<'a>(environment: &'a [String], name: &str) -> Option<&'a str> {
     })
 }
 
+/// Whether `role` keeps the inherited Git context: a probe, and `decide`'s reviewer, which
+/// starts in the checkout the command was run in, always do; the implement role only in the
+/// legacy workspace; a gate and a review pass, each in a work tree the engine made, never.
 const fn keeps_the_inherited_context(legacy: bool, role: &ExecutionRole) -> bool {
     match role {
-        ExecutionRole::Probe(_) => true,
+        ExecutionRole::Probe(_) | ExecutionRole::Decide => true,
         ExecutionRole::Implement => legacy,
-        ExecutionRole::Gate | ExecutionRole::Review | ExecutionRole::Decide => false,
+        ExecutionRole::Gate | ExecutionRole::Review => false,
     }
 }
 

@@ -52,19 +52,26 @@ sentence above stands: there is no daemon.
 a schema-4 run found by its exact id, it asks the run's recorded primary reviewer, at the run's
 recorded review effort, read-only, to propose an answer to each open question in the order raised,
 or to the one named by its id or an unambiguous prefix. A question that chooses which agent runs
-a task is skipped and left to a person. Nothing is written and no agent is asked when the run is
+a task is skipped and left to a person, and so is one a person has answered already, whose
+answer the run applies. Nothing is written and no agent is asked when the run is
 unknown, not schema 4, or records no primary reviewer, nor when its admission refuses it: a run
+an engine is driving; a run
 recorded on the container runner, since the call starts on this host; a run whose pools the
 credential pre-flight of its resume refuses; a reviewer whose adapter cannot guarantee all of cost
 reporting in dollars, a dollar ceiling per call, no web access and the run's private directory
 being unreadable (Claude Code alone claims them; Copilot and Codex report no dollar cost); a
-`--max-cost-usd` that is not a positive number; and a private directory no permission rule can
-name exactly. A claim admits nothing by itself: each call's command is checked as built, and is
-refused before it is written or started unless it carries no environment overlay, `-p` with
+`--max-cost-usd` that is not a positive number; a private directory no permission rule can
+name exactly; and, when a question is left to ask, a reviewer that fails the pre-flight a run makes
+of each recorded agent (its CLI probed, and every account its pools configure signed in). A claim
+admits nothing by itself: each call's command is checked as built, and is
+refused before it is written or started unless it carries no environment overlay, exactly the
+recorded reviewer's `--model` and the recorded review effort as `--effort`, `-p` with
 `--output-format json`, `--max-budget-usd` at most what is left of the allowance,
 `--permission-mode dontAsk`, `--setting-sources ""`, `--strict-mcp-config` and no flag besides
 the call's own, and settings that allow `Read`, `Glob` and `Grep` at most and deny `WebFetch`,
-`WebSearch`, and reads of `.upstroke/**` and of the run's private directory. A run is decided
+`WebSearch`, and reads of `.upstroke/**` and of the run's private directory. The plan file goes
+into the prompt only when its bytes hash to the plan the run recorded, and the call starts in the
+checkout the command was run in, its environment composed for that checkout. A run is decided
 once: immediately before its first call the command claims it by creating its proposals directory
 exclusively (§15), and a run whose directory exists, complete, partial, of an older format or
 anything else at that name, is refused with nothing written and no agent asked; the claim is never

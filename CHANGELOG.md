@@ -13,11 +13,13 @@
   an interruption. Each question gets at most one call, each call is capped at what is left of the
   run's `--max-cost-usd` allowance (default 5), and only a clean, successful, priced call is
   counted, at its price; any other outcome is saved as refused and ends the command, naming the
-  questions left. It asks only a Claude Code reviewer of a host run whose pools pass the
-  credential pre-flight a resume would run, giving each call that remainder as its own
-  `--max-budget-usd`, no web access, no read of the run's private directory and no environment
-  overlay, each checked on the command as built; any other run or command is refused before
-  anything is written or asked.
+  questions left. It asks only a Claude Code reviewer of a host run that no engine is driving,
+  whose pools pass the credential pre-flight a resume would run and whose CLI passes the probe and
+  sign-in checks a run makes of it, giving each call the recorded model and review effort, that
+  remainder as its own `--max-budget-usd`, no web access, no read of the run's private directory
+  and no environment overlay, each checked on the command as built; any other run or command is
+  refused before anything is written or asked. A question a person has answered already is
+  skipped, and the plan goes into the prompt only when it is the plan the run recorded.
 - Capacity is now tracked for the machine rather than for a repository; `[capacity] scope = "repo"`
   or `upstroke capacity --scope repo` folds only this repository. Nothing routes on any of this yet.
   Only an attempt that passed, in a run of any schema, clears another run's rate limit on its pool,
