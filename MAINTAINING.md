@@ -52,7 +52,9 @@ source, documentation, workflows, release machinery and this file.
    on the guest. The build machine's operator sets
    `WINGUEST_BUSY` to `1` while baselines or Upstroke runs hold the machine, and clears it
    afterwards. A hosted run is not free: measured on 2026-11-15 (run 43719719561), the whole
-   suite takes 59 to 76 minutes on `windows-latest` and its shards 15 to 23 minutes each,
+   suite takes 59 to 76 minutes on `windows-latest` and three of its shards took 14m42s, 17m17s
+   and 22m53s (the fourth shard of that run never ended, and is now shards 2 and 3 of 5, which
+   have not run as separate jobs),
    against the guest's 13 for the whole. Each shard runs under a 40-minute limit. In that run
    one whole-suite job failed a kill-timing test, and one shard did not end after its tests had
    passed, a leftover test process holding its output; neither followed a change.
