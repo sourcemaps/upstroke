@@ -21,7 +21,9 @@ that evaluates it:
 - A Clippy lint or `#[expect]` is evidenced only by a Clippy leg for that target. CI runs one for
   each of the three — `lint`, `lint (windows)`, `lint (macos)` — beside `test` and `msrv` matrices
   that compile all three, the `test` legs natively and `msrv` by target triple. `lint (macos)`
-  compiles the macOS target from Linux, since `cfg` follows the target, not the host.
+  compiles the macOS target from Linux, since `cfg` follows the target, not the host; a build
+  script or proc-macro would compile for the Linux host, so the package has none, and a test
+  refuses one.
 - A rustc lint is evaluated by any leg that compiles the region, but its `#[expect]` retires itself
   only where warnings are errors. `ci.yml` sets `RUSTFLAGS: -D warnings` at workflow scope, so
   today that is every leg; narrowing it to one job would silently remove the self-retirement

@@ -42,8 +42,12 @@ tuple it compiles. The macOS gate is [`CLIPPY_GATE_MACOS_CROSS`].
 
 The macOS Clippy gate: [`CLIPPY_GATE`] with `--target aarch64-apple-darwin`,
 run on `ubuntu-latest`. `cfg` follows the target, not the host, so a Linux
-Clippy for that tuple evaluates every `#[cfg(target_os = "macos")]` region as
-a Mac would. `lint (macos)` ran on `macos-latest` until GitHub's cap of five
+Clippy for that tuple evaluates every `#[cfg(target_os = "macos")]` region of
+the package's target code as a Mac would. A build script or a proc-macro is a
+host unit and compiles for Linux even under `--target`, so the package has
+none: `no_repository_file_adds_a_host_unit_the_macos_cross_checks_cannot_reach`
+refuses one, and adding one means restoring a native `macos-latest` Clippy and
+MSRV leg. `lint (macos)` ran on `macos-latest` until GitHub's cap of five
 macOS jobs at once for the account met seven per run -- this leg, an `msrv`
 entry and the five macOS test legs -- and run 45175187088 showed each macOS
 job starting as another ended. The five test legs still run natively.

@@ -681,7 +681,12 @@ jobs:
   #
   # The leg runs on Linux and compiles for `aarch64-apple-darwin`, the tuple
   # `macos-latest` builds. `cfg` follows the target, not the host, so Clippy
-  # evaluates every `#[cfg(target_os = "macos")]` region as a Mac would; the
+  # evaluates every `#[cfg(target_os = "macos")]` region of the package's
+  # target code as a Mac would. A host unit -- a build script or a
+  # proc-macro -- still compiles for Linux, so the package may have none:
+  # `no_repository_file_adds_a_host_unit_the_macos_cross_checks_cannot_reach`
+  # refuses one, and adding one means restoring a native `macos-latest`
+  # Clippy and MSRV leg in the same change. The
   # toolchain step installs that tuple's standard library, and the workflow
   # oracle holds it to the tuple the command names. It moved off
   # `macos-latest` because GitHub runs at most five macOS jobs at once for the
