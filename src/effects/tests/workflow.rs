@@ -4503,6 +4503,65 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         replacement: "    timeout-minutes: 45\n",
         refused_as: "test-job-timeout",
     },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-SUITE-PIPED-AGAIN",
+        escape: "line 4 of the guest's suite step is a pipeline again, Cargo piped into \
+                 `Tee-Object -Variable log`, as it read before the step started Cargo as a \
+                 process and waited on that. A pipeline ends when every process holding its \
+                 pipe has ended; by the inference the step is written against, a test process \
+                 that outlives the suite with that pipe in hand holds the step open after the \
+                 last result line, and a suite that passed runs to the guest's 20 minutes and \
+                 is cancelled, on the one machine every lane waits for. Lines 5 and 7 still \
+                 read the files and the exit code line 4 no longer makes: the row is the wait \
+                 put back and no working step, and the pin refuses the text whatever the rest \
+                 of it would then do",
+        job: Some("test-windows"),
+        anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
+        replacement: "          cargo test --all-targets --all-features | Tee-Object -Variable log\n",
+        refused_as: "test-windows-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-SURVIVOR-ALLOWED",
+        escape: "line 8 of the guest's suite step, the throw for a test process left running, \
+                 is gone. Line 6 still lists each `upstroke*` process and stops it, and the \
+                 step goes on to its count: a suite that passed and left a process is green. \
+                 The listing is then a line in the log of a job nobody has a reason to open, \
+                 the process is stopped and forgotten, and which test leaves it -- the one \
+                 thing the two runs that did not end left unestablished -- is looked for by \
+                 no one",
+        job: Some("test-windows"),
+        anchor: "          if ($left.Count -gt 0) { throw \"$($left.Count) test process(es) outlived the suite, listed above: a test leaves a process running, which would hold this step open\" }\n",
+        replacement: "",
+        refused_as: "test-windows-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-SUITE-PIPED-AGAIN",
+        escape: "line 4 of the shards' suite step is a pipeline again, Cargo over the leg's \
+                 `matrix.tests` piped into `Tee-Object -Variable log`: the pipeline the legs \
+                 ran in runs 43719719561 and 44277078005, in each of which a shard reported \
+                 its tests and did not end before its job's limit. By the inference the step \
+                 is written against, a test process that outlives the suite holds that pipe, \
+                 so a leg whose tests all passed is cancelled at its 40 minutes with no \
+                 failing test to show for it, on whichever of the five legs runs the test \
+                 that leaves the process",
+        job: Some("test-windows-hosted"),
+        anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- ${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
+        replacement: "          cargo test --all-targets --all-features -- ${{ matrix.tests }} | Tee-Object -Variable log\n",
+        refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-SURVIVOR-ALLOWED",
+        escape: "line 8 of the shards' suite step, the throw for a test process left running, \
+                 is gone, on all five legs at once. Each leg still lists the `upstroke*` \
+                 processes left and stops them, then counts and clears its floor: the leg \
+                 whose tests leave a process is green beside the other four, the process is \
+                 stopped and forgotten, and which test leaves it, the question both runs that \
+                 did not end left open, is asked by nothing",
+        job: Some("test-windows-hosted"),
+        anchor: "          if ($left.Count -gt 0) { throw \"$($left.Count) test process(es) outlived the suite, listed above: a test leaves a process running, which would hold this step open\" }\n",
+        replacement: "",
+        refused_as: "test-windows-hosted-command",
+    },
 ];
 
 pub(super) fn mutate_workflow(

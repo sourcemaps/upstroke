@@ -298,6 +298,9 @@ process: the job that ran the test names the process's command line.
 it starts: that it waits with `WaitForExit()` and not `-Wait`, pipes nothing
 into `Tee-Object`, exits with Cargo's code before it counts, and lists the
 processes before that exit and throws for them after it.
+Measured in the oracle, each an edit to the workflow that leaves this text
+alone: `MUT-TEST-WINDOWS-SUITE-PIPED-AGAIN`, line 4 a pipeline into
+`Tee-Object` again, and `MUT-TEST-WINDOWS-SURVIVOR-ALLOWED`, line 8 removed.
 
 The hosted twin ran this step too, character for character, until it ran
 the suite in shards. Its legs now run [`WINDOWS_SHARD_WITNESS`], which keeps
@@ -370,8 +373,10 @@ whole suite's cannot see, a leg whose filter matched almost nothing.
 Measured, `MUT-TEST-WINDOWS-HOSTED-COMPILER-CHECK-DROPPED`,
 `MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED`,
 `MUT-TEST-WINDOWS-HOSTED-FLOOR-DROPPED`,
-`MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED` and
-`MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`.
+`MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED`,
+`MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`,
+`MUT-TEST-WINDOWS-HOSTED-SUITE-PIPED-AGAIN` and
+`MUT-TEST-WINDOWS-HOSTED-SURVIVOR-ALLOWED`.
 
 No PowerShell runs on the build box ([`HOST_ACCEPTANCE_WINDOWS_CAPTURE`]),
 so this text was not executed where it was written. Its execution is the
