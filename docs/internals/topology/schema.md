@@ -202,9 +202,11 @@ the post-activation ceiling be exercised without moving production's.
 
 ### Errors
 
-[`SchemaRefusal::TopologyLogUnreadable`] for a topology log this binary is
-not activated for, and [`SchemaRefusal::NewerThanReadable`] for anything
-above the topology schema.
+Whenever `schema` is above the supplied `ceiling`:
+[`SchemaRefusal::TopologyLogUnreadable`] when `schema` is the topology
+schema, and [`SchemaRefusal::NewerThanReadable`] for any other schema,
+including a legacy one below the topology schema (schema 3 with ceiling 2,
+for example).
 
 ## `pub fn select_for_schema(schema: u32, ceiling: u32) -> Result<ReaderSelection, SchemaRefusal> {` › `if schema == TOPOLOGY_SCHEMA {`
 
