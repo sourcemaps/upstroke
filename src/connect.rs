@@ -207,7 +207,7 @@ fn pool_for_agent(agent: &str, discovery: &Discovery) -> Pool {
     )
 }
 
-#[derive(Debug, Default, PartialEq, serde::Deserialize)]
+#[derive(Debug, Default, PartialEq)]
 struct OperatorKeys {
     profile: Option<String>,
     monthly_allowance: Option<toml::Value>,
@@ -215,11 +215,37 @@ struct OperatorKeys {
     usage_provider: Option<String>,
     usage_token_env: Option<String>,
     usage_account: Option<String>,
+    mistyped: Vec<&'static str>,
 }
 
 impl OperatorKeys {
+    fn read(pool: &toml::Table) -> Self {
+        let mut mistyped = Vec::new();
+        let mut string = |key: &'static str| match pool.get(key) {
+            Some(toml::Value::String(text)) => Some(text.clone()),
+            Some(_) => {
+                mistyped.push(key);
+                None
+            }
+            None => None,
+        };
+        Self {
+            profile: string("profile"),
+            monthly_allowance: pool.get("monthly_allowance").cloned(),
+            endpoint: string("endpoint"),
+            usage_provider: string("usage_provider"),
+            usage_token_env: string("usage_token_env"),
+            usage_account: string("usage_account"),
+            mistyped,
+        }
+    }
+
     fn apply(self, pool: &mut Pool) -> Vec<String> {
-        let mut problems = Vec::new();
+        let mut problems: Vec<String> = self
+            .mistyped
+            .iter()
+            .map(|key| format!("`{key}` must be a string; it was not carried"))
+            .collect();
         if let Some(profile) = self.profile {
             pool.profile = Some(profile);
         }
@@ -253,6 +279,7 @@ impl OperatorKeys {
             || self.usage_provider.is_some()
             || self.usage_token_env.is_some()
             || self.usage_account.is_some()
+            || !self.mistyped.is_empty()
     }
 }
 
@@ -276,15 +303,15 @@ fn allowance_of(value: &toml::Value) -> Result<crate::capacity::Allowance, Inval
 }
 
 fn operator_keys(text: &str) -> std::collections::BTreeMap<String, OperatorKeys> {
-    #[derive(serde::Deserialize)]
-    struct Doc {
-        pools: Option<std::collections::BTreeMap<String, OperatorKeys>>,
-    }
-    toml::from_str::<Doc>(text)
-        .ok()
-        .and_then(|doc| doc.pools)
-        .unwrap_or_default()
-        .into_iter()
+    let Ok(document) = toml::from_str::<toml::Table>(text) else {
+        return std::collections::BTreeMap::new();
+    };
+    let Some(pools) = document.get("pools").and_then(toml::Value::as_table) else {
+        return std::collections::BTreeMap::new();
+    };
+    pools
+        .iter()
+        .filter_map(|(name, pool)| Some((name.clone(), OperatorKeys::read(pool.as_table()?))))
         .filter(|(_, keys)| keys.any())
         .collect()
 }
@@ -1398,6 +1425,206 @@ mod tests {
                 Some("/profiles/work"),
                 "a valid operator key beside the refused ones is still carried"
             );
+        }
+    }
+
+    fn both_agents_signed_in() -> Machine {
+        let signed_in = |id: &'static str, shape: PoolKind| FakeAdapter {
+            id,
+            discovery: Some(Discovery {
+                auth: AuthState::Authenticated,
+                models: Vec::new(),
+                shape: Some(shape),
+                notes: Vec::new(),
+            }),
+        };
+        Machine {
+            adapters: vec![
+                signed_in("claude-code", PoolKind::SubscriptionWindow),
+                signed_in("copilot", PoolKind::Credits),
+            ],
+        }
+    }
+
+    const OTHER_POOL: &str = "[pools.claude-code]\nkind = \"subscription-window\"\nagent = \
+                              \"claude-code\"\nprofile = \"/profiles/work\"\n\
+                              monthly_allowance = 300\nendpoint = \"http://homeserver:11434/v1\"\n";
+
+    fn force_both_pools(path: &Path, copilot_keys: &str) -> (ConnectReport, Vec<Pool>) {
+        fs::write(
+            path,
+            format!(
+                "{OTHER_POOL}[pools.copilot]\nkind = \"credits\"\nagent = \"copilot\"\n\
+                 {copilot_keys}"
+            ),
+        )
+        .expect("a hand-written file with two pools");
+        let forced = run_with(
+            &ConnectOptions {
+                pools_path: Some(path.to_path_buf()),
+                force: true,
+            },
+            &both_agents_signed_in(),
+            ["claude-code", "copilot"],
+        )
+        .expect("connect runs");
+        let mut warnings = Vec::new();
+        let hermetic = path.parent().expect("the pools file is in a directory");
+        let cfg = crate::config::load(None, hermetic, Some(path), &mut warnings)
+            .unwrap_or_else(|error| panic!("the file --force wrote loads: {error}"));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        (forced, cfg.pools)
+    }
+
+    fn assert_the_other_pool_kept_its_keys(pools: &[Pool]) {
+        let other = pools
+            .iter()
+            .find(|pool| pool.name == "claude-code")
+            .unwrap_or_else(|| panic!("no claude-code pool in {pools:?}"));
+        assert_eq!(other.profile.as_deref(), Some("/profiles/work"));
+        assert_eq!(
+            other.monthly_allowance,
+            crate::capacity::Allowance::Units(300.0)
+        );
+        assert_eq!(
+            other.endpoint.as_deref(),
+            Some("http://homeserver:11434/v1")
+        );
+    }
+
+    #[test]
+    fn mistyped_usage_key_must_not_delete_other_pools_profiles() {
+        let tree = scratch("usage-mistyped-beside");
+        let (forced, pools) =
+            force_both_pools(&tree.path().join("pools.toml"), "usage_provider = 42\n");
+        assert_eq!(forced.outcome, Wrote::Written);
+        assert_eq!(pools.len(), 2, "{pools:?}");
+        assert_the_other_pool_kept_its_keys(&pools);
+        assert_eq!(
+            forced.warnings,
+            ["pool `copilot`: `usage_provider` must be a string; it was not carried"]
+        );
+        let rendered = render_report(&forced);
+        assert!(
+            rendered.lines().any(|line| line
+                == "warning: pool `copilot`: `usage_provider` must be a string; it was not \
+                    carried"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn review409_bad_usage_type_preserves_other_pools_operator_keys() {
+        for key in ["usage_provider", "usage_token_env", "usage_account"] {
+            for (value, spelled) in [
+                ("424242", "424242"),
+                ("42.5", "42.5"),
+                ("true", "true"),
+                ("1979-05-27T07:32:00Z", "1979"),
+                ("[\"LEAK\"]", "LEAK"),
+                ("{ token = \"LEAK\" }", "LEAK"),
+            ] {
+                let tree = scratch("usage-mistyped-each");
+                let (forced, pools) = force_both_pools(
+                    &tree.path().join("pools.toml"),
+                    &format!("{key} = {value}\n"),
+                );
+                assert_eq!(forced.outcome, Wrote::Written, "{key} = {value}");
+                assert_the_other_pool_kept_its_keys(&pools);
+                assert_eq!(
+                    forced.warnings.len(),
+                    1,
+                    "{key} = {value}: {:?}",
+                    forced.warnings
+                );
+                let warning = &forced.warnings[0];
+                assert!(warning.starts_with("pool `copilot`: "), "{warning}");
+                assert!(
+                    warning.contains(&format!("`{key}` must be a string")),
+                    "{warning}"
+                );
+                assert!(!warning.contains(spelled), "{warning}");
+                assert!(
+                    !forced
+                        .content
+                        .lines()
+                        .any(|line| !line.starts_with('#') && line.contains("usage_")),
+                    "{}",
+                    forced.content
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_pool_whose_own_usage_account_is_mistyped_keeps_its_own_profile() {
+        let tree = scratch("usage-account-mistyped");
+        let path = tree.path().join("pools.toml");
+        fs::write(
+            &path,
+            "[pools.claude-code]\nkind = \"subscription-window\"\nagent = \"claude-code\"\n\
+             profile = \"/profiles/work\"\nusage_provider = \"github-ai-credits\"\n\
+             usage_token_env = \"GH_PLAN_TOKEN\"\nusage_account = 424242\n",
+        )
+        .expect("a hand-written file");
+
+        let forced = connect(&path, true);
+        assert_eq!(forced.outcome, Wrote::Written);
+        assert_eq!(
+            forced.warnings,
+            ["pool `claude-code`: `usage_account` must be a string; it was not carried"]
+        );
+        let pool = the_one_pool(&path);
+        assert_eq!(pool.profile.as_deref(), Some("/profiles/work"));
+        assert_eq!(
+            pool.usage,
+            Some(crate::capacity::UsageSource {
+                provider: crate::capacity::UsageProvider::GithubAiCredits,
+                token_env: Some("GH_PLAN_TOKEN".to_owned()),
+                account: None,
+            })
+        );
+    }
+
+    #[test]
+    fn operator_keys_are_read_pool_by_pool_and_key_by_key() {
+        let read = operator_keys(
+            "[pools]\nnot-a-table = 7\n\
+             [pools.mistyped]\nkind = \"credits\"\nprofile = 42\nendpoint = [\"http://a/v1\"]\n\
+             monthly_allowance = \"auto\"\nusage_provider = \"anthropic-cost\"\n\
+             usage_account = { name = \"LEAK\" }\n\
+             [pools.valid]\nprofile = \"/profiles/valid\"\nendpoint = \"http://b/v1\"\n\
+             monthly_allowance = 300\n\
+             [pools.no-operator-keys]\nkind = \"credits\"\nagent = \"copilot\"\n",
+        );
+        assert_eq!(
+            read.into_iter().collect::<Vec<_>>(),
+            [
+                (
+                    "mistyped".to_owned(),
+                    OperatorKeys {
+                        monthly_allowance: Some(toml::Value::String("auto".to_owned())),
+                        usage_provider: Some("anthropic-cost".to_owned()),
+                        mistyped: vec!["profile", "endpoint", "usage_account"],
+                        ..OperatorKeys::default()
+                    },
+                ),
+                (
+                    "valid".to_owned(),
+                    OperatorKeys {
+                        profile: Some("/profiles/valid".to_owned()),
+                        monthly_allowance: Some(toml::Value::Integer(300)),
+                        endpoint: Some("http://b/v1".to_owned()),
+                        ..OperatorKeys::default()
+                    },
+                ),
+            ]
+        );
+        for document in [
+            "pools = 42\n",
+            "[pools.valid]\nprofile = \"/profiles/valid\"\nthis line is not toml\n",
+        ] {
+            assert!(operator_keys(document).is_empty(), "{document}");
         }
     }
 }
