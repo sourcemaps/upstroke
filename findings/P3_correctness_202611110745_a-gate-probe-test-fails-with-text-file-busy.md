@@ -48,11 +48,6 @@ So the case expected the probe's Git call to fail in one particular way and it f
 the operating system refused to execute a file that was open for writing. Operating-system error
 26 on Linux is what executing such a file returns.
 
-**Which file was busy, and what held it open, is not established.** One candidate, and it is only
-a candidate: the stand-in `git` the test has just written. A descriptor open for writing can
-outlive the write in a process that another thread of the same test binary forks at that moment,
-and the suite runs its tests on many threads, several of which spawn children.
-
 The same test passed in the Ubuntu job of the three earlier CI runs of the same tree
 (42961933564, 42968003215 and 42973429587, on pull request #360), and it printed `... ok` in the
 macOS job of the second run.
@@ -60,13 +55,47 @@ macOS job of the second run.
 **It is a defect of the test, not of the engine,** as far as the evidence goes: the stand-in
 program and the probe are the test's own.
 
+## Class
+
+**The prior ID of this class is `W2-HOST-TESTS-WRITE-THEN-EXEC-ETXTBSY`**, recorded in
+`reviews/FINDINGS.md`: a test writes a program with `fs::write`, another thread of the test binary
+forks while the file is open for writing and the child inherits the descriptor, and executing the
+file then fails with "Text file busy".
+
+**Established: the mechanism and the executable.** Both are supported by that prior finding, by
+its deterministic witness of the mechanism (`inherited_writer_helper`, in
+`src/runner/host/tests.rs`, which shows a forked child's inherited writer making `execve` fail
+with `ETXTBSY` after the original descriptor is closed), and by the code: this test writes its
+stand-in `git` with `fs::write` (`src/engine/tests.rs`, near line 11110) and the probe then
+executes it, which is the class's write-then-exec shape. Commit `83029793` applied the class's
+remedy to another stand-in `git` in `src/engine/tests.rs` for this same error. The busy file is
+the stand-in `git`.
+
+**Not established: which process held the descriptor** in these two runs. It is not known, and
+the repair does not need it to be: the remedy closes the write in a process of its own, so no
+thread of the test binary holds a writer for any fork to inherit, whichever one forked.
+
+## Rate, owner and consequence
+
+**Rate.** Two failures of this test in the Ubuntu test job, among the 120 most recent CI runs the
+operator surveyed on 2026-11-10 and the runs of 2026-11-11. This is a count over the runs
+surveyed, not a measured frequency.
+
+**Owner.** The repair is the next task of the run that amends this finding.
+
+**Consequence.** Only a failure with this fingerprint is this intermittent failure: the Ubuntu or
+another Unix test job, this test, and a probe line ending in `Text file busy (os error 26)`. Any
+other failure of the same test is a regression to be investigated, not a recurrence of this one.
+
 ## What the change that takes this up should do
 
-1. **First establish which file is busy**, from a failing run's record or by reproducing it.
-   Nothing above settles it, and a fix aimed at the candidate without that is a guess.
-2. **Then make the test not execute a file that it or a sibling still holds open for writing**,
-   and keep the assertion as strict as it is. A text-file-busy failure must not be accepted as the
+1. **Write the stand-in `git` with `write_program_in_its_own_process`** (in
+   `src/runner/container.rs`) instead of `fs::write`, as commit `83029793` did for the other
+   stand-in `git` in `src/engine/tests.rs`. The program is then written and closed by a process
+   of its own, so no thread of the test binary holds a writer to it when another thread forks.
+2. **Keep the assertion as strict as it is.** A text-file-busy failure must not be accepted as the
    expected one: the case asserts how the probe's Git call fails, and widening it to admit this
    failure would stop it asserting that.
 
-No mutation witness is available until the failure can be produced on demand.
+The mechanism's deterministic witness is the class's, `inherited_writer_helper` in
+`src/runner/host/tests.rs`; this test's own failure cannot be produced on demand.
