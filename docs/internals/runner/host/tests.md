@@ -1619,7 +1619,8 @@ red was (`W2-MACOS-HOST-CONTAINMENT-ROLE-GROUP-FINGERPRINT`).
 ## `fn group_leadership(observations: &[proc::GroupObservation]) -> (Vec<bool>, String) {`
 
 The decisions and the rendered records side by side, so an assertion
-compares the former and prints the latter.
+compares the former and prints the latter. The role grid also prints
+the records once the assertion passes; see its Unix assertion below.
 
 ## `impl RoleWitness` › `fn handle(&self) -> Self {`
 
@@ -1904,6 +1905,27 @@ injected at `child_created` would need.
 
 Unix: the containment *operation* — not only its hook — ran for
 this role. The witness is the kernel.
+
+The expected value is unchanged; the predicate behind it,
+`GroupObservation::leads_own_group`, now also accepts, on macOS, an
+exited, unreaped child whose record names its own pid
+([`agent/proc` notes](../../agent/proc.md)).
+
+A passing role prints its record too, to stderr, after the assertion
+(`PR173-LIVE-RECORD-ANSWER-NEVER-PRINTED`: until then only a failing
+grid rendered them). On macOS the record carries what `proc_pidinfo`,
+given the non-zero argument that asks for an exited record, answered —
+so a child still running at the look (`before the look running`) shows
+whether that call answers for a live process. That question is still
+open: the `agent/proc` notes read the answer from XNU's source, not
+from a printed record. A record whose child had already exited does not
+answer it, and the grid's children are short-lived, so a run may hold
+none that answers.
+
+libtest captures a passing test's output and shows it only under
+`--nocapture` or `--show-output`. CI's suite step passes neither, so
+its log does not carry these records; the measurement is one run of
+this test with one of those flags, on the macOS runner.
 
 ## `const SPAWN_KILL_POINT: &str = "UPSTROKE_SPAWN_KILL_POINT";`
 
