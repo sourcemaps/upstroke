@@ -121,7 +121,10 @@ cmd = "cargo test"
   the same model pinned through a different CLI is not detected. A fresh run is not created if
   that alternative cannot be probed ([design/17](design/17_design_configuration_reference.md));
   only a run an older binary created (schema 1–3) warns and falls back to the
-  frozen same-model reviewer. With `[routing] review = { cross_family = false }` a model can
+  frozen same-model reviewer. The Codex roster-upgrade refusal in
+  [§17](design/17_design_configuration_reference.md) also applies to those older runs when the CLI
+  passes the entire earlier roster and its required efforts but fails an added model or effort.
+  With `[routing] review = { cross_family = false }` a model can
   review its own work, and the run warns, naming the tasks.
   A configured blast-radius second opinion is stricter: it needs both families, and both must pass.
 - **Host commands are cleaned up.** On Windows every supervised command is assigned to a
