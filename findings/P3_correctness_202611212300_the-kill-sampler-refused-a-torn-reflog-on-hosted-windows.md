@@ -134,7 +134,8 @@ job this test was the only failure.
 |---|---|---|---|---|---|
 | `45384932886` (`pull_request`) | `138413285908`, `test (windows-latest, 13 of 14)` | a GitHub-hosted `windows-latest` runner | 2026-11-24, 11:31:22Z to 11:40:16Z | #413 at `d62eff5d` (an empty commit on `d4b85ec8`, with its tree) | `278c049`, GitHub's merge of `d62eff5d` into `master` at `0161b067` |
 
-Read from the raw job log (`evidence/job-45384932886-138413285908.log`, SHA-256
+Read from the job's log as GitHub's API serves it, with ANSI escape sequences removed
+(`evidence/job-45384932886-138413285908.log`, SHA-256
 `d59419e550a8e61992bfb3053c9a668a9b19fdb510413231688a81d8eb6257a7`):
 
 - Line 467:
