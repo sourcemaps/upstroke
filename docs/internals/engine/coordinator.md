@@ -854,13 +854,15 @@ to hang it on would put a fact about nothing into the estimator.
 ## `impl Run<'_>` › `let reset_at = if agent == claude::ADAPTER_ID {`
 
 The reset time the limit message gave, where it gave one.
-`agent::reset_at_from_limit_message` reads the failure's `limit_message`
-(below), and then its reason, for Claude
-Code's `· resets 5:30am (UTC)` or `· resets Nov 14, 9am (UTC)`, completes
-the missing date or year against now, and returns the time as RFC 3339 UTC;
-it returns `None` for any text without a reset in exactly that form,
-including one in a zone other than UTC. Now is `util::unix_seconds_now`,
-the same clock read the same way as the event's own `ts`.
+`agent::reset_at_from_limit_message` reads one of the failure's texts, its
+`limit_message` or its reason (below), for the reset a recognised limit in
+it gives, Claude Code's `You've hit your 5-hour limit · resets 5:30am (UTC)`
+or `· resets Nov 14, 9am (UTC)`, completes the missing date or year against
+now, and returns the time as RFC 3339 UTC. It returns `None` for a text
+whose limit gives no reset in exactly that form, including one in a zone
+other than UTC, and for a reset no limit gives, however well it parses. Now
+is `util::unix_seconds_now`, the same clock read the same way as the event's
+own `ts`.
 
 Only Claude Code's text is read. The agent is the one that failed — the
 implementer's for a worker's refusal, the last reviewer's for a reviewer's —
@@ -869,8 +871,8 @@ adapter cannot leave a second spelling behind. Every other agent's
 `reset_at` is `None` without a parse. The parser only knows Claude Code's
 shape, but that shape is loose enough to match words another vendor might
 print: a Copilot refusal reading `premium request allowance exhausted;
-resets Dec 1, 12am (UTC)` parses, and nothing says Copilot means a UTC
-midnight on that date by it. Recording that would put a guess into the log
+you've hit your weekly limit · resets Dec 1, 12am (UTC)` parses, and nothing
+says Copilot means a UTC midnight on that date by it. Recording that would put a guess into the log
 as the subscription's own reset; `another_agents_rate_limit_naming_a_reset_records_none_on_pool_exhausted`
 in `engine::tests` holds it out.
 
@@ -884,8 +886,8 @@ was before.
 
 ## `impl Run<'_>` › `.chain(std::iter::once(failure.reason.as_str()))`
 
-The limit's own text first, then the reason, and the first that names a
-reset wins. Claude Code can exit 1 with a JSON result that has nothing to do
+The limit's own text first, then the reason; which of them is read is the
+`.find` below. Claude Code can exit 1 with a JSON result that has nothing to do
 with the limit, such as `request failed`, and print `You've hit your 5-hour
 limit · resets 5:30am (UTC)` on stderr. `claude::parse_output` reads the
 limit from stderr and classifies the attempt `RateLimited`, but the detail
@@ -901,11 +903,10 @@ resets 9am (UTC)` beside the five-hour limit on stderr made the reason
 `pool rate-limited: MCP cache resets 9am (UTC)`; it has no `hit your … limit`
 line, so the parser fell back to the reason's only `resets` and recorded
 09:00 for a pool that came back at 05:30. The stderr is carried only when it
-is what signalled the limit, so it is read first, and the reason only when
-there is no carried text or that text names no reset. A failure with no
-`limit_message` reads exactly what it read before, and so does one whose
-stderr signalled the limit without naming a reset. The event's `detail` is
-still the reason; the stderr is not stored anywhere new.
+is what signalled the limit, so it is read first. The parser no longer
+reads a reset no limit gives at all, so that reason now gives `None` even
+read alone. The event's `detail` is still the reason; the stderr is not
+stored anywhere new.
 
 A reviewer's failure carries the same `limit_message`
 (`PR380-REVIEWER-STDERR-RESET-DROPPED`): `run_review` keeps a rate-limited
@@ -918,6 +919,29 @@ recorded `None`. The two cases are
 and
 `a_reviewers_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_pool_exhausted`
 in `engine::tests`.
+
+## `impl Run<'_>` › `.find(|text| names_a_quota_limit(text))`
+
+The first text that holds a recognised limit decides, and it alone is
+parsed. `agent::names_a_quota_limit` says whether a text holds a limit the
+parser reads resets from, whatever that limit's reset is. So when the stderr
+holds one, the reason is never read: if the stderr's limit gives no reset,
+or one that cannot be read, `reset_at` is `None`, and no reset in the reason
+stands in for it. The reason is read only when there is no carried stderr or
+the stderr holds no such limit, as when it signalled with one of the fixed
+phrases (`usage limit`) instead.
+
+This was a `find_map` over the parser, the first text that gave a reset
+winning, and the regression review found it passing over an unreadable
+limit reset. Stderr `You've hit your 5-hour limit - resets 5:30am
+(Europe/London)` was rightly read as `None`, since the zone is not UTC, and
+the `find_map` went on to the JSON result `MCP cache resets 9am (UTC)` and
+recorded `2026-11-15T09:00:00Z`. The parser no longer reads that result's
+reset, which no limit gives, but a result with a limit of its own (`You've
+hit your weekly limit - resets 9am (UTC)`) would still have stood in, so the
+choice of text is made here, before parsing.
+`an_unreadable_reset_on_stderr_is_not_replaced_by_the_results_on_pool_exhausted`
+in `engine::tests` runs both results.
 
 ## `impl Run<'_>` › `.is_some_and(|recorded| reset_at.is_none() || *recorded == reset_at);`
 

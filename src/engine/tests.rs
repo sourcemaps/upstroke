@@ -8325,11 +8325,10 @@ fn a_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_pool_exhaus
 #[test]
 fn a_limit_on_stderr_outranks_an_unrelated_reset_in_the_result_on_pool_exhausted() {
     const REASON: &str = "pool rate-limited: MCP cache resets 9am (UTC)";
-    let alone = crate::agent::reset_at_from_limit_message(REASON, crate::util::unix_seconds_now())
-        .expect("the reason alone names a reset");
-    assert!(
-        alone.ends_with("T09:00:00Z"),
-        "read first, the reason's unrelated reset is the one recorded: {alone}"
+    assert_eq!(
+        crate::agent::reset_at_from_limit_message(REASON, crate::util::unix_seconds_now()),
+        None,
+        "the reason's reset follows no limit, so it is not read even alone"
     );
 
     let (_tree, repo) = temp_engine_repo("poolexhaustedstderroutranksreason");
@@ -8388,6 +8387,77 @@ fn a_limit_on_stderr_outranks_an_unrelated_reset_in_the_result_on_pool_exhausted
         "the limit's own reset, not the reason's 09:00: {reset_at}"
     );
     assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
+}
+
+#[test]
+fn an_unreadable_reset_on_stderr_is_not_replaced_by_the_results_on_pool_exhausted() {
+    const LIMITED_RESULT: &str = r#"{"type":"result","is_error":true,"result":"You've hit your weekly limit - resets 9am (UTC)","session_id":"s-limit"}"#;
+    for (name, result, reason) in [
+        (
+            "poolexhaustedstderrunreadable",
+            CLAUDE_UNRELATED_RESET,
+            "pool rate-limited: MCP cache resets 9am (UTC)",
+        ),
+        (
+            "poolexhaustedstderrunreadablelimited",
+            LIMITED_RESULT,
+            "pool rate-limited: You've hit your weekly limit - resets 9am (UTC)",
+        ),
+    ] {
+        let (_tree, repo) = temp_engine_repo(name);
+        seed(
+            &repo,
+            "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+            Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+        );
+        let mut opts = options(&repo);
+        opts.config_path = Some(repo.join("upstroke.toml"));
+        opts.pools_path = Some(pools_file(&repo, CLAUDE_POOL));
+        let mut source = source(
+            vec![Effect::RateLimited, Effect::EditFile],
+            vec![ReviewBehavior::Pass],
+        );
+        source.adapter.worker_limit_result = result;
+        // `-` for the real message's `·`, as in the tests above.
+        source.adapter.worker_limit_on_stderr =
+            Some("You've hit your 5-hour limit - resets 5:30am (Europe/London)");
+        let report = run_with(&opts, &source).expect("run");
+        assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+        let events = events_of(&repo, &report.run_id);
+        let reasons: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match &e.body {
+                EventBody::AttemptFinished { data, .. } => data
+                    .failure
+                    .as_ref()
+                    .filter(|f| f.kind == FailureKind::RateLimited)
+                    .map(|f| f.reason.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reasons,
+            [reason],
+            "stderr classified the attempt and the JSON result is still its reason"
+        );
+
+        let signals: Vec<&events::PoolExhausted> = events
+            .iter()
+            .filter_map(|e| match &e.body {
+                EventBody::PoolExhausted { data, .. } => Some(data),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(signals.len(), 1, "{signals:?}");
+        assert_eq!(signals[0].pool, "claude-max");
+        assert_eq!(signals[0].detail, reason, "{signals:?}");
+        assert_eq!(
+            signals[0].reset_at, None,
+            "the limit on stderr gave a reset in another zone, and no reset in the \
+             result stands in for it: {signals:?}"
+        );
+    }
 }
 
 #[test]
@@ -8780,7 +8850,7 @@ fn a_rate_limit_after_a_success_retired_its_pool_writes_pool_exhausted_again() {
 
 #[test]
 fn another_agents_rate_limit_naming_a_reset_records_none_on_pool_exhausted() {
-    const COPILOT_RESET: &str = "premium request allowance exhausted; resets Dec 1, 12am (UTC)";
+    const COPILOT_RESET: &str = "premium request allowance exhausted; you've hit your weekly limit · resets Dec 1, 12am (UTC)";
     assert!(
         crate::agent::reset_at_from_limit_message(COPILOT_RESET, crate::util::unix_seconds_now())
             .is_some(),

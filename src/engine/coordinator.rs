@@ -10,7 +10,9 @@ use std::fs;
 use std::time::Duration;
 
 use crate::agent::proc::NoHooks;
-use crate::agent::{AdapterSource, BuiltinAdapters, Caps, claude, reset_at_from_limit_message};
+use crate::agent::{
+    AdapterSource, BuiltinAdapters, Caps, claude, names_a_quota_limit, reset_at_from_limit_message,
+};
 use crate::capacity;
 use crate::config::{self, OnTaskFailure};
 use crate::error::UpstrokeError;
@@ -1064,7 +1066,8 @@ impl Run<'_> {
                 .limit_message()
                 .into_iter()
                 .chain(std::iter::once(failure.reason.as_str()))
-                .find_map(|text| reset_at_from_limit_message(text, now))
+                .find(|text| names_a_quota_limit(text))
+                .and_then(|text| reset_at_from_limit_message(text, now))
         } else {
             None
         };

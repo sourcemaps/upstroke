@@ -176,8 +176,10 @@ limit, so any limit has to come from stderr.
 ## `const CLAUDE_UNRELATED_RESET: &str = r#"{"type":"result","is_error":true,"result":"MCP cache resets 9am (UTC)","session_id":"s-limit"}"#;`
 
 A failed result that signals no rate limit but names a reset of its own:
-`MCP cache resets 9am (UTC)`. It has no `hit your … limit` line, so read on
-its own its only `resets` is taken, and it is 09:00, not the limit's.
+`MCP cache resets 9am (UTC)`. It has no `hit your … limit` line, so its
+reset is no limit's. When the parser still read a text's only `resets`,
+reading it took 09:00; now it gives `None`, and the tests that carry it
+check that no 09:00 is recorded from it whatever the stderr says.
 
 ## `const CLAUDE_REVIEW_REQUEST_FAILED: &str = r#"{"type":"result","is_error":true,"result":"request failed","session_id":"fake-review-session","fake":"UPSTROKE-FAKE-REVIEW"}"#;`
 
@@ -5224,12 +5226,29 @@ was `None`.
 ## `fn a_limit_on_stderr_outranks_an_unrelated_reset_in_the_result_on_pool_exhausted() {`
 
 `PR380-UNRELATED-REASON-RESET-PREEMPTS-LIMIT`. The run above, with the JSON result
-`CLAUDE_UNRELATED_RESET` (`MCP cache resets 9am (UTC)`) through `worker_limit_result`. The test
-first checks that the reason, `pool rate-limited: MCP cache resets 9am (UTC)`, parses on its own to
-a `T09:00:00Z` reset, so reading it first is what would record the wrong time. The rate-limited
+`CLAUDE_UNRELATED_RESET` (`MCP cache resets 9am (UTC)`) through `worker_limit_result`. The rate-limited
 `attempt_finished` still reads that reason and the one `pool_exhausted` carries it as its detail,
 but its `reset_at` ends `T05:30:00Z`: the limit on stderr is read before the reason. When the
 reason was read first, its lone `resets` won and the pool was recorded as back at 09:00.
+
+The test first checked that the reason, `pool rate-limited: MCP cache resets 9am (UTC)`, parsed
+on its own to a `T09:00:00Z` reset, so that reading it first was what would record the wrong time.
+Since `PR380-UNRELATED-LONE-RESET-ATTRIBUTED` the parser reads no reset that no limit gives, so the
+check is now that the reason alone gives `None`: the reason cannot record the wrong time in either
+order, and the stderr's 05:30 is still what the test requires.
+
+## `fn an_unreadable_reset_on_stderr_is_not_replaced_by_the_results_on_pool_exhausted() {`
+
+The regression review's reset finding, end to end. Stderr carries `You've hit your 5-hour limit -
+resets 5:30am (Europe/London)`, a limit whose reset is in a zone the parser refuses, and the JSON
+result is, in one run, `CLAUDE_UNRELATED_RESET` (`MCP cache resets 9am (UTC)`) and, in a second,
+`You've hit your weekly limit - resets 9am (UTC)`, a limit with a UTC reset of its own. Each run's
+rate-limited `attempt_finished` reads `pool rate-limited: ` and its result, the one `pool_exhausted`
+carries that reason as its detail, and its `reset_at` is `None`. The stderr names a limit, so it
+alone is read, and its reset cannot be. Before, the coordinator's `find_map` went on to the reason
+when the stderr gave no reset, and recorded 09:00 from either result; the first run is also held
+by the parser, which no longer reads a reset no limit gives, and only the second fails if the
+coordinator reads the reason after an unreadable stderr reset.
 
 ## `fn a_reviewers_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_pool_exhausted() {`
 
@@ -5334,9 +5353,12 @@ instant recorded two different resets and failed the test's equality.
 
 The reset is read only from Claude Code's text. The small tier is pinned to `copilot`, the pools
 file names only `copilot-window`, and the Copilot fake refuses once with `premium request allowance
-exhausted; resets Dec 1, 12am (UTC)` before it edits; Claude Code reviews. The test first checks
-that `agent::reset_at_from_limit_message` does parse that text on its own, so the only thing that
-can keep the reset out is the engine's check of the agent. The one `pool_exhausted` names
+exhausted; you've hit your weekly limit · resets Dec 1, 12am (UTC)` before it edits; Claude Code
+reviews. The test first checks that `agent::reset_at_from_limit_message` does parse that text on
+its own, so the only thing that can keep the reset out is the engine's check of the agent. The text
+was `premium request allowance exhausted; resets Dec 1, 12am (UTC)` until the parser stopped
+reading a reset no limit gives; that text no longer parses, so it could no longer tell the agent
+check from the parser, and the weekly limit was put before its reset. The one `pool_exhausted` names
 `copilot-window` and `copilot` and carries the text in its detail, and its `reset_at` is `None`.
 Before the engine compared the agent with `claude::ADAPTER_ID`, it recorded the nearest 1 December
 at 00:00 UTC there: a reset read from another vendor's words on the strength of Claude Code's.
