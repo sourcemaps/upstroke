@@ -49,26 +49,37 @@ assertion catches it. A listing that waited for the lock is caught elsewhere: th
 the lock only after the listing returns, so a listing that needed the lock would be refused and
 fail the `expect`.
 
-So there are two candidate causes, and the record does not tell them apart:
+So there are three candidate causes, and the record does not tell them apart:
 
-- **one slow `git worktree list`**, a single attempt that took longer than 500 ms; or
-- **a listing that failed and was attempted again until its deadline**, succeeding on an attempt
-  begun just before it.
+- **one slow `git worktree list`**, a single attempt that took longer than 500 ms;
+- **a listing that failed and was attempted again until its deadline**, succeeding on the last
+  attempt the access admits, which `tolerant_registry_access` makes the first attempt that begins
+  at or after the deadline; or
+- **scheduler delay outside the registry access**: the test starts its timer before it calls
+  `worktree_records`, so time the thread spends not running counts against the bound even when no
+  Git process is running. A thread descheduled for more than 500 ms before the access sets its own
+  deadline, or after its one attempt returns and before the test reads its timer, fails the
+  assertion with a single fast attempt and no attempt made again.
 
 **Rate.** This failure appeared in **1 of the 63** `test (winguest)` jobs that completed among
 the 86 CI runs created on 2026-11-11 UTC (62 succeeded, 1 failed, 23 were cancelled).
 
-**The cause is not established.** Neither candidate is ruled out. The Windows guest shares its
-machine with the operator's baselines and Upstroke runs, and that day the machine was often
-heavily loaded, which would fit either. Whether it was loaded when this job ran was not recorded,
+**The cause is not established.** None of the three candidates is ruled out. The Windows guest
+shares its machine with the operator's baselines and Upstroke runs, and that day the machine was
+often heavily loaded, which would fit any of them. Whether it was loaded when this job ran was not recorded,
 and the log does not say how many attempts the listing made.
 
 ## What the change that takes this up should do
 
-- **Tell the two candidate causes apart before repairing either.** For instance, assert that the
-  listing made no attempt beyond its first: the test build already counts attempts made again per
-  repository (`contended_attempts` in `src/workspace_manager.rs`, near line 9416), so its value
-  for the repository should not change across the listing.
+- **Tell the three candidate causes apart before repairing any.** The attempt count alone does
+  not. Asserting that the listing made no attempt beyond its first separates the listing attempted
+  again from the other two: the test build already counts attempts made again per repository
+  (`contended_attempts` in `src/workspace_manager.rs`, near line 9416), so its value for the
+  repository should not change across the listing. A slow Git process and time lost outside it
+  both make one attempt, so the change should also record how long the Git attempt itself took
+  (or the time from the access's own deadline being set to `worktree_records`' return) and report
+  it beside the listing's duration: a slow Git process accounts for the time past 500 ms there,
+  time lost outside it does not. Only once the causes are told apart should a repair be chosen.
 - **Do not widen the 500 ms bound.** If the sighting was a listing attempted again until its
   deadline, a wider bound would hide that, and a later fix-check reading this finding would call
   it closed.
