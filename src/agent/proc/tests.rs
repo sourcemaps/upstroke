@@ -3437,6 +3437,7 @@ fn reaper_container_cells(
                     .expect("spawn a disposable coordinator"),
             ),
             reaper: None,
+            leader: LeaderSeen::Unread,
             on_wait: &mut on_drain_wait,
         };
 
@@ -3444,6 +3445,7 @@ fn reaper_container_cells(
         let agent_pid = read_pid(&agent_path, Duration::from_secs(30));
         let reaper_pid = read_pid(&reaper_path, Duration::from_secs(30));
         drain.reaper = Some(reaper_pid);
+        drain.leader = leader_seen(reaper_pid);
         reapers.push(reaper_pid);
         let coordinator = drain
             .coordinator
@@ -3553,18 +3555,22 @@ fn reaper_container_cells(
 #[cfg(unix)]
 fn drain_reaper_group(
     pgid: i32,
+    armed: LeaderSeen,
     bound: Duration,
     mut on_wait: impl FnMut(),
 ) -> Result<(), Duration> {
-    fn group_ended(pgid: i32) -> bool {
+    fn group_ended(pgid: i32, armed: LeaderSeen) -> bool {
         // SAFETY: signal 0 performs no delivery; a negative pid only asks
         // whether a process of that group exists.
         let answered = unsafe { libc::kill(-pgid, 0) };
-        answered == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        if answered == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return true;
+        }
+        number_was_reissued(armed, leader_seen(pgid))
     }
     let began = Instant::now();
     let mut announced = false;
-    while !group_ended(pgid) {
+    while !group_ended(pgid, armed) {
         let waited = began.elapsed();
         if waited >= bound {
             return Err(waited);
@@ -3586,12 +3592,19 @@ struct ReaperDrain<'a> {
     written_after: &'a Path,
     coordinator: Option<ChildGuard>,
     reaper: Option<i32>,
+    leader: LeaderSeen,
     on_wait: &'a mut dyn FnMut(i32),
 }
 
 #[cfg(unix)]
 impl ReaperDrain<'_> {
     const BOUND: Duration = Duration::from_secs(30);
+
+    fn read_leader_once_armed(&mut self) {
+        if let (Some(pgid), LeaderSeen::Unread) = (self.reaper, self.leader) {
+            self.leader = leader_seen(pgid);
+        }
+    }
 
     fn published_pid(record: &Path, written_after: &Path) -> Option<i32> {
         std::fs::symlink_metadata(written_after).ok()?;
@@ -3622,6 +3635,7 @@ impl Drop for ReaperDrain<'_> {
                 thread::sleep(Duration::from_millis(10));
             }
         }
+        self.read_leader_once_armed();
         drop(coordinator);
         if self.reaper.is_none() {
             self.reaper = Self::published_pid(self.published, self.written_after);
@@ -3642,6 +3656,8 @@ impl Drop for ReaperDrain<'_> {
             );
             self.reaper = Some(pgid);
         }
+        self.read_leader_once_armed();
+        let leader = self.leader;
         let failure = match self.reaper {
             None => format!(
                 "[{}] the coordinator was ended and collected without publishing a reaper's pid at \
@@ -3651,17 +3667,20 @@ impl Drop for ReaperDrain<'_> {
                 self.published.display(),
                 self.tree.display()
             ),
-            Some(pgid) => match drain_reaper_group(pgid, Self::BOUND, || (self.on_wait)(pgid)) {
-                Ok(()) => return,
-                Err(waited) => format!(
-                    "[{}] process group {pgid} still answered with a member {waited:?} after the \
-                     cell ended (bound {:?}), so a stub the reaper started may still write into \
-                     {}; nothing was signalled: the test holds the group's number, not the group",
-                    self.cell,
-                    Self::BOUND,
-                    self.tree.display()
-                ),
-            },
+            Some(pgid) => {
+                match drain_reaper_group(pgid, leader, Self::BOUND, || (self.on_wait)(pgid)) {
+                    Ok(()) => return,
+                    Err(waited) => format!(
+                        "[{}] process group {pgid} still answered with a member {waited:?} \
+                         after the cell ended (bound {:?}), so a stub the reaper started may \
+                         still write into {}; nothing was signalled: the test holds the group's \
+                         number, not the group",
+                        self.cell,
+                        Self::BOUND,
+                        self.tree.display()
+                    ),
+                }
+            }
         };
         if thread::panicking() {
             let _ = writeln!(std::io::stderr(), "{failure}");
@@ -4228,7 +4247,9 @@ fn a_reaper_group_drain_fails_at_its_bound_without_signalling_the_group() {
         .expect("spawn a group leader this test owns");
     let pgid = i32::try_from(member.id()).expect("a pid fits an i32");
     let mut announced = 0_u32;
-    let outcome = drain_reaper_group(pgid, Duration::from_millis(100), || announced += 1);
+    let outcome = drain_reaper_group(pgid, leader_seen(pgid), Duration::from_millis(100), || {
+        announced += 1
+    });
     drop(member.stdin.take());
     let status = member.wait().expect("reap the group's member");
     assert!(
@@ -5033,6 +5054,59 @@ fn a_group_number_reissued_to_a_later_process_is_told_from_its_first_holder() {
             i32::MAX
         );
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_reaper_group_drain_ends_at_a_number_that_names_a_later_process() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let mut member = group_member(0);
+    let pgid = i32::try_from(member.id()).expect("a pid fits an i32");
+    let seen = leader_seen(pgid);
+    let LeaderSeen::Started(started) = seen else {
+        panic!(
+            "the group leader {pgid} this test owns was seen as {seen:?}, not as a process with \
+             a start time"
+        );
+    };
+    let mut announced = 0_u32;
+    let after_another = drain_reaper_group(
+        pgid,
+        LeaderSeen::Started(started.wrapping_add(1)),
+        Duration::from_millis(100),
+        || announced += 1,
+    );
+    let after_none =
+        drain_reaper_group(pgid, LeaderSeen::Absent, Duration::from_millis(100), || {
+            announced += 1
+        });
+    drop(member.stdin.take());
+    let status = member.wait().expect("reap the group's member");
+    assert_eq!(
+        after_another,
+        Ok(()),
+        "armed with a start time other than that of the process now at pid {pgid}, the drain \
+         did not read the number as reissued (the drain armed with no process there returned \
+         {after_none:?})"
+    );
+    assert_eq!(
+        after_none,
+        Ok(()),
+        "armed with no process at pid {pgid}, and a process there now, the drain did not read \
+         the number as reissued"
+    );
+    assert_eq!(
+        announced, 0,
+        "the drains announced a wait {announced} times: a reissued number ends the wait at the \
+         first probe"
+    );
+    assert_eq!(
+        status.signal(),
+        None,
+        "the member ended by a signal ({status}): a drain signalled a group it held only the \
+         number of"
+    );
 }
 
 const READINESS_ROLE: &str = "UPSTROKE_READINESS_ROLE";

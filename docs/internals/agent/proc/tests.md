@@ -1178,7 +1178,10 @@ the end of its iteration, the live cell's `continue` and an unwind
 alike, the drain's drop runs to its end before the tree is reclaimed:
 it ends and collects the coordinator, then waits for the reaper's
 group. The cell arms it with the reaper's pid once both pids are read,
-the agent's first and the reaper's second. The reaper's record is the
+the agent's first and the reaper's second, and directly after that
+reads the identity of the process at that pid (`leader_seen`), which
+the drain's wait compares with what it later sees there ("Why nothing
+is signalled", below). The reaper's record is the
 pid's digits with no terminator, written in place, so nothing in it
 tells a whole record from a prefix (`ReaperDrain`); the coordinator
 creates the agent's record only after its write of the reaper's has
@@ -1246,11 +1249,57 @@ set of writers, observed directly.
 Why nothing is signalled. Once its coordinator is reaped the reaper is
 an orphan its new parent collects, so all the test holds of the group
 is its number, and a number can be reused once the group has ended.
-The probe cannot end the wait early: while the reaper's group has a
-member its id stays in use, and no other group can take it. A reuse
-after the group ended can lengthen the wait to the bound and fail it
+Beside the number the drain holds what it saw at that number read as a
+pid when it was armed (`ReaperDrain`'s `leader`), and its wait ends
+either when signal 0 to the group answers `ESRCH` or when the process
+now at that pid is a later one (`drain_reaper_group`'s `group_ended`).
+Neither can end the wait early. While the reaper's group has a member
+its id stays in use, so no other group can take it, and no process can
+be issued that pid (POSIX, "Process ID Reuse", under
+`enum LeaderSeen {`), so the process at the pid is the one the drain
+was armed with or none at all, which `number_was_reissued` does not
+read as a reissue. This takes `/proc` to be the test's own pid
+namespace's, which nothing here checks.
+
+What a reuse after the group ended does now:
+
+- On Linux, a number reissued to a process that exists when the drain
+  probes ends the wait at that probe: its start time differs from the
+  armed one, or one is there where none was armed, and the drain
+  returns as for an ended group
+  (`a_reaper_group_drain_ends_at_a_number_that_names_a_later_process`).
+- Still a false red on Linux: a number reissued to a new group whose
+  own leader has since exited and left members. The probe then finds a
+  group and no process at the pid, and a group without its leader is
+  not told from the original, whose leader can be gone too
+  (`(Started(_), Absent)` is not a reissue). Also a reissue before the
+  identity was read, since the identity is read at arming: by the cell
+  directly after it arms the drain, or by the drop when the drain arms
+  itself, directly after its handshake while the coordinator may still
+  run, or after the coordinator's collection when the pid is read only
+  then. The identity is then the later process's, and the drain waits
+  on it as on the original. A read that fails leaves the identity
+  `Unread`, and the drain then waits as it did before this change.
+- On macOS nothing changes, and the false red stands as before:
+  `leader_seen` answers `Unread` there, because the start time cannot
+  be read without `libc` names (`proc_bsdinfo`, `PROC_PIDTBSDINFO`)
+  that `effects/wrappers.toml`, outside this change, does not classify.
+
+Every remaining case lengthens the wait to the bound and fails it
 there, a false red, and nothing more, because no path here signals the
-group. The first shape of this drain sent the group SIGKILL on that
+group. Each needs the kernel to come round to the same pid again, the
+whole pid space on a kernel that issues pids in sequence, between the
+group's end and the drain's next probe, 10 ms apart while it waits, or,
+for a group that ended before the drain began, the drain's start: that
+probe finds no group otherwise, and the wait ends. Where an identity is
+read more is needed within that window: the leaderless group needs its
+leader to have exited within it too, since a leader still there ends
+the wait, and the early reissue needs to come before the identity's
+read. Where no identity is read, on macOS or after a failed read, a
+reissue anywhere in the window to a group of any shape is enough. That
+is a bound on likelihood, not an exclusion.
+
+The first shape of this drain sent the group SIGKILL on that
 failing path, which under such a reuse would have reached whatever
 group had taken the number (`PR340-R1-1`). Holding the group by
 ownership instead would need a member of the test's own inside the
@@ -1381,22 +1430,39 @@ nothing of the group's other members, and an agent still answering at
 
 ## `fn drain_reaper_group(`
 
-Waits for the process group `pgid` to have no member, probing every
-10 ms, and returns how long it waited once `bound` has passed with a
-member still answering. `on_wait` runs once, after the first probe that
-finds a member and before the first pause: the announcement the
-witness's gate is built on. The bound is read before the announcement,
-so a zero bound fails without announcing. Nothing here signals; the only
-call is `kill(-pgid, 0)`. It is a function of its own so that
+Waits for the process group `pgid` to end, probing every 10 ms, and
+returns how long it waited once `bound` has passed with the group not
+seen ended. `armed` is what the caller saw at the number `pgid` read as
+a pid when it armed the drain (`leader_seen`). A wait ends in one of
+two ways (`group_ended`): the group has no member, or the process now
+at that pid is a later one than `armed` names, so the number was issued
+again after the group ended. With `armed` `Unread`, on macOS always,
+only the first remains. `on_wait` runs once, after the first probe that
+does not see the group ended and before the first pause: the
+announcement the witness's gate is built on. The bound is read before
+the announcement, so a zero bound fails without announcing. Nothing
+here signals; its calls are `kill(-pgid, 0)` and, on Linux, the read of
+`/proc/<pgid>/stat` behind `leader_seen`. It is a function of its own
+so that
 `a_reaper_group_drain_fails_at_its_bound_without_signalling_the_group`
-can drive its bounded failure against a group that test owns; the
-cells call it through their `ReaperDrain`.
+can drive its bounded failure against a group that test owns, and
+`a_reaper_group_drain_ends_at_a_number_that_names_a_later_process` its
+second way of ending; the cells call it through their `ReaperDrain`.
 
-## `fn drain_reaper_group(` › `fn group_ended(pgid: i32) -> bool {`
+## `fn drain_reaper_group(` › `fn group_ended(pgid: i32, armed: LeaderSeen) -> bool {`
 
-Whether no process of the group `pgid` exists: `kill(-pgid, 0)`
-answering `ESRCH`, and nothing else. A group the caller may not signal
-(`EPERM`) still exists, and no other answer is read as an end.
+Whether the group the drain was armed against has ended. True when
+`kill(-pgid, 0)` answers `ESRCH`: no process of the group `pgid`
+exists. A group the caller may not signal (`EPERM`) still exists, and
+no other answer of `kill` is read as an end. Otherwise true only when
+`number_was_reissued(armed, leader_seen(pgid))`: a process now has the
+pid `pgid` with a start time other than the armed one, or has it where
+none had it when the drain was armed. By the POSIX rule under
+`enum LeaderSeen {`, that process could be issued the pid only once
+the armed group's lifetime had ended, so the probe that still finds a
+group at the number finds a later one. `leader_seen` is read only after
+`kill` has not answered `ESRCH`, so an ended group costs no `/proc`
+read.
 
 ## `struct ReaperDrain<'a> {`
 
@@ -1404,8 +1470,12 @@ A container cell's drain, owned by the cell: the cell's name and tree,
 for its report, the path the coordinator publishes its reaper's pid at
 (`published`), the path of the record the coordinator writes after that
 one, the agent's (`written_after`), the coordinator's `ChildGuard`, the
-reaper's pid once it is known, and the caller's `on_drain_wait`. Its
-bound, `BOUND`, is the 30 s of the test's other waits.
+reaper's pid once it is known, what was seen at that pid read as a
+process once the drain was armed (`leader`, `LeaderSeen::Unread` until
+it is read), and the caller's `on_drain_wait`. Its bound, `BOUND`, is
+the 30 s of the test's other waits. `read_leader_once_armed` reads the
+leader (`leader_seen`) when a pid is known and nothing has been read
+yet, and does nothing otherwise; the drop calls it twice.
 
 The reaper's record has no terminator, and production writes it in
 place (`std::fs::write` straight into the final path, in
@@ -1434,8 +1504,12 @@ is unwinding through it.
    agent's record exists, and asks the coordinator whether it has
    exited (`try_wait`, which collects it if so), and stops at a pid, at
    an exit, or at `BOUND`. Nothing is signalled while it waits.
-2. It drops the coordinator's guard, which ends the coordinator by its
-   own pid if it still runs and collects it.
+2. If it is armed by now, by the cell or by step 1, and no leader has
+   been read (`Unread`: the drain armed itself, or the cell's read
+   failed), it reads the leader (`read_leader_once_armed`) while the
+   coordinator may still run. Then it drops the coordinator's guard,
+   which ends the coordinator by its own pid if it still runs and
+   collects it.
 3. Still unarmed, it reads through `published_pid` once more: the
    coordinator has been collected, so both records are final. This
    also catches a pid published just before an exit that step 1 saw
@@ -1447,9 +1521,13 @@ is unwinding through it.
    writes one line saying so to stderr, naming the cell and the
    record's path, through `writeln!` with its result dropped, and arms
    itself with that pid, so its group is drained on that footing.
-5. Armed, it runs `drain_reaper_group` over the reaper's group with
-   `BOUND`, handing the caller's hook the group's id, and returns once
-   the group has no member.
+5. Armed, it reads the leader if it is still unread, the pid having
+   come from step 3 or 4 or the read in step 2 having failed, the same
+   call again. It then runs `drain_reaper_group` over the reaper's
+   group with that leader and `BOUND`, handing the caller's hook the
+   group's id, and returns once the group is seen ended. The leader is
+   copied into a local first, so the call's closure borrows only
+   `on_wait`.
 
 Past the bound in step 5, or with no pid read at all, it builds
 one report naming the cell, the group or the published path, and the
@@ -1462,8 +1540,11 @@ process and lose the failure that is unwinding, and `eprintln!` panics
 when the write fails. The tree's guard drops next either way; a reclaim
 of its that then fails while a failure unwinds is reported, not raised
 (`ScratchTree`'s drop). Nothing here signals but the coordinator's
-guard, by the coordinator's own pid; the drain's only call is
-`kill(-pgid, 0)`.
+guard, by the coordinator's own pid; the drain's calls are
+`kill(-pgid, 0)` and, on Linux, reads of `/proc/<pgid>/stat`
+(`leader_seen`, in steps 2 and 5 and at each probe), which answer a
+variant on every failure and never panic, so the reads add no panic to
+a drop that may run while a failure unwinds.
 
 ## `fn group_member(pgid: i32) -> ChildGuard {`
 
@@ -1962,8 +2043,12 @@ is this test's own child, a shell blocked reading its stdin, which
 `process_group(0)` makes the leader of a group of its own, so the test
 holds that group by ownership: the child is not reaped until the test
 waits for it, and until then its number cannot name another group.
-`drain_reaper_group` is given 100 ms and must fail, having announced
-once. The test then closes the child's stdin, the shell's `read` meets
+`drain_reaper_group` is given 100 ms and `leader_seen(pgid)`, the
+identity a drain armed against this group holds: the process at the
+number is the one it was armed with, so the second way a wait ends
+does not apply (on macOS the identity is `Unread`, with the same
+effect). The drain must fail, having announced once. The test then
+closes the child's stdin, the shell's `read` meets
 end of file and the shell exits, and its status must carry no signal.
 A drain that signalled the group on its failing path, as the first
 shape did, ends the child by that signal before its stdin is closed,
@@ -2361,8 +2446,9 @@ as its pid, and it is not the process that had that pid when the drain
 was armed, the original group's lifetime has ended, and with it every
 member that could still write.
 
-Nothing calls this, `leader_seen` or `number_was_reissued` yet outside
-their test. The next task of this run wires them into the drain.
+The drain holds one as `ReaperDrain`'s `leader` and hands it to
+`drain_reaper_group`, whose `group_ended` compares it with what
+`leader_seen` sees at each probe that does not answer `ESRCH`.
 
 ## `fn leader_seen(pgid: i32) -> LeaderSeen {`
 
@@ -2388,9 +2474,8 @@ Any other error, `EMFILE` while descriptors are exhausted for one, is
 its absence.
 
 It never panics, and contains no `.expect(`, `.unwrap()` or `panic!`:
-every failure is a variant. The drain's drop will call it, and that
-drop also runs while a failure unwinds, where a panic aborts the
-process.
+every failure is a variant. The drain's drop calls it, and that drop
+also runs while a failure unwinds, where a panic aborts the process.
 
 It is written with `cfg!(target_os = "linux")` as an ordinary
 condition, not with `#[cfg]` blocks, so every Unix compiles the same
@@ -2405,8 +2490,9 @@ classified `proc_bsdshortinfo` carries no start time. So on macOS the
 identity stays `Unread`, `number_was_reissued` never answers true from
 it, and the drain keeps its present behaviour.
 
-Nothing calls it yet outside its test; the next task of this run wires
-it into the drain.
+The cell calls it when it arms its drain, the drain's drop when the
+drain is armed with nothing read (`read_leader_once_armed`), and
+`group_ended` at each probe that does not answer `ESRCH`.
 
 ## `fn number_was_reissued(armed: LeaderSeen, now: LeaderSeen) -> bool {`
 
@@ -2436,8 +2522,7 @@ case is not excluded. It errs towards the present behaviour: the drain
 keeps waiting, to its bound, and fails as it does today; it never takes
 a live group for ended.
 
-Nothing calls it yet outside its test; the next task of this run wires
-it into the drain.
+`group_ended` calls it at each probe that does not answer `ESRCH`.
 
 ## `fn a_group_number_reissued_to_a_later_process_is_told_from_its_first_holder() {`
 
@@ -2466,6 +2551,52 @@ seen now as Started(8), the reissue was answered false", `left: false`,
 The field index has only a weak witness. An index of 18 reads
 `itrealvalue`, which is zero, and fails the `n > 0` assertion. An index
 of 20 or more would not be caught by this test.
+
+## `fn a_reaper_group_drain_ends_at_a_number_that_names_a_later_process() {`
+
+The witness for the drain's second way of ending: a group's number
+that now names a process other than the one the drain was armed with
+(`drain_reaper_group`'s `group_ended`). Linux only, since only there
+does `leader_seen` read a start time.
+
+The member is `group_member(0)`, a shell blocked on its stdin that
+leads a group of its own and is this test's own child, so for the whole
+test its number names that group and no other. `leader_seen(pgid)` must
+answer `Started(started)`. Two drains then run over the live group,
+100 ms each: one armed with `Started(started.wrapping_add(1))`, a start
+time other than the member's, and one armed with `Absent`. These are the
+two shapes `number_was_reissued` answers true for, and to each drain
+the member reads as a later process at the number, though signal 0
+still finds a group there.
+
+The armed identities are made up. The test cannot stage a real
+reissue: that needs the kernel to issue the same pid to a later process
+after the first holder's group has ended, and nothing a test does can
+make it. What the test establishes is the drain's half: given an armed
+identity and a process at the number that does not match it, the wait
+ends.
+
+Then it closes the member's stdin, the shell exits at end of file, and
+the test collects it. Only then does it assert: both drains returned
+`Ok(())`, `announced` is 0, so each ended at its first probe, before
+any pause, and the member's status carries no signal, so neither drain
+signalled the group. Asserting after the collection keeps a failing
+assertion from leaving the member to its guard, whose kill would stand
+in for how it ended. The first assertion's message also names the
+second drain's outcome, so a failure shows both.
+
+MEASURED. With `group_ended` made to ignore the identity, returning
+the `kill` answer alone, this test failed and every other test of this
+module passed (85 passed, 1 failed): both drains returned `Err` at
+their 100 ms bound, the first `Err(101.218378ms)` and the second
+`Err(100.944145ms)`, named in the first assertion's message. With
+`group_ended` restored, it passes (86 passed).
+
+The reading of the leader has no witness of its own, in the cell
+(`drain.leader = leader_seen(reaper_pid);`) or in the drop
+(`read_leader_once_armed`, twice): a witness would need the kernel to
+reissue a reaper's number while a cell runs, and no test can make the
+kernel reissue a number.
 
 ## `const READINESS_ROLE: &str = "UPSTROKE_READINESS_ROLE";`
 
