@@ -55,3 +55,28 @@ native macOS validation.
 Do not skip, weaken, or automatically retry the assertion inside the test. A successful fresh CI
 run permits the ordinary merge checks to proceed but does not resolve this finding. No product
 repair is included here, and the original failures are not regraded.
+
+## Quarantined on macOS, 2026-11-11
+
+The owner decided on 2026-11-11 to quarantine the test on macOS until this finding is repaired.
+
+This replaces, for macOS only and until the repair, the instruction above not to skip the test.
+Everywhere else, and on macOS once the finding is repaired, that instruction stands as written. The
+assertion is not weakened, and nothing retries it.
+
+The reason for the decision: on 2026-11-11 the test failed in the macOS test job eight times, on
+eight different pull-request heads whose changes touch nothing near it. These are the eight, as the
+CI run and job of `test (macos-latest)`:
+
+- run 42976030457, job 130375210731;
+- run 42988928017, job 130416735154;
+- run 43004727185, job 130469246954;
+- runs 43058994038, 43059735704 and 43065890345 (job numbers not recorded here);
+- run 43094291655, job 130779022448;
+- run 43094224878, job 130778802196.
+
+While the quarantine stands, the macOS job does not witness this failure. Its absence from CI is
+therefore not evidence that the defect is gone.
+
+Lifting the quarantine is part of what the repair must do, with the native macOS validation this
+finding already requires.
