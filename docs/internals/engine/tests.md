@@ -3000,8 +3000,12 @@ mode 0700, as before that fix (the helper makes it 0755). The helper's end
 waits for its reaper without a bound. This test's call to it is bounded, by the
 isolated child it runs in and that child's deadline (`FUA-I4-RELAY`); until this
 round the test called it from its own process. Other callers of the helper are
-not all bounded: ordinary tests call it with no outer bound through `git_shim`,
-`a_fake_cmd`, `delivery_program` and two Docker-stub sites.
+not all bounded: ordinary tests call it with no outer bound at nine sites,
+through `git_shim`, `a_fake_cmd` and `delivery_program` and two Docker-stub
+tests in `src/engine/tests.rs`, through `capability_control` (two sites) and one
+Docker-stub test in `src/runner/container/tests.rs`, and one Docker-stub test in
+`src/runner/container/exec/tests.rs`, recorded as finding
+`PR368-WRITER-HELPER-UNBOUNDED-CALLERS`.
 
 Nothing fails if the stand-in is written by `fs::write` again. The
 inherited-writer technique of `runner::host::tests` needs a fork taken while the
