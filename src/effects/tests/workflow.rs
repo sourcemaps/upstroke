@@ -19,12 +19,12 @@ use super::ci_model::{
     GATE_JOB_FIELDS, GATE_SCRIPTS, GOLDEN_IMAGE_TOOLCHAIN, HOST_ACCEPTANCE_CAPTURE,
     HOST_ACCEPTANCE_WINDOWS_CAPTURE, KNOWN_SHELLS, MSRV_COMMAND, MSRV_ENTRY_KEYS, MSRV_JOB,
     MSRV_JOB_FIELDS, MSRV_MATRIX_FIELDS, MSRV_RUNS_ON, MSRV_TOOLCHAIN_TARGETS,
-    OPTIONAL_DEFAULTS_FIELD, PINNED_ACTIONS, REQUIRED_CONTEXT, RUSTFLAGS_KEY, RUSTFLAGS_VALUE,
-    STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS, TEST_JOB_NAME, TEST_LEGS,
-    TEST_SCRIPTS, TEST_SHARD_COMMAND, TEST_STEP_ENV, TEST_STEP_FIELDS, TEST_TIMEOUT_MINUTES,
+    OPTIONAL_DEFAULTS_FIELD, PINNED_ACTIONS, REQUIRED_CONTEXT, RETIRED_TEST_JOB, RUSTFLAGS_KEY,
+    RUSTFLAGS_VALUE, STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS, TEST_JOB_NAME,
+    TEST_JOBS, TEST_SCRIPTS, TEST_SHARD_COMMAND, TEST_STEP_FIELDS, TEST_TIMEOUT_MINUTES,
     TEST_WINDOWS_HOSTED_JOB, TEST_WINDOWS_HOSTED_JOB_FIELDS, TEST_WINDOWS_HOSTED_NAME,
     TEST_WINDOWS_HOSTED_SCRIPTS, TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES, TEST_WINDOWS_PLATFORM,
-    TEST_WINDOWS_STEP_ENV, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS, TOOLCHAIN_TARGETS,
+    TEST_WINDOWS_STEP_ENV, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS, TOOLCHAIN_TARGETS, TestJob,
     WINDOWS_BUILD_WITNESS, WINDOWS_SHARD_FILTERS, WINDOWS_SHARD_FLOORS, WINDOWS_SHARD_WITNESS,
     WORKFLOW_ENV, WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
 };
@@ -484,178 +484,212 @@ fn aggregate_complaints(doc: &Yaml, jobs: &Yaml, job_names: &BTreeSet<String>) -
 }
 
 pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
-    let mut out = Vec::new();
     let Some(jobs) = field(doc, "jobs") else {
         return vec!["[jobs] the workflow declares no `jobs:` mapping".to_owned()];
     };
-    let Some(job) = field(jobs, "test") else {
-        return vec!["[test-job-missing] no `test` job, so nothing runs these fixtures".to_owned()];
-    };
-
-    for complaint in field_complaints(job, &TEST_JOB_FIELDS, &OPTIONAL_DEFAULTS_FIELD) {
-        out.push(format!("[unexpected-job-field] `test` {complaint}"));
+    let mut out = test_jobs_table_complaints();
+    if field(jobs, RETIRED_TEST_JOB).is_some() {
+        out.push(format!(
+            "[test-job-split] the workflow still declares a `{RETIRED_TEST_JOB}` job. The suite \
+             runs on each platform that hosts it in a job of its own, {:?}, and the split is \
+             the contract: a `{RETIRED_TEST_JOB}` job beside them runs legs no row of \
+             `TEST_JOBS` holds to anything, and one in their place runs every platform's legs \
+             under one `runs-on:` this contract no longer reads.",
+            TEST_JOBS.iter().map(|row| row.id).collect::<Vec<&str>>()
+        ));
     }
-    for (index, step) in steps_of(job).iter().enumerate() {
-        let runs_the_suite = scalar(step, "run") == Some(TEST_SHARD_COMMAND);
-        let runs_the_capture = scalar(step, "run") == Some(HOST_ACCEPTANCE_CAPTURE);
-        let runs_the_observation = scalar(step, "run") == Some(CAPABILITY_OBSERVATION);
-        let allowed: &[&str] = if runs_the_suite || runs_the_capture {
-            &TEST_STEP_FIELDS
-        } else if runs_the_observation {
-            &CAPABILITY_STEP_FIELDS
-        } else {
-            &STEP_FIELDS
-        };
-        let strange = unexpected(&field_names(step), allowed);
-        if !strange.is_empty() {
+
+    for row in &TEST_JOBS {
+        let id = row.id;
+        let Some(job) = field(jobs, id) else {
             out.push(format!(
-                "[unexpected-step-field] `test` step {index} declares {strange:?}"
+                "[test-job-missing] no `{id}` job, so nothing runs these fixtures on `{}`",
+                row.runner
+            ));
+            continue;
+        };
+
+        for complaint in field_complaints(job, &TEST_JOB_FIELDS, &OPTIONAL_DEFAULTS_FIELD) {
+            out.push(format!("[unexpected-job-field] `{id}` {complaint}"));
+        }
+        let host = runner_target(row.runner);
+        if host.is_none() {
+            out.push(format!(
+                "[step-shell] `{id}` runs on `{}`, which is not a runner this contract models, \
+                 so the shell its steps resolve to is undecidable here",
+                row.runner
             ));
         }
-        if runs_the_suite {
-            out.extend(step_env_complaints(
-                step,
-                &format!("`test` step {index}"),
-                "test-step-env",
-                &TEST_STEP_ENV,
-            ));
-        }
-        if runs_the_capture {
-            out.extend(step_env_complaints(
-                step,
-                &format!("`test` step {index}"),
-                "test-capture-step-env",
-                &TEST_STEP_ENV,
-            ));
-        }
-        if runs_the_observation {
-            out.extend(step_env_complaints(
-                step,
-                &format!("`test` step {index}"),
-                "test-capability-step-env",
-                &TEST_STEP_ENV,
-            ));
-            out.extend(observation_step_complaints(
-                step,
-                &format!("`test` step {index}"),
-                "test-capability-step",
-            ));
-        }
-        if scalar(step, "run").is_some() {
-            for target in CI_TARGETS.iter().filter(|target| hosts_tests(target)) {
-                out.extend(shell_complaints(
-                    doc,
-                    job,
-                    step,
-                    target,
-                    &format!("`test` step {index} on `{}`", target.runner),
-                    target.default_shell,
+        for (index, step) in steps_of(job).iter().enumerate() {
+            let named = format!("`{id}` step {index}");
+            let runs_the_suite = scalar(step, "run") == Some(TEST_SHARD_COMMAND);
+            let runs_the_capture = scalar(step, "run") == Some(HOST_ACCEPTANCE_CAPTURE);
+            let runs_the_observation = scalar(step, "run") == Some(CAPABILITY_OBSERVATION);
+            let allowed: &[&str] = if runs_the_suite || runs_the_capture {
+                &TEST_STEP_FIELDS
+            } else if runs_the_observation {
+                &CAPABILITY_STEP_FIELDS
+            } else {
+                &STEP_FIELDS
+            };
+            let strange = unexpected(&field_names(step), allowed);
+            if !strange.is_empty() {
+                out.push(format!(
+                    "[unexpected-step-field] {named} declares {strange:?}"
                 ));
             }
+            if runs_the_suite {
+                out.extend(step_env_complaints(
+                    step,
+                    &named,
+                    "test-step-env",
+                    &row.step_env,
+                ));
+            }
+            if runs_the_capture {
+                out.extend(step_env_complaints(
+                    step,
+                    &named,
+                    "test-capture-step-env",
+                    &row.step_env,
+                ));
+            }
+            if runs_the_observation {
+                out.extend(step_env_complaints(
+                    step,
+                    &named,
+                    "test-capability-step-env",
+                    &row.step_env,
+                ));
+                out.extend(observation_step_complaints(
+                    step,
+                    &named,
+                    "test-capability-step",
+                ));
+            }
+            if scalar(step, "run").is_some() {
+                out.extend(
+                    host.map(|target| {
+                        shell_complaints(
+                            doc,
+                            job,
+                            step,
+                            target,
+                            &format!("{named} on `{}`", target.runner),
+                            target.default_shell,
+                        )
+                    })
+                    .unwrap_or_default(),
+                );
+            }
         }
-    }
 
-    let running = steps_of(job)
-        .iter()
-        .filter(|step| scalar(step, "run") == Some(TEST_SHARD_COMMAND))
-        .count();
-    if running != 1 {
-        out.push(format!(
-            "[test-job-command] the `test` job has {running} steps whose `run:` is exactly \
-             `{TEST_SHARD_COMMAND}`, not one. These fixtures are only evidence of anything in \
-             a job that executes them, and the line hands libtest the leg's `matrix.tests`: \
-             without it every leg of a divided suite runs the suite whole, under the \
-             {TEST_TIMEOUT_MINUTES} minutes set for a shard of it."
+        let running = steps_of(job)
+            .iter()
+            .filter(|step| scalar(step, "run") == Some(TEST_SHARD_COMMAND))
+            .count();
+        if running != 1 {
+            out.push(format!(
+                "[test-job-command] `{id}` has {running} steps whose `run:` is exactly \
+                 `{TEST_SHARD_COMMAND}`, not one. These fixtures are only evidence of anything \
+                 in a job that executes them, and the line hands libtest the leg's \
+                 `matrix.tests`: without it every leg of a divided suite runs the suite whole, \
+                 under the {TEST_TIMEOUT_MINUTES} minutes set for a shard of it."
+            ));
+        }
+        out.extend(capture_complaints(
+            job,
+            id,
+            "test-capture-command",
+            TEST_SHARD_COMMAND,
+            HOST_ACCEPTANCE_CAPTURE,
         ));
-    }
-    out.extend(capture_complaints(
-        job,
-        "test",
-        "test-capture-command",
-        TEST_SHARD_COMMAND,
-        HOST_ACCEPTANCE_CAPTURE,
-    ));
-    out.extend(observation_complaints(
-        job,
-        "test",
-        "test-capability-command",
-        HOST_ACCEPTANCE_CAPTURE,
-        CAPABILITY_OBSERVATION,
-    ));
-    out.extend(checkout_complaints(job, "test", "test-job-checkout"));
-    out.extend(step_pin_complaints(
-        job,
-        "test",
-        "test-job-run-script",
-        &TEST_SCRIPTS,
-    ));
-    out.extend(toolchain_complaints(
-        job,
-        "test",
-        "test-job-toolchain",
-        Some(STABLE_TOOLCHAIN),
-    ));
+        out.extend(observation_complaints(
+            job,
+            id,
+            "test-capability-command",
+            HOST_ACCEPTANCE_CAPTURE,
+            CAPABILITY_OBSERVATION,
+        ));
+        out.extend(checkout_complaints(job, id, "test-job-checkout"));
+        out.extend(step_pin_complaints(
+            job,
+            id,
+            "test-job-run-script",
+            &TEST_SCRIPTS,
+        ));
+        out.extend(toolchain_complaints(
+            job,
+            id,
+            "test-job-toolchain",
+            Some(STABLE_TOOLCHAIN),
+        ));
 
-    out.extend(test_leg_matrix_complaints(job));
-    if scalar(job, "runs-on") != Some("${{ matrix.os }}") {
-        out.push(format!(
-            "[test-job-matrix] the `test` job's `runs-on:` is {:?}, so the matrix above \
-             decides nothing",
-            scalar(job, "runs-on")
-        ));
-    }
-    if scalar(job, "name") != Some(TEST_JOB_NAME) {
-        out.push(format!(
-            "[test-job-name] the `test` job is named {:?}, not `{TEST_JOB_NAME}`. The name is \
-             how a run's list tells the legs apart: under `matrix.os` the shards of one runner \
-             publish one name, and under a literal every leg does, so a red leg does not say \
-             which shard's tests failed.",
-            scalar(job, "name")
-        ));
-    }
-    let minutes = field(job, "timeout-minutes").and_then(Yaml::as_i64);
-    if minutes != Some(TEST_TIMEOUT_MINUTES) {
-        out.push(format!(
-            "[test-job-timeout] the `test` job is bounded at {minutes:?} minutes, not exactly \
-             {TEST_TIMEOUT_MINUTES} as an integer. Every leg has the one limit, about twice \
-             the slowest shard expected: an expression gives a leg a limit this contract \
-             cannot read, and a wider one lets a leg that never ends hold the required check \
-             and the merge-queue entry behind it for as long as it allows."
-        ));
-    }
+        out.extend(test_leg_matrix_complaints(job, row));
+        if scalar(job, "runs-on") != Some(row.runner) {
+            out.push(format!(
+                "[test-job-matrix] `{id}` runs on {:?}, not `{}`. The job runs the shards of \
+                 `{}`'s suite: on another runner it runs that platform's shards elsewhere, and \
+                 its legs are green over a platform none of them ran on. An expression or a \
+                 label set is a runner this contract cannot read.",
+                field(job, "runs-on"),
+                row.runner,
+                row.runner
+            ));
+        }
+        if scalar(job, "name") != Some(TEST_JOB_NAME) {
+            out.push(format!(
+                "[test-job-name] `{id}` is named {:?}, not `{TEST_JOB_NAME}`. The name is how a \
+                 run's list tells the legs apart: under a name that does not read `matrix.leg` \
+                 the job's shards publish one name, so a red leg does not say which shard's \
+                 tests failed.",
+                scalar(job, "name")
+            ));
+        }
+        let minutes = field(job, "timeout-minutes").and_then(Yaml::as_i64);
+        if minutes != Some(TEST_TIMEOUT_MINUTES) {
+            out.push(format!(
+                "[test-job-timeout] `{id}` is bounded at {minutes:?} minutes, not exactly \
+                 {TEST_TIMEOUT_MINUTES} as an integer. Every leg of both jobs has the one \
+                 limit, about three times the slowest shard expected: an expression gives a leg \
+                 a limit this contract cannot read, and a wider one lets a leg that never ends \
+                 hold the required check and the merge-queue entry behind it for as long as it \
+                 allows."
+            ));
+        }
 
-    let toolchains: Vec<&Yaml> = steps_of(job)
-        .iter()
-        .filter(|step| {
-            scalar(step, "uses").is_some_and(|uses| uses.starts_with("dtolnay/rust-toolchain@"))
-        })
-        .collect();
-    if toolchains.len() != 1 {
-        out.push(format!(
-            "[test-job-toolchain] the `test` job has {} `dtolnay/rust-toolchain` steps, not \
-             one",
-            toolchains.len()
-        ));
-        return out;
-    }
-    let with = field(toolchains[0], "with");
-    let components: BTreeSet<&str> = with
-        .and_then(|with| scalar(with, "components"))
-        .map(|list| list.split(',').map(str::trim).collect())
-        .unwrap_or_default();
-    if !components.contains("clippy") {
-        out.push(format!(
-            "[test-job-toolchain] the `test` job installs components {components:?}, which \
-             do not include `clippy`, so `every_declared_effect_denial_refuses_for_the_reason\
-             _it_declares` cannot run there: `dtolnay/rust-toolchain` installs the minimal \
-             profile and `clippy-driver` is not in it."
-        ));
-    }
-    if with.and_then(|with| scalar(with, "toolchain")) != Some("stable") {
-        out.push(format!(
-            "[test-job-toolchain] the `test` job selects toolchain {:?}, not `stable`",
-            with.and_then(|with| scalar(with, "toolchain"))
-        ));
+        let toolchains: Vec<&Yaml> = steps_of(job)
+            .iter()
+            .filter(|step| {
+                scalar(step, "uses").is_some_and(|uses| uses.starts_with("dtolnay/rust-toolchain@"))
+            })
+            .collect();
+        if toolchains.len() != 1 {
+            out.push(format!(
+                "[test-job-toolchain] `{id}` has {} `dtolnay/rust-toolchain` steps, not one",
+                toolchains.len()
+            ));
+            continue;
+        }
+        let with = field(toolchains[0], "with");
+        let components: BTreeSet<&str> = with
+            .and_then(|with| scalar(with, "components"))
+            .map(|list| list.split(',').map(str::trim).collect())
+            .unwrap_or_default();
+        if !components.contains("clippy") {
+            out.push(format!(
+                "[test-job-toolchain] `{id}` installs components {components:?}, which do not \
+                 include `clippy`, so `every_declared_effect_denial_refuses_for_the_reason\
+                 _it_declares` cannot run there: `dtolnay/rust-toolchain` installs the minimal \
+                 profile and `clippy-driver` is not in it."
+            ));
+        }
+        if with.and_then(|with| scalar(with, "toolchain")) != Some("stable") {
+            out.push(format!(
+                "[test-job-toolchain] `{id}` selects toolchain {:?}, not `stable`",
+                with.and_then(|with| scalar(with, "toolchain"))
+            ));
+        }
     }
     out
 }
@@ -664,116 +698,111 @@ fn hosts_tests(target: &CiTarget) -> bool {
     target.runner != TEST_WINDOWS_PLATFORM
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct TestLeg {
-    os: String,
-    leg: String,
-    tests: String,
-}
-
-fn test_legs() -> Vec<TestLeg> {
-    TEST_LEGS
-        .iter()
-        .flat_map(|(runner, filters)| {
-            let selections = shard_selections(filters);
-            let shards = selections.len();
-            selections
-                .into_iter()
-                .enumerate()
-                .map(move |(index, tests)| TestLeg {
-                    os: (*runner).to_owned(),
-                    leg: if shards == 1 {
-                        (*runner).to_owned()
-                    } else {
-                        format!("{runner}, {} of {shards}", index + 1)
-                    },
-                    tests,
-                })
-        })
-        .collect()
-}
-
-fn test_leg(entry: &Yaml) -> Option<TestLeg> {
-    if !field_complaints(entry, &["leg", "os", "tests"], &[]).is_empty() {
-        return None;
-    }
-    Some(TestLeg {
-        os: scalar(entry, "os")?.to_owned(),
-        leg: scalar(entry, "leg")?.to_owned(),
-        tests: scalar(entry, "tests")?.to_owned(),
-    })
-}
-
-fn test_leg_matrix_complaints(job: &Yaml) -> Vec<String> {
-    let mut out = Vec::new();
+fn test_jobs_table_complaints() -> Vec<String> {
     let hosting: Vec<&str> = CI_TARGETS
         .iter()
         .filter(|target| hosts_tests(target))
         .map(|target| target.runner)
         .collect();
-    let tabled: Vec<&str> = TEST_LEGS.iter().map(|(runner, _)| *runner).collect();
-    if tabled != hosting {
-        out.push(format!(
-            "[test-job-matrix] `TEST_LEGS` gives legs to the runners {tabled:?}, not, in \
-             order and once each, to {hosting:?} -- the `CI_TARGETS` runners that host tests. \
-             The matrix is held to that table, so a platform the table leaves out leaves the \
-             workflow with every check below still passing."
-        ));
+    let tabled: Vec<&str> = TEST_JOBS.iter().map(|row| row.runner).collect();
+    if tabled == hosting {
+        return Vec::new();
     }
+    vec![format!(
+        "[test-job-matrix] `TEST_JOBS` gives test jobs to the runners {tabled:?}, not, in order \
+         and one job each, to {hosting:?} -- the `CI_TARGETS` runners that host tests. Each job \
+         is held to its own row, so a platform the table leaves out leaves the workflow with \
+         every check below still passing."
+    )]
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TestLeg {
+    leg: String,
+    tests: String,
+}
+
+fn test_legs(row: &TestJob) -> Vec<TestLeg> {
+    let selections = shard_selections(row.filters);
+    let shards = selections.len();
+    selections
+        .into_iter()
+        .enumerate()
+        .map(|(index, tests)| TestLeg {
+            leg: if shards == 1 {
+                row.runner.to_owned()
+            } else {
+                format!("{}, {} of {shards}", row.runner, index + 1)
+            },
+            tests,
+        })
+        .collect()
+}
+
+fn test_leg(entry: &Yaml) -> Option<TestLeg> {
+    if !field_complaints(entry, &["leg", "tests"], &[]).is_empty() {
+        return None;
+    }
+    Some(TestLeg {
+        leg: scalar(entry, "leg")?.to_owned(),
+        tests: scalar(entry, "tests")?.to_owned(),
+    })
+}
+
+fn test_leg_matrix_complaints(job: &Yaml, row: &TestJob) -> Vec<String> {
+    let id = row.id;
+    let mut out = Vec::new();
     let Some(strategy) = field(job, "strategy") else {
-        out.push(
-            "[test-job-matrix] the `test` job declares no `strategy:`, so it is one leg on no \
-             runner: `runs-on:` and the suite's selection both read a `matrix` that is not \
-             there"
-                .to_owned(),
-        );
+        out.push(format!(
+            "[test-job-matrix] `{id}` declares no `strategy:`, so it is one leg with no shard \
+             to run: the suite's selection reads a `matrix` that is not there"
+        ));
         return out;
     };
     for complaint in field_complaints(strategy, &["fail-fast", "matrix"], &[]) {
         out.push(format!(
-            "[test-job-matrix] the `test` job's `strategy:` {complaint}. The legs are read \
-             from `fail-fast` and `matrix` and from nothing else there."
+            "[test-job-matrix] `{id}`'s `strategy:` {complaint}. The legs are read from \
+             `fail-fast` and `matrix` and from nothing else there."
         ));
     }
     if field(strategy, "fail-fast").and_then(Yaml::as_bool) != Some(false) {
-        out.push(
-            "[test-job-matrix] the `test` job's `fail-fast:` is not `false`, so one leg's \
-             failure cancels the others before they report: a run shows one platform's or \
-             one shard's failing tests and hides the rest"
-                .to_owned(),
-        );
+        out.push(format!(
+            "[test-job-matrix] `{id}`'s `fail-fast:` is not `false`, so one leg's failure \
+             cancels the others before they report: a run shows one shard's failing tests and \
+             hides the rest"
+        ));
     }
     let matrix = field(strategy, "matrix");
     if let Some(matrix) = matrix {
         for complaint in field_complaints(matrix, &["include"], &[]) {
             out.push(format!(
-                "[test-job-matrix] the `test` job's `matrix:` {complaint}. The legs are the \
-                 `include:` list and nothing else. Beside an axis GitHub adds an `include:` \
-                 entry to the axis's combinations where it can instead of making a leg of it, \
-                 a later entry overwriting the keys an earlier one added, and `exclude:` \
-                 removes combinations of an axis; either way the legs are no longer the ones \
-                 the list names."
+                "[test-job-matrix] `{id}`'s `matrix:` {complaint}. The legs are the `include:` \
+                 list and nothing else. Beside an axis GitHub adds an `include:` entry to the \
+                 axis's combinations where it can instead of making a leg of it, a later entry \
+                 overwriting the keys an earlier one added, and `exclude:` removes combinations \
+                 of an axis; either way the legs are no longer the ones the list names."
             ));
         }
     }
-    let expected: Vec<Option<TestLeg>> = test_legs().into_iter().map(Some).collect();
+    let expected: Vec<Option<TestLeg>> = test_legs(row).into_iter().map(Some).collect();
     let found: Option<Vec<Option<TestLeg>>> = matrix
         .and_then(|matrix| field(matrix, "include"))
         .and_then(Yaml::as_vec)
         .map(|entries| entries.iter().map(test_leg).collect());
     if found.as_ref() != Some(&expected) {
         out.push(format!(
-            "[test-job-matrix] the `test` job's `matrix.include:` reads as {found:#?}, not, in \
-             order, exactly {expected:#?}. That is one mapping for each leg `TEST_LEGS` \
-             derives, with exactly the keys `os`, `leg` and `tests`: the runner; the runner \
-             alone where its suite runs whole, otherwise the runner, a comma and the shard's \
-             place; and the libtest arguments `shard_selections` derives from the runner's \
-             filters, the empty string for a suite that runs whole. An entry that reads as \
-             `None` is not such a mapping. A dropped leg leaves its tests unrun on its \
-             platform while the others are green -- the whole suite, or one shard of it -- a \
-             narrowed one does the same for the tests it lost, a widened one runs another \
-             shard's tests a second time, and a runner outside the table is a platform this \
-             job was not given: Windows has a suite job of its own, `{TEST_WINDOWS_HOSTED_JOB}`."
+            "[test-job-matrix] `{id}`'s `matrix.include:` reads as {found:#?}, not, in order, \
+             exactly {expected:#?}. That is one mapping for each leg its row of `TEST_JOBS` \
+             derives, with exactly the keys `leg` and `tests`: the runner alone where its suite \
+             runs whole, otherwise the runner, a comma and the shard's place; and the libtest \
+             arguments `shard_selections` derives from the row's filters, the empty string for \
+             a suite that runs whole. An entry that reads as `None` is not such a mapping. A \
+             dropped leg leaves its tests unrun on `{}` while the others are green -- the whole \
+             suite, or one shard of it -- a narrowed one does the same for the tests it lost, a \
+             widened one runs another shard's tests a second time, and a leg labelled for \
+             another platform runs on this job's runner under that platform's name: Windows \
+             has a suite job of its own, `{TEST_WINDOWS_HOSTED_JOB}`.",
+            row.runner
         ));
     }
     out
@@ -2001,20 +2030,20 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-MATRIX-EXCLUDED",
-        escape: "an `exclude:` naming the macOS runner, beside the `include:` list that still \
-                 names its five legs. Over an axis, `exclude:` removes combinations the axis \
-                 still lists, and every check that reads the list passes while the fixtures \
-                 never run on that platform -- the matrix half of \
+        escape: "an `exclude:` naming the first macOS leg, beside the `include:` list in \
+                 `test-macos` that still names all five. Over an axis, `exclude:` removes \
+                 combinations the axis still lists, and every check that reads the list passes \
+                 while the fixtures never run on that platform -- the matrix half of \
                  `PR5-MACOS-CLIPPY-NEVER-RUN`, and what this row measured while the legs were \
                  an `os:` axis. GitHub documents that `include:` entries are processed after \
                  `exclude:`, so by that rule this one removes no leg of an `include:` list; \
                  that is the rule as documented, and no workflow was run to watch it. The \
                  oracle does not weigh it: the legs are read from `include:` and from nothing \
                  else in `matrix:`, so the key is refused whatever it would remove.",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "        include:\n",
         replacement: "        exclude:\n\
-                      \x20         - os: macos-latest\n\
+                      \x20         - leg: \"macos-latest, 1 of 5\"\n\
                       \x20       include:\n",
         refused_as: "test-job-matrix",
     },
@@ -2077,8 +2106,19 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "a gate the aggregate does not depend on: branch protection settles green \
                  while the Windows denial gate is red. `PR5D-MSVC-CLIPPY-NEVER-RUN`.",
         job: Some("merge-gate"),
-        anchor: "    needs: [lint, lint-windows, lint-macos, msrv, test, test-windows-hosted]\n",
-        replacement: "    needs: [lint, lint-macos, msrv, test, test-windows-hosted]\n",
+        anchor: "    needs: [lint, lint-windows, lint-macos, msrv, test-linux, test-macos, test-windows-hosted]\n",
+        replacement: "    needs: [lint, lint-macos, msrv, test-linux, test-macos, test-windows-hosted]\n",
+        refused_as: "aggregate-needs",
+    },
+    WorkflowEscape {
+        name: "MUT-AGGREGATE-DROPS-TEST-MACOS",
+        escape: "the aggregate no longer needs `test-macos`: branch protection settles green \
+                 while a macOS shard is red, or before the macOS legs have run at all. The split \
+                 made the macOS suite a job of its own, so the aggregate must name it as it \
+                 names every other gate.",
+        job: Some("merge-gate"),
+        anchor: "    needs: [lint, lint-windows, lint-macos, msrv, test-linux, test-macos, test-windows-hosted]\n",
+        replacement: "    needs: [lint, lint-windows, lint-macos, msrv, test-linux, test-windows-hosted]\n",
         refused_as: "aggregate-needs",
     },
     WorkflowEscape {
@@ -2099,8 +2139,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  `requires.split_whitespace().any(|word| word == looped)` passes on the \
                  trailing mention.",
         job: Some("merge-gate"),
-        anchor: "          for gate in LINT LINT_WINDOWS LINT_MACOS MSRV TEST TEST_WINDOWS_HOSTED; do\n",
-        replacement: "          for gate in LINT LINT_WINDOWS MSRV TEST TEST_WINDOWS_HOSTED; do : LINT_MACOS\n",
+        anchor: "          for gate in LINT LINT_WINDOWS LINT_MACOS MSRV TEST_LINUX TEST_MACOS TEST_WINDOWS_HOSTED; do\n",
+        replacement: "          for gate in LINT LINT_WINDOWS MSRV TEST_LINUX TEST_MACOS TEST_WINDOWS_HOSTED; do : LINT_MACOS\n",
         refused_as: "aggregate-loop",
     },
     WorkflowEscape {
@@ -2136,7 +2176,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the job that runs these fixtures stops running them. Named in \
                  `test-docs-consistency.sh` as a mutation that gate's withdrawn claim could \
                  not kill.",
-        job: Some("test"),
+        job: Some("test-linux"),
         anchor: "      - run: cargo test --all-targets --all-features -- ${{ matrix.tests }}\n",
         replacement: "",
         refused_as: "test-job-command",
@@ -2145,9 +2185,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-CI-CARGO-TEST-STEP-SKIPPED",
         escape: "the same, by disabling the job rather than deleting the step. The other \
                  mutation `test-docs-consistency.sh` kept as history.",
-        job: Some("test"),
-        anchor: "    runs-on: ${{ matrix.os }}\n",
-        replacement: "    runs-on: ${{ matrix.os }}\n    if: false\n",
+        job: Some("test-linux"),
+        anchor: "    runs-on: ubuntu-latest\n",
+        replacement: "    runs-on: ubuntu-latest\n    if: false\n",
         refused_as: "unexpected-job-field",
     },
     WorkflowEscape {
@@ -2157,7 +2197,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  text and the nine-line comment above the line spelled it, so deleting the \
                  line left the test green -- `PR4-CENSUS-COMMENT-ORACLE`, in the test whose \
                  purpose is to answer which command runs this.",
-        job: Some("test"),
+        job: Some("test-linux"),
         anchor: "          components: clippy\n",
         replacement: "",
         refused_as: "test-job-toolchain",
@@ -2166,37 +2206,36 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-CI-TEST-MATRIX-NARROWED",
         escape: "the hosted fixtures run on one platform and the other goes unexercised, \
                  while every check that names the command still passes. The legs removed from \
-                 the `include:` list are the two Linux ones, their six lines, which are that \
-                 platform's whole suite: the five macOS legs stay, each green.",
-        job: Some("test"),
-        anchor: "          - os: ubuntu-latest\n\
-                 \x20           leg: \"ubuntu-latest, 1 of 2\"\n\
+                 `test-linux`'s `include:` list are its two, their four lines, which are that \
+                 platform's whole suite: the five macOS legs of `test-macos` stay, each green.",
+        job: Some("test-linux"),
+        anchor: "          - leg: \"ubuntu-latest, 1 of 2\"\n\
                  \x20           tests: \"engine::\"\n\
-                 \x20         - os: ubuntu-latest\n\
-                 \x20           leg: \"ubuntu-latest, 2 of 2\"\n\
+                 \x20         - leg: \"ubuntu-latest, 2 of 2\"\n\
                  \x20           tests: \"--skip engine::\"\n",
         replacement: "",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-MATRIX-KEEPS-WINDOWS",
-        escape: "the hosted matrix quietly re-admits Windows, as an eighth `include:` entry that \
-                 runs the suite whole on `windows-latest`. Two jobs then run the Windows \
-                 suite, and the one whose duration this contract retired is back on the \
-                 critical path with every other check passing.",
-        job: Some("test"),
+        escape: "`test-linux`'s matrix quietly re-admits Windows, as a third `include:` entry \
+                 labelled `windows-latest` that runs the suite whole. The job's runner is \
+                 `ubuntu-latest`, so the whole suite runs once more on Linux, on the critical \
+                 path, under the check name `test (windows-latest)`, which reads as a Windows \
+                 result beside the fourteen legs of the job that runs the Windows suite, with \
+                 every other check passing.",
+        job: Some("test-linux"),
         anchor: "        include:\n",
         replacement: "        include:\n\
-                      \x20         - os: windows-latest\n\
-                      \x20           leg: \"windows-latest\"\n\
+                      \x20         - leg: \"windows-latest\"\n\
                       \x20           tests: \"\"\n",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-RUN-RETARGETED",
-        escape: "the same retarget on the hosted test matrix: two platforms test `master` \
-                 while every pin still matches",
-        job: Some("test"),
+        escape: "the same retarget on `test-linux`: the Linux legs test `master` while every \
+                 pin still matches",
+        job: Some("test-linux"),
         anchor: "          git config --global user.name \"upstroke CI\"\n",
         replacement: "          git config --global user.name \"upstroke CI\"\n\
                       \x20         git fetch origin master\n\
@@ -2212,26 +2251,28 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  case the undeclared test passes with the branch unrun where the declared \
                  one fails at the declaration (34-r6-casefold-declaration.log, ext4) -- while \
                  every pin still matches",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "      - run: cargo test --all-targets --all-features -- ${{ matrix.tests }}\n\
                  \x20       env:\n\
-                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
         replacement: "      - run: cargo test --all-targets --all-features -- ${{ matrix.tests }}\n",
         refused_as: "test-step-env",
     },
     WorkflowEscape {
         name: "MUT-TEST-CASEFOLD-DECLARED-ON-THE-WRONG-LEG",
-        escape: "the declaration moves to the ubuntu runner, whose temporary directory does not \
-                 fold case: the macOS legs observe instead of requiring, and an ubuntu leg \
-                 fails its declaration loudly -- a red that reads as a flake rather than as \
-                 the guard having moved",
-        job: Some("test"),
+        escape: "the declaration made on the ubuntu runner, whose temporary directory does not \
+                 fold case: `test-linux`'s suite step declares `1`, and each Linux leg fails \
+                 its declaration loudly -- a red that reads as a flake rather than as the guard \
+                 declared on the wrong platform. Under one job this row moved the declaration \
+                 from the macOS legs to the ubuntu ones in one expression; with a job per \
+                 platform each job's map is its own, and this is the wrong one of the two",
+        job: Some("test-linux"),
         anchor: "      - run: cargo test --all-targets --all-features -- ${{ matrix.tests }}\n\
                  \x20       env:\n\
-                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"\"\n",
         replacement: "      - run: cargo test --all-targets --all-features -- ${{ matrix.tests }}\n\
                       \x20       env:\n\
-                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}\n",
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
         refused_as: "test-step-env",
     },
     WorkflowEscape {
@@ -2242,13 +2283,13 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  `run:` scalar and the declaration both still match -- \
                  `MUT-GATE-STEP-RETARGETED`'s shape on the step that now carries an \
                  environment",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "      - run: cargo test --all-targets --all-features -- ${{ matrix.tests }}\n\
                  \x20       env:\n\
-                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
         replacement: "      - run: cargo test --all-targets --all-features -- ${{ matrix.tests }}\n\
                       \x20       env:\n\
-                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n\
                       \x20         CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu\n",
         refused_as: "test-step-env",
     },
@@ -2385,9 +2426,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-CHECKOUT-REF",
-        escape: "the hosted test matrix checks out `master`: two platforms test a tree the \
-                 candidate never touched while Clippy and MSRV read the candidate",
-        job: Some("test"),
+        escape: "`test-linux` checks out `master`: the Linux legs test a tree the candidate \
+                 never touched while Clippy and MSRV read the candidate",
+        job: Some("test-linux"),
         anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
         replacement: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\
                       \x20       with:\n\
@@ -2488,7 +2529,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the same narrowing under the name Cargo prefers, so the job's `RUSTFLAGS` is \
                  not rewritten but ignored. Nothing in this workflow mentions `RUSTFLAGS` in \
                  that job for a reader to notice.",
-        job: Some("test"),
+        job: Some("test-linux"),
         anchor: "    timeout-minutes: 30\n",
         replacement: "    timeout-minutes: 30\n\
                       \x20   env:\n\
@@ -2688,7 +2729,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the same write with the name and the redirection on different lines. A \
                  heredoc is the form that defeats any reading anchored to `echo` or to a \
                  single line, and the job it lands in is the one that runs these fixtures.",
-        job: Some("test"),
+        job: Some("test-linux"),
         anchor: "      - run: cargo test --all-targets --all-features -- ${{ matrix.tests }}\n",
         replacement: "      - run: |\n\
                       \x20         cat >> \"$GITHUB_ENV\" <<'EOF'\n\
@@ -2779,10 +2820,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-CAPTURE-STEP-DELETED",
         escape: "the hosted capture step is gone. Every leg runs its suite, reports success and \
                  leaves no host acceptance record, and nothing else here asks for one.",
-        job: Some("test"),
+        job: Some("test-linux"),
         anchor: r#"      - name: Capture the native host acceptance record
         env:
-          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: ""
         run: |
           set -o pipefail
           log="$RUNNER_TEMP/host-acceptance-record.log"
@@ -2805,7 +2846,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-CAPTURE-STEP-DISABLED",
         escape: "a step-level `if: false` on the hosted capture: the job reports success with the \
                  record never made, and the suite above it still green",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "      - name: Capture the native host acceptance record\n",
         replacement: "      - name: Capture the native host acceptance record\n\
                       \x20       if: false\n",
@@ -2815,7 +2856,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-CAPTURE-STEP-ABSOLVED",
         escape: "`continue-on-error` on the hosted capture: a failed record, a missing frame or a \
                  test that did not pass ends the step red and the job green",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "      - name: Capture the native host acceptance record\n",
         replacement: "      - name: Capture the native host acceptance record\n\
                       \x20       continue-on-error: true\n",
@@ -2826,7 +2867,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "`--ignored` dropped. The exact filter still names the test, libtest reports it \
                  ignored, `0 passed; 0 failed; 1 ignored`, and Cargo exits zero having run \
                  nothing: a no-op that only the pin and the step's own count refuse",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | tee \"$log\"\n",
         replacement: "          cargo test --all-features --lib engine::tests::host_acceptance_record -- --exact --nocapture | tee \"$log\"\n",
         refused_as: "test-capture-command",
@@ -2836,7 +2877,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the filter names a test that does not exist, so it matches nothing: `running 0 \
                  tests`, exit zero, no record. The pin refuses the moved filter before CI runs \
                  it.",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | tee \"$log\"\n",
         replacement: "          cargo test --all-features --lib engine::tests::host_acceptance_records -- --ignored --exact --nocapture | tee \"$log\"\n",
         refused_as: "test-capture-command",
@@ -2847,7 +2888,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  `tee`, which succeeds, so a failing test or a Cargo that never built the harness \
                  ends the step on the checks after it, and a failure that still printed a pass \
                  line and a frame goes green",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "          set -o pipefail\n",
         replacement: "",
         refused_as: "test-capture-command",
@@ -2857,7 +2898,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the line that demands the named test's pass line and `1 passed; 0 failed; 0 \
                  ignored` is gone, so a run that executed some other test, or no test at all, \
                  is judged by its frame alone",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "          if ! grep -qx 'test engine::tests::host_acceptance_record \\.\\.\\. ok' \"$log\" || ! grep -q '^test result: ok\\. 1 passed; 0 failed; 0 ignored; ' \"$log\"; then echo \"the capture did not run exactly the one host acceptance test to a pass\" >&2; exit 1; fi\n",
         replacement: "",
         refused_as: "test-capture-command",
@@ -2867,7 +2908,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the frame check is gone: a record cut short, a chunk lost or doubled, or no \
                  record at all passes the step, and the job is green over a record no reader \
                  can reconstruct",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: r#"          awk '
             $1 == "UPSTROKE-HOST-ACCEPTANCE-RECORD" { f[++m] = $0 }
             END {
@@ -2886,7 +2927,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "a pinned cache step between the suite and the capture. Every script and action \
                  still matches its pin; the capture now runs a harness the cache may have \
                  replaced after the suite ran, so the record's binary need not be the suite's",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "      - name: Capture the native host acceptance record\n",
         replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
                       \x20     - name: Capture the native host acceptance record\n",
@@ -2896,10 +2937,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-CAPTURE-CASEFOLD-DROPPED",
         escape: "the hosted capture no longer carries its leg's case-fold declaration, so it runs \
                  under an environment the suite step did not, with its script still on its pin",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "      - name: Capture the native host acceptance record\n\
                  \x20       env:\n\
-                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
         replacement: "      - name: Capture the native host acceptance record\n",
         refused_as: "test-capture-step-env",
     },
@@ -2908,13 +2949,13 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the capture's admitted `env:` gains `CARGO_TARGET_DIR`: Cargo builds and runs a \
                  harness of its own, in another target directory, rather than the one the suite \
                  step built and ran, with the script and the declaration still matching",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "      - name: Capture the native host acceptance record\n\
                  \x20       env:\n\
-                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
         replacement: "      - name: Capture the native host acceptance record\n\
                       \x20       env:\n\
-                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n\
                       \x20         CARGO_TARGET_DIR: target/capture\n",
         refused_as: "test-capture-step-env",
     },
@@ -2923,11 +2964,11 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the hosted observation step is gone (omitted). Every leg runs its suite and the \
                  host capture, reports success and leaves no container capability record, and \
                  nothing else here asks for one.",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: r##"      - name: Capture the container capability observation
         timeout-minutes: 4
         env:
-          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
         run: |
           set -eo pipefail
           log="$RUNNER_TEMP/container-capability-record.log"
@@ -2950,7 +2991,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-CAPABILITY-STEP-DISABLED",
         escape: "a step-level `if: false` on the hosted observation (conditional): the job \
                  reports success with the record never made",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "      - name: Capture the container capability observation\n",
         replacement: "      - name: Capture the container capability observation\n\
                       \x20       if: false\n",
@@ -2961,7 +3002,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the observation runs under `if: ${{ !cancelled() }}` (conditional). It then \
                  runs after a failed suite or capture, so its record no longer stands on a \
                  harness the suite passed, and the contract places it success-only",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "      - name: Capture the container capability observation\n",
         replacement: "      - name: Capture the container capability observation\n\
                       \x20       if: ${{ !cancelled() }}\n",
@@ -2971,7 +3012,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-CAPABILITY-STEP-ABSOLVED",
         escape: "`continue-on-error` on the hosted observation (failure-swallowing): an unresolved \
                  process, a refused record or a missing frame ends the step red and the job green",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "      - name: Capture the container capability observation\n",
         replacement: "      - name: Capture the container capability observation\n\
                       \x20       continue-on-error: true\n",
@@ -2981,7 +3022,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-CAPABILITY-IGNORED-NOT-RUN",
         escape: "`--ignored` dropped (no-op): libtest reports the test ignored, `0 passed; 0 \
                  failed; 1 ignored`, and Cargo exits zero having asked nothing",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee \"$log\"\n",
         replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --exact --nocapture | tee \"$log\"\n",
         refused_as: "test-capability-command",
@@ -2990,7 +3031,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-CAPABILITY-FILTER-MOVED",
         escape: "the filter names a test that does not exist (filtered): `running 0 tests`, exit \
                  zero, no record",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee \"$log\"\n",
         replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_records -- --ignored --exact --nocapture | tee \"$log\"\n",
         refused_as: "test-capability-command",
@@ -2999,7 +3040,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-CAPABILITY-FILTER-WIDENED",
         escape: "`--exact` dropped (filtered): the name becomes a substring filter, so any ignored \
                  test whose path contains it runs beside the observation",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee \"$log\"\n",
         replacement: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --nocapture | tee \"$log\"\n",
         refused_as: "test-capability-command",
@@ -3008,7 +3049,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-CAPABILITY-ECHOED",
         escape: "the Cargo line is echoed (no-op): the step prints the command, asks nothing, and \
                  only its own pass-line check would notice",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee \"$log\"\n",
         replacement: "          echo cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | tee \"$log\"\n",
         refused_as: "test-capability-command",
@@ -3018,7 +3059,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "`set -eo pipefail` dropped (failure-swallowing). Under the default `bash -e` the \
                  pipeline takes its status from `tee`, so a failing observation that still \
                  printed a pass line and a frame goes green",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "          set -eo pipefail\n",
         replacement: "",
         refused_as: "test-capability-command",
@@ -3027,7 +3068,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-CAPABILITY-ZERO-TESTS-ADMITTED",
         escape: "the pass-line and `1 passed; 0 failed; 0 ignored` check is gone, so a run of no \
                  test or of another is judged by its frame alone",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "          if ! grep -qx 'test runner::container::tests::container_capability_record \\.\\.\\. ok' \"$log\" || ! grep -q '^test result: ok\\. 1 passed; 0 failed; 0 ignored; ' \"$log\"; then echo \"the observation did not run exactly the one container capability test to a pass\" >&2; exit 1; fi\n",
         replacement: "",
         refused_as: "test-capability-command",
@@ -3036,7 +3077,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-CAPABILITY-FRAMING-UNCHECKED",
         escape: "the frame check is gone: a record cut short, a chunk lost or doubled, or no \
                  record at all passes the step",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: r##"          awk '
             $1 == "UPSTROKE-CONTAINER-CAPABILITY-RECORD" { f[++m] = $0 }
             END {
@@ -3055,7 +3096,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "a pinned cache step between the host capture and the observation (misplaced): \
                  every script and action still matches its pin, and the observation runs a \
                  harness the cache may have replaced after the suite ran",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "      - name: Capture the container capability observation\n",
         replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
                       \x20     - name: Capture the container capability observation\n",
@@ -3066,10 +3107,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the observation moved above the host capture (misplaced): both scripts still \
                  match their pins and each runs once, but the observation no longer follows \
                  the record the capture makes",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: r##"      - name: Capture the native host acceptance record
         env:
-          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
         run: |
           set -o pipefail
           log="$RUNNER_TEMP/host-acceptance-record.log"
@@ -3107,7 +3148,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
       - name: Capture the container capability observation
         timeout-minutes: 4
         env:
-          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
         run: |
           set -eo pipefail
           log="$RUNNER_TEMP/container-capability-record.log"
@@ -3126,7 +3167,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         replacement: r##"      - name: Capture the container capability observation
         timeout-minutes: 4
         env:
-          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
         run: |
           set -eo pipefail
           log="$RUNNER_TEMP/container-capability-record.log"
@@ -3143,7 +3184,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
             }' "$log" || { echo "the container capability record is missing or its framing is incomplete" >&2; exit 1; }
       - name: Capture the native host acceptance record
         env:
-          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
         run: |
           set -o pipefail
           log="$RUNNER_TEMP/host-acceptance-record.log"
@@ -3165,7 +3206,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-CAPABILITY-TIMEOUT-DROPPED",
         escape: "the observation's 4-minute bound is gone: a stalled question is held by the \
                  job's own timeout, past the step's budget",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "        timeout-minutes: 4\n",
         replacement: "",
         refused_as: "test-capability-step",
@@ -3174,7 +3215,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-CAPABILITY-TIMEOUT-WIDENED",
         escape: "the observation's bound widened to 30 minutes: every field still present, and a \
                  stalled question spends the leg's headroom",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "        timeout-minutes: 4\n",
         replacement: "        timeout-minutes: 30\n",
         refused_as: "test-capability-step",
@@ -3184,15 +3225,15 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the observation's admitted `env:` gains `DOCKER_HOST`: the step no longer \
                  observes the leg's own environment but one this file chose, with its script \
                  still on its pin",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "      - name: Capture the container capability observation\n\
                  \x20       timeout-minutes: 4\n\
                  \x20       env:\n\
-                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
         replacement: "      - name: Capture the container capability observation\n\
                       \x20       timeout-minutes: 4\n\
                       \x20       env:\n\
-                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n\
                       \x20         DOCKER_HOST: tcp://127.0.0.1:2375\n",
         refused_as: "test-capability-step-env",
     },
@@ -3201,15 +3242,15 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the observation's admitted `env:` gains `UPSTROKE_REQUIRE_DOCKER`: the contract \
                  runs it in the leg's environment unchanged, and the variable is the suite's \
                  Docker requirement, not this record's",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "      - name: Capture the container capability observation\n\
                  \x20       timeout-minutes: 4\n\
                  \x20       env:\n\
-                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
         replacement: "      - name: Capture the container capability observation\n\
                       \x20       timeout-minutes: 4\n\
                       \x20       env:\n\
-                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n\
+                      \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n\
                       \x20         UPSTROKE_REQUIRE_DOCKER: \"1\"\n",
         refused_as: "test-capability-step-env",
     },
@@ -3217,10 +3258,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-CAPABILITY-CASEFOLD-DROPPED",
         escape: "the hosted observation no longer carries its leg's case-fold declaration, so it \
                  runs under an environment the suite step did not",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "        timeout-minutes: 4\n\
                  \x20       env:\n\
-                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
         replacement: "        timeout-minutes: 4\n",
         refused_as: "test-capability-step-env",
     },
@@ -3576,10 +3617,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  `topology::effects::registry::`'s among them. These legs hold no count to a \
                  floor, so all five are green over a macOS suite that lost those tests, beside \
                  a Linux leg that still runs them",
-        job: Some("test"),
-        anchor: "            leg: \"macos-latest, 5 of 5\"\n\
+        job: Some("test-macos"),
+        anchor: "          - leg: \"macos-latest, 5 of 5\"\n\
                  \x20           tests: \"",
-        replacement: "            leg: \"macos-latest, 5 of 5\"\n\
+        replacement: "          - leg: \"macos-latest, 5 of 5\"\n\
                       \x20           tests: \"--skip effects:: ",
         refused_as: "test-job-matrix",
     },
@@ -3590,7 +3631,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  `effects::` runs on no macOS leg, as under `MUT-TEST-MACOS-SHARD-NARROWED`, and \
                  no floor is there to say so; here the string opens as the table's does, so a \
                  reading that stopped at the table's last word would pass it",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "--skip engine::topology::attempt::\"\n    steps:\n",
         replacement: "--skip engine::topology::attempt:: --skip effects::\"\n    steps:\n",
         refused_as: "test-job-matrix",
@@ -3604,7 +3645,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  macOS leg. These legs hold no count to a floor, so all five are green over a \
                  macOS suite that lost those tests, beside the Linux and Windows legs that \
                  still run them",
-        job: Some("test"),
+        job: Some("test-macos"),
         anchor: "            tests: \"engine::topology::coordinator::tests::interleaving:: engine::topology::coordinator::tests::a_s ",
         replacement: "            tests: \"engine::topology::coordinator::tests::a_s ",
         refused_as: "test-job-matrix",
@@ -3617,9 +3658,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  the first leg and again in the last. These legs hold no count to a floor, and \
                  a repeat would only raise one: the last leg spends those tests' time a second \
                  time and every leg is green",
-        job: Some("test"),
-        anchor: "            leg: \"macos-latest, 5 of 5\"\n            tests: \"--skip engine::topology::coordinator::tests::a_p --skip ",
-        replacement: "            leg: \"macos-latest, 5 of 5\"\n            tests: \"--skip ",
+        job: Some("test-macos"),
+        anchor: "          - leg: \"macos-latest, 5 of 5\"\n            tests: \"--skip engine::topology::coordinator::tests::a_p --skip ",
+        replacement: "          - leg: \"macos-latest, 5 of 5\"\n            tests: \"--skip ",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
@@ -3629,9 +3670,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  it, as every macOS leg after the third does, and libtest runs no test a \
                  `--skip` names whatever filter selects it, so the event log's own tests run on \
                  no macOS leg. These legs hold no count to a floor, so all five are green",
-        job: Some("test"),
-        anchor: " events::log:: --skip engine::topology::coordinator::tests::a_p --skip workspace_manager::tests::t --skip engine::tests::a_k --skip engine::tests::a_r --skip engine::tests::a_s --skip runner::host:: --skip workspace::tests:: --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::a_s --skip workspace_manager::tests::e --skip workspace_manager::tests::n --skip topology::census:: --skip effects::tests::\"\n          - os: macos-latest\n            leg: \"macos-latest, 4 of 5\"\n            tests: \"",
-        replacement: " --skip engine::topology::coordinator::tests::a_p --skip workspace_manager::tests::t --skip engine::tests::a_k --skip engine::tests::a_r --skip engine::tests::a_s --skip runner::host:: --skip workspace::tests:: --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::a_s --skip workspace_manager::tests::e --skip workspace_manager::tests::n --skip topology::census:: --skip effects::tests::\"\n          - os: macos-latest\n            leg: \"macos-latest, 4 of 5\"\n            tests: \"events::log:: ",
+        job: Some("test-macos"),
+        anchor: " events::log:: --skip engine::topology::coordinator::tests::a_p --skip workspace_manager::tests::t --skip engine::tests::a_k --skip engine::tests::a_r --skip engine::tests::a_s --skip runner::host:: --skip workspace::tests:: --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::a_s --skip workspace_manager::tests::e --skip workspace_manager::tests::n --skip topology::census:: --skip effects::tests::\"\n          - leg: \"macos-latest, 4 of 5\"\n            tests: \"",
+        replacement: " --skip engine::topology::coordinator::tests::a_p --skip workspace_manager::tests::t --skip engine::tests::a_k --skip engine::tests::a_r --skip engine::tests::a_s --skip runner::host:: --skip workspace::tests:: --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::a_s --skip workspace_manager::tests::e --skip workspace_manager::tests::n --skip topology::census:: --skip effects::tests::\"\n          - leg: \"macos-latest, 4 of 5\"\n            tests: \"events::log:: ",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
@@ -3643,71 +3684,82 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  macOS shards and the Windows suite still run the rest on their platforms; the \
                  tests that run on Linux alone, the one that executes the aggregate's script \
                  among them, then run nowhere",
-        job: Some("test"),
-        anchor: "            leg: \"ubuntu-latest, 2 of 2\"\n            tests: \"--skip engine::\"\n",
-        replacement: "            leg: \"ubuntu-latest, 2 of 2\"\n            tests: \"engine::\"\n",
+        job: Some("test-linux"),
+        anchor: "          - leg: \"ubuntu-latest, 2 of 2\"\n            tests: \"--skip engine::\"\n",
+        replacement: "          - leg: \"ubuntu-latest, 2 of 2\"\n            tests: \"engine::\"\n",
         refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-SHARD-SELECTION-DROPPED",
-        escape: "the cargo line loses the leg's selection and is the whole suite's again, the \
-                 table untouched: each of the seven legs runs its platform's whole suite, on \
-                 macOS a leg that took 27 to 37 minutes while it was one, under the 30 minutes \
-                 set for a shard. That is five macOS legs cancelled at their limit on a slow \
-                 day, and seven green legs and no shard on a fast one",
-        job: Some("test"),
+        escape: "`test-macos`'s cargo line loses the leg's selection and is the whole suite's \
+                 again, the table untouched: each of its five legs runs the whole macOS suite, \
+                 a leg that took 27 to 37 minutes while it was one, under the 30 minutes set \
+                 for a shard. That is five macOS legs cancelled at their limit on a slow day, \
+                 and five green legs and no shard on a fast one",
+        job: Some("test-macos"),
         anchor: "      - run: cargo test --all-targets --all-features -- ${{ matrix.tests }}\n",
         replacement: "      - run: cargo test --all-targets --all-features\n",
         refused_as: "test-job-command",
     },
     WorkflowEscape {
         name: "MUT-TEST-FILTER-HARDCODED",
-        escape: "the suite step names one filter, `engine::`, where it read the leg's \
-                 `matrix.tests`, the table untouched. All seven legs then run the one subset, the \
-                 Linux legs among them, and none holds a count to a floor: every leg is green and \
-                 every test whose name does not contain `engine::` runs on no leg of this job. \
+        escape: "`test-linux`'s suite step names one filter, `engine::`, where it read the \
+                 leg's `matrix.tests`, the table untouched. Both Linux legs then run the one \
+                 subset, and neither holds a count to a floor: both are green and every test \
+                 whose name does not contain `engine::` runs on no leg of this job. \
                  The line is a quoted scalar because a plain one cannot end in a colon: \
                  unquoted, it is a document the parser refuses before this contract reads it",
-        job: Some("test"),
+        job: Some("test-linux"),
         anchor: "      - run: cargo test --all-targets --all-features -- ${{ matrix.tests }}\n",
         replacement: "      - run: \"cargo test --all-targets --all-features -- engine::\"\n",
         refused_as: "test-job-command",
     },
     WorkflowEscape {
         name: "MUT-TEST-LEGS-NAMED-BY-RUNNER",
-        escape: "the job named by `matrix.os` again, as it was while each runner had one leg. \
-                 The five macOS shards then publish one name, `test (macos-latest)`, five \
-                 times over, and the two Linux shards `test (ubuntu-latest)` twice, and a red \
-                 one does not say which shard's tests failed",
-        job: Some("test"),
+        escape: "`test-macos` named by its runner again, `test (macos-latest)`, as the macOS \
+                 leg was while each runner had one leg. The five macOS shards then publish that \
+                 one name five times over, and a red one does not say which shard's tests \
+                 failed",
+        job: Some("test-macos"),
         anchor: "    name: test (${{ matrix.leg }})\n",
-        replacement: "    name: test (${{ matrix.os }})\n",
+        replacement: "    name: test (macos-latest)\n",
         refused_as: "test-job-name",
     },
     WorkflowEscape {
         name: "MUT-TEST-TIMEOUT-RAISED-FOR-MACOS",
-        escape: "the expression that gave the macOS leg 45 minutes while it ran the suite \
-                 whole, put back over the shards. Each macOS leg, a shard of that suite, may \
-                 then run half as long again as the limit set for it, holding the required \
-                 check and the queue entry behind it; and the limit is an expression, which \
-                 this contract cannot read as a number",
-        job: Some("test"),
+        escape: "the 45 minutes the macOS leg had while it ran the suite whole, put back on \
+                 `test-macos` over the shards. Each macOS leg, a shard of that suite, may then \
+                 run half as long again as the limit set for it, holding the required check \
+                 and the queue entry behind it. Under one job this took an expression, which \
+                 this contract cannot read as a number; with a job per platform it is one plain \
+                 integer, which only the equality with the pinned 30 refuses",
+        job: Some("test-macos"),
         anchor: "    timeout-minutes: 30\n",
-        replacement: "    timeout-minutes: ${{ matrix.os == 'macos-latest' && 45 || 30 }}\n",
+        replacement: "    timeout-minutes: 45\n",
         refused_as: "test-job-timeout",
     },
     WorkflowEscape {
         name: "MUT-TEST-TIMEOUT-RAISED",
-        escape: "the limit raised to 45 minutes for every leg, the number the macOS leg had \
-                 while it ran the suite whole, as a plain integer. It reads as a number, so \
-                 nothing refuses it as unreadable the way the expression of \
-                 `MUT-TEST-TIMEOUT-RAISED-FOR-MACOS` is refused: only the equality with the \
-                 pinned 30 does. A leg that never ends then holds the required check, and the \
-                 merge-queue entry behind it, half as long again",
-        job: Some("test"),
+        escape: "the limit raised to 45 minutes on `test-linux` as well, the number the macOS \
+                 leg had while it ran the suite whole, as a plain integer. It reads as a \
+                 number, as `MUT-TEST-TIMEOUT-RAISED-FOR-MACOS`'s now does: only the equality \
+                 with the pinned 30 refuses it. A Linux leg that never ends then holds the \
+                 required check, and the merge-queue entry behind it, half as long again",
+        job: Some("test-linux"),
         anchor: "    timeout-minutes: 30\n",
         replacement: "    timeout-minutes: 45\n",
         refused_as: "test-job-timeout",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-MACOS-ON-LINUX",
+        escape: "`test-macos`'s `runs-on: macos-latest` becomes `ubuntu-latest`. Every leg keeps \
+                 its macOS name and its macOS shard's filters, and all five run on Linux: the \
+                 macOS shards run elsewhere, every leg is green, and no test of this job runs on \
+                 a Mac",
+        job: Some("test-macos"),
+        anchor: "    runs-on: macos-latest\n",
+        replacement: "    runs-on: ubuntu-latest\n",
+        refused_as: "test-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SUITE-PIPED-AGAIN",
@@ -4059,7 +4111,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-AGGREGATE-ACCEPTS-THE-HOSTED-SHARDS-SKIPPED",
         escape: "the aggregate accepts `skipped` from the hosted shards: the old rule's \
                  acceptance of a skipped Windows suite job, put back for the one job left. The \
-                 loop still names all six gates and every other one must still succeed, so a \
+                 loop still names all seven gates and every other one must still succeed, so a \
                  run whose shards are skipped is green with no Windows suite: under \
                  `MUT-TEST-WINDOWS-HOSTED-CONDITIONED`'s `if:`, every queue entry",
         job: Some("merge-gate"),

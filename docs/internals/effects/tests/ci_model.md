@@ -60,8 +60,9 @@ regions. Measured, `MUT-GATE-CROSS-TARGET-DROPPED`.
 
 The command that builds and executes this file's fixtures, character for
 character: the whole suite, with no selection. No job runs it whole now.
-Every leg runs the suite it builds over a selection: the `test` job's as
-[`TEST_SHARD_COMMAND`], and the Windows shards' through
+Every leg runs the suite it builds over a selection: the legs of
+`test-linux` and `test-macos` as [`TEST_SHARD_COMMAND`], and the Windows
+shards' through
 [`WINDOWS_SHARD_WITNESS`], whose line 4 starts `cargo` as a process with this
 command's arguments and `--no-run` after them, so that Cargo only builds,
 and whose line 7 starts each harness Cargo built over the leg's selection.
@@ -70,10 +71,10 @@ Until 2026-11-20 the guest's Windows job ran it whole, as one job
 
 ## `pub(super) const TEST_SHARD_COMMAND: &str =`
 
-The `test` job's suite step, character for character: [`TEST_COMMAND`], then
-` -- ${{ matrix.tests }}`. The expression is text here, as it is in
-`ci.yml`; GitHub replaces it with the leg's `tests:` value from the job's
-matrix ([`TEST_LEGS`]) before bash reads the line. What follows `--` goes to
+The suite step of `test-linux` and `test-macos`, character for character:
+[`TEST_COMMAND`], then ` -- ${{ matrix.tests }}`. The expression is text
+here, as it is in `ci.yml`; GitHub replaces it with the leg's `tests:` value
+from the job's matrix (its row of [`TEST_JOBS`]) before bash reads the line. What follows `--` goes to
 libtest in every harness `--all-targets` builds.
 
 - On every leg, Linux or macOS, the value is the shard's filters, if it has
@@ -84,8 +85,9 @@ libtest in every harness `--all-targets` builds.
   string: the line ended at `--`, libtest was handed nothing, and the leg
   ran the whole suite, as it did when the step was [`TEST_COMMAND`] alone.
 
-One step for every leg, so nothing in it varies by leg except through that
-expression and the case-fold map's ([`TEST_STEP_ENV`]); what the expression
+One step for every leg of a job, so nothing in it varies by leg except
+through that expression, and by job except through the case-fold map (each
+row's `step_env`, a literal since the split); what the expression
 evaluates to is the matrix check's to hold. The oracle recognises the suite
 step by this text, and
 `the_workflow_that_runs_these_tests_installs_the_compiler_they_need` holds
@@ -151,7 +153,7 @@ script, the suite with the witness that it executed
 [`CAPABILITY_WINDOWS_OBSERVATION`]. Each is one exact string, as in
 [`TEST_SCRIPTS`].
 
-The identity script is the `test` job's, the same on any runner. The two
+The identity script is the one `test-linux` and `test-macos` run, the same on any runner. The two
 acceptance-record steps were the guest's job's as well until 2026-11-20,
 the same two constants, because neither depended on the guest's image: each
 runs the test it names and checks the frame it prints, and every container
@@ -409,7 +411,7 @@ again with it; where the second compiles, the build script turns the
 feature on. Each also has Cargo run it again whenever the variable
 changes. A Cargo that saw the variable would hand it to those build
 scripts and to every compiler it ran, and build the three, and every
-harness over them, otherwise than the `test` job's legs and a user's
+harness over them, otherwise than the legs of `test-linux` and `test-macos` and a user's
 machine do, from a tree nobody changed. That is read from the three build
 scripts at the versions `Cargo.lock` held on 2026-11-21; no build here was
 made with the variable set.
@@ -649,7 +651,7 @@ with it on 2026-11-20. Since 2026-11-21 the first two rows above measure the
 step deleted and its exit line removed on the shards. Any other edit makes
 the capture an unpinned script, the refusal
 `MUT-TEST-WINDOWS-HOSTED-RUN-RETARGETED` measures on the identity step, and
-those edits are measured on the `test` job's capture
+those edits are measured on the capture of `test-linux` and `test-macos`
 ([`HOST_ACCEPTANCE_CAPTURE`]).
 
 ## `pub(super) const CAPABILITY_OBSERVATION: &str = r#"set -eo pipefail`
@@ -725,7 +727,7 @@ this script's own lines, or put a step between it and the capture, mutated
 the guest's job and went with it on 2026-11-20. On the shards an edited
 observation is an unpinned script, as an edited capture is
 ([`HOST_ACCEPTANCE_WINDOWS_CAPTURE`]), and the edits themselves are measured
-on the `test` job's observation ([`CAPABILITY_OBSERVATION`]).
+on `test-macos`' observation ([`CAPABILITY_OBSERVATION`]).
 
 ## `pub(super) const CAPABILITY_STEP_FIELDS: [&str; 4] = ["env", "name", "run", "timeout-minutes"];`
 
@@ -739,7 +741,7 @@ and `test-windows-hosted`, every field required.
   may, and only this step carries it; [`TEST_STEP_FIELDS`] and
   [`STEP_FIELDS`] are unchanged.
 
-Measured, in the `test` job, `MUT-TEST-CAPABILITY-STEP-DISABLED`,
+Measured, in `test-macos`, `MUT-TEST-CAPABILITY-STEP-DISABLED`,
 `MUT-TEST-CAPABILITY-STEP-RUN-WHEN-NOT-CANCELLED` and
 `MUT-TEST-CAPABILITY-STEP-ABSOLVED`, each a field the set leaves out. On the
 shards, `MUT-TEST-WINDOWS-HOSTED-CAPABILITY-TIMEOUT-DROPPED`, a required
@@ -869,10 +871,10 @@ Measured, `MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-FLOATS`,
 ## `pub(super) const TEST_WINDOWS_PLATFORM: &str = "windows-latest";`
 
 The [`CI_TARGETS`] runner whose tests run in [`TEST_WINDOWS_HOSTED_JOB`], on
-this very runner, rather than in the `test` matrix. The job's steps are read
-under its shell and cfg valuations: a `run:` step there resolves to `pwsh`,
-and it builds the MSVC tuple. The oracle holds the job's `runs-on:` to this
-runner and the `test` job's table to every other. Measured,
+this very runner, rather than in a job of [`TEST_JOBS`]. The job's steps are
+read under its shell and cfg valuations: a `run:` step there resolves to
+`pwsh`, and it builds the MSVC tuple. The oracle holds the job's `runs-on:`
+to this runner and [`TEST_JOBS`]' rows to every other. Measured,
 `MUT-TEST-WINDOWS-HOSTED-ON-THE-GUEST` and `MUT-TEST-MATRIX-KEEPS-WINDOWS`.
 
 ## `pub(super) const TEST_WINDOWS_HOSTED_JOB: &str = "test-windows-hosted";`
@@ -955,8 +957,8 @@ Under the re-pack from the three runs, every leg's prediction, about 9
 minutes a job, was above that floor.
 
 The aggregate reads the fourteen legs through one result,
-`needs.test-windows-hosted.result`, as it reads the `test` and `msrv`
-matrices through one result each, and it accepts `success` alone from it, as
+`needs.test-windows-hosted.result`, as it reads the `test-linux`,
+`test-macos` and `msrv` matrices through one result each, and it accepts `success` alone from it, as
 from every gate ([`AGGREGATE_SCRIPT`]). `fail-fast` is `false`, so a failed
 leg does not cancel the others before they report. What GitHub gives a
 matrix whose leg did not finish is observed, not a rule stated here: a leg
@@ -1182,10 +1184,10 @@ ending `::` -- `runner::host::`, `workspace::tests::`, the coordinator's
 `runner::contract::` and `engine::topology::attempt::` -- and the rest open
 a test's name in one large module, such as
 `engine::topology::coordinator::tests::a_p` or
-`workspace_manager::tests::a`; the fifth shard is everything else. The `test` job's five
-macOS legs are derived from it, through [`TEST_LEGS`]; until the macOS
-suite was divided nothing in `ci.yml` read it, and the suite was one leg of
-the `test` matrix. `the_shard_tables_run_every_test_in_exactly_one_shard`
+`workspace_manager::tests::a`; the fifth shard is everything else. The five
+legs of `test-macos` are derived from it, through its row of [`TEST_JOBS`];
+until the macOS suite was divided nothing in `ci.yml` read it, and the suite
+was one leg of the `test` matrix. `the_shard_tables_run_every_test_in_exactly_one_shard`
 holds its count of derived argument strings and the first of them, places
 the same fourteen names, and holds its filters to the same shape.
 
@@ -1224,15 +1226,15 @@ first time: its slowest leg, the second, took 16.0 minutes. The lists of
 2026-11-22 replaced its four filters.
 
 The table has no floors beside it, where the Windows one has
-[`WINDOWS_SHARD_FLOORS`]. The `test` job's legs held no count of passing
+[`WINDOWS_SHARD_FLOORS`]. The Linux and macOS legs held no count of passing
 tests before the shards and gained none with them. A filter here that
 matches no test only moves tests to a later leg; none stops running.
 
 ## `pub(super) const LINUX_SHARD_FILTERS: [&[&str]; 1] = [&["engine::"]];`
 
 The same kind of table for the Linux suite, under the same rule: one list of
-one filter, two shards -- `engine::`, and everything else. The `test` job's
-two Linux legs are derived from it, through [`TEST_LEGS`].
+one filter, two shards -- `engine::`, and everything else. The two legs of
+`test-linux` are derived from it, through its row of [`TEST_JOBS`].
 `the_shard_tables_run_every_test_in_exactly_one_shard` holds its two derived
 argument strings to literals and places the same fourteen names, and holds
 its filter to the same shape.
@@ -1252,7 +1254,9 @@ Linux alone then run nowhere, and the matrix check refuses it. Measured,
 
 ## `pub(super) const TEST_JOB_NAME: &str = "test (${{ matrix.leg }})";`
 
-The `test` job's `name:`, an expression, held as the workflow writes it.
+The `name:` of `test-linux` and `test-macos`, an expression, held as the
+workflow writes it; it was the one `test` job's before the split, so every
+leg's check name is unchanged.
 GitHub lists each leg under the name with its `leg:` in place:
 `test (ubuntu-latest, 1 of 2)` and `test (ubuntu-latest, 2 of 2)`, and
 `test (macos-latest, 1 of 5)` to `test (macos-latest, 5 of 5)`. Until the
@@ -1268,8 +1272,8 @@ Measured, `MUT-TEST-LEGS-NAMED-BY-RUNNER`.
 
 ## `pub(super) const TEST_TIMEOUT_MINUTES: i64 = 30;`
 
-The `test` job's limit: 30 minutes for every leg, on every lane, and an
-integer in `ci.yml`.
+The limit of `test-linux` and `test-macos`: 30 minutes for every leg, on
+every lane, and an integer in `ci.yml`.
 
 While the macOS suite ran whole the limit was an expression, 45 minutes on
 the macOS leg and 30 on ubuntu. In two merge-queue entries of one head on
@@ -1303,35 +1307,81 @@ three times the slowest leg expected and a little under twice the 16.0
 measured, and the limit the Linux leg already had. Code `test-job-timeout`.
 Measured, `MUT-TEST-TIMEOUT-RAISED-FOR-MACOS` and `MUT-TEST-TIMEOUT-RAISED`.
 
-## `pub(super) const TEST_LEGS: [(&str, &[&[&str]]); 2] = [`
+## `pub(super) struct TestJob {`
 
-The `test` job's legs, as data: each runner that hosts its platform's tests
-there, with the ordered filter lists that divide its suite. `ubuntu-latest` has
-[`LINUX_SHARD_FILTERS`] and runs its suite as two legs. `macos-latest` has
-[`MACOS_SHARD_FILTERS`] and runs it as five.
+One row of [`TEST_JOBS`]: a job that runs the suite on one platform, and
+what the workflow oracle holds that job to. Until 2026-11-24 one `test` job
+ran the Linux and macOS legs together, its runner read from each leg's
+`os:` and its case-fold declaration from an expression over that runner;
+the owner split it into one job per platform that day. A row carries what
+the one job used to work out per leg, so each job's `ci.yml` text is
+literal: its runner, its legs and its declaration.
 
-The matrix is derived from this table rather than written beside it.
+## `pub(super) struct TestJob` › `pub(super) id: &'static str,`
+
+The job's id in `ci.yml`: `test-linux` or `test-macos`. The oracle reads the
+job by it, names it in every complaint about that job, and the aggregate
+reads its result through it (`TEST_LINUX_RESULT`, `TEST_MACOS_RESULT`).
+
+## `pub(super) struct TestJob` › `pub(super) runner: &'static str,`
+
+The job's `runs-on:`, a literal, and the runner its shells are resolved
+under. `test_leg_matrix_complaints` derives each leg's `leg:` label from it.
+A job on another runner runs that platform's shards elsewhere: code
+`test-job-matrix`, measured by `MUT-TEST-MACOS-ON-LINUX`.
+
+## `pub(super) struct TestJob` › `pub(super) filters: &'static [&'static [&'static str]],`
+
+The ordered filter lists that divide the job's suite:
+[`LINUX_SHARD_FILTERS`] for `test-linux`, two legs, and
+[`MACOS_SHARD_FILTERS`] for `test-macos`, five.
+
+## `pub(super) struct TestJob` › `pub(super) step_env: [(&'static str, &'static str); 1],`
+
+The `env:` map the job's suite, capture and observation steps carry, pinned
+whole: [`TEMP_FOLDS_CASE_KEY`] bound to `""` on `test-linux` and to `1` on
+`test-macos`, the value each platform's legs received from the one job's
+expression before the split. The macOS runner's temporary directory folds
+case and the ubuntu runner's does not. The reasons the map is pinned whole
+are under [`TEMP_FOLDS_CASE_KEY`].
+
+## `pub(super) const TEST_JOBS: [TestJob; 2] = [`
+
+The Linux and macOS test jobs, as data: each runner that hosts its platform's
+tests there, the job that runs them, the ordered filter lists that divide its
+suite, and its steps' pinned case-fold map.
+
+Each job's matrix is derived from its row rather than written beside it.
 `test_legs` in `super::workflow` makes one leg for each string
-`shard_selections` makes of a runner's filters, seven today, and
-`test_leg_matrix_complaints` requires the `include:` list of `ci.yml` to be
-those legs, entry for entry and in order: each entry's `os:` the runner, its
-`leg:` the label [`TEST_JOB_NAME`] reads, and its `tests:` the string
-[`TEST_SHARD_COMMAND`] hands to libtest.
+`shard_selections` makes of the row's filters, two for `test-linux` and five
+for `test-macos`, and `test_leg_matrix_complaints` requires the job's
+`include:` list in `ci.yml` to be those legs, entry for entry and in order:
+each entry's `leg:` the label [`TEST_JOB_NAME`] reads and its `tests:` the
+string [`TEST_SHARD_COMMAND`] hands to libtest. No entry has an `os:`: the
+runner is the job's.
 
-A filter list for each runner, not one for the job. What divides a suite is
+A filter list for each runner, not one for both. What divides a suite is
 how long it takes on that runner: the Linux suite, never the slow one
 ([`TEST_TIMEOUT_MINUTES`]), ran whole and with no filter until 2026-11-19,
 and is two legs where the macOS suite is five. Giving `ubuntu-latest` its
 filter was an edit to this table and to `ci.yml`, and to the ledger rows
 that quote the Linux entries.
 
-The runners here must be the [`CI_TARGETS`] runners that host tests, in
-order and once each; the same function refuses any other list. Without that
-the table and the workflow could lose a platform together with the equality
-between them still holding. Windows is absent for the reason it is absent
-from the matrix: its suite runs in [`TEST_WINDOWS_HOSTED_JOB`]. Measured rows
-and the two measurements made by hand are under `test_leg_matrix_complaints`
-in the workflow notes.
+The rows' runners must be the [`CI_TARGETS`] runners that host tests, in
+order and one job each; `test_jobs_table_complaints` refuses any other
+table. Without that the table and the workflow could lose a platform
+together with the equality between them still holding. Windows has no row
+for the reason it has no leg here: its suite runs in
+[`TEST_WINDOWS_HOSTED_JOB`]. Measured rows and the two measurements made by
+hand are under `test_leg_matrix_complaints` in the workflow notes.
+
+## `pub(super) const RETIRED_TEST_JOB: &str = "test";`
+
+The id of the one job the Linux and macOS legs had until 2026-11-24. A job
+of that id left in the workflow is refused, code `test-job-split`: beside
+[`TEST_JOBS`]' jobs it runs legs no row holds to anything, and in their
+place it runs every platform's legs under one `runs-on:` the oracle no
+longer reads.
 
 ## `pub(super) const MSRV_JOB: &str = "msrv";`
 
@@ -1402,19 +1452,23 @@ The aggregate's script, pinned.
 
 A pin rather than a family of substring predicates, which is what the
 standing row forbids growing more of. The enumerated escape is
-`for gate in LINT LINT_WINDOWS MSRV TEST; do : LINT_MACOS` -- a loop that
+`for gate in LINT LINT_WINDOWS MSRV TEST_LINUX TEST_MACOS TEST_WINDOWS_HOSTED; do : LINT_MACOS`
+-- a loop that
 omits a gate while a `contains` check for the omitted name still passes --
 and a pin refuses it outright. The pin is not its own oracle: the loop's gate
 list is re-derived from `needs:` below and compared, so this literal being a
 faithful copy is itself checked against the job graph.
 
 Every gate must succeed, the hosted shards among them, on every event. One
-loop names the six gates and fails for any result of any of them but
+loop names the seven gates and fails for any result of any of them but
 `success`, so a skipped `test-windows-hosted` is red like any skipped gate.
 Until 2026-11-20 the script set two Windows suite jobs aside, the guest's
 and the hosted one, and required exactly one of them to succeed and the
 other to be skipped, because the picker sent a run to one. With the guest
-retired there is one job, and nothing is set aside.
+retired there is one job, and nothing is set aside. Since 2026-11-24 the
+Linux and macOS suites are two gates, `TEST_LINUX` and `TEST_MACOS`, where
+the one `test` job was `TEST`; `MUT-AGGREGATE-DROPS-TEST-MACOS` measures the
+aggregate losing one of them.
 `the_aggregate_requires_the_hosted_windows_shards_and_every_other_gate`
 runs the workflow's script with every gate succeeding, and with each gate in
 turn failed, cancelled, skipped or abandoned. Measured, by that test on the
@@ -1442,11 +1496,11 @@ scalar still matches character for character. `lint (macos)` names its tuple
 with `--target`, which Cargo takes over the variable, so the measured row
 stands on `lint (windows)`. Measured,
 `MUT-GATE-STEP-RETARGETED`. The steps that carry an `env:` outside the
-aggregate are steps of the two suite-running jobs -- the suite step of the
-`test` job and of [`TEST_WINDOWS_HOSTED_JOB`], with the capture and
-observation steps after each -- and their maps are pinned whole by
-[`TEST_STEP_ENV`] and [`TEST_WINDOWS_STEP_ENV`] rather than admitted by field
-name.
+aggregate are steps of the three suite-running jobs -- the suite step of
+each of [`TEST_JOBS`]' jobs and of [`TEST_WINDOWS_HOSTED_JOB`], with the
+capture and observation steps after each -- and their maps are pinned whole
+by each row's `step_env` and [`TEST_WINDOWS_STEP_ENV`] rather than admitted
+by field name.
 
 ## `pub(super) const TEMP_FOLDS_CASE_KEY: &str = "UPSTROKE_TEST_TEMP_FOLDS_CASE";`
 
@@ -1459,17 +1513,16 @@ exactly `1`, and observes the branch everywhere else, so a case-sensitive
 volume anywhere the variable is not set takes the negative branch instead of
 failing (`PR258-CASEFOLD-EXPECTATION-KEYED-ON-TARGET-OS`: keyed on the target
 OS, the requirement failed on a supported case-sensitive volume before the
-scan was checked). The declaration is per leg because the filesystems are:
-the macOS runner's temporary directory folds case, the ubuntu runner's does
-not, and the hosted Windows runner's NTFS does.
+scan was checked). The declaration is per platform because the filesystems
+are: the macOS runner's temporary directory folds case, the ubuntu runner's
+does not, and the hosted Windows runner's NTFS does.
 
-## `pub(super) const TEST_STEP_ENV: [(&str, &str); 1] = [(`
-
-The whole `env:` map of the hosted step that runs the suite, as an equality.
-The value is an expression over the matrix -- `1` on `macos-latest`, empty on
-`ubuntu-latest` -- so one step declares for every leg: it reads `matrix.os`,
-which each `include:` entry carries, the five macOS shards' alike
-([`TEST_LEGS`]). Pinned whole, the way
+Each of [`TEST_JOBS`]' rows pins the whole `env:` map of its job's suite
+step as an equality: `1` on `test-macos`, the empty string on `test-linux`.
+Until 2026-11-24 one job's step declared for every leg through an expression
+over `matrix.os`, and its map was pinned as one constant, `TEST_STEP_ENV`;
+with a job per platform each job's map is a literal of its own. Pinned
+whole, the way
 [`WORKFLOW_ENV`] and the aggregate's map are: a dropped binding makes the leg
 observe the casefold branch instead of requiring it, so a temporary directory
 that stopped folding case would pass unreported (undeclared on ext4 the alias
@@ -1505,25 +1558,25 @@ observation each carry the map whole, under codes of their own
 other key. Measured, `MUT-TEST-WINDOWS-HOSTED-CASEFOLD-DECLARATION-DROPPED`,
 `MUT-TEST-WINDOWS-HOSTED-CAPTURE-CASEFOLD-DROPPED` and
 `MUT-TEST-WINDOWS-HOSTED-CAPABILITY-CASEFOLD-DROPPED`. A key put beside the
-declaration is measured on the `test` job's steps ([`TEST_STEP_ENV`]); the
+declaration is measured on `test-macos`' steps (its row of [`TEST_JOBS`]); the
 row that put one on a Windows observation mutated the guest's job and went
 with it on 2026-11-20.
 
 ## `pub(super) const TEST_STEP_FIELDS: [&str; 6] = ["env", "name", "run", "shell", "uses", "with"];`
 
 The fields the step that runs the suite, and the capture step after it, may
-declare: [`STEP_FIELDS`] plus the `env` whose map [`TEST_STEP_ENV`] and
-[`TEST_WINDOWS_STEP_ENV`] pin. Neither may carry `if:` or `continue-on-error:`
+declare: [`STEP_FIELDS`] plus the `env` whose map each row of [`TEST_JOBS`]
+and [`TEST_WINDOWS_STEP_ENV`] pin. Neither may carry `if:` or `continue-on-error:`
 (`MUT-TEST-CAPTURE-STEP-DISABLED`, `MUT-TEST-CAPTURE-STEP-ABSOLVED` and, on
 the shards' suite step, `MUT-TEST-WINDOWS-HOSTED-SUITE-ON-ONE-LANE`). The
 observation step has [`CAPABILITY_STEP_FIELDS`], and every other step of the
-two test jobs keeps [`STEP_FIELDS`].
+three test jobs keeps [`STEP_FIELDS`].
 
 ## `pub(super) const AGGREGATE_STEP_FIELDS: [&str; 4] = ["env", "name", "run", "shell"];`
 
 The fields the aggregate's one step may declare: `name`, `run` and `shell`,
 plus the `env` whose mapping is pinned key by key -- as the suite steps' maps
-in the two test jobs are pinned by [`TEST_STEP_ENV`] and
+in the three test jobs are pinned by [`TEST_JOBS`]' rows and
 [`TEST_WINDOWS_STEP_ENV`].
 
 ## `pub(super) const AGGREGATE_JOB_FIELDS: [&str; 6] =`
@@ -1534,10 +1587,10 @@ leaves the required context missing rather than red.
 
 ## `pub(super) const TEST_JOB_FIELDS: [&str; 5] =`
 
-The fields the job that runs these fixtures declares. Each is pinned by
-value as well: `name` by [`TEST_JOB_NAME`], `runs-on` as `${{ matrix.os }}`,
+The fields each of [`TEST_JOBS`]' jobs declares. Each is pinned by value as
+well: `name` by [`TEST_JOB_NAME`], `runs-on` by the row's runner, a literal,
 `timeout-minutes` by [`TEST_TIMEOUT_MINUTES`], `strategy`, whole, by the
-legs [`TEST_LEGS`] derives, and the steps' scripts by [`TEST_SCRIPTS`].
+legs the row derives, and the steps' scripts by [`TEST_SCRIPTS`].
 
 ## `pub(super) const TEST_WINDOWS_HOSTED_JOB_FIELDS: [&str; 5] =`
 
@@ -1560,7 +1613,7 @@ well as the permission scan.
 
 ## `pub(super) const MSRV_JOB_FIELDS: [&str; 5] =`
 
-The fields the MSRV leg declares. The same shape as the `test` job, and named
+The fields the MSRV leg declares. The same shape as the Linux and macOS test jobs, and named
 separately because the reason one of its absences matters is its own.
 
 `continue-on-error:` is the field this refuses that nothing else would have.
@@ -1661,7 +1714,7 @@ counts what actually ran.
 
 ## `pub(super) const TOOLCHAIN_ACTION: &str = "dtolnay/rust-toolchain@";`
 
-The toolchain every gate and the `test` matrix install, and the action that
+The toolchain every gate and the Linux and macOS test jobs install, and the action that
 installs it.
 
 The action is pinned by commit in [`PINNED_ACTIONS`]; this pins its

@@ -304,10 +304,29 @@ pub(super) const LINUX_SHARD_FILTERS: [&[&str]; 1] = [&["engine::"]];
 pub(super) const TEST_JOB_NAME: &str = "test (${{ matrix.leg }})";
 pub(super) const TEST_TIMEOUT_MINUTES: i64 = 30;
 
-pub(super) const TEST_LEGS: [(&str, &[&[&str]]); 2] = [
-    ("ubuntu-latest", &LINUX_SHARD_FILTERS),
-    ("macos-latest", &MACOS_SHARD_FILTERS),
+pub(super) struct TestJob {
+    pub(super) id: &'static str,
+    pub(super) runner: &'static str,
+    pub(super) filters: &'static [&'static [&'static str]],
+    pub(super) step_env: [(&'static str, &'static str); 1],
+}
+
+pub(super) const TEST_JOBS: [TestJob; 2] = [
+    TestJob {
+        id: "test-linux",
+        runner: "ubuntu-latest",
+        filters: &LINUX_SHARD_FILTERS,
+        step_env: [(TEMP_FOLDS_CASE_KEY, "")],
+    },
+    TestJob {
+        id: "test-macos",
+        runner: "macos-latest",
+        filters: &MACOS_SHARD_FILTERS,
+        step_env: [(TEMP_FOLDS_CASE_KEY, "1")],
+    },
 ];
+
+pub(super) const RETIRED_TEST_JOB: &str = "test";
 
 pub(super) const MSRV_JOB: &str = "msrv";
 pub(super) const MSRV_COMMAND: &str =
@@ -325,7 +344,7 @@ pub(super) const AGGREGATE_JOB: &str = "merge-gate";
 pub(super) const REQUIRED_CONTEXT: &str = "upstroke-ci";
 
 pub(super) const AGGREGATE_SCRIPT: &str = r#"failed=0
-for gate in LINT LINT_WINDOWS LINT_MACOS MSRV TEST TEST_WINDOWS_HOSTED; do
+for gate in LINT LINT_WINDOWS LINT_MACOS MSRV TEST_LINUX TEST_MACOS TEST_WINDOWS_HOSTED; do
   result_var="${gate}_RESULT"
   result="${!result_var}"
   if [[ "$result" != "success" ]]; then
@@ -341,11 +360,6 @@ pub(super) const GATE_JOB_FIELDS: [&str; 4] = ["name", "runs-on", "steps", "time
 pub(super) const STEP_FIELDS: [&str; 5] = ["name", "run", "shell", "uses", "with"];
 
 pub(super) const TEMP_FOLDS_CASE_KEY: &str = "UPSTROKE_TEST_TEMP_FOLDS_CASE";
-
-pub(super) const TEST_STEP_ENV: [(&str, &str); 1] = [(
-    TEMP_FOLDS_CASE_KEY,
-    "${{ matrix.os == 'macos-latest' && '1' || '' }}",
-)];
 
 pub(super) const TEST_WINDOWS_STEP_ENV: [(&str, &str); 1] = [(TEMP_FOLDS_CASE_KEY, "1")];
 
