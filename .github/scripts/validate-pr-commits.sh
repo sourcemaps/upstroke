@@ -10,11 +10,16 @@
 #   claude-author      the author's email is noreply@anthropic.com, or the author's name, trimmed,
 #                      is exactly `Claude` -- both case-insensitive;
 #   claude-committer   the same two tests on the committer;
-#   claude-co-author   a message line that, after leading whitespace, begins `Co-Authored-By:` and
-#                      names `claude` or `anthropic` anywhere after it;
-#   claude-session     a message line that, after leading whitespace, begins `Claude-Session:`;
-#   claude-generated   a message line holding `Generated with [Claude Code]` or
-#                      `Generated with Claude Code`.
+#   claude-co-author   a message line whose key, after leading whitespace, is `Co-Authored-By`,
+#                      followed by optional whitespace and a `:`, and whose value names Claude BY
+#                      IDENTITY: its `<address>` is noreply@anthropic.com or at anthropic.com or a
+#                      subdomain of it, or its name holds `claude` or `anthropic` as a whole word;
+#   claude-session     a message line whose key, after leading whitespace, is `Claude-Session`,
+#                      followed by optional whitespace and a `:`;
+#   claude-generated   a message line that is a footer: after leading whitespace and at most one
+#                      run of characters that are neither letters, digits nor whitespace (an emoji)
+#                      and optional whitespace, it BEGINS `Generated with [Claude Code]` or
+#                      `Generated with Claude Code`, whatever follows.
 #
 # Every comparison is case-insensitive, because none of these is spelled one way by every tool
 # that writes it, and git preserves whatever case it was given.
@@ -23,21 +28,49 @@
 # agents, so a subject such as `fix(agent): the Claude Code adapter reads its version` is a
 # legitimate commit and a rule that refused the words `Claude Code` would refuse it. So:
 #
-#   A NAME MATCHES ONLY WHOLE. `Claude` and nothing else, after trimming, is the name Claude Code
-#   commits under; a contributor whose name merely begins or contains it is somebody else. The
-#   email is the address Claude Code writes, matched whole for the same reason.
+#   AN AUTHOR OR COMMITTER NAME MATCHES ONLY WHOLE. `Claude` and nothing else, after trimming, is
+#   the name Claude Code commits under; a contributor whose name merely begins or contains it is
+#   somebody else. The email is the address Claude Code writes, matched whole for the same reason.
+#
+#   A CO-AUTHOR IS MATCHED BY IDENTITY, NOT BY SUBSTRING. The value is split into its `<address>`,
+#   the first `<...>` in it, and its name, everything else. The address, trimmed, is refused when
+#   it is noreply@anthropic.com, or when its domain -- what follows its last `@` -- is anthropic.com
+#   or ends in `.anthropic.com`. The name is refused when it holds `claude` or `anthropic` as a
+#   whole word, a word being bounded by the start or end of the name or by a character that is
+#   neither an ASCII letter, a digit nor a hyphen (a non-ASCII byte bounds a word: the comparison
+#   is byte-wise, below). So `Claude`, `Claude Fable 5.2` and `Anthropic Claude` are refused, and
+#   `Jean-Claude Martin`, `Claudette Martin` and an address at `philanthropic.example` are people.
+#   A value with no `<address>` is all name, so a bare `noreply@anthropic.com` is still refused:
+#   `@` and `.` bound the word `anthropic`.
 #
 #   A TRAILER MATCHES ONLY AT THE START OF ITS LINE. `Co-Authored-By:` and `Claude-Session:` are
 #   trailers, and a trailer is a line that begins with its key. A sentence that mentions
-#   `Claude-Session` in passing -- this paragraph, a commit message about the rewrite -- is not one.
-#   Leading whitespace is allowed before the key because an indented trailer still reads as a
-#   credit to anyone who looks, and the rule exists for what a reader sees. The co-author rule
-#   then needs `claude` or `anthropic` AFTER the key, so a co-author who is a person passes and
-#   any Anthropic address, or any Claude model's name, does not.
+#   `Claude-Session:` in passing -- this paragraph, a commit message about the rewrite -- is not
+#   one. Leading whitespace is allowed before the key because an indented trailer still reads as a
+#   credit to anyone who looks, and the rule exists for what a reader sees; whitespace is allowed
+#   between the key and its `:` because git itself parses `Co-Authored-By :` as that trailer.
 #
-#   THE GENERATED-WITH FOOTER MATCHES ANYWHERE IN ITS LINE, because it is written behind an emoji
-#   (`🤖 Generated with [Claude Code](...)`) and has no key to anchor on. Both phrasings are named
-#   whole, so `generated with` in prose about something else passes.
+#   THE GENERATED-WITH FOOTER MATCHES ONLY AT THE START OF ITS LINE, past at most one emoji or
+#   other run of punctuation, because it is written behind an emoji (`🤖 Generated with [Claude
+#   Code](...)`) and has no key to anchor on. A sentence that says `generated with Claude Code`
+#   part-way through, or a subject quoting the phrase, is prose about the footer and passes.
+#
+# TRAILERS ARE READ AS GIT READS THEM, three ways, and a rule hit any of them refuses:
+#
+#   - every message line as written (all five line rules);
+#   - every line of the message UNFOLDED: a line that begins with whitespace and follows a line
+#     whose key matches `^[[:space:]]*[A-Za-z0-9-]+[[:space:]]*:` is appended to that line, its
+#     leading whitespace dropped and one space joining the two, as git's trailer folding does, so a
+#     `Co-Authored-By:` whose identity sits on an indented continuation line is judged whole (all
+#     five line rules, on every line, folded or not);
+#   - every line `git interpret-trailers --parse --no-divider` prints for the message, which is what
+#     git itself takes for the trailers (the co-author and session rules). `--no-divider` because
+#     that is how git reads a commit's trailers: a `---` in a commit message ends nothing. The
+#     message is the object's own message part, written to a file and parsed from it, never
+#     through a pipe whose status is lost.
+#
+# Each rule is reported at most ONCE per commit, with the first line that broke it, so a credit
+# found by two of those readings, or written twice, is one refusal line and not two.
 #
 # THE COMMITS JUDGED ARE THE PULL REQUEST'S OWN: every commit reachable from the head and from no
 # merge base of the two ends. That set is exactly the commits the head carries that the target
@@ -67,21 +100,28 @@
 # can be read as part of another. Every `author` and `committer` header is judged, not the first,
 # so a hand-built object carrying two cannot hide the second behind the first.
 #
-# EVERY LISTING IS WRITTEN TO A FILE AND READ TO ITS END. git's status is taken from the command
-# that wrote the file, where it is a status; through a pipe or `< <(...)` it belongs to nobody, and
-# a failed rev-list would read as a pull request with no commits. And a read that fails mid-file
+# EVERY LISTING IS WRITTEN TO A FILE AND READ TO ITS END: the merge bases, the commit list, each
+# commit object and each commit's parsed trailers. git's status is taken from the command that
+# wrote the file, where it is a status; through a pipe or `< <(...)` it belongs to nobody, and a
+# failed rev-list would read as a pull request with no commits. And a read that fails mid-file
 # looks to `read` exactly like the end of it, so the number of lines written is counted first and
-# the loop must reach it: a short read is exit 2, never fewer lines judged. These are the rules
-# .github/scripts/changed-in-range.sh and test-docs-consistency.sh state for their own listings.
+# the loop must reach it: a short read is exit 2, never fewer lines judged. A short read of the
+# merge bases is the dangerous one -- an exclusion list left empty judges the target's own history
+# -- so each of its lines must also be a full object name (40 or 64 hex digits). These are the
+# rules .github/scripts/changed-in-range.sh and test-docs-consistency.sh state for their own
+# listings.
 #
-# THE OUTPUT NEVER CARRIES AN EMAIL ADDRESS. A refusal is one line on stderr per rule hit:
+# NOTHING THE SCRIPT PRINTS CARRIES AN EMAIL ADDRESS: refusals, failures, the pass line and git's
+# own error output on a failure all pass through one redaction. A refusal is one line on stderr per
+# rule a commit breaks:
 #
 #   claude-credit: <full-sha> <rule-id>: <the author or committer's name, or the message line>
 #
-# An identity is shown by its name alone, and in a message line every token holding an `@` is
-# replaced by `[email redacted]`, so a `Co-Authored-By:` line naming somebody's address names
-# nobody's in the log. Control characters are shown as `?`, so a line cannot carry a carriage
-# return or an escape sequence into the runner's log. A pass is one line on stdout:
+# An identity is shown by its name alone, and in any printed text every token holding an `@` is
+# replaced by `[email redacted]`, so a `Co-Authored-By:` line naming somebody's address, or an
+# unresolvable end shaped like one, names nobody's in the log. Control characters are shown as
+# `?`, so a line cannot carry a carriage return or an escape sequence into the runner's log. Every
+# other message begins `commit-credit-policy:`, and a pass is one line on stdout:
 #
 #   commit-credit-policy: <n> commit(s) checked, none credits Claude
 
@@ -95,38 +135,53 @@ export LC_ALL=C
 export GIT_NO_REPLACE_OBJECTS=1
 shopt -s nocasematch
 
+# shown <text>: the text as this script may print it -- control characters as `?`, and every
+# token holding an `@` replaced, so no email address reaches the log.
+shown() {
+  local text="${1//[[:cntrl:]]/?}"
+  printf '%s\n' "$text" | sed -E 's/[^[:space:]<>]*@[^[:space:]<>]*/[email redacted]/g'
+}
+
+say() {  # say <text>: one `commit-credit-policy:` line, redacted
+  printf 'commit-credit-policy: %s\n' "$(shown "$1")"
+}
+
+fail() {  # fail <text>: the closed failure, redacted, at exit 2
+  say "$1" >&2
+  exit 2
+}
+
+work=""
+# fail_git <text>: the closed failure, then what git printed to $work/git-err, every line of it
+# redacted, at exit 2.
+fail_git() {
+  local line
+  say "$1" >&2
+  if [[ -n "$work" && -s "$work/git-err" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      say "git: $line" >&2
+    done < "$work/git-err"
+  fi
+  exit 2
+}
+
 target="${1:-}"
 head="${2:-}"
 
 if [[ -z "$target" || -z "$head" ]]; then
-  echo "usage: validate-pr-commits.sh <target-sha> <head-sha>" >&2
+  say "usage: validate-pr-commits.sh <target-sha> <head-sha>" >&2
   exit 2
 fi
 
-target_sha="$(git rev-parse --verify --quiet "$target^{commit}")" \
-  || { echo "commit-credit-policy: target commit $target is not in this checkout" >&2; exit 2; }
-head_sha="$(git rev-parse --verify --quiet "$head^{commit}")" \
-  || { echo "commit-credit-policy: head commit $head is not in this checkout" >&2; exit 2; }
+# rev-parse's own diagnostics are dropped: the end that did not resolve is named below, redacted,
+# and that is all they could have said.
+target_sha="$(git rev-parse --verify --quiet "$target^{commit}" 2> /dev/null)" \
+  || fail "target commit $target is not in this checkout"
+head_sha="$(git rev-parse --verify --quiet "$head^{commit}" 2> /dev/null)" \
+  || fail "head commit $head is not in this checkout"
 
 work="$(mktemp -d)"
 trap 'rm -rf -- "$work"' EXIT
-
-# No common ancestor is not an empty range: it means the two ends are unrelated histories, and the
-# head's whole history is not this pull request's to answer for.
-git merge-base --all "$target_sha" "$head_sha" > "$work/merge-bases" \
-  || { echo "commit-credit-policy: no merge base between $target_sha and $head_sha" >&2; exit 2; }
-[[ -s "$work/merge-bases" ]] \
-  || { echo "commit-credit-policy: no merge base between $target_sha and $head_sha" >&2; exit 2; }
-
-bases=()
-while IFS= read -r merge_base; do
-  bases+=("$merge_base")
-done < "$work/merge-bases"
-
-# No pathspec, so no history simplification: a commit reached only through a merge of a side
-# branch is listed like any other, and so is the merge.
-git rev-list "$head_sha" --not "${bases[@]}" > "$work/commits" \
-  || { echo "commit-credit-policy: could not list the commits between the merge base and $head_sha" >&2; exit 2; }
 
 # lines_in <file>: the number of newline-terminated lines in it, measured before a loop reads it.
 lines_in() {
@@ -135,15 +190,36 @@ lines_in() {
   echo $(( n ))
 }
 
-# shown <text>: the text as a refusal line may print it -- control characters as `?`, and every
-# token holding an `@` replaced, so no email address reaches the log.
-shown() {
-  local text="${1//[[:cntrl:]]/?}"
-  printf '%s\n' "$text" | sed -E 's/[^[:space:]<>]*@[^[:space:]<>]*/[email redacted]/g'
-}
+object_name_re='^([0-9a-f]{40}|[0-9a-f]{64})$'
+
+# No common ancestor is not an empty range: it means the two ends are unrelated histories, and the
+# head's whole history is not this pull request's to answer for.
+git merge-base --all "$target_sha" "$head_sha" > "$work/merge-bases" 2> "$work/git-err" \
+  || fail_git "no merge base between $target_sha and $head_sha"
+[[ -s "$work/merge-bases" ]] \
+  || fail "no merge base between $target_sha and $head_sha"
+
+based="$(lines_in "$work/merge-bases")" \
+  || fail "could not measure the merge-base list"
+bases=()
+while IFS= read -r merge_base; do
+  [[ "$merge_base" =~ $object_name_re ]] \
+    || fail "the merge-base list holds a line that is not an object name"
+  bases+=("$merge_base")
+done < "$work/merge-bases"
+(( ${#bases[@]} == based && based > 0 )) \
+  || fail "read ${#bases[@]} of the $based merge bases listed"
+
+# No pathspec, so no history simplification: a commit reached only through a merge of a side
+# branch is listed like any other, and so is the merge.
+git rev-list "$head_sha" --not "${bases[@]}" > "$work/commits" 2> "$work/git-err" \
+  || fail_git "could not list the commits between the merge base and $head_sha"
 
 refusals=0
-refuse() {  # refuse <sha> <rule-id> <text>
+hits=" "
+refuse() {  # refuse <sha> <rule-id> <text>: at most once per rule per commit
+  [[ "$hits" == *" $2 "* ]] && return 0
+  hits="$hits$2 "
   printf 'claude-credit: %s %s: %s\n' "$1" "$2" "$(shown "$3")" >&2
   refusals=$(( refusals + 1 ))
 }
@@ -164,17 +240,67 @@ is_claude() {
 # because `\<` written inline is a word boundary to some regex libraries and not a `<`.
 identity_re='^(author|committer) ([^<]*)<([^>]*)>'
 
-# judge <sha>: every refusal the commit earns, one line each.
+# The trailer keys, and the key any line must have for an indented line after it to fold into it.
+fold_key_re='^[[:space:]]*[A-Za-z0-9-]+[[:space:]]*:'
+co_author_re='^[[:space:]]*co-authored-by[[:space:]]*:(.*)$'
+session_re='^[[:space:]]*claude-session[[:space:]]*:'
+# A value's `<address>`, and the name around it. Held in variables for the same reason as above.
+address_re='^([^<]*)<([^>]*)>(.*)$'
+# `claude` or `anthropic` as a whole word: bounded by an end of the name or by a byte that is not
+# an ASCII letter, a digit or a hyphen.
+word_re='(^|[^A-Za-z0-9-])(claude|anthropic)($|[^A-Za-z0-9-])'
+# The footer: leading whitespace, at most one run of non-alphanumeric, non-space bytes (an emoji is
+# several such bytes in a row) and optional whitespace, then the phrase, whatever follows.
+footer_re='^[[:space:]]*([^[:alnum:][:space:]]+[[:space:]]*)?generated with (\[claude code\]|claude code)'
+
+# names_claude <co-author value>: the co-author's identity is Claude's or Anthropic's.
+names_claude() {
+  local value="$1" name address domain
+  if [[ "$value" =~ $address_re ]]; then
+    name="${BASH_REMATCH[1]} ${BASH_REMATCH[3]}"
+    address="$(trim "${BASH_REMATCH[2]}")"
+    domain="${address##*@}"
+    if [[ "$address" == "noreply@anthropic.com" || "$domain" == "anthropic.com" || "$domain" == *".anthropic.com" ]]; then
+      return 0
+    fi
+  else
+    name="$value"
+  fi
+  [[ "$name" =~ $word_re ]]
+}
+
+# judge_trailer <sha> <line>: the co-author and session rules, the two that read trailers.
+judge_trailer() {
+  if [[ "$2" =~ $co_author_re ]] && names_claude "${BASH_REMATCH[1]}"; then
+    refuse "$1" claude-co-author "$2"
+  fi
+  if [[ "$2" =~ $session_re ]]; then
+    refuse "$1" claude-session "$2"
+  fi
+}
+
+# judge_line <sha> <line>: all three message-line rules.
+judge_line() {
+  judge_trailer "$1" "$2"
+  if [[ "$2" =~ $footer_re ]]; then
+    refuse "$1" claude-generated "$2"
+  fi
+}
+
+# judge <sha>: every refusal the commit earns, one line per rule.
 judge() {
-  local sha="$1" object="$work/object" line in_headers=1 authors=0 committers=0 read_lines=0 written
-  local role name email rule
-  git cat-file commit "$sha" > "$object" \
-    || { echo "commit-credit-policy: could not read commit $sha" >&2; exit 2; }
+  local sha="$1" object="$work/object" message_file="$work/message" trailers="$work/trailers"
+  local line in_headers=1 authors=0 committers=0 read_lines=0 written parsed read_trailers=0
+  local role name email rule last
+  local message=() logical=()
+  hits=" "
+  git cat-file commit "$sha" > "$object" 2> "$work/git-err" \
+    || fail_git "could not read commit $sha"
   # A final newline, so the last message line is a whole line and the count below counts it. An
   # empty line at the end of a message is nothing any rule looks at.
   printf '\n' >> "$object"
   written="$(lines_in "$object")" \
-    || { echo "commit-credit-policy: could not measure commit $sha" >&2; exit 2; }
+    || fail "could not measure commit $sha"
   while IFS= read -r line; do
     read_lines=$(( read_lines + 1 ))
     if (( in_headers )); then
@@ -189,7 +315,7 @@ judge() {
         *) continue ;;
       esac
       [[ "$line" =~ $identity_re ]] \
-        || { echo "commit-credit-policy: commit $sha carries an identity header git could not have written" >&2; exit 2; }
+        || fail "commit $sha carries an identity header git could not have written"
       role="${BASH_REMATCH[1]}"
       name="${BASH_REMATCH[2]}"
       email="${BASH_REMATCH[3]}"
@@ -206,37 +332,56 @@ judge() {
       fi
       continue
     fi
-    if [[ "$line" =~ ^[[:space:]]*Co-Authored-By:(.*)$ ]] \
-       && [[ "${BASH_REMATCH[1]}" == *claude* || "${BASH_REMATCH[1]}" == *anthropic* ]]; then
-      refuse "$sha" claude-co-author "$line"
-    fi
-    if [[ "$line" =~ ^[[:space:]]*Claude-Session: ]]; then
-      refuse "$sha" claude-session "$line"
-    fi
-    if [[ "$line" == *"Generated with [Claude Code]"* || "$line" == *"Generated with Claude Code"* ]]; then
-      refuse "$sha" claude-generated "$line"
-    fi
+    message+=("$line")
+    judge_line "$sha" "$line"
   done < "$object"
   (( read_lines == written )) \
-    || { echo "commit-credit-policy: read $read_lines of the $written lines of commit $sha" >&2; exit 2; }
+    || fail "read $read_lines of the $written lines of commit $sha"
   # An author and a committer, at the least: a commit without both was not read as a commit.
   (( authors >= 1 && committers >= 1 )) \
-    || { echo "commit-credit-policy: commit $sha carries no author or no committer" >&2; exit 2; }
+    || fail "commit $sha carries no author or no committer"
+
+  # The message unfolded: an indented line after a keyed line continues it.
+  for line in ${message[@]+"${message[@]}"}; do
+    last=$(( ${#logical[@]} - 1 ))
+    if (( last >= 0 )) && [[ "$line" =~ ^[[:space:]] && "${logical[$last]}" =~ $fold_key_re ]]; then
+      logical[$last]="${logical[$last]} ${line#"${line%%[![:space:]]*}"}"
+    else
+      logical+=("$line")
+    fi
+  done
+  for line in ${logical[@]+"${logical[@]}"}; do
+    judge_line "$sha" "$line"
+  done
+
+  # And what git takes for the trailers, parsed from the message part alone.
+  printf '%s\n' ${message[@]+"${message[@]}"} > "$message_file" \
+    || fail "could not write the message of commit $sha"
+  git interpret-trailers --parse --no-divider "$message_file" > "$trailers" 2> "$work/git-err" \
+    || fail_git "could not parse the trailers of commit $sha"
+  parsed="$(lines_in "$trailers")" \
+    || fail "could not measure the trailers of commit $sha"
+  while IFS= read -r line; do
+    read_trailers=$(( read_trailers + 1 ))
+    judge_trailer "$sha" "$line"
+  done < "$trailers"
+  (( read_trailers == parsed )) \
+    || fail "read $read_trailers of the $parsed trailer lines of commit $sha"
 }
 
 listed="$(lines_in "$work/commits")" \
-  || { echo "commit-credit-policy: could not measure the commit list" >&2; exit 2; }
+  || fail "could not measure the commit list"
 checked=0
 while IFS= read -r sha; do
-  [[ "$sha" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] \
-    || { echo "commit-credit-policy: the commit list holds a line that is not an object name" >&2; exit 2; }
+  [[ "$sha" =~ $object_name_re ]] \
+    || fail "the commit list holds a line that is not an object name"
   judge "$sha"
   checked=$(( checked + 1 ))
 done < "$work/commits"
 (( checked == listed )) \
-  || { echo "commit-credit-policy: read $checked of the $listed commits listed" >&2; exit 2; }
+  || fail "read $checked of the $listed commits listed"
 
 if (( refusals > 0 )); then
   exit 1
 fi
-echo "commit-credit-policy: $checked commit(s) checked, none credits Claude"
+say "$checked commit(s) checked, none credits Claude"

@@ -184,10 +184,18 @@ jobs:
       # the pull request's own, bounded by every merge base, so master's older
       # history is never judged; .github/scripts/validate-pr-commits.sh argues
       # each rule. The head is the pull request's own head on both triggers, read
-      # from the API on a queue entry, as the branch step above explains.
+      # from the API on a queue entry, as the branch step above explains. It is
+      # read into a variable in its own statement because a command substitution
+      # inside an argument list loses its status, so a failed read would reach
+      # the validator as an empty head instead of stopping the step.
       - name: Refuse commits that credit Claude
         shell: bash
         env:
           TARGET_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: |
-          bash .github/scripts/validate-pr-commits.sh "$TARGET_SHA" "$(tr -d '[:space:]' < "$RUNNER_TEMP/pr-head")"
+          head_sha="$(tr -d '[:space:]' < "$RUNNER_TEMP/pr-head")"
+          if [[ -z "$head_sha" ]]; then
+            echo "commit-credit-policy: the pull request's head SHA is empty" >&2
+            exit 2
+          fi
+          bash .github/scripts/validate-pr-commits.sh "$TARGET_SHA" "$head_sha"

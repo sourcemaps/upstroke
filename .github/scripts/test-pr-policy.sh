@@ -6894,25 +6894,46 @@ fi
 # .github/scripts/validate-pr-commits.sh refuses a pull request any of whose own commits credits
 # Claude, and it is judged here on real repositories, as the listing builders above are, because
 # what it decides is which COMMITS are the pull request's, and only a real history can be wrong
-# about that. Every commit is made with its author and committer given explicitly, so neither the
-# fixture's configured identity nor the contributor's can decide a case, and with
-# `--cleanup=verbatim` and `--no-verify`, so the message the script reads is the message written
-# here and no hook of the contributor's rewrites it.
+# about that.
+#
+# AMBIENT GIT CANNOT CHANGE A VERDICT. Every commit and merge is made with its author and
+# committer, names, emails and dates, given explicitly, so neither the fixture's configured
+# identity nor the contributor's can decide a case; commits use `--cleanup=verbatim`, so the
+# message the script reads is the message written here; every git command in the fixture runs
+# with `-c core.hooksPath=/dev/null`, so no hook of the contributor's, on commit, merge or
+# checkout, rewrites anything; and for the whole section GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM
+# point at /dev/null, so neither the contributor's nor the machine's config (a trailer setting, a
+# template directory, a signing key) reaches the fixture or the script. Both are put back after.
 #
 # THE TARGET'S OWN HISTORY CREDITS CLAUDE, BELOW THE MERGE BASE AND ABOVE IT, in every case. master
 # carries `Claude-Session:` lines from before the rewrite, so every case here runs against a target
 # shaped that way: a case that refuses must refuse for its own commit, and one that passes must pass
 # with the old history in reach.
+credit_saved_global="${GIT_CONFIG_GLOBAL-}" credit_had_global="${GIT_CONFIG_GLOBAL+set}"
+credit_saved_system="${GIT_CONFIG_SYSTEM-}" credit_had_system="${GIT_CONFIG_SYSTEM+set}"
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+
 credit_script="$root/.github/scripts/validate-pr-commits.sh"
 credit_repo="$fixture_dir/repo-commit-credit"
 new_repo "$credit_repo"
+credit_date='2026-11-25T12:00:00 +0000'
+
+# credit_git <args>: git in the fixture repository with hooks off and the fixture's own author and
+# committer, names, emails and dates, pinned for anything it writes.
+credit_git() {
+  GIT_AUTHOR_NAME='Jane Doe' GIT_AUTHOR_EMAIL=jane@example.com GIT_AUTHOR_DATE="$credit_date" \
+    GIT_COMMITTER_NAME='Jane Doe' GIT_COMMITTER_EMAIL=jane@example.com GIT_COMMITTER_DATE="$credit_date" \
+    git -c core.hooksPath=/dev/null -C "$credit_repo" "$@"
+}
 
 credit_commit() {  # credit_commit <parent> <author name> <author email> <committer name> <committer email> <message> -> its SHA
-  git -C "$credit_repo" checkout -q --detach "$1" || return 1
+  credit_git checkout -q --detach "$1" || return 1
   printf '%s\n' "$6" \
-    | GIT_AUTHOR_NAME="$2" GIT_AUTHOR_EMAIL="$3" GIT_COMMITTER_NAME="$4" GIT_COMMITTER_EMAIL="$5" \
-      git -C "$credit_repo" commit -q --allow-empty --no-verify --cleanup=verbatim -F - || return 1
-  git -C "$credit_repo" rev-parse HEAD
+    | GIT_AUTHOR_NAME="$2" GIT_AUTHOR_EMAIL="$3" GIT_AUTHOR_DATE="$credit_date" \
+      GIT_COMMITTER_NAME="$4" GIT_COMMITTER_EMAIL="$5" GIT_COMMITTER_DATE="$credit_date" \
+      git -c core.hooksPath=/dev/null -C "$credit_repo" \
+        commit -q --allow-empty --no-verify --cleanup=verbatim -F - || return 1
+  credit_git rev-parse HEAD
 }
 
 plain_commit() {  # plain_commit <parent> <message> -> its SHA, by a fixture author and committer
@@ -6922,9 +6943,9 @@ plain_commit() {  # plain_commit <parent> <message> -> its SHA, by a fixture aut
 claude_history_message=$'chore: a commit from before the rewrite\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_old'
 
 echo seed > "$credit_repo/seed.txt"
-git -C "$credit_repo" add -A
-git -C "$credit_repo" commit -q -m 'the root'
-credit_root="$(git -C "$credit_repo" rev-parse HEAD)"
+credit_git add -A
+credit_git commit -q --no-verify -m 'the root'
+credit_root="$(credit_git rev-parse HEAD)"
 credit_old="$(credit_commit "$credit_root" Claude noreply@anthropic.com Claude noreply@anthropic.com "$claude_history_message")" \
   || { echo 'could not build the commit-credit target history' >&2; exit 1; }
 credit_base="$(plain_commit "$credit_old" 'the merge base: a plain commit on master')" \
@@ -6968,7 +6989,8 @@ credit_refuse() {
     exit 1
   fi
   want="$(printf '%s\n' "$@" | tr ':' ' ' | sort)"
-  got="$(sed -n -E 's/^claude-credit: ([0-9a-f]{40}) (claude-[a-z-]+): .*$/\1 \2/p' "$fixture_dir/credit-err" | sort)"
+  # A 40- or 64-digit object name: a SHA-256 repository's refusals name its commits in full too.
+  got="$(sed -n -E 's/^claude-credit: ([0-9a-f]{40}|[0-9a-f]{64}) (claude-[a-z-]+): .*$/\1 \2/p' "$fixture_dir/credit-err" | sort)"
   if [[ "$got" != "$want" ]]; then
     echo "commit credit: $label: the refusals named [$got], and [$want] was expected:" >&2
     cat "$fixture_dir/credit-err" >&2
@@ -6987,7 +7009,9 @@ credit_refuse() {
   fi
 }
 
-credit_fail_closed() {  # credit_fail_closed <label> <target> <head>
+# credit_fail_closed <label> <target> <head>: exit 2, no refusal line, and no email address
+# anywhere in what the failure printed.
+credit_fail_closed() {
   credit_run "$2" "$3"
   if [[ "$credit_rc" != 2 ]]; then
     echo "commit credit: $1: exit $credit_rc and 2 was expected" >&2
@@ -6995,6 +7019,11 @@ credit_fail_closed() {  # credit_fail_closed <label> <target> <head>
   fi
   if grep -q '^claude-credit:' "$fixture_dir/credit-err"; then
     echo "commit credit: $1: a closed failure printed a refusal" >&2
+    exit 1
+  fi
+  if grep -q '@' "$fixture_dir/credit-out" "$fixture_dir/credit-err"; then
+    echo "commit credit: $1: a closed failure printed an email address:" >&2
+    cat "$fixture_dir/credit-err" >&2
     exit 1
   fi
 }
@@ -7008,6 +7037,20 @@ c="$(plain_commit "$credit_base" $'feat: pair on the adapter\n\nCo-Authored-By: 
 credit_pass 'a Co-Authored-By line naming a person' "$c" 1
 c="$(plain_commit "$credit_base" $'docs: the rewrite record\n\nsee the Claude-Session line in the old history')" || exit 1
 credit_pass 'Claude-Session named anywhere but at the start of a line' "$c" 1
+c="$(plain_commit "$credit_base" $'docs: the rewrite record\n\nthe old history ends every message with a Claude-Session: line, and the rewrite drops it')" || exit 1
+credit_pass 'the literal Claude-Session: mid-sentence' "$c" 1
+# A co-author is matched by identity, not by substring: each of these is a person.
+c="$(plain_commit "$credit_base" $'feat: pair with Jean-Claude\n\nCo-Authored-By: Jean-Claude Martin <jcm@example.com>')" || exit 1
+credit_pass 'Co-Authored-By Jean-Claude Martin' "$c" 1
+c="$(plain_commit "$credit_base" $'feat: pair with Claudette\n\nCo-Authored-By: Claudette Martin <cm@example.com>')" || exit 1
+credit_pass 'Co-Authored-By Claudette Martin' "$c" 1
+c="$(plain_commit "$credit_base" $'feat: pair with Ava\n\nCo-Authored-By: Ava Martin <ava@philanthropic.example>')" || exit 1
+credit_pass 'Co-Authored-By an address at philanthropic.example' "$c" 1
+# The generated-with rule matches a footer, not prose about one.
+c="$(plain_commit "$credit_base" $'docs: the adapter\'s output\n\nExamples generated with Claude Code include an extra blank line.')" || exit 1
+credit_pass 'a body sentence saying generated with Claude Code part-way through' "$c" 1
+c="$(plain_commit "$credit_base" 'docs: explain why the adapter strips the text "Generated with Claude Code"')" || exit 1
+credit_pass 'a subject quoting "Generated with Claude Code"' "$c" 1
 # The target alone credits Claude, at the merge base's parent and again after it; the pull request
 # is one plain commit and is judged as one.
 c="$(plain_commit "$credit_base" 'feat: a change cut from a master that credits Claude')" || exit 1
@@ -7029,12 +7072,26 @@ c="$(plain_commit "$credit_base" $'feat: a change\n\n   Claude-Session: https://
 credit_refuse 'an indented Claude-Session trailer' "$c" "$c:claude-session"
 c="$(plain_commit "$credit_base" $'feat: a change\n\n\xf0\x9f\xa4\x96 Generated with [Claude Code](https://claude.com/claude-code)')" || exit 1
 credit_refuse 'the Generated with [Claude Code] footer' "$c" "$c:claude-generated"
+c="$(plain_commit "$credit_base" $'feat: a change with a bare footer\n\nGenerated with Claude Code.')" || exit 1
+credit_refuse 'a bare Generated with Claude Code. line' "$c" "$c:claude-generated"
+# Each half of a co-author's identity refuses alone: the name with a neutral address, and a
+# neutral name at the Claude Code address.
+c="$(plain_commit "$credit_base" $'feat: a change\n\nCo-Authored-By: Claude <bot@example.com>')" || exit 1
+credit_refuse 'Co-Authored-By the name Claude at a neutral address' "$c" "$c:claude-co-author"
+c="$(plain_commit "$credit_base" $'feat: a change\n\nCo-Authored-By: Jane Roe <noreply@anthropic.com>')" || exit 1
+credit_refuse 'Co-Authored-By a neutral name at noreply@anthropic.com' "$c" "$c:claude-co-author"
+# Trailers are read as git reads them: folded, and with whitespace before the colon. Each is one
+# refusal, however many of the script's readings find it.
+c="$(plain_commit "$credit_base" $'feat: a change with a folded trailer\n\nCo-Authored-By:\n  Claude <noreply@anthropic.com>')" || exit 1
+credit_refuse 'a Co-Authored-By whose identity is on an indented continuation line' "$c" "$c:claude-co-author"
+c="$(plain_commit "$credit_base" $'feat: a change with a spaced trailer\n\nCo-Authored-By : Claude <noreply@anthropic.com>')" || exit 1
+credit_refuse 'Co-Authored-By : with a space before the colon' "$c" "$c:claude-co-author"
 # Reached only through a merge: the side branch's commit is on no first-parent path from the head.
 credit_side="$(plain_commit "$credit_base" $'feat: the side branch\n\nCo-Authored-By: Claude <noreply@anthropic.com>')" || exit 1
 credit_trunk="$(plain_commit "$credit_base" 'feat: the trunk')" || exit 1
-git -C "$credit_repo" checkout -q --detach "$credit_trunk"
-git -C "$credit_repo" merge -q --no-ff "$credit_side" -m 'merge the side branch'
-c="$(git -C "$credit_repo" rev-parse HEAD)"
+credit_git checkout -q --detach "$credit_trunk"
+credit_git merge -q --no-ff --no-verify "$credit_side" -m 'merge the side branch'
+c="$(credit_git rev-parse HEAD)"
 credit_refuse 'an offending commit reached only through a merged side branch' "$c" "$credit_side:claude-co-author"
 credit_first="$(plain_commit "$credit_base" $'feat: one\n\nClaude-Session: https://claude.ai/code/session_y')" || exit 1
 credit_second="$(plain_commit "$credit_first" $'feat: two\n\nGenerated with Claude Code')" || exit 1
@@ -7043,8 +7100,9 @@ credit_refuse 'two offending commits, both named' "$credit_second" \
 
 # Closed failures.
 credit_fail_closed 'an unresolvable head' "$credit_target" 0123456789abcdef0123456789abcdef01234567
+credit_fail_closed 'an unresolvable head shaped like an email address' "$credit_target" someone@example.com
 credit_orphan="$(printf 'an unrelated history\n' \
-  | git -C "$credit_repo" commit-tree "$(git -C "$credit_repo" mktree < /dev/null)")" \
+  | credit_git commit-tree "$(credit_git mktree < /dev/null)")" \
   || { echo 'could not build the commit-credit orphan' >&2; exit 1; }
 credit_fail_closed 'two commits with no merge base' "$credit_target" "$credit_orphan"
 
@@ -7060,18 +7118,18 @@ crisscross_a="$(plain_commit "$crisscross_base" "${crisscross_message/chore: /ch
   || { echo 'could not build the criss-cross commit A' >&2; exit 1; }
 crisscross_c="$(plain_commit "$crisscross_base" "${crisscross_message/chore: /chore: C, }")" \
   || { echo 'could not build the criss-cross commit C' >&2; exit 1; }
-git -C "$credit_repo" checkout -q --detach "$crisscross_a"
-git -C "$credit_repo" merge -q --no-ff "$crisscross_c" -m 'the criss-cross target: merge A, then C'
-crisscross_target="$(git -C "$credit_repo" rev-parse HEAD)"
-git -C "$credit_repo" checkout -q --detach "$crisscross_c"
-git -C "$credit_repo" merge -q --no-ff "$crisscross_a" -m 'the criss-cross head: merge C, then A'
-crisscross_merge="$(git -C "$credit_repo" rev-parse HEAD)"
+credit_git checkout -q --detach "$crisscross_a"
+credit_git merge -q --no-ff --no-verify "$crisscross_c" -m 'the criss-cross target: merge A, then C'
+crisscross_target="$(credit_git rev-parse HEAD)"
+credit_git checkout -q --detach "$crisscross_c"
+credit_git merge -q --no-ff --no-verify "$crisscross_a" -m 'the criss-cross head: merge C, then A'
+crisscross_merge="$(credit_git rev-parse HEAD)"
 crisscross_head="$(plain_commit "$crisscross_merge" 'feat: a plain change on the criss-cross head')" || exit 1
 
 # The cases below assert, in order: the fixture is criss-crossed (two merge bases, A and C), or
 # every case after it proves nothing about two merge bases; the gate passes with the pull request's
 # own two commits counted; and a head commit crediting Claude is refused, named alone.
-crisscross_bases="$(git -C "$credit_repo" merge-base --all "$crisscross_target" "$crisscross_head" | sort)" \
+crisscross_bases="$(credit_git merge-base --all "$crisscross_target" "$crisscross_head" | sort)" \
   || { echo 'commit credit: git merge-base --all failed on the criss-cross fixture' >&2; exit 1; }
 if [[ "$crisscross_bases" != "$(printf '%s\n' "$crisscross_a" "$crisscross_c" | sort)" ]]; then
   echo "commit credit: the criss-cross fixture is not criss-crossed: git merge-base --all named [$crisscross_bases], and exactly A ($crisscross_a) and C ($crisscross_c) were expected" >&2
@@ -7085,6 +7143,10 @@ c="$(plain_commit "$crisscross_merge" $'feat: a change on the criss-cross head\n
 credit_target="$crisscross_target" \
   credit_refuse 'criss-crossed histories: the head commit crediting Claude is named, and neither merge base' \
   "$c" "$c:claude-co-author"
+
+# The section's config isolation, put back as it was found.
+if [[ -n "$credit_had_global" ]]; then export GIT_CONFIG_GLOBAL="$credit_saved_global"; else unset GIT_CONFIG_GLOBAL; fi
+if [[ -n "$credit_had_system" ]]; then export GIT_CONFIG_SYSTEM="$credit_saved_system"; else unset GIT_CONFIG_SYSTEM; fi
 
 echo 'commit-credit fixtures passed'
 
