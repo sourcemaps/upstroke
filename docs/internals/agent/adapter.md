@@ -231,8 +231,8 @@ Registry in routing order; ids match `WorkerProfile.agent`.
 The shared effort levels the help entry for `--effort` does not advertise: all of them when help
 has no `--effort` line. Looking only for the flag proves too little, since CLI versions have
 exposed `--effort` with a narrower enum. It reads from the first help line that contains `--effort`
-to the next line that starts with `-`, so words elsewhere in `--help` are not read; a prose line
-mentioning `--effort` before the option's own entry would start the read there instead.
+to the next line whose first non-whitespace character is `-`, so words elsewhere in `--help` are not
+read; a prose line mentioning `--effort` before the option's own entry would start the read there instead.
 
 ## `pub(crate) fn advertises_flag(help: &str, flag: &str) -> bool {`
 
@@ -260,10 +260,11 @@ your branch" earlier in the text does not hide a limit message after it. "hit yo
 needs no window: "usage limit" is one of the twelve phrases.
 
 The rule is narrow on purpose. A rate-limit signal is ground truth about capacity (§13): the
-ladder does not count the attempt, defers it, and after three deferrals asks a human. So "You've
-hit your context-window limit", "hit your rate of change limit", "hit your token limit", "hit your
-context limit · resets after compaction", "hit your request limit · resets 9am (UTC)" and a bare
-"hit your limit" do not signal. They are task failures, to be retried or escalated like any other.
+ladder does not count the attempt, defers it, and at the deferral cap (`max_defers`, three by default)
+asks a human. So "You've hit your context-window limit", "hit your rate of change limit", "hit your
+token limit", "hit your context limit · resets after compaction", "hit your request limit · resets
+9am (UTC)" and a bare "hit your limit" do not signal. They are task failures, to be retried or escalated
+like any other.
 
 The rule splits the already lower-cased text on "hit your " and reads each piece with
 `trim_start_matches`, `strip_prefix`, `get` and `starts_with`. Those return slices of the same
@@ -314,8 +315,8 @@ comes back. "session", "weekly" and the hours window signal with or without a re
 The names are a closed list: "opus", "sonnet", "haiku" and "fable", and nothing else. This matcher
 is shared by every agent, and a reset alone does not make a limit a quota: a Copilot or Codex
 message `You've hit your context limit · resets after compaction` read as a rate limit would make
-the coordinator record `pool_exhausted` for a pool that is not, and the ladder defer the task three
-times and ask a human, where it should retry or escalate. "context", "token" and "request" limits
+the coordinator record `pool_exhausted` for a pool that is not, and the ladder defer the task and then
+ask a human, where it should retry or escalate. "context", "token" and "request" limits
 are about the prompt or the call, and waiting fixes none of them.
 
 The list is closed, rather than open with a list of words to refuse, because the mistakes are not
@@ -333,7 +334,7 @@ the end of the text, or at a character that is not an ASCII letter, ASCII digit 
 full stop, a space, a semicolon or the " · resets" of the observed five-hour message all end it;
 "limiter", "limitation" and "limited" do not, and give `None`. Without the boundary, a failed
 attempt whose error read `The request hit your session limiter and returned an internal error.`
-would be read as `RateLimited`: the ladder would not count it, defer it three times and ask a
+would be read as `RateLimited`: the ladder would not count it, defer it and then ask a
 human, when a real failure should be retried or escalated.
 
 The check strips " limit" with `strip_prefix` and asks `starts_with` whether the next character is
@@ -434,8 +435,8 @@ taken from one of them would record another thing's reset as the pool's.
 
 So `MCP cache resets 9am (UTC)` on one line and `You've hit your 5-hour limit · resets 5:30am
 (UTC)` on the next give 05:30, in either order, and `You've hit your session limit` with `resets
-5:30am (UTC)` on the next line gives 05:30 whatever other lines the text has. `MCP cache resets
-5:30am (UTC)` alone gives `None`, as does the session limit with that reset a line further down.
+5:30am (UTC)` on the next line gives 05:30. `MCP cache resets 5:30am (UTC)` alone gives `None`, as does
+the session limit with that reset a line further down.
 
 The chosen reset is the only one parsed. When the limit's reset is malformed or in another zone
 the answer is `None`, even if another reset in the text parses: the limit's is the one the message
@@ -575,9 +576,10 @@ checks would still report `AgentError` and the cells would pass for the wrong re
 
 Each adapter in `ADAPTERS` maps each of the grid's six supervision shapes to the same status (18
 cells, three distinct statuses). The supervisor's two flags are inputs to parsing: `output_limited`
-means the tree was terminated with the transcript truncated, and `timed_out` that it was terminated
-for exceeding its wall clock. A truncated transcript authorizes nothing, and a timeout is a distinct
-ladder input from a generic agent failure.
+means stdout or stderr exceeded the output limit (the supervisor terminates a tree still running when
+that happens; a drain can also report it after the process has exited), and `timed_out` that the tree
+was terminated for exceeding its wall clock. A truncated transcript authorizes nothing, and a timeout
+is a distinct ladder input from a generic agent failure.
 
 The domain is `ADAPTERS`, so no adapter is left out of the grid, and the expectations are literals,
 a table rather than a re-derivation of the branch order: the two rows where an exit code of 0 meets
@@ -1159,9 +1161,9 @@ entry's constant (codex's `debug models` step passing `VERSION`) or an arithmeti
 one (`HELP.saturating_sub(1)`). Two processes then carry one identity and the ledger cannot tell
 them apart.
 
-This asserts the property at the point of use: each constant a use site names is declared, none is
-used twice, every declared one is used, and the only non-bare uses are codex's documented block, a
-base plus an index, for its six strict-config parser probes.
+This asserts it of the scanned lines: each constant a line names is declared, none is named twice,
+every declared one is named, and a line that is not exactly `probe_ordinal::NAME,` names only the
+constants of codex's documented block, a base plus an index, for its six strict-config parser probes.
 
 ## `struct Adapter` › `declared: &'static [&'static str],`
 
@@ -1170,13 +1172,13 @@ read from the module.
 
 ## `struct Adapter` › `block_parts: &'static [&'static str],`
 
-Constants that may appear in an expression, with the block they open. Everything else must reach
-the Runner as a bare `probe_ordinal::NAME` argument.
+Constants that may appear in an expression, with the block they open. Any other scanned line must be
+exactly `probe_ordinal::NAME,`.
 
 ## `struct Adapter` › `call_sites: usize,`
 
-How many processes this adapter starts through `probe_request`, counting each variable-length block
-as one call site.
+How many of this adapter's source lines contain `probe_request(`, `///` lines aside. A variable-length
+block is one such line, so this is not a count of processes.
 
 ## `fn every_probe_call_site_passes_its_own_ordinal_constant()` › `block_parts: &["CONFIG_BASE", "CONFIG_PER_SURFACE"],`
 
@@ -1185,18 +1187,18 @@ The one variable-length step: six strict-config parser probes (two surfaces x th
 
 ## `fn every_probe_call_site_passes_its_own_ordinal_constant()` › `let collisions: Vec<(&String, &usize)> =`
 
-No constant is used twice: that is the collision this exists to catch, and it is what a table-only
+No constant is named twice: that is the collision this exists to catch, and it is what a table-only
 test cannot see.
 
 ## `fn every_probe_call_site_passes_its_own_ordinal_constant()` › `let declared: BTreeSet<&str> = adapter.declared.iter().copied().collect();`
 
-And every declared constant is used: an ordinal declared and never passed is a step whose identity
-came from somewhere else.
+And every declared constant is named on a scanned line: an ordinal declared and never named is a step
+whose identity came from somewhere else.
 
 ## `fn every_probe_call_site_passes_its_own_ordinal_constant()` › `let calls = adapter`
 
-The number of processes, counted from the call sites rather than from the table.
+The number of source lines that contain `probe_request(`, rather than a number read from the table.
 
 ## `fn every_probe_call_site_passes_its_own_ordinal_constant()` › `assert_eq!(total_sites, 12, "the adapters' probe call sites moved");`
 
-Hostility as a count: 3 + 2 + 7 across the three adapters, written from what each pre-flight does.
+Hostility as a count: 3 + 2 + 7 `probe_request(` lines across the three adapters.

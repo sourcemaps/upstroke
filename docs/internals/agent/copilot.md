@@ -31,7 +31,7 @@ applies, while a review prompt carries up to [`crate::review::MAX_DIFF_BYTES`] o
 ledger shows Copilot attempts as unpriced), and no documented session resume (so §11.4's same-rung
 retry starts fresh with accumulated feedback). Both are `Caps` axes the engine dispatches on.
 `max_turns` has no counterpart, so a per-profile turn cap does not apply to Copilot attempts (the
-wall-clock timeout is the only bound); and whether `--no-ask-user` also suppresses
+wall-clock timeout still bounds them); and whether `--no-ask-user` also suppresses
 *tool-permission* prompts is undocumented, so an un-allowed tool could in principle hang an attempt
 until that timeout.
 
@@ -166,10 +166,9 @@ review re-ask in `src/review.rs` reuses its first ask's `session_id`. This adapt
 ## `pub fn permission_args(profile: &WorkerProfile, gate_cmds: &[String]) -> Vec<String> {`
 
 The per-attempt permission surface as argv (§20). Edit profiles get the write tool and exactly the
-configured gate commands; reviewers get neither. Nobody is granted a URL, so network access stays
-behind a permission this adapter never gives. `--no-ask-user` is passed, but whether it also
-suppresses tool-permission prompts is undocumented (above), so a request for a URL could wait for
-the wall-clock timeout rather than be refused.
+configured gate commands; reviewers get neither. Nobody is granted a URL. `--no-ask-user` is passed,
+but whether it also suppresses tool-permission prompts is undocumented (above), so a request for a URL
+could wait for the wall-clock timeout rather than be refused.
 
 Reading is not granted explicitly because this CLI allows the working directory by default and
 `--add-dir` is what widens that; the engine never widens it, so an agent sees the workspace and
@@ -245,10 +244,9 @@ is executing the diff under review.
 
 ## `fn no_profile_is_ever_handed_the_whole_machine()` › `for permissions in [PermissionMode::Edit, PermissionMode::ReadOnly] {`
 
-§20: for either permission mode, `build_args` emits none of the skip-all flags and grants no URL,
-which is what keeps an edit profile off the network. The fixture's `extra_args` is empty:
-`build_args` appends a profile's `extra_args` verbatim (`extra_args_are_appended_last`), and
-nothing here checks what they hold.
+§20: for either permission mode, `build_args` emits none of the skip-all flags and grants no URL.
+The fixture's `extra_args` is empty: `build_args` appends a profile's `extra_args` verbatim
+(`extra_args_are_appended_last`), and nothing here checks what they hold.
 
 ## `fn the_short_flag_check_is_not_fooled_by_longer_flags()` › `assert!(!crate::agent::advertises_flag(`
 

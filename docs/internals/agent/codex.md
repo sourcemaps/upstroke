@@ -31,7 +31,7 @@ codex-cli 0.147.0: a resume with no sandbox flag ran under the policy its sessio
 review prompt carries up to [`crate::review::MAX_DIFF_BYTES`] of diff, so argv was never an
 option. The CLI also *waits* on stdin when it expects input ("Reading additional input from
 stdin…"), so the payload must always be written and the pipe always closed; [`super::proc`] does
-both, and an empty payload would hang every attempt until the wall-clock timeout.
+both.
 
 **stdout is JSONL, stderr is tracing.** `--json` emits one event per line (`thread.started`,
 `turn.started`, `item.started`, `item.completed`, `turn.completed`) while stderr carries
@@ -75,8 +75,8 @@ carries its justification and the condition under which the section shrinks.
 
 ## `const PROBE_TIMEOUT: Duration = Duration::from_secs(60);`
 
-Generous because §19 makes a probe failure a refusal to start, so a slow machine timing out here
-loses a whole run rather than one attempt. Paid once per run.
+Budget for one probe call. Generous because §19 makes a probe failure a refusal to start, so a slow
+machine timing out here loses a whole run rather than one attempt. Paid once per run.
 
 ## `const CONFIG_PROBE_UNKNOWN_KEY: &str = "upstroke_probe_deliberately_unknown";`
 
@@ -321,9 +321,9 @@ The CLI this adapter names, and what to tell an operator whose boundary does not
 ## `const CLI: &str = "codex";`
 
 One name, not a platform-dependent candidate list. Which file the name is belongs to the boundary
-that executes it, which with a container runner is not this machine's filesystem. Skipping an
-unspawnable candidate (such as a Windows Store package payload that a filesystem lookup sees but
-that refuses to spawn) and applying `PATHEXT` are the resolver's job.
+that executes it, which with a container runner is not this machine's filesystem. Applying `PATHEXT`
+is the resolver's job. The host runner's resolver stats candidates and spawns none, so it does not
+skip one that refuses to spawn (such as a Windows Store package payload).
 
 ## `const INSTALL_HINT`
 
@@ -331,8 +331,8 @@ What to tell an operator whose boundary has no `codex`.
 
 ## `impl AdapterSource for CodexAdapter {`
 
-Registry entry, so `by_id("codex")` resolves without reaching this module through the concrete
-type.
+A source holding this one adapter: `get` returns it for its own id and `None` for any other. `by_id`
+does not use it; it scans `ADAPTERS`.
 
 ## `mod tests` › `const FORBIDDEN: [&str; 4] = [`
 
@@ -483,8 +483,7 @@ Three of the six carry `resume`, so both surfaces were probed, not one surface s
 
 ## `fn the_six_config_parser_probes_are_six_distinct_identities` › `let declared: BTreeSet<u32> = probe_ordinal::ALL.into_iter().collect();`
 
-Each computed ordinal must be one the table reserves, so the computed block and the hand-written
-table cannot drift apart.
+Each computed ordinal must be one the table reserves.
 
 ## `mod tests` › `fn preflight_starts_exactly_the_processes_the_ordinal_table_declares() {`
 

@@ -34,7 +34,7 @@ run, at pre-flight.
 Which of this adapter's pre-flight processes each identity is. A named table rather than a
 counter, for the reason [`super::probe_request`] gives: an ordinal is a property of the step, so
 two pre-flights of one machine mint the same identities whether or not an earlier step was
-skipped. Dense from 0 and pairwise distinct, asserted by `every_preflight_process_has_its_own_ordinal`.
+skipped. Pairwise distinct, asserted by `every_preflight_process_has_its_own_ordinal`.
 
 ## `mod probe_ordinal` › `pub const ALL: [u32; 3] = [VERSION, HELP, AUTH_STATUS];`
 
@@ -77,8 +77,10 @@ only top-level key is `permissions`
 credential. `discovery_asks_with_exactly_the_settings_arguments_a_worker_is_given` compares this
 request against `build_args`' own output, not a copy of it.
 
-`connect`, the capacity report's agent status and pre-flight call this same `discover`, so they
-report an account as a worker would meet it.
+`connect`, the capacity report's agent status and pre-flight call this same `discover`, so all three
+ask with these settings arguments. Which credentials the CLI runs under is the calling runner's:
+`probe_request` sets no credential profile, and pre-flight adds an account's, where it has one
+(`UnderPool`).
 
 **What it still does not show.**
 
@@ -148,8 +150,8 @@ workspace, where there is no path to them at all.
 ## `fn parse_output(out: &ProcessOutput) -> Outcome {`
 
 Defensive outcome parsing: the JSON result is trusted when present, but a missing or malformed
-field never panics and never fails the parse — status degrades to `AgentError` instead. Diff,
-transcript path, and pool drain are engine-owned and left empty here.
+field never panics and never fails the parse. Diff, transcript path, and pool drain are engine-owned
+and left empty here.
 
 ## `fn parse_output(out: &ProcessOutput) -> Outcome` › `outcome.detail = result_text;`
 
@@ -168,8 +170,8 @@ empty stderr.
 
 ## `fn parse_auth_status(out: &ProcessOutput) -> Discovery {`
 
-Read `claude auth status --json` defensively: a missing or malformed field yields
-[`AuthState::Unknown`], never an error and never a confident wrong answer.
+Read `claude auth status --json` defensively: output that is not JSON, or a missing or non-boolean
+`loggedIn`, yields [`AuthState::Unknown`], never an error.
 
 The signed-out shape observed in Aug 2026 was `{"loggedIn": bool, "authMethod": "…",
 "apiProvider": "…"}`; signed in (observed 2026-08-10, Max plan) it grew `email`, `orgId`,

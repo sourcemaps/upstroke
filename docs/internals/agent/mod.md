@@ -18,8 +18,9 @@ is the living design authority.
 Agent adapters (DESIGN.md §8, §16): turn a `TaskRun` into a subprocess of
 an official agent CLI and parse what came back. Adapters never commit and
 never speak HTTP. Besides building commands and reading process output,
-each adapter's `materialize_permissions` writes the permission settings
-file its CLI reads (`util::write_json`). One file per agent.
+each adapter's `materialize_permissions` writes a JSON file (`util::write_json`): Claude Code's is the
+settings file its command references; Copilot's and Codex's is an audit-only record, their permissions
+being argv flags. One file per agent.
 
 ## `#![deny(`
 
