@@ -85,3 +85,31 @@ at `4bb04a65` on ubuntu, macOS and the build box's gates; and the re-run at the 
 jobs, `~/orch-pr11/logs/pr11_impl_g/findings/run-36769385877-jobs.tsv`. Nothing here changes the
 change that takes this up (above).
 
+## A third fingerprint, 2026-11-12
+
+The same test, `workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered`,
+in the `test (winguest)` job (the self-hosted Windows guest), panicked at
+`src\workspace_manager\tests.rs:13274:9` with the message `every sample recovered by its classified
+action` — the sampler's assertion that each sample's classified recovery succeeded
+(`record.recovered`), reached after the assertions that every sample was accounted for and that none
+was unclassified had passed. It did so three times on 2026-11-12, each time the only failing test of
+its job, on pull requests whose changes do not touch the workspace manager:
+
+- CI run 43221659775, job 131194404548, pull request #366 at `583e7e6b`: 3369 passed, 1 failed.
+- CI run 43234617706, job 131238552041, pull request #373 at `72ebee2f`: 3388 passed, 1 failed.
+- CI run 43289831147, job 131432857144, pull request #375 at `1132819`: the same panic.
+
+In the first, the log's per-site summary showed:
+
+    Object.CandidateStage       n=8 none=0 internal=1 after=7 unclassified=0
+    Object.CandidateWriteTree   n=8 none=7 internal=1 after=0 unclassified=0
+    Object.ProposalCherryPick   n=8 none=0 internal=3 after=5 unclassified=0
+    Worktree.Add                n=8 none=1 internal=0 after=7 unclassified=0
+
+Which site's recovery failed the log does not say. No rate is given: the number of guest jobs that
+ran this test that day was not counted for this record.
+
+This is a third fingerprint of this row, not a new row: a recovery that fails is consistent with
+this file's failure sequence — a real `git` still running after the kill ended its launcher — and
+that reading is not established by the logs. The guest was heavily loaded that day.
+
