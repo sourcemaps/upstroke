@@ -704,6 +704,7 @@ pub enum Undecided {
     Availability,
     Window(WindowId, WindowUnknown),
     Demand(DemandProblem),
+    Model,
     Effect,
     Schedule,
     Bound,
@@ -901,6 +902,13 @@ fn decide(context: &Context<'_>, grant: &Grant) -> Decision {
     }
     let mut windows = Vec::with_capacity(context.windows.len());
     for (id, state) in context.windows {
+        let drawn_on = context
+            .queue
+            .iter()
+            .any(|item| draws_on(*id, item.model, Reach::EveryModel));
+        if !drawn_on {
+            continue;
+        }
         match state {
             WindowState::Known(forecast) => {
                 windows.push(SimWindow::new(context, grant.kind, *id, forecast));
@@ -928,8 +936,35 @@ fn decide(context: &Context<'_>, grant: &Grant) -> Decision {
         work,
         models,
         expiry_secs: secs(ends_at_unix.saturating_sub(context.now_unix)),
+        unlabeled: Reach::EveryModel,
     };
     let now_unix = context.now_unix;
+    let reach_matters = scenario.models.contains(&ModelLabel::Unknown)
+        && scenario.windows.iter().any(|window| {
+            draws_on(window.id, ModelLabel::Unknown, Reach::EveryModel)
+                != draws_on(window.id, ModelLabel::Unknown, Reach::NoModel)
+        });
+    let resolved = if reach_matters {
+        let on_every = resolve(&scenario, now_unix);
+        let on_none = resolve(
+            &Scenario {
+                unlabeled: Reach::NoModel,
+                ..scenario
+            },
+            now_unix,
+        );
+        match (on_every, on_none) {
+            (Ok(every), Ok(none)) if every == none => Ok(every),
+            (Ok(_), Ok(_)) => Ok(Decision::Unknown(Undecided::Model)),
+            (Err(too_long), _) | (_, Err(too_long)) => Err(too_long),
+        }
+    } else {
+        resolve(&scenario, now_unix)
+    };
+    resolved.unwrap_or(Decision::Unknown(Undecided::Bound))
+}
+
+fn resolve(scenario: &Scenario, now_unix: u64) -> Result<Decision, TooLong> {
     let cautious = scenario
         .choose(Assumption::NoRestore)
         .map(|choice| decision(choice, now_unix));
@@ -949,7 +984,7 @@ fn decide(context: &Context<'_>, grant: &Grant) -> Decision {
     } else {
         cautious
     };
-    let resolved = match resolved {
+    match resolved {
         Ok(Decision::LetExpire(ExpireReason::NoUnlock)) => {
             scenario.choose(Assumption::BestSchedule).map(|choice| {
                 choice.map_or(Decision::LetExpire(ExpireReason::NoUnlock), |_| {
@@ -958,21 +993,33 @@ fn decide(context: &Context<'_>, grant: &Grant) -> Decision {
             })
         }
         other => other,
-    };
-    resolved.unwrap_or(Decision::Unknown(Undecided::Bound))
+    }
 }
 
 fn decision(choice: Option<f64>, now_unix: u64) -> Decision {
     let Some(at) = choice else {
         return Decision::LetExpire(ExpireReason::NoUnlock);
     };
-    let whole = (at + TIME_EPSILON_SECS).floor();
-    if whole < 1.0 {
+    if at < 1.0 {
         Decision::Redeem
     } else {
         Decision::Defer {
-            until_unix: now_unix.saturating_add(whole_secs_up(whole)),
+            until_unix: now_unix.saturating_add(whole_secs_up(at)),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    EveryModel,
+    NoModel,
+}
+
+fn draws_on(window: WindowId, model: ModelLabel, unlabeled: Reach) -> bool {
+    match (window, model) {
+        (WindowId::Session | WindowId::Weekly | WindowId::Model(ModelLabel::Unknown), _) => true,
+        (WindowId::Model(_), ModelLabel::Unknown) => unlabeled == Reach::EveryModel,
+        (WindowId::Model(label), _) => label == model,
     }
 }
 
@@ -1028,13 +1075,8 @@ impl SimWindow {
         self.used >= FULL_PERCENT - PERCENT_EPSILON
     }
 
-    fn limits(&self, model: ModelLabel) -> bool {
-        match self.id {
-            WindowId::Session | WindowId::Weekly => true,
-            WindowId::Model(label) => {
-                label == model || label == ModelLabel::Unknown || model == ModelLabel::Unknown
-            }
-        }
+    fn limits(&self, model: ModelLabel, unlabeled: Reach) -> bool {
+        draws_on(self.id, model, unlabeled)
     }
 
     fn refill_due(
@@ -1107,6 +1149,7 @@ struct Scenario {
     work: Vec<f64>,
     models: Vec<ModelLabel>,
     expiry_secs: f64,
+    unlabeled: Reach,
 }
 
 impl Scenario {
@@ -1115,8 +1158,8 @@ impl Scenario {
         let mut candidates: Vec<f64> = baseline
             .events
             .iter()
-            .copied()
-            .filter(|at| *at > 0.0 && *at < self.expiry_secs)
+            .map(|at| (at - TIME_EPSILON_SECS).ceil())
+            .filter(|at| *at >= 1.0 && *at < self.expiry_secs)
             .collect();
         let last_chance = self.expiry_secs - 1.0;
         if last_chance > 0.0 {
@@ -1124,7 +1167,7 @@ impl Scenario {
         }
         candidates.push(0.0);
         candidates.sort_by(f64::total_cmp);
-        candidates.dedup_by(|later, earlier| *later - *earlier <= TIME_EPSILON_SECS);
+        candidates.dedup();
         if candidates.len() > MAX_CANDIDATES {
             return Err(TooLong);
         }
@@ -1150,6 +1193,7 @@ impl Scenario {
         let mut clock = 0.0_f64;
         let mut current = 0_usize;
         let mut budget = MAX_STEPS;
+        let reach = self.unlabeled;
         loop {
             budget = budget.checked_sub(1).ok_or(TooLong)?;
             for window in &mut windows {
@@ -1167,7 +1211,7 @@ impl Scenario {
                 });
             };
             let redeem_at = pending.map(|due| due.at);
-            let blocked = |window: &SimWindow| window.limits(model) && window.exhausted();
+            let blocked = |window: &SimWindow| window.limits(model, reach) && window.exhausted();
             if windows.iter().any(blocked) {
                 let unblock = windows
                     .iter()
@@ -1185,7 +1229,7 @@ impl Scenario {
                 continue;
             }
             for window in &mut windows {
-                if window.limits(model) && window.awaiting_use && window.rate > 0.0 {
+                if window.limits(model, reach) && window.awaiting_use && window.rate > 0.0 {
                     if let Clock::Rolling(period) = window.clock {
                         window.refill = Some(clock + period);
                     }
@@ -1194,7 +1238,7 @@ impl Scenario {
             }
             let mut step = *remaining;
             for window in &windows {
-                if window.limits(model) && window.rate > 0.0 {
+                if window.limits(model, reach) && window.rate > 0.0 {
                     step = step.min((FULL_PERCENT - window.used) / window.rate);
                 }
                 if let Some(refill) = window.refill {
@@ -1206,7 +1250,7 @@ impl Scenario {
             }
             let step = step.max(0.0);
             for window in &mut windows {
-                if window.limits(model) && window.rate > 0.0 {
+                if window.limits(model, reach) && window.rate > 0.0 {
                     if (FULL_PERCENT - window.used) / window.rate - step <= TIME_EPSILON_SECS {
                         window.used = FULL_PERCENT;
                         events.push(clock + step);
@@ -2103,10 +2147,11 @@ mod tests {
             1.0,
             100 * HOUR,
         ));
-        assert_eq!(
-            decision(&claude(binding_model, weekly, &one_job(4.0))),
-            Decision::Unknown(Undecided::Effect)
-        );
+        let mut binding = claude(binding_model, weekly, &one_job(4.0));
+        for item in &mut binding.demand {
+            item.model = ModelLabel::Fable;
+        }
+        assert_eq!(decision(&binding), Decision::Unknown(Undecided::Effect));
         let unknown_kind = usable(GrantKind::Unknown, 240 * HOUR);
         assert_eq!(
             decision(&claude(
@@ -2349,24 +2394,99 @@ mod tests {
         );
     }
 
+    fn fable_grant_for(model: ModelLabel) -> Decision {
+        let mut scene = claude(
+            claude_fable_exhausted(),
+            usable(GrantKind::Fable, 48 * HOUR),
+            &one_job(1.0),
+        );
+        for item in &mut scene.demand {
+            item.model = model;
+        }
+        decision(&scene)
+    }
+
     #[test]
     fn fable_grant_cannot_unlock_already_runnable_sonnet_work() {
-        let on_model = |model: ModelLabel| {
-            let mut scene = claude(
-                claude_fable_exhausted(),
-                usable(GrantKind::Fable, 48 * HOUR),
-                &one_job(1.0),
-            );
-            for item in &mut scene.demand {
-                item.model = model;
-            }
-            decision(&scene)
-        };
         assert_eq!(
-            on_model(ModelLabel::Sonnet),
+            fable_grant_for(ModelLabel::Sonnet),
             Decision::LetExpire(ExpireReason::NoUnlock)
         );
-        assert_eq!(on_model(ModelLabel::Fable), Decision::Redeem);
+        assert_eq!(fable_grant_for(ModelLabel::Fable), Decision::Redeem);
+    }
+
+    #[test]
+    fn unidentified_work_does_not_prove_model_demand() {
+        assert_eq!(
+            fable_grant_for(ModelLabel::Sonnet),
+            Decision::LetExpire(ExpireReason::NoUnlock)
+        );
+        assert_eq!(fable_grant_for(ModelLabel::Fable), Decision::Redeem);
+        assert_eq!(
+            fable_grant_for(ModelLabel::Unknown),
+            Decision::Unknown(Undecided::Model)
+        );
+    }
+
+    #[test]
+    fn unrelated_model_reading() {
+        let scene = |model: ModelLabel, fable_read: bool| {
+            let mut readings = exhausted_weekly();
+            if fable_read {
+                readings.push(reading(FABLE, 0, 50.0, 100 * HOUR));
+            }
+            let mut built = claude(
+                readings,
+                usable(GrantKind::Weekly, 240 * HOUR),
+                &one_job(4.0),
+            );
+            for item in &mut built.demand {
+                item.model = model;
+            }
+            built
+        };
+        assert_eq!(
+            decision(&scene(ModelLabel::Sonnet, false)),
+            Decision::Redeem
+        );
+        let sonnet = scene(ModelLabel::Sonnet, true);
+        assert_eq!(
+            state(&only_plan(&sonnet), FABLE),
+            WindowState::Unknown(WindowUnknown::InsufficientHistory)
+        );
+        assert_eq!(decision(&sonnet), Decision::Redeem);
+        let unread =
+            Decision::Unknown(Undecided::Window(FABLE, WindowUnknown::InsufficientHistory));
+        for model in [ModelLabel::Fable, ModelLabel::Unknown] {
+            assert_eq!(decision(&scene(model, true)), unread, "{model:?}");
+        }
+    }
+
+    #[test]
+    fn subsecond_exhaustion_is_rounded_before_comparison() {
+        let per_hour = 60.0;
+        let mut readings = burning(
+            WindowId::Weekly,
+            FULL_PERCENT - per_hour * 0.5 / SECS_PER_HOUR,
+            per_hour,
+            72 * HOUR,
+        );
+        readings.extend(burning(WindowId::Session, 0.0, 0.0, 5 * HOUR));
+        let scene = claude(
+            readings,
+            usable(GrantKind::Weekly, 240 * HOUR),
+            &one_job(6_000.5 / SECS_PER_HOUR),
+        );
+        let WindowState::Known(weekly) = state(&only_plan(&scene), WindowId::Weekly) else {
+            panic!("the weekly window is forecast");
+        };
+        assert_eq!(weekly.exhaustion_unix, Some(NOW + 1));
+        assert_eq!(
+            decision(&scene),
+            Decision::Defer {
+                until_unix: NOW + 1
+            }
+        );
     }
 
     #[test]

@@ -56,7 +56,8 @@ plan is a fixture.
 ## Units
 
 - **Time**: Unix seconds (`u64`) on every input and output. The simulation measures seconds after
-  `now_unix` as `f64`; a `Defer` is rounded to a whole second (below).
+  `now_unix` as `f64`, but a redemption is only ever simulated at a whole second, so the time a
+  decision states is a time that was scored (below).
 - **Usage**: percent of a window's allowance used, `0.0` through `100.0` inclusive. `100.0` is
   exhausted.
 - **Burn**: percent of the window per hour (`Segment::percent_per_hour`,
@@ -65,8 +66,9 @@ plan is a fixture.
   demand advances each window it draws on by that window's observed `percent_per_hour`. It must be
   finite and positive. Work draws on the session and weekly windows and on the model window named
   by `Demand::model`; another model's window neither limits it nor advances. Work whose model is
-  `ModelLabel::Unknown` draws on every model window, and all work draws on an unlabeled model
-  window (`WindowId::Model(ModelLabel::Unknown)`).
+  `ModelLabel::Unknown` is unlabeled: which model window it draws on is not known, so it is
+  decided twice, once drawing on every model window and once on none (see `decide`). All work
+  draws on an unlabeled model window (`WindowId::Model(ModelLabel::Unknown)`).
 - **Priority**: `u32`, larger is more important.
 - **Freshness**: `Input::stale_after_secs`, the oldest a window's latest reading or an inventory may
   be. It is the caller's; there is no default.
@@ -210,10 +212,20 @@ Checks are applied in this order, and the first that settles the grant decides i
    `usable_now: false`, into `NotUsable`, and the same count may become usable a second later.
 3. An account with no runnable demand is `LetExpire(NoUnlock)`, since a redemption can unlock
    nothing.
-4. Any of the account's windows unknown is `Unknown(Window(id, reason))`, because any window may be
-   the one that limits.
+4. A window some queued item draws on that is unknown is `Unknown(Window(id, reason))`, because it
+   may be the one that limits. Unlabeled work counts as drawing on every model window here. A
+   window no queued item draws on, such as another model's window when all the work names its
+   model, neither limits the queue nor advances with it: its state decides nothing, and it is left
+   out of the comparison.
 5. Any invalid demand item on the account is `Unknown(Demand(problem))`.
 6. Otherwise the comparison below decides.
+
+Where the queue holds unlabeled work and the comparison has a model window that work could draw on,
+the whole comparison, its effect bounds and schedule check included, is made twice: once with the
+unlabeled work drawing on every model window and once on none. The grant is decided only where
+the two agree, and is `Unknown(Model)` otherwise. An exhausted model window is not evidence of
+demand for its reset when the same work could as well run on another model now. A scenario over
+`MAX_STEPS` in either is `Unknown(Bound)`.
 
 ## `impl Scenario` › `fn simulate(&self, redemption: Option<Redemption>) -> Result<Outcome, TooLong> {`
 
@@ -233,9 +245,13 @@ that exceeds it is `Unknown(Bound)`.
 
 ## `impl Scenario` › `fn choose(&self, assumption: Assumption) -> Result<Option<f64>, TooLong> {`
 
-The baseline is the queue with the grant never redeemed. The candidate redemption times are now,
-every refill and exhaustion moment the baseline passes before the grant's end, and the last whole
-second before the end. More than `MAX_CANDIDATES` is `Unknown(Bound)`. Each candidate is simulated
+The baseline is the queue with the grant never redeemed. The candidate redemption times are whole
+seconds after `now_unix`: now, the first whole second at or after each refill and exhaustion moment
+the baseline passes (with a tolerance of `TIME_EPSILON_SECS`), and the last whole second before
+the grant's end. A candidate at or after the end is dropped. A moment is rounded before it is
+simulated, never after, so a redemption is scored at the second it would be recommended for.
+Rounding up keeps a candidate from landing before the exhaustion or refill it answers. More than
+`MAX_CANDIDATES` is `Unknown(Bound)`. Each candidate is simulated
 and scored, and a candidate is chosen only when it is strictly better than the baseline. Nominal
 restored quota is therefore never valued: only useful work done sooner, or completed at all,
 counts. The cost of moving a refill schedule is part of every candidate's simulated future.
@@ -256,8 +272,10 @@ every higher level ties, so useful high-priority work outweighs any amount of lo
   candidate. `Defer` means waiting loses nothing, or gains something. A deferral to the grant's last
   second (`ends_at_unix - 1`) is a real answer: any time up to then serves equally well, and the
   handler would plan again before it.
-- A chosen time is rounded down to the whole second. Under one second from now is `Redeem`;
-  otherwise it is `Defer { until_unix }`.
+- The chosen time is the whole second that was scored. Second `0` is `Redeem`; any later second
+  `s` is `Defer { until_unix: now_unix + s }`. An exhaustion half a second away is therefore
+  `Defer` to the next second when redeeming then beats redeeming now: a redemption now throws away
+  the half second the window still holds.
 - An account's grants are decided independently, each as if no other were redeemed. Because a
   redemption requires balances and timestamps to be read again before restored capacity is
   allocated (§13), at most one grant per account is `Redeem`. It is the one with the earliest
@@ -270,9 +288,13 @@ An unknown is never filled with a guess:
 
 - Unknown inventory (`Grants::Unknown`) is distinct from known-empty inventory
   (`Grants::KnownEmpty`).
-- An unknown window, availability or demand leaves the grant `Decision::Unknown` with the specific
-  reason; no balance, rate, date or spendable grant is invented. A grant not usable now has unknown
+- An unknown window that queued work draws on, unknown availability or invalid demand leaves the
+  grant `Decision::Unknown` with the specific reason; no balance, rate, date or spendable grant is
+  invented. A grant not usable now has unknown
   availability; it is not taken to expire unusable.
+- The model window unlabeled work draws on is unknown. Where it matters, the comparison runs with
+  that work drawing on every model window and on none; the decision stands only when both agree,
+  and is `Unknown(Model)` otherwise.
 - The schedule a restarted window gets after a redemption is unknown. Its lower bound (no refill)
   may choose a redemption; a no-benefit answer stands only when the best schedule gains nothing
   either, and is `Unknown(Schedule)` otherwise.
@@ -293,8 +315,10 @@ Each of these can change a decision:
 2. **Demand is serial at the account's burn.** Competing runs on one account are served one after
    another in rank order. Their hours add; they do not overlap or multiply the rate.
 3. **Work draws on its own model's window.** An item stated as one model is limited by the session,
-   weekly and that model's window only. An item whose model is `ModelLabel::Unknown` is assumed to
-   draw on every model window, so an exhausted model window blocks it.
+   weekly and that model's window only. An item whose model is `ModelLabel::Unknown` is not taken to
+   draw on any one model's window: the grant is decided with it drawing on every model window and
+   on none, and an answer the two do not share is `Unknown(Model)`. An unknown model window it
+   could draw on still leaves the grant unknown.
 4. **Claude's session window rolls.** After its reported refill, a Claude session window opens a new
    five-hour window at its next use. Weekly Claude windows refill every seven days from the
    reported reset. Nothing is assumed of model or Codex windows after their reported refill.
@@ -317,12 +341,15 @@ readings, one hour apart, ending at `NOW`. All other helpers build on it:
 - `filling_weekly(resets_in)`: weekly at 60% burning 2%/h, so it is exhausted 20 h out unless it
   refills first, and an idle session window refilling in 5 h.
 - `one_job(hours)`: one feature run of priority 5. Every demand item the helpers build has the model
-  `ModelLabel::Unknown`, so it draws on every model window; a test that names a model sets it.
+  `ModelLabel::Unknown`, so a scene with a model window decides it both ways (above); a test that
+  names a model sets it.
 - `input(..)` and `claude(..)`: one `operator` account with a fresh `Source::Reader` inventory, no
   `Account::coverage`, and `stale_after_secs` of one hour. A Codex test that expects known effects
   sets `codex_covered_allowances()` (below).
 - `claude_fable_exhausted()`: the Fable model window at 100% (10%/h, refills in 50 h), session at
   20% (10%/h, 3 h) and weekly at 40% (1%/h, 72 h). Only work that draws on the Fable window waits.
+- `fable_grant_for(model)`: the decision on a Fable grant ending in 48 h, over
+  `claude_fable_exhausted()` and one hour of work of the given model.
 - `codex_covered_allowances()`: the windows a Codex banked reset covers, per plan: `plus` covers
   weekly only; `pro` covers session and weekly. Synthetic, since no Codex reader exists; the test
   that uses it sets it as the account's `Account::coverage`.
@@ -347,7 +374,9 @@ Worked examples the tests pin:
 | Codex `plus` with `codex_covered_allowances()`, full grant ending in 48 h: weekly at 0% (100 h), uncovered session at 100% (25%/h, 2 h), 1 h job | `LetExpire(NoUnlock)`: on `plus` the reset leaves the session unchanged, and the weekly has no use to restore |
 | the same `plus` scene with no `Account::coverage` | `Unknown(Effect)`: every effect is unknown, and the hopeful bound redeems where the cautious one does not |
 | weekly under `max` at 98% and 100% (50 and 40 min ago), weekly grant, 4 h job, session readings 30 min ago, 20 min ago and now, the first under `pro`, the others under `max` | the weekly is `Unknown(PlanChanged)` and the grant `Unknown(Window(Weekly, PlanChanged))`; with the first session reading under `max` too, the weekly is forecast and the grant is `Redeem` |
-| `claude_fable_exhausted()`, Fable grant ending in 48 h, 1 h of Sonnet work; then the same hour as Fable work | `LetExpire(NoUnlock)`: the Sonnet work runs now on the existing session and weekly balance; `Redeem` for the Fable work |
+| `claude_fable_exhausted()`, Fable grant ending in 48 h, 1 h of Sonnet work; then the same hour as Fable work; then as unlabeled work | `LetExpire(NoUnlock)`: the Sonnet work runs now on the existing session and weekly balance; `Redeem` for the Fable work; `Unknown(Model)`: drawing on every model window it is the Fable work, on none it is the Sonnet work |
+| `exhausted_weekly`, weekly grant, 4 h of Sonnet work, with one Fable reading (no rate); then the same with Fable or unlabeled work | `Redeem`: the Sonnet work does not draw on the unknown Fable window; `Unknown(Window(Model(Fable), InsufficientHistory))` |
+| weekly half a second from exhaustion at 60%/h (a 6000 s allowance, refilling in 72 h), idle session, weekly grant ending in 240 h, a 6000.5 s job | `Defer` to `NOW + 1`: redeeming at second one finishes at 6001 s, and redeeming now at 259200.5 s, after the weekly refill |
 
 A planner test pins the history rule above: weekly readings under `max` two hours apart, with a
 session reading under `pro` between them, are two segments (`First`, `PlanChange`) and the weekly
