@@ -5583,7 +5583,7 @@ fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {
     );
     let catches = "catch { if ($code -ne 0) { \"reading the suite's output or listing the processes it left failed: $_\" } else { throw } }";
     let builds = "$build = Start-Process ";
-    let build_exits = "if ($code -ne 0) { Get-Content $err; exit $code }";
+    let build_exits = "if ($code -ne 0) { try { Get-Content $err } catch { \"reading the build's errors failed: $_\" }; exit $code }";
     let collects = "$harnesses = @(Get-Content $built | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -ceq 'compiler-artifact' -and $_.profile.test -and $_.executable } | ForEach-Object { $_.executable }); if ($harnesses.Count -eq 0) { throw \"Cargo built no test harness, so this shard would run nothing\" }";
     let bootstraps = "$env:RUSTC_BOOTSTRAP = '1'; ";
     let runs = "$suite = Start-Process ";
@@ -5643,10 +5643,12 @@ fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {
     if !builds_whole {
         out.push(
             "does not build the test harnesses with `cargo test --all-targets --all-features \
-             --no-run`, its messages written as JSON, and exit with Cargo's code on the next line \
-             when the build fails: without `--no-run` Cargo runs the whole suite itself, with no \
-             times, before the harnesses run the shard again, and a build that failed after it \
-             linked some harnesses runs those and can pass",
+             --no-run`, its messages written as JSON, and, on the next line when the build \
+             fails, read the build's errors in a `try` and exit with Cargo's code: without \
+             `--no-run` Cargo runs the whole suite itself, with no times, before the harnesses \
+             run the shard again, a build that failed after it linked some harnesses runs those \
+             and can pass, and a read of the errors that fails outside a `try` ends the step \
+             with PowerShell's error, not Cargo's code",
         );
     }
     let sets_bootstrap: Vec<usize> = lines
@@ -5963,8 +5965,19 @@ fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {
             "the build's failure not exited on",
             replaced(
                 script,
-                "if ($code -ne 0) { Get-Content $err; exit $code }\n",
+                "if ($code -ne 0) { try { Get-Content $err } catch { \"reading the build's errors \
+                 failed: $_\" }; exit $code }\n",
                 "",
+            ),
+            builds,
+        ),
+        (
+            "the build's errors read outside a `try`",
+            replaced(
+                script,
+                "if ($code -ne 0) { try { Get-Content $err } catch { \"reading the build's errors \
+                 failed: $_\" }; exit $code }\n",
+                "if ($code -ne 0) { Get-Content $err; exit $code }\n",
             ),
             builds,
         ),

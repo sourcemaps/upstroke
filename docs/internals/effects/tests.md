@@ -2301,8 +2301,8 @@ from its text, as the ones it does not do. Ten:
    waits for the process's descendants as well.
 2. It pipes nothing into `Tee-Object`.
 3. It builds the harnesses with `TEST_COMMAND`, `--no-run` and the JSON
-   message format, keeps Cargo's exit, and exits with it on the next line
-   when the build failed.
+   message format, keeps Cargo's exit, and on the next line, when the build
+   failed, reads the build's errors in a `try` and exits with it.
 4. It sets `RUSTC_BOOTSTRAP` only after the build, and before it starts the
    harnesses.
 5. It collects, on the line before it starts them, every harness the build
@@ -2385,7 +2385,8 @@ The third complaint: the build whole. The first line holding
 `$build = Start-Process ` must hold it followed by
 [`windows_suite_build_arguments`], must end by keeping `$build.ExitCode` as
 `$code`, and must be followed by
-`if ($code -ne 0) { Get-Content $err; exit $code }`, whole.
+`if ($code -ne 0) { try { Get-Content $err } catch { "reading the build's errors failed: $_" }; exit $code }`,
+whole.
 
 `--no-run`, because without it `cargo test` runs every harness it built,
 over the whole suite and with no times, and only then does the loop run the
@@ -2394,12 +2395,22 @@ exit on the next line is the build's own: Cargo can fail having linked
 some harnesses, whose messages are already in the file, and a script that
 went on would collect those, run them, and could pass. The build's
 standard error is printed first, since the diagnostics that say why are
-there.
+there, and it is read inside a `try`: GitHub runs a `pwsh` step with
+`$ErrorActionPreference = 'stop'`, so a read that fails outside one ends
+the step with PowerShell's error, not Cargo's code, and without the
+errors. The `catch` prints the failure, and the exit after it is Cargo's
+code either way. Its message names no `cargo`, which `holds_cargo` would
+count against the line (the ninth complaint). When the build was split
+from the run the line read the errors bare, where `cffdb983` had read
+them inside the `try` whose `catch` keeps the code, until a review found
+it. That is read from the text; no run showed it.
 
-Measured by two edits in
+Measured by three edits in
 [`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`]:
-`--no-run` removed, and the next line's exit removed. In the workflow
-alone the first is `MUT-TEST-WINDOWS-HOSTED-BUILD-RUNS-THE-SUITE`
+`--no-run` removed, the next line's exit removed, and that line put back
+as it stood, reading the errors outside a `try`. In the workflow alone the
+first is `MUT-TEST-WINDOWS-HOSTED-BUILD-RUNS-THE-SUITE` and the third
+`MUT-TEST-WINDOWS-HOSTED-BUILD-ERRORS-READ-UNGUARDED`
 (`ci_test_windows_hosted_job_complaints` in the workflow notes).
 
 ## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {` › `let bootstraps_after_the_build = build_at.is_some_and(|at| {`
@@ -2756,7 +2767,7 @@ eleven lines, nor since it became fourteen, when the floor moved to line
 The complaints of [`windows_suite_wait_complaints`] that the oracle's pin
 cannot refuse, executed on the shards' script, `WINDOWS_SHARD_WITNESS`:
 every one but the second and the eighth. The script as the workflow runs it
-draws no complaint, and each of twenty-three edits to it draws exactly one,
+draws no complaint, and each of twenty-four edits to it draws exactly one,
 the one the edit is made for. The test's name is for the ninth and the
 tenth, which were all it executed until the legs reported their tests'
 times. Until 2026-11-20 its edits, eight then, were made to the guest's
@@ -2813,6 +2824,10 @@ Two more, each drawing the seventh, came when the loop came to keep each
 harness's code before it copies the harness's two outputs: the code kept
 only after the copies, and the standard output copied outside a `try` of
 its own.
+
+One more, drawing the third, came when the build's errors came to be read
+in a `try`: the line after the build put back as it stood, reading them
+outside one.
 
 Exactly one complaint, not at least one. So the test also shows that each
 edit is refused by the complaint written for it and by no other: a second

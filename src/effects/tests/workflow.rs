@@ -3572,6 +3572,19 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         refused_as: "test-windows-hosted-command",
     },
     WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-BUILD-ERRORS-READ-UNGUARDED",
+        escape: "the build's errors read outside a `try`, the line the step had before it read \
+                 them in one: under `$ErrorActionPreference = 'stop'` a build that failed and \
+                 whose errors file cannot be read ends the step with PowerShell's error, not \
+                 Cargo's code, and without the errors that say what failed. Not a false green, \
+                 since the step still fails, but the leg's log says a file could not be read \
+                 and not why the build failed",
+        job: Some("test-windows-hosted"),
+        anchor: "          if ($code -ne 0) { try { Get-Content $err } catch { \"reading the build's errors failed: $_\" }; exit $code }\n",
+        replacement: "          if ($code -ne 0) { Get-Content $err; exit $code }\n",
+        refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-EMPTY-HARNESS-LIST-ALLOWED",
         escape: "the refusal of an empty list of harnesses is gone. Not a false green while the \
                  lines after it hold: with no harness run no output is written, and reading it \

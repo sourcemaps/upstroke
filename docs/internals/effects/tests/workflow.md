@@ -596,6 +596,15 @@ before the loop runs the shard again; on 2026-11-15 the whole suite alone
 took 3,311 to 4,292 s in the harness on this runner, more than a leg's 40
 minutes.
 
+`MUT-TEST-WINDOWS-HOSTED-BUILD-ERRORS-READ-UNGUARDED` puts back the line
+after the build as it stood before it read the build's errors in a `try`:
+`if ($code -ne 0) { Get-Content $err; exit $code }`. Under
+`$ErrorActionPreference = 'stop'` a build that failed and whose errors file
+cannot be read then ends the step with PowerShell's error, not Cargo's
+code, and without the errors that say what failed. Not a false green, since
+the step still fails, but the leg's log says a file could not be read and
+not why the build failed.
+
 `MUT-TEST-WINDOWS-HOSTED-EMPTY-HARNESS-LIST-ALLOWED` removes the refusal of
 an empty list of harnesses. Not a false green while the lines after it
 hold: with no harness run there is no output to read and no count to clear

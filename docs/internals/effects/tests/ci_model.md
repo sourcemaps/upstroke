@@ -299,7 +299,10 @@ Between the compiler check and the count is the suite itself, lines 3 to
 5. The build's failure: its standard error printed, and its code the
    step's exit. Cargo can fail having linked some harnesses, whose messages
    are already in the file, and a script that went on would run those and
-   could pass.
+   could pass. The errors are read inside a `try` whose `catch` prints a
+   failed read in their place, and the exit comes after the `catch`, so a
+   read that fails cannot replace Cargo's code. Measured,
+   `MUT-TEST-WINDOWS-HOSTED-BUILD-ERRORS-READ-UNGUARDED`.
 6. The harnesses: every message in the build's file whose `reason` is
    `compiler-artifact`, compared case-sensitively, whose profile is a
    test's and which names an executable, in the order Cargo reported them.
