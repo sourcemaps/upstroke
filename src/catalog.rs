@@ -86,6 +86,12 @@ pub const CATALOG: &[CatalogEntry] = &[
     ),
     entry(
         "claude-code",
+        "claude-fable-5-2",
+        Tier::Frontier,
+        Family::Anthropic,
+    ),
+    entry(
+        "claude-code",
         "claude-opus-4-8",
         Tier::Frontier,
         Family::Anthropic,
@@ -282,6 +288,60 @@ mod tests {
             example_binding(Tier::Frontier),
             EXAMPLE_FRONTIER,
             "registering the pair changes no default binding"
+        );
+    }
+
+    #[test]
+    fn fable_5_2_is_registered_exactly_behind_opus_5_5_and_moves_no_default() {
+        let fable = lookup("claude-code", "claude-fable-5-2").expect("Fable 5.2 is catalogued");
+        assert_eq!(
+            (fable.tier, fable.family),
+            (Tier::Frontier, Family::Anthropic)
+        );
+
+        let position = |agent: &str, model: &str| {
+            CATALOG
+                .iter()
+                .position(|e| e.agent == agent && e.model == model)
+                .unwrap_or_else(|| panic!("{agent}/{model} is catalogued"))
+        };
+        assert_eq!(
+            position("claude-code", "claude-fable-5-2"),
+            position("claude-code", "claude-opus-5-5") + 1,
+            "Fable 5.2 sits immediately behind Opus 5.5"
+        );
+
+        for (agent, model) in [
+            ("claude-code", "claude-fable-5.2"),
+            ("claude-code", "fable"),
+            ("claude-code", "claude-fable"),
+            ("copilot", "claude-fable-5-2"),
+            ("codex", "claude-fable-5-2"),
+        ] {
+            assert!(
+                lookup(agent, model).is_none(),
+                "{agent}/{model} must stay unknown"
+            );
+        }
+
+        assert_eq!(
+            example_binding(Tier::Frontier),
+            EXAMPLE_FRONTIER,
+            "registering Fable 5.2 changes no default binding"
+        );
+        assert_eq!(
+            different_family_at(Tier::Frontier, Family::OpenAI, everything)
+                .map(|picked| (picked.agent, picked.model)),
+            Some(("claude-code", "claude-opus-5")),
+            "the Anthropic partner of an OpenAI-family primary is still the default Opus"
+        );
+        assert_eq!(
+            CATALOG
+                .iter()
+                .find(|e| e.agent == "claude-code" && e.tier == Tier::Frontier)
+                .map(|e| e.model),
+            Some("claude-opus-5"),
+            "claude-code's first frontier entry, the repair ladder's pick, is still the default Opus"
         );
     }
 

@@ -55,7 +55,8 @@ Preview default per tier when no pin applies (also listed in [`CATALOG`]).
 
 Snapshot of the Claude Code, Copilot and Codex CLI rosters as of Aug 2026,
 plus the two exact frontier slugs added in Nov 2026 for the self-host
-binding (`claude-opus-5-5`, `gpt-6-astra`).
+binding (`claude-opus-5-5`, `gpt-6-astra`) and one more added later that
+month for explicit pins only (`claude-fable-5-2`).
 
 **Table order is preference order.** [`different_family_at`] returns the
 first match, so moving an entry up promotes it for cross-family review.
@@ -97,6 +98,28 @@ it was:
 
 Moving this row ahead of Opus 5 would move those two picks and leave the
 preview where it is. Changing the default means changing `EXAMPLE_FRONTIER`.
+
+## `"claude-fable-5-2",`
+
+Registered for explicit pins: `[[pins]] tier = "frontier", agent =
+"claude-code", model = "claude-fable-5-2"` loads and binds the frontier tier
+to it. The slug is exact. The dotted `claude-fable-5.2`, the bare `fable` or
+`claude-fable`, and the same name under `copilot` or `codex` all stay unknown
+pins. No default moves, for the same two reasons as Opus 5.5:
+
+- **The constant.** `EXAMPLE_FRONTIER` is untouched, so the unpinned preview,
+  the unpinned worker and the unpinned review primary are still
+  `claude-opus-5`.
+- **The row's place.** This row sits behind both Opus 5 and Opus 5.5, so it
+  is never the first Anthropic frontier match. `different_family_at(Frontier,
+  OpenAI, _)` and the repair ladder's `claude-code` frontier pick both still
+  resolve to `claude-opus-5`. Its place relative to the retained
+  `claude-opus-4-8` decides no pick today. It only orders the list of known
+  `claude-code` models that an unknown pin's refusal prints.
+
+A Fable 5.2 pin is Anthropic-family, so its cross-family review partner is
+the same one an Opus pin gets. Making it the default means changing
+`EXAMPLE_FRONTIER`, not moving this row.
 
 ## `entry("copilot", "gemini-3.1-pro", Tier::Mid, Family::Google),`
 
@@ -247,6 +270,14 @@ error, never a near match.
 The restricted build is a control. The `everything` assertion after it is
 the claim the shipped binary depends on, since its registry also carries
 Copilot.
+
+## `fn fable_5_2_is_registered_exactly_behind_opus_5_5_and_moves_no_default() {`
+
+The new row's exact slug, its place right behind Opus 5.5, and the near
+misses that must keep refusing. The last three assertions are the defaults
+and order-driven picks it must not move: the example binding, the Anthropic
+partner of an OpenAI-family primary, and `claude-code`'s first frontier
+entry, which is what the repair ladder takes.
 
 ## `fn a_tier_with_no_reachable_other_family_resolves_to_nothing` › `let claude_only = |agent: &str| agent == "claude-code";`
 
