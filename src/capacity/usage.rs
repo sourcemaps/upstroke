@@ -3,6 +3,9 @@
 //!
 //! A report is what one provider usage endpoint said about one pool at one
 //! moment: per quota window, how much was drawn and when the window resets.
+//! Where the provider reports per account, it also records which account it
+//! was asked about, since that is what the reading measures and the pool's
+//! `usage_account` can change after it was taken ([`account_for`]).
 //! The tracker (`src/tracker.rs`) is the only writer; it asks the endpoint
 //! over HTTPS, which the engine never does (§4.2). Everything here is the
 //! other side of that line: a persisted schema, its codec, and the read. No
@@ -24,6 +27,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use super::UsageSource;
 
 /// The schema this build writes and the only one it reads.
 pub const SCHEMA: u32 = 1;
@@ -70,9 +75,31 @@ pub struct UsageReport {
     pub pool: String,
     /// The provider endpoint that answered (`usage_provider`).
     pub provider: String,
+    /// The account the endpoint was asked about, which is the pool's
+    /// `usage_account` at the refresh, or `None` for a provider that reports
+    /// per key and not per account ([`account_for`]). It is the account's
+    /// name and never a credential. A report stored before accounts were
+    /// recorded reads back as `None` as well.
+    pub account: Option<String>,
     /// When the tracker received the answer, in Unix seconds.
     pub fetched_at: u64,
     pub windows: Vec<UsageWindow>,
+}
+
+/// The account a report fetched for `source` is about: the pool's
+/// `usage_account` where the provider reports per account, and `None` where
+/// it reports per key, whatever the pool sets.
+///
+/// The tracker records this in each report it writes, and
+/// `capacity::machine::reading` holds a stored report to what it answers for
+/// the pool as configured now. Both call this one function, so writer and
+/// reader cannot disagree about which account a report belongs to.
+#[must_use]
+pub fn account_for(source: &UsageSource) -> Option<&str> {
+    source
+        .account
+        .as_deref()
+        .filter(|_| source.provider.needs_account())
 }
 
 /// Why a report file is not a report.
@@ -101,6 +128,11 @@ struct RawReport {
     schema: u32,
     pool: String,
     provider: String,
+    /// Optional, so that a report stored before accounts were recorded still
+    /// decodes, and left out of a per-key provider's report, which is then
+    /// the same bytes it was before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account: Option<String>,
     fetched_at: String,
     windows: Vec<RawWindow>,
 }
@@ -138,6 +170,7 @@ impl UsageReport {
             schema: SCHEMA,
             pool: self.pool.clone(),
             provider: self.provider.clone(),
+            account: self.account.clone(),
             fetched_at: crate::util::rfc3339_utc(self.fetched_at),
             windows: self
                 .windows
@@ -161,7 +194,9 @@ impl UsageReport {
     ///
     /// [`ReportDefect`] for anything that is not exactly a schema-1 report
     /// within the bounds above: an unknown field, a missing one, a number out
-    /// of range, a timestamp this build cannot read.
+    /// of range, a timestamp this build cannot read. `account` is the one
+    /// field that may be absent, as it is from a per-key provider's report
+    /// and from any report stored before accounts were recorded.
     pub fn decode(bytes: &[u8]) -> Result<Self, ReportDefect> {
         let probe: SchemaProbe = serde_json::from_slice(bytes)
             .map_err(|error| ReportDefect::Malformed(error.to_string()))?;
@@ -200,6 +235,7 @@ impl UsageReport {
         let report = Self {
             pool: raw.pool,
             provider: raw.provider,
+            account: raw.account,
             fetched_at,
             windows,
         };
@@ -218,6 +254,20 @@ impl UsageReport {
     pub fn validate(&self) -> Result<(), ReportDefect> {
         check_name("pool", &self.pool)?;
         check_name("provider", &self.provider)?;
+        if self
+            .account
+            .as_deref()
+            .is_some_and(|account| !super::names_an_account(account))
+        {
+            return Err(ReportDefect::Field {
+                field: "account",
+                problem: format!(
+                    "not an account name: letters, digits, `.`, `_` and `-`, not starting with \
+                     `.` or `-`, at most {} characters",
+                    super::MAX_USAGE_KEY_CHARS
+                ),
+            });
+        }
         if self.windows.len() > MAX_WINDOWS {
             return Err(ReportDefect::Field {
                 field: "windows",
@@ -421,6 +471,7 @@ mod tests {
         UsageReport {
             pool: "anthropic-api".to_owned(),
             provider: "anthropic-cost".to_owned(),
+            account: None,
             fetched_at: 1_795_435_380,
             windows: vec![UsageWindow {
                 label: "month".to_owned(),
@@ -460,6 +511,122 @@ mod tests {
                 ],
             })
         );
+    }
+
+    /// A report from a provider that reports per account, as the tracker
+    /// writes one.
+    fn per_account() -> UsageReport {
+        UsageReport {
+            pool: "copilot".to_owned(),
+            provider: "github-ai-credits".to_owned(),
+            account: Some("octo-cat".to_owned()),
+            ..report()
+        }
+    }
+
+    #[test]
+    fn a_report_records_the_account_it_was_fetched_for() {
+        let written = encoded(&per_account());
+        let value: serde_json::Value =
+            serde_json::from_str(&written).expect("the encoding is JSON");
+        assert_eq!(value["account"], "octo-cat", "{written}");
+        assert_eq!(UsageReport::decode(written.as_bytes()), Ok(per_account()));
+    }
+
+    #[test]
+    fn a_report_stored_before_accounts_were_recorded_still_decodes() {
+        let stored_before = serde_json::json!({
+            "schema": 1,
+            "pool": "copilot",
+            "provider": "github-ai-credits",
+            "fetched_at": "2026-11-23T12:03:00Z",
+            "windows": [
+                {"label": "month", "used_amount": 12.5, "resets_at": "2026-12-01T00:00:00Z"},
+            ],
+        });
+        let unrecorded = UsageReport {
+            account: None,
+            ..per_account()
+        };
+        assert_eq!(
+            UsageReport::decode(stored_before.to_string().as_bytes()),
+            Ok(unrecorded.clone()),
+            "a report written before the account was recorded is still a report, of no known \
+             account"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&encoded(&unrecorded))
+                .expect("the encoding is JSON"),
+            stored_before,
+            "and a report with no account is written as one was before the field existed"
+        );
+    }
+
+    #[test]
+    fn an_account_that_is_not_an_account_name_is_refused_on_the_way_in_and_on_the_way_out() {
+        for account in ["", "octo cat", "../orgs/acme", "-octo", "octo\u{1b}[2J"] {
+            let bad = UsageReport {
+                account: Some(account.to_owned()),
+                ..per_account()
+            };
+            let refused = bad.validate();
+            assert!(
+                matches!(
+                    refused,
+                    Err(ReportDefect::Field {
+                        field: "account",
+                        ..
+                    })
+                ),
+                "{account:?} validated"
+            );
+            assert_eq!(
+                bad.encode(),
+                refused.clone().map(|()| String::new()),
+                "{account:?}: what does not validate does not encode"
+            );
+            if let Err(defect) = refused {
+                assert!(
+                    account.is_empty() || !defect.to_string().contains(account),
+                    "the refusal repeats what was written: {defect}"
+                );
+            }
+        }
+        let written = encoded(&per_account()).replacen("\"octo-cat\"", "\"octo cat\"", 1);
+        assert!(matches!(
+            UsageReport::decode(written.as_bytes()),
+            Err(ReportDefect::Field {
+                field: "account",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn the_account_a_report_is_for_is_the_pools_only_where_the_provider_reads_one() {
+        use crate::capacity::UsageProvider;
+
+        let source = |provider, account: Option<&str>| UsageSource {
+            provider,
+            token_env: Some("TOKEN".to_owned()),
+            account: account.map(str::to_owned),
+        };
+        assert_eq!(
+            account_for(&source(UsageProvider::GithubAiCredits, Some("octo-cat"))),
+            Some("octo-cat")
+        );
+        assert_eq!(
+            account_for(&source(UsageProvider::GithubPremiumRequests, None)),
+            None
+        );
+        for provider in [UsageProvider::AnthropicCost, UsageProvider::OpenaiCost] {
+            assert_eq!(
+                account_for(&source(provider, Some("octo-cat"))),
+                None,
+                "`{provider}` reports per key, so its report is about no account, whatever the \
+                 pool sets"
+            );
+        }
     }
 
     #[test]
