@@ -88,10 +88,16 @@ writes them. `usage_provider` names which documented usage endpoint `upstroke ca
 asks for this pool: `anthropic-cost`, `openai-cost`, `github-ai-credits` or
 `github-premium-requests`, spelled exactly; any other value is refused at load, naming the four.
 `usage_token_env` is the **name** of the environment variable the tracker reads the credential
-from at the moment it asks. The credential itself never belongs in the file, and a value that is
-not a variable's name (letters, digits and underscores, not starting with a digit) is refused
-without being repeated, since the usual way to get there is pasting the key. `usage_account` is
-the account, where the provider reports per account (a GitHub login); it is placed in the
+from at the moment it asks, never the credential itself, which never belongs in the file. A value
+that is not a variable's name (letters, digits and underscores, not starting with a digit, at
+most 64 characters) is refused without being repeated, since the usual way to get there is
+pasting the key. So is a value with a credential's shape, even where its characters would make a
+name: one that starts as a provider's token does (`github_pat_`, `ghp_`, `gho_`, `ghu_`, `ghs_`,
+`ghr_`, `sk-`, `sk-ant-` or `xoxb-`, matched exactly, case included) or one longer than 64
+characters. A GitHub fine-grained token is letters, digits and underscores, so only the shape
+tells it from a name. The refusal names the pool and says the key takes a variable's name, and
+`connect` applies the same check, so it does not carry such a value. `usage_account` is the
+account, where the provider reports per account (a GitHub login); it is placed in the
 request's address, so it is refused unless it is letters, digits, `.`, `_` and `-`. A usage key
 with no `usage_provider` is refused, because the likeliest cause is that key misspelled. A
 provider with no `usage_token_env`, or with no account it needs, loads with a warning and is

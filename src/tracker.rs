@@ -37,7 +37,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::capacity::usage::{self, UsageReport, UsageWindow};
-use crate::capacity::{Pool, UsageProvider};
+use crate::capacity::{MAX_TOKEN_ENV_CHARS, Pool, UsageProvider};
 use crate::error::UpstrokeError;
 
 pub mod provider;
@@ -162,8 +162,9 @@ fn refresh_pool(
         Some(value) if !value.is_empty() => Secret::new(value),
         Some(_) | None => {
             return Outcome::Skipped(format!(
-                "the environment variable `{variable}` is not set, and it is where the pool \
-                 says the credential is"
+                "the environment variable {} is not set, and it is where the pool says the \
+                 credential is",
+                variable_as_printed(variable)
             ));
         }
     };
@@ -190,6 +191,24 @@ fn refresh_pool(
         Ok(_) => Outcome::Stored(report.windows),
         Err(error) => Outcome::Failed(error.to_string()),
     }
+}
+
+/// How a diagnostic names the variable a pool's `usage_token_env` gives.
+///
+/// Whole, when it is no longer than a name the pools reader takes
+/// ([`MAX_TOKEN_ENV_CHARS`]). A longer value is far likelier a credential
+/// pasted where its variable's name belongs, so it is shown as its first eight
+/// characters and its length. The reader refuses such a value before a refresh
+/// begins; this is a second guard, for a pool that reaches the tracker some
+/// other way, so that a credential never reaches a terminal or a captured log
+/// whole.
+fn variable_as_printed(variable: &str) -> String {
+    let length = variable.chars().count();
+    if length <= MAX_TOKEN_ENV_CHARS {
+        return format!("`{variable}`");
+    }
+    let opening: String = variable.chars().take(8).collect();
+    format!("`{opening}…` ({length} characters, cut short in case it is a credential)")
 }
 
 /// Store `report` as its pool's report under `store`, replacing the one there.
@@ -726,6 +745,164 @@ agent = \"claude-code\"
             rendered.contains("no pool names a `usage_provider`"),
             "{rendered}"
         );
+    }
+
+    /// The prefixes a provider's token starts with that the pools reader
+    /// refuses in `usage_token_env`, as finding PR409-PASTED-GITHUB-TOKEN-LEAK
+    /// lists them.
+    const TOKEN_PREFIXES: [&str; 9] = [
+        "github_pat_",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "sk-",
+        "sk-ant-",
+        "xoxb-",
+    ];
+
+    /// A pools file whose one pool gives `value` as its credential's variable
+    /// and lacks nothing else a refresh needs.
+    fn pools_naming(value: &str) -> String {
+        format!(
+            "[pools.copilot]\nkind = \"credits\"\nagent = \"copilot\"\n\
+             usage_provider = \"github-ai-credits\"\nusage_token_env = \"{value}\"\n\
+             usage_account = \"octo-cat\"\n"
+        )
+    }
+
+    #[test]
+    fn a_pasted_github_token_must_not_be_printed_as_a_variable_name() {
+        let pasted = format!("github_pat_{}", "A".repeat(82));
+        let machine = Machine::new("tracker-pasted-token", &pools_naming(&pasted));
+        let table = Table::new(&[]);
+        let printed = match refresh(&machine.options(), &table, &environment) {
+            Ok(report) => report.render(),
+            Err(refusal) => refusal.to_string(),
+        };
+        assert!(
+            !printed.contains(&pasted),
+            "what the refresh prints carries the pasted token whole"
+        );
+        assert!(
+            table.asked.borrow().is_empty(),
+            "and nothing is asked with it: {printed}"
+        );
+    }
+
+    #[test]
+    fn a_credential_shaped_variable_stops_the_refresh_at_the_pools_file_unrepeated() {
+        let mut shaped: Vec<(String, String)> = TOKEN_PREFIXES
+            .into_iter()
+            .map(|prefix| {
+                (
+                    format!("a value starting `{prefix}`"),
+                    format!("{prefix}EXAMPLE_0nly"),
+                )
+            })
+            .collect();
+        shaped.push(("a 65-character value".to_owned(), "K".repeat(65)));
+        for (what, value) in &shaped {
+            let machine = Machine::new("tracker-credential-shaped", &pools_naming(value));
+            let table = Table::new(&[]);
+            let refusal = match refresh(&machine.options(), &table, &environment) {
+                Ok(_) => panic!("{what} was taken for a variable's name"),
+                Err(refusal) => refusal.to_string(),
+            };
+            assert!(
+                !refusal.contains(value.as_str()),
+                "the refusal of {what} repeats it"
+            );
+            assert!(
+                refusal.contains(
+                    "[pools.copilot] `usage_token_env` must be the NAME of an environment \
+                     variable"
+                ),
+                "the refusal names the pool and says what the key takes: {refusal}"
+            );
+            assert!(table.asked.borrow().is_empty(), "{refusal}");
+        }
+
+        let longest = "K".repeat(64);
+        let unset = |_: &str| None::<String>;
+        for ordinary in ["GITHUB_TOKEN", "ANTHROPIC_ADMIN_KEY", longest.as_str()] {
+            let machine = Machine::new("tracker-ordinary-variable", &pools_naming(ordinary));
+            let report = refresh(&machine.options(), &Table::new(&[]), &unset)
+                .expect("an ordinary name is a variable's name");
+            match outcome(&report, "copilot") {
+                Outcome::Skipped(why) => assert!(
+                    why.contains(&format!("the environment variable `{ordinary}` is not set")),
+                    "the name is printed whole, as before: {why}"
+                ),
+                other => panic!("`{ordinary}` is unset, so the pool is skipped: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_variable_longer_than_the_reader_takes_is_printed_cut_short() {
+        let tree = scratch("tracker-cut-short");
+        let store = usage::store_dir(tree.path());
+        let table = Table::new(&[]);
+        let rendered_for = |variable: &str| {
+            let pool = Pool {
+                usage: Some(crate::capacity::UsageSource {
+                    provider: UsageProvider::GithubAiCredits,
+                    token_env: Some(variable.to_owned()),
+                    account: Some("octo-cat".to_owned()),
+                }),
+                ..Pool::discovered(
+                    "copilot",
+                    crate::capacity::PoolKind::Credits,
+                    "copilot",
+                    Vec::new(),
+                )
+            };
+            RefreshReport {
+                pools: vec![PoolRefresh {
+                    pool: pool.name.clone(),
+                    provider: UsageProvider::GithubAiCredits,
+                    outcome: refresh_pool(&pool, &store, &table, &environment, NOON),
+                }],
+            }
+            .render()
+        };
+
+        let pasted = format!("github_pat_{}", "A".repeat(82));
+        let too_long = "K".repeat(65);
+        for (variable, shown) in [
+            (
+                &pasted,
+                "the environment variable `github_p…` (93 characters, cut short in case it is a \
+                 credential) is not set",
+            ),
+            (
+                &too_long,
+                "the environment variable `KKKKKKKK…` (65 characters, cut short in case it is a \
+                 credential) is not set",
+            ),
+        ] {
+            let rendered = rendered_for(variable);
+            assert!(
+                !rendered.contains(variable.as_str()),
+                "a name of {} characters is printed whole",
+                variable.len()
+            );
+            assert!(rendered.contains(shown), "{rendered}");
+        }
+
+        let longest = "K".repeat(64);
+        let rendered = rendered_for(&longest);
+        assert!(
+            rendered.contains(&format!("the environment variable `{longest}` is not set")),
+            "a name the reader takes is printed whole: {rendered}"
+        );
+        assert!(
+            table.asked.borrow().is_empty(),
+            "nothing is asked without a credential"
+        );
+        assert!(!store.exists(), "and nothing is stored");
     }
 
     mod fold {
