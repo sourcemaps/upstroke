@@ -860,17 +860,10 @@ impl StablePrefix {
     }
 }
 
-/// The digest of a log's first newline-terminated line, without its newline;
-/// `None` when the log holds no complete line.
-///
-/// Finding the line is all this does: the spelling belongs to
-/// [`crate::rundir::run_started_sha256`], so the value P5b writes into the
-/// commit record and the value recovery recomputes over the replayed line are
-/// produced by one definition (`SWEEP-CLASSIFY-011`).
 #[must_use]
 pub fn first_line_digest(bytes: &[u8]) -> Option<String> {
     let end = bytes.iter().position(|byte| *byte == b'\n')?;
-    Some(crate::rundir::run_started_sha256(&bytes[..end]))
+    Some(crate::rundir::run_started_sha256(bytes.get(..end)?))
 }
 
 pub fn establish_stable_prefix(

@@ -9,9 +9,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-// The digest oracles below are computed here rather than through
-// `rundir::run_started_sha256`, which `first_line_digest` delegates to: an
-// oracle spelled by the function under test would agree with it by definition.
 use sha2::{Digest, Sha256};
 
 use super::premove::PremoveEventLog;
