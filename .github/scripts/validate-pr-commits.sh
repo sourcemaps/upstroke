@@ -7,6 +7,8 @@
 #
 # Nothing is parsed. Every other spelling passes: a listed limit. A message quoting a listed string is refused: a listed false refusal. The claim is for the workflow's checkout.
 #
+# Beside the Contract (ruling r116): a commit that declares an encoding (git's `%e` is not empty) is not judged, and the gate stops at exit 2. git may decode such an object before it reports its fields, so what it reports need not be what the object holds.
+#
 # It checks the repository in the current directory. The owner's direction of 2026-11-25,
 # recorded at .github/master-rewrite-2026-11-25.md: master's history was rewritten to carry no
 # such credit, and this is the check for the listed strings.
@@ -30,6 +32,9 @@
 #     `Co-Authored-By: Claude` (rule claude-co-author), `Claude-Session:` (rule claude-session), or
 #     `Generated with Claude Code` or `Generated with [Claude Code]` (rule claude-generated). No
 #     listed string holds a newline, so a message holds one exactly when one of its lines does.
+#
+# Every per-commit read is `git log --no-walk --no-show-signature --encoding=UTF-8`, so
+# `log.showSignature`, `i18n.logOutputEncoding` and `i18n.commitEncoding` change no verdict.
 #
 # Those are the five rule IDs. Each is reported at most ONCE per commit: an identity rule with the
 # trimmed name, and a message rule with the first message line that holds one of its strings, so a
@@ -56,12 +61,13 @@
 # A MESSAGE CANNOT FORGE A RECORD BOUNDARY. The commit list is `git rev-list`'s, one object name
 # per line, and every line is required to be a full hexadecimal object name before it is used, so
 # nothing a commit says can add, drop or rename an entry. Each commit is then read alone, by its
-# own name: its four identity fields into one file, a field to a line -- git keeps each identity on
-# one header line, so no field can hold a newline -- and its message into another. No message line
-# can be taken for an identity, and no text in one commit can be read as part of another.
+# own name: its `%e` into one file, which must hold one empty line, its four identity fields
+# into a second, a field to a line -- git keeps each identity on one header line, so no field can
+# hold a newline -- and its message into a third. No message line can be taken for an identity,
+# and no text in one commit can be read as part of another.
 #
 # EVERY LISTING IS WRITTEN TO A FILE AND READ TO ITS END: the merge bases, the commit list, and
-# each commit's identities and message. git's status is taken from the command that wrote the
+# each commit's `%e`, identities and message. git's status is taken from the command that wrote the
 # file, where it is a status; through a pipe or `< <(...)` it belongs to nobody, and a failed
 # rev-list would read as a pull request with no commits. And a read that fails mid-file looks to
 # `read` exactly like the end of it, so the bytes written are measured first and the read must
@@ -268,12 +274,28 @@ claude_identity() {
      "$1" == "Claude" || "$1" == "claude[bot]" ]]
 }
 
+# commit_log <format> <sha> --: git log over one commit, as every read in judge runs it, so no
+# signature check writes a line ahead of the fields and git reports UTF-8 whatever the
+# repository's i18n settings say.
+commit_log() {
+  git log --no-walk --no-show-signature --encoding=UTF-8 "$@"
+}
+
 # judge <sha>: every refusal the commit earns, one line per rule.
 judge() {
   local sha="$1" author committer line
   hits=" "
+  # The encoding the commit declares, before any other field. git decodes a commit that declares
+  # one before it reports a field, so such a commit is not judged: the read must be exactly one
+  # line, and that line empty.
+  commit_log --format=%e "$sha" -- > "$work/encoding" 2> "$work/git-err" \
+    || fail_git "could not read the encoding of commit $sha"
+  read_lines "$work/encoding" "the encoding of commit $sha"
+  if (( ${#lines[@]} != 1 )) || [[ -n "${lines[0]}" ]]; then
+    fail "commit $sha declares an encoding"
+  fi
   # The raw fields, a field to a line, and never the mailmap forms.
-  git log --no-walk --format='%an%n%ae%n%cn%n%ce' "$sha" -- > "$work/identities" 2> "$work/git-err" \
+  commit_log --format='%an%n%ae%n%cn%n%ce' "$sha" -- > "$work/identities" 2> "$work/git-err" \
     || fail_git "could not read the identities of commit $sha"
   read_lines "$work/identities" "the identities of commit $sha"
   (( ${#lines[@]} == 4 )) || fail "could not read the identities of commit $sha"
@@ -288,7 +310,7 @@ judge() {
 
   # The message. No listed string holds a newline, so the message holds one exactly when one of
   # its lines does, and refuse() shows the first line that holds the rule's string.
-  git log --no-walk --format=%B "$sha" -- > "$work/message" 2> "$work/git-err" \
+  commit_log --format=%B "$sha" -- > "$work/message" 2> "$work/git-err" \
     || fail_git "could not read the message of commit $sha"
   read_lines "$work/message" "the message of commit $sha"
   for line in ${lines[@]+"${lines[@]}"}; do

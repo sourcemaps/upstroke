@@ -7241,6 +7241,62 @@ c="$(credit_commit "$credit_base" Claude noreply@anthropic.com Claude noreply@an
 credit_refuse 'round four, case 7: a commit shaped like the first credited one, each rule named once' "$c" \
   "$c:claude-author" "$c:claude-committer" "$c:claude-co-author" "$c:claude-session"
 
+# Ruling r116: git's configuration does not change what a commit's reads report, and a commit git
+# would decode before reporting it is not judged. Each configuration key is set in the fixture
+# repository for its own cases alone, and unset right after them.
+#
+# log.showSignature puts git's verification of a signed commit ahead of its fields. The object is
+# built by hand, as case 4's is, with an SSH-armoured signature header; no allowed-signers file is
+# configured, so neither gpg nor ssh-keygen runs. Measured for r116: with --no-show-signature taken
+# out of the reads, exit 2, git writing `No signature` before the fields.
+credit_signed="$(printf 'tree %s\nparent %s\nauthor Claude <noreply@anthropic.com> 1795608000 +0000\ncommitter Claude <noreply@anthropic.com> 1795608000 +0000\ngpgsig -----BEGIN SSH SIGNATURE-----\n U1NIU0lHAAAAAQ==\n -----END SSH SIGNATURE-----\n\nfeat: a signed commit\n' \
+  "$credit_handmade_tree" "$credit_target" | credit_git hash-object -t commit -w --stdin)" \
+  || { echo 'could not build the signed commit-credit object' >&2; exit 1; }
+credit_git config log.showSignature true
+credit_refuse 'log.showSignature: a signed commit whose author and committer are Claude' "$credit_signed" \
+  "$credit_signed:claude-author" "$credit_signed:claude-committer"
+credit_git config --unset log.showSignature
+
+# An output encoding of UTF-7, whichever key names it, writes `@`, `[` and `]` as `+AEA-`, `+AFs-`
+# and `+AF0-`. Both commits are made before either key is set: a commit made while
+# i18n.commitEncoding is set declares that encoding, and is then exit 2. Measured for r116: with
+# --encoding=UTF-8 taken out of the reads, each exits 0.
+credit_utf7_author="$(credit_commit "$credit_target" 'Jane Roe' '12345678+claude[bot]@users.noreply.github.com' \
+  'Jane Doe' jane@example.com 'feat: a change from a bot address')" || exit 1
+credit_utf7_footer="$(plain_commit "$credit_target" $'feat: a change with a footer\n\nGenerated with [Claude Code]')" || exit 1
+for credit_key in i18n.logOutputEncoding i18n.commitEncoding; do
+  credit_git config "$credit_key" UTF-7
+  credit_refuse "$credit_key UTF-7: an author email ending +claude[bot]@users.noreply.github.com" \
+    "$credit_utf7_author" "$credit_utf7_author:claude-author"
+  credit_refuse "$credit_key UTF-7: the message line Generated with [Claude Code]" \
+    "$credit_utf7_footer" "$credit_utf7_footer:claude-generated"
+  credit_git config --unset "$credit_key"
+done
+
+# A commit that declares an encoding is not judged. git decodes it before it reports a field, and
+# under `encoding IBM037` the first object's identities read as four empty lines and its message
+# as empty, though it credits Claude in its identities and in three message lines. Both objects are
+# built by hand on the target, the header directly after the committer line, and each stops the
+# gate at exit 2 naming it, credited or neutral. Measured for r116: without the check, both exit 0.
+credit_declares_encoding() {  # <label> <head>: exit 2, and stderr is the one line naming the head
+  credit_fail_closed "$1" "$credit_target" "$2"
+  if [[ -s "$fixture_dir/credit-out" || "$(wc -l < "$fixture_dir/credit-err")" -ne 1 ||
+        "$(cat "$fixture_dir/credit-err")" != "commit-credit-policy: commit $2 declares an encoding" ]]; then
+    echo "commit credit: $1: expected one line, that commit $2 declares an encoding:" >&2
+    cat "$fixture_dir/credit-err" >&2
+    exit 1
+  fi
+}
+credit_encoded="$(printf 'tree %s\nparent %s\nauthor Claude <noreply@anthropic.com> 1795608000 +0000\ncommitter Claude <noreply@anthropic.com> 1795608000 +0000\nencoding IBM037\n\nfeat: a commit that declares an encoding\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_encoded\nGenerated with [Claude Code]\n' \
+  "$credit_handmade_tree" "$credit_target" | credit_git hash-object -t commit -w --stdin)" \
+  || { echo 'could not build the encoded commit-credit object' >&2; exit 1; }
+credit_encoded_neutral="$(printf 'tree %s\nparent %s\nauthor Jane Doe <jane@example.com> 1795608000 +0000\ncommitter Jane Doe <jane@example.com> 1795608000 +0000\nencoding IBM037\n\nfeat: a neutral commit that declares an encoding\n' \
+  "$credit_handmade_tree" "$credit_target" | credit_git hash-object -t commit -w --stdin)" \
+  || { echo 'could not build the neutral encoded commit-credit object' >&2; exit 1; }
+credit_declares_encoding 'encoding IBM037 on a commit crediting Claude in its identities and its message' \
+  "$credit_encoded"
+credit_declares_encoding 'encoding IBM037 on a neutral commit' "$credit_encoded_neutral"
+
 # Reached only through a merge: the side branch's commit is on no first-parent path from the head.
 credit_side="$(plain_commit "$credit_base" $'feat: the side branch\n\nCo-Authored-By: Claude <noreply@anthropic.com>')" || exit 1
 credit_trunk="$(plain_commit "$credit_base" 'feat: the trunk')" || exit 1
@@ -7376,6 +7432,16 @@ git() {
       fi
     done
   fi
+  # The encoding read, found the same way by its own format argument.
+  if [[ "$CREDIT_PHASE" == encoding && "$1" == log ]]; then
+    local credit_arg
+    for credit_arg in "$@"; do
+      if [ "$credit_arg" = '--format=%e' ]; then
+        printf '%s' "$CREDIT_RECORDS"
+        return 0
+      fi
+    done
+  fi
   if [[ "$CREDIT_PHASE" == "$1" ]] &&
       { [[ "$1" != rev-list ]] || [[ "${3:-}" == --not ]]; }; then
     case "$CREDIT_FAULT" in
@@ -7468,6 +7534,17 @@ BASH_ENV="$credit_fault_env" CREDIT_PHASE=identities CREDIT_FAULT=records \
   CREDIT_RECORDS=$'Jane Doe\njane@example.com\nJane Doe\n' \
   credit_contract_failure 'an identity read of three lines, the committer email missing' \
   'could not read the identities of commit'
+
+# And its encoding read must be exactly one line, and that line empty. For the same plain commit, a
+# read of two lines, the first empty, and a read of no line at all each stop the gate as a commit
+# that declares an encoding. Measured for r116: with the one-line half of the check taken out, the
+# two-line read exits 0.
+BASH_ENV="$credit_fault_env" CREDIT_PHASE=encoding CREDIT_FAULT=records CREDIT_RECORDS=$'\n\n' \
+  credit_contract_failure 'an encoding read of two lines, the first empty' \
+  "commit $credit_clean declares an encoding"
+BASH_ENV="$credit_fault_env" CREDIT_PHASE=encoding CREDIT_FAULT=records CREDIT_RECORDS='' \
+  credit_contract_failure 'an encoding read of no line at all' \
+  "commit $credit_clean declares an encoding"
 
 # r72 row 6: producer output has the repository's own width, not either supported width.
 # In SHA-256 the wrong-width record is a resolvable 40-digit abbreviation of the real object.
