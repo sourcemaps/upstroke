@@ -3028,26 +3028,40 @@ inventories and timing files are not inputs to either representation.
 
 ## `fn the_category_selectors_agree_with_the_native_libtest_inventory() {`
 
-Run `check --explain` over Cargo's real native all-target, all-feature list
-and require nonzero `unit/cli` membership. This validates first-row ownership,
-exactly one generated selection per registration, and an empty remainder
-when all category filters are skipped. Ignored registrations are included.
-
-Then run `prove --harness` on the current library harness: libtest itself
+Run `prove --harness` on the current library harness: libtest itself
 lists each generated selection, and each set must equal the first-match
 owner's set. Across legs every registration must occur exactly once, and the
-all-skipped list must be empty. The nested Cargo listing reuses the enclosing
-build slot; it does not allocate another slot or execute test bodies. These
-are native proofs, so the other operating systems still supply their own
-inventories in CI.
+all-skipped list must be empty. Ignored registrations are included. This
+proof starts no Cargo process inside the running test. The standalone
+`check` still builds and lists the native all-target, all-feature inventory
+and requires nonzero `unit/cli` membership. These are native proofs, so the
+other operating systems still supply their own inventories in CI.
+
+## `fn the_category_check_refuses_bootstrap_before_starting_a_subprocess() {`
+
+Run `check` with `RUSTC_BOOTSTRAP` set to `1`, `0`, and the empty string in
+its child environment. Replace Python's subprocess constructor with a
+refusal so that even a regression cannot start Cargo from this control.
+Require exit code 1 and the exact bootstrap diagnostic, distinguishing the
+intended early refusal from the subprocess trap or any other failure.
+
+## `fn the_category_proof_refuses_an_inventory_without_cli_when_required() {`
+
+Compile an inert libtest fixture with ordinary and ignored `util::`
+registrations and no `cli_tests::` registrations. The same harness must pass
+`prove --harness` and fail `prove --require-cli --harness` with the exact
+missing-`unit/cli` diagnostic. The optional requirement exercises the same
+validation that standalone `check` always applies, without starting Cargo.
+Every fixture body panics if executed.
 
 ## `fn the_category_check_refuses_an_inert_unclassified_registration_including_ignored_tests() {`
 
 Compile a libtest fixture twice. Both builds contain ordinary and ignored
 `cli_tests::` registrations; the second adds the ignored, unclassified
-`newly_registered_unclassified`. The first must pass `prove`; the second
-must fail with that name and `TEST_CATEGORIES` in its diagnostic. Every
-fixture body panics if executed, making this a listing-only refusal witness.
+`newly_registered_unclassified`. The first must pass `prove --require-cli`;
+the second must fail with that name and `TEST_CATEGORIES` in its diagnostic.
+Every fixture body panics if executed, making this a listing-only refusal
+witness and a positive control for the CLI requirement.
 
 ## `mod merge_gate_answers {`
 

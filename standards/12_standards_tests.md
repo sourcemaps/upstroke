@@ -82,10 +82,14 @@ blocks in `.github/workflows/ci.yml`. Commit the table and its generated matrice
 not hand-edit the generated selectors. `generate --check` refuses stale blocks. The local
 check builds and lists the native all-target, all-feature inventory, including ignored tests,
 without executing test bodies. It checks one correct leg per name and lists again with all
-category filters skipped: that remainder must be empty. `--explain` reports subcategory counts
-and later matches. The script uses `upstroke-build cargo` when that wrapper is available, or
-reuses the caller-owned Cargo build slot when invoked from a test; it does not assign a target
-directory. Workstations and CI otherwise use Cargo directly.
+category filters skipped: that remainder must be empty. It requires at least one registration
+owned by `unit/cli`. `--explain` reports subcategory counts and later matches. The script uses
+`upstroke-build cargo` when that wrapper is available; it does not assign a target directory.
+Workstations and CI otherwise use Cargo directly. `check` refuses before starting any subprocess
+when `RUSTC_BOOTSTRAP` is present in its environment, even if empty. Inside a running test,
+`prove --harness` lists the already built current executable without starting Cargo.
+`prove --require-cli --harness` also applies the standalone check's CLI requirement; a library
+harness alone does not contain the binary's CLI registrations.
 
 For `uncategorised: <name>`, inspect the test's full module path and purpose. Move it into the
 appropriate already classified module, or add a narrowly justified filter or row to

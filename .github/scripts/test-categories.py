@@ -94,11 +94,16 @@ def legs(rows, platform):
     return result
 
 
-def owner(rows, platform, name):
+def category_row(rows, name):
     row = next((row for row in rows if any(f in name for f in row["filters"])), None)
     if row is None:
         raise ValueError(f"uncategorised: {name} — add it to a TEST_CATEGORIES row in "
                          "src/effects/tests/ci_model.rs, or put it in a module a row names")
+    return row
+
+
+def owner(rows, platform, name):
+    row = category_row(rows, name)
     if platform != "windows":
         return row["category"], row["macos"] if platform == "macos" else 1
     matches = [leg for leg, _, filters in row["windows"]
@@ -125,7 +130,7 @@ def runs(selection, name):
     return (not filters or any(f in name for f in filters)) and not any(f in name for f in skips)
 
 
-def validate(rows, platform, names):
+def validate(rows, platform, names, require_cli=False):
     if not names:
         raise ValueError("libtest listed no tests; refusing an empty inventory")
     selections = legs(rows, platform)
@@ -144,6 +149,11 @@ def validate(rows, platform, names):
         counts[expected] += 1
     if errors:
         raise ValueError("\n".join(errors))
+    if require_cli and not any(
+        row["category"] == "unit" and row["subcategory"] == "cli"
+        for row in (category_row(rows, name) for name in names)
+    ):
+        raise ValueError("libtest listed no unit/cli registrations; refusing an incomplete all-target inventory")
     return counts
 
 
@@ -179,10 +189,6 @@ def checked(command):
 
 def cargo():
     # A build box owns target isolation. CI and workstations use ordinary Cargo.
-    # A check called by a test already runs inside Cargo's caller-owned build
-    # slot. Reuse that process environment; acquiring the slot again deadlocks.
-    if os.environ.get("CARGO_TARGET_DIR") and os.environ.get("CARGO"):
-        return [os.environ["CARGO"]]
     wrapper = shutil.which("upstroke-build")
     return [wrapper, "cargo"] if wrapper else ["cargo"]
 
@@ -191,9 +197,9 @@ def native_platform():
     return {"linux": "ubuntu", "darwin": "macos", "win32": "windows"}[sys.platform]
 
 
-def prove(rows, platform, harness):
+def prove(rows, platform, harness, require_cli=False):
     names = listed(checked([harness, "--list", "--format", "terse"]))
-    validate(rows, platform, names)
+    validate(rows, platform, names, require_cli=require_cli)
     observed = Counter()
     for leg in legs(rows, platform):
         actual = listed(checked([harness, "--list", "--format", "terse", *leg["tests"].split()]))
@@ -241,8 +247,13 @@ def main():
     parser.add_argument("--check", action="store_true", help="refuse a stale generated matrix")
     parser.add_argument("--platform", choices=PLATFORMS, default=native_platform())
     parser.add_argument("--harness", help="already built native libtest executable")
+    parser.add_argument("--require-cli", action="store_true",
+                        help="require a unit/cli registration (always required by check)")
     parser.add_argument("--explain", action="store_true", help="show subcategory counts and later matches")
     args = parser.parse_args()
+    if args.action == "check" and "RUSTC_BOOTSTRAP" in os.environ:
+        raise ValueError("check refuses to run Cargo while RUSTC_BOOTSTRAP is set; "
+                         "use prove --harness for a running libtest")
     rows = registry()
     if args.action == "contract":
         print(json.dumps(dict(registry=rows, legs={p: legs(rows, p) for p in PLATFORMS})))
@@ -257,11 +268,11 @@ def main():
     elif args.action == "prove":
         if not args.harness:
             parser.error("prove requires --harness")
-        prove(rows, args.platform, args.harness)
+        prove(rows, args.platform, args.harness, require_cli=args.require_cli)
     else:
         names = listed(checked(cargo() + ["test", "--all-targets", "--all-features",
                                          "--", "--list", "--format", "terse"]))
-        counts = validate(rows, args.platform, names)
+        counts = validate(rows, args.platform, names, require_cli=True)
         skips = [word for row in rows for f in row["filters"] for word in ("--skip", f)]
         unmatched = listed(checked(cargo() + ["test", "--all-targets", "--all-features",
                                               "--", "--list", "--format", "terse", *skips]))

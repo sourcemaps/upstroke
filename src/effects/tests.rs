@@ -6409,21 +6409,6 @@ fn the_category_generator_and_workflow_use_the_rust_registry() {
 
 #[test]
 fn the_category_selectors_agree_with_the_native_libtest_inventory() {
-    let all_targets = category_tool(&["check".as_ref(), "--explain".as_ref()]);
-    assert!(
-        all_targets.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&all_targets.stdout),
-        String::from_utf8_lossy(&all_targets.stderr)
-    );
-    let inventory = String::from_utf8_lossy(&all_targets.stdout);
-    assert!(
-        inventory.lines().any(|line| {
-            line.strip_prefix("subcategory unit/cli: ")
-                .is_some_and(|count| count.parse::<usize>().is_ok_and(|count| count > 0))
-        }),
-        "the all-target list must include the real CLI harness: {inventory}"
-    );
     let harness = std::env::current_exe().expect("native libtest harness");
     let output = category_tool(&["prove".as_ref(), "--harness".as_ref(), harness.as_os_str()]);
     assert!(
@@ -6431,6 +6416,95 @@ fn the_category_selectors_agree_with_the_native_libtest_inventory() {
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn the_category_check_refuses_bootstrap_before_starting_a_subprocess() {
+    for bootstrap in ["1", "0", ""] {
+        let output = std::process::Command::new(if cfg!(windows) { "python" } else { "python3" })
+            .args([
+                "-c",
+                r#"
+import runpy
+import subprocess
+import sys
+
+def refuse_subprocess(*args, **kwargs):
+    raise AssertionError("check attempted a subprocess while RUSTC_BOOTSTRAP was set")
+
+subprocess.Popen = refuse_subprocess
+sys.argv = [sys.argv[1], "check"]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"#,
+            ])
+            .arg(repo_root().join(".github/scripts/test-categories.py"))
+            .env("RUSTC_BOOTSTRAP", bootstrap)
+            .output()
+            .expect("run the category checker with bootstrap set and subprocesses forbidden");
+        assert_eq!(output.status.code(), Some(1), "bootstrap={bootstrap:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr).trim(),
+            "check refuses to run Cargo while RUSTC_BOOTSTRAP is set; \
+             use prove --harness for a running libtest",
+            "bootstrap={bootstrap:?}"
+        );
+    }
+}
+
+#[test]
+fn the_category_proof_refuses_an_inventory_without_cli_when_required() {
+    let directory =
+        crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "categories-no-cli")
+            .expect("category fixture directory without CLI registrations");
+    let source = directory.path().join("category_fixture.rs");
+    fs::write(
+        &source,
+        r#"
+mod util {
+    #[test]
+    fn ordinary() { panic!("listing must never execute a test"); }
+    #[test]
+    #[ignore = "an inert record registration"]
+    fn ignored_record() { panic!("listing must never execute an ignored test"); }
+}
+"#,
+    )
+    .expect("write an inert libtest fixture without CLI registrations");
+    let harness = directory.path().join(if cfg!(windows) {
+        "fixture.exe"
+    } else {
+        "fixture"
+    });
+    let built = std::process::Command::new("rustc")
+        .arg("--test")
+        .arg(&source)
+        .arg("-o")
+        .arg(&harness)
+        .output()
+        .expect("compile inert libtest registrations without CLI tests");
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let output = category_tool(&["prove".as_ref(), "--harness".as_ref(), harness.as_os_str()]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("2 registrations"));
+    let output = category_tool(&[
+        "prove".as_ref(),
+        "--require-cli".as_ref(),
+        "--harness".as_ref(),
+        harness.as_os_str(),
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr).trim(),
+        "libtest listed no unit/cli registrations; refusing an incomplete all-target inventory"
     );
 }
 
@@ -6475,7 +6549,12 @@ fn newly_registered_unclassified() { panic!("the catch-all must not execute"); }
             "{}",
             String::from_utf8_lossy(&built.stderr)
         );
-        let output = category_tool(&["prove".as_ref(), "--harness".as_ref(), harness.as_os_str()]);
+        let output = category_tool(&[
+            "prove".as_ref(),
+            "--require-cli".as_ref(),
+            "--harness".as_ref(),
+            harness.as_os_str(),
+        ]);
         if unclassified {
             assert!(
                 !output.status.success(),
