@@ -163,8 +163,14 @@ replacing rename. So `AnswerPublication::Published` means this answer is the
 published file, and `AnswerPublication::AlreadyAnswered` means another was
 published first: it is untouched, this answer is not published, and this
 answer's staged file is removed. A caller tells "already answered" from an
-I/O error, and from the uncited-conviction refusal, by type. Every failure
-leaves at most the staged `.partial`, which readers ignore.
+I/O error, and from the uncited-conviction refusal, by type. Whatever the
+link did, the staged file is then removed if it can be. Once the link has
+succeeded or found `<qid>.json` existing, the outcome is decided, and a
+failure removing the staged name does not change it: that name stays as
+`.partial` residue, which readers ignore, and the outcome is still returned.
+An I/O error means the link failed for another reason and the answer was not
+published; the staged file is removed then too. Every path leaves at most the
+staged `.partial`, and only when its removal fails.
 
 Atomic and create-once: each publisher stages its answer in a file of its
 own, `<qid>.json.<pid>-<ulid>.partial`, created exclusively, and publishes it
@@ -476,7 +482,7 @@ answer's, so a witness run over both shapes cannot lose that power without a tes
 
 The rule is the run layout's design: `design/15`, "An answer file is read, never taken". Ingestion
 reads a published answer and never takes it, so an ingestion leaves the file exactly as it found
-it; publication, which can replace the file, is outside the rule. The answer file belongs to the run-scoped
+it; publication, which creates the file once and never replaces it, is outside the rule. The answer file belongs to the run-scoped
 run-directory contents that the effects vocabulary's row R21 accounts for. After a read of a
 published answer, the file is still present and `fs::read` of it equals the bytes taken before the
 read; each assertion message names R21's read-never-take rule and the read under test.

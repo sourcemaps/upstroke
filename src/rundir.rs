@@ -2040,19 +2040,24 @@ pub fn stage_answer<T: Serialize>(
 ///
 /// The staged file is hard-linked to `answers/<qid>.json`, which fails if that
 /// name exists, so an answer already published is never replaced; there is no
-/// fallback to a replacing rename. Then the staged name is removed.
+/// fallback to a replacing rename. Then, whatever the link did, the staged
+/// name is removed if it can be. That removal is cleanup and never changes
+/// the outcome: a staged name it cannot remove stays as `.partial` residue,
+/// which every reader ignores (readers open only the exact `<qid>.json`).
 ///
-/// - [`AnswerPublication::Published`]: this answer is at `<qid>.json`, and the
-///   staged name is gone.
+/// - [`AnswerPublication::Published`]: this answer is at `<qid>.json`. Its
+///   staged name is gone, or left as residue if it could not be removed.
 /// - [`AnswerPublication::AlreadyAnswered`]: `<qid>.json` already existed and
-///   is untouched; this answer is not published, and its staged name is gone.
+///   is untouched; this answer is not published. Its staged name is gone, or
+///   left as residue if it could not be removed.
 ///
 /// # Errors
 ///
-/// An I/O error linking leaves `<qid>.json` as it was and the staged file as
-/// `.partial` residue. An I/O error removing the staged name leaves that
-/// residue too, after the outcome above happened: with a successful link the
-/// answer **is** published.
+/// An I/O error linking, for any reason but an existing `<qid>.json`, means
+/// the answer was **not** published: `<qid>.json` is as it was, and the
+/// staged file is removed, or left as residue if that removal fails too. The
+/// error is the link's, naming `<qid>.json`. A failure removing the staged
+/// name is never an error.
 ///
 /// [`AnswerPublication::Published`]: crate::interaction::AnswerPublication::Published
 /// [`AnswerPublication::AlreadyAnswered`]: crate::interaction::AnswerPublication::AlreadyAnswered
@@ -2066,23 +2071,22 @@ pub fn publish_answer(
         EffectSiteId::Answer(AnswerSite::PublishRename),
         || {
             let StagedAnswer { staged, published } = staged;
-            let outcome = match fs::hard_link(&staged, &published) {
-                Ok(()) => AnswerPublication::Published,
+            let linked = fs::hard_link(&staged, &published);
+            // The staged file is this publisher's alone and no coordinator
+            // prunes it, so it is removed on every path. The link already
+            // decided the outcome; a removal that fails leaves `.partial`
+            // residue, which no reader opens, and is not this call's error.
+            let _ = fs::remove_file(&staged);
+            match linked {
+                Ok(()) => Ok(AnswerPublication::Published),
                 Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
-                    AnswerPublication::AlreadyAnswered
+                    Ok(AnswerPublication::AlreadyAnswered)
                 }
-                Err(source) => {
-                    return Err(UpstrokeError::Io {
-                        path: published,
-                        source,
-                    });
-                }
-            };
-            fs::remove_file(&staged).map_err(|source| UpstrokeError::Io {
-                path: staged,
-                source,
-            })?;
-            Ok(outcome)
+                Err(source) => Err(UpstrokeError::Io {
+                    path: published,
+                    source,
+                }),
+            }
         },
     )
 }

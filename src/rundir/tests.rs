@@ -13045,6 +13045,218 @@ fn two_publishers_of_one_answer_publish_exactly_one() {
     );
 }
 
+/// Restores a sealed directory's permissions when dropped, so the scratch tree
+/// can be reclaimed whether the test passes or an assertion fails. Bound after
+/// the tree, so it drops first.
+#[cfg(unix)]
+struct UnsealOnDrop {
+    dir: PathBuf,
+    permissions: fs::Permissions,
+}
+
+#[cfg(unix)]
+impl Drop for UnsealOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.dir, self.permissions.clone());
+    }
+}
+
+/// Stage `answer` in `root/staging`, a directory of its own, to be published
+/// as `answers/<qid>.json`, then seal `root/staging` read-only so its entries
+/// cannot be removed. Returns the staged answer, its bytes, and the guard that
+/// unseals the directory; `None` when this process removes entries of a
+/// read-only directory anyway (root, or `CAP_DAC_OVERRIDE`), which a scratch
+/// probe in the sealed directory finds out before any assertion is made.
+#[cfg(unix)]
+fn stage_where_the_staged_name_cannot_be_removed(
+    root: &Path,
+    answers: &Path,
+    answer: &serde_json::Value,
+) -> Option<(StagedAnswer, Vec<u8>, UnsealOnDrop)> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let staging = root.join("staging");
+    create_dir(&staging).expect("the staging directory");
+    let StagedAnswer { staged, .. } =
+        stage_answer(&staging, "q-1", answer, &mut NoHooks).expect("stage");
+    let staged_bytes = fs::read(&staged).expect("the staged answer");
+    let probe = staging.join("probe");
+    fs::write(&probe, b"probe\n").expect("the removal probe");
+
+    let permissions = fs::metadata(&staging)
+        .expect("the staging directory's metadata")
+        .permissions();
+    let unseal = UnsealOnDrop {
+        dir: staging.clone(),
+        permissions: permissions.clone(),
+    };
+    fs::set_permissions(&staging, fs::Permissions::from_mode(0o555))
+        .expect("seal the staging directory");
+    match fs::remove_file(&probe) {
+        Err(refused) if refused.kind() == io::ErrorKind::PermissionDenied => {}
+        Err(other) => panic!(
+            "removing {} failed, but not with a permission error: {other}",
+            probe.display()
+        ),
+        // This process ignores permission bits, as root does: no removal in
+        // the sealed directory is refused, so the shape under test cannot be
+        // built here. The guard unseals as it drops.
+        Ok(()) => return None,
+    }
+    Some((
+        StagedAnswer {
+            staged,
+            published: answers.join("q-1.json"),
+        },
+        staged_bytes,
+        unseal,
+    ))
+}
+
+/// A published answer stays published when its staged name cannot be removed
+/// (`PR385-CLEANUP-MASKS-PUBLICATION`).
+///
+/// The link to `<qid>.json` succeeds, so the answer takes effect; only the
+/// removal of the staged name afterwards fails, because the staging directory
+/// is read-only. That removal is cleanup, not publication: `publish_answer`
+/// must still say `Published`, and the staged name stays as `.partial`
+/// residue. Reporting the removal failure as the outcome told the caller the
+/// answer failed (the CLI exited 1) while the engine was reading it.
+#[cfg(unix)]
+#[test]
+fn a_published_answer_stays_published_when_its_staged_name_cannot_be_removed() {
+    use crate::interaction::AnswerPublication;
+
+    let tree = scratch("answer-publish-sealed-stage");
+    let answers = tree.path().join("answers");
+    create_dir(&answers).expect("answers");
+    // Unsealed on drop, before the tree is reclaimed.
+    let Some((staged, staged_bytes, _unseal)) = stage_where_the_staged_name_cannot_be_removed(
+        tree.path(),
+        &answers,
+        &serde_json::json!({"text": "published"}),
+    ) else {
+        return;
+    };
+    let residue = staged.path().to_path_buf();
+
+    let outcome = publish_answer(staged, &mut NoHooks);
+    assert!(
+        matches!(outcome, Ok(AnswerPublication::Published)),
+        "the link succeeded, so the answer is published whatever the cleanup did: {outcome:?}"
+    );
+    assert_eq!(
+        fs::read(answers.join("q-1.json")).expect("the published answer"),
+        staged_bytes,
+        "<qid>.json holds the staged bytes"
+    );
+    assert!(
+        residue.is_file(),
+        "the staged name that could not be removed stays as `.partial` residue"
+    );
+}
+
+/// A refused answer is still refused when its staged name cannot be removed
+/// (`PR385-CLEANUP-MASKS-PUBLICATION`).
+///
+/// `<qid>.json` already exists, so the link fails with `AlreadyExists` and the
+/// outcome is decided: `AlreadyAnswered`, with `<qid>.json` untouched. The
+/// removal of the staged name fails afterwards, and must not turn the refusal
+/// into an I/O error.
+#[cfg(unix)]
+#[test]
+fn a_refused_answer_is_still_refused_when_its_staged_name_cannot_be_removed() {
+    use crate::interaction::AnswerPublication;
+
+    let tree = scratch("answer-refuse-sealed-stage");
+    let answers = tree.path().join("answers");
+    create_dir(&answers).expect("answers");
+    let kept = b"{\n  \"text\": \"answered first\"\n}\n";
+    fs::write(answers.join("q-1.json"), kept).expect("the answer published first");
+    // Unsealed on drop, before the tree is reclaimed.
+    let Some((staged, staged_bytes, _unseal)) = stage_where_the_staged_name_cannot_be_removed(
+        tree.path(),
+        &answers,
+        &serde_json::json!({"text": "refused"}),
+    ) else {
+        return;
+    };
+    assert_ne!(
+        staged_bytes,
+        kept.to_vec(),
+        "the two answers must be told apart by their bytes"
+    );
+    let residue = staged.path().to_path_buf();
+
+    let outcome = publish_answer(staged, &mut NoHooks);
+    assert!(
+        matches!(outcome, Ok(AnswerPublication::AlreadyAnswered)),
+        "the link was refused, so the answer is already answered whatever the cleanup did: \
+         {outcome:?}"
+    );
+    assert_eq!(
+        fs::read(answers.join("q-1.json")).expect("the kept answer"),
+        kept.to_vec(),
+        "<qid>.json keeps the bytes published first"
+    );
+    assert!(
+        residue.is_file(),
+        "the staged name that could not be removed stays as `.partial` residue"
+    );
+}
+
+/// A link that fails for any reason but `AlreadyExists` removes its staged
+/// file (`PR385-LINK-ERROR-LEAKS-STAGING`).
+///
+/// The staged file is this publisher's alone and no coordinator prunes it, so
+/// a publisher that returned on a failed link without removing it left one
+/// more `.partial` per failed retry. Here `<qid>.json` lies in a directory
+/// that does not exist, so the link fails with `NotFound`: the error is the
+/// link's, naming `<qid>.json`, and the staged file is gone.
+#[test]
+fn a_failed_link_removes_its_staged_file() {
+    let tree = scratch("answer-link-fails");
+    let answers = tree.path().join("answers");
+    create_dir(&answers).expect("answers");
+    let StagedAnswer { staged, .. } = stage_answer(
+        &answers,
+        "q-1",
+        &serde_json::json!({"text": "unpublishable"}),
+        &mut NoHooks,
+    )
+    .expect("stage");
+    let unpublishable = tree.path().join("missing").join("q-1.json");
+
+    let outcome = publish_answer(
+        StagedAnswer {
+            staged: staged.clone(),
+            published: unpublishable.clone(),
+        },
+        &mut NoHooks,
+    );
+    match outcome {
+        Err(UpstrokeError::Io { path, source }) => {
+            assert_eq!(path, unpublishable, "the error is the link's");
+            assert_ne!(
+                source.kind(),
+                io::ErrorKind::AlreadyExists,
+                "the link failed for a reason other than an existing answer"
+            );
+        }
+        other => panic!("a failed link is an I/O error: {other:?}"),
+    }
+    assert!(
+        !staged.exists(),
+        "the staged file is removed when the link fails: {}",
+        staged.display()
+    );
+    assert_eq!(
+        read_dir_names(&answers).expect("the answers directory lists"),
+        Vec::<OsString>::new(),
+        "no `.partial` is left behind"
+    );
+}
+
 /// Whatever an operator left at the old fixed staging name `report.json.tmp`
 /// — a hard link to a note outside the run directory, a symbolic link, a
 /// directory — is left exactly as found, and the report is published beside
