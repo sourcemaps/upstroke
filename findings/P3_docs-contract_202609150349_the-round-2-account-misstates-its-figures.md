@@ -54,9 +54,9 @@ The record left master on 2026-11-24 (`bde77050`) and is read from history at th
 its own copies, the sentences at `:141` and `:1088`, are archived evidence that nobody keeps true
 and are not corrected. What stays open is the #290 body, whose three sentences still read as the
 failure sequence quotes them in the body as saved on 2026-11-24
-(`~/selfhost-docs5-20261124/evidence/r2-bodies/pr290-body.md`): line 257,
-"(`git diff --stat fcfedc75 HEAD -- src`: four files)"; line 176, "the first landing's ten, round
-1's nine, and round 2's seven"; and line 249, "the commits between are the record and the two
+(`gh pr view 290 --repo sourcemaps/upstroke --json body --jq .body` as printed on 2026-11-24): line
+257, "(`git diff --stat fcfedc75 HEAD -- src`: four files)"; line 176, "the first landing's ten,
+round 1's nine, and round 2's seven"; and line 249, "the commits between are the record and the two
 findings' corrections".
 
 ## What the change that takes this up should do

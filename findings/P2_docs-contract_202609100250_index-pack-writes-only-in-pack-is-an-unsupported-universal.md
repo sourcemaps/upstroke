@@ -40,12 +40,12 @@ The record left master on 2026-11-24 (`bde77050`) and is read from history at th
 its own copies, the §1.1 sentence there among them, are archived evidence that nobody keeps true
 and are not corrected. What stays open is the #258 body, whose two sentences still read as the
 failure sequence quotes them in the body as saved on 2026-11-24
-(`~/selfhost-docs5-20261124/evidence/r2-bodies/pr258-body.md`): line 15, the Scope bullet for
-`src/workspace_manager.rs`, "round 6 names `unpack-objects` as the producer traced to the root and
-`index-pack --stdin` at the same threshold as one that writes only in `pack`", and line 101, the
-guard cell of the `PR258-ROOT-WRITE-UNIVERSAL-OVERSTATES-PRODUCERS` row, "index-pack --stdin at the
-same threshold as one that writes only in pack"; the body's "Round 6 executions" paragraph, line
-36, still says it scoped to the execution.
+(`gh pr view 258 --repo sourcemaps/upstroke --json body --jq .body` as printed on 2026-11-24): line
+15, the Scope bullet for `src/workspace_manager.rs`, "round 6 names `unpack-objects` as the
+producer traced to the root and `index-pack --stdin` at the same threshold as one that writes only
+in `pack`", and line 101, the guard cell of the `PR258-ROOT-WRITE-UNIVERSAL-OVERSTATES-PRODUCERS`
+row, "index-pack --stdin at the same threshold as one that writes only in pack"; the body's "Round
+6 executions" paragraph, line 36, still says it scoped to the execution.
 
 ## Why it is deferred
 

@@ -39,9 +39,9 @@ the SHA-bound comment.
 The record left master on 2026-11-24 (`bde77050`) and is read from history at the location above;
 its own copy, the §14.3 sentence there, is archived evidence that nobody keeps true and is not
 corrected. What stays open is the #258 body's Gates paragraph, which in the body as saved on
-2026-11-24 (`~/selfhost-docs5-20261124/evidence/r2-bodies/pr258-body.md`, line 38) still reads as
-the failure sequence quotes it: "`45-r7-final-checks.log` covers whitespace, the freeze, the local
-body validation and the cited round-7 files".
+2026-11-24 (`gh pr view 258 --repo sourcemaps/upstroke --json body --jq .body` as printed on
+2026-11-24, line 38) still reads as the failure sequence quotes it: "`45-r7-final-checks.log`
+covers whitespace, the freeze, the local body validation and the cited round-7 files".
 
 ## Why it is deferred
 

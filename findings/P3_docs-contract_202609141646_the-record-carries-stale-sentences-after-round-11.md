@@ -78,10 +78,10 @@ The record left master on 2026-11-24 (`bde77050`) and is read from history at th
 where every record line number above still holds (no commit touched the record between `8e215030`
 and `48f2af7a`); its own five copies are archived evidence that nobody keeps true and are not
 corrected. What stays open is the body's copy in item 5: in the #279 body as saved on 2026-11-24
-(`~/selfhost-docs5-20261124/evidence/r2-bodies/pr279-body.md`), the Validation paragraph on round
-10's code head still reads at line 30, as the failure sequence quotes it, that the reaper-lease
-flake is "46 of the 1,069 full-suite logs saved on the box, the first failing one of 2026-09-12
-19:16Z".
+(`gh pr view 279 --repo sourcemaps/upstroke --json body --jq .body` as printed on 2026-11-24), the
+Validation paragraph on round 10's code head still reads at line 30, as the failure sequence quotes
+it, that the reaper-lease flake is "46 of the 1,069 full-suite logs saved on the box, the first
+failing one of 2026-09-12 19:16Z".
 
 ## Why this is deferred
 
