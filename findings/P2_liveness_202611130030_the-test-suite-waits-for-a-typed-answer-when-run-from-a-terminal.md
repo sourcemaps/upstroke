@@ -4,7 +4,7 @@ severity: P2
 disposition: deferred
 category: liveness
 pr: TBD
-reviewed_sha: c060def5377c172905d5316b944a65b1d16abaeb
+reviewed_sha: 2b16cec2b9a4cd6f018bb0a285071a9e8946bcf9
 location: src/interaction.rs:451
 provenance: pre_existing
 first_bad:
@@ -47,7 +47,7 @@ with standard input from `/dev/null`.
 
 ## Reproduction
 
-At this branch's head, with the library's test binary built:
+At `master` `2b16cec2`, with the library's test binary built:
 
     <test binary> --exact engine::tests::a_zero_gate_schema_4_resume_probes_its_recorded_shell_when_todays_config_names_an_unavailable_one
 
