@@ -1685,12 +1685,26 @@ pub fn write_question_payload<T: Serialize>(
 /// last … so a kill mid-census leaves a husk the next census completes".
 /// Removing the marker first would leave a marker-less husk carrying content,
 /// which the next census retains rather than finishes.
+///
+/// **A listing that fails removes nothing.** Its error is returned as
+/// [`UpstrokeError::Io`] for `public` before the first removal: what the
+/// directory holds is exactly what the failure leaves unknown, and an empty
+/// list in its place would go straight on to the marker
+/// (`SWEEP-CLASSIFY-009`).
+///
+/// # Errors
+///
+/// The listing's error, or the first removal's.
 pub fn remove_public_husk(public: &Path, hooks: &mut dyn RunDirHooks) -> Result<(), UpstrokeError> {
     funnel(
         hooks,
         EffectSiteId::RunDir(RunDirSite::RemovePublicHusk),
         || {
-            for entry in read_dir_names(public) {
+            let entries = read_dir_names(public).map_err(|source| UpstrokeError::Io {
+                path: public.to_path_buf(),
+                source,
+            })?;
+            for entry in entries {
                 if entry == OsStr::new(MARKER) {
                     continue;
                 }
@@ -1747,7 +1761,7 @@ fn remove_file_if_present(path: &Path) -> Result<(), UpstrokeError> {
 }
 
 /// The names of `dir`'s entries, sorted, each exactly as the directory holds
-/// it.
+/// it; a directory that does not exist has none.
 ///
 /// `OsString`s, never lossy strings, because the names are identity:
 /// [`remove_public_husk`] joins each one onto the husk to remove it, and both
@@ -1756,13 +1770,33 @@ fn remove_file_if_present(path: &Path) -> Result<(), UpstrokeError> {
 /// the `to_string_lossy` this used to apply: the husk's removal joined a path
 /// that does not exist, stopped on its `NotFound`, and left the husk for every
 /// later census to report again (`SWEEP-NAMES-005`).
-fn read_dir_names(dir: &Path) -> Vec<OsString> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
+///
+/// **A listing that failed is an error, never an empty list**
+/// (`SWEEP-CLASSIFY-009`). Both production callers read an empty list as a
+/// bare directory, and a bare husk is one the census reclaims. This used to
+/// answer empty when `read_dir` itself failed, and its `.flatten()` dropped
+/// every entry whose read failed, so a transient failure (`EMFILE`, say)
+/// turned a committed run's public directory -- `events.jsonl` and no marker
+/// -- into a bare husk, and the removal, listing it again once the failure
+/// had passed, deleted the event log. Only `NotFound` on opening `dir` is the
+/// empty answer, because absence is a fact: a directory that is not there
+/// holds nothing.
+///
+/// # Errors
+///
+/// `read_dir`'s error for anything but `NotFound`, and the first error
+/// reading an entry.
+fn read_dir_names(dir: &Path) -> io::Result<Vec<OsString>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
     };
-    let mut names: Vec<OsString> = entries.flatten().map(|entry| entry.file_name()).collect();
+    let mut names = entries
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<io::Result<Vec<OsString>>>()?;
     names.sort();
-    names
+    Ok(names)
 }
 
 // ---------------------------------------------------------------------------

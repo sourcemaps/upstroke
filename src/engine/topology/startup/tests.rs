@@ -1127,6 +1127,9 @@ fn every_retain_reason() -> Vec<RetainReason> {
             expected: "b".to_owned(),
         },
         RetainReason::MarkerlessWithContent,
+        RetainReason::PublicDirUnreadable {
+            detail: "a".to_owned(),
+        },
         RetainReason::PossiblyCommitted,
         RetainReason::ClassificationIncomplete,
     ]

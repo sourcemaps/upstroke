@@ -3450,6 +3450,21 @@ fn proof_cases() -> Vec<ProofCase> {
             expect: Expect::Retained("markerless-with-content", None),
         },
         ProofCase {
+            // `SWEEP-CLASSIFY-009`: a listing that fails is not a bare
+            // directory. A file where the directory was is the failure every
+            // platform gives the same way, as root too -- `ENOTDIR` on Unix,
+            // `ERROR_DIRECTORY` on Windows, neither `NotFound`. The
+            // permission-bit shape the finding is about is
+            // `a_public_directory_that_cannot_be_listed_is_retained`.
+            name: "public directory the filesystem will not list",
+            before: nothing,
+            after: |husk| {
+                fs::remove_dir_all(husk.public()).expect("remove the public directory");
+                write(&husk.public(), b"a file where the public directory was");
+            },
+            expect: Expect::Retained("public-dir-unreadable", None),
+        },
+        ProofCase {
             name: "private half carrying a commit record",
             before: nothing,
             after: |husk| write(&husk.private.join(COMMIT_RECORD), b"{}"),
@@ -4161,7 +4176,7 @@ fn p0_creates_the_public_directory_and_nothing_private() {
 
     assert!(public.is_dir(), "P0 created the public run directory");
     assert_eq!(
-        read_dir_names(&public),
+        read_dir_names(&public).expect("the public directory lists"),
         Vec::<OsString>::new(),
         "and it is bare: no skeleton, no marker, no private half beneath it"
     );
@@ -4194,21 +4209,21 @@ fn the_owner_record_is_the_first_content_of_a_private_half() {
 
     create_private_dir(&private, &mut NoHooks).expect("P3");
     assert_eq!(
-        read_dir_names(&private),
+        read_dir_names(&private).expect("the private half lists"),
         Vec::<OsString>::new(),
         "immediately after P3 the private half is empty"
     );
 
     stage_owner_record(&private, &owner, &mut NoHooks).expect("P3a");
     assert_eq!(
-        read_dir_names(&private),
+        read_dir_names(&private).expect("the private half lists"),
         vec![OsString::from(OWNER_RECORD_STAGED)],
         "the staged owner record is the only thing in it"
     );
 
     publish_owner_record(&private, &mut NoHooks).expect("P3b");
     assert_eq!(
-        read_dir_names(&private),
+        read_dir_names(&private).expect("the private half lists"),
         vec![OsString::from(OWNER_RECORD)],
         "and after publication the owner record is the only content there has ever been"
     );
@@ -13891,5 +13906,112 @@ fn a_public_husk_holding_a_name_that_is_not_utf8_is_reclaimed() {
         ),
         "the public husk is gone: {}",
         public.display()
+    );
+}
+
+/// A public directory that cannot be listed is **retained**, never answered
+/// as a bare husk with nothing bound (`SWEEP-CLASSIFY-009`).
+///
+/// The finding's husk: a committed run's public directory holding
+/// `events.jsonl` and no marker, whose listing fails. `read_dir_names`
+/// answered every failure with an empty list, `unbound_shape` read that as
+/// `NothingBound(Bare)` -- the answer that authorises `remove_public_husk`,
+/// which lists the directory again and, once the failure has passed, deletes
+/// the event log. Here the failure is the directory's read permission removed,
+/// so listing it is refused with `PermissionDenied`, and the proof has to
+/// answer `public-dir-unreadable`. With the fold restored, this test fails on
+/// exactly that `NothingBound(Bare)`. The removal is then asked too, and has to
+/// return the listing's failure with the event log still in place.
+///
+/// Linux only, as the neighbouring non-UTF-8 test is: a mode bit is how an
+/// unlistable directory is built without privilege. A process that ignores
+/// mode bits, as root does, lists the directory anyway; the test checks for
+/// that before asking the proof and fails with a diagnostic, rather than
+/// passing having shown nothing. The permission is given back by a guard
+/// declared after the scratch tree, so it drops first, on a panic as on a
+/// normal return, and the tree can be reclaimed.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_public_directory_that_cannot_be_listed_is_retained() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// Gives `path` back the permissions it had. A failed restore is left to
+    /// surface where it matters: the scratch tree's reclaim, which needs the
+    /// permission back, then fails and reports it.
+    struct Restore {
+        path: PathBuf,
+        permissions: fs::Permissions,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.path, self.permissions.clone());
+        }
+    }
+
+    let tree = scratch("unlistablehusk");
+    let public = public_dir(&tree.path().join("repo"), "01UNLISTABLEHUSK0000000000");
+    fs::create_dir_all(&public).expect("the public directory");
+    write(&public.join(EVENT_LOG), b"a committed run's event log");
+    assert!(!public.join(MARKER).exists(), "the husk has no marker");
+
+    let permissions = fs::metadata(&public)
+        .expect("the public directory's permissions")
+        .permissions();
+    let _restore = Restore {
+        path: public.clone(),
+        permissions: permissions.clone(),
+    };
+    fs::set_permissions(
+        &public,
+        fs::Permissions::from_mode(permissions.mode() & !0o444),
+    )
+    .expect("remove the public directory's read permission");
+    match fs::read_dir(&public) {
+        Err(refused) if refused.kind() == std::io::ErrorKind::PermissionDenied => {}
+        Err(other) => panic!(
+            "listing {} failed, but not with a permission error: {other}",
+            public.display()
+        ),
+        Ok(_) => panic!(
+            "{} still lists with its read permission removed: this process ignores \
+             permission bits, as root does, so this test cannot show anything; run it as an \
+             unprivileged user",
+            public.display()
+        ),
+    }
+
+    match prove_private_half_ownership(
+        &public,
+        &RepoKey::v1(&tree.path().join("git-dir")),
+        &tree.path().join("private"),
+    ) {
+        PrivateHalfOwnership::Retained(reason) => assert_eq!(
+            reason.kind(),
+            "public-dir-unreadable",
+            "a listing refused for permission is retained as unreadable: {reason}"
+        ),
+        PrivateHalfOwnership::NothingBound(shape) => panic!(
+            "a public directory that could not be listed answered NothingBound({shape:?}); only \
+             a retained answer keeps the census from reclaiming it, events.jsonl and all"
+        ),
+        PrivateHalfOwnership::Proven(proof) => panic!(
+            "a public directory that could not be listed answered Proven({proof:?}); only a \
+             retained answer keeps the census from reclaiming it, events.jsonl and all"
+        ),
+    }
+
+    let error = remove_public_husk(&public, &mut NoHooks)
+        .expect_err("a removal that cannot list the directory reports it");
+    assert!(
+        matches!(
+            &error,
+            UpstrokeError::Io { path, source }
+                if path == &public && source.kind() == std::io::ErrorKind::PermissionDenied
+        ),
+        "the removal returns the listing's own failure, for the public path: {error}"
+    );
+    assert!(
+        public.join(EVENT_LOG).is_file(),
+        "and it removed nothing: the event log is still there"
     );
 }
