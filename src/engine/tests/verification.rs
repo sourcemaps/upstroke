@@ -1,4 +1,7 @@
 //! Extended notes: `docs/internals/engine/tests/verification.md`
+// Allowlist placement: the funnel section of `effects/allowlist.toml`.
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![forbid(clippy::disallowed_macros)]
 
 use super::*;
 

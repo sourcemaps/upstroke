@@ -36,13 +36,21 @@ use crate::runner::CommandSpec;
 use crate::topology::effects::EventSite;
 use crate::workspace::Workspace;
 
+#[cfg(test)]
 mod capacity_budget;
+#[cfg(test)]
 mod kept_output;
+#[cfg(test)]
 mod legacy_resume;
+#[cfg(test)]
 mod questions;
+#[cfg(test)]
 mod snapshot_registration;
+#[cfg(test)]
 mod topology_admission;
+#[cfg(test)]
 mod topology_execution;
+#[cfg(test)]
 mod verification;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -8281,3 +8289,14 @@ fn recorded_target_resume_child() {
         std::env::var_os(RECORDED_TARGET_REFUSAL).expect("the parent names the refusal's file");
     fs::write(refusal, refused.to_string()).expect("the refusal recorded");
 }
+
+// `-` for the real message's `·`, as in the tests above.
+const LIMIT_PAST_THE_HEAD: &str = concat!(
+    r#"{"type":"result","is_error":true,"result":"MCP cache resets 9am (UTC). "#,
+    "mcp server docs: tool list refreshed in 812ms, 14 tools registered, 2 skipped as duplicates. ",
+    "mcp server docs: tool list refreshed in 815ms, 14 tools registered, 2 skipped as duplicates. ",
+    "mcp server docs: tool list refreshed in 818ms, 14 tools registered, 2 skipped as duplicates. ",
+    "mcp server docs: tool list refreshed in 821ms, 14 tools registered, 2 skipped as duplicates. ",
+    "mcp server docs: tool list refreshed in 824ms, 14 tools registered, 2 skipped as duplicates. ",
+    r#"You've hit your 5-hour limit - resets 5:30am (UTC)","session_id":"fake-review-session","fake":"UPSTROKE-FAKE-REVIEW"}"#,
+);

@@ -844,6 +844,219 @@ no allowance cannot call them; `tracker::tests::only_the_cli_reaches_the_tracker
 covers the frozen legacy modules, which do state one, by reading every \
 production source file for the module's name."""
 
+[[funnel]]
+path = "src/engine/tests/capacity_budget.rs"
+allows = ["clippy::disallowed_methods"]
+packet = "effect_site_inventory.mechanism (2), test-only attachment to src/engine/tests.rs"
+review = """
+Whole-file test-only child of `src/engine/tests.rs`, explicitly declared under `#[cfg(test)]`. \
+There is no production surface or production export. These unchanged tests and helpers \
+exercise the existing engine and funnel APIs, construct and alter scratch repositories and \
+residue, and observe real child processes. Only the operations moved from the parent are \
+allowed; every remaining governed lint is forbidden here. `clippy::disallowed_methods`: \
+fs::create_dir_all, fs::write, resume_harness, run_harness, run_with."""
+
+[[funnel]]
+path = "src/engine/tests/kept_output.rs"
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
+packet = "effect_site_inventory.mechanism (2), test-only attachment to src/engine/tests.rs"
+review = """
+Whole-file test-only child of `src/engine/tests.rs`, explicitly declared under `#[cfg(test)]`. \
+There is no production surface or production export. These unchanged tests and helpers \
+exercise the existing engine and funnel APIs, construct and alter scratch repositories and \
+residue, and observe real child processes. Only the operations moved from the parent are \
+allowed; every remaining governed lint is forbidden here. `clippy::disallowed_methods`: \
+fs::copy, fs::create_dir, fs::create_dir_all, fs::remove_file, fs::rename, \
+fs::set_permissions, fs::write, File::create, std::os::unix::fs::symlink, .output, .spawn, \
+.status, .write_fmt, run, run_with. `clippy::disallowed_types`: Command, OpenOptions."""
+
+[[funnel]]
+path = "src/engine/tests/legacy_resume.rs"
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
+packet = "effect_site_inventory.mechanism (2), test-only attachment to src/engine/tests.rs"
+review = """
+Whole-file test-only child of `src/engine/tests.rs`, explicitly declared under `#[cfg(test)]`. \
+There is no production surface or production export. These unchanged tests and helpers \
+exercise the existing engine and funnel APIs, construct and alter scratch repositories and \
+residue, and observe real child processes. Only the operations moved from the parent are \
+allowed; every remaining governed lint is forbidden here. `clippy::disallowed_methods`: \
+fs::create_dir, fs::remove_file, fs::write, .output, resume_harness, resume_with, run_harness, \
+run_harness_inner_with_id, run_with. `clippy::disallowed_types`: Command."""
+
+[[funnel]]
+path = "src/engine/tests/questions.rs"
+allows = ["clippy::disallowed_methods"]
+packet = "effect_site_inventory.mechanism (2), test-only attachment to src/engine/tests.rs"
+review = """
+Whole-file test-only child of `src/engine/tests.rs`, explicitly declared under `#[cfg(test)]`. \
+There is no production surface or production export. These unchanged tests and helpers \
+exercise the existing engine and funnel APIs, construct and alter scratch repositories and \
+residue, and observe real child processes. Only the operations moved from the parent are \
+allowed; every remaining governed lint is forbidden here. `clippy::disallowed_methods`: \
+fs::create_dir_all, fs::write, resume_with, run_harness, run_with."""
+
+[[funnel]]
+path = "src/engine/tests/snapshot_registration.rs"
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
+packet = "effect_site_inventory.mechanism (2), test-only attachment to src/engine/tests.rs"
+review = """
+Whole-file test-only child of `src/engine/tests.rs`, explicitly declared under `#[cfg(test)]`. \
+There is no production surface or production export. These unchanged tests and helpers \
+exercise the existing engine and funnel APIs, construct and alter scratch repositories and \
+residue, and observe real child processes. Only the operations moved from the parent are \
+allowed; every remaining governed lint is forbidden here. `clippy::disallowed_methods`: \
+fs::create_dir, fs::create_dir_all, fs::remove_dir_all, fs::remove_file, fs::write, \
+std::os::unix::fs::symlink, .output, run_with. `clippy::disallowed_types`: Command."""
+
+[[funnel]]
+path = "src/engine/tests/topology_admission.rs"
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
+packet = "effect_site_inventory.mechanism (2), test-only attachment to src/engine/tests.rs"
+review = """
+Whole-file test-only child of `src/engine/tests.rs`, explicitly declared under `#[cfg(test)]`. \
+There is no production surface or production export. These unchanged tests and helpers \
+exercise the existing engine and funnel APIs, construct and alter scratch repositories and \
+residue, and observe real child processes. Only the operations moved from the parent are \
+allowed; every remaining governed lint is forbidden here. `clippy::disallowed_methods`: \
+fs::copy, fs::create_dir, fs::create_dir_all, fs::remove_file, fs::rename, fs::write, \
+File::create, std::os::unix::fs::symlink, .spawn, resume_with, run_with. \
+`clippy::disallowed_types`: Command."""
+
+[[funnel]]
+path = "src/engine/tests/topology_execution.rs"
+allows = ["clippy::disallowed_methods"]
+packet = "effect_site_inventory.mechanism (2), test-only attachment to src/engine/tests.rs"
+review = """
+Whole-file test-only child of `src/engine/tests.rs`, explicitly declared under `#[cfg(test)]`. \
+There is no production surface or production export. These unchanged tests and helpers \
+exercise the existing engine and funnel APIs, construct and alter scratch repositories and \
+residue, and observe real child processes. Only the operations moved from the parent are \
+allowed; every remaining governed lint is forbidden here. `clippy::disallowed_methods`: \
+fs::create_dir, fs::create_dir_all, fs::remove_file, fs::write, resume_with, run_harness, \
+run_with."""
+
+[[funnel]]
+path = "src/engine/tests/verification.rs"
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
+packet = "effect_site_inventory.mechanism (2), test-only attachment to src/engine/tests.rs"
+review = """
+Whole-file test-only child of `src/engine/tests.rs`, explicitly declared under `#[cfg(test)]`. \
+There is no production surface or production export. These unchanged tests and helpers \
+exercise the existing engine and funnel APIs, construct and alter scratch repositories and \
+residue, and observe real child processes. Only the operations moved from the parent are \
+allowed; every remaining governed lint is forbidden here. `clippy::disallowed_methods`: \
+fs::create_dir, fs::create_dir_all, fs::remove_file, fs::write, .output, resume, \
+resume_contained, resume_harness, resume_with, run, run_contained, run_harness, \
+run_harness_on, run_with. `clippy::disallowed_types`: Command."""
+
+[[funnel]]
+path = "src/workspace_manager/tests/containment.rs"
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+packet = "effect_site_inventory.mechanism (2), test-only attachment to src/workspace_manager/tests.rs"
+review = """
+Whole-file test-only child of `src/workspace_manager/tests.rs`, explicitly declared under \
+`#[cfg(test)]`. There is no production surface or production export. These unchanged tests and \
+helpers exercise the existing engine and funnel APIs, construct and alter scratch repositories \
+and residue, and observe real child processes. Only the operations moved from the parent are \
+allowed; every remaining governed lint is forbidden here. `clippy::disallowed_methods`: \
+fs::copy, fs::create_dir, fs::create_dir_all, fs::remove_dir, fs::remove_file, fs::rename, \
+fs::set_permissions, fs::write, std::os::unix::fs::symlink, .output, .spawn. \
+`clippy::disallowed_types`: Command, OpenOptions. `clippy::disallowed_macros`: eprintln!."""
+
+[[funnel]]
+path = "src/workspace_manager/tests/guarded_reads.rs"
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
+packet = "effect_site_inventory.mechanism (2), test-only attachment to src/workspace_manager/tests.rs"
+review = """
+Whole-file test-only child of `src/workspace_manager/tests.rs`, explicitly declared under \
+`#[cfg(test)]`. There is no production surface or production export. These unchanged tests and \
+helpers exercise the existing engine and funnel APIs, construct and alter scratch repositories \
+and residue, and observe real child processes. Only the operations moved from the parent are \
+allowed; every remaining governed lint is forbidden here. `clippy::disallowed_methods`: \
+fs::create_dir, fs::create_dir_all, fs::remove_dir, fs::remove_file, fs::rename, fs::write, \
+std::os::unix::fs::symlink, .output. `clippy::disallowed_types`: Command."""
+
+[[funnel]]
+path = "src/workspace_manager/tests/incarnations.rs"
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+packet = "effect_site_inventory.mechanism (2), test-only attachment to src/workspace_manager/tests.rs"
+review = """
+Whole-file test-only child of `src/workspace_manager/tests.rs`, explicitly declared under \
+`#[cfg(test)]`. There is no production surface or production export. These unchanged tests and \
+helpers exercise the existing engine and funnel APIs, construct and alter scratch repositories \
+and residue, and observe real child processes. Only the operations moved from the parent are \
+allowed; every remaining governed lint is forbidden here. `clippy::disallowed_methods`: \
+fs::remove_dir_all, fs::remove_file, fs::set_permissions, fs::write. \
+`clippy::disallowed_types`: OpenOptions. `clippy::disallowed_macros`: eprintln!."""
+
+[[funnel]]
+path = "src/workspace_manager/tests/reclaim.rs"
+allows = ["clippy::disallowed_methods", "clippy::disallowed_macros"]
+packet = "effect_site_inventory.mechanism (2), test-only attachment to src/workspace_manager/tests.rs"
+review = """
+Whole-file test-only child of `src/workspace_manager/tests.rs`, explicitly declared under \
+`#[cfg(test)]`. There is no production surface or production export. These unchanged tests and \
+helpers exercise the existing engine and funnel APIs, construct and alter scratch repositories \
+and residue, and observe real child processes. Only the operations moved from the parent are \
+allowed; every remaining governed lint is forbidden here. `clippy::disallowed_methods`: \
+fs::create_dir, fs::create_dir_all, fs::remove_dir, fs::remove_dir_all, fs::remove_file, \
+fs::rename, fs::write, std::os::unix::fs::symlink, .spawn. `clippy::disallowed_macros`: \
+eprintln!."""
+
+[[funnel]]
+path = "src/workspace_manager/tests/refs.rs"
+allows = ["clippy::disallowed_methods"]
+packet = "effect_site_inventory.mechanism (2), test-only attachment to src/workspace_manager/tests.rs"
+review = """
+Whole-file test-only child of `src/workspace_manager/tests.rs`, explicitly declared under \
+`#[cfg(test)]`. There is no production surface or production export. These unchanged tests and \
+helpers exercise the existing engine and funnel APIs, construct and alter scratch repositories \
+and residue, and observe real child processes. Only the operations moved from the parent are \
+allowed; every remaining governed lint is forbidden here. `clippy::disallowed_methods`: \
+fs::remove_file, fs::write."""
+
+[[funnel]]
+path = "src/workspace_manager/tests/registry.rs"
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+packet = "effect_site_inventory.mechanism (2), test-only attachment to src/workspace_manager/tests.rs"
+review = """
+Whole-file test-only child of `src/workspace_manager/tests.rs`, explicitly declared under \
+`#[cfg(test)]`. There is no production surface or production export. These unchanged tests and \
+helpers exercise the existing engine and funnel APIs, construct and alter scratch repositories \
+and residue, and observe real child processes. Only the operations moved from the parent are \
+allowed; every remaining governed lint is forbidden here. `clippy::disallowed_methods`: \
+fs::create_dir, fs::create_dir_all, fs::remove_dir, fs::remove_dir_all, fs::remove_file, \
+fs::rename, fs::set_permissions, fs::write, std::os::unix::fs::symlink, .spawn, .write_all. \
+`clippy::disallowed_types`: Command. `clippy::disallowed_macros`: eprintln!."""
+
+[[funnel]]
+path = "src/workspace_manager/tests/residue.rs"
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types", "clippy::disallowed_macros"]
+packet = "effect_site_inventory.mechanism (2), test-only attachment to src/workspace_manager/tests.rs"
+review = """
+Whole-file test-only child of `src/workspace_manager/tests.rs`, explicitly declared under \
+`#[cfg(test)]`. There is no production surface or production export. These unchanged tests and \
+helpers exercise the existing engine and funnel APIs, construct and alter scratch repositories \
+and residue, and observe real child processes. Only the operations moved from the parent are \
+allowed; every remaining governed lint is forbidden here. `clippy::disallowed_methods`: \
+fs::create_dir, fs::create_dir_all, fs::remove_dir_all, fs::remove_file, fs::set_permissions, \
+fs::write, std::os::unix::fs::symlink, .output. `clippy::disallowed_types`: Command, \
+OpenOptions. `clippy::disallowed_macros`: eprintln!."""
+
+[[funnel]]
+path = "src/workspace_manager/tests/snapshots.rs"
+allows = ["clippy::disallowed_methods", "clippy::disallowed_types"]
+packet = "effect_site_inventory.mechanism (2), test-only attachment to src/workspace_manager/tests.rs"
+review = """
+Whole-file test-only child of `src/workspace_manager/tests.rs`, explicitly declared under \
+`#[cfg(test)]`. There is no production surface or production export. These unchanged tests and \
+helpers exercise the existing engine and funnel APIs, construct and alter scratch repositories \
+and residue, and observe real child processes. Only the operations moved from the parent are \
+allowed; every remaining governed lint is forbidden here. `clippy::disallowed_methods`: \
+fs::create_dir, fs::create_dir_all, fs::remove_dir_all, fs::remove_file, fs::rename, \
+fs::write, std::os::unix::fs::symlink, .output, .spawn, .status, .write_all. \
+`clippy::disallowed_types`: Command."""
+
 # ---------------------------------------------------------------------------
 # Legacy modules, FROZEN AT PR5
 #

@@ -1,4 +1,7 @@
 //! Extended notes: `docs/internals/engine/tests/capacity_budget.md`
+// Allowlist placement: the funnel section of `effects/allowlist.toml`.
+#![allow(clippy::disallowed_methods)]
+#![forbid(clippy::disallowed_types, clippy::disallowed_macros)]
 
 use super::*;
 
@@ -995,17 +998,6 @@ fn a_reviewers_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_p
     assert!(reset_at.ends_with("T05:30:00Z"), "{reset_at}");
     assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
 }
-
-// `-` for the real message's `·`, as in the tests above.
-const LIMIT_PAST_THE_HEAD: &str = concat!(
-    r#"{"type":"result","is_error":true,"result":"MCP cache resets 9am (UTC). "#,
-    "mcp server docs: tool list refreshed in 812ms, 14 tools registered, 2 skipped as duplicates. ",
-    "mcp server docs: tool list refreshed in 815ms, 14 tools registered, 2 skipped as duplicates. ",
-    "mcp server docs: tool list refreshed in 818ms, 14 tools registered, 2 skipped as duplicates. ",
-    "mcp server docs: tool list refreshed in 821ms, 14 tools registered, 2 skipped as duplicates. ",
-    "mcp server docs: tool list refreshed in 824ms, 14 tools registered, 2 skipped as duplicates. ",
-    r#"You've hit your 5-hour limit - resets 5:30am (UTC)","session_id":"fake-review-session","fake":"UPSTROKE-FAKE-REVIEW"}"#,
-);
 
 #[test]
 fn a_reviewers_limit_in_the_result_past_the_reasons_head_records_its_reset_on_pool_exhausted() {
