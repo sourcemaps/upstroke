@@ -292,8 +292,10 @@ jobs:
   # run's `pick-windows-home` answers `hosted` -- WINGUEST_BUSY is `1`, or
   # WINGUEST_QUEUE_LIMIT is set and the guest's queue has reached it, both
   # opt-in and neither set by default. Then this job is skipped
-  # and `test-windows-hosted` below runs the same suite on windows-latest;
-  # the aggregate requires exactly one of the two to succeed. Measured
+  # and `test-windows-hosted` below runs the same suite on windows-latest,
+  # in five shards, each on a runner of its own; the aggregate requires
+  # exactly one of the two jobs to succeed, and the hosted job succeeds only
+  # when all five shards do. Measured
   # 2026-09-15/16: five hosted samples of the suite on windows-latest (run
   # 34980597250, at 126b8832) took 1122-1499 s in the harness, 21m 30s to
   # 28m 03s a job; the guest, on three green runs of pull request #299, took
@@ -433,10 +435,14 @@ jobs:
           if (-not $ok) { throw "the container capability record is missing or its framing is incomplete" }
 
   # The Windows suite's hosted twin, for a run `pick-windows-home` sends off
-  # the guest. Its suite step is the guest's, character for character: the
-  # three compiler questions, the suite, its exit and the count of passing
-  # tests against the same floor. It differs only where GitHub's image
-  # differs from the guest's. No image carries the compiler here, so step 1
+  # the guest: the one suite in five shards, each a leg of this job's matrix
+  # on a windows-latest runner of its own. Its suite step is the guest's but
+  # for three things: the cargo line hands libtest the shard's filter, the
+  # count of passing tests is held to the shard's share of the guest's
+  # floor, and a last line prints the count. The three compiler questions,
+  # the suite's exit and the count itself are the guest's, character for
+  # character. Otherwise the job differs only where GitHub's image differs
+  # from the guest's. No image carries the compiler here, so step 1
   # installs the image's, `1.97.1`, not `stable`. Current stable is ahead of
   # the image (`lint (windows)` installed 1.98.1 on 2026-09-16), so `stable`
   # here would run the suite on a compiler the guest never ran it on: a test
@@ -458,7 +464,7 @@ jobs:
   # lane carried none: a run restores caches from its own ref or the default
   # branch, a queue entry's ref is a fresh `gh-readonly-queue/` branch, and
   # `master` saves a twin cache only on a push the picker itself sent here,
-  # so nearly every run would start cold and then upload, inside its 55
+  # so nearly every run would start cold and then upload, inside its 40
   # minutes, a cache nothing later reads; the workflow oracle refuses one
   # here. A pull request sent here twice is the one run that would gain.
   # The host acceptance capture and the container capability observation
@@ -469,18 +475,61 @@ jobs:
   # directory and services are not the guest's, so a test whose outcome
   # depends on the machine can still pass here and fail there.
   #
-  # 55 minutes, the ceiling the hosted Windows suite last ran under. This job
-  # inherits that suite's risk: it took 21 to 28 minutes a job in September
-  # 2026, and in October several merge-queue entries reached 45 and then 55
-  # minutes and were cancelled, the cause unknown (the comment above
-  # `test-windows`). Splitting the suite into shards, as draft pull request
-  # #339 proposed, is not done here.
+  # Five shards, because one job no longer fits. Measured on 2026-11-15, run
+  # 43719719561, on windows-latest with four processors: the whole suite
+  # took 3,311 to 4,292 s in the harness, 59 to 76 minutes a job. Four
+  # shards by test name took 692 to 1,669 s and ran 193 + 776 + 320 + 2,218
+  # = 3,507 tests, the whole suite's count. The slowest leg that ended took
+  # 22m 53s. The 1,669 s shard, the rest of `engine::topology::`, is divided
+  # in two here, which makes the five.
+  #
+  # The shard rule: a leg runs the tests whose names contain its filter and
+  # none of the filters of the legs before it, each of those a `--skip`; the
+  # last leg has no filter and runs the tests that contain none of them. So
+  # every test runs in exactly one leg. The workflow oracle derives the table
+  # below from its filter list and its floors, and holds this matrix to it
+  # entry for entry; the five floors sum to the guest's 1700. Every `shard:`
+  # and `tests:` value is double-quoted: a `tests:` value contains `:: `, a
+  # colon and a space, which YAML reads as a mapping in a plain scalar.
+  #
+  # `fail-fast: false`, so one leg's failure does not cancel the others
+  # before they report. `needs.test-windows-hosted.result` is `success` only
+  # when every leg succeeded, and the aggregate already reads the `test` and
+  # `msrv` matrices through one result each. So its rule stands as written:
+  # exactly one of the two Windows suite jobs succeeded and the other was
+  # skipped, which now means the guest's job, or all five shards.
+  #
+  # 40 minutes a leg: 1.75 times the slowest measured leg, and inside the
+  # merge queue's 60. In that run the 1,669 s shard printed every
+  # `test result: ok` line 31.6 minutes into its job and did not end: a
+  # leftover test process held the step's output until the job's limit, and
+  # the runner's clean-up killed it. The limit bounds that; it does not
+  # repair it.
   test-windows-hosted:
-    name: test (windows-latest)
+    name: test (windows-latest, ${{ matrix.shard }})
     runs-on: windows-latest
     needs: pick-windows-home
     if: needs.pick-windows-home.outputs.home == 'hosted'
-    timeout-minutes: 55
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: "1 of 5"
+            tests: "engine::topology::coordinator::tests::a"
+            floor: 95
+          - shard: "2 of 5"
+            tests: "engine::topology::coordinator:: --skip engine::topology::coordinator::tests::a"
+            floor: 30
+          - shard: "3 of 5"
+            tests: "engine::topology:: --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator::"
+            floor: 340
+          - shard: "4 of 5"
+            tests: "engine:: --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::"
+            floor: 150
+          - shard: "5 of 5"
+            tests: "--skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology:: --skip engine::"
+            floor: 1085
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -501,10 +550,11 @@ jobs:
         run: |
           $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()
           if ($rustc -notmatch '^rustc 1\.97\.1 ' -or $path_rustc -notmatch '^rustc 1\.97\.1 ' -or $cargo -notmatch '^cargo 1\.97\.1 ') { throw "the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow" }
-          cargo test --all-targets --all-features | Tee-Object -Variable log
+          cargo test --all-targets --all-features -- ${{ matrix.tests }} | Tee-Object -Variable log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $passed = [int](($log | Select-String -Pattern '^test result: ok\. (\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)
-          if ($passed -lt 1700) { throw "the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them" }
+          if ($passed -lt ${{ matrix.floor }}) { throw "shard ${{ matrix.shard }} reported $passed passing tests, below its floor of ${{ matrix.floor }}: Cargo compiled the harnesses and executed almost none of this shard's tests" }
+          "shard ${{ matrix.shard }} reported $passed passing tests; its floor is ${{ matrix.floor }}"
 
       - name: Capture the native host acceptance record
         env:
@@ -648,7 +698,10 @@ jobs:
   # gate must succeed except the two Windows suite jobs, of which
   # `pick-windows-home` sends a run to one: exactly one of those must succeed
   # and the other be skipped, so both skipped, both run, or either failed or
-  # cancelled is red.
+  # cancelled is red. `test-windows-hosted` is a matrix, and its result is
+  # `success` only when every shard succeeded, as `test`'s and `msrv`'s are
+  # only when every leg did; so the hosted half of the rule is all five
+  # shards, and one that failed or was cancelled is red.
   merge-gate:
     name: upstroke-ci
     if: always()

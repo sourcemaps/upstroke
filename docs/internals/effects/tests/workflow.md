@@ -371,14 +371,26 @@ before it is pushed. Codes `<job>-needs`, `<job>-condition` and
 ## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {`
 
 Every way the Windows suite's hosted twin fails its contract, pinned as
-strictly as the guest's job: field set, name, runner, timeout, `needs:` and
-condition; every step's fields, the case-fold map on the suite, capture and
-observation steps, and the observation's bound; the platform-default shell on
-every `run:` step; exactly one suite step running the guest's
-[`WINDOWS_TEST_WITNESS`], compiler questions included, the capture
-immediately after it and the observation immediately after that; one
-input-free checkout at step 0; every script and action on the guest's
-pins, [`TEST_WINDOWS_SCRIPTS`]; and no cache step.
+strictly as the guest's job: field set ([`TEST_WINDOWS_HOSTED_JOB_FIELDS`],
+the guest's plus `strategy`), name, runner, timeout, `needs:` and condition;
+the shard matrix, whole ([`windows_shard_matrix_complaints`]); every step's
+fields, the case-fold map on the suite, capture and observation steps, and
+the observation's bound; the platform-default shell on every `run:` step;
+exactly one suite step running [`WINDOWS_SHARD_WITNESS`], the guest's
+compiler questions included, the capture immediately after it and the
+observation immediately after that; one input-free checkout at step 0;
+every script and action on the twin's pins,
+[`TEST_WINDOWS_HOSTED_SCRIPTS`]; and no cache step.
+
+The steps are one list that every leg runs, so they are read once: nothing
+in a step may vary by leg except through the three `matrix` expressions the
+pinned suite script carries, and what those evaluate to is the matrix
+check's to hold. The suite step is recognised by [`WINDOWS_SHARD_WITNESS`]
+wherever the guest's check uses [`WINDOWS_TEST_WITNESS`]: for the step's
+field set and case-fold map, for the count of suite steps, and for the
+capture's place after it. A twin step that carried the guest's script
+instead would be an unpinned script here, and the count of suite steps
+would be zero.
 
 Where the guest's job refuses a toolchain install, this one requires one:
 the toolchain action at step 1, with `clippy` among its components, since
@@ -412,6 +424,94 @@ and names the cause. Measured, `MUT-TEST-WINDOWS-HOSTED-CACHE-RESTORED`.
 
 The `clippy` component, read from the install step the way the `test` job's
 check reads it. Measured, `MUT-TEST-WINDOWS-HOSTED-WITHOUT-CLIPPY`.
+
+## `struct ShardLeg {`
+
+One leg of the twin's matrix as the oracle compares it: the shard's label,
+the libtest arguments, and the floor. The expected legs and the legs read
+from `ci.yml` are both made of it, so the comparison is one equality and a
+refusal prints both sides field by field.
+
+## `pub(super) fn windows_shard_labels() -> Vec<String> {`
+
+The `shard:` value of each leg, in order: `1 of 5` to `5 of 5`. The count is
+[`WINDOWS_SHARD_FILTERS`]' length and one more, as [`shard_selections`]
+makes one more shard than it is given filters, so a filter added to the
+table renames every leg and no label is written down.
+
+The label is what GitHub puts in the leg's job name, in place of
+`${{ matrix.shard }}`, and what the suite step prints beside its count. The
+picker fixtures in `super` build the legs' listed names from it.
+
+## `fn windows_shard_legs() -> Vec<ShardLeg> {`
+
+The table the twin's matrix must equal, derived and never written out: leg
+`k` has the `k`-th label, the `k`-th string [`shard_selections`] makes of
+[`WINDOWS_SHARD_FILTERS`], and the `k`-th of [`WINDOWS_SHARD_FLOORS`].
+`the_shard_tables_run_every_test_in_exactly_one_shard` holds the floors to
+one for each shard, so the three lists are one length.
+
+## `fn shard_leg(entry: &Yaml) -> Option<ShardLeg> {`
+
+One `include:` entry of `ci.yml` read as a leg, or nothing: a mapping with
+exactly the keys `shard`, `tests` and `floor`, the first two strings and the
+third an integer. A fourth key is refused rather than ignored. An
+`include:` entry may set anything a step or the job reads from `matrix`,
+and a key this contract does not model is one whose reader it has not
+looked for. A quoted `floor: "95"` is refused too. GitHub would put the
+same text into the script, so nothing would run differently; the refusal
+keeps the table to one spelling, a floor that can only be a number.
+
+## `fn windows_shard_matrix_complaints(job: &Yaml) -> Vec<String> {`
+
+The twin's `strategy:`, whole, under the one code
+`test-windows-hosted-matrix`. Four things, each its own complaint:
+
+1. `strategy:` declares exactly `fail-fast` and `matrix`.
+2. `fail-fast` is `false`. Otherwise the first leg to fail cancels the legs
+   still running, and a run reports one shard's failures and none of the
+   others'.
+3. `matrix:` declares exactly `include`. An axis beside the list changes
+   what the list means. GitHub documents that each `include:` entry is added
+   to every combination the axes make where it overwrites none of their
+   values, a later entry overwriting what an earlier one added, and becomes
+   a leg of its own only where it cannot be added. By that rule, with one
+   axis of one value all five entries land on one combination and the last
+   wins: one leg, the last shard's, and a job whose result is `success`.
+   That is the rule as documented; no workflow was run to watch it.
+4. `include:` is, in order, exactly [`windows_shard_legs`]' five, each read
+   by [`shard_leg`].
+
+The fourth is the one the shard table exists for. The rule that every test
+runs in exactly one shard is proved of [`shard_selections`]' strings; it
+says nothing of a workflow whose strings differ from them. A leg dropped
+from the list, or one whose arguments select less than the table's, runs
+its tests in no leg while the others are green, and the aggregate reads
+one `success`. A leg whose arguments select more runs another shard's tests
+twice. A floor below the table's is one a shard clears having executed
+almost none of its tests; the script's pin cannot see that, since the
+script reads the floor from the matrix ([`WINDOWS_SHARD_WITNESS`]).
+
+In order, though GitHub does not run the legs in order: the order is the
+table's, each leg skipping the filters of the legs before it, and an
+equality over an ordered list is the plain way to hold every leg to its own
+row.
+
+Measured, `MUT-TEST-WINDOWS-HOSTED-SHARD-NARROWED`,
+`MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED`,
+`MUT-TEST-WINDOWS-HOSTED-FAIL-FAST-ENABLED` and
+`MUT-TEST-WINDOWS-HOSTED-MATRIX-AXIS-ADDED`. No row deletes a leg: its
+anchor would be the leg's three lines, and a leg's arguments are written
+out in the oracle in one test and nowhere else. A deleted leg was measured
+by hand instead, on 2026-11-17, in `ci.yml` itself and then restored: with
+the fifth entry's three lines removed, three tests of `super` failed, each
+with the fourth complaint and both tables printed --
+`the_workflow_shape_oracle_refuses_every_escape_the_ledger_names` at its
+clean-workflow check,
+`the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler` and
+`every_platform_this_crate_configures_for_has_a_clippy_gate_the_aggregate_requires`.
+The same three failed the same way with the second leg's `--skip` naming
+`tests::b`.
 
 ## `fn capture_complaints(`
 
@@ -996,7 +1096,9 @@ second shard skips its own filter and selects nothing. The same test holds
 both tables' strings to written-out literals.
 
 One function, so that the tables and anything derived from them cannot
-disagree about the rule.
+disagree about the rule. The hosted twin's matrix is the first thing derived
+from one: [`windows_shard_legs`] takes each leg's arguments from here, and
+`ci.yml` is held to them.
 
 ## `pub(super) fn libtest_runs(selection: &str, name: &str) -> bool {`
 

@@ -88,17 +88,27 @@ pattern.
 
 ## `pub(super) const TEST_WINDOWS_SCRIPTS: [&str; 4] = [`
 
-The scripts the Windows test leg runs: the identity script, the suite
-with the witness that it executed, [`HOST_ACCEPTANCE_WINDOWS_CAPTURE`] and
-[`CAPABILITY_WINDOWS_OBSERVATION`].
+The scripts the guest's Windows suite job runs: the identity script, the
+suite with the witness that it executed, [`HOST_ACCEPTANCE_WINDOWS_CAPTURE`]
+and [`CAPABILITY_WINDOWS_OBSERVATION`].
 
-Both Windows suite jobs run this one list, the guest's and its hosted twin
-[`TEST_WINDOWS_HOSTED_JOB`]'s. The twin's suite step is the guest's, compiler
-questions included, because the twin installs the guest's compiler
-([`GOLDEN_IMAGE_TOOLCHAIN`]). The two acceptance-record steps carry over
+Until the hosted twin ran the suite in shards both Windows suite jobs ran
+this one list. The twin's is now [`TEST_WINDOWS_HOSTED_SCRIPTS`], which
+differs in its suite step alone.
+
+## `pub(super) const TEST_WINDOWS_HOSTED_SCRIPTS: [&str; 4] = [`
+
+The scripts every leg of the hosted twin [`TEST_WINDOWS_HOSTED_JOB`] runs:
+[`TEST_WINDOWS_SCRIPTS`] with [`WINDOWS_SHARD_WITNESS`] in the suite's place.
+
+The other three are the guest's own constants, not copies. The identity
+script is the same on any runner. The two acceptance-record steps carry over
 because neither depends on the guest's image: each runs the test it names
 and checks the frame it prints, and every container capability class
-passes, an absent Docker included.
+passes, an absent Docker included. Each of the five legs runs both, after
+its own share of the suite, so a run sent to the twin prints five host
+acceptance records and five capability observations where the guest prints
+one of each.
 
 ## `pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;`
 
@@ -196,17 +206,67 @@ check, and this is the leg saying that it ran what it claims to have run.
 Measured, `MUT-WINDOWS-WITNESS-FLOOR-DROPPED` and
 `MUT-WINDOWS-WITNESS-COUNT-DROPPED`.
 
-The same step runs on the hosted twin, character for character. There a
-step does install the compiler -- the image's version, at step 1 -- and the
-three questions are what make that install the claim rather than a hope:
-the toolchain action tolerates a failed `rustup default` and verifies only
-`rustc +1.97.1`, so it can report success while bare `cargo` is still the
-runner's preinstalled stable. The count carries over for the reason it
-exists on the guest: the twin's machine is GitHub's, not the build box, but
-a Cargo target runner or a `[workspace]` selection reaches it the same way.
-Measured on the twin, `MUT-TEST-WINDOWS-HOSTED-COMPILER-CHECK-DROPPED`,
-`MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED` and
-`MUT-TEST-WINDOWS-HOSTED-FLOOR-DROPPED`.
+The hosted twin ran this step too, character for character, until it ran
+the suite in shards. Its legs now run [`WINDOWS_SHARD_WITNESS`], which keeps
+four of these six lines and changes two.
+
+## `pub(super) const WINDOWS_SHARD_WITNESS: &str`
+
+The suite step of every leg of the hosted twin, character for character:
+[`WINDOWS_TEST_WITNESS`] with the leg's shard on the cargo line, the leg's
+floor in the count's test, and a seventh line that prints the count. The
+three `matrix` expressions are text here, as they are in `ci.yml`; GitHub
+replaces each with the leg's value from the table
+[`TEST_WINDOWS_HOSTED_JOB`]'s matrix carries before PowerShell reads the
+script.
+
+Line by line, against the guest's:
+
+1. The three compiler questions. The guest's line.
+2. The refusal of any compiler but [`GOLDEN_IMAGE_TOOLCHAIN`]'s. The guest's
+   line. On the twin a step does install the compiler -- the image's
+   version, at step 1 -- and the questions are what make that install the
+   claim rather than a hope: the toolchain action tolerates a failed `rustup
+   default` and verifies only `rustc +1.97.1`, so it can report success
+   while bare `cargo` is still the runner's preinstalled stable.
+3. [`TEST_COMMAND`], then `-- ${{ matrix.tests }}`, then the guest's
+   `Tee-Object`. What follows `--` goes to libtest in every harness
+   `--all-targets` builds: the leg's filter, if it has one, and a `--skip`
+   for each filter of the legs before it. Without the selection every leg
+   runs the whole suite.
+4. Cargo's exit through `Tee-Object`. The guest's line.
+5. The sum of every `test result: ok.` line's passed count. The guest's
+   line.
+6. The refusal of a sum below `${{ matrix.floor }}`, where the guest's line
+   names [`WINDOWS_TEST_FLOOR`]. The message names the shard and its floor.
+7. The sum, the shard and the floor, printed. A leg that passes then says in
+   its log how far above its floor it ran, which is what a later change to a
+   floor is measured from; the guest's step prints the sum only when it
+   refuses.
+
+The floor is not in this text. It reaches the script from the matrix, so
+the equality over the script holds that line 6 reads `matrix.floor` and
+the oracle's check of the matrix holds what each leg's floor is
+([`WINDOWS_SHARD_FLOORS`]); a lowered floor in the table leaves this pin
+intact and is refused there. The same division holds the selection: this
+text says line 3 reads `matrix.tests`, and the matrix check says what each
+leg's is ([`WINDOWS_SHARD_FILTERS`]).
+
+`the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler`
+holds lines 1, 2, 4 and 5 to the guest's lines, line 3 to the command with
+only the selection added, and line 6 to the matrix's floor. The count
+carries over for the reason it exists on the guest: the twin's machines are
+GitHub's, not the build box, but a Cargo target runner or a `[workspace]`
+selection reaches them the same way. A shard's floor also refuses what the
+whole suite's cannot see, a leg whose filter matched almost nothing.
+Measured, `MUT-TEST-WINDOWS-HOSTED-COMPILER-CHECK-DROPPED`,
+`MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED`,
+`MUT-TEST-WINDOWS-HOSTED-FLOOR-DROPPED` and
+`MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED`.
+
+No PowerShell runs on the build box ([`HOST_ACCEPTANCE_WINDOWS_CAPTURE`]),
+so this text was not executed where it was written. Its execution is the
+twin's evidence, on the first run sent there.
 
 ## `pub(super) const HOST_ACCEPTANCE_CAPTURE: &str = r#"set -o pipefail`
 
@@ -252,9 +312,9 @@ Measured in the oracle: `MUT-TEST-CAPTURE-STEP-DELETED`,
 ## `pub(super) const HOST_ACCEPTANCE_WINDOWS_CAPTURE: &str = r#"cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | Tee-Object -Variable capture`
 
 The same capture on the guest, under the job's PowerShell, character for
-character, and on the hosted twin when the picker sends the run there. It
-stands immediately after the suite-and-witness step, so it runs the harness
-that step built on the compiler that step asserted.
+character, and on every leg of the hosted twin when the picker sends the run
+there. It stands immediately after the suite-and-witness step, so it runs
+the harness that step built on the compiler that step asserted.
 
 - `$LASTEXITCODE` carries Cargo's exit through `Tee-Object`, as in
   [`WINDOWS_TEST_WITNESS`].
@@ -434,7 +494,8 @@ action at a pinned commit with an allowlisted input name. Measured,
 The job that runs those fixtures for the one platform whose test execution
 is not in the `test` matrix, on the curated guest, on every lane -- unless
 the run's `pick-windows-home` answers `hosted`, when this job is skipped and
-[`TEST_WINDOWS_HOSTED_JOB`] runs the same suite on `windows-latest`.
+[`TEST_WINDOWS_HOSTED_JOB`] runs the same suite on `windows-latest`, in five
+shards.
 
 The Windows suite is spawn- and worktree-heavy, and on `windows-latest` it
 was the whole CI wall clock: a median of 12.5 minutes and a tail of 21 on
@@ -503,8 +564,9 @@ job is now refused outright, since at this very version it would pass the
 witness while the workflow, not the image, chose the compiler.
 
 The hosted twin, [`TEST_WINDOWS_HOSTED_JOB`], has no image to carry a
-compiler, so it installs this version, exactly, and runs the guest's
-[`WINDOWS_TEST_WITNESS`], whose questions assert it. It first installed
+compiler, so it installs this version, exactly, and runs
+[`WINDOWS_SHARD_WITNESS`], whose compiler questions are the guest's and
+assert it. It first installed
 `stable`; the first review of #375 found that the split the hosted queue
 lane's pin had removed, and the operator pinned the twin to the guest's
 compiler on 2026-11-12. A twin on `stable` runs the suite on a compiler the
@@ -549,26 +611,53 @@ answer is `guest`. Measured, `MUT-TEST-WINDOWS-TIMEOUT-RAISED`,
 
 ## `pub(super) const TEST_WINDOWS_HOSTED_JOB: &str = "test-windows-hosted";`
 
-The Windows suite's hosted twin: `test (windows-latest)` on GitHub's
+The Windows suite's hosted twin, a matrix of five legs on GitHub's
 `windows-latest`, needing `pick-windows-home` and running only when its
-answer is `hosted`. It installs [`GOLDEN_IMAGE_TOOLCHAIN`] with `clippy` at
-step 1 and then runs the guest's [`TEST_WINDOWS_SCRIPTS`], so the two homes
-run one suite, on one compiler, against one floor. The two conditions
-compare the one answer with its two values, so exactly one of the two jobs
-runs on any run whose picker succeeded;
+answer is `hosted`. Each leg installs [`GOLDEN_IMAGE_TOOLCHAIN`] with
+`clippy` at step 1 and then runs [`TEST_WINDOWS_HOSTED_SCRIPTS`]: one shard
+of the guest's suite, on the guest's compiler, against that shard's share of
+the guest's floor. The two conditions compare the one answer with its two
+values, so exactly one of the two jobs runs on any run whose picker
+succeeded;
 `the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler`
-holds the install to the version the suite step asserts, and the conditions
-to that shape.
+holds the install to the version the suite step asserts, the conditions to
+that shape, and the legs' suite step to the guest's.
 
-55 minutes: the ceiling the hosted Windows suite last ran under. The job
-inherits that suite's record -- 21 to 28 minutes a job in September 2026,
-and merge-queue entries cancelled at 45 and then 55 minutes in October with
-the cause unknown ([`TEST_WINDOWS_JOB`]). Sharding the suite, as draft pull
-request #339 proposed, is not done. Measured,
-`MUT-TEST-WINDOWS-HOSTED-RUNS-BESIDE-THE-GUEST`,
+The name is `test (windows-latest, ${{ matrix.shard }})`, an expression, and
+the constant holds it as the workflow writes it. GitHub lists each leg under
+the name with its shard in place, `test (windows-latest, 1 of 5)` to
+`test (windows-latest, 5 of 5)`, and those are the names another run's
+picker is handed; it reads none of them
+([`PICK_WINDOWS_HOME_SCRIPT`] selects the guest's job and the picker).
+
+Five legs, because the suite as one job stopped fitting. Measured on
+2026-11-15, run 43719719561, on `windows-latest` with four processors: the
+whole suite took 3,311 to 4,292 s in the harness, 59 to 76 minutes a job,
+past the 55 minutes this job then ran under. Four shards by test name took
+692 to 1,669 s and ran 193 + 776 + 320 + 2,218 = 3,507 tests, the whole
+suite's count; the slowest leg that ended took 22m 53s. The 1,669 s shard,
+the rest of `engine::topology::`, is divided in two, which makes the five of
+[`WINDOWS_SHARD_FILTERS`]. Draft pull request #339 had proposed sharding
+the suite.
+
+The aggregate is unchanged by the matrix. `needs.<job>.result` for a matrix
+job is `success` only when every leg succeeded, and the aggregate already
+read the `test` and `msrv` matrices through one result each; so its rule,
+exactly one of the two Windows suite jobs succeeded and the other was
+skipped, now means the guest's job or all five shards. `fail-fast` is
+`false`, so a failed leg does not cancel the others before they report.
+
+40 minutes a leg: 1.75 times the slowest measured leg, and inside the merge
+queue's 60. In that run the 1,669 s shard printed every `test result: ok`
+line 31.6 minutes into its job and did not end: a leftover test process held
+the step's output until the job's limit, and the runner's clean-up killed
+it. The limit bounds that and does not repair it. The September and October
+record of the hosted suite as one job is under [`TEST_WINDOWS_JOB`].
+Measured, `MUT-TEST-WINDOWS-HOSTED-RUNS-BESIDE-THE-GUEST`,
 `MUT-TEST-WINDOWS-HOSTED-NEEDS-DROPPED`,
 `MUT-TEST-WINDOWS-HOSTED-TIMEOUT-RAISED` and
-`MUT-TEST-WINDOWS-HOSTED-ON-THE-GUEST`.
+`MUT-TEST-WINDOWS-HOSTED-ON-THE-GUEST`; the matrix's own rows are under
+`windows_shard_matrix_complaints` in the workflow notes.
 
 ## `pub(super) const CACHE_ACTION: &str = "Swatinem/rust-cache@";`
 
@@ -577,7 +666,7 @@ restores caches from its own ref or the default branch. A merge-queue
 entry's ref is a fresh `gh-readonly-queue/` branch, and `master` saves a
 twin cache only on a push the picker itself sent to the twin, which with
 routing opt-in is rare; so nearly every twin run would start cold and then
-upload, inside its 55 minutes, a cache nothing later reads, spending the
+upload, inside its 40 minutes, a cache nothing later reads, spending the
 repository's cache space. That was the hosted merge-queue lane's reason for
 carrying none before `d3434ace`. The twin first carried one, "like the other
 hosted jobs", which the first review of #375 found did not answer that
@@ -588,11 +677,14 @@ twin twice is the one run that would have gained. Measured,
 ## `pub(super) const WINDOWS_SHARD_FILTERS: [&str; 4] = [`
 
 The ordered filters that divide the Windows suite into five shards, as data:
-the list a hosted shard matrix is to be built from. Nothing in `ci.yml` reads
-it yet. The twin still runs the suite as one job
-([`TEST_WINDOWS_HOSTED_JOB`]), and the table is here first, with the proof
-that it loses no test and repeats none, so that a matrix can be derived from
-it rather than written beside it.
+the list the hosted twin's matrix is held to
+([`TEST_WINDOWS_HOSTED_JOB`]). The table came first, with the proof that it
+loses no test and repeats none, and the matrix is derived from it rather
+than written beside it: `windows_shard_matrix_complaints` in
+`super::workflow` requires each leg's `tests:` in `ci.yml` to be the string
+`shard_selections` makes of this list for that shard, in order. The five
+strings are written out in one place in the oracle, the test named below,
+and nowhere else.
 
 The rule is `shard_selections`' in `super::workflow`. Shard `k` runs the tests
 whose names contain filter `k` and none of the filters before it, and one
@@ -620,7 +712,9 @@ reads as a filter, none of them twice.
 ## `pub(super) const WINDOWS_SHARD_FLOORS: [u32; 5] = [95, 30, 340, 150, 1085];`
 
 The count each Windows shard must report before it may succeed, in shard
-order: [`WINDOWS_TEST_FLOOR`] divided among the five.
+order: [`WINDOWS_TEST_FLOOR`] divided among the five. Each is its leg's
+`floor:` in the twin's matrix, an integer the oracle holds to this list, and
+the number line 6 of [`WINDOWS_SHARD_WITNESS`] tests the leg's count against.
 
 They sum to that floor, 1700, and
 `the_shard_tables_run_every_test_in_exactly_one_shard` holds the sum, one
@@ -641,7 +735,8 @@ a whole-suite control in the same run.
 
 The same kind of list for the macOS suite, under the same rule: two filters,
 three shards -- `engine::topology::`, the rest of `engine::`, and everything
-else. Nothing in `ci.yml` reads it yet either.
+else. Nothing in `ci.yml` reads this one yet: the macOS suite is still one
+leg of the `test` matrix.
 `the_shard_tables_run_every_test_in_exactly_one_shard` holds its three
 derived argument strings to literals and places the same eight names, and
 holds its filters to the same shape.
@@ -978,9 +1073,10 @@ runs it in the leg's environment unchanged: no `DOCKER_*` selector and no
 
 ## `pub(super) const TEST_WINDOWS_STEP_ENV: [(&str, &str); 1] = [(TEMP_FOLDS_CASE_KEY, "1")];`
 
-The same declaration on the Windows suite steps, `1` outright: each Windows
-suite job is one job with no matrix, and both the guest's NTFS and the
-hosted runner's fold case. The twin's three steps carry the same map under
+The same declaration on the Windows suite steps, `1` outright: the guest's
+job has no matrix, the twin's matrix varies the shard and not the runner,
+and both the guest's NTFS and the hosted runner's fold case. The twin's
+three steps carry the same map under
 codes of their own (`test-windows-hosted-step-env`,
 `test-windows-hosted-capture-step-env`,
 `test-windows-hosted-capability-step-env`); measured there,
@@ -1019,14 +1115,25 @@ The fields the job that runs these fixtures declares.
 
 ## `pub(super) const TEST_WINDOWS_JOB_FIELDS: [&str; 6] =`
 
-The fields both Windows suite jobs declare, the guest's and its hosted twin:
-the `test` job's set without a `strategy:`, since one job on one machine
-needs no matrix, plus `needs:` and `if:`, which tie each to the picker's
-answer. Both are required, and their values are pinned exactly
-([`TEST_WINDOWS_CONDITION`], [`TEST_WINDOWS_HOSTED_CONDITION`]), so an `if:`
-is admitted only as the one condition each job runs under; before the twin
-existed the guest's job had no `if:` at all. `continue-on-error:` is absent
-by construction, as everywhere in this contract.
+The fields the guest's Windows suite job declares: the `test` job's set
+without a `strategy:`, since one job on one machine needs no matrix, plus
+`needs:` and `if:`, which tie it to the picker's answer. Both are required,
+and their values are pinned exactly ([`TEST_WINDOWS_CONDITION`]), so an
+`if:` is admitted only as the one condition the job runs under; before the
+twin existed the guest's job had no `if:` at all. `continue-on-error:` is
+absent by construction, as everywhere in this contract. The twin declared
+this same set until it became a matrix.
+
+## `pub(super) const TEST_WINDOWS_HOSTED_JOB_FIELDS: [&str; 7] = [`
+
+The fields the hosted twin declares: [`TEST_WINDOWS_JOB_FIELDS`] plus
+`strategy`, which carries its five legs. `strategy` is required, not
+admitted: without it the job is one leg whose `matrix` expressions are
+empty. Its contents are pinned whole by `windows_shard_matrix_complaints`
+in `super::workflow`, and `needs:` and `if:` are pinned as the guest's are
+([`TEST_WINDOWS_HOSTED_CONDITION`]). A second list rather than an optional
+field on the first, so that a `strategy:` on the guest's job is still
+refused: a matrix there would queue more than one job for the one guest.
 
 ## `pub(super) const MSRV_JOB_FIELDS: [&str; 5] =`
 

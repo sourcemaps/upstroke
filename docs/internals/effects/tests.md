@@ -2214,8 +2214,11 @@ this check read and how each was shown a spelling it missed.
 
 The leg whose tests leave GitHub's runners reports that they ran, and
 refuses to run them on any compiler but
-the one [`GOLDEN_IMAGE_TOOLCHAIN`] names. The script is both Windows suite
-jobs' suite step, the guest's and its hosted twin's, so this holds both --
+the one [`GOLDEN_IMAGE_TOOLCHAIN`] names. The script is the guest's suite
+step; the hosted twin's legs run `WINDOWS_SHARD_WITNESS`, which
+[`the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler`]
+holds to this one line by line, so what this test reads of the compiler
+questions is read of both --
 asking Cargo which compiler it
 will run, the step's PATH which `rustc` it names, and the step's PATH
 which `cargo` it has. The fixtures' own PATH is Cargo's to build, and a
@@ -2322,6 +2325,29 @@ not picking here -- a guest job held, or an earlier run still choosing. It is
 stated by the fixture, not derived from the script's output, so the two
 checks in [`together`] do not copy the rule they test.
 
+## `fn twin_legs() -> Vec<String> {`
+
+The hosted twin's five legs as GitHub lists them in a run's jobs:
+`test (windows-latest, 1 of 5)` to `test (windows-latest, 5 of 5)`. The twin
+is a matrix, its `name:` is an expression, and the API lists each leg under
+the name with its shard in place. The names are made here the same way,
+`TEST_WINDOWS_HOSTED_NAME` with each of `windows_shard_labels`' labels in
+place of `${{ matrix.shard }}`, so a renamed job or a sixth shard moves the
+fixtures with it. Until the twin was a matrix a job list here named one
+hosted job, `test (windows-latest)`, twice from the constant and once as a
+literal.
+
+## `fn beside_the_twin<'a>(`
+
+A run's job list with the twin's legs in it: the jobs given, then every leg
+of [`twin_legs`] in one status. A run sent to the twin lists all five, so a
+canned list that names a hosted job names five.
+
+The script reads none of them. It selects jobs by two names, the guest's
+and the picker's, and a leg's is neither; that is what the three lists that
+use this are there to show, and why no answer moved when one hosted job
+became five.
+
 ## `fn cases() -> Vec<Case> {`
 
 Every answer the plan names, the three the earlier attempt's reviews found
@@ -2349,7 +2375,8 @@ one are [`other_runs_still_choosing`].
 
 The rest: `WINGUEST_BUSY` is `1` exactly and then nothing is asked, and
 `true` is not `1`; an unreadable API; one job below a limit of 2 and two at
-it; this run left out; completed guest jobs and other jobs not counted;
+it; this run left out; completed guest jobs and other jobs not counted, the
+twin's five legs queued among them ([`beside_the_twin`]);
 limits of 3 and 1; and five values that are not whole numbers from 1 to 999999 --
 `0`, `-1`, `2.5`, `two`, ` 3` -- each leaving routing on the queue off, so
 nothing is asked and the answer is `guest`, over the deep queue below.
@@ -2381,7 +2408,8 @@ later.
   under which the API lists a job waiting on its `needs` as `queued`.
 - Not counted: an earlier run whose guest job is `completed` beside a
   finished picker, sent to the twin or done; and an earlier run with jobs
-  listed and neither a picker nor a guest job among them.
+  listed and neither a picker nor a guest job among them. Both list the
+  twin's five legs in progress ([`beside_the_twin`]).
 - Runs 99 and 1000 against this run's 900: ids are compared as numbers. As
   strings `99` sorts after `900` and `1000` before it, and each row would
   answer the other way.
@@ -2518,24 +2546,57 @@ failed saying the fixtures had passed and run none. Restored.
 
 ## `fn the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler() {`
 
-The hosted twin matches the contract, and two relations hold between it and
-the guest's job that the oracle's pins, each against its own constant, do
-not state. The toolchain the twin's one install selects, read from the
-workflow, is the version the guest's suite step -- which the twin runs too
--- asserts for Cargo's compiler, so the two homes run the suite on one
-compiler. And the two conditions are one comparison of the picker's
-answer, with `guest` and `hosted` its two values, so the two jobs cannot
-both run, or both be skipped, on a run whose picker succeeded. Measured by
-setting the twin's install back to `stable` in the workflow and restoring
-it: this test and the oracle's clean-workflow check both failed, each with
-the twin's toolchain complaint.
+The hosted twin matches the contract, and three relations hold between it
+and the guest's job that the oracle's pins, each against its own constant,
+do not state.
+
+The toolchain the twin's one install selects, read from the workflow, is
+the version its suite step asserts for Cargo's compiler, so the two homes
+run the suite on one compiler. The question is read from
+`WINDOWS_SHARD_WITNESS`, the script the twin's legs run.
+
+The two conditions are one comparison of the picker's answer, with `guest`
+and `hosted` its two values, so the two jobs cannot both run, or both be
+skipped, on a run whose picker succeeded.
+
+And the legs' suite step is the guest's but for the shard. The oracle pins
+`WINDOWS_TEST_WITNESS` and `WINDOWS_SHARD_WITNESS` each as a whole text, and
+two whole texts can drift apart with both pins holding. So, by line:
+
+- lines 1, 2, 4 and 5 of the shards' script are the guest's lines 1, 2, 4
+  and 5: the compiler questions, their refusal, the suite's exit and the
+  count;
+- the guest's line 3 is `TEST_COMMAND` and ` | Tee-Object -Variable log`,
+  and the shards' line 3 is the same with ` -- ${{ matrix.tests }}` between
+  them and nothing else, so a leg runs the guest's command over its
+  selection;
+- the shards' line 6 opens `if ($passed -lt ${{ matrix.floor }}) { throw `,
+  so the floor a leg refuses below is the one the matrix hands it, which
+  the oracle holds to `WINDOWS_SHARD_FLOORS`.
+
+The shards' seventh line, which prints the count, is held by the oracle's
+pin alone.
+
+Measured by setting the twin's install back to `stable` in the workflow and
+restoring it: this test and the oracle's clean-workflow check both failed,
+each with the twin's toolchain complaint. That was before the shards. On
+2026-11-17, with a leg's arguments changed in the workflow and with a leg
+removed, each restored, this test failed at its first assertion with the
+matrix complaint (`windows_shard_matrix_complaints` in the workflow notes).
+And with line 6 testing `$passed -lt 0` in the workflow and in
+`WINDOWS_SHARD_WITNESS` together, then restored, the oracle's clean-workflow
+check passed, as an equality whose two sides moved together must, and this
+test failed at its line 6 assertion. The assertions on lines 1 to 5 were not
+mutated.
 
 ## `fn the_shard_tables_run_every_test_in_exactly_one_shard() {`
 
 The two shard tables of the CI model, `WINDOWS_SHARD_FILTERS` and
 `MACOS_SHARD_FILTERS`, each divide the suite: every test runs in exactly one
-shard. The test reads no workflow. No line of `ci.yml` is derived from the
-tables yet, and this is the proof that comes before one is.
+shard. The test reads no workflow. It was the proof that came before any
+line of `ci.yml` was derived from a table; the hosted twin's matrix now is,
+and `windows_shard_matrix_complaints` in the workflow notes is what holds
+`ci.yml` to the Windows table. Nothing in `ci.yml` reads the macOS one.
 
 Five claims.
 

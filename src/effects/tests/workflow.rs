@@ -25,11 +25,13 @@ use super::ci_model::{
     PICK_WINDOWS_HOME_TIMEOUT_MINUTES, PINNED_ACTIONS, REQUIRED_CONTEXT, RUSTFLAGS_KEY,
     RUSTFLAGS_VALUE, STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS, TEST_SCRIPTS,
     TEST_STEP_ENV, TEST_STEP_FIELDS, TEST_WINDOWS_CONDITION, TEST_WINDOWS_HOSTED_CONDITION,
-    TEST_WINDOWS_HOSTED_JOB, TEST_WINDOWS_HOSTED_NAME, TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES,
-    TEST_WINDOWS_JOB, TEST_WINDOWS_JOB_FIELDS, TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME,
-    TEST_WINDOWS_PLATFORM, TEST_WINDOWS_SCRIPTS, TEST_WINDOWS_STEP_ENV,
-    TEST_WINDOWS_TIMEOUT_MINUTES, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS, WINDOWS_BUILD_WITNESS,
-    WINDOWS_TEST_WITNESS, WORKFLOW_ENV, WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
+    TEST_WINDOWS_HOSTED_JOB, TEST_WINDOWS_HOSTED_JOB_FIELDS, TEST_WINDOWS_HOSTED_NAME,
+    TEST_WINDOWS_HOSTED_SCRIPTS, TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES, TEST_WINDOWS_JOB,
+    TEST_WINDOWS_JOB_FIELDS, TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM,
+    TEST_WINDOWS_SCRIPTS, TEST_WINDOWS_STEP_ENV, TEST_WINDOWS_TIMEOUT_MINUTES, TOOLCHAIN_ACTION,
+    TOOLCHAIN_COMPONENTS, WINDOWS_BUILD_WITNESS, WINDOWS_SHARD_FILTERS, WINDOWS_SHARD_FLOORS,
+    WINDOWS_SHARD_WITNESS, WINDOWS_TEST_WITNESS, WORKFLOW_ENV, WORKFLOW_FIELDS,
+    WORKFLOW_PERMISSIONS,
 };
 use super::repo_root;
 
@@ -876,7 +878,11 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
         )];
     };
 
-    for complaint in field_complaints(job, &TEST_WINDOWS_JOB_FIELDS, &OPTIONAL_DEFAULTS_FIELD) {
+    for complaint in field_complaints(
+        job,
+        &TEST_WINDOWS_HOSTED_JOB_FIELDS,
+        &OPTIONAL_DEFAULTS_FIELD,
+    ) {
         out.push(format!(
             "[unexpected-job-field] `{TEST_WINDOWS_HOSTED_JOB}` {complaint}"
         ));
@@ -903,10 +909,11 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
         TEST_WINDOWS_HOSTED_CONDITION,
         TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES,
     ));
+    out.extend(windows_shard_matrix_complaints(job));
 
     for (index, step) in steps_of(job).iter().enumerate() {
         let named = format!("`{TEST_WINDOWS_HOSTED_JOB}` step {index}");
-        let runs_the_suite = scalar(step, "run") == Some(WINDOWS_TEST_WITNESS);
+        let runs_the_suite = scalar(step, "run") == Some(WINDOWS_SHARD_WITNESS);
         let runs_the_capture = scalar(step, "run") == Some(HOST_ACCEPTANCE_WINDOWS_CAPTURE);
         let runs_the_observation = scalar(step, "run") == Some(CAPABILITY_WINDOWS_OBSERVATION);
         let allowed: &[&str] = if runs_the_suite || runs_the_capture {
@@ -966,24 +973,26 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
 
     let running = steps_of(job)
         .iter()
-        .filter(|step| scalar(step, "run") == Some(WINDOWS_TEST_WITNESS))
+        .filter(|step| scalar(step, "run") == Some(WINDOWS_SHARD_WITNESS))
         .count();
     if running != 1 {
         out.push(format!(
             "[test-windows-hosted-command] `{TEST_WINDOWS_HOSTED_JOB}` has {running} steps whose \
-             `run:` is exactly the guest's pinned suite-and-witness script, not one. The lines \
+             `run:` is exactly the pinned shard suite-and-witness script, not one. The lines \
              before `{TEST_COMMAND}` refuse any compiler but the image's \
              `{GOLDEN_IMAGE_TOOLCHAIN}`, which on this runner is the one the install selected \
-             only if its `rustup default` took; the lines after it are the count of passing \
-             tests against the guest's floor, without which a suite that compiled and executed \
-             nothing is green here as on the guest."
+             only if its `rustup default` took. The cargo line hands libtest the leg's \
+             `matrix.tests`, without which every leg runs the whole suite. The lines after it \
+             are the count of passing tests against the leg's `matrix.floor`, without which a \
+             shard that compiled and executed nothing is green here as the suite would be on \
+             the guest."
         ));
     }
     out.extend(capture_complaints(
         job,
         TEST_WINDOWS_HOSTED_JOB,
         "test-windows-hosted-capture-command",
-        WINDOWS_TEST_WITNESS,
+        WINDOWS_SHARD_WITNESS,
         HOST_ACCEPTANCE_WINDOWS_CAPTURE,
     ));
     out.extend(observation_complaints(
@@ -1002,7 +1011,7 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
         job,
         TEST_WINDOWS_HOSTED_JOB,
         "test-windows-hosted-run-script",
-        &TEST_WINDOWS_SCRIPTS,
+        &TEST_WINDOWS_HOSTED_SCRIPTS,
     ));
     out.extend(toolchain_complaints(
         job,
@@ -1038,8 +1047,9 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
                  saves a cargo cache. A run reads caches from its own ref or the default branch: \
                  a merge-queue entry's ref is a fresh `gh-readonly-queue/` branch, and `master` \
                  saves a twin cache only on a push the picker itself sent here, so nearly every \
-                 run starts cold and then uploads, inside its 55 minutes, a cache nothing later \
-                 reads -- the reason the hosted merge-queue lane carried none."
+                 run starts cold and then uploads, inside its \
+                 {TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES} minutes, a cache nothing later reads -- \
+                 the reason the hosted merge-queue lane carried none."
             ));
         }
     }
@@ -1055,6 +1065,99 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
             "[test-windows-hosted-toolchain] `{TEST_WINDOWS_HOSTED_JOB}` installs components \
              {components:?}, which do not include `clippy`. The suite's effect-denial fixtures \
              run `clippy-driver`, and `dtolnay/rust-toolchain` installs the minimal profile."
+        ));
+    }
+    out
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ShardLeg {
+    shard: String,
+    tests: String,
+    floor: i64,
+}
+
+pub(super) fn windows_shard_labels() -> Vec<String> {
+    let shards = WINDOWS_SHARD_FILTERS.len() + 1;
+    (1..=shards)
+        .map(|shard| format!("{shard} of {shards}"))
+        .collect()
+}
+
+fn windows_shard_legs() -> Vec<ShardLeg> {
+    windows_shard_labels()
+        .into_iter()
+        .zip(shard_selections(&WINDOWS_SHARD_FILTERS))
+        .zip(WINDOWS_SHARD_FLOORS)
+        .map(|((shard, tests), floor)| ShardLeg {
+            shard,
+            tests,
+            floor: i64::from(floor),
+        })
+        .collect()
+}
+
+fn shard_leg(entry: &Yaml) -> Option<ShardLeg> {
+    if !field_complaints(entry, &["floor", "shard", "tests"], &[]).is_empty() {
+        return None;
+    }
+    Some(ShardLeg {
+        shard: scalar(entry, "shard")?.to_owned(),
+        tests: scalar(entry, "tests")?.to_owned(),
+        floor: field(entry, "floor")?.as_i64()?,
+    })
+}
+
+fn windows_shard_matrix_complaints(job: &Yaml) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(strategy) = field(job, "strategy") else {
+        return vec![format!(
+            "[test-windows-hosted-matrix] `{TEST_WINDOWS_HOSTED_JOB}` declares no `strategy:`, \
+             so it is one leg with no shard to run: its script's `matrix` expressions are \
+             empty, and no table divides the suite"
+        )];
+    };
+    for complaint in field_complaints(strategy, &["fail-fast", "matrix"], &[]) {
+        out.push(format!(
+            "[test-windows-hosted-matrix] `{TEST_WINDOWS_HOSTED_JOB}`'s `strategy:` {complaint}. \
+             The shards are read from `fail-fast` and `matrix` and from nothing else there."
+        ));
+    }
+    if field(strategy, "fail-fast").and_then(Yaml::as_bool) != Some(false) {
+        out.push(format!(
+            "[test-windows-hosted-matrix] `{TEST_WINDOWS_HOSTED_JOB}`'s `fail-fast:` is not \
+             `false`, so one leg's failure cancels the others before they report: a run shows \
+             one shard's failing tests and hides every other shard's."
+        ));
+    }
+    let matrix = field(strategy, "matrix");
+    if let Some(matrix) = matrix {
+        for complaint in field_complaints(matrix, &["include"], &[]) {
+            out.push(format!(
+                "[test-windows-hosted-matrix] `{TEST_WINDOWS_HOSTED_JOB}`'s `matrix:` \
+                 {complaint}. The legs are the `include:` list and nothing else. Beside an axis \
+                 GitHub adds each `include:` entry to the axis's combinations instead of making \
+                 a leg of it, a later entry overwriting the keys an earlier one added, so the \
+                 legs are no longer the shards the list names."
+            ));
+        }
+    }
+    let expected: Vec<Option<ShardLeg>> = windows_shard_legs().into_iter().map(Some).collect();
+    let found: Option<Vec<Option<ShardLeg>>> = matrix
+        .and_then(|matrix| field(matrix, "include"))
+        .and_then(Yaml::as_vec)
+        .map(|entries| entries.iter().map(shard_leg).collect());
+    if found.as_ref() != Some(&expected) {
+        out.push(format!(
+            "[test-windows-hosted-matrix] `{TEST_WINDOWS_HOSTED_JOB}`'s `matrix.include:` reads \
+             as {found:#?}, not, in order, exactly {expected:#?}. That is one mapping for each \
+             shard, with exactly the keys `shard`, `tests` and `floor`: the shard's place as a \
+             string, the libtest arguments `shard_selections` derives for it from \
+             `WINDOWS_SHARD_FILTERS`, and its floor in `WINDOWS_SHARD_FLOORS` as an integer; an \
+             entry that reads as `None` is not such a mapping. A dropped or narrowed shard runs \
+             its tests nowhere while the other legs are green, a widened one runs another \
+             shard's tests a second time, and a floor below the table's is one a shard that \
+             executed almost none of its tests clears."
         ));
     }
     out
@@ -3822,22 +3925,25 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED",
-        escape: "the hosted twin keeps the suite command and loses the count. A Cargo target \
-                 runner in the image's environment or Cargo home then hands every harness to a \
-                 wrapper that exits zero, and the run the picker sent off the guest is green \
-                 having executed nothing",
+        escape: "the hosted twin keeps the suite command and loses the count: the line that \
+                 sums it, the line that holds it to the shard's floor and the line that prints \
+                 it. A Cargo target runner in the image's environment or Cargo home then hands \
+                 every harness to a wrapper that exits zero, and each of the five legs of the \
+                 run the picker sent off the guest is green having executed nothing",
         job: Some("test-windows-hosted"),
-        anchor: "          $passed = [int](($log | Select-String -Pattern '^test result: ok\\. (\\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)\n          if ($passed -lt 1700) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n",
+        anchor: "          $passed = [int](($log | Select-String -Pattern '^test result: ok\\. (\\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)\n          if ($passed -lt ${{ matrix.floor }}) { throw \"shard ${{ matrix.shard }} reported $passed passing tests, below its floor of ${{ matrix.floor }}: Cargo compiled the harnesses and executed almost none of this shard's tests\" }\n          \"shard ${{ matrix.shard }} reported $passed passing tests; its floor is ${{ matrix.floor }}\"\n",
         replacement: "",
         refused_as: "test-windows-hosted-command",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-FLOOR-DROPPED",
-        escape: "the hosted twin's count stays and its floor drops to zero, so a suite that \
-                 executed no test clears it: a floor the guest holds and its twin does not",
+        escape: "the hosted twin's count stays and the floor it is held to drops from the \
+                 shard's to zero, so a shard that executed no test clears it, on every leg at \
+                 once and with the table of floors untouched: a floor the guest holds and its \
+                 twin does not",
         job: Some("test-windows-hosted"),
-        anchor: "          if ($passed -lt 1700) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n",
-        replacement: "          if ($passed -lt 0) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n",
+        anchor: "          if ($passed -lt ${{ matrix.floor }}) { throw \"shard ${{ matrix.shard }} reported $passed passing tests, below its floor of ${{ matrix.floor }}: Cargo compiled the harnesses and executed almost none of this shard's tests\" }\n",
+        replacement: "          if ($passed -lt 0) { throw \"shard ${{ matrix.shard }} reported $passed passing tests, below its floor of ${{ matrix.floor }}: Cargo compiled the harnesses and executed almost none of this shard's tests\" }\n",
         refused_as: "test-windows-hosted-command",
     },
     WorkflowEscape {
@@ -3846,8 +3952,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  version. The toolchain action tolerates a failed `rustup default` and verifies \
                  only `rustc +1.97.1`, so the install can report success while bare `cargo` is \
                  the runner's preinstalled stable, and a `RUSTC` or a PATH naming another \
-                 install is read by nothing else here: the suite runs on a compiler the guest \
-                 never ran it on with every other pin matching",
+                 install is read by nothing else here: every shard runs its tests on a compiler \
+                 the guest never ran them on with every other pin matching",
         job: Some("test-windows-hosted"),
         anchor: "          $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\n\
                  \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\n",
@@ -3857,8 +3963,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-RUNS-BESIDE-THE-GUEST",
         escape: "a twin condition that holds whatever the picker answered, so both Windows jobs \
-                 run on every run the guest takes: a hosted suite spent for nothing, and the \
-                 aggregate red over two green legs",
+                 run on every run the guest takes: five hosted shards spent for nothing, and \
+                 the aggregate red over two green jobs",
         job: Some("test-windows-hosted"),
         anchor: "    if: needs.pick-windows-home.outputs.home == 'hosted'\n",
         replacement: "    if: needs.pick-windows-home.result == 'success'\n",
@@ -3894,20 +4000,22 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-TIMEOUT-RAISED",
-        escape: "the guest's 20 minutes raised to the twin's 55: a stalled guest holds the build \
-                 machine, and every run queued behind it, nearly three times as long",
+        escape: "the guest's 20 minutes raised to the twin's 40: a stalled guest holds the build \
+                 machine, and every run queued behind it, twice as long",
         job: Some("test-windows"),
         anchor: "    timeout-minutes: 20\n",
-        replacement: "    timeout-minutes: 55\n",
+        replacement: "    timeout-minutes: 40\n",
         refused_as: "test-windows-timeout",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-TIMEOUT-RAISED",
-        escape: "the twin's ceiling raised past the 55 minutes the hosted suite last ran under, \
-                 so a hung hosted suite holds the required check longer than any hosted run \
-                 ever needed",
+        escape: "a shard's ceiling raised from its 40 minutes, which is 1.75 times the slowest \
+                 measured leg and inside the merge queue's 60, to two hours. A leg whose \
+                 leftover test process holds its step's output after every result line has \
+                 printed, as one did in run 43719719561, then holds the required check and the \
+                 queue entry behind it until that ceiling",
         job: Some("test-windows-hosted"),
-        anchor: "    timeout-minutes: 55\n",
+        anchor: "    timeout-minutes: 40\n",
         replacement: "    timeout-minutes: 120\n",
         refused_as: "test-windows-hosted-timeout",
     },
@@ -3939,7 +4047,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  identity step. The action is pinned and given no input, so every other pin \
                  holds; the step uploads a cache per run that no later run reads, from a queue \
                  entry's fresh ref and with `master` almost never saving one, and spends the \
-                 upload inside the twin's 55 minutes",
+                 upload inside each leg's 40 minutes",
         job: Some("test-windows-hosted"),
         anchor: "      - name: Configure git identity\n",
         replacement: "      - name: Cache cargo\n\
@@ -4003,6 +4111,62 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                       \x20       with:\n\
                       \x20         ref: master\n",
         refused_as: "test-windows-hosted-checkout",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-SHARD-NARROWED",
+        escape: "the last shard, the one with no filter, gains a `--skip effects::`. Every test \
+                 of that shard whose name contains `effects::` then runs in no leg, this \
+                 oracle's among them. The leg's floor is about half of its count, so where the \
+                 skip takes less than the other half all five legs are green over a suite that \
+                 lost those tests",
+        job: Some("test-windows-hosted"),
+        anchor: "          - shard: \"5 of 5\"\n            tests: \"",
+        replacement: "          - shard: \"5 of 5\"\n            tests: \"--skip effects:: ",
+        refused_as: "test-windows-hosted-matrix",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED",
+        escape: "the last shard's floor lowered to 1 in the table, the script untouched. The \
+                 step still tests the count against `matrix.floor`, so its pin holds, and a leg \
+                 that executed one test clears the floor the matrix now hands it",
+        job: Some("test-windows-hosted"),
+        anchor: "            floor: 1085\n",
+        replacement: "            floor: 1\n",
+        refused_as: "test-windows-hosted-matrix",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-FAIL-FAST-ENABLED",
+        escape: "`fail-fast: true` on the shard matrix: the first leg to fail cancels the legs \
+                 still running, so a run sent to the twin reports one shard's failing tests and \
+                 none of the others', and the run that repairs them finds the next shard's",
+        job: Some("test-windows-hosted"),
+        anchor: "      fail-fast: false\n",
+        replacement: "      fail-fast: true\n",
+        refused_as: "test-windows-hosted-matrix",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-MATRIX-AXIS-ADDED",
+        escape: "an axis beside the `include:` list, which still names all five shards. By \
+                 GitHub's documented rule for `include:`, each entry is added to the axis's one \
+                 combination instead of making a leg of its own, and a later entry overwrites \
+                 the `shard`, `tests` and `floor` an earlier one added: one leg runs, the last \
+                 shard's, it clears its own floor, the job's result is `success`, and four \
+                 shards' tests ran nowhere",
+        job: Some("test-windows-hosted"),
+        anchor: "      matrix:\n        include:\n",
+        replacement: "      matrix:\n        os: [windows-latest]\n        include:\n",
+        refused_as: "test-windows-hosted-matrix",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED",
+        escape: "the cargo line loses the leg's selection and is the guest's again, the table \
+                 and the floors untouched: each of the five legs runs the whole suite. Measured \
+                 on 2026-11-15 at 59 to 76 minutes a job, that is five legs cancelled at their \
+                 limit; on a faster runner it is five green legs and no shard",
+        job: Some("test-windows-hosted"),
+        anchor: "          cargo test --all-targets --all-features -- ${{ matrix.tests }} | Tee-Object -Variable log\n",
+        replacement: "          cargo test --all-targets --all-features | Tee-Object -Variable log\n",
+        refused_as: "test-windows-hosted-command",
     },
     WorkflowEscape {
         name: "MUT-AGGREGATE-ACCEPTS-BOTH-WINDOWS-JOBS-SKIPPED",

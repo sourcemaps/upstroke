@@ -5383,7 +5383,7 @@ use ci_model::{
     OVERRIDING_REPO_FILES, PICK_WINDOWS_HOME_NAME, PICK_WINDOWS_HOME_SCRIPT, RUSTFLAGS_KEY,
     TEST_COMMAND, TEST_WINDOWS_CONDITION, TEST_WINDOWS_HOSTED_CONDITION, TEST_WINDOWS_HOSTED_JOB,
     TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM, WINDOWS_SHARD_FILTERS,
-    WINDOWS_SHARD_FLOORS, WINDOWS_TEST_FLOOR, WINDOWS_TEST_WITNESS,
+    WINDOWS_SHARD_FLOORS, WINDOWS_SHARD_WITNESS, WINDOWS_TEST_FLOOR, WINDOWS_TEST_WITNESS,
 };
 use workflow::{
     WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_pick_windows_home_complaints,
@@ -5638,7 +5638,9 @@ mod pick_windows_home_answers {
         TEST_WINDOWS_NAME,
     };
     use super::scratch_dir;
-    use super::workflow::{ci_workflow_text, field, parse_workflow, scalar, steps_of};
+    use super::workflow::{
+        ci_workflow_text, field, parse_workflow, scalar, steps_of, windows_shard_labels,
+    };
 
     const REPOSITORY: &str = "upstroke/fixture";
     const THIS_RUN: u64 = 900;
@@ -5785,8 +5787,28 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
             .collect()
     }
 
+    fn twin_legs() -> Vec<String> {
+        windows_shard_labels()
+            .iter()
+            .map(|shard| TEST_WINDOWS_HOSTED_NAME.replace("${{ matrix.shard }}", shard))
+            .collect()
+    }
+
+    fn beside_the_twin<'a>(
+        others: &[(&'a str, &'a str)],
+        legs: &'a [String],
+        status: &'a str,
+    ) -> Vec<(&'a str, &'a str)> {
+        others
+            .iter()
+            .copied()
+            .chain(legs.iter().map(|leg| (leg.as_str(), status)))
+            .collect()
+    }
+
     fn cases() -> Vec<Case> {
         let guest = TEST_WINDOWS_NAME;
+        let twin = twin_legs();
         let empty = || vec![run_page(&[])];
         let mut out = vec![
             Case {
@@ -5954,11 +5976,14 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     (runs("in_progress"), vec![run_page(&[102])]),
                     (
                         jobs(101),
-                        vec![job_page(&[
-                            (11, guest, "completed"),
-                            (12, "test (windows-latest)", "queued"),
-                            (13, "lint (windows)", "queued"),
-                        ])],
+                        vec![listed_jobs(
+                            101,
+                            &beside_the_twin(
+                                &[(guest, "completed"), ("lint (windows)", "queued")],
+                                &twin,
+                                "queued",
+                            ),
+                        )],
                     ),
                     (jobs(102), vec![job_page(&[(21, guest, "queued")])]),
                 ],
@@ -6039,7 +6064,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
 
     fn other_runs_still_choosing() -> Vec<Case> {
         let guest = TEST_WINDOWS_NAME;
-        let twin = TEST_WINDOWS_HOSTED_NAME;
+        let twin = twin_legs();
         let picker = PICK_WINDOWS_HOME_NAME;
         let earlier = 101;
         let later = 950;
@@ -6131,11 +6156,11 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
             beside_one_run(
                 "an-earlier-run-sent-to-the-hosted-runner-is-not-counted",
                 earlier,
-                &[
-                    (picker, "completed"),
-                    (guest, "completed"),
-                    (twin, "in_progress"),
-                ],
+                &beside_the_twin(
+                    &[(picker, "completed"), (guest, "completed")],
+                    &twin,
+                    "in_progress",
+                ),
                 (0, 0),
                 "guest",
             ),
@@ -6149,7 +6174,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
             beside_one_run(
                 "an-earlier-run-with-neither-a-picker-nor-a-guest-job-is-not-counted",
                 earlier,
-                &[("lint", "in_progress"), (twin, "in_progress")],
+                &beside_the_twin(&[("lint", "in_progress")], &twin, "in_progress"),
                 (0, 0),
                 "guest",
             ),
@@ -6629,16 +6654,52 @@ fn the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler() {
     let version = GOLDEN_IMAGE_TOOLCHAIN.replace('.', "\\.");
     assert!(
         installed == [GOLDEN_IMAGE_TOOLCHAIN]
-            && WINDOWS_TEST_WITNESS.contains(&format!("$rustc -notmatch '^rustc {version} '")),
-        "the twin installs {installed:?} where the guest's suite step, which the twin runs too, \
-         asserts `{GOLDEN_IMAGE_TOOLCHAIN}`, so the two homes do not run the suite on one \
-         compiler"
+            && WINDOWS_SHARD_WITNESS.contains(&format!("$rustc -notmatch '^rustc {version} '")),
+        "the twin installs {installed:?} where its suite step, whose compiler questions are \
+         the guest's, asserts `{GOLDEN_IMAGE_TOOLCHAIN}`, so the two homes do not run the suite \
+         on one compiler"
     );
     assert_eq!(
         TEST_WINDOWS_CONDITION.replace("'guest'", "'hosted'"),
         TEST_WINDOWS_HOSTED_CONDITION,
         "the two Windows suite jobs' conditions are not one comparison of the picker's answer \
          with its two values"
+    );
+
+    let guest: Vec<&str> = WINDOWS_TEST_WITNESS.lines().collect();
+    let shard: Vec<&str> = WINDOWS_SHARD_WITNESS.lines().collect();
+    for line in [1_usize, 2, 4, 5] {
+        let guests = guest.get(line - 1);
+        assert!(
+            guests.is_some() && shard.get(line - 1) == guests,
+            "line {line} of the shards' suite step is {:?} and the guest's is {guests:?}: the \
+             compiler questions, the suite's exit and the count are not one text on the two \
+             homes",
+            shard.get(line - 1)
+        );
+    }
+    let whole_suite = format!("{TEST_COMMAND} | Tee-Object -Variable log");
+    assert_eq!(
+        guest.get(2).copied(),
+        Some(whole_suite.as_str()),
+        "line 3 of the guest's suite step is not `{TEST_COMMAND}` with its output kept for the \
+         count, so the guest does not run the whole suite"
+    );
+    let one_shard = format!("{TEST_COMMAND} -- ${{{{ matrix.tests }}}} | Tee-Object -Variable log");
+    assert_eq!(
+        shard.get(2).copied(),
+        Some(one_shard.as_str()),
+        "line 3 of the shards' suite step is not the guest's command with the leg's \
+         `matrix.tests` handed to libtest and nothing else, so a shard does not run its share \
+         of the guest's suite"
+    );
+    assert!(
+        shard
+            .get(5)
+            .is_some_and(|line| line.starts_with("if ($passed -lt ${{ matrix.floor }}) { throw ")),
+        "line 6 of the shards' suite step, {:?}, does not refuse a count below the leg's \
+         `matrix.floor`, so the floors the oracle holds the matrix to are floors no leg tests",
+        shard.get(5)
     );
 }
 
