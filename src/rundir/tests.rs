@@ -13854,12 +13854,13 @@ fn an_ambiguous_husk_prefix_is_not_reported_as_one_husk() {
 /// standing. With that conversion restored, this test fails on exactly that
 /// error.
 ///
-/// Unix only, because the name is spelt as bytes (`OsStrExt::from_bytes`). A
-/// filesystem that holds only UTF-8 names refuses to create the entry with
-/// `EILSEQ`, as APFS does under macOS's temporary directory. No husk on such a
-/// filesystem can hold the name this defect needs, so there the test says so
-/// and stops before it asserts anything; any other refusal fails it.
-#[cfg(unix)]
+/// Linux only, because the name is spelt as bytes (`OsStrExt::from_bytes`) and
+/// the filesystems this project builds and tests on there accept it. A
+/// filesystem that holds only UTF-8 names refuses to create the entry, as APFS
+/// does with `EILSEQ` under macOS's temporary directory, and no husk on it can
+/// hold the name this defect needs. A refusal therefore fails the test with a
+/// diagnostic saying so, rather than letting it pass having asserted nothing.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_public_husk_holding_a_name_that_is_not_utf8_is_reclaimed() {
     use std::os::unix::ffi::OsStrExt as _;
@@ -13873,16 +13874,12 @@ fn a_public_husk_holding_a_name_that_is_not_utf8_is_reclaimed() {
         name.to_str().is_none(),
         "the witness's entry name is not valid UTF-8"
     );
-    match fs::write(public.join(name), b"run-scoped content") {
-        Ok(()) => {}
-        Err(refused) if refused.raw_os_error() == Some(libc::EILSEQ) => {
-            eprintln!(
-                "this filesystem holds only UTF-8 names ({refused}), so no husk on it can hold \
-                 the entry this witness needs; nothing is asserted"
-            );
-            return;
-        }
-        Err(error) => panic!("an entry whose name is not valid UTF-8: {error}"),
+    if let Err(refused) = fs::write(public.join(name), b"run-scoped content") {
+        panic!(
+            "the filesystem under {} refused an entry whose name is not valid UTF-8 \
+             ({refused}); this test needs one that accepts such names",
+            public.display()
+        );
     }
 
     remove_public_husk(&public, &mut NoHooks)
