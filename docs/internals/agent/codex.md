@@ -187,7 +187,11 @@ preserve a saved Codex pool without either caller maintaining a model list or
 repeating a probe. The refusal tells the operator to restore a compatible CLI
 and retry. `fixture::ConfiguredCodex` runs isolated shell stubs through the real
 runner and this adapter's probe, discovery, build and parser for those regression
-tests; its configured paths never select a provider CLI or account.
+tests; its configured paths never select a provider CLI or account. The shared
+Unix-only fixture lives inline in `tests::fixture`, re-exported as `fixture` for
+the engine and connect tests. It inherits this adapter's filesystem allowances.
+The configured runner clones each request as an owned snapshot, retaining the
+real invocation identity and execution boundary while substituting the local CLI.
 
 ## `fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError> {` › `json_output: true,`
 
