@@ -322,11 +322,12 @@ turned that reviewer off. The per-task `second_opinion` loop is not touched
 — an override's second opinion is an explicit request, still resolved
 from the primary's family and still refused when it cannot resolve.
 
-## `&& let Some(warning) = resolved.self_review_warning(plan, chains, tier)`
+## `if let Some(warning) = resolved.self_review_warning(plan, chains, tier) {`
 
 The carried step-6 item, now visible: say when a task will be judged by
 the model that wrote it and nothing in this build can prevent it. Not
-said when the configuration turned the alternative off: the
+said when the configuration turned the alternative off — the enclosing
+`if cfg.review_cross_family {` skips it — because the
 `cross_family = false` warning above already says it, once.
 
 ## `pub struct ReviewSubject<'a> {`

@@ -34,7 +34,7 @@ does not read lowers (`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-C
 names the pair the day it is dropped. `forbid` compiles because nothing here
 allows a governed lint.
 
-## `pub(super) fn review_echo(plan: &ReviewPlan) -> String {`
+## `pub(super) fn review_echo(plan: &ReviewPlan, cross_family: bool) -> String {`
 
 Who judges the work (§11.2–§11.3), for the preview.
 
@@ -44,6 +44,15 @@ probe. Pre-flight is where a named reviewer has to prove it can actually
 run — and where a missing one either warns or refuses. The line says so,
 because a preview that reads as a promise is worse than one that reads as a
 plan.
+
+`cross_family` is the config's `review_cross_family`, passed in because the
+plan alone cannot say why it has no alternative: nothing of another family
+at the review tier in this build, and
+`[routing] review = { cross_family = false }`, both leave `alternative`
+`None`. Only the first is "no cross-family reviewer exists in this build".
+Saying it of the second is false — the same build resolves one the moment
+the switch is unset — so with the switch off the line names the
+configuration that turned the reviewer off instead.
 
 ## `pub(super) fn capacity_echo(`
 

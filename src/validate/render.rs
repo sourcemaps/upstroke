@@ -14,7 +14,7 @@ use crate::route::ResolvedChain;
 
 use super::{Report, Row};
 
-pub(super) fn review_echo(plan: &ReviewPlan) -> String {
+pub(super) fn review_echo(plan: &ReviewPlan, cross_family: bool) -> String {
     let Some(primary) = &plan.primary else {
         return "review: disabled ([routing] review = { enabled = false })".to_owned();
     };
@@ -33,6 +33,9 @@ pub(super) fn review_echo(plan: &ReviewPlan) -> String {
             " (tasks it implements itself would be reviewed by {} instead, if installed)",
             alt.describe()
         )),
+        None if !cross_family => line.push_str(
+            " (cross-family review is turned off by [routing] review = { cross_family = false })",
+        ),
         None => line.push_str(" (no cross-family reviewer exists in this build)"),
     }
     let demanded = plan.second_opinion.iter().flatten().count();

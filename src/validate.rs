@@ -221,7 +221,7 @@ pub fn run(opts: &ValidateOptions) -> Result<Report, UpstrokeError> {
         warnings,
         strategy: render::strategy_echo(&analysis.config),
         capacity: render::capacity_echo(&analysis.config, &observations, run_id.as_deref()),
-        review: render::review_echo(&reviews),
+        review: render::review_echo(&reviews, analysis.config.review_cross_family),
         effort: render::effort_echo(&analysis.config),
         gates: analysis.gates.into_iter().map(|gate| gate.name).collect(),
         gates_from_config: analysis.gates_from_config,
@@ -841,9 +841,8 @@ mod tests {
         assert!(!note.contains("second opinion"), "{note}");
     }
 
-    #[test]
-    fn the_preview_binds_an_explicit_opus_5_5_worker_to_an_astra_6_reviewer_at_max() {
-        let root = scratch_root("opus55-astra6");
+    fn opus_5_5_preview(tag: &str, review: &str) -> String {
+        let root = scratch_root(tag);
         let plan = root.path().join("plan.md");
         fs::write(
             &plan,
@@ -853,16 +852,30 @@ mod tests {
         let cfg = root.path().join("upstroke.toml");
         fs::write(
             &cfg,
-            "[routing]\nimplement = { chain = [\"frontier\"] }\n\
-             review = { tier = \"frontier\" }\n\n\
-             [routing.effort]\nimplementation = \"max\"\nreview = \"max\"\n\n\
-             [[pins]]\ntier = \"frontier\"\nagent = \"claude-code\"\nmodel = \"claude-opus-5-5\"\n",
+            format!(
+                "[routing]\nimplement = {{ chain = [\"frontier\"] }}\n{review}\n\n\
+                 [routing.effort]\nimplementation = \"max\"\nreview = \"max\"\n\n\
+                 [[pins]]\ntier = \"frontier\"\nagent = \"claude-code\"\n\
+                 model = \"claude-opus-5-5\"\n"
+            ),
         )
         .expect("config");
         let mut o = opts("unused");
         o.plan_path = plan;
         o.config_path = Some(cfg);
-        let rendered = run(&o).expect("validate").render();
+        run(&o).expect("validate").render()
+    }
+
+    fn review_line(rendered: &str) -> &str {
+        rendered
+            .lines()
+            .find(|l| l.starts_with("review:"))
+            .expect("review line")
+    }
+
+    #[test]
+    fn the_preview_binds_an_explicit_opus_5_5_worker_to_an_astra_6_reviewer_at_max() {
+        let rendered = opus_5_5_preview("opus55-astra6", "review = { tier = \"frontier\" }");
 
         let encode = rendered
             .lines()
@@ -873,12 +886,8 @@ mod tests {
             "{encode}"
         );
         assert!(!encode.contains("second opinion"), "{encode}");
-        let review = rendered
-            .lines()
-            .find(|l| l.starts_with("review:"))
-            .expect("review line");
         assert_eq!(
-            review,
+            review_line(&rendered),
             "review: claude-code/claude-opus-5-5 (5400s independent timeout per pass) (tasks it \
              implements itself would be reviewed by codex/gpt-6-astra instead, if installed)"
         );
@@ -888,6 +897,65 @@ mod tests {
             .expect("effort line");
         assert_eq!(effort, "effort: implementation=max, review=max");
         assert!(!rendered.contains("also the reviewer"), "{rendered}");
+    }
+
+    #[test]
+    fn the_preview_says_cross_family_false_turned_the_alternative_off() {
+        let rendered = opus_5_5_preview(
+            "opus55-xfamily-off",
+            "review = { tier = \"frontier\", cross_family = false }",
+        );
+
+        assert_eq!(
+            review_line(&rendered),
+            "review: claude-code/claude-opus-5-5 (5400s independent timeout per pass) \
+             (cross-family review is turned off by [routing] review = { cross_family = false })"
+        );
+        assert!(
+            !rendered.contains("no cross-family reviewer exists"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("gpt-6-astra"), "{rendered}");
+    }
+
+    #[test]
+    fn the_preview_of_the_opus_5_5_profile_is_unchanged_with_the_switch_unset() {
+        let unset = opus_5_5_preview("opus55-xfamily-unset", "review = { tier = \"frontier\" }");
+        let on = opus_5_5_preview(
+            "opus55-xfamily-on",
+            "review = { tier = \"frontier\", cross_family = true }",
+        );
+
+        assert_eq!(on, unset, "cross_family = true must preview as unset does");
+        assert_eq!(
+            review_line(&unset),
+            "review: claude-code/claude-opus-5-5 (5400s independent timeout per pass) (tasks it \
+             implements itself would be reviewed by codex/gpt-6-astra instead, if installed)"
+        );
+        assert!(!unset.contains("turned off"), "{unset}");
+        assert!(!unset.contains("cross_family"), "{unset}");
+    }
+
+    #[test]
+    fn the_review_echo_keeps_no_alternative_in_this_build_apart_from_the_switch() {
+        let plan = review::ReviewPlan {
+            enabled: Some(true),
+            primary: Some(review::PassBinding::new("claude-code", "claude-opus-5-5")),
+            ..review::ReviewPlan::default()
+        };
+
+        let absent = render::review_echo(&plan, true);
+        assert!(
+            absent.ends_with(" (no cross-family reviewer exists in this build)"),
+            "{absent}"
+        );
+        assert!(!absent.contains("turned off"), "{absent}");
+
+        let turned_off =
+            " (cross-family review is turned off by [routing] review = { cross_family = false })";
+        let off = render::review_echo(&plan, false);
+        assert!(off.ends_with(turned_off), "{off}");
+        assert!(!off.contains("no cross-family reviewer exists"), "{off}");
     }
 
     #[test]

@@ -461,12 +461,40 @@ is the difference between a plan and a promise.
 The per-task decision belongs in the row that explains what this
 task's paths bought it — and only on the task whose paths matched.
 
+## `fn opus_5_5_preview(tag: &str, review: &str) -> String {`
+
+The self-host profile — an Opus 5.5 pin at the frontier tier, `max` effort
+for both roles — written once, with only its `[routing] review` entry left
+to the caller. The tests below compare previews of it that differ in that
+entry alone, so nothing else may vary between them.
+
 ## `fn the_preview_binds_an_explicit_opus_5_5_worker_to_an_astra_6_reviewer_at_max() {`
 
 The self-host binding as the public command prints it, on the registry
 this build ships: an Opus 5.5 pin implements at `max`, and the work it
 writes would be judged by Astra 6 at `max`. Exact lines, because "some
 other family" is not the binding that was asked for.
+
+## `fn the_preview_says_cross_family_false_turned_the_alternative_off() {`
+
+The same profile with the switch off. Astra 6 is still in this build and
+would be chosen the moment the switch is unset, so "no cross-family
+reviewer exists in this build" would be false here: the line names the
+configuration that turned the reviewer off, and nothing in the preview
+names Astra 6.
+
+## `fn the_preview_of_the_opus_5_5_profile_is_unchanged_with_the_switch_unset() {`
+
+And the switch costs the unset profile nothing: its review line is the
+one the binding test above pins, and `cross_family = true` previews
+byte for byte as unset does.
+
+## `fn the_review_echo_keeps_no_alternative_in_this_build_apart_from_the_switch() {`
+
+Driven on a plan rather than a config because no configuration in this
+build reaches the other `None` — every tier in the catalog carries at
+least two families, each behind an adapter this build ships — yet the
+text for it has to survive the day a tier stops having a partner.
 
 ## `assert!(`
 
