@@ -372,14 +372,11 @@ absent-runtime double) of the engine's test-mode seam
 seam's one detail, `UNARMED`. Each
 `ContainerRuntime` method that can answer with an error, which is all of them
 but `reaper_program`, is called once, the four effects last: twelve
-questions. On Unix they are asked in an isolated child,
-`unarmed_inspection_questions_child`, whose `PATH` has a recording stub
-`docker` first, and the test requires the child's success and libtest's
-`1 passed`, and that the stub was never invoked. So on Unix a double that
-asked or acted on a container runtime would reach only the stub, and the
-test would fail. Elsewhere the same twelve assertions run in-process, where
-no invocation is counted, so on Windows a double that delegated an effect
-would still reach the machine's runtime before the test failed.
+questions. They are asked in-process on every platform, and no invocation is
+counted, so the test shows the double's answers only: a double that also
+asked a container runtime and gave the same answers would pass it, and one
+that delegated an effect would act on the machine's runtime before the test
+failed (`PR444-UNARMED-TEST-MISSES-DOCKER-INVOCATIONS`).
 
 It lives in this module and not in `engine::tests` because it calls those
 four effects, `ContainerRuntime::create`, `start`, `stop` and `remove`.
@@ -395,15 +392,6 @@ blanked. It skips the funnel and three files by name, this module's among
 them. The engine's test module has no `#[cfg(test)]` of its own, so its
 production region is the whole file, and the census would find the test's
 four effect calls there. That is why the test lives here.
-
-## `fn unarmed_inspection_questions_child() {`
-
-The child of the test above, run under `run_test_isolated`. It asks the
-twelve questions through the private function
-`ask_the_unarmed_inspection_runtime_every_question` and asserts that the
-double's count, which
-`engine::topology::entry::container_runtime::unarmed_answers()` reads, is
-twelve.
 
 ## `fn a_seeded_container_carries_owner_labels_and_an_incarnation() {`
 
