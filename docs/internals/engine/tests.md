@@ -3410,8 +3410,12 @@ appends a copy of the run's one `attempt_started` naming the other task; it is r
 `a_reviewed_candidate_whose_publication_and_kept_pin_fail_carries_no_advice` takes N2's moved-head arm and also plants
 a ref below the kept pin's name (`advance_the_branch_and_block_the_kept_pin_after_capture`), so that the publication
 refuses with `HEAD moved` and the kept pin fails too. No pin exists, the checkout keeps the output, and the kept note
-says the pin failed and carries none of N1's advice. It is red when `kept_on_error` appends the advice for a candidate
-as well.
+is the run's only warning and equals, as a whole, the text that says the pin failed and why and carries no advice: the
+pin's name, the `git update-ref` that failed with the pin's unreferenced commit (the one commit in the object store with
+the captured tree and parent and the kept subject) and Git's refusal over the planted `blocker` ref, which the test
+takes from the same `git update-ref` run again, since its wording differs between Git versions.
+It is red when `kept_on_error` appends any advice for a candidate, N1's or other, and when the arm emits a second
+warning.
 
 ## `fn a_legacy_run_under_an_inherited_selection_checks_its_review_input_at_the_selected_repository() {`
 

@@ -17422,30 +17422,62 @@ fn a_reviewed_candidate_whose_publication_and_kept_pin_fail_carries_no_advice() 
         status_of(&repo).contains("agent-output.txt"),
         "the checkout keeps the output"
     );
-    let warning = warned
-        .warnings
-        .iter()
-        .find(|warning| warning.contains("pinning it at"))
-        .expect("the kept note");
-    let failed = format!(
-        "the reviewed candidate of attempt 1 of `t1` is kept in this checkout, and pinning it \
-         at `{pin}` failed: "
-    );
+    let (_, parent, tree) = captured(&repo);
+    let identity =
+        format!("tree {tree}\nparent {parent}\nauthor upstroke <upstroke@upstroke.local> ");
+    let commits: Vec<String> = git_in(
+        &repo,
+        &[
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objectname) %(objecttype)",
+        ],
+    )
+    .lines()
+    .filter_map(|line| line.strip_suffix(" commit"))
+    .filter(|oid| {
+        let text = git_in(&repo, &["cat-file", "commit", oid]);
+        text.starts_with(&identity) && text.ends_with("\n\n[upstroke] kept: t1 attempt 1\n")
+    })
+    .map(str::to_owned)
+    .collect();
+    let [commit] = commits.as_slice() else {
+        panic!("the kept pin's one unreferenced commit of the candidate: {commits:?}");
+    };
+    let zero = "0".repeat(parent.len());
+    let update = [
+        "update-ref",
+        "--no-deref",
+        "-m",
+        "upstroke: pin prepared task",
+        pin.as_str(),
+        commit.as_str(),
+        zero.as_str(),
+    ];
+    let again = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(update)
+        .output()
+        .expect("run git");
+    assert!(!again.status.success(), "the blocker still refuses the pin");
+    let refused = String::from_utf8_lossy(&again.stderr).trim().to_owned();
     assert!(
-        warning.starts_with(&failed),
-        "the note says the pin failed: {warning}"
+        refused.contains(&format!("'{pin}/blocker' exists")),
+        "Git refuses the pin over the planted blocker: {refused}"
     );
-    for advice in [
-        "Nothing outside this checkout keeps it",
-        "`git clean` or `git reset --hard`",
-        "remove the attribute that sets it",
-        "and then resume",
-    ] {
-        assert!(
-            !warning.contains(advice),
-            "the reviewed candidate's note carries no advice, so not {advice:?}: {warning}"
-        );
-    }
+    let [warning] = warned.warnings.as_slice() else {
+        panic!("the kept note, and no other warning: {:?}", warned.warnings);
+    };
+    assert_eq!(
+        warning.as_str(),
+        format!(
+            "the reviewed candidate of attempt 1 of `t1` is kept in this checkout, and pinning it \
+             at `{pin}` failed: git error: git {} failed: {refused}",
+            update.join(" ")
+        ),
+        "the reviewed candidate's note says the pin failed and why, and carries no advice"
+    );
 }
 
 #[cfg(unix)]
