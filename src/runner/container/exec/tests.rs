@@ -6405,8 +6405,6 @@ const SLOW_START_REAL_DOCKER: &str = "UPSTROKE_TEST_SLOW_START_REAL_DOCKER";
 #[cfg(unix)]
 #[test]
 fn real_docker_a_container_slow_to_start_still_reaches_its_timeout() {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let docker = match docker_gate(
         "real_docker_a_container_slow_to_start_still_reaches_its_timeout",
         ContainerTrace::off(),
@@ -6418,14 +6416,15 @@ fn real_docker_a_container_slow_to_start_still_reaches_its_timeout() {
         return no_image(&reason);
     }
     let inherited = std::env::var_os("PATH").unwrap_or_default();
-    let real = std::env::split_paths(&inherited)
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(crate::runner::container::DOCKER_PROGRAM))
-        .find(|candidate| {
-            std::fs::metadata(candidate)
-                .is_ok_and(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
-        })
-        .expect("the `docker` the gate ran is on this process's PATH");
+    let found = crate::util::find_program(crate::runner::container::DOCKER_PROGRAM)
+        .expect("the lookup the gate passed finds the same `docker` again");
+    let real = if found.is_absolute() {
+        found
+    } else {
+        std::env::current_dir()
+            .expect("this process's working directory")
+            .join(found)
+    };
 
     let tree = repo::scratch("real-slow-start");
     let bin = tree.path().join("bin");
@@ -6457,15 +6456,22 @@ fn slow_docker_start_child() {
     let scratch = PathBuf::from(
         std::env::var_os(SLOW_START_SCRATCH).expect("the parent names its scratch directory"),
     );
-    let real = std::env::var(SLOW_START_REAL_DOCKER).expect("the parent names the real `docker`");
+    let real = PathBuf::from(
+        std::env::var_os(SLOW_START_REAL_DOCKER).expect("the parent names the real `docker`"),
+    );
+    assert!(
+        real.is_absolute() && real.is_file(),
+        "the stand-in runs {} from wherever the runner starts it, so it must be an absolute path \
+         to a file",
+        real.display()
+    );
     let stand_in = scratch
         .join("bin")
         .join(crate::runner::container::DOCKER_PROGRAM);
     std::fs::write(
         &stand_in,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = start ]; then sleep 5; fi\nexec '{}' \"$@\"\n",
-            real.replace('\'', r"'\''")
+            "#!/bin/sh\nif [ \"$1\" = start ]; then sleep 5; fi\nexec \"${SLOW_START_REAL_DOCKER}\" \"$@\"\n"
         ),
     )
     .expect("the stand-in `docker`");
