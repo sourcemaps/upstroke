@@ -4716,6 +4716,7 @@ fn windows_ambient_coordinator_helper() {
         timeout: Duration::from_secs(60),
         agent: None,
         invocation: gate_invocation(),
+        credential_profile: None,
     };
     let _ = runner.run_blocking(&request);
     unreachable!("the coordinator helper was supposed to die at CreatedSuspended");
