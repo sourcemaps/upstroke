@@ -131,6 +131,11 @@
 #   MUT-LEDGER-TABBED-CELL       cells were trimmed of spaces only, so a tab around a policy-valid
 #                                `P3` reached the audit as part of the severity and an accepted,
 #                                filed P3 blocked as `severity-mismatch` instead of reading READY
+#   MUT-LEDGER-WIDE-TRIM         cells were trimmed by `str.strip()`, which takes off every
+#                                character Python calls whitespace, where the validator, under
+#                                `LC_ALL=C`, trims six: a U+00A0 or U+001C beside the id, severity
+#                                or disposition came off here and stayed on there, so the cell the
+#                                audit judged was not the cell the validator refused
 #   MUT-LEDGER-POST-TABLE-ROW    a `|` line in the ledger section AFTER the canonical table had
 #                                ended was read as a row: the table held only `None yet`, a blank
 #                                line ended it for both validators, and a later row recording the
@@ -8348,6 +8353,45 @@ expect MUT-LEDGER-TABBED-CELL "$(ledger_rows "$tmp/tabbed-row.md")" '0|ACCEPT-P3
 expect MUT-LEDGER-TABBED-CELL "$(parse_nul ledger "$tmp/tabbed-row.md")" \
   '0|ledger|1|ACCEPT-P3|P3|accepted-risk|'
 
+# EXACTLY THE SIX CHARACTERS THE VALIDATOR TRIMS, AND NO OTHERS. The audit runs validate-pr-body.sh
+# under `LC_ALL=C`, where its `trim`'s `[[:space:]]` is space, tab, newline, vertical tab, form feed
+# and carriage return; `str.strip()` takes off U+00A0 and U+001C as well. Each character below is
+# put either side of one of the three cells the parser returns, in the READY case's row, and written
+# as bytes, so what is tested does not depend on the locale this runs under. A tab, a vertical tab
+# and a form feed are trimmed: the validator passes the row, and the parser returns it as the
+# validator read it. U+00A0 and U+001C are kept: the validator refuses the row, and the parser
+# returns the cell with the character still on it, as the validator read it -- which matches no
+# finding's id, no severity and no disposition, and blocks through main (with the body policy's
+# witnesses, below, where the READY case's review and head are built).
+trim_cell_row() {  # trim_cell_row CELL CHAR: the row ACCEPT-P3:P3:accepted-risk, CHAR either side of CELL
+  case "$1" in
+    id)          printf '%s' "$2ACCEPT-P3$2:P3:accepted-risk" ;;
+    severity)    printf '%s' "ACCEPT-P3:$2P3$2:accepted-risk" ;;
+    disposition) printf '%s' "ACCEPT-P3:P3:$2accepted-risk$2" ;;
+  esac
+}
+trim_case() {  # trim_case pass|fail CELL NAME|CHAR: the body as $tmp/trim-CELL-NAME.md, and its reads
+  local file="$tmp/trim-$2-${3%%|*}.md" row label
+  row="$(trim_cell_row "$2" "${3#*|}")"
+  ledger_policy_body "$file" "$(printf '## Review finding ledger\n\n'; ledger_table "$row")"
+  if [[ "$1" == pass ]]; then   # trimmed: the row as the READY case writes it
+    label="MUT-LEDGER-TABBED-CELL ${3%%|*} $2"
+    row=ACCEPT-P3:P3:accepted-risk
+  else                          # kept: the row as written, the character still on its cell
+    label="MUT-LEDGER-WIDE-TRIM ${3%%|*} $2"
+  fi
+  expect "$label policy" "$(body_policy "$file")" "$1"
+  expect "$label" "$(ledger_rows "$file")" "0|$row"
+  expect "$label payload" "$(parse_nul ledger "$file")" "0|ledger|1|${row//:/|}|"
+}
+trim_cells=(id severity disposition)
+trimmed_chars=($'tab|\t' $'vtab|\v' $'formfeed|\f')
+kept_chars=($'nbsp|\xc2\xa0' $'fs|\x1c')
+for trim_cell in "${trim_cells[@]}"; do
+  for trim_char in "${trimmed_chars[@]}"; do trim_case pass "$trim_cell" "$trim_char"; done
+  for trim_char in "${kept_chars[@]}"; do trim_case fail "$trim_cell" "$trim_char"; done
+done
+
 # --- the canonical table, found by position, and nothing after it -------------------------------
 # validate-pr-body.sh's walk: after the heading, the header is the first `|` line, the separator
 # the next line, and the rows the contiguous `|` lines after it, up to the first line that is not
@@ -8920,17 +8964,21 @@ done
 # --- the body policy, run by the audit on the body it parses, through main ---------------------------
 # THE AUDIT SAMPLES THE CHECKS BEFORE IT FETCHES THE BODY, and an edit to the body does not move the
 # head, so the `upstroke-pr-policy` conclusion it reads judged a body it may never have seen. Three
-# bodies validate-pr-body.sh refuses and the ledger parser reads whole, each READY at exit 0 while
+# bodies validate-pr-body.sh refuses and the ledger parser read whole, each READY at exit 0 while
 # the parse alone decided:
 #   - the guard cell is `—`: the validator requires a regression test or a documented guard, and
 #     the parser never reads that column;
 #   - an accepted P3 row beside the `None yet` row: the validator refuses the mixture, and the
 #     parser steps over `None yet` and reads the row;
-#   - a filed P2's row says `deferred` and then U+00A0: `str.strip()` takes the no-break space off,
+#   - a filed P2's row says `deferred` and then U+00A0: `str.strip()` took the no-break space off,
 #     and the validator's `[[:space:]]` under C keeps it, so `deferred<U+00A0>` is no disposition.
-# Each is asserted three ways -- the validator refuses it, the parser reads the row the READY case
-# needs, and the audit is NOT-READY with `body-policy-failed:` as its ONLY blocker -- so it is the
-# audit's run of the validator that blocks, and nothing else in the body.
+# Each is asserted three ways -- the validator refuses it, the parser reads its row, and the audit is
+# NOT-READY with `body-policy-failed:` as its first blocker. The parser still reads the first two
+# whole, as the READY case needs them, and there `body-policy-failed:` is the ONLY blocker: it is the
+# audit's run of the validator that blocks, and nothing else in the body. The third it reads as the
+# validator does now -- it trims only what the validator trims and keeps the no-break space
+# (MUT-LEDGER-WIDE-TRIM) -- so `deferred<U+00A0>` is no disposition to either, and
+# `bad-disposition:` stands beside the policy's blocker.
 #
 # The first two are the READY case's review and head with the body changed; the third is a review
 # whose one finding is a P2, which neither lane below must fix, on a head that files it once, and
@@ -8959,33 +9007,61 @@ expect "MUT-BODY-POLICY-UNCHECKED beside-none-yet parse" \
   "$(ledger_rows "$tmp/policy-beside-none-yet.md")" '0|ACCEPT-P3:P3:accepted-risk'
 expect "MUT-BODY-POLICY-UNCHECKED deferred-nbsp policy" \
   "$(body_policy "$tmp/policy-deferred-nbsp.md")" fail
-expect "MUT-BODY-POLICY-UNCHECKED deferred-nbsp parse" \
-  "$(ledger_rows "$tmp/policy-deferred-nbsp.md")" '0|DEFER-P2:P2:deferred'
+expect "MUT-LEDGER-WIDE-TRIM deferred-nbsp parse" \
+  "$(ledger_rows "$tmp/policy-deferred-nbsp.md")" $'0|DEFER-P2:P2:deferred\xc2\xa0'
 expect "MUT-BODY-POLICY-UNCHECKED deferred control policy" "$(body_policy "$tmp/policy-deferred.md")" pass
 for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
   for policy_witness in guard-dash beside-none-yet deferred-nbsp; do
     case "$policy_witness" in
-      deferred-nbsp) policy_review="$tmp/defer-p2.md"; policy_head="$defer_p2_head" ;;
-      *)             policy_review="$tmp/accept-p3.md"; policy_head="$accept_head_one" ;;
+      deferred-nbsp) policy_review="$tmp/defer-p2.md"; policy_head="$defer_p2_head"
+                     policy_blockers=$'body-policy-failed:1,bad-disposition:DEFER-P2=deferred\xc2\xa0' ;;
+      *)             policy_review="$tmp/accept-p3.md"; policy_head="$accept_head_one"
+                     policy_blockers=body-policy-failed:1 ;;
     esac
     got="$(accept_run "$accept_branch" "$policy_review" "$tmp/policy-$policy_witness.md" "$policy_head")"
     [[ "$got" == *" READY "* ]] \
       && error "MUT-BODY-POLICY-UNCHECKED: a body the validator refuses read READY [$policy_witness] on [$accept_branch]: [$got]"
     contains "MUT-BODY-POLICY-UNCHECKED $policy_witness [$accept_branch]" "$got" " NOT-READY "
-    # the blocker and nothing beside it: the table line is the last thing printed
+    # the blockers and nothing beside them: the table line is the last thing printed
     contains "MUT-BODY-POLICY-UNCHECKED $policy_witness [$accept_branch]" "$got" \
-      "blockers=body-policy-failed:1 "
+      "blockers=$policy_blockers "
     expect "MUT-BODY-POLICY-UNCHECKED $policy_witness status [$accept_branch]" "${got%%|*}" 0
     [[ "$got" == *GH-UNSTUBBED* ]] \
       && error "MUT-BODY-POLICY-UNCHECKED: the audit made a call this case does not model: [$got]"
   done
   # The deferred P2 without the no-break space, filed once: READY, so the NOT-READY above is the
-  # policy's doing and not the review's, the head's or the lane's.
+  # no-break space's doing and not the review's, the head's or the lane's.
   got="$(accept_run "$accept_branch" "$tmp/defer-p2.md" "$tmp/policy-deferred.md" "$defer_p2_head")"
   contains "MUT-BODY-POLICY-UNCHECKED deferred control [$accept_branch]" "$got" " READY "
   expect "MUT-BODY-POLICY-UNCHECKED deferred control status [$accept_branch]" "${got%%|*}" 0
   [[ "$got" == *body-policy-failed* || "$got" == *NOT-READY* || "$got" == *GH-UNSTUBBED* ]] \
     && error "MUT-BODY-POLICY-UNCHECKED: a policy-valid deferred P2 blocked on [$accept_branch]: [$got]"
+done
+# A CHARACTER THE VALIDATOR KEEPS IS KEPT, AND BLOCKS. Each kept-character body of the cell trims --
+# U+00A0 or U+001C either side of the id, the severity or the disposition of the READY case's row --
+# through main against the READY case's review, head and lane. The validator refuses it, and the
+# cell the parser returns fails to match: the id is no finding's, so the finding has no row; the
+# severity is not the review's; the disposition is none. So each is NOT-READY on the policy's
+# blocker and the cell's own, both, where `str.strip()` handed the audit the READY case's row.
+for trim_cell in "${trim_cells[@]}"; do
+  for trim_char in "${kept_chars[@]}"; do
+    trim_name="${trim_char%%|*} $trim_cell"
+    case "$trim_cell" in
+      id)          trim_blocker='no-row:ACCEPT-P3' ;;
+      severity)    trim_blocker='severity-mismatch:ACCEPT-P3' ;;
+      disposition) trim_blocker="bad-disposition:ACCEPT-P3=${trim_char#*|}accepted-risk${trim_char#*|}" ;;
+    esac
+    got="$(accept_run feature/a-slug "$tmp/accept-p3.md" \
+      "$tmp/trim-$trim_cell-${trim_char%%|*}.md" "$accept_head_one")"
+    [[ "$got" == *" READY "* ]] \
+      && error "MUT-LEDGER-WIDE-TRIM: a kept character read READY [$trim_name]: [$got]"
+    contains "MUT-LEDGER-WIDE-TRIM $trim_name" "$got" " NOT-READY "
+    # the two blockers and nothing beside them: the table line is the last thing printed
+    contains "MUT-LEDGER-WIDE-TRIM $trim_name" "$got" "blockers=body-policy-failed:1,$trim_blocker "
+    expect "MUT-LEDGER-WIDE-TRIM $trim_name status" "${got%%|*}" 0
+    [[ "$got" == *GH-UNSTUBBED* ]] \
+      && error "MUT-LEDGER-WIDE-TRIM: the audit made a call this case does not model: [$got]"
+  done
 done
 # THE TITLE IS THE PULL REQUEST'S OWN, read for this run. The READY case's body under a title the
 # validator refuses is `body-policy-failed:1` and nothing else; and a title that could not be read

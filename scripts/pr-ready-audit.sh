@@ -301,10 +301,11 @@ read_parser_fields() {
 # THE AUDIT RUNS IT ITSELF, ON THE BYTES IT PARSES, because the check's verdict is not about those
 # bytes. The checks are sampled before the body is fetched, and an edit to the body does not move
 # the head, so a green `upstroke-pr-policy` judged whatever body the pull request carried when it
-# ran. Three bodies the validator refuses and the ledger parser reads whole -- a row whose guard
+# ran. Three bodies the validator refuses and the ledger parser read whole -- a row whose guard
 # cell is `—`, an accepted P3 row beside the `None yet` row, and a filed P2's `deferred` followed by
-# U+00A0, which `str.strip()` removes and `[[:space:]]` under C keeps -- each read READY at exit 0,
-# on a ledger the policy had refused or never seen. The caller hands this the one file it fetched
+# U+00A0, which the parser's `str.strip()` removed and `[[:space:]]` under C keeps -- each read
+# READY at exit 0, on a ledger the policy had refused or never seen. The parser now trims only what
+# the validator trims and keeps the U+00A0; the first two it still reads whole. The caller hands this the one file it fetched
 # and handed the parser, so the body judged and the body read are the same bytes.
 #
 # `LC_ALL=C` so the answer is a function of the bytes and not of the caller's locale: the

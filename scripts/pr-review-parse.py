@@ -1032,6 +1032,11 @@ LEDGER_HEADER = (
 )
 LEDGER_SEPARATOR = "|---|---|---|---|---|---|---|---|---|"
 LEDGER_NONE = "None yet"
+# What validate-pr-body.sh's `trim` takes off either end of a cell: `[[:space:]]`, in the C locale
+# the audit runs it under (`LC_ALL=C`), where the class is these six characters and no others.
+# `str.strip()` with no argument takes off every character Python calls whitespace -- U+00A0 and
+# U+001C among them -- and the validator keeps both.
+C_SPACE = " \t\n\v\f\r"
 
 
 def ledger_result(args):
@@ -1093,7 +1098,7 @@ def ledger_result(args):
     `\\r` `mapfile` would keep is gone before `mapfile` runs. A space or tab before the CR is not a
     carriage return, survives the deletion on both sides, and is a near miss here.
 
-    AGAINST THE VALIDATORS this is stricter, and is never looser. `validate-pr-body.sh` takes the
+    AGAINST THE VALIDATORS, WHERE THE TWO WALKS MEET. `validate-pr-body.sh` takes the
     heading only as the exact line and refuses a second one. Every line it takes this takes, and
     no other line is a heading here, so a body it passes has one ledger section here too, and the
     same one; a line that differs from its heading only in whitespace is never a ledger here, only
@@ -1107,12 +1112,23 @@ def ledger_result(args):
     table's rows by both. `validate-pr-ledger-evidence.sh` does not look at the heading: it reads
     from the first canonical header line anywhere in the body, and does not look for a repeated id.
 
-    EVERY CELL RETURNED IS TRIMMED OF ALL SURROUNDING WHITESPACE, as the body validator trims it
-    (`[[:space:]]`). Trimmed of spaces alone, a policy-valid row with a tab either side of `P3`
-    reached the audit as a tabbed severity and blocked as `severity-mismatch`. Where `str.strip()`
-    and `[[:space:]]` could differ, the difference can only block: a character the validator keeps
-    fails its id, severity and disposition patterns, and one this keeps matches no finding's id and
-    no severity.
+    IN EACH ROW THIS READS THREE CELLS, AND A BODY IT READS IS NOT A BODY THE POLICY PASSES. This
+    used to call itself stricter than the validators and never looser, and it is not. It returns
+    each row's id, severity and disposition, holds them to none of the validator's rules -- its id
+    pattern, `P0`-`P3`, its dispositions -- and reads no other column at all. So a body the
+    validator refuses can be read here whole: a guard cell of `—`, or a row beside `None yet`. READY
+    needs the validator's pass on the same bytes, and the audit checks that: it runs
+    `validate-pr-body.sh` itself, on the one file it hands this.
+
+    EVERY CELL RETURNED IS TRIMMED OF EXACTLY WHAT THE BODY VALIDATOR TRIMS, AND OF NOTHING ELSE.
+    Its `trim` takes `[[:space:]]` off either end, and the audit runs it under `LC_ALL=C`, where that
+    class is six characters: space, tab, newline, vertical tab, form feed and carriage return
+    (`C_SPACE`). Trimmed of spaces alone, a policy-valid row with a tab either side of `P3` reached
+    the audit as a tabbed severity and blocked as `severity-mismatch`. Trimmed by `str.strip()`,
+    which takes off every character Python calls whitespace, a cell lost a U+00A0 or a U+001C the
+    validator had kept: a filed P2's `deferred` followed by U+00A0 was no disposition to the
+    validator, and `deferred` here. Now a character the validator keeps is kept here, so each cell
+    returned is the cell the validator read.
     """
     if len(args) != 1:
         raise Unparsed("ledger takes one file")
@@ -1158,7 +1174,7 @@ def ledger_result(args):
             place = "ended"
             continue
         cells = line.split("|")
-        identifier = (cells[1] if len(cells) > 1 else "").strip()
+        identifier = (cells[1] if len(cells) > 1 else "").strip(C_SPACE)
         if identifier == LEDGER_NONE:
             continue
         if identifier in ids:
@@ -1167,8 +1183,8 @@ def ledger_result(args):
         rows.append(
             {
                 "id": identifier,
-                "severity": (cells[2] if len(cells) > 2 else "").strip(),
-                "disposition": (cells[9] if len(cells) > 9 else "").strip(),
+                "severity": (cells[2] if len(cells) > 2 else "").strip(C_SPACE),
+                "disposition": (cells[9] if len(cells) > 9 else "").strip(C_SPACE),
             }
         )
     if place in ("header", "separator"):
