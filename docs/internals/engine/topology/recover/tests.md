@@ -6308,7 +6308,8 @@ Why kills as well as error returns. The PR10 record's R11 reads an error
 return at a hook phase as leaving the durable state a kill there leaves.
 Gate 5's first run graded "kills between every terminal-finalization
 effect" asserted on that reading, executed as a real kill at one cell only
-(`reviews/2026-09-14-gate-G5.md` on `gate/g5-run1`, §8 groups 1 and 5).
+(that run's record, §8 groups 1 and 5, was written on the run's own branch
+and never reached `master`; no public copy exists).
 Here every cell's death is held to the order the error-return matrix
 asserts at the same cell. The error-return matrix also has a blind spot the
 reading does not name: its faulted resume and its next resume share a
