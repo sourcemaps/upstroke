@@ -16,16 +16,20 @@ The Event funnel's tests. Three rules hold throughout:
 * **Enumerations come from the types.** The site grids iterate `EventSite::ALL`,
   `SubEffectPoint::modes()` and `BarrierStep::ALL` rather than a hand-written list, so a variant
   added later is uncovered loudly instead of silently.
-* **Hostility is a count.** The differential grid varies the log's shape, the torn tail's length
-  and its bytes independently, and
-  `the_grid_varies_shape_and_tail_length_and_tail_content_independently` asserts how many shapes,
-  distinct tail lengths and distinct committed-line counts it holds.
+* **Hostility is a count.** The differential grid's coverage is counted, not listed by hand:
+  `the_grid_varies_shape_and_tail_length_and_tail_content_independently` asserts thirteen shapes,
+  six distinct lengths after the last newline (0, for a log that ends on one, then 1, 2, 5, 11 and
+  53 bytes), at least four distinct committed-line counts and exactly one absent file. Despite its
+  name it checks only those counts. The grid does not vary tail length, tail content and prefix
+  independently; `open_grid` below says which cases it holds.
 
 ## `#![allow(clippy::disallowed_methods, clippy::disallowed_types)]`
 
 Allowlist placement: the **funnel section** of `effects/allowlist.toml`, which carries this
 module's review clause -- effects only inside site-taking APIs, no writable handle returned.
-`decisions.effect_site_inventory.mechanism` (2).
+The design packet's `decisions.effect_site_inventory.mechanism` (2), which is not in this
+repository, is the source the allowlist entry's `packet` field cites for attaching this test
+module to the Event funnel; the entry's `review` clause is the rule that applies.
 
 ## `use sha2::{Digest, Sha256};`
 
