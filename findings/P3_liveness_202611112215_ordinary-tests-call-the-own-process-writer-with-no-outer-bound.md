@@ -7,7 +7,7 @@ pr: 368
 reviewed_sha: 7201f8b71a1c44615b3efedcf8d6e5b8986f5f05
 location: src/runner/container.rs:2370
 provenance: pre_existing
-first_bad:
+first_bad: FUA-I4-RELAY
 guard: the change that gives each of the nine call sites an outer bound, by moving the write into an isolated child under a deadline as #368 did for the gate-probe test, or bounds the helper's end itself, with a witness that a stopped reaper ends one test and not the suite
 ---
 
