@@ -79,8 +79,11 @@
 #     with its fenced JSON verdict, or the `<!-- upstroke-frontier-review -->` prose form) reviewed
 #     the head itself, or a commit the head differs from only by clean merge commits (git's own
 #     merge of the two parents, the branch diff byte-identical before and after, and no gate
-#     edited by the pull request) and pushes confined to findings/ or reviews/FINDINGS.md
-#     (MAINTAINING step 5 keeps the review across both)
+#     edited by the pull request) and ledger pushes (MAINTAINING step 5 keeps the review across
+#     both). A push keeps the review only if it adds files under findings/ (or reviews/findings/
+#     on a head cut before 2026-09-12), or changes reviews/FINDINGS.md; one that modifies, deletes
+#     or renames a finding file is a repair (NEEDS-ATTEST), because it can rewrite or unfile an
+#     open finding (PR382-ACCEPTED-P3-REPURPOSES-FINDING-FILE)
 #   - the review is against the pull request's own base: the workflow form must record its base
 #     commit, which must lie on the current base branch (and, for a base other than master, not
 #     on master); no base change may be recorded on the pull request after the review was
@@ -117,7 +120,8 @@
 # unreadable as `body-policy-failed:127`, a body the parser refused or that did not arrive whole
 # as `ledger-parse-failed` and `ledger-parse-incomplete`, a review that records no reviewed commit as
 # `review-records-no-reviewed-sha`, a finding-file listing that errored as
-# `finding-file-lookup-failed`, and a gate-edit check that could not run as
+# `finding-file-lookup-failed`, a push whose per-path statuses could not be read as
+# `ledger-status-read-failed`, and a gate-edit check that could not run as
 # `gate-edit-check-failed`; an unreadable ruleset list or open-pull-request list refuses the whole
 # run before the first pull request is judged. Every list request is paginated, because a first
 # page is not a list and 30 rows of nothing hid an active ruleset on page two.
@@ -1158,7 +1162,7 @@ audit_one() {
       # resolution or a third parent is a new change that `--no-merges` below would hide), the
       # branch's diff against its base is byte-identical before and after the merge, and the pull
       # request edits no gate. Anything wider is reviewed again.
-      local merge_edits="" merges m expected before after touched t rest outside
+      local merge_edits="" merges m expected before after touched t rest outside statuses line st walked
       merges="$(git rev-list --merges "$reviewed..$head" --not "origin/$base")"
       for m in $merges; do
         local parents
@@ -1194,32 +1198,56 @@ audit_one() {
         moved="merge-edits:${merge_edits:0:7}"
       elif [[ -z "$touched" ]]; then
         moved="merges-only"
+      elif ! statuses="$(git log --no-merges --no-renames --name-status --format= "$reviewed..$head" --not "origin/$base")"; then
+        # What the push did to each path, over the range `touched` was read from. Unread, no path
+        # is known to be an addition, and "I could not look" is not one.
+        blockers+=("ledger-status-read-failed")
+        moved="repairs"
       else
-        # Which side of the ledger each touched path falls on, walked by expansion. Written as
-        # `! grep -vE ... <<< "$touched"` this was the exemption granted by a read that did not
-        # happen: grep's 1 is "every path is in the ledger", which keeps the review across the
-        # push, and a here-string bash could not spill to a temporary file returns that same 1
-        # with grep never run -- so a head moved by repairs, which is NEEDS-ATTEST, would have
-        # audited as ledger-only, which is READY.
+        # A PUSH KEEPS THE REVIEW ONLY IF IT ADDS FILES UNDER findings/ (or reviews/findings/ on a
+        # head cut before 2026-09-12), OR CHANGES reviews/FINDINGS.md. One that modifies, deletes or
+        # renames a finding file is a repair, NEEDS-ATTEST: judged by name alone, a push rewriting an
+        # open finding's `id:` to a new P3's unfiled the old one and filed the new, and an `rm`
+        # unfiled it outright, each READY (PR382-ACCEPTED-P3-REPURPOSES-FINDING-FILE). So the
+        # status is read per commit: `--no-renames` makes a rename the deletion it contains, and a
+        # file added then edited in the range has an `M` line, which is a repair too.
+        #
+        # Walked by expansion. Written as `! grep -vE ... <<< "$touched"` this was the exemption
+        # granted by a read that did not happen: a here-string bash could not spill returns grep's
+        # 1, "every path is in the ledger", with grep never run -- a repair audited as READY.
         outside=0
-        rest="$touched"
+        walked=0
+        rest="$statuses"
         while [[ -n "$rest" ]]; do
-          t="${rest%%$'\n'*}"
+          line="${rest%%$'\n'*}"
           if [[ "$rest" == *$'\n'* ]]; then rest="${rest#*$'\n'}"; else rest=""; fi
-          # An empty path is not a ledger path. `grep -v` returned a blank line as a line outside
-          # the ledger and this must agree with it: the rewrite is here to stop a failed read
-          # granting the exemption, not to widen who gets it.
+          [[ -n "$line" ]] || continue   # git's blank line between one commit's paths and the next's
+          walked=1
+          # A status, a tab and a path, or the line is outside the ledger: what this cannot parse
+          # fails toward another pass, never toward keeping the review. A path git quoted (`"`
+          # first) is one whose bytes the name test below cannot see.
+          if [[ "$line" != *$'\t'* ]]; then outside=1; break; fi
+          st="${line%%$'\t'*}"
+          t="${line#*$'\t'}"
+          if [[ -z "$st" || -z "$t" || "$t" == '"'* ]]; then outside=1; break; fi
+          # The closed ledger FILE, edited in place on a branch cut before 2026-09-12, whatever the
+          # status, as before. It differs from the moved directory only in case.
+          [[ "$t" == reviews/FINDINGS.md ]] && continue
           # Either ledger prefix, for the reason finding_file_count gives: `$reviewed..$head` is
-          # the caller's range and a head cut before 2026-09-12 carries the ledger at
-          # reviews/findings/. Unwidened, a ledger-only push on such a head read as `repairs`,
-          # which is NEEDS-ATTEST -- the conservative direction, unlike the count above, but wrong
-          # about the same tree. reviews/FINDINGS.md is the closed ledger FILE and is a separate
-          # name, differing from the moved directory only in case.
-          [[ "$t" == findings/* || "$t" == reviews/findings/* || "$t" == reviews/FINDINGS.md ]] && continue
+          # the caller's range, and a pre-move head carries the ledger at reviews/findings/.
+          [[ "$st" == A && ( "$t" == findings/* || "$t" == reviews/findings/* ) ]] && continue
           outside=1
           break
         done
-        if ((outside)); then moved="repairs"; else moved="ledger-only"; fi
+        # `touched` named paths, so a status read with no line in it did not read this range.
+        if ((walked == 0)); then
+          blockers+=("ledger-status-read-failed")
+          moved="repairs"
+        elif ((outside)); then
+          moved="repairs"
+        else
+          moved="ledger-only"
+        fi
       fi
     fi
   fi

@@ -9235,6 +9235,239 @@ policy_present_status=0
   run_body_validator "$policy_title" "$tmp/accept-p3-row.md" ) > /dev/null 2>&1 || policy_present_status=$?
 expect "MUT-BODY-VALIDATOR-MISSING library control" "$policy_present_status" 0
 
+# --- a push keeps the review only if it adds files under the ledger ----------------------------------
+# MUT-LEDGER-PUSH-REWRITES-FINDING (PR382-ACCEPTED-P3-REPURPOSES-FINDING-FILE). A push confined to
+# findings/ kept the review by its paths' names alone, so a push that rewrote an open finding's `id:`
+# to a new P3's -- one file, two findings, the old one unfiled -- read `moved=ledger-only` and READY
+# under a `deferred` row and under an `accepted-risk` one, and so did an `rm` of an open finding's
+# file. Each push here is a commit on the reviewed head, which files OPEN-P3 once and NEW-P3 nowhere,
+# and the review is of that head while the stub serves the push's: so `moved` is the push's doing.
+#
+# THE NEIGHBOUR THAT MUST NOT MOVE is the push that adds a file of its own for NEW-P3, under the same
+# review and the same rows: `moved=ledger-only`, READY, and enqueued once. The rest are NEEDS-ATTEST,
+# and enqueued never. Run with --enqueue through a stub that models the enqueue path in front of the
+# accept stub -- the labels, the two head reads, the base read and `pr merge` itself, recorded -- so
+# "not enqueued" is a count of calls and not only a state.
+ledger_push_gh="$tmp/ledger-push-gh"
+mkdir -p "$ledger_push_gh"
+printf '#!/usr/bin/env bash\naccept_gh=%q\n' "$accept_gh/gh" > "$ledger_push_gh/gh"
+cat >> "$ledger_push_gh/gh" <<'GH'
+case "$*" in
+  *"/labels?per_page=100"*)   exit 0 ;;
+  "label create"*)            exit 0 ;;
+  "pr edit"*)                 exit 0 ;;
+  "pr merge"*)                printf '[%s]' "$@" >> "$STUB_MERGE_LOG"
+                              printf '\n' >> "$STUB_MERGE_LOG"; exit 0 ;;
+  *"--json headRefOid"*)      echo "$STUB_HEAD"; exit 0 ;;
+  *"--json baseRefName"*)     echo master; exit 0 ;;
+esac
+exec "$accept_gh" "$@"
+GH
+chmod +x "$ledger_push_gh/gh"
+# The real git for every call but the push's status read, which LEDGER_STATUS_MODE answers: `fail`
+# exits 128, `empty` exits 0 having printed nothing, `spaces` prints git's own answer with each tab
+# made a space. Unset, it is the real git throughout, which is this wrapper's own control.
+ledger_push_git="$tmp/ledger-push-git"
+mkdir -p "$ledger_push_git"
+printf '#!/usr/bin/env bash\nreal_git=%q\n' "$(command -v git)" > "$ledger_push_git/git"
+cat >> "$ledger_push_git/git" <<'GIT'
+for arg in "$@"; do
+  [[ "$arg" == --name-status ]] || continue
+  case "${LEDGER_STATUS_MODE:-}" in
+    fail)   echo "fatal: the push's status read, made to fail" >&2; exit 128 ;;
+    empty)  exit 0 ;;
+    spaces) out="$("$real_git" "$@")" || exit $?
+            printf '%s\n' "${out//$'\t'/ }"; exit 0 ;;
+  esac
+done
+exec "$real_git" "$@"
+GIT
+chmod +x "$ledger_push_git/git"
+ledger_push_blob() {  # ledger_push_blob ID TEXT: a finding file filing ID, its body TEXT
+  printf -- '---\nid: %s\nseverity: P3\n---\n\n%s\n' "$1" "$2" \
+    | git -C "$enqueue_repo" hash-object -w --stdin
+}
+ledger_push_tree() {  # ledger_push_tree PATH=BLOB...: a root tree holding exactly those files
+  local one path blob findings="" legacy="" reviews="" top="" tree
+  for one in "$@"; do
+    path="${one%%=*}"; blob="${one#*=}"
+    case "$path" in
+      findings/*)         findings+="100644 blob $blob"$'\t'"${path#findings/}"$'\n' ;;
+      reviews/findings/*) legacy+="100644 blob $blob"$'\t'"${path#reviews/findings/}"$'\n' ;;
+      reviews/*)          reviews+="100644 blob $blob"$'\t'"${path#reviews/}"$'\n' ;;
+      *)                  top+="100644 blob $blob"$'\t'"$path"$'\n' ;;
+    esac
+  done
+  if [[ -n "$legacy" ]]; then
+    tree="$(printf '%s' "$legacy" | git -C "$enqueue_repo" mktree)"
+    reviews+="040000 tree $tree"$'\t'"findings"$'\n'
+  fi
+  if [[ -n "$reviews" ]]; then
+    tree="$(printf '%s' "$reviews" | git -C "$enqueue_repo" mktree)"
+    top+="040000 tree $tree"$'\t'"reviews"$'\n'
+  fi
+  if [[ -n "$findings" ]]; then
+    tree="$(printf '%s' "$findings" | git -C "$enqueue_repo" mktree)"
+    top+="040000 tree $tree"$'\t'"findings"$'\n'
+  fi
+  printf '%s' "$top" | git -C "$enqueue_repo" mktree
+}
+ledger_push_commit() {  # ledger_push_commit PARENT MESSAGE PATH=BLOB...: a commit holding those files
+  local parent="$1" message="$2" tree
+  shift 2
+  tree="$(ledger_push_tree "$@")"
+  git -C "$enqueue_repo" -c user.email=t@example -c user.name=t \
+    commit-tree "$tree" -p "$parent" -m "$message"
+}
+ledger_push_run() {  # ledger_push_run REVIEW BODY HEAD [MODE]: "<status>|<output>|<pr merge calls>"
+  local out status=0
+  : > "$tmp/ledger-push-merges.log"
+  out="$(cd "$enqueue_repo" && STUB_MERGE_LOG="$tmp/ledger-push-merges.log" \
+    STUB_BRANCH=feature/a-slug STUB_REVIEW_BODY="$1" STUB_LEDGER_BODY="$2" STUB_HEAD="$3" \
+    LEDGER_STATUS_MODE="${4:-}" PATH="$ledger_push_git:$ledger_push_gh:$PATH" \
+    bash "$root/scripts/pr-ready-audit.sh" --enqueue 999 2>&1)" || status=$?
+  printf '%s|%s|%s' "$status" "$(tr '\n' ' ' <<< "$out")" \
+    "$(grep -c . "$tmp/ledger-push-merges.log" || true)"
+}
+ledger_push_status() {  # ledger_push_status HEAD: the audit's status read of the push, on one line
+  git -C "$enqueue_repo" log --no-merges --no-renames --name-status --format= \
+    "$ledger_push_reviewed..$1" | grep . | tr '\t\n' '> '
+}
+lp_open="$(ledger_push_blob OPEN-P3 'Open, and filed at the reviewed head.')"
+lp_retag="$(ledger_push_blob NEW-P3 'Open, and filed at the reviewed head.')"
+lp_edited="$(ledger_push_blob OPEN-P3 'Open, and filed at the reviewed head. A sentence added.')"
+lp_new="$(ledger_push_blob NEW-P3 'Raised by the review, and filed in a file of its own.')"
+lp_new_edited="$(ledger_push_blob NEW-P3 'Raised by the review, filed, and then edited.')"
+lp_legacy="$(ledger_push_blob LEGACY-OPEN 'Filed under the old prefix.')"
+lp_legacy_new="$(ledger_push_blob LEGACY-NEW 'Filed under the old prefix by the push.')"
+lp_closed="$(printf '# Findings\n\nClosed.\n' | git -C "$enqueue_repo" hash-object -w --stdin)"
+lp_closed_edited="$(printf '# Findings\n\nClosed, and a line added.\n' \
+  | git -C "$enqueue_repo" hash-object -w --stdin)"
+lp_repair="$(printf 'a repair\n' | git -C "$enqueue_repo" hash-object -w --stdin)"
+# The reviewed head, and each push as the files it leaves: R's three, with one change.
+lp_r=(findings/open-p3.md="$lp_open" reviews/FINDINGS.md="$lp_closed"
+  reviews/findings/legacy.md="$lp_legacy")
+ledger_push_reviewed="$(ledger_push_commit "$enqueue_head" "the reviewed head" "${lp_r[@]}")"
+lp_rest=(reviews/FINDINGS.md="$lp_closed" reviews/findings/legacy.md="$lp_legacy")
+lp_head_retag="$(ledger_push_commit "$ledger_push_reviewed" "retag OPEN-P3 as NEW-P3" \
+  findings/open-p3.md="$lp_retag" "${lp_rest[@]}")"
+lp_head_delete="$(ledger_push_commit "$ledger_push_reviewed" "unfile OPEN-P3" "${lp_rest[@]}")"
+lp_head_rename="$(ledger_push_commit "$ledger_push_reviewed" "move OPEN-P3's file to NEW-P3's" \
+  findings/new-p3.md="$lp_retag" "${lp_rest[@]}")"
+lp_head_add="$(ledger_push_commit "$ledger_push_reviewed" "file NEW-P3" \
+  "${lp_r[@]}" findings/new-p3.md="$lp_new")"
+lp_head_edit="$(ledger_push_commit "$ledger_push_reviewed" "edit OPEN-P3's text" \
+  findings/open-p3.md="$lp_edited" "${lp_rest[@]}")"
+lp_head_add_edit="$(ledger_push_commit "$(ledger_push_commit "$ledger_push_reviewed" "file NEW-P3" \
+  "${lp_r[@]}" findings/new-p3.md="$lp_new")" "edit NEW-P3's text" \
+  "${lp_r[@]}" findings/new-p3.md="$lp_new_edited")"
+lp_head_closed="$(ledger_push_commit "$ledger_push_reviewed" "edit the closed ledger" \
+  findings/open-p3.md="$lp_open" reviews/FINDINGS.md="$lp_closed_edited" \
+  reviews/findings/legacy.md="$lp_legacy")"
+lp_head_legacy_add="$(ledger_push_commit "$ledger_push_reviewed" "file under the old prefix" \
+  "${lp_r[@]}" reviews/findings/legacy-new.md="$lp_legacy_new")"
+lp_head_legacy_edit="$(ledger_push_commit "$ledger_push_reviewed" "edit a file under the old prefix" \
+  findings/open-p3.md="$lp_open" reviews/FINDINGS.md="$lp_closed" \
+  reviews/findings/legacy.md="$lp_legacy_new")"
+lp_head_quoted="$(ledger_push_commit "$ledger_push_reviewed" "file NEW-P3 under a name git quotes" \
+  "${lp_r[@]}" findings/tab$'\t'new-p3.md="$lp_new")"
+lp_head_outside="$(ledger_push_commit "$ledger_push_reviewed" "a repair outside the ledger" \
+  "${lp_r[@]}" repair.txt="$lp_repair")"
+# The heads are what they say, by the audit's own count and by the audit's own status read, so each
+# answer below is about the push and not about a head that was built wrong.
+lp_count() { (cd "$enqueue_repo" && finding_file_count "$1" "$2"); }
+expect "MUT-LEDGER-PUSH-REWRITES-FINDING reviewed head files OPEN-P3" "$(lp_count OPEN-P3 "$ledger_push_reviewed")" 1
+expect "MUT-LEDGER-PUSH-REWRITES-FINDING reviewed head files NEW-P3 nowhere" "$(lp_count NEW-P3 "$ledger_push_reviewed")" 0
+for lp_head in "$lp_head_retag" "$lp_head_rename"; do
+  expect "MUT-LEDGER-PUSH-REWRITES-FINDING retag files NEW-P3" "$(lp_count NEW-P3 "$lp_head")" 1
+  expect "MUT-LEDGER-PUSH-REWRITES-FINDING retag unfiles OPEN-P3" "$(lp_count OPEN-P3 "$lp_head")" 0
+done
+expect "MUT-LEDGER-PUSH-REWRITES-FINDING delete unfiles OPEN-P3" "$(lp_count OPEN-P3 "$lp_head_delete")" 0
+for lp_head in "$lp_head_add" "$lp_head_add_edit" "$lp_head_quoted"; do
+  expect "MUT-LEDGER-PUSH-REWRITES-FINDING add files NEW-P3" "$(lp_count NEW-P3 "$lp_head")" 1
+  expect "MUT-LEDGER-PUSH-REWRITES-FINDING add keeps OPEN-P3" "$(lp_count OPEN-P3 "$lp_head")" 1
+done
+expect "MUT-LEDGER-PUSH-REWRITES-FINDING retag read" "$(ledger_push_status "$lp_head_retag")" \
+  'M>findings/open-p3.md '
+expect "MUT-LEDGER-PUSH-REWRITES-FINDING delete read" "$(ledger_push_status "$lp_head_delete")" \
+  'D>findings/open-p3.md '
+expect "MUT-LEDGER-PUSH-REWRITES-FINDING rename read" "$(ledger_push_status "$lp_head_rename")" \
+  'A>findings/new-p3.md D>findings/open-p3.md '
+expect "MUT-LEDGER-PUSH-REWRITES-FINDING add read" "$(ledger_push_status "$lp_head_add")" \
+  'A>findings/new-p3.md '
+expect "MUT-LEDGER-PUSH-REWRITES-FINDING add-then-edit read" "$(ledger_push_status "$lp_head_add_edit")" \
+  'M>findings/new-p3.md A>findings/new-p3.md '
+expect "MUT-LEDGER-PUSH-REWRITES-FINDING closed-ledger read" "$(ledger_push_status "$lp_head_closed")" \
+  'M>reviews/FINDINGS.md '
+expect "MUT-LEDGER-PUSH-REWRITES-FINDING quoted read" "$(ledger_push_status "$lp_head_quoted")" \
+  'A>"findings/tab\tnew-p3.md" '
+# The review of the reviewed head that raises NEW-P3, its two rows, and a clean PASS of the same head.
+accept_review "$tmp/ledger-push-new-p3.md" '{"id":"NEW-P3","severity":"P3"}' "$ledger_push_reviewed"
+accept_ledger "$tmp/ledger-push-deferred.md" NEW-P3 P3 deferred
+accept_ledger "$tmp/ledger-push-accepted.md" NEW-P3 P3 accepted-risk
+{ printf 'Reviewed head: %s\n\n```json\n' "$ledger_push_reviewed"
+  printf '{"reviewed_sha":"%s","base_sha":"%s","verdict":"PASS","findings":[]}' \
+    "$ledger_push_reviewed" "$enqueue_base"
+  printf '\n```\n'; } > "$tmp/ledger-push-pass.md"
+for lp_body in ledger-push-deferred ledger-push-accepted; do
+  expect "MUT-LEDGER-PUSH-REWRITES-FINDING [$lp_body] policy" "$(body_policy "$tmp/$lp_body.md")" pass
+done
+# lp_case NAME REVIEW BODY HEAD MOVED STATE MERGES [MODE]: one audit, its answer, and no unmodelled call
+lp_case() {
+  local got
+  got="$(ledger_push_run "$tmp/$2.md" "$tmp/$3.md" "$4" "${8:-}")"
+  contains "MUT-LEDGER-PUSH-REWRITES-FINDING $1" "$got" "moved=$5 "
+  contains "MUT-LEDGER-PUSH-REWRITES-FINDING $1" "$got" " $6 "
+  expect "MUT-LEDGER-PUSH-REWRITES-FINDING $1 status" "${got%%|*}" 0
+  expect "MUT-LEDGER-PUSH-REWRITES-FINDING $1 merge calls" "${got##*|}" "$7"
+  [[ "$6" != READY && "$got" == *" READY "* ]] \
+    && error "MUT-LEDGER-PUSH-REWRITES-FINDING: [$1] read READY: [$got]"
+  [[ "$got" == *GH-UNSTUBBED* ]] \
+    && error "MUT-LEDGER-PUSH-REWRITES-FINDING: [$1] made a call this case does not model: [$got]"
+  lp_got="$got"
+}
+# The neighbours: a file of its own for NEW-P3, under each row and under the clean review, READY and
+# enqueued once at the push's head. Every case below differs from one of these in the push alone.
+lp_case "add, deferred" ledger-push-new-p3 ledger-push-deferred "$lp_head_add" ledger-only READY 1
+contains "MUT-LEDGER-PUSH-REWRITES-FINDING add, deferred enqueue" "$lp_got" "enqueued #999 at ${lp_head_add:0:7}"
+[[ "$lp_got" == *blockers=* ]] && error "MUT-LEDGER-PUSH-REWRITES-FINDING: [add, deferred] blocked: [$lp_got]"
+lp_case "add, accepted" ledger-push-new-p3 ledger-push-accepted "$lp_head_add" ledger-only READY 1
+lp_case "add, clean" ledger-push-pass no-findings-body "$lp_head_add" ledger-only READY 1
+# The finding's witness, three shapes: the retag under each row, and the deletion under the clean
+# review, where nothing but the push stands between it and READY. And the rename, which is both.
+lp_case "(i) retag, deferred" ledger-push-new-p3 ledger-push-deferred "$lp_head_retag" repairs NEEDS-ATTEST 0
+lp_case "(ii) retag, accepted" ledger-push-new-p3 ledger-push-accepted "$lp_head_retag" repairs NEEDS-ATTEST 0
+lp_case "(iii) delete, clean" ledger-push-pass no-findings-body "$lp_head_delete" repairs NEEDS-ATTEST 0
+lp_case "rename, deferred" ledger-push-new-p3 ledger-push-deferred "$lp_head_rename" repairs NEEDS-ATTEST 0
+# A modification is a repair, the `id:` untouched; so is a file added and then edited in the range.
+lp_case "edit, clean" ledger-push-pass no-findings-body "$lp_head_edit" repairs NEEDS-ATTEST 0
+lp_case "add then edit, deferred" ledger-push-new-p3 ledger-push-deferred "$lp_head_add_edit" \
+  repairs NEEDS-ATTEST 0
+# The closed ledger FILE keeps the review whatever its status, and the old prefix is held to the
+# new one's rule: an addition keeps it, a modification does not.
+lp_case "closed ledger edited" ledger-push-pass no-findings-body "$lp_head_closed" ledger-only READY 1
+lp_case "old prefix, add" ledger-push-pass no-findings-body "$lp_head_legacy_add" ledger-only READY 1
+lp_case "old prefix, edit" ledger-push-pass no-findings-body "$lp_head_legacy_edit" repairs NEEDS-ATTEST 0
+# A path git quoted, and a path outside the ledger, are repairs, as before.
+lp_case "quoted path" ledger-push-new-p3 ledger-push-deferred "$lp_head_quoted" repairs NEEDS-ATTEST 0
+lp_case "outside the ledger" ledger-push-pass no-findings-body "$lp_head_outside" repairs NEEDS-ATTEST 0
+# A STATUS READ THAT DID NOT HAPPEN BLOCKS. The READY neighbour, with git failing only for that read,
+# and with it answering 0 and nothing: each NOT-READY on `ledger-status-read-failed` alone. A line
+# that is not a status, a tab and a path is a repair. And the wrapper passing the read through is
+# the neighbour itself, READY, so it is the read and not the wrapper that blocks.
+lp_case "status read passed through" ledger-push-new-p3 ledger-push-deferred "$lp_head_add" \
+  ledger-only READY 1 pass
+for lp_mode in fail empty; do
+  lp_case "status read [$lp_mode]" ledger-push-new-p3 ledger-push-deferred "$lp_head_add" \
+    repairs NOT-READY 0 "$lp_mode"
+  contains "MUT-LEDGER-PUSH-REWRITES-FINDING status read [$lp_mode]" "$lp_got" \
+    "blockers=ledger-status-read-failed "
+done
+lp_case "status read [spaces]" ledger-push-new-p3 ledger-push-deferred "$lp_head_add" \
+  repairs NEEDS-ATTEST 0 spaces
+[[ "$lp_got" == *blockers=* ]] \
+  && error "MUT-LEDGER-PUSH-REWRITES-FINDING: [status read spaces] blocked: [$lp_got]"
+
 # --- every body `ledger_policy_body` built, through main ---------------------------------------------
 # THE BLOCKER APPEARS EXACTLY WHEN `body_policy` SAYS `fail`, over every body this file built with
 # the required sections -- the stubs' own, the accepted and rejected rows, every heading, table and
