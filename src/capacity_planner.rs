@@ -125,16 +125,24 @@ pub struct WindowHistory {
 #[must_use]
 pub fn observed_burn(readings: &[Reading], now_unix: u64) -> Vec<WindowHistory> {
     let mut grouped: BTreeMap<(&AccountId, WindowId), Vec<&Reading>> = BTreeMap::new();
+    let mut plans: BTreeMap<&AccountId, Vec<(u64, &PlanId)>> = BTreeMap::new();
     for reading in readings {
         grouped
             .entry((&reading.account, reading.window))
             .or_default()
             .push(reading);
+        if let Some(plan) = &reading.plan {
+            plans
+                .entry(&reading.account)
+                .or_default()
+                .push((reading.observed_at_unix, plan));
+        }
     }
     grouped
         .into_iter()
         .map(|((account, window), readings)| {
-            let (segments, latest) = history(readings, now_unix);
+            let reported = plans.get(account).map_or(&[][..], Vec::as_slice);
+            let (segments, latest) = history(readings, reported, now_unix);
             WindowHistory {
                 account: account.clone(),
                 window,
@@ -145,7 +153,11 @@ pub fn observed_burn(readings: &[Reading], now_unix: u64) -> Vec<WindowHistory> 
         .collect()
 }
 
-fn history(mut readings: Vec<&Reading>, now_unix: u64) -> (Vec<Segment>, Latest) {
+fn history(
+    mut readings: Vec<&Reading>,
+    plans: &[(u64, &PlanId)],
+    now_unix: u64,
+) -> (Vec<Segment>, Latest) {
     let from_future = readings
         .iter()
         .any(|reading| reading.observed_at_unix > now_unix);
@@ -176,7 +188,7 @@ fn history(mut readings: Vec<&Reading>, now_unix: u64) -> (Vec<Segment>, Latest)
         let opened_by = match segments.last_mut() {
             None if broken => Boundary::Discontinuity,
             None => Boundary::First,
-            Some(segment) => match split(segment, plan, point, resets) {
+            Some(segment) => match split(segment, plan, point, resets, plans) {
                 Some(boundary) => boundary,
                 None if broken => Boundary::Discontinuity,
                 None => {
@@ -219,9 +231,19 @@ fn same_values(a: &Reading, b: &Reading) -> bool {
         && a.resets_at_unix == b.resets_at_unix
 }
 
-fn split(segment: &Segment, plan: &PlanId, point: Point, resets: u64) -> Option<Boundary> {
+fn split(
+    segment: &Segment,
+    plan: &PlanId,
+    point: Point,
+    resets: u64,
+    plans: &[(u64, &PlanId)],
+) -> Option<Boundary> {
     let moved = resets != segment.resets_at_unix;
-    if *plan != segment.plan {
+    let since = segment.last.observed_at_unix..=point.observed_at_unix;
+    let switched = plans
+        .iter()
+        .any(|(at, other)| since.contains(at) && **other != segment.plan);
+    if *plan != segment.plan || switched {
         Some(Boundary::PlanChange)
     } else if point.used_percent < segment.last.used_percent
         || (moved && segment.resets_at_unix <= point.observed_at_unix)
@@ -413,6 +435,7 @@ pub struct Account {
     pub id: AccountId,
     pub provider: Provider,
     pub inventory: InventoryEvidence,
+    pub coverage: Option<BTreeMap<PlanId, BTreeSet<WindowId>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,6 +473,24 @@ pub const fn effect(provider: Provider, kind: GrantKind, window: WindowId) -> Ef
             (GrantKind::Weekly | GrantKind::Session | GrantKind::Full, WindowId::Model(_))
             | (GrantKind::Fable | GrantKind::Unknown, _) => Effect::Unknown,
         },
+    }
+}
+
+fn covered_effect(
+    provider: Provider,
+    kind: GrantKind,
+    window: WindowId,
+    coverage: Option<&BTreeMap<PlanId, BTreeSet<WindowId>>>,
+    plan: Option<&PlanId>,
+) -> Effect {
+    let rule = effect(provider, kind, window);
+    let Some(coverage) = coverage else {
+        return rule;
+    };
+    match plan.and_then(|plan| coverage.get(plan)) {
+        Some(covered) if covered.contains(&window) => rule,
+        Some(_) => Effect::Unchanged,
+        None => Effect::Unknown,
     }
 }
 
@@ -506,6 +547,7 @@ pub struct Demand {
     pub run: RunId,
     pub account: AccountId,
     pub hours: f64,
+    pub model: ModelLabel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -535,6 +577,7 @@ pub struct Ranked {
     pub run: RunId,
     pub account: AccountId,
     pub hours: f64,
+    pub model: ModelLabel,
     pub rank: Rank,
 }
 
@@ -553,6 +596,7 @@ pub fn rank_demand(runs: &[Run], demand: &[Demand], priorities: &Priorities) -> 
             run: item.run.clone(),
             account: item.account.clone(),
             hours: item.hours,
+            model: item.model,
             rank: if item.hours.is_finite() && item.hours > 0.0 {
                 rank_of(&item.run, &purposes, priorities)
             } else {
@@ -711,6 +755,7 @@ pub fn plan(input: &Input) -> Vec<AccountPlan> {
             let context = Context {
                 now_unix: input.now_unix,
                 provider: account.provider,
+                coverage: account.coverage.as_ref(),
                 windows: &windows,
                 queue: &queue,
             };
@@ -740,6 +785,7 @@ pub fn plan(input: &Input) -> Vec<AccountPlan> {
 struct Context<'a> {
     now_unix: u64,
     provider: Provider,
+    coverage: Option<&'a BTreeMap<PlanId, BTreeSet<WindowId>>>,
     windows: &'a [(WindowId, WindowState)],
     queue: &'a [Ranked],
 }
@@ -821,12 +867,9 @@ fn decide(context: &Context<'_>, grant: &Grant) -> Decision {
     let mut windows = Vec::with_capacity(context.windows.len());
     for (id, state) in context.windows {
         match state {
-            WindowState::Known(forecast) => windows.push(SimWindow::new(
-                context.provider,
-                *id,
-                forecast,
-                context.now_unix,
-            )),
+            WindowState::Known(forecast) => {
+                windows.push(SimWindow::new(context, grant.kind, *id, forecast));
+            }
             WindowState::Unknown(reason) => {
                 return Decision::Unknown(Undecided::Window(*id, *reason));
             }
@@ -834,19 +877,21 @@ fn decide(context: &Context<'_>, grant: &Grant) -> Decision {
     }
     let mut ranks = Vec::with_capacity(context.queue.len());
     let mut work = Vec::with_capacity(context.queue.len());
+    let mut models = Vec::with_capacity(context.queue.len());
     for item in context.queue {
         if let Rank::Invalid(problem) = item.rank {
             return Decision::Unknown(Undecided::Demand(problem));
         }
         ranks.push(item.rank);
         work.push(item.hours * SECS_PER_HOUR);
+        models.push(item.model);
     }
     let scenario = Scenario {
         provider: context.provider,
-        kind: grant.kind,
         windows,
         ranks,
         work,
+        models,
         expiry_secs: secs(ends_at_unix.saturating_sub(context.now_unix)),
     };
     let now_unix = context.now_unix;
@@ -856,7 +901,7 @@ fn decide(context: &Context<'_>, grant: &Grant) -> Decision {
     let touches_unknown = scenario
         .windows
         .iter()
-        .any(|window| effect(scenario.provider, scenario.kind, window.id) == Effect::Unknown);
+        .any(|window| window.effect == Effect::Unknown);
     let resolved = if touches_unknown {
         let hopeful = scenario
             .choose(Assumption::FullRestore)
@@ -895,7 +940,6 @@ enum Assumption {
 #[derive(Debug, Clone, Copy)]
 struct Redemption {
     at: f64,
-    kind: GrantKind,
     assumption: Assumption,
 }
 
@@ -906,23 +950,45 @@ struct SimWindow {
     rate: f64,
     refill: Option<f64>,
     clock: Clock,
+    effect: Effect,
     awaiting_use: bool,
 }
 
 impl SimWindow {
-    fn new(provider: Provider, id: WindowId, forecast: &WindowForecast, now_unix: u64) -> Self {
+    fn new(
+        context: &Context<'_>,
+        kind: GrantKind,
+        id: WindowId,
+        forecast: &WindowForecast,
+    ) -> Self {
         Self {
             id,
             used: forecast.used_percent,
             rate: forecast.percent_per_hour / SECS_PER_HOUR,
-            refill: Some(secs(forecast.refill_unix.saturating_sub(now_unix))),
-            clock: natural_clock(provider, id),
+            refill: Some(secs(forecast.refill_unix.saturating_sub(context.now_unix))),
+            clock: natural_clock(context.provider, id),
+            effect: covered_effect(
+                context.provider,
+                kind,
+                id,
+                context.coverage,
+                Some(&forecast.plan),
+            ),
             awaiting_use: false,
         }
     }
 
     fn exhausted(&self) -> bool {
         self.used >= FULL_PERCENT - PERCENT_EPSILON
+    }
+
+    fn limits(&self, model: ModelLabel) -> bool {
+        match self.id {
+            WindowId::Session | WindowId::Weekly => true,
+            WindowId::Model(label) => {
+                label == model || label == ModelLabel::Unknown || model == ModelLabel::Unknown
+            }
+        }
     }
 
     fn refill_due(&mut self, clock: f64, events: &mut Vec<f64>) {
@@ -943,7 +1009,7 @@ impl SimWindow {
 
 fn restore(provider: Provider, windows: &mut [SimWindow], redemption: &Redemption) {
     for window in windows {
-        let rule = effect(provider, redemption.kind, window.id);
+        let rule = window.effect;
         let restored = match rule {
             Effect::Restores => true,
             Effect::RestoresBelowFull => window.used > 0.0,
@@ -979,10 +1045,10 @@ struct Level {
 
 struct Scenario {
     provider: Provider,
-    kind: GrantKind,
     windows: Vec<SimWindow>,
     ranks: Vec<Rank>,
     work: Vec<f64>,
+    models: Vec<ModelLabel>,
     expiry_secs: f64,
 }
 
@@ -1008,11 +1074,7 @@ impl Scenario {
         let mut best = None;
         let mut best_score = self.score(&baseline);
         for at in candidates.into_iter().rev() {
-            let outcome = self.simulate(Some(Redemption {
-                at,
-                kind: self.kind,
-                assumption,
-            }))?;
+            let outcome = self.simulate(Some(Redemption { at, assumption }))?;
             let score = self.score(&outcome);
             if compare(&score, &best_score) == Ordering::Greater {
                 best = Some(at);
@@ -1038,17 +1100,19 @@ impl Scenario {
                 restore(self.provider, &mut windows, &due);
                 pending = None;
             }
-            let Some(remaining) = left.get_mut(current) else {
+            let (Some(remaining), Some(&model)) = (left.get_mut(current), self.models.get(current))
+            else {
                 return Ok(Outcome {
                     completions,
                     events,
                 });
             };
             let redeem_at = pending.map(|due| due.at);
-            if windows.iter().any(SimWindow::exhausted) {
+            let blocked = |window: &SimWindow| window.limits(model) && window.exhausted();
+            if windows.iter().any(blocked) {
                 let unblock = windows
                     .iter()
-                    .filter(|window| window.exhausted())
+                    .filter(|window| blocked(window))
                     .filter_map(|window| window.refill)
                     .chain(redeem_at)
                     .min_by(f64::total_cmp);
@@ -1062,7 +1126,7 @@ impl Scenario {
                 continue;
             }
             for window in &mut windows {
-                if window.awaiting_use && window.rate > 0.0 {
+                if window.limits(model) && window.awaiting_use && window.rate > 0.0 {
                     if let Clock::Rolling(period) = window.clock {
                         window.refill = Some(clock + period);
                     }
@@ -1071,7 +1135,7 @@ impl Scenario {
             }
             let mut step = *remaining;
             for window in &windows {
-                if window.rate > 0.0 {
+                if window.limits(model) && window.rate > 0.0 {
                     step = step.min((FULL_PERCENT - window.used) / window.rate);
                 }
                 if let Some(refill) = window.refill {
@@ -1083,7 +1147,7 @@ impl Scenario {
             }
             let step = step.max(0.0);
             for window in &mut windows {
-                if window.rate > 0.0 {
+                if window.limits(model) && window.rate > 0.0 {
                     if (FULL_PERCENT - window.used) / window.rate - step <= TIME_EPSILON_SECS {
                         window.used = FULL_PERCENT;
                         events.push(clock + step);
@@ -1425,6 +1489,7 @@ impl Ledger {
                 id: self.setup.grant.account.clone(),
                 provider: self.setup.provider,
                 inventory: self.inventory.clone(),
+                coverage: self.setup.coverage.clone(),
             }],
             readings: self.readings.clone(),
             runs: work.runs.clone(),
@@ -1572,15 +1637,13 @@ impl Ledger {
     }
 
     fn effect_on(&self, window: WindowId) -> Effect {
-        let rule = effect(self.setup.provider, self.setup.grant.kind, window);
-        let Some(coverage) = &self.setup.coverage else {
-            return rule;
-        };
-        match self.plan.as_ref().and_then(|(_, plan)| coverage.get(plan)) {
-            Some(covered) if covered.contains(&window) => rule,
-            Some(_) => Effect::Unchanged,
-            None => Effect::Unknown,
-        }
+        covered_effect(
+            self.setup.provider,
+            self.setup.grant.kind,
+            window,
+            self.setup.coverage.as_ref(),
+            self.plan.as_ref().map(|(_, plan)| plan),
+        )
     }
 
     fn reply(&mut self, claim: ClaimId, reply: Reply) -> Transition {
@@ -1893,6 +1956,7 @@ mod tests {
                 id: operator(),
                 provider,
                 inventory: inventory(grants),
+                coverage: None,
             }],
             readings,
             runs: work
@@ -1911,6 +1975,7 @@ mod tests {
                     run: run_id(run),
                     account: operator(),
                     hours: *hours,
+                    model: ModelLabel::Unknown,
                 })
                 .collect(),
             priorities: Priorities {
@@ -2299,6 +2364,7 @@ mod tests {
             run: run_id(run),
             account: operator(),
             hours,
+            model: ModelLabel::Unknown,
         })
         .collect();
         let priorities = Priorities {
@@ -2348,6 +2414,7 @@ mod tests {
             run: run_id("helper"),
             account: operator(),
             hours: 1.0,
+            model: ModelLabel::Unknown,
         });
         assert_eq!(
             decision(&orphaned),
@@ -3864,5 +3931,107 @@ mod tests {
         );
         assert!(ledger.claims().is_empty());
         assert_eq!(windows.map(|window| ledger.usable(window)), before);
+    }
+
+    #[test]
+    fn recommendation_respects_codex_plan_coverage() {
+        let mut readings = burning(WindowId::Session, 100.0, 25.0, 2 * HOUR);
+        readings.extend(burning(WindowId::Weekly, 0.0, 0.0, 100 * HOUR));
+        let mut ledger = codex_ledger(GrantKind::Full, 48 * HOUR, on_plan("plus", readings));
+        let basis = ledger.recommend(&work(&one_job(1.0)));
+        assert_eq!(
+            basis.decision(),
+            Some(Decision::LetExpire(ExpireReason::NoUnlock))
+        );
+        assert_eq!(
+            ledger.apply(
+                NOW + MIN,
+                claim_of(ALPHA, GrantKind::Full, 48 * HOUR, basis)
+            ),
+            Transition::Refused(Refusal::NotRecommended(basis.decision()))
+        );
+        assert!(ledger.claims().is_empty());
+        assert_eq!(
+            clock(&ledger, WindowId::Session),
+            (Refill::At(NOW + 2 * HOUR), false)
+        );
+        assert_eq!(
+            clock(&ledger, WindowId::Weekly),
+            (Refill::At(NOW + 100 * HOUR), false)
+        );
+    }
+
+    #[test]
+    fn fable_grant_cannot_unlock_already_runnable_sonnet_work() {
+        let on_model = |model: ModelLabel| {
+            let mut job = work(&one_job(1.0));
+            for item in &mut job.demand {
+                item.model = model;
+            }
+            job
+        };
+        let mut ledger = claude_ledger(GrantKind::Fable, 48 * HOUR, claude_fable_exhausted());
+        let basis = ledger.recommend(&on_model(ModelLabel::Sonnet));
+        assert_eq!(
+            basis.decision(),
+            Some(Decision::LetExpire(ExpireReason::NoUnlock))
+        );
+        assert_eq!(
+            ledger.apply(
+                NOW + MIN,
+                claim_of(ALPHA, GrantKind::Fable, 48 * HOUR, basis)
+            ),
+            Transition::Refused(Refusal::NotRecommended(basis.decision()))
+        );
+        assert!(matches!(
+            ledger.apply(
+                NOW + MIN,
+                permit(BETA, &[(WindowId::Session, 10.0), (WindowId::Weekly, 1.0)])
+            ),
+            Transition::Permitted(_)
+        ));
+        assert_eq!(
+            ledger.recommend(&on_model(ModelLabel::Fable)).decision(),
+            Some(Decision::Redeem)
+        );
+        assert!(ledger.claims().is_empty());
+    }
+
+    #[test]
+    fn an_intervening_account_plan_change_breaks_window_rate_history() {
+        let across = |session_plan: &str| {
+            vec![
+                reading_on("max", WindowId::Weekly, 2 * HOUR, 10.0, 72 * HOUR),
+                reading_on(session_plan, WindowId::Session, HOUR, 5.0, 4 * HOUR),
+                reading_on("max", WindowId::Weekly, 0, 30.0, 72 * HOUR),
+            ]
+        };
+        let weekly_shape = |readings: &[Reading]| -> Vec<(Boundary, usize)> {
+            observed_burn(readings, NOW)
+                .into_iter()
+                .find(|history| history.window == WindowId::Weekly)
+                .expect("the weekly window has a history")
+                .segments
+                .iter()
+                .map(|segment| (segment.opened_by, segment.readings))
+                .collect()
+        };
+
+        let unchanged = across("max");
+        assert_eq!(weekly_shape(&unchanged), vec![(Boundary::First, 2)]);
+        let WindowState::Known(forecast) = state(&states(unchanged), WindowId::Weekly) else {
+            panic!("one plan throughout gives a weekly rate");
+        };
+        assert!(close(forecast.percent_per_hour, 10.0), "{forecast:#?}");
+
+        let changed = across("pro");
+        assert_eq!(
+            weekly_shape(&changed),
+            vec![(Boundary::First, 1), (Boundary::PlanChange, 1)]
+        );
+        assert_eq!(
+            state(&states(changed), WindowId::Weekly),
+            WindowState::Unknown(WindowUnknown::InsufficientHistory)
+        );
     }
 }

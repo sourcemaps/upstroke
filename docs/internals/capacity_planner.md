@@ -41,6 +41,7 @@ caller knows. This module takes them as values and never invokes a reader.
 | `Reading::window` | `five_hour` → `WindowId::Session`, `seven_day` → `WindowId::Weekly`, a `ModelWindow` label → `WindowId::Model` (`"unknown model"` → `ModelLabel::Unknown`) |
 | `Reading::observed_at_unix` | the `now_unix` the reader was called with |
 | `Reading::account`, `Reading::plan` | caller-supplied: the reader reports neither |
+| `Account::coverage` | caller-supplied: for Codex, the windows each plan's banked reset covers (`None` applies `effect` unnarrowed) |
 | `Grant { resets_left, ends_at_unix, kind, availability }` | `tracker::reset::Grant`'s fields of the same names; `GrantKind` is `reset::Kind` variant for variant, `Availability` is `reset::Availability` |
 | `Inventory::observed_at_unix`, `Inventory::grants` | `tracker::reset::Inventory`'s fields of the same names |
 | `InventoryEvidence::Unknown` | `ResetReport::Unavailable(_)`, or no read at all |
@@ -68,8 +69,11 @@ plan is a fixture.
 - **Burn**: percent of the window per hour (`Segment::percent_per_hour`,
   `WindowForecast::percent_per_hour`).
 - **Demand**: `Demand::hours` is hours of runnable work at the account's observed burn: one hour of
-  demand advances every one of the account's windows by its observed `percent_per_hour`. It must be
-  finite and positive.
+  demand advances each window it draws on by that window's observed `percent_per_hour`. It must be
+  finite and positive. Work draws on the session and weekly windows and on the model window named
+  by `Demand::model`; another model's window neither limits it nor advances. Work whose model is
+  `ModelLabel::Unknown` draws on every model window, and all work draws on an unlabeled model
+  window (`WindowId::Model(ModelLabel::Unknown)`).
 - **Priority**: `u32`, larger is more important.
 - **Freshness**: `Input::stale_after_secs`, the oldest a window's latest reading or an inventory may
   be. It is the caller's; there is no default.
@@ -88,14 +92,16 @@ Anything else is `Latest::Incomplete` and breaks the history. A history is split
 | `Boundary` | Opens a segment when |
 |---|---|
 | `First` | the first comparable reading |
-| `PlanChange` | the plan differs from the segment's |
+| `PlanChange` | the plan differs from the segment's, or any reading of the account, in any window, from the segment's last reading through this one names another plan |
 | `Refill` | the percent fell, or the reset moved after the segment's reset time had passed |
 | `ResetMoved` | the reset moved without the old one passing |
 | `Discontinuity` | the reading follows an incomplete or contradictory one |
 
 A segment's burn is its rise from first to last reading over the time between them. Within a
 segment the percent never falls, so burn is never negative. One reading, or readings of a single
-second, give no rate.
+second, give no rate. The plan is the account's, not the window's: a weekly reading under one plan,
+a session reading under another and a weekly reading under the first again put the two weekly
+readings in different segments, so no rate is taken across the change.
 
 ## `fn forecast(`
 
@@ -135,6 +141,12 @@ not restarted. `Unchanged` leaves the window. `Unknown` is not guessed (below).
 
 A Fable grant restores the weekly use spent on Fable. That is the Fable model window, and an
 unknown share of the weekly one.
+
+An account with `Account::coverage` narrows the rule by the plan it is on, the same way the ledger
+narrows a claim by `Setup::coverage`: a window the account's plan covers keeps the rule, a window it
+does not cover is `Unchanged`, and every window is `Unknown` when the plan is not listed. The
+simulation takes each window's effect from that narrowed rule, so a Codex `plus` reset, which covers
+the weekly allowance only, restores nothing in an exhausted session window.
 
 ## `pub const fn schedule_after_restore(provider: Provider, window: WindowId) -> Schedule {`
 
@@ -193,11 +205,13 @@ Checks are applied in this order, and the first that settles the grant decides i
 ## `impl Scenario` › `fn simulate(&self, redemption: Option<Redemption>) -> Result<Outcome, TooLong> {`
 
 The simulation starts at `now_unix` from each window's forecast. It runs the queue in order while
-no window is exhausted, advancing every window at its burn, and waits while any window is
-exhausted. Waiting ends at that window's next refill or at the pending redemption. Refills follow
-the reported reset and then `natural_clock`. A redemption applies `effect` and
-`schedule_after_restore` at its moment. The simulation ends when the queue completes or when every
-exhausted window has nothing left to refill it; the work left over is then incomplete. It never
+no window the current item draws on (see *Demand* under Units) is exhausted, advancing those
+windows at their burn, and waits while any of them is exhausted. Waiting ends at such a window's
+next refill or at the pending redemption. A window the item does not draw on neither blocks it nor
+advances. Refills follow the reported reset and then `natural_clock`. A redemption applies each
+window's effect (`effect`, narrowed by `Account::coverage`) and `schedule_after_restore` at its
+moment. The simulation ends when the queue completes or when every exhausted window the current
+item draws on has nothing left to refill it; the work left over is then incomplete. It never
 stops at the grant's expiry. Expiry is the last moment a redemption may happen, not a deadline for
 spending what it restored, so work that runs after expiry on restored allowance counts in full.
 `MAX_STEPS` bounds the work; a scenario that exceeds it is `Unknown(Bound)`.
@@ -242,8 +256,8 @@ An unknown is never filled with a guess:
   (`Grants::KnownEmpty`).
 - An unknown window, availability or demand leaves the grant `Decision::Unknown` with the specific
   reason; no balance, rate, date or spendable grant is invented.
-- Where the grant has an `Effect::Unknown` on any of the account's windows, the comparison runs
-  twice. The cautious bound assumes the unknown windows are not restored; the hopeful bound assumes
+- Where the grant has an `Effect::Unknown` on any of the account's windows (by rule, or because the
+  account's plan is missing from its `Account::coverage`), the comparison runs twice. The cautious bound assumes the unknown windows are not restored; the hopeful bound assumes
   they are fully restored with their schedule kept. The decision stands only when both bounds agree,
   and is `Unknown(Effect)` otherwise.
 
@@ -252,19 +266,22 @@ An unknown is never filled with a guess:
 Each of these can change a decision:
 
 1. **Burn continues at the observed rate while work runs.** Each window's rate is the average over
-   its newest segment. The rate applies whenever queued work runs and stops when the queue waits or
-   empties. A window observed idle (rate `0`) is never forecast to bind, however much demand is
-   queued.
+   its newest segment. The rate applies whenever queued work that draws on the window runs and
+   stops when the queue waits or empties. A window observed idle (rate `0`) is never forecast to
+   bind, however much demand is queued.
 2. **Demand is serial at the account's burn.** Competing runs on one account are served one after
    another in rank order. Their hours add; they do not overlap or multiply the rate.
-3. **Claude's session window rolls.** After its reported refill, a Claude session window opens a new
+3. **Work draws on its own model's window.** An item stated as one model is limited by the session,
+   weekly and that model's window only. An item whose model is `ModelLabel::Unknown` is assumed to
+   draw on every model window, so an exhausted model window blocks it.
+4. **Claude's session window rolls.** After its reported refill, a Claude session window opens a new
    five-hour window at its next use. Weekly Claude windows refill every seven days from the
    reported reset. Nothing is assumed of model or Codex windows after their reported refill.
-4. **A schedule that must be re-read gains no refill** within the comparison (above). That is a
+5. **A schedule that must be re-read gains no refill** within the comparison (above). That is a
    lower bound on such a redemption's worth.
-5. **One redemption per grant.** A grant with `resets_left > 1` is planned for its next redemption
+6. **One redemption per grant.** A grant with `resets_left > 1` is planned for its next redemption
    only. A later one is planned after the re-read.
-6. **Readings are the account's whole state.** The planner does not know what a provider has not
+7. **Readings are the account's whole state.** The planner does not know what a provider has not
    reported, so a window with no reading is unknown and blocks the decision.
 
 ## Fixtures
@@ -277,9 +294,10 @@ readings, one hour apart, ending at `NOW`. All other helpers build on it:
   4 h). A weekly grant redeemed now unblocks waiting work.
 - `filling_weekly(resets_in)`: weekly at 60% burning 2%/h, so it is exhausted 20 h out unless it
   refills first, and an idle session window refilling in 5 h.
-- `one_job(hours)`: one feature run of priority 5.
-- `input(..)` and `claude(..)`: one `operator` account with a fresh `Source::Reader` inventory, and
-  `stale_after_secs` of one hour.
+- `one_job(hours)`: one feature run of priority 5. Every demand item the helpers build has the model
+  `ModelLabel::Unknown`, so it draws on every model window; a test that names a model sets it.
+- `input(..)` and `claude(..)`: one `operator` account with a fresh `Source::Reader` inventory, no
+  `Account::coverage`, and `stale_after_secs` of one hour.
 
 Worked examples the tests pin:
 
@@ -318,8 +336,10 @@ an earlier one (`Refusal::ClockBehind`).
 
 ### `impl Ledger` › `pub fn recommend(&self, work: &Work) -> Recommendation {`
 
-Builds an `Input` from the ledger's readings and inventory at its own clock and calls `plan`, the
-same planner as above, unchanged. The `Recommendation` carries the planner's decision for this
+Builds an `Input` from the ledger's readings and inventory at its own clock, with
+`Setup::coverage` as the account's `Account::coverage`, and calls `plan`, the same planner as
+above, unchanged. The forecast and the claim therefore narrow the grant's effect by the same
+covered allowances. The `Recommendation` carries the planner's decision for this
 grant (`None` when the inventory is unknown or does not list it) and the generation and second it
 was read at. It changes nothing: two requests that ask at the same generation get equal
 recommendations, and the ledger is untouched. Its fields are private, so code outside the module
@@ -445,3 +465,10 @@ All are synthetic (`Source::Fixture` or the planner fixtures above) and timed fr
 | `crossed(true)`, `crossed(false)`, Fable-exhausted with a weekly grant | `Unknown(Effect)`, `Defer` to `NOW + 2 h`, `Unknown(Effect)`; no claim; Sonnet work permitted where only the Fable window blocks |
 | `crossed(false)` waited out | `Defer` refused at once; after the session refills, the old basis is `StaleBasis`, a new one `Redeem`, and the job is permitted after the snapshot |
 | weekly grant ending in 30 min | `Expired` at the end; balances and the permit unchanged; a lagging inventory does not revive it |
+| Codex `plus`, full grant: weekly full (0%, 100 h), uncovered session 100% (2 h), 1 h job | `LetExpire(NoUnlock)`; the claim refused; neither window's clock is touched |
+| `claude_fable_exhausted()`, Fable grant, 1 h of Sonnet work; then the same hour as Fable work | `LetExpire(NoUnlock)` and the claim refused, while the Sonnet work is permitted from existing session and weekly balance; `Redeem` for the Fable work |
+
+A planner test pins the history rule above: weekly readings under `max` two hours apart, with a
+session reading under `pro` between them, are two segments (`First`, `PlanChange`) and the weekly
+window is `Unknown(InsufficientHistory)`; with that session reading under `max` they are one
+segment at 10%/h.
