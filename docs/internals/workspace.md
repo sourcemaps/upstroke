@@ -1634,9 +1634,13 @@ in another shape than today's (a bare `?;` with no `map_err`, or `sync_parent(co
 ## `const COPY_BARRIER: [&str; 4] = [`
 
 The four steps of `write_copy`'s barrier, in order, as `check_copy_barrier` finds them in a body
-with its whitespace removed: the written file opened with write access and bound to `written`,
-`written` synced, the `.partial` renamed to the copy's name, and the copy's directory synced. The
-pin's controls name the steps from it, so their expected breaches move with it.
+with its whitespace removed: the written file opened with write access, the opening call standing
+in that whitespace-free text as the binding of `written`; `written` synced; the `.partial` renamed
+to the copy's name; and the copy's directory synced. The first step matches text, not a binding:
+once whitespace is gone, `let written =` and an assignment to `letwritten`, an identifier ending in
+`written`, read the same, so the check does not establish that the `written` it finds synced names
+the file the first step opens. The pin's controls name the steps from it, so their expected
+breaches move with it.
 
 ## `enum CopyBarrierBreach {`
 
@@ -1675,6 +1679,12 @@ too, though it leaves only the closure. The last step being the body's tail is w
 rule: no return can follow it, so any that the check lets through leaves before the barrier
 completes, and leaves with an error. `Ok(())` when every step and the return rule hold; otherwise
 the first breach, the steps' before the return rule's.
+
+What it does not see: it matches whitespace-free text, so a binding of another identifier ending in
+`written`, as `letwritten = …` reads as `let written = …`, can stand in for `let written`, and a
+body that opens the partial into that other name and syncs a `written` bound to another file
+passes, renaming the unsynced partial into place. The pin catches an accidental removal or
+reordering of the barrier's steps, not a body written to mislead it.
 
 ## `struct InheritedSelection {`
 
