@@ -10,7 +10,7 @@ as it is in the source, so the heading is the grep string that finds the code.
 
 The question checks, the budget stop, and the end of a run.
 
-## `impl RunState` › `pub(super) fn check_question_raised(&self, question: &FrozenQuestion) -> Result<(), FoldE…`
+## `impl RunState` › `pub(super) fn check_question_raised(&self, question: &FrozenQuestion) -> Result<(), FoldError> {`
 
 --- questions ---------------------------------------------------------
 
@@ -51,11 +51,11 @@ and the budget kind alone -- so this is the only point at which the two
 are read at all, and a stop recorded here is a stop the log has to
 justify with its own numbers.
 
-## `impl RunState` › `pub(super) fn check_run_finished(&self, finished: &RunFinished4) -> Result<(), FoldError>…`
+## `impl RunState` › `pub(super) fn check_run_finished(&self, finished: &RunFinished4) -> Result<(), FoldError> {`
 
 --- run_finished ------------------------------------------------------
 
-## `pub(super) fn check_run_finished(&self, finished: &RunFinis…` › `let derived = self.derived_outcome();`
+## `pub(super) fn check_run_finished(&self, finished: &RunFinished4) -> Result<(), FoldError> {` › `let derived = self.derived_outcome();`
 
 refusals[19] / INV-15: the recorded outcome is the derived one, and
 the derived one is not NotEnding.
