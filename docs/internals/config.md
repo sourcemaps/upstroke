@@ -100,8 +100,8 @@ recorded as part of the run's execution identity (see `RunnerSelection`'s
 ## `#[serde(flatten)]`
 
 Everything else. As in `[engine]`, an unknown key here is an **error**;
-see [`read_runner`]. (In `[engine]` only an unknown *value* of the
-recognised `shell` key warns.)
+see [`read_runner`]. (In `[engine]` an unknown *value* of the
+recognised `shell` key still warns.)
 
 ## `#[derive(Debug, Deserialize)]`
 
@@ -1212,8 +1212,8 @@ the default is doing the work rather than the fixture.
 
 Every shape `[runner]` refuses, each with the reason, and each named.
 
-An unknown key is an **error** here, as it is in `[engine]` (where only
-an unknown value of the recognised `shell` key warns), and the grid says
+An unknown key is an **error** here, as it is in `[engine]` (where an
+unknown value of the recognised `shell` key still warns), and the grid says
 so out loud: `knid = "container"` would leave the run executing on the
 host while its config reads as though gate code were confined.
 
