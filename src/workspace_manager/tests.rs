@@ -607,9 +607,9 @@ fn a_duplicated_site_is_refused_rather_than_resolved_by_order() {
 
 /// `PR28-REPLAY-UNBOUNDED`. `u64::MAX` parsed happily. Measured before the
 /// fix: the printed ladder's first rung asked for 2_049_638_230_412_172_119
-/// microseconds — about **64,949 years** — and `kill_git_child` sleeps
-/// unconditionally, so the run would have ended at CI's job timeout rather
-/// than at any assertion.
+/// microseconds — about **64,949 years** — and `kill_git_child` waits out
+/// its rung unconditionally, so the run would have ended at CI's job timeout
+/// rather than at any assertion.
 #[test]
 fn a_replay_budget_past_the_ceiling_is_refused() {
     let stage = EffectSiteId::Object(ObjectSite::CandidateStage);
@@ -13367,12 +13367,13 @@ fn sampled_git_child_kills_every_residue_classified_and_recovered() {
             //
             // This is the aim and only the aim — `PR5-R5-001`. These are
             // the parameters the caller passed, so `sample_site` computing
-            // a ladder is the whole of what they can witness: deleting
-            // `std::thread::sleep(after)` from `kill_git_child`, which
-            // fires every kill at the spawn instant and is the exact
-            // negation of the clause cited above, left this list a perfect
-            // ladder and the suite green on Linux and on the Windows guest.
-            // The two assertions after it are over what the kills *did*.
+            // a ladder is the whole of what they can witness: deleting the
+            // wait before the kill from `kill_git_child` (then
+            // `std::thread::sleep(after)`), which fires every kill at the
+            // spawn instant and is the exact negation of the clause cited
+            // above, left this list a perfect ladder and the suite green on
+            // Linux and on the Windows guest. The two assertions after it
+            // are over what the kills *did*.
             let delays: Vec<std::time::Duration> =
                 shape.iter().map(|launch| launch.after).collect();
             assert!(
@@ -13565,8 +13566,8 @@ fn sampled_git_child_kills_every_residue_classified_and_recovered() {
                 // artifact carries it, and `UPSTROKE_RESIDUE_BUDGET_US` feeds it
                 // back -- which is what makes this sampler reproducible, since
                 // it has no seed and this duration is the only variance a
-                // replay can pin. Wake times, Git's own progress, cache state
-                // and scheduling still vary between runs.
+                // replay can pin. Firing times, Git's own progress, cache
+                // state and scheduling still vary between runs.
                 "budget_us": u64::try_from(budget.as_micros()).unwrap_or(u64::MAX),
                 "budget_replayed": replayed,
                 "none": record.histogram.none,
@@ -13839,9 +13840,9 @@ struct SamplingRun {
     /// The timescale the kill ladder was cut from, and whether it was measured
     /// on this machine or replayed from `UPSTROKE_RESIDUE_BUDGET_US`. This is the
     /// only variance a replay can pin -- see [`measure_budget`] -- so it is the
-    /// most a recorded run can offer. It is not *all* the variance: actual wake
-    /// times, Git's progress, cache state and scheduling still differ, so a
-    /// replay reproduces the nominal ladder rather than the original run.
+    /// most a recorded run can offer. It is not *all* the variance: actual
+    /// firing times, Git's progress, cache state and scheduling still differ, so
+    /// a replay reproduces the nominal ladder rather than the original run.
     budget: std::time::Duration,
     replayed: bool,
     /// What `classify_object_residue` answered for each sample, in order.
@@ -14362,8 +14363,8 @@ fn measure_budget(site: EffectSiteId, fixture: &Fixture) -> std::time::Duration 
 /// this machine at this moment. Load, page cache and disk move it; the fractions
 /// never move. So the measured budget is the only variance a replay can pin,
 /// and pinning it is the nearest thing to a reproducible failure available here
-/// -- the ladder becomes identical, though the wake times it produces and Git's
-/// own progress against them still vary run to run.
+/// -- the ladder becomes identical, though the firing times it produces and
+/// Git's own progress against them still vary run to run.
 ///
 /// A fixed default would be worse than the status quo: the point of re-measuring
 /// on every run is that the ladder lands in different places on different
@@ -14411,12 +14412,12 @@ enum BudgetSpecError {
 
 /// The largest replay budget a spec may ask for.
 ///
-/// Four sites each sleep a ladder summing to about four budgets, so the whole
-/// sampling costs roughly `16 x budget`. At five seconds that is 80 seconds of
-/// sleeping — generous, since the largest budget ever *measured* here is about
-/// 45 ms, and bounded, which unbounded input was not: `u64::MAX` parsed happily
-/// and asked its first rung to sleep about 64,949 years, ending only at CI's
-/// job timeout.
+/// Four sites each wait out a ladder summing to about four budgets, so the
+/// whole sampling costs roughly `16 x budget`. At five seconds that is 80
+/// seconds of waiting — generous, since the largest budget ever *measured* here
+/// is about 45 ms, and bounded, which unbounded input was not: `u64::MAX` parsed
+/// happily and asked its first rung to sleep about 64,949 years, ending only at
+/// CI's job timeout.
 const MAX_REPLAY_BUDGET_US: u64 = 5_000_000;
 
 /// Parse a replay spec, validating **every** entry, and return the budget for
@@ -14905,7 +14906,7 @@ struct SampleKill {
 
 fn kill_git_child(cwd: &Path, args: &[String], after: std::time::Duration) -> SampleKill {
     let mut child = SampledChild::spawn(cwd, args);
-    std::thread::sleep(after);
+    wait_out_rung(after, || child.spawned.elapsed(), std::thread::sleep);
     // Kept, not discarded. A kill can answer an error without anything being
     // wrong -- while the Windows kill was `Child::kill`, `TerminateProcess`
     // answered `ERROR_ACCESS_DENIED` for a child that had already exited --
