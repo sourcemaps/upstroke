@@ -1280,6 +1280,49 @@ fn the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_pr
     assert_eq!(seen.count(spawn, HookPhase::After), 2);
 }
 
+const SPAWNED_GRANDCHILD_PID: &str = "spawned-grandchild.pid";
+
+/// The production adapter's hooks, recording the grandchild the kill child
+/// spawns in its kill directory.
+struct RecordsTheGrandchild {
+    inner: crate::runner::HarnessHooks,
+    pid_file: PathBuf,
+}
+
+impl crate::agent::proc::SpawnHooks for RecordsTheGrandchild {
+    fn point(&mut self, point: SubEffectPoint) -> crate::topology::effects::Injection {
+        self.inner.point(point)
+    }
+
+    fn point_mode(
+        &mut self,
+        point: SubEffectPoint,
+        mode: InjectionMode,
+    ) -> crate::topology::effects::Injection {
+        self.inner.point_mode(point, mode)
+    }
+
+    fn phase(
+        &mut self,
+        site: ProcessSite,
+        phase: HookPhase,
+    ) -> crate::topology::effects::Injection {
+        self.inner.phase(site, phase)
+    }
+
+    fn child_created(&mut self, pid: u32) {
+        self.inner.child_created(pid);
+        #[cfg(windows)]
+        let record = format!(
+            "{pid} {}",
+            crate::agent::proc::process_creation_time(pid).unwrap_or(0)
+        );
+        #[cfg(not(windows))]
+        let record = pid.to_string();
+        crate::workspace_manager::fixture::write_file(&self.pid_file, record.as_bytes());
+    }
+}
+
 /// The child of `every_kill_point_of_the_process_funnel_kills_the_child_on_this_host`:
 /// arms one `Process.Spawn` point in kill mode on the production adapter and
 /// runs one command through the host runner, which consults the point on the
@@ -1303,6 +1346,12 @@ fn spawn_kill_child() {
         let outcome = crate::runner::host::contain_write_command(&mut hooks);
         panic!("the kill at `{site}`/{point} did not take this process: {outcome:?}");
     }
+    crate::runner::host::contain_write_command(&mut crate::agent::proc::NoHooks)
+        .expect("the kill child is contained, as every write command is before it spawns");
+    let hooks = RecordsTheGrandchild {
+        inner: hooks,
+        pid_file: dir.join(SPAWNED_GRANDCHILD_PID),
+    };
     let runner = crate::runner::host::HostRunner::new().with_hooks(Box::new(hooks));
     let outcome = crate::runner::Runner::run_blocking(&runner, &trivial_request(&dir));
     panic!("the kill at `{site}`/{point} did not take this process: {outcome:?}");
@@ -1342,7 +1391,66 @@ fn every_kill_point_of_the_process_funnel_kills_the_child_on_this_host() {
             fixture::died_by_abort(&status),
             "`{site}`/{point}: the child did not die by the kill: {status:?}"
         );
+        #[cfg(windows)]
+        if let Ok(record) = std::fs::read_to_string(dir.join(SPAWNED_GRANDCHILD_PID)) {
+            let mut fields = record.split_whitespace();
+            let pid: u32 = fields
+                .next()
+                .and_then(|field| field.parse().ok())
+                .expect("the recorded pid");
+            let created: u64 = fields
+                .next()
+                .and_then(|field| field.parse().ok())
+                .expect("the recorded creation time");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while crate::agent::proc::process_alive(pid, created) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "`{site}`/{point}: the grandchild the dead child spawned is still \
+                     alive (pid {pid})"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
     }
+}
+
+#[test]
+fn the_spawn_kill_child_is_contained_before_it_spawns() {
+    let body = include_str!("tests.rs")
+        .lines()
+        .skip_while(|line| *line != "fn spawn_kill_child() {")
+        .take_while(|line| *line != "}")
+        .collect::<Vec<_>>()
+        .join("\n");
+    let contained = "contain_write_command(&mut crate::agent::proc::NoHooks)";
+    assert!(
+        body.contains(contained),
+        "`spawn_kill_child` must contain itself before it spawns: a kill at \
+         `CreatedSuspended` otherwise strands a suspended grandchild on Windows"
+    );
+    let ambient = body
+        .find("if point == SubEffectPoint::AmbientJobJoined {")
+        .expect("`spawn_kill_child` drives the `AmbientJobJoined` point itself");
+    let ambient_closed = ambient
+        + body[ambient..]
+            .find("\n    }\n")
+            .expect("the `AmbientJobJoined` block closes");
+    let at = body.find(contained).unwrap_or(0);
+    let runner = body
+        .find("HostRunner::new()")
+        .expect("`spawn_kill_child` builds a host runner");
+    assert!(
+        at > ambient_closed,
+        "`spawn_kill_child` must contain itself after the `AmbientJobJoined` block, which \
+         dies in the containment step: a kill at `CreatedSuspended` otherwise strands a \
+         suspended grandchild on Windows"
+    );
+    assert!(
+        at < runner,
+        "`spawn_kill_child` must contain itself before it builds the host runner: a kill at \
+         `CreatedSuspended` otherwise strands a suspended grandchild on Windows"
+    );
 }
 
 /// `Process.Spawn`'s one error-return point, `ambient_job_joined`, exists on
