@@ -79,6 +79,15 @@ enum Command {
         )]
         reset_credits: Option<ResetProvider>,
         #[arg(
+            long,
+            value_enum,
+            conflicts_with_all = ["reset_credits", "refresh", "scope", "config", "pools"],
+            help = "Read advisory Claude subscription windows and reset grants; defaults to the CLI's own login"
+        )]
+        subscription_usage: Option<ResetProvider>,
+        #[arg(long, value_enum, requires = "subscription_usage")]
+        auth: Option<SubscriptionAuth>,
+        #[arg(
             help = "Which runs feed the estimates, overriding [capacity] scope: every run on this machine, or this repository's alone"
         )]
         #[arg(long, value_enum)]
@@ -175,6 +184,22 @@ enum Interaction {
 #[derive(Clone, Copy, ValueEnum)]
 enum ResetProvider {
     Claude,
+}
+
+#[derive(Clone, Copy, Default, ValueEnum)]
+enum SubscriptionAuth {
+    #[default]
+    Cli,
+    Bearer,
+}
+
+impl SubscriptionAuth {
+    const fn chosen(self) -> tracker::subscription::Auth {
+        match self {
+            Self::Cli => tracker::subscription::Auth::Cli,
+            Self::Bearer => tracker::subscription::Auth::Bearer,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -282,20 +307,35 @@ fn dispatch(
 }
 
 fn execute(command: Command, contained: Contained) -> anyhow::Result<ExitCode> {
-    execute_with_reset_reader(command, contained, || {
-        let runner = upstroke::runner::host::HostRunner::new();
-        tracker::reset_credits(
-            &tracker::CurlTransport::new(&runner),
-            &|variable| std::env::var(variable).ok(),
-            None,
-        )
-    })
+    execute_with_readers(
+        command,
+        contained,
+        || {
+            let runner = upstroke::runner::host::HostRunner::new();
+            tracker::reset_credits(
+                &tracker::CurlTransport::new(&runner),
+                &|variable| std::env::var(variable).ok(),
+                None,
+            )
+        },
+        |auth| {
+            let runner = upstroke::runner::host::HostRunner::new();
+            tracker::subscription_usage(
+                auth,
+                &runner,
+                &tracker::CurlTransport::new(&runner),
+                &|variable| std::env::var(variable).ok(),
+                None,
+            )
+        },
+    )
 }
 
-fn execute_with_reset_reader(
+fn execute_with_readers(
     command: Command,
     _contained: Contained,
     read_reset: impl FnOnce() -> tracker::reset::ResetReport,
+    read_subscription: impl FnOnce(tracker::subscription::Auth) -> tracker::subscription::Report,
 ) -> anyhow::Result<ExitCode> {
     match command {
         Command::Connect { force, pools } => {
@@ -315,7 +355,14 @@ fn execute_with_reset_reader(
             refresh,
             scope,
             reset_credits,
+            subscription_usage,
+            auth,
         } => {
+            if let Some(ResetProvider::Claude) = subscription_usage {
+                let report = read_subscription(auth.unwrap_or_default().chosen());
+                print!("{}", report.render());
+                return Ok(ExitCode::SUCCESS);
+            }
             if let Some(ResetProvider::Claude) = reset_credits {
                 let report = read_reset();
                 print!("{}", report.render());
@@ -745,6 +792,8 @@ mod tests {
                 Command::Capacity {
                     refresh: false,
                     reset_credits: None,
+                    subscription_usage: None,
+                    auth: None,
                     scope: None,
                     ..
                 }
@@ -816,15 +865,24 @@ mod tests {
             pools: Some(PathBuf::from(ABSENT_PLAN)),
             refresh: false,
             reset_credits: Some(ResetProvider::Claude),
+            subscription_usage: None,
+            auth: None,
             scope: None,
         };
         let contained = containment::establish(&command, || panic!("read-only command"))
             .expect("no containment needed");
         let called = std::cell::Cell::new(false);
-        let result = execute_with_reset_reader(command, contained, || {
-            called.set(true);
-            tracker::reset::ResetReport::Unavailable(tracker::reset::Unavailable::MissingCredential)
-        });
+        let result = execute_with_readers(
+            command,
+            contained,
+            || {
+                called.set(true);
+                tracker::reset::ResetReport::Unavailable(
+                    tracker::reset::Unavailable::MissingCredential,
+                )
+            },
+            |_| panic!("reset command does not read subscription usage"),
+        );
         assert_eq!(result.expect("unavailable is advisory"), ExitCode::SUCCESS);
         assert!(called.get());
 
@@ -833,10 +891,75 @@ mod tests {
             .command;
         let contained = containment::establish(&command, || panic!("read-only command"))
             .expect("no containment needed");
-        let result = execute_with_reset_reader(command, contained, || {
-            panic!("ordinary commands never read reset credits")
-        });
+        let result = execute_with_readers(
+            command,
+            contained,
+            || panic!("ordinary commands never read reset credits"),
+            |_| panic!("ordinary commands never read subscription usage"),
+        );
         assert!(result.is_err(), "validate still reads its own plan");
+    }
+
+    #[test]
+    fn subscription_dispatch_selects_one_reader_and_refuses_contradictory_flags() {
+        use tracker::subscription::{Auth, Report};
+
+        for (extra, expected) in [
+            (vec![], Auth::Cli),
+            (vec!["--auth", "cli"], Auth::Cli),
+            (vec!["--auth", "bearer"], Auth::Bearer),
+        ] {
+            let command = Cli::try_parse_from(
+                ["upstroke", "capacity", "--subscription-usage", "claude"]
+                    .into_iter()
+                    .chain(extra),
+            )
+            .expect("subscription command")
+            .command;
+            assert_eq!(command_class(&command), CommandClass::ReadOnly);
+            let contained =
+                containment::establish(&command, || panic!("read only")).expect("no ambient job");
+            let called = std::cell::Cell::new(0);
+            let result = execute_with_readers(
+                command,
+                contained,
+                || panic!("no separate reset call"),
+                |auth| {
+                    assert_eq!(auth, expected);
+                    called.set(called.get() + 1);
+                    Report::Unavailable(tracker::reset::Unavailable::CliResponse)
+                },
+            );
+            assert_eq!(result.expect("advisory"), ExitCode::SUCCESS);
+            assert_eq!(called.get(), 1);
+        }
+        for extra in [
+            vec!["--refresh"],
+            vec!["--reset-credits", "claude"],
+            vec!["--scope", "repo"],
+            vec!["--config", "absent"],
+            vec!["--pools", "absent"],
+            vec!["--auth", "other"],
+            vec!["--auth", "cli", "--auth", "bearer"],
+        ] {
+            assert!(
+                Cli::try_parse_from(
+                    ["upstroke", "capacity", "--subscription-usage", "claude"]
+                        .into_iter()
+                        .chain(extra)
+                )
+                .is_err()
+            );
+        }
+        for args in [
+            vec!["capacity", "--auth", "cli"],
+            vec!["capacity", "--reset-credits", "claude", "--auth", "bearer"],
+            vec!["capacity", "--subscription-usage", "codex"],
+            vec!["run", "plan.md", "--subscription-usage", "claude"],
+            vec!["resume", "01ABCDEF", "--subscription-usage", "claude"],
+        ] {
+            assert!(Cli::try_parse_from(std::iter::once("upstroke").chain(args)).is_err());
+        }
     }
 
     #[test]

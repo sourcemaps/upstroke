@@ -33,11 +33,20 @@ with what was reported, `skipped` with what was missing (no `usage_token_env`, a
 is not set, no account), or `failed` with the provider's status or `curl`'s own error — and then
 the report, which now reads what was stored. A refresh that stores nothing is not an error: the
 command exits `0` once the report is printed, and each pool's line is where its outcome is.
-Without `--refresh` or `--reset-credits`, the command asks no provider, and no other command ever
+Without `--refresh`, `--reset-credits` or `--subscription-usage`, the command asks no provider, and no other command ever
 does. To keep the reports current, schedule `upstroke capacity --refresh` with the machine's own scheduler; there
 is no daemon.
 
 `capacity --reset-credits claude` is the tracker's separate opt-in read of voluntary account reset grants (§13). It bypasses pool/config loading and agent probes and conflicts with `--refresh`, `--scope`, `--config` and `--pools`. It reads only `UPSTROKE_CLAUDE_RESET_TOKEN`, which must hold an explicitly provider-authorized bearer; ordinary native-app-only credentials are unsuitable without that authorization. Missing credentials send no request. It prints advisory count, kind, use-by, expiry and availability, preserves unknowns and distinguishes an explicit empty inventory from unavailable data. Results, including unavailable, exit `0`; no inventory is stored or redeemed and no pool estimate changes.
+
+`capacity --subscription-usage claude [--auth cli|bearer]` reads advisory subscription
+windows and optional voluntary grants (§13). It defaults to the CLI's own login; select an
+already signed-in profile through `CLAUDE_CONFIG_DIR`, or leave it unset for the CLI default.
+Bearer auth uses only the existing provider-authorized `UPSTROKE_CLAUDE_RESET_TOKEN` and
+fixed GET. No fallback or second request occurs. The command bypasses pool/config loading
+and discovery probes and conflicts with `--reset-credits`, `--refresh`, `--scope`, `--config`
+and `--pools`. `--auth` without `--subscription-usage` is refused. Windows and grants are
+independent, unknown stays unknown, and unavailable results exit 0 without persistence.
 
 **`capacity serve`, decided 2026-11-25 (not built).** The capacity handler (§13) will be a
 subcommand of the one binary, `upstroke capacity serve`, started explicitly by the operator, under

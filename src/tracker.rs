@@ -1,10 +1,12 @@
 //! The capacity tracker: the one part of upstroke that speaks HTTP, and the
 //! reason it is not the engine (DESIGN.md §4.2, §13).
 //!
-//! **What it is.** Two opt-in reads: `capacity --refresh` for billing and
+//! **What it is.** Opt-in reads: `capacity --refresh` for billing and
 //! `capacity --reset-credits claude` for advisory voluntary reset inventory.
 //! The latter needs no pool, reads only an explicitly provider-authorized
-//! operator bearer, and stores nothing. For each billing pool that names a
+//! operator bearer, and stores nothing. `capacity --subscription-usage claude`
+//! reads independent windows and grants through the CLI's own login or that
+//! same bearer GET, with no fallback or persistence. For each billing pool that names a
 //! `usage_provider`, it asks that provider's documented usage endpoint how
 //! much the account has drawn, and stores the answer under the machine
 //! directory (`~/.upstroke/capacity/usage/`). Nothing else: it dispatches no
@@ -17,7 +19,7 @@
 //! event log and the files on disk, and a network answer that arrived or did
 //! not arrive mid-run is neither.
 //!
-//! **How the split is held.** [`refresh`] and [`reset_credits`] are on
+//! **How the split is held.** [`refresh`], [`reset_credits`] and [`subscription_usage`] are on
 //! `clippy.toml`'s denylist as effectful wrappers, so a module that states no
 //! allowance for governed lints cannot name them, and every topology module
 //! forbids them. The frozen legacy
@@ -51,6 +53,7 @@ use crate::error::UpstrokeError;
 
 pub mod provider;
 pub mod reset;
+pub mod subscription;
 pub mod transport;
 
 pub use self::provider::Secret;
@@ -66,25 +69,57 @@ pub fn reset_credits(
     credential: &dyn Fn(&str) -> Option<String>,
     now_unix: Option<u64>,
 ) -> reset::ResetReport {
-    use reset::{ResetReport, Unavailable};
+    match reset_response(transport, credential) {
+        Ok(response) => reset::parse(
+            &response,
+            now_unix.unwrap_or_else(crate::util::unix_seconds_now),
+        ),
+        Err(reason) => reset::ResetReport::Unavailable(reason),
+    }
+}
+
+fn reset_response(
+    transport: &dyn UsageTransport,
+    credential: &dyn Fn(&str) -> Option<String>,
+) -> Result<provider::UsageResponse, reset::Unavailable> {
+    use reset::Unavailable;
 
     let Some(token) = credential(reset::TOKEN_ENV).filter(|value| !value.is_empty()) else {
-        return ResetReport::Unavailable(Unavailable::MissingCredential);
+        return Err(Unavailable::MissingCredential);
     };
     if !token.bytes().all(|byte| byte.is_ascii_graphic()) {
-        return ResetReport::Unavailable(Unavailable::InvalidCredential);
+        return Err(Unavailable::InvalidCredential);
     }
     let request = reset::request(Secret::new(token));
-    let response = match transport.get(&request) {
-        Ok(response) => response,
-        // Runner and curl errors can contain arbitrary text. Expose only the
-        // category here, including when a fake transport echoes a credential.
-        Err(error) => return ResetReport::Unavailable(Unavailable::from_transport(&error)),
+    // Never expose process output, including errors that echo the credential.
+    transport
+        .get(&request)
+        .map_err(|error| Unavailable::from_transport(&error))
+}
+
+/// Read advisory subscription windows and grants through exactly one selected
+/// route. CLI auth stays inside Claude; bearer auth resolves only TOKEN_ENV.
+/// No fallback, persistence, redemption or pool arithmetic occurs here.
+pub fn subscription_usage(
+    auth: subscription::Auth,
+    runner: &dyn crate::runner::Runner,
+    transport: &dyn UsageTransport,
+    credential: &dyn Fn(&str) -> Option<String>,
+    now_unix: Option<u64>,
+) -> subscription::Report {
+    let payload = match auth {
+        subscription::Auth::Cli => subscription::read_cli(runner),
+        subscription::Auth::Bearer => reset_response(transport, credential)
+            .and_then(|response| reset::response_value(&response)),
     };
-    reset::parse(
-        &response,
-        now_unix.unwrap_or_else(crate::util::unix_seconds_now),
-    )
+    match payload {
+        Ok(value) => subscription::parse(
+            &value,
+            auth,
+            now_unix.unwrap_or_else(crate::util::unix_seconds_now),
+        ),
+        Err(reason) => subscription::Report::Unavailable(reason),
+    }
 }
 
 /// What to refresh, found the way `upstroke capacity` finds it.
@@ -621,6 +656,299 @@ agent = \"claude-code\"
             assert!(!report.render().contains("synthetic-reset-secret"));
             assert!(!format!("{report:?}").contains("synthetic-reset-secret"));
             assert_eq!(table.asked.borrow().len(), 1, "no automatic retry");
+        }
+    }
+
+    // Runner requires Sync. Each lock protects a single transfer: the scripted
+    // answer is consumed once and the owned request snapshot is inspected after
+    // the call. Locks never nest and no lock survives across the returned future.
+    struct SubscriptionRunner {
+        answer: std::sync::Mutex<Option<crate::agent::ProcessOutput>>,
+        seen: std::sync::Mutex<Vec<crate::runner::RunnerRequest>>,
+    }
+
+    impl crate::runner::Runner for SubscriptionRunner {
+        fn run<'a>(
+            &'a self,
+            request: &'a crate::runner::RunnerRequest,
+            _call: crate::runner::RunnerCall<'a>,
+        ) -> crate::runner::RunFuture<'a> {
+            self.seen.lock().expect("seen lock").push(request.clone());
+            let answer = self.answer.lock().expect("answer lock").take();
+            let answer = answer.ok_or_else(|| {
+                crate::runner::RunnerError::never_started(
+                    &request.invocation,
+                    UpstrokeError::Refused {
+                        message: "synthetic-secret-account".to_owned(),
+                    },
+                )
+            });
+            Box::pin(async move { answer })
+        }
+    }
+
+    fn subscription_output() -> crate::agent::ProcessOutput {
+        crate::agent::ProcessOutput {
+            code: Some(0),
+            stdout: concat!(
+                "{\"type\":\"system\",\"account\":\"synthetic-secret-account\"}\n",
+                "{\"type\":\"control_response\",\"response\":{\"request_id\":\"usage-only\",",
+                "\"subtype\":\"success\",\"response\":{\"rate_limits_available\":true,",
+                "\"rate_limits\":{\"five_hour\":{\"utilization\":12},\"cedar_ember\":null}}}}\n"
+            )
+            .to_owned(),
+            stderr: "synthetic-secret-account".to_owned(),
+            duration: std::time::Duration::ZERO,
+            timed_out: false,
+            output_limited: false,
+        }
+    }
+
+    fn subscription_runner(answer: Option<crate::agent::ProcessOutput>) -> SubscriptionRunner {
+        SubscriptionRunner {
+            answer: std::sync::Mutex::new(answer),
+            seen: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn subscription_cli_is_one_exact_probe_with_its_profile_and_no_bearer() {
+        use crate::runner::host::{HostEnvironment, KeyCase};
+        use std::ffi::OsString;
+
+        let runner = subscription_runner(Some(subscription_output()));
+        let table = Table::new(&[]);
+        let report = subscription_usage(
+            subscription::Auth::Cli,
+            &runner,
+            &table,
+            &|_| panic!("CLI must never resolve the bearer"),
+            Some(NOON),
+        );
+        assert!(report.render().contains("five-hour: used: 12%"));
+        assert!(!report.render().contains("synthetic-secret-account"));
+        assert!(table.asked.borrow().is_empty());
+        let seen = runner.seen.lock().expect("seen lock");
+        assert_eq!(seen.len(), 1);
+        let request = seen.first().expect("one probe");
+        assert_eq!(request.command.program, "claude");
+        assert_eq!(
+            request.command.args,
+            [
+                "-p",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--no-session-persistence",
+                "--strict-mcp-config",
+                "--tools",
+                "",
+                "--setting-sources",
+                ""
+            ]
+        );
+        assert_eq!(
+            std::str::from_utf8(&request.command.stdin).expect("JSON stdin"),
+            "{\"type\":\"control_request\",\"request_id\":\"usage-only\",\"request\":{\"subtype\":\"get_usage\",\"skip_behaviors\":true}}\n"
+        );
+        assert_eq!(request.timeout, transport::PROCESS_TIMEOUT);
+        assert_eq!(request.credential_profile, None);
+        assert_eq!(
+            request.command.env,
+            vec![(reset::TOKEN_ENV.to_owned(), String::new())]
+        );
+        assert!(request.command.settings_file.is_none());
+        for profile in [None, Some("/synthetic/profile")] {
+            let mut base = vec![
+                (
+                    OsString::from(reset::TOKEN_ENV),
+                    OsString::from("synthetic-bearer"),
+                ),
+                (
+                    OsString::from("CLAUDE_CODE_OAUTH_TOKEN"),
+                    OsString::from("synthetic-native"),
+                ),
+            ];
+            if let Some(profile) = profile {
+                base.push((OsString::from("CLAUDE_CONFIG_DIR"), OsString::from(profile)));
+            }
+            let environment = HostEnvironment::with_base(base, KeyCase::Sensitive);
+            let composed = environment
+                .compose(
+                    &request.role,
+                    request.agent.as_ref(),
+                    None,
+                    &request.command.env,
+                )
+                .expect("compose");
+            let value = |key: &str| {
+                composed
+                    .iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.to_str().expect("synthetic ASCII"))
+            };
+            assert_eq!(value(reset::TOKEN_ENV), Some(""));
+            assert_eq!(value("CLAUDE_CONFIG_DIR"), profile);
+            assert_eq!(value("CLAUDE_CODE_OAUTH_TOKEN"), Some("synthetic-native"));
+        }
+    }
+
+    #[test]
+    fn subscription_cli_failures_are_advisory_redacted_and_never_fall_back() {
+        for failure in 0..8 {
+            let mut output = subscription_output();
+            let reason = match failure {
+                0 => {
+                    output.code = Some(1);
+                    reset::Unavailable::CliFailed
+                }
+                1 => {
+                    output.code = None;
+                    reset::Unavailable::CliFailed
+                }
+                2 => {
+                    output.timed_out = true;
+                    reset::Unavailable::CliTimedOut
+                }
+                3 => {
+                    output.output_limited = true;
+                    reset::Unavailable::SubscriptionTooLarge
+                }
+                4 => {
+                    output.stdout = "x".repeat(transport::MAX_BODY_BYTES + 1);
+                    reset::Unavailable::SubscriptionTooLarge
+                }
+                5 => {
+                    output.stdout = "synthetic-secret-account".to_owned();
+                    reset::Unavailable::CliResponse
+                }
+                6 => {
+                    output.stderr = "x".repeat(transport::MAX_BODY_BYTES + 1);
+                    reset::Unavailable::SubscriptionTooLarge
+                }
+                _ => reset::Unavailable::CliNotStarted,
+            };
+            let runner = subscription_runner((failure != 7).then_some(output));
+            let table = Table::new(&[]);
+            let report = subscription_usage(
+                subscription::Auth::Cli,
+                &runner,
+                &table,
+                &|_| panic!("no fallback"),
+                Some(NOON),
+            );
+            assert_eq!(report, subscription::Report::Unavailable(reason));
+            assert!(!report.render().contains("synthetic-secret-account"));
+            assert!(table.asked.borrow().is_empty());
+            assert_eq!(runner.seen.lock().expect("seen lock").len(), 1);
+        }
+    }
+
+    #[test]
+    fn subscription_bearer_dispatches_the_existing_curl_request_once() {
+        let mut output = subscription_output();
+        output.stdout =
+            "{\"seven_day\":{\"utilization\":31},\"cedar_ember\":{\"grants\":[]}}\n200".to_owned();
+        let runner = subscription_runner(Some(output));
+        let transport = CurlTransport::new(&runner);
+        let report = subscription_usage(
+            subscription::Auth::Bearer,
+            &runner,
+            &transport,
+            &|name| {
+                assert_eq!(name, reset::TOKEN_ENV);
+                Some("synthetic-bearer".to_owned())
+            },
+            Some(NOON),
+        );
+        let text = report.render();
+        assert!(text.contains("seven-day: used: 31%"));
+        assert!(text.contains("explicitly empty inventory"));
+        assert!(!text.contains("synthetic"));
+        let seen = runner.seen.lock().expect("seen lock");
+        assert_eq!(seen.len(), 1);
+        let request = seen.first().expect("one curl call");
+        assert_eq!(request.command.program, "curl");
+        assert_eq!(request.command.args, transport::arguments());
+        assert_eq!(
+            std::str::from_utf8(&request.command.stdin).expect("config text"),
+            "url = \"https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1\"\n\
+             header = \"anthropic-beta: oauth-2025-04-20\"\n\
+             header = \"Authorization: Bearer synthetic-bearer\"\n"
+        );
+    }
+
+    #[test]
+    fn subscription_bearer_reuses_one_get_and_never_asks_the_cli() {
+        for body in [
+            r#"{"five_hour":{"utilization":23},"cedar_ember":{"grants":[]}}"#,
+            r#"{"cedar_ember":{"grants":[]}}"#,
+            r#"{"seven_day":{"utilization":31}}"#,
+        ] {
+            let runner = subscription_runner(None);
+            let table = Table::new(&[("api.anthropic.com", Ok((200, body)))]);
+            let report = subscription_usage(
+                subscription::Auth::Bearer,
+                &runner,
+                &table,
+                &|name| {
+                    assert_eq!(name, reset::TOKEN_ENV);
+                    Some("synthetic-bearer".to_owned())
+                },
+                Some(NOON),
+            );
+            assert!(matches!(report, subscription::Report::Read { .. }));
+            assert!(!report.render().contains("synthetic-bearer"));
+            assert!(runner.seen.lock().expect("seen lock").is_empty());
+            assert_eq!(table.asked.borrow().len(), 1);
+        }
+        for (answer, reason) in [
+            (
+                Err(TransportError::Failed {
+                    code: "synthetic-bearer".to_owned(),
+                    stderr: "synthetic-bearer".to_owned(),
+                }),
+                reset::Unavailable::Transport,
+            ),
+            (
+                Ok((401, "synthetic-bearer")),
+                reset::Unavailable::CredentialRefused,
+            ),
+            (Ok((500, "synthetic-bearer")), reset::Unavailable::Status),
+            (
+                Ok((200, "synthetic-bearer")),
+                reset::Unavailable::NotReported,
+            ),
+        ] {
+            let runner = subscription_runner(None);
+            let table = Table::new(&[("api.anthropic.com", answer)]);
+            let report = subscription_usage(
+                subscription::Auth::Bearer,
+                &runner,
+                &table,
+                &|_| Some("synthetic-bearer".to_owned()),
+                Some(NOON),
+            );
+            assert_eq!(report, subscription::Report::Unavailable(reason));
+            assert!(!report.render().contains("synthetic-bearer"));
+            assert!(runner.seen.lock().expect("seen lock").is_empty());
+            assert_eq!(table.asked.borrow().len(), 1);
+        }
+        for token in [None, Some(""), Some("bad\nsecret")] {
+            let runner = subscription_runner(None);
+            let table = Table::new(&[]);
+            let report = subscription_usage(
+                subscription::Auth::Bearer,
+                &runner,
+                &table,
+                &|_| token.map(str::to_owned),
+                Some(NOON),
+            );
+            assert!(report.render().contains("no request sent"));
+            assert!(runner.seen.lock().expect("seen lock").is_empty());
+            assert!(table.asked.borrow().is_empty());
         }
     }
 

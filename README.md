@@ -55,6 +55,7 @@ On Windows, Codex can review but not implement.
 | `upstroke capacity` | Checks sign-in once per agent and shows each pool's estimated remaining, from every run on this machine. |
 | `upstroke capacity --refresh` | First asks each pool's billing endpoint what it has drawn this month, for pools you opted in. |
 | `upstroke capacity --reset-credits claude` | Reads advisory voluntary reset grants: count, kind and use-by, independently of pools. Requires provider-authorized `UPSTROKE_CLAUDE_RESET_TOKEN`; native-app-only credentials are unsuitable without that authorization. |
+| `upstroke capacity --subscription-usage claude [--auth cli\|bearer]` | Reads advisory percentages, automatic reset clocks and optional voluntary grants. Defaults to the signed-in CLI; select its profile with `CLAUDE_CONFIG_DIR`. Bearer auth uses only the provider-authorized reset token and the same fixed GET. |
 | `upstroke run plan.md --budget 15` | Runs for real on a `upstroke/run-<id>` branch; needs a clean working tree. |
 | `upstroke status [<run-id>]` | The ledger: attempts, models, cost. |
 | `upstroke answer <question-id>` | Answers a question that parked a task. |
@@ -109,7 +110,9 @@ cmd = "cargo test"
   `upstroke capacity --refresh` reads the documented billing endpoint of each pool you opted in,
   through `curl`, with a key from an environment variable you name. The separate opt-in
   `capacity --reset-credits claude` reads the fixed first-party reset endpoint with an explicitly
-  provider-authorized bearer; it stores nothing and does not redeem credits
+  provider-authorized bearer. `capacity --subscription-usage claude` uses the signed-in CLI's
+  read-only usage control request; `--auth bearer` selects the same fixed GET instead.
+  Both advisory commands store nothing and do not redeem credits
   ([design/13](design/13_design_capacity_engine.md)).
 - **Ground truth is the diff, not the transcript.** Gates and reviewers get the diff the engine
   captured.

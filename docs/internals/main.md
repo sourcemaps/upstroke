@@ -92,10 +92,17 @@ billing refresh and report options. Unavailable is an advisory result, printed w
 The inventory is not persisted, redeemed or used in pool arithmetic. Tests inject credentials
 and transport responses rather than reading live credentials.
 
-`execute_with_reset_reader` injects only the reset read for CLI dispatch tests; production
-`execute` supplies the existing Runner-backed tracker operation. The closure is called only
-in the reset arm. A failing configuration path cannot block the reset result, and an ordinary
-command never invokes that closure.
+`execute_with_readers` injects separate reset and subscription reads for CLI dispatch tests;
+production `execute` supplies the Runner-backed tracker operations. Only the selected
+closure is called. A failing configuration path cannot block the result, and ordinary
+commands never invoke either closure.
+
+`capacity --subscription-usage claude [--auth cli|bearer]` calls the denied
+`subscription_usage` entry, defaulting to the CLI's own login. The read returns before
+pool/config loading or discovery. It conflicts with the reset reader and all report options;
+`--auth` requires the subscription flag. The CLI child retains its selected config directory
+and native auth but receives an empty reset bearer. Bearer mode reuses the existing fixed
+GET. Neither route retries, falls back, stores a report or uses readings in pool arithmetic.
 
 ## `enum Command` › `scope: Option<Scope>,`
 
@@ -446,7 +453,9 @@ drives a run, so neither is the "coordinator" whose ambient job INV-18
 names. Since 2026-11-23 `capacity --refresh` also starts `curl`, once per
 pool that names a usage provider, through the same host Runner. The opt-in
 `capacity --reset-credits claude` also starts curl, once, with a usable credential;
-it does not probe agents. Both are capacity operations, so the count stands at two.
+it does not probe agents. `capacity --subscription-usage claude` starts one bounded CLI
+control probe, or the same GET with `--auth bearer`. All are capacity operations, so the
+count stands at two.
 
 ## `mod tests` › `fn a_write_command_refuses_before_any_effect_when_containment_fails() {`
 

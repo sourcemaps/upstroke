@@ -184,6 +184,7 @@ disallowed-methods = [
     { path = "upstroke::connect::run_with", reason = "UPSTROKE-WRAPPER: creates a directory and writes the operator's upstroke.toml" },
     { path = "upstroke::tracker::refresh", reason = "UPSTROKE-WRAPPER: the capacity tracker; asks provider usage endpoints over HTTPS through a curl subprocess and stores what they report. Never an engine path (DESIGN.md §4 invariant 2): a run reads the stored reports, it does not ask for one" },
     { path = "upstroke::tracker::reset_credits", reason = "UPSTROKE-WRAPPER: opt-in read of Claude reset inventory through the bounded curl GET transport; no engine caller, credentials or inventory stored (DESIGN.md §4.2, §13)" },
+    { path = "upstroke::tracker::subscription_usage", reason = "UPSTROKE-WRAPPER: opt-in Claude subscription read through one selected CLI probe or bearer GET; no engine caller, fallback or persistence (DESIGN.md §4.2, §13)" },
     { path = "upstroke::tracker::publish", reason = "UPSTROKE-WRAPPER: creates the machine's usage-report directory, stages a report and renames it into place, removing the staged file if either step fails" },
     # The legacy engine's own conductors, in the classification domain since
     # #306 (`PR7-WRAPPERS-EMPTY-DOMAIN`): `pub(super)` items of the private

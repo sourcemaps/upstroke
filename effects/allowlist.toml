@@ -798,6 +798,13 @@ allows = ["clippy::disallowed_methods"]
 packet = "none: not a module the retired packet names. Added on 2026-11-23 with the capacity tracker (DESIGN.md §4 invariant 2, §13), as CODING_STANDARDS.md §2 requires of a new effect: reviewed into this file in the change that introduces it"
 review = """
 The capacity tracker's entry points and its one effect on disk. The opt-in \
+`subscription_usage` entry selects exactly one route: the existing bearer \
+GET or a bounded Runner probe of the official Claude CLI's get_usage control \
+request. The CLI inherits its normal auth and CLAUDE_CONFIG_DIR; the reset \
+bearer is blanked in its CommandSpec environment. No credential discovery, \
+fallback, prompt, model request, redemption or report write occurs. The new \
+subscription child forbids all three governed lints, uses the existing \
+probe_request/Runner funnel and adds no raw effect primitive. \
 `reset_credits` entry reads only the fixed Claude reset-metadata endpoint \
 through the existing transport, independently of pools, and stores nothing. \
 It accepts only the dedicated operator-provided, provider-authorized bearer; \
@@ -825,7 +832,9 @@ test call sites of `reset_credits` use this existing allowance. \
 `clippy::disallowed_types` and `clippy::disallowed_macros` are FORBIDDEN in this \
 file rather than left to `-D warnings`: it names no `std::process::Command` and \
 prints nothing. \
-NO PROCESS IS STARTED HERE. The HTTPS request is a `curl` subprocess, built as a \
+NO PROCESS IS STARTED DIRECTLY HERE. The subscription CLI probe is built in \
+`src/tracker/subscription.rs` and reaches the same Runner funnel. The HTTPS \
+request is a `curl` subprocess, built as a \
 data-only `CommandSpec` in `src/tracker/transport.rs` and started by the Runner \
 through `agent::probe_request`, the Process funnel every other program goes \
 through. That child and `src/tracker/provider.rs` each state `#![forbid(..)]` of \
@@ -845,7 +854,7 @@ writes it again. A report is validated against the reader's bounds before the \
 first effect. \
 HANDLES: no item returns a `File`, an `OpenOptions` or a `Command`. `publish` \
 returns the destination path. \
-ITS ENTRY POINTS ARE DENIED. `refresh`, `reset_credits` and `publish` are \
+ITS ENTRY POINTS ARE DENIED. `refresh`, `reset_credits`, `subscription_usage` and `publish` are \
 effectful rows of \
 `effects/wrappers.toml` and entries of `clippy.toml`, so a module that states \
 no allowance cannot call them; `tracker::tests::only_the_cli_reaches_the_tracker` \

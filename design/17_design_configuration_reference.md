@@ -93,6 +93,13 @@ attempt (`PR408-CODEX-SIGN-IN-NOT-PREFLIGHTED`). The legacy
 
 The independent `capacity --reset-credits claude` reader needs no pool or usage keys. Its only credential source is the operator-provided `UPSTROKE_CLAUDE_RESET_TOKEN`, explicitly provider-authorized for this integration (§13); native-app-only credentials are unsuitable without that authorization. It does not select or change account profiles.
 
+`capacity --subscription-usage claude` also needs no pool or usage keys. Its default
+`--auth cli` keeps the CLI's own login and inherited `CLAUDE_CONFIG_DIR` (or the CLI default),
+and blanks the reset token in the child. Select an already signed-in profile with, for
+example, `CLAUDE_CONFIG_DIR=/absolute/profile upstroke capacity --subscription-usage claude`.
+`--auth bearer` uses only the reset token and fixed GET above, never the CLI credentials.
+Neither route falls back to the other, and neither stores a report or consumes a grant.
+
 **What the usage keys do.** They opt a pool into the capacity tracker (§13), and only an operator
 writes them. `usage_provider` names which documented usage endpoint `upstroke capacity --refresh`
 asks for this pool: `anthropic-cost`, `openai-cost`, `github-ai-credits` or

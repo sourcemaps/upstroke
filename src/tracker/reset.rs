@@ -137,6 +137,16 @@ pub enum Unavailable {
     Status,
     #[error("the provider did not report a recognized reset inventory")]
     NotReported,
+    #[error("Claude CLI could not start; check the installation and CLI login")]
+    CliNotStarted,
+    #[error("Claude CLI usage probe timed out")]
+    CliTimedOut,
+    #[error("Claude CLI usage probe failed; check the CLI login")]
+    CliFailed,
+    #[error("Claude CLI did not return one valid usage control response")]
+    CliResponse,
+    #[error("the subscription response exceeds the output or window-count limit")]
+    SubscriptionTooLarge,
 }
 
 impl Unavailable {
@@ -165,6 +175,15 @@ pub enum ResetReport {
 /// grant fields remain unknown; a known disqualifier always defeats usability.
 #[must_use]
 pub fn parse(response: &UsageResponse, now_unix: u64) -> ResetReport {
+    match response_value(response) {
+        Ok(value) => parse_value(&value, now_unix),
+        Err(reason) => ResetReport::Unavailable(reason),
+    }
+}
+
+/// Shared status, size and JSON checks for the single fixed bearer response.
+/// Errors carry only a fixed category, never the response body.
+pub(super) fn response_value(response: &UsageResponse) -> Result<Value, Unavailable> {
     let unavailable = match response.status {
         200 => None,
         401 | 403 => Some(Unavailable::CredentialRefused),
@@ -172,15 +191,16 @@ pub fn parse(response: &UsageResponse, now_unix: u64) -> ResetReport {
         _ => Some(Unavailable::Status),
     };
     if let Some(reason) = unavailable {
-        return ResetReport::Unavailable(reason);
+        return Err(reason);
     }
     if response.body.len() > MAX_BODY_BYTES {
-        return ResetReport::Unavailable(Unavailable::TooLarge);
+        return Err(Unavailable::TooLarge);
     }
-    let value: Value = match serde_json::from_str(&response.body) {
-        Ok(value) => value,
-        Err(_) => return ResetReport::Unavailable(Unavailable::NotReported),
-    };
+    serde_json::from_str(&response.body).map_err(|_| Unavailable::NotReported)
+}
+
+/// The same validated grant representation for native and bearer payloads.
+pub(super) fn parse_value(value: &Value, now_unix: u64) -> ResetReport {
     let Some(cedar) = value.get("cedar_ember").and_then(Value::as_object) else {
         return ResetReport::Unavailable(Unavailable::NotReported);
     };
