@@ -25,17 +25,24 @@ source, documentation, workflows, release machinery and this file.
    `master` is updated first and waits again, and the audit reports it as `behind-master`.
 
    **The Windows suite has two homes.** It runs on the guest unless the run's
-   `pick-windows-home` job answers `hosted`; then `test-windows` is skipped,
-   `test-windows-hosted` runs on `windows-latest` with the guest image's compiler, installed and
-   asserted, and the guest's suite step and passing-test floor, and `upstroke-ci` requires
-   exactly one of the two to pass. The answer is `hosted` when the repository variable
-   `WINGUEST_BUSY` is `1`, or when the repository variable `WINGUEST_QUEUE_LIMIT` is a whole
+   `pick-windows-home` job answers `hosted`; then `test-windows` is skipped and
+   `test-windows-hosted` runs the suite on `windows-latest` in five shards,
+   `test (windows-latest, k of 5)`. Each shard installs and asserts the guest image's compiler,
+   runs the guest's suite step with that shard's test-name filter, and holds a share of the
+   guest's passing-test floor; the shares sum to it. A test runs in exactly one shard: each
+   shard skips the filters of the shards before it, and the last takes what no filter names.
+   `upstroke-ci` still requires exactly one of the two jobs to pass, and the hosted one passes
+   only when all five shards do. The answer is `hosted` in three cases: the repository variable
+   `WINGUEST_BUSY` is `1`; the run is a pull request's and the repository variable
+   `WINGUEST_PR_HOSTED` is `1`; or the repository variable `WINGUEST_QUEUE_LIMIT` is a whole
    number from 1 to 999999 and the guest's queue reaches it: the guest's jobs queued or running in other
    runs, together with the runs of a lower run id that have not yet shown where their own suite
    goes. The limit is best effort. While every run's picker can read the API and list the other
    runs, of runs that start together, a merge queue's entries among them, the earliest take the
-   guest up to the limit and no further, and the rest go to the hosted runner. Both are opt-in:
-   with neither set every run goes to the guest, and an unset or malformed limit counts nothing.
+   guest up to the limit and no further, and the rest go to the hosted runner. All three are
+   opt-in: with none set every run goes to the guest, and an unset or malformed limit counts
+   nothing. `WINGUEST_PR_HOSTED` moves pull-request runs only, never a merge-queue entry or a
+   push, and reads no API.
    A GitHub API the job cannot read answers `guest`: a failed question never moves a run off
    the guest. So the limit can be passed in two ways. A burst of n runs costs about n² requests,
    each picker asking about each other active run, against the workflow token's rate limits
@@ -44,12 +51,13 @@ source, documentation, workflows, release machinery and this file.
    `pending` or a finished run re-run, is not counted. Either can put more suites than the limit
    on the guest. The build machine's operator sets
    `WINGUEST_BUSY` to `1` while baselines or Upstroke runs hold the machine, and clears it
-   afterwards. A hosted run is not free: by the workflow's September 2026 measurements it takes
-   three to four times the guest's time, 21 to 28 minutes a job against about 7, and in October
-   2026 hosted merge-queue entries reached the 45- and then the 55-minute timeout, the cause
-   unknown; the twin runs under that 55 minutes.
+   afterwards. A hosted run is not free: measured on 2026-11-15 (run 43719719561), the whole
+   suite takes 59 to 76 minutes on `windows-latest` and its shards 15 to 23 minutes each,
+   against the guest's 13 for the whole. Each shard runs under a 40-minute limit. In that run
+   one whole-suite job failed a kill-timing test, and one shard did not end after its tests had
+   passed, a leftover test process holding its output; neither followed a change.
 
-   The two homes share the compiler, the suite and the floor. What still differs is the runner:
+   The two homes share the compiler and the suite, and the floor in sum. What still differs is the runner:
    GitHub's image against the curated guest's, their filesystems and temporary directories,
    their services, and what the runner environment reports. A test that depends on those can
    pass on one home and fail on the other, and a run sent to the twin can pass where the guest
@@ -65,7 +73,11 @@ source, documentation, workflows, release machinery and this file.
    guest). These are repository variables, so the change reaches every run that starts while it
    stands -- other pull requests, pushes to `master` and merge-queue entries go to the same home
    -- and it is the operator's to make while the operator holds the machine; set it for the
-   re-run and put it back once that run's picker has answered.
+   re-run and put it back once that run's picker has answered. To move one pull request's run,
+   `WINGUEST_PR_HOSTED` is the variable that reaches pull-request runs only: re-run all of its
+   jobs after setting it to `1` (to the twin), or after clearing it (to the guest, unless
+   `WINGUEST_BUSY` or the limit still answers `hosted`). It reaches every pull request's run
+   that starts while it stands, and never a push to `master` or a merge-queue entry.
 4. **One frontier review pass on the green head.** Give the exact diff and head SHA to an
    independent frontier-class reviewer at `max` effort — today `gpt-5.6-sol` through `codex exec`,
    run by the owner's review driver against the pull request's own base. Allow at least 90 minutes per
