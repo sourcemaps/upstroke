@@ -21,7 +21,7 @@ guard: the change that records per-test durations on the hosted Windows legs and
        -> `bounded` panics with its fixed timeout text, which names a deadlock
     -> a finalization kill child, re-run for cell 5, does not end within its 120 s `KILL_CHILD_BOUND`
        -> the child is killed and reaped, and the parent panics "the kill child did not end in time"
-    -> the leg fails on these two tests; the change under test touched no Rust code
+    -> the leg fails on these two tests; the change under test touched neither test nor the code they drive
 
 The two bounds, at the reviewed commit:
 
@@ -81,9 +81,12 @@ Read from the raw job log (`evidence/job-44741248743-136305204188.log`, SHA256
 - `test result: FAILED. 74 passed; 2 failed; 7 ignored; 0 measured; 3554 filtered out; finished in 590.79s`. These
   two were the job's only failures.
 
-Pull request #392 changes no Rust code; it re-split the hosted Windows legs. The same commit, `2c18bb4c`, passed every
-Windows leg, these two tests included, in CI run `44736631711` on 2026-11-20 at 12:32Z, 35 minutes earlier. Run
-`44741248743` was started by an edit to #392's description, not by a new commit. Leg 4 holds 76 tests at
+Pull request #392 re-split the hosted Windows legs. The Rust it changes is four test files (`src/effects/tests.rs`,
+`src/effects/tests/ci_model.rs`, `src/effects/tests/workflow.rs` and `src/engine/tests.rs`); it changes neither failing
+test nor the code they drive. The same tree, `dc3e7e3e`, passed every Windows leg, these two tests included, in CI run
+`44736631711` on 2026-11-20 at 12:32Z, and failed here in run `44741248743` 35 minutes later. Run `44741248743` was
+started by an edit to #392's description, not by a new commit. The next run to pass was of a different tree,
+`83bb3c8b`, so no rerun of `dc3e7e3e` passed after this failure. Leg 4 holds 76 tests at
 `2c18bb4c`, against 59 before the re-split (`docs/internals/effects/tests/ci_model.md`, the shard paragraphs: the
 re-split's counts, 50, 27, 99, 76, ..., against the 2026-11-19 counts, 50, 27, 116, 59, ...).
 
@@ -91,8 +94,9 @@ re-split's counts, 50, 27, 99, 76, ..., against the 2026-11-19 counts, 50, 27, 1
 
 **Established.** On one hosted Windows leg, one reduced-limit run of the coordinator did not end within 120 s, and
 one finalization kill child, at cell 5 of the complete run, did not end within 120 s. Both tests, and several other
-tests of the module that passed, had been running for over 60 seconds. The change under test touched no Rust code,
-and the same commit passed both tests on every Windows leg 35 minutes earlier.
+tests of the module that passed, had been running for over 60 seconds. The change under test touched neither failing
+test nor the code they drive, and the same tree, `dc3e7e3e`, passed both tests on every Windows leg 35 minutes
+earlier.
 
 **Established: the first panic's wording says nothing about the cause.** It is the fixed text of `bounded`'s
 `Timeout` arm (line 11345), printed for any scenario that has not ended within `BOUND`.
@@ -104,7 +108,7 @@ on its way to it, is not known.
 
 **Inferred, not established: a slow runner, not a deadlock.** That both bounds were reached because the leg's runner
 was slow or oversubscribed while several long interleaving tests ran in parallel, not because the coordinator or the
-finalization stalled. What supports it: the same commit passed both tests on every Windows leg 35 minutes earlier;
+finalization stalled. What supports it: the same tree passed both tests on every Windows leg 35 minutes earlier;
 several tests of the module passed the 60-second notice in this job; the leg holds 17 more tests than it did before
 the re-split; and the two failures are of different scenarios through different bounds. Two things may have made it
 worse, and neither is established: the abandoned thread of the timed-out reduced-limit run kept running beside the
