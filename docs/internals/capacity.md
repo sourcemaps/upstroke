@@ -218,12 +218,14 @@ what each variant means on the wire is `src/tracker/provider.rs`'s: a match
 there is exhaustive, so a variant added here does not compile until it has a
 request and a parser.
 
-**The admission rule is DESIGN.md §13's**: an endpoint its provider documents,
-taking a credential the provider issues for the purpose. The four here meet
-it. The subscription-window endpoints that most usage tools read do not —
-Claude Code's is undocumented and takes the Claude.ai OAuth credential, which
-Anthropic's terms reserve for its own applications — and are absent on
-purpose, not for want of a parser.
+**The admission rule is DESIGN.md §13's**: an explicitly selected first-party
+read-only capacity endpoint, taking a credential the provider authorizes for
+this integration. The four variants here remain the configured documented
+billing providers, reporting spend for their pools. The separate read-only
+Claude reset inventory is one admitted undocumented endpoint, independent of
+configured billing pools and not a member of this enum. Its admission does
+not authorize reuse of ordinary vendor-login credentials restricted to native
+applications.
 
 ## `impl UsageProvider` › `pub fn parse(s: &str) -> Option<Self> {`
 
