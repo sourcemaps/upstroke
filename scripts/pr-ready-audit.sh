@@ -100,6 +100,11 @@
 #     `severity-mismatch`, NOT-READY. Every other accepted-risk row, and every rejected row, is
 #     the owner's call and sends the pull request to MANUAL. A witnessed or MUST P3 never reaches
 #     its row: both are blocked first, whatever the row says (the two hard rules, below)
+#   - the audit's OWN run of .github/scripts/validate-pr-body.sh, on the pull request's title and
+#     on the very bytes the ledger is parsed from -- the body is fetched once and both read that one
+#     copy -- exits 0; any other status is `body-policy-failed:<status>`. A green
+#     `upstroke-pr-policy` is not this: it judged the body the pull request carried when it ran,
+#     and a body edit does not move the head
 #
 # This script decides whether to merge, so every uncertainty resolves to NOT-READY. A read that
 # failed, a read that may be short, and a field the review did not record are each an uncertainty,
@@ -107,9 +112,10 @@
 # a review comment the audit could not fetch as `review-fetch-failed`, a parser that exited
 # non-zero as `review-parse-failed`, a parser result that did not arrive whole as
 # `review-parse-incomplete`, an unreadable timeline as `timeline-lookup-failed`, an unreadable
-# pull request as `pr-lookup-failed`, an unreadable pull-request body as `ledger-lookup-failed`
-# and one the parser refused or that did not arrive whole as `ledger-parse-failed` and
-# `ledger-parse-incomplete`, a review that records no reviewed commit as
+# pull request as `pr-lookup-failed`, an unreadable pull-request title as `title-lookup-failed`,
+# an unreadable pull-request body as `ledger-lookup-failed`, a body validator that is missing or
+# unreadable as `body-policy-failed:127`, a body the parser refused or that did not arrive whole
+# as `ledger-parse-failed` and `ledger-parse-incomplete`, a review that records no reviewed commit as
 # `review-records-no-reviewed-sha`, a finding-file listing that errored as
 # `finding-file-lookup-failed`, and a gate-edit check that could not run as
 # `gate-edit-check-failed`; an unreadable ruleset list or open-pull-request list refuses the whole
@@ -185,17 +191,24 @@
 # reach the audit, and the deferring implementor's row asserts there is none (MAINTAINING step 5
 # binds them). A merge-in is checked on step 5's terms: git's own merge of its parents, the
 # branch diff byte-identical before and after, no gate edited by the pull request, and no branch
-# commit outside the ledger.
+# commit outside the ledger. Of the policy validators the `upstroke-pr-policy` check runs, the
+# audit runs validate-pr-body.sh and, as before, no other: validate-pr-ledger-evidence.sh and
+# validate-pr-branch.sh reach READY only through that check's conclusion. And it samples the
+# checks before it fetches the body, as before, so a body edited after the check ran is held to
+# validate-pr-body.sh by the audit's own run and to the other validators by nothing but a check run
+# that judged the body it replaced.
 #
-# The pure parts (the lane table, the parser call and the reader for its result, the frontmatter id
-# match, the newest-check-run choice) are functions, exercised by
-# .github/scripts/test-pr-ready-audit.sh along with `scripts/pr-review-parse.py` itself; sourcing
+# The pure parts (the lane table, the parser call and the reader for its result, the body
+# validator's call, the frontmatter id match, the newest-check-run choice) are functions, exercised
+# by .github/scripts/test-pr-ready-audit.sh along with `scripts/pr-review-parse.py` itself; sourcing
 # this file with PR_READY_AUDIT_LIBRARY=1 defines them, and `scripts/lane.sh`'s with them, without
 # running the audit.
 #
 # Needs: bash, git (a checkout with `origin` pointing at the repository), gh (its built-in --jq
-# does the API-side JSON work), and python3 or python, which now reads BOTH review forms and the
-# pull request's ledger; without a python nothing is judged and every pull request blocks.
+# does the API-side JSON work), python3 or python, which now reads BOTH review forms and the
+# pull request's ledger -- without a python nothing is judged and every pull request blocks -- and
+# .github/scripts/validate-pr-body.sh where this file's checkout keeps it, without which every pull
+# request blocks as `body-policy-failed:127`.
 
 set -euo pipefail
 
@@ -276,6 +289,37 @@ read_parser_fields() {
   [[ "$count" =~ ^[0123456789]+$ ]] || return 1
   # `10#` so a count bash would read as octal is read as the decimal the parser wrote.
   ((${#fields[@]} == head_count + per_record * 10#$count))
+}
+
+# ---- the body policy -----------------------------------------------------------------------------
+
+# run_body_validator TITLE FILE: run .github/scripts/validate-pr-body.sh -- the body validator the
+# `upstroke-pr-policy` check runs -- with TITLE as the pull request's title and FILE as its body, and
+# return the validator's exit status. 0 is the one answer that lets a pull request be READY; every
+# other status, whatever it means, is `body-policy-failed:<status>` at the caller.
+#
+# THE AUDIT RUNS IT ITSELF, ON THE BYTES IT PARSES, because the check's verdict is not about those
+# bytes. The checks are sampled before the body is fetched, and an edit to the body does not move
+# the head, so a green `upstroke-pr-policy` judged whatever body the pull request carried when it
+# ran. Three bodies the validator refuses and the ledger parser reads whole -- a row whose guard
+# cell is `—`, an accepted P3 row beside the `None yet` row, and a filed P2's `deferred` followed by
+# U+00A0, which `str.strip()` removes and `[[:space:]]` under C keeps -- each read READY at exit 0,
+# on a ledger the policy had refused or never seen. The caller hands this the one file it fetched
+# and handed the parser, so the body judged and the body read are the same bytes.
+#
+# `LC_ALL=C` so the answer is a function of the bytes and not of the caller's locale: the
+# validator's `trim` is `[[:space:]]` and its patterns are ranges, and both are the locale's to
+# define.
+#
+# A VALIDATOR THAT IS NOT THERE IS NOT A VALIDATOR THAT PASSED. Its path is settled from this file's
+# own location, as the parser's is, and a missing or unreadable file returns 127 here -- said, not
+# left to whatever `bash` makes of a path it cannot run. A body bash cannot open for the validator
+# is a redirection that failed: 1, with the validator never run, and it blocks the same way, since
+# no status but 0 lets anything through.
+run_body_validator() {
+  local validator="$audit_dir/../.github/scripts/validate-pr-body.sh"
+  [[ -f "$validator" && -r "$validator" ]] || return 127
+  LC_ALL=C "$BASH" "$validator" "$1" < "$2"
 }
 
 # frontmatter_has_id ID: reads a finding file on stdin and PRINTS `1` when its YAML frontmatter,
@@ -1174,14 +1218,31 @@ audit_one() {
   # it is read so an `accepted-risk` row is held to the severity the review gave: judged on the
   # review's alone, a review P3 whose row recorded P2 and `accepted-risk` read READY, though a P2
   # recorded so is the owner's call.
+  #
+  # AND THE SAME BYTES ARE JUDGED BY THE BODY POLICY, by the audit's own run of
+  # validate-pr-body.sh (`run_body_validator`). The body is fetched ONCE, into one file, and that
+  # file is what both read: the parser can read a body whole that the validator refuses, and the
+  # `upstroke-pr-policy` check sampled above judged whatever body the pull request carried when it
+  # ran, so neither the parse nor the check says the body passes the policy. Any status but 0 is
+  # `body-policy-failed:<status>`. The validator judges the title too, so the title is read here;
+  # a title that could not be read is `title-lookup-failed`, and the validator is not run on a
+  # title that was never read, since its refusal would then be the read's and not the body's.
   local body_file ledger_file ledger_status=0 ledger_body_status=0 disposition row_severity nfiles j k
+  local title title_status=0 policy_status=0
   ledger_id=(); ledger_severity=(); ledger_disposition=()
+  title="$(gh pr view "$pr" --repo "$repo" --json title --jq .title)" || title_status=$?
+  if ((title_status != 0)); then blockers+=("title-lookup-failed"); fi
   body_file="$(mktemp)"
   ledger_file="$(mktemp)"
   gh pr view "$pr" --repo "$repo" --json body --jq .body > "$body_file" || ledger_body_status=$?
   if ((ledger_body_status != 0)); then
     blockers+=("ledger-lookup-failed")
   else
+    # The validator's diagnostics go to stderr, beside the parser's: the table is stdout's.
+    if ((title_status == 0)); then
+      run_body_validator "$title" "$body_file" >&2 || policy_status=$?
+      if ((policy_status != 0)); then blockers+=("body-policy-failed:$policy_status"); fi
+    fi
     run_review_parser ledger "$body_file" "$ledger_file" || ledger_status=$?
     if ((ledger_status != 0)); then
       blockers+=("ledger-parse-failed:$ledger_status")

@@ -148,6 +148,22 @@
 #                                to the header pattern and blocked instead of reading READY -- or a
 #                                section whose first two `|` lines are not the canonical header and
 #                                separator was read instead of refused
+#   MUT-BODY-POLICY-UNCHECKED    the audit judged the ledger the parser read and never ran
+#                                validate-pr-body.sh on that body, so a body the validator refuses
+#                                and the parser reads whole -- a guard cell of `—`, an accepted P3
+#                                row beside `None yet`, or `deferred` and a U+00A0 on a filed P2's
+#                                row -- read READY at exit 0 on the strength of a policy check that
+#                                ran on another body, instead of NOT-READY, `body-policy-failed:`
+#   MUT-BODY-POLICY-DIVERGES     the audit's blocker and the validator's own answer disagreed about
+#                                a body: over every body `ledger_policy_body` builds in this file,
+#                                `body-policy-failed:` must appear exactly where `body_policy` says
+#                                `fail`, so a READY case cannot be READY on a body the policy
+#                                refuses and a refused body cannot hide behind another blocker
+#   MUT-BODY-FETCHED-TWICE       the body was fetched more than once in one audit, so the validator
+#                                and the parser could be handed different bytes and each pass its own
+#   MUT-BODY-VALIDATOR-MISSING   a body validator that is missing or cannot be read was read as one
+#                                that passed, instead of `body-policy-failed:127`; or a pull-request
+#                                title the audit could not read was not a blocker of its own
 #   MUT-JSON-SPLIT-BY-REGEX    findings read by splitting text on "},{" instead of a parser
 #   MUT-NULL-WITNESS             a null witness field counted as a witness
 #   MUT-MUST-UNSEEN              a MUST deviation was not flagged
@@ -917,6 +933,53 @@ contains MUT-REVIEWER-ENV-BEFORE-FLAG "$got" "2|refusing: UPSTROKE_REVIEW_AUTHOR
 got="$(run_audit --reviewer 'bad_login' 123)"
 contains MUT-REVIEWER-ENV-BEFORE-FLAG "$got" "2|refusing: --reviewer [bad_login] is not a GitHub login."
 
+# --- the bodies the stubs serve ------------------------------------------------------------------
+# THE AUDIT RUNS validate-pr-body.sh ON THE BODY IT PARSES, and READY needs that run to exit 0, so a
+# body a stub serves is one the validator passes unless the case is about one it refuses. The stubs
+# below used to answer `no ledger`, which no validator passes -- every case they serve would be
+# NOT-READY on `body-policy-failed:1` whatever it was about. They serve a `None yet` ledger instead,
+# which the parser reads as no rows, exactly as it read `no ledger`: a finding the review gives is
+# still `no-row:`, and a review that gives none still reaches READY, for the reason each case tests.
+# Every stub answers the title with STUB_PR_TITLE, the title `body_policy` judges a body under, so the
+# audit's run of the validator and this file's are one call on one title.
+#
+# `ledger_policy_body` builds every body that carries the required sections, and RECORDS each file it
+# writes in `policy_bodies`: near the end of this file every one of them is run through the audit,
+# and `body-policy-failed:` must appear exactly where `body_policy` -- the audit's own
+# `run_body_validator` -- says `fail`. It is never called from a subshell, which would lose the record.
+policy_title='fix(review): read one ledger'
+export STUB_PR_TITLE="$policy_title"
+policy_bodies=()
+ledger_policy_body() {  # ledger_policy_body FILE LEDGER-TEXT: the required sections, then LEDGER-TEXT
+  { printf '## Summary\n\nSummary.\n\n## Scope\n\nScope.\n\n## Validation\n\nValidation.\n\n'
+    printf '## Review evidence\n\nEvidence.\n\n## Risk and rollback\n\nRisk.\n\n'
+    printf '%s\n' "$2"; } > "$1"
+  policy_bodies+=("$1")
+}
+ledger_row() {  # ledger_row ID:SEVERITY:DISPOSITION: one row the body validator accepts
+  local id="${1%%:*}" rest="${1#*:}"
+  printf '| %s | %s | %s / src/x.rs:1 | a reviewed failure -> a wrong answer | pre_existing | correctness | — | `guard` | %s |\n' \
+    "$id" "${rest%%:*}" "$enqueue_head" "${rest#*:}"
+}
+ledger_table() {  # ledger_table ID:SEVERITY:DISPOSITION...: the canonical header, separator and rows
+  local row
+  printf '%s\n' '| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |'
+  printf '%s\n' '|---|---|---|---|---|---|---|---|---|'
+  for row in "$@"; do ledger_row "$row"; done
+}
+# THE AUDIT'S OWN CALL, and not a copy of it: a copy here could pin a locale, a title or a path the
+# audit does not, and agree with itself while the audit judged the body otherwise.
+body_policy() {  # body_policy FILE: "pass" or "fail", as the audit's `run_body_validator` judges FILE
+  if run_body_validator "$policy_title" "$1" > /dev/null 2>&1; then echo pass; else echo fail; fi
+}
+ledger_none_row='| None yet | — | — | — | — | — | — | — | — |'
+ledger_policy_body "$tmp/no-findings-body.md" "$(
+  printf '## Review finding ledger\n\n'; ledger_table; printf '%s\n' "$ledger_none_row")"
+expect "MUT-BODY-POLICY-DIVERGES the stubs' body policy" "$(body_policy "$tmp/no-findings-body.md")" pass
+expect "MUT-BODY-POLICY-DIVERGES the stubs' body" "$(
+  "$review_python" scripts/pr-review-parse.py ledger "$tmp/no-findings-body.md" 2>&1 | jq -c .rows)" '[]'
+export STUB_NO_FINDINGS_BODY="$tmp/no-findings-body.md"
+
 # --- a failed review lookup, through main -------------------------------------------------------
 # The helper case above proves latest_review_id reports a failure. This proves the audit acts on
 # it: `no-review` and "the lookup did not complete" are different lines in the table, and only the
@@ -941,8 +1004,9 @@ case "$*" in
                               exit "${STUB_COMMENTS_STATUS:-1}" ;;
   *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
   *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
+  *"--json title"*)           printf '%s\n' "$STUB_PR_TITLE" ;;
   *"--json body"*)            (( ${STUB_BODY_STATUS:-0} )) && exit "$STUB_BODY_STATUS"
-                              echo "no ledger" ;;
+                              cat "$STUB_NO_FINDINGS_BODY" ;;      # `None yet`: no rows, policy-valid
   "pr view"*)                 (( ${STUB_PRVIEW_STATUS:-0} )) && exit "$STUB_PRVIEW_STATUS"
                               printf '%s\n%s\nfalse\nCLEAN\nmaster\n%s\n' \
                                 "${STUB_BRANCH:-feature/x}" "$head" "$head"
@@ -1277,7 +1341,8 @@ case "$*" in
                               exit "${STUB_COMMENTS_STATUS:-1}" ;;
   *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
   *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
-  *"--json body"*)            echo "no ledger" ;;
+  *"--json title"*)           printf '%s\n' "$STUB_PR_TITLE" ;;
+  *"--json body"*)            cat "$STUB_NO_FINDINGS_BODY" ;;      # `None yet`: no rows, policy-valid
   "pr view"*)                 printf '%s\n%s\nfalse\nCLEAN\nmaster\n%s\n' \
                                 "${STUB_BRANCH:-feature/x}" "$head" "$head"
                               stub_labels_n=0
@@ -7104,7 +7169,8 @@ case "$*" in
   *"/comments?per_page=100"*) echo "2026-09-01T00:00:00Z 5001" ;;
   *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
   *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
-  *"--json body"*)            echo "no ledger" ;;
+  *"--json title"*)           printf '%s\n' "$STUB_PR_TITLE" ;;
+  *"--json body"*)            cat "$STUB_NO_FINDINGS_BODY" ;;      # `None yet`: no rows, policy-valid
   *"--json headRefOid"*)      echo "$head" ;;
   *"--json baseRefName"*)     echo master ;;
   "pr view"*)                 printf '%s\n%s\nfalse\nCLEAN\nmaster\n%s\n0\n' \
@@ -8117,27 +8183,9 @@ expect MUT-LEDGER-SEVERITY-DROPPED "$(ledger_rows "$tmp/short-row-body.md")" '0|
 # Each body below carries every section validate-pr-body.sh requires and rows it accepts, and each is
 # held against that validator as well as the parser: the shadow, tabbed and trailing-space bodies are
 # ones the validator PASSES, so the parser's reading of them is all that stands between them and
-# READY, and the parser must never pass a body the validator refuses for the same reason.
-ledger_policy_body() {  # ledger_policy_body FILE LEDGER-TEXT: the required sections, then LEDGER-TEXT
-  { printf '## Summary\n\nSummary.\n\n## Scope\n\nScope.\n\n## Validation\n\nValidation.\n\n'
-    printf '## Review evidence\n\nEvidence.\n\n## Risk and rollback\n\nRisk.\n\n'
-    printf '%s\n' "$2"; } > "$1"
-}
-ledger_row() {  # ledger_row ID:SEVERITY:DISPOSITION: one row the body validator accepts
-  local id="${1%%:*}" rest="${1#*:}"
-  printf '| %s | %s | %s / src/x.rs:1 | a reviewed failure -> a wrong answer | pre_existing | correctness | — | `guard` | %s |\n' \
-    "$id" "${rest%%:*}" "$enqueue_head" "${rest#*:}"
-}
-ledger_table() {  # ledger_table ID:SEVERITY:DISPOSITION...: the canonical header, separator and rows
-  local row
-  printf '%s\n' '| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |'
-  printf '%s\n' '|---|---|---|---|---|---|---|---|---|'
-  for row in "$@"; do ledger_row "$row"; done
-}
-body_policy() {  # body_policy FILE: "pass" or "fail", as validate-pr-body.sh judges FILE
-  if "$BASH" "$root/.github/scripts/validate-pr-body.sh" 'fix(review): read one ledger' \
-    < "$1" > /dev/null 2>&1; then echo pass; else echo fail; fi
-}
+# READY, and the parser must never pass a body the validator refuses for the same reason. The
+# bodies are built by `ledger_policy_body`, `ledger_table` and `ledger_row`, and judged by
+# `body_policy`, all four defined above with the bodies the stubs serve.
 
 # THE REVIEWER'S WITNESS. A `(draft)` section before the real ledger records ACCEPT-P3 as a P3
 # `accepted-risk`; the real ledger records it as P2. Both validators pass the body -- the body
@@ -8311,8 +8359,7 @@ expect MUT-LEDGER-TABBED-CELL "$(parse_nul ledger "$tmp/tabbed-row.md")" \
 # PR382-POST-TABLE-ROW-ACCEPTED, the frontier's witness. The canonical table holds only `None yet`.
 # A blank line ends it for both validators, and a later row in the same section records ACCEPT-P3
 # as a P3 `accepted-risk`. Read as every `|` line, that row was returned, and no validator had
-# looked at it.
-ledger_none_row='| None yet | — | — | — | — | — | — | — | — |'
+# looked at it. (`ledger_none_row` is the canonical `None yet` row, defined with the stubs' body.)
 ledger_policy_body "$tmp/none-yet.md" "$(
   printf '## Review finding ledger\n\n'; ledger_table; printf '%s\n' "$ledger_none_row")"
 expect "MUT-LEDGER-POST-TABLE-ROW none-yet policy" "$(body_policy "$tmp/none-yet.md")" pass
@@ -8436,7 +8483,16 @@ case "$*" in
   *"/comments?per_page=100"*) echo "2026-09-01T00:00:00Z 5001" ;;
   *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
   *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
-  *"--json body"*)            cat "$STUB_LEDGER_BODY" ;;
+  *"--json title"*)           (( ${STUB_TITLE_STATUS:-0} )) && exit "$STUB_TITLE_STATUS"
+                              printf '%s\n' "$STUB_PR_TITLE" ;;
+  # Every body fetch is logged, one line naming the pull request, when STUB_BODY_FETCH_LOG is set;
+  # with STUB_LEDGER_DIR set the body is that directory's file named for the pull request, so one
+  # run can audit many bodies.
+  *"--json body"*)            if [[ -n "${STUB_BODY_FETCH_LOG:-}" ]]; then
+                                printf '%s\n' "$3" >> "$STUB_BODY_FETCH_LOG" || exit 96
+                              fi
+                              if [[ -n "${STUB_LEDGER_DIR:-}" ]]; then cat "$STUB_LEDGER_DIR/$3"
+                              else cat "$STUB_LEDGER_BODY"; fi ;;
   "pr view"*)                 printf '%s\n%s\nfalse\nCLEAN\nmaster\n%s\n0\n' \
                                 "$STUB_BRANCH" "$head" "$head" ;;
   *) echo "GH-UNSTUBBED $*" >&2; exit 97 ;;
@@ -8450,12 +8506,14 @@ accept_review() {  # accept_review FILE FINDING-JSON [HEAD]: a review of HEAD wi
       "$reviewed" "$enqueue_base" "$2"
     printf '\n```\n'; } > "$1"
 }
+# A body the validator passes, built by `ledger_policy_body`: every required section, and a row with
+# a full reviewed commit and a failure sequence long enough to be one. This used to write a summary
+# and the ledger alone, a seven-character commit and `a -> b`, which the validator refuses for the
+# four missing sections, the short commit and the short sequence -- harmless while nothing but the
+# parser read it, and `body-policy-failed:1` on every case below once the audit runs the validator,
+# READY ones included.
 accept_ledger() {  # accept_ledger FILE ID SEVERITY DISPOSITION: a body whose ledger is that one row
-  { printf '## Summary\n\nOne finding, recorded.\n\n## Review finding ledger\n\n'
-    printf '%s\n' '| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |'
-    printf '%s\n' '|---|---|---|---|---|---|---|---|---|'
-    printf '| %s | %s | %s / src/x.rs:1 | a -> b | pre_existing | correctness | — | `guard` | %s |\n' \
-      "$2" "$3" "${enqueue_head:0:7}" "$4"; } > "$1"
+  ledger_policy_body "$1" "$(printf '## Review finding ledger\n\n'; ledger_table "$2:$3:$4")"
 }
 accept_run() {  # accept_run BRANCH REVIEW BODY [HEAD]: "<status>|<the audit's output, on one line>"
   local out status=0
@@ -8481,6 +8539,10 @@ accept_ledger "$tmp/accept-p3-row.md" ACCEPT-P3 P3 accepted-risk
 accept_ledger "$tmp/accept-p3-row-says-p2.md" ACCEPT-P3 P2 accepted-risk
 accept_ledger "$tmp/accept-p2-row.md" ACCEPT-P2 P2 accepted-risk
 accept_ledger "$tmp/reject-p3-row.md" ACCEPT-P3 P3 rejected
+# Each a body the validator passes, so what decides each case below is the row and not the policy.
+for accept_body in accept-p3-row accept-p3-row-says-p2 accept-p2-row reject-p3-row; do
+  expect "MUT-BODY-POLICY-DIVERGES [$accept_body] policy" "$(body_policy "$tmp/$accept_body.md")" pass
+done
 
 # The ruling: an unwitnessed P3 on an `accepted-risk` row recording P3, with its one finding file,
 # is READY with no manual read, in a lane that fixes P0-P1 under the fix-P0/fix-P1 prefixes and in
@@ -8750,6 +8812,7 @@ accept_review "$tmp/doc-readme-p3.md" '{"id":"DOC-P3","severity":"P3"}' "$doc_re
 accept_review "$tmp/doc-process-p3.md" '{"id":"DOC-P3","severity":"P3"}' "$doc_process_head"
 accept_review "$tmp/doc-filed-p3.md" '{"id":"DOC-P3","severity":"P3"}' "$doc_filed_head"
 accept_ledger "$tmp/doc-p3-row.md" DOC-P3 P3 accepted-risk
+expect "MUT-BODY-POLICY-DIVERGES [doc-p3-row] policy" "$(body_policy "$tmp/doc-p3-row.md")" pass
 for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
   for doc_name in readme process; do
     case "$doc_name" in
@@ -8853,6 +8916,194 @@ for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
       && error "MUT-DUPLICATE-REVIEW-ID-OVERREACH: two findings with ids of their own blocked on [$accept_branch] ($dup_disposition): [$got]"
   done
 done
+
+# --- the body policy, run by the audit on the body it parses, through main ---------------------------
+# THE AUDIT SAMPLES THE CHECKS BEFORE IT FETCHES THE BODY, and an edit to the body does not move the
+# head, so the `upstroke-pr-policy` conclusion it reads judged a body it may never have seen. Three
+# bodies validate-pr-body.sh refuses and the ledger parser reads whole, each READY at exit 0 while
+# the parse alone decided:
+#   - the guard cell is `—`: the validator requires a regression test or a documented guard, and
+#     the parser never reads that column;
+#   - an accepted P3 row beside the `None yet` row: the validator refuses the mixture, and the
+#     parser steps over `None yet` and reads the row;
+#   - a filed P2's row says `deferred` and then U+00A0: `str.strip()` takes the no-break space off,
+#     and the validator's `[[:space:]]` under C keeps it, so `deferred<U+00A0>` is no disposition.
+# Each is asserted three ways -- the validator refuses it, the parser reads the row the READY case
+# needs, and the audit is NOT-READY with `body-policy-failed:` as its ONLY blocker -- so it is the
+# audit's run of the validator that blocks, and nothing else in the body.
+#
+# The first two are the READY case's review and head with the body changed; the third is a review
+# whose one finding is a P2, which neither lane below must fix, on a head that files it once, and
+# the same row without the no-break space is its control: READY.
+policy_guard_row="$(printf '| ACCEPT-P3 | P3 | %s / src/x.rs:1 | a reviewed failure -> a wrong answer | pre_existing | correctness | — | — | accepted-risk |' \
+  "$enqueue_head")"
+ledger_policy_body "$tmp/policy-guard-dash.md" "$(
+  printf '## Review finding ledger\n\n'; ledger_table; printf '%s\n' "$policy_guard_row")"
+ledger_policy_body "$tmp/policy-beside-none-yet.md" "$(
+  printf '## Review finding ledger\n\n'; ledger_table; printf '%s\n' "$ledger_none_row"
+  ledger_row ACCEPT-P3:P3:accepted-risk)"
+defer_p2_head="$(filed_head_with defer-p2.md=DEFER-P2)"
+expect "MUT-BODY-POLICY-UNCHECKED one-file head" \
+  "$(cd "$enqueue_repo" && finding_file_count DEFER-P2 "$defer_p2_head")" 1
+accept_review "$tmp/defer-p2.md" '{"id":"DEFER-P2","severity":"P2"}' "$defer_p2_head"
+ledger_policy_body "$tmp/policy-deferred-nbsp.md" "$(
+  printf '## Review finding ledger\n\n'; ledger_table $'DEFER-P2:P2:deferred\xc2\xa0')"
+ledger_policy_body "$tmp/policy-deferred.md" "$(
+  printf '## Review finding ledger\n\n'; ledger_table DEFER-P2:P2:deferred)"
+expect "MUT-BODY-POLICY-UNCHECKED guard-dash policy" "$(body_policy "$tmp/policy-guard-dash.md")" fail
+expect "MUT-BODY-POLICY-UNCHECKED guard-dash parse" "$(ledger_rows "$tmp/policy-guard-dash.md")" \
+  '0|ACCEPT-P3:P3:accepted-risk'
+expect "MUT-BODY-POLICY-UNCHECKED beside-none-yet policy" \
+  "$(body_policy "$tmp/policy-beside-none-yet.md")" fail
+expect "MUT-BODY-POLICY-UNCHECKED beside-none-yet parse" \
+  "$(ledger_rows "$tmp/policy-beside-none-yet.md")" '0|ACCEPT-P3:P3:accepted-risk'
+expect "MUT-BODY-POLICY-UNCHECKED deferred-nbsp policy" \
+  "$(body_policy "$tmp/policy-deferred-nbsp.md")" fail
+expect "MUT-BODY-POLICY-UNCHECKED deferred-nbsp parse" \
+  "$(ledger_rows "$tmp/policy-deferred-nbsp.md")" '0|DEFER-P2:P2:deferred'
+expect "MUT-BODY-POLICY-UNCHECKED deferred control policy" "$(body_policy "$tmp/policy-deferred.md")" pass
+for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
+  for policy_witness in guard-dash beside-none-yet deferred-nbsp; do
+    case "$policy_witness" in
+      deferred-nbsp) policy_review="$tmp/defer-p2.md"; policy_head="$defer_p2_head" ;;
+      *)             policy_review="$tmp/accept-p3.md"; policy_head="$accept_head_one" ;;
+    esac
+    got="$(accept_run "$accept_branch" "$policy_review" "$tmp/policy-$policy_witness.md" "$policy_head")"
+    [[ "$got" == *" READY "* ]] \
+      && error "MUT-BODY-POLICY-UNCHECKED: a body the validator refuses read READY [$policy_witness] on [$accept_branch]: [$got]"
+    contains "MUT-BODY-POLICY-UNCHECKED $policy_witness [$accept_branch]" "$got" " NOT-READY "
+    # the blocker and nothing beside it: the table line is the last thing printed
+    contains "MUT-BODY-POLICY-UNCHECKED $policy_witness [$accept_branch]" "$got" \
+      "blockers=body-policy-failed:1 "
+    expect "MUT-BODY-POLICY-UNCHECKED $policy_witness status [$accept_branch]" "${got%%|*}" 0
+    [[ "$got" == *GH-UNSTUBBED* ]] \
+      && error "MUT-BODY-POLICY-UNCHECKED: the audit made a call this case does not model: [$got]"
+  done
+  # The deferred P2 without the no-break space, filed once: READY, so the NOT-READY above is the
+  # policy's doing and not the review's, the head's or the lane's.
+  got="$(accept_run "$accept_branch" "$tmp/defer-p2.md" "$tmp/policy-deferred.md" "$defer_p2_head")"
+  contains "MUT-BODY-POLICY-UNCHECKED deferred control [$accept_branch]" "$got" " READY "
+  expect "MUT-BODY-POLICY-UNCHECKED deferred control status [$accept_branch]" "${got%%|*}" 0
+  [[ "$got" == *body-policy-failed* || "$got" == *NOT-READY* || "$got" == *GH-UNSTUBBED* ]] \
+    && error "MUT-BODY-POLICY-UNCHECKED: a policy-valid deferred P2 blocked on [$accept_branch]: [$got]"
+done
+# THE TITLE IS THE PULL REQUEST'S OWN, read for this run. The READY case's body under a title the
+# validator refuses is `body-policy-failed:1` and nothing else; and a title that could not be read
+# is `title-lookup-failed`, NOT-READY, with no validator run on the title that never arrived.
+got="$(STUB_PR_TITLE='Read one ledger' accept_run feature/a-slug "$tmp/accept-p3.md" \
+  "$tmp/accept-p3-row.md" "$accept_head_one")"
+contains "MUT-BODY-POLICY-UNCHECKED refused title" "$got" " NOT-READY "
+contains "MUT-BODY-POLICY-UNCHECKED refused title" "$got" "blockers=body-policy-failed:1 "
+got="$(STUB_TITLE_STATUS=1 accept_run feature/a-slug "$tmp/accept-p3.md" \
+  "$tmp/accept-p3-row.md" "$accept_head_one")"
+contains MUT-BODY-VALIDATOR-MISSING "$got" " NOT-READY "
+contains MUT-BODY-VALIDATOR-MISSING "$got" "blockers=title-lookup-failed "
+expect "MUT-BODY-VALIDATOR-MISSING title status" "${got%%|*}" 0
+
+# ONE FETCH, ONE COPY, BOTH READERS. The validator and the parser are handed the one file the audit
+# wrote the body into, so the stub that serves it sees one fetch per pull request audited -- two
+# fetches would be two copies, and an edit between them would hand each reader a body of its own.
+: > "$tmp/body-fetches.log"
+got="$(STUB_BODY_FETCH_LOG="$tmp/body-fetches.log" accept_run feature/a-slug "$tmp/accept-p3.md" \
+  "$tmp/accept-p3-row.md" "$accept_head_one")"
+contains "MUT-BODY-FETCHED-TWICE one audit" "$got" " READY "
+expect "MUT-BODY-FETCHED-TWICE one audit" "$(tr '\n' ' ' < "$tmp/body-fetches.log")" '999 '
+: > "$tmp/body-fetches.log"
+got="$(cd "$enqueue_repo" && STUB_BODY_FETCH_LOG="$tmp/body-fetches.log" STUB_BRANCH=feature/a-slug \
+  STUB_REVIEW_BODY="$tmp/accept-p3.md" STUB_LEDGER_BODY="$tmp/accept-p3-row.md" \
+  STUB_HEAD="$accept_head_one" PATH="$accept_gh:$PATH" \
+  bash "$root/scripts/pr-ready-audit.sh" 999 1000 2>&1 | tr '\n' ' ')"
+contains "MUT-BODY-FETCHED-TWICE two audits" "$got" "#999 "
+contains "MUT-BODY-FETCHED-TWICE two audits" "$got" "#1000"
+expect "MUT-BODY-FETCHED-TWICE two audits READY" "$(grep -o ' READY ' <<< "$got" | wc -l | tr -d ' ')" 2
+expect "MUT-BODY-FETCHED-TWICE two audits" "$(tr '\n' ' ' < "$tmp/body-fetches.log")" '999 1000 '
+
+# A VALIDATOR THAT IS NOT THERE BLOCKS. The audit, its lane table and its parser, copied to a tree
+# with no .github/scripts/validate-pr-body.sh beside them, judge the READY case's pull request: the
+# validator is found from the audit's own location, so it is missing there, and the run is
+# NOT-READY on `body-policy-failed:127` alone. The same tree with the validator copied in is READY,
+# so the refusal is the missing file's and not the copy's. A directory in the validator's place is
+# a path that exists and cannot be run, and blocks the same way.
+for policy_tree in missing present directory; do
+  mkdir -p "$tmp/policy-tree-$policy_tree/scripts" "$tmp/policy-tree-$policy_tree/.github/scripts"
+  cp scripts/pr-ready-audit.sh scripts/lane.sh scripts/pr-review-parse.py \
+    "$tmp/policy-tree-$policy_tree/scripts/"
+done
+cp .github/scripts/validate-pr-body.sh "$tmp/policy-tree-present/.github/scripts/"
+mkdir -p "$tmp/policy-tree-directory/.github/scripts/validate-pr-body.sh"
+for policy_tree in missing present directory; do
+  got="$(cd "$enqueue_repo" && STUB_BRANCH=feature/a-slug STUB_REVIEW_BODY="$tmp/accept-p3.md" \
+    STUB_LEDGER_BODY="$tmp/accept-p3-row.md" STUB_HEAD="$accept_head_one" PATH="$accept_gh:$PATH" \
+    bash "$tmp/policy-tree-$policy_tree/scripts/pr-ready-audit.sh" 999 2>&1 | tr '\n' ' ')"
+  [[ "$got" == *GH-UNSTUBBED* ]] \
+    && error "MUT-BODY-VALIDATOR-MISSING: the audit made a call this case does not model: [$got]"
+  if [[ "$policy_tree" == present ]]; then
+    contains "MUT-BODY-VALIDATOR-MISSING control" "$got" " READY "
+    [[ "$got" == *body-policy-failed* || "$got" == *NOT-READY* ]] \
+      && error "MUT-BODY-VALIDATOR-MISSING: the copied tree with its validator blocked: [$got]"
+  else
+    contains "MUT-BODY-VALIDATOR-MISSING [$policy_tree]" "$got" " NOT-READY "
+    contains "MUT-BODY-VALIDATOR-MISSING [$policy_tree]" "$got" "blockers=body-policy-failed:127 "
+  fi
+done
+# and the library function itself says so, with the body it is handed unchanged.
+policy_missing_status=0
+( audit_dir="$tmp/policy-tree-missing/scripts"
+  run_body_validator "$policy_title" "$tmp/accept-p3-row.md" ) > /dev/null 2>&1 || policy_missing_status=$?
+expect "MUT-BODY-VALIDATOR-MISSING library" "$policy_missing_status" 127
+policy_present_status=0
+( audit_dir="$tmp/policy-tree-present/scripts"
+  run_body_validator "$policy_title" "$tmp/accept-p3-row.md" ) > /dev/null 2>&1 || policy_present_status=$?
+expect "MUT-BODY-VALIDATOR-MISSING library control" "$policy_present_status" 0
+
+# --- every body `ledger_policy_body` built, through main ---------------------------------------------
+# THE BLOCKER APPEARS EXACTLY WHEN `body_policy` SAYS `fail`, over every body this file built with
+# the required sections -- the stubs' own, the accepted and rejected rows, every heading, table and
+# trimming case, the shared and duplicated ids, and the witnesses above. One run audits them all,
+# one pull request per body, against the READY case's review, head and lane, and each table line
+# is matched to its body by the pull request's number. In one direction this is a READY case that is
+# READY on a body the policy refuses; in the other, a body the policy passes that the audit refuses
+# for the policy.
+policy_dir="$tmp/policy-bodies"
+mkdir -p "$policy_dir"
+policy_prs=()
+for ((policy_n = 0; policy_n < ${#policy_bodies[@]}; policy_n++)); do
+  cp "${policy_bodies[policy_n]}" "$policy_dir/$((policy_n + 1))"
+  policy_prs+=("$((policy_n + 1))")
+done
+policy_status=0
+policy_out="$(cd "$enqueue_repo" && STUB_LEDGER_DIR="$policy_dir" STUB_BRANCH=feature/a-slug \
+  STUB_REVIEW_BODY="$tmp/accept-p3.md" STUB_HEAD="$accept_head_one" PATH="$accept_gh:$PATH" \
+  bash "$root/scripts/pr-ready-audit.sh" "${policy_prs[@]}" 2> "$tmp/policy-bodies.err")" \
+  || policy_status=$?
+expect "MUT-BODY-POLICY-DIVERGES status" "$policy_status" 0
+[[ "$(< "$tmp/policy-bodies.err")" == *GH-UNSTUBBED* ]] \
+  && error "MUT-BODY-POLICY-DIVERGES: the audit made a call this case does not model"
+declare -A policy_line=()
+while IFS= read -r one_line; do
+  # `#<number>` and then the padding: the number is the key
+  if [[ "$one_line" == '#'* ]]; then
+    policy_key="${one_line%% *}"
+    policy_line["${policy_key#'#'}"]="$one_line"
+  fi
+done <<< "$policy_out"
+policy_passes=0
+policy_fails=0
+for ((policy_n = 0; policy_n < ${#policy_bodies[@]}; policy_n++)); do
+  policy_file="${policy_bodies[policy_n]}"
+  one_line="${policy_line[$((policy_n + 1))]:-}"
+  if [[ -z "$one_line" ]]; then
+    error "MUT-BODY-POLICY-DIVERGES: no table line for [${policy_file##*/}]"
+    continue
+  fi
+  policy_said="$(body_policy "$policy_file")"
+  if [[ "$one_line" == *body-policy-failed:* ]]; then policy_audit=fail; else policy_audit=pass; fi
+  expect "MUT-BODY-POLICY-DIVERGES [${policy_file##*/}]: [$one_line]" "$policy_audit" "$policy_said"
+  if [[ "$policy_said" == pass ]]; then policy_passes=$((policy_passes + 1)); else policy_fails=$((policy_fails + 1)); fi
+done
+# Both answers are among them, so the agreement above is not one answer agreeing with itself.
+((policy_passes > 0 && policy_fails > 0)) \
+  || error "MUT-BODY-POLICY-DIVERGES: [$policy_passes] bodies pass and [$policy_fails] fail; both must occur"
 
 if ((failed)); then
   echo "test-pr-ready-audit: FAILED" >&2
