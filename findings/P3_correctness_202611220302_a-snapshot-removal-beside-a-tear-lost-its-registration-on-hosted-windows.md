@@ -172,7 +172,7 @@ the failed assertion, so this run never reached it.
   died on a half-written entry (`:25`). This sighting is the regression test failing once on a
   hosted runner, not a recurrence that finding records. It is a relative, not a parent.
 - **`CI-FLAKE-WINDOWS-ADD-REFUSAL-PAST-REGISTRY-DEADLINE`**
-  (`findings/P3_correctness_202611211600_an-add-refused-at-once-took-three-seconds-on-hosted-windows.md`)
+  (`d431d220:findings/P3_correctness_202611211600_an-add-refused-at-once-took-three-seconds-on-hosted-windows.md`)
   records one whole `add_worktree` call taking 3.39 s, in another job on 2026-11-20, against the same 500 ms test deadline. It marks as inferred, not established, that the time was spent in the `git worktree add` attempt. That is a different test, with a different assertion: a wall-time bound on
   an add. Whether the two share a cause is not established.
 
