@@ -4,7 +4,7 @@
 
 - Capacity is now tracked for the machine rather than for a repository; `[capacity] scope = "repo"`
   or `upstroke capacity --scope repo` folds only this repository. Nothing routes on any of this yet.
-- Only an attempt that passed, in a run of any schema, clears another run's rate limit on its pool,
+  Only an attempt that passed, in a run of any schema, clears another run's rate limit on its pool,
   and only when its worker finished after that limit was met.
 - `upstroke capacity --refresh` is new: the capacity tracker, asking each pool's `usage_provider`
   for this month's draw (`usage_token_env`, `usage_account`); no other command reaches a network.
@@ -29,7 +29,9 @@
 - `upstroke run` creates schema-4 runs on the execution topology (`max_parallel`, `max_per_agent`,
   `max_per_pool`); still unreleased, no longer inert, superseding the entries below (`design/17`).
 - The container runner now gives a worker or reviewer its own permission-settings file, read-only,
-  where its CLI was handed a host path the container withholds.
+  where its CLI was handed a host path the container withholds. On Unix every container runs as the
+  coordinator's effective uid and gid, so the image and any credential volume must be usable by that
+  user, and a command's stdin now reaches its container.
 - `[runner] mounts` now takes effect on Unix and Windows, as part of the run's recorded execution
   identity; a config accepted while mounts were inert may now be refused.
 - A decline, or a lineage member's failed settlement, meeting an open verification of its lineage
