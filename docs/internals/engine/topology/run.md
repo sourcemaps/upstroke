@@ -2437,25 +2437,41 @@ that agree by inspection (§15, "one fold, not two").
 ## `fn spent_resets(events: &[TopologyEvent]) -> BTreeSet<String> {`
 
 The pools whose recorded reset is spent: the pool refused an attempt again,
-at or past that reset, after the `pool_exhausted` that recorded it. Read from
-the log alone, so a resumed run reads the same set as the process that wrote
-it. Resumed at 05:32 after `primary` refused past its 03:01, the woken task
-binds `spare` and not `primary`
+two minutes or more past that reset (`interaction::RESET_WAIT_MARGIN`), after
+the `pool_exhausted` that recorded it. Read from the log alone, so a resumed
+run reads the same set as the process that wrote it. Resumed at 05:32 after
+`primary` refused at 03:03, two minutes past its 03:01, the woken task binds
+`spare` and not `primary`
 (`tests::a_resumed_run_reads_a_reset_its_pool_refused_past_as_spent`).
 
 | Event | Effect on its pool |
 |---|---|
 | `pool_exhausted` | records the reset it names (or none), and the pool is not spent |
-| `attempt_finished` limited on the pool, its `ts` at or past the recorded reset, not the refusal that recorded it | spent |
+| `attempt_finished` limited on the pool, its `ts` at or past the recorded reset plus `interaction::RESET_WAIT_MARGIN`, not the refusal that recorded it | spent |
 | any other | none |
+
+**The margin.** A refusal is counted from the recorded reset plus
+`interaction::RESET_WAIT_MARGIN`, added as [`serving_pool`] adds it: the
+instant a held pool serves from, and the one a wait toward the reset runs
+to. A pool can come back a little after the reset it names, which is what
+the margin is for, so a refusal inside it says nothing yet about whether
+the reset brought the pool back. Counted from the reset itself, such a
+refusal dropped the reset, and the wait ran to the other pool's. A resumed
+run woken at 03:02, with `primary` held to 03:01 and `spare` to 05:30,
+binds `primary`, which refuses naming 03:01 again: the reset is kept, and
+`awaited_reset` waits to 03:03 for `primary`, not to 05:32 for `spare`
+(`tests::a_refusal_a_minute_past_a_reset_leaves_it_unspent_and_the_wait_runs_to_its_margin`).
+Refused at 03:01:00, 03:02:00 or 03:02:59 the reset is kept; refused at
+03:03:00 it is spent
+(`tests::a_reset_is_spent_only_by_a_refusal_two_minutes_or_more_past_it`).
 
 The refusal that recorded a reset is the `attempt_finished` that follows its
 `pool_exhausted` with nothing between, as `capacity::exhausted_pools_of`
 reads it. It is not counted, even when the reset it named was already
 behind the clock: a pool that names 02:59 at 03:00 is waited for to 03:01
 (`tests::a_held_pool_whose_reset_passed_inside_the_margin_is_waited_for_only_to_two_minutes_past_it`).
-A later refusal past the reset is the evidence that the reset did not bring
-the pool back. It names the same reset, or none it can read, so
+A later refusal past the reset and its margin is the evidence that the reset
+did not bring the pool back. It names the same reset, or none it can read, so
 `capacity::pool_exhausted_to_record` writes no new signal for it, and
 without this rule the run would keep the old reset and serve the pool from
 it again and again. A later `pool_exhausted` for the pool, with a reset of

@@ -1062,6 +1062,50 @@ accepted: the resumed run reads `primary`'s 03:01 as spent from the log alone.
 On the unrepaired code generation 3 binds `primary`, first in file order with its reset and
 margin passed, and the test fails on the pool.
 
+## `const NAMING_THREE_OH_ONE_AGAIN: [(TaskKey, GenerationId, &str); 3] = [`
+
+The limits of the regression witness: `MIRRORED`'s, with generation 2 naming 03:01 again
+rather than no reset at all, so the refusal it settles writes no new `pool_exhausted` and is counted
+by `spent_resets` against the 03:01 it names.
+
+## `struct ResumedAt(&'static str);`
+
+A clock that stays at the reading it is given: the instant the next process resumes at, and
+so the `ts` of the refusal it settles.
+
+## `fn refused_again_on_resume(`
+
+The sequence of the regression witness (`r3-regression-witness/witness.rs`), stepped to the
+refusal that `at` stamps. On a durable run, at 03:00, `primary` refuses generation 0 naming 03:01 and
+the task fails over, and `spare` refuses generation 1 naming 05:30 and the task is deferred.
+The next process resumes at `at`, which wakes the task, and generation 2 binds `primary`:
+before 03:03:00 as the first in file order, no held pool's reset and margin having passed,
+and at 03:03:00 as the pool whose reset and margin have. It refuses naming 03:01 again: no new `pool_exhausted` is written and the task is deferred again.
+Every test of the margin reads this one log, and only the refusal's stamp differs.
+
+## `fn a_refusal_a_minute_past_a_reset_leaves_it_unspent_and_the_wait_runs_to_its_margin() {`
+
+The witness, with the refusal stamped 03:02, a minute past `primary`'s 03:01 reset and a
+minute short of its margin. `held_unspent` keeps 03:01 for `primary`, and `awaited_reset` at
+03:02 names `primary` and 03:01 and runs to 03:03. The target is asked of `awaited_reset`
+directly: the sixty seconds from 03:02 to 03:03 are also the plain backoff's minute, so a
+sleep of a minute would not tell the two waits apart.
+
+On the unrepaired code (`345df0df`) the refusal at 03:02, at or past 03:01, spent the reset.
+`held_unspent` dropped it, and the wait ran to 05:32 for `spare`. The test fails on
+`held_unspent`.
+
+## `fn a_reset_is_spent_only_by_a_refusal_two_minutes_or_more_past_it() {`
+
+The witness's log with the refusal stamped at each edge of the margin. Stamped 03:01:00, at
+the reset, 03:02:59, a second short of the margin, or 03:02:00, the witness's own minute, the
+reset is kept: `held_unspent` keeps 03:01 for `primary`, and `awaited_reset` at the stamp runs
+to 03:03:00 for `primary`. Stamped 03:03:00, the reset plus the margin to the second, it is
+spent: `held_unspent` holds `primary` with no reset, and the wait is `spare`'s, to 05:32:00.
+
+On the unrepaired code the first stamp, at 03:01:00, already spent the reset, and the test
+fails on `held_unspent` there.
+
 ## `fn with_one_pool_a_reset_at_the_clock_backs_off_as_before() {`
 
 An agent with one pool, `claude-max`, limited with `resets 3am (UTC)` at 03:00:00. Its reset

@@ -3626,6 +3626,163 @@ fn a_resumed_run_reads_a_reset_its_pool_refused_past_as_spent() {
     );
 }
 
+const NAMING_THREE_OH_ONE_AGAIN: [(TaskKey, GenerationId, &str); 3] = [
+    (TaskKey(0), GenerationId(0), LIMIT_RESET_AT_THREE_OH_ONE),
+    (TaskKey(0), GenerationId(1), FIVE_HOUR_LIMIT),
+    (TaskKey(0), GenerationId(2), LIMIT_RESET_AT_THREE_OH_ONE),
+];
+
+struct ResumedAt(&'static str);
+
+impl TimeSource for ResumedAt {
+    fn now_rfc3339(&self) -> String {
+        self.0.to_owned()
+    }
+}
+
+fn refused_again_on_resume(tag: &str, at: &'static str) -> crate::engine::topology::scaffold::Wide {
+    use crate::engine::topology::scaffold::{ScaffoldAdapters, WideTask};
+
+    let mut wide = on_primary_and_spare(tag, &NAMING_THREE_OH_ONE_AGAIN, true);
+    let mut hooks = wide.env.hooks();
+    for _ in 0..2 {
+        step_answered_by(&mut wide, ScaffoldAdapters::rate_limiting(), &mut hooks);
+    }
+    assert_eq!(
+        deferral_of(&wide, TaskKey(0)),
+        (TaskState::Deferred, 1),
+        "{tag}: at 03:00 `primary` refuses naming 03:01 and `spare` naming 05:30, so the task is \
+         deferred"
+    );
+
+    let (_, mut resumed) = wide
+        .resume(
+            "inc-2",
+            limited_runner(
+                &[WideTask::independent("alpha")],
+                &NAMING_THREE_OH_ONE_AGAIN,
+                &[],
+            ),
+            Ceiling::unlimited(),
+        )
+        .expect("the next process resumes the run");
+    resumed.env.adapters = std::sync::Arc::new(ScaffoldAdapters::rate_limiting());
+    let mut hooks = resumed.env.hooks();
+    let clock = ResumedAt(at);
+    let refused = {
+        let seams = RunSeams {
+            clock: &clock,
+            ..resumed.env.seams()
+        };
+        resumed.run.step(&seams, &mut hooks).expect("a step")
+    };
+    assert!(
+        matches!(
+            refused,
+            Progress::Settled {
+                key: TaskKey(0),
+                accepted: false,
+                ..
+            }
+        ),
+        "{tag}: the resume wakes the task, and generation 2 is refused: {refused:?}"
+    );
+    assert_eq!(
+        pools_of_attempts(&resumed).last().cloned(),
+        Some(Some("primary".to_owned())),
+        "{tag}: generation 2 binds `primary`, first in file order"
+    );
+    assert_eq!(
+        pools_exhausted(&resumed),
+        [
+            (
+                "primary".to_owned(),
+                Some("2026-11-11T03:01:00Z".to_owned())
+            ),
+            ("spare".to_owned(), Some("2026-11-11T05:30:00Z".to_owned())),
+        ],
+        "{tag}: the refusal names 03:01 again, so it writes no new `pool_exhausted`"
+    );
+    assert_eq!(
+        deferral_of(&resumed, TaskKey(0)).0,
+        TaskState::Deferred,
+        "{tag}: both pools are held, so the refusal defers the task again"
+    );
+    resumed
+}
+
+#[test]
+fn a_refusal_a_minute_past_a_reset_leaves_it_unspent_and_the_wait_runs_to_its_margin() {
+    let resumed = refused_again_on_resume("spent-reset-inside-the-margin", "2026-11-11T03:02:00Z");
+    assert_eq!(
+        resumed.run.held_unspent().get("primary"),
+        Some(&Some("2026-11-11T03:01:00Z".to_owned())),
+        "`primary` refused again at 03:02, past its 03:01 reset but short of its margin, so the \
+         reset is not spent"
+    );
+    let now = unix_seconds_of("2026-11-11T03:02:00Z").expect("a UTC reading");
+    assert_eq!(
+        resumed.run.awaited_reset(now, resumed.env.seams().plans),
+        Some(AwaitedReset {
+            pool: "primary".to_owned(),
+            reset_at: "2026-11-11T03:01:00Z".to_owned(),
+            until_unix: unix_seconds_of("2026-11-11T03:03:00Z").expect("a UTC reading"),
+        }),
+        "the wait runs to 03:03, two minutes past `primary`'s reset, and not to 05:32 for \
+         `spare`. It is asked of `awaited_reset`, since the 60 seconds to 03:03 are also the \
+         plain backoff's minute"
+    );
+}
+
+#[test]
+fn a_reset_is_spent_only_by_a_refusal_two_minutes_or_more_past_it() {
+    const SPENT: Option<&str> = None;
+    const KEPT: Option<&str> = Some("2026-11-11T03:01:00Z");
+    for (tag, stamp, kept, (pool, reset_at, until)) in [
+        (
+            "spent-reset-stamped-at-the-reset",
+            "2026-11-11T03:01:00Z",
+            KEPT,
+            ("primary", "2026-11-11T03:01:00Z", "2026-11-11T03:03:00Z"),
+        ),
+        (
+            "spent-reset-stamped-a-second-short",
+            "2026-11-11T03:02:59Z",
+            KEPT,
+            ("primary", "2026-11-11T03:01:00Z", "2026-11-11T03:03:00Z"),
+        ),
+        (
+            "spent-reset-stamped-a-minute-past",
+            "2026-11-11T03:02:00Z",
+            KEPT,
+            ("primary", "2026-11-11T03:01:00Z", "2026-11-11T03:03:00Z"),
+        ),
+        (
+            "spent-reset-stamped-at-the-margin",
+            "2026-11-11T03:03:00Z",
+            SPENT,
+            ("spare", "2026-11-11T05:30:00Z", "2026-11-11T05:32:00Z"),
+        ),
+    ] {
+        let resumed = refused_again_on_resume(tag, stamp);
+        assert_eq!(
+            resumed.run.held_unspent().get("primary"),
+            Some(&kept.map(str::to_owned)),
+            "{tag}: `primary` refused again at {stamp}, naming its 03:01 reset again"
+        );
+        let now = unix_seconds_of(stamp).expect("a UTC reading");
+        assert_eq!(
+            resumed.run.awaited_reset(now, resumed.env.seams().plans),
+            Some(AwaitedReset {
+                pool: pool.to_owned(),
+                reset_at: reset_at.to_owned(),
+                until_unix: unix_seconds_of(until).expect("a UTC reading"),
+            }),
+            "{tag}: refused at {stamp}, the wait runs to {until} for `{pool}`"
+        );
+    }
+}
+
 #[test]
 fn with_one_pool_a_reset_at_the_clock_backs_off_as_before() {
     use crate::engine::topology::scaffold::WideTask;

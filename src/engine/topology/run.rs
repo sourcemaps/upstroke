@@ -3116,6 +3116,7 @@ fn last_settled_record(events: &[TopologyEvent], key: TaskKey) -> Option<&Attemp
 }
 
 fn spent_resets(events: &[TopologyEvent]) -> BTreeSet<String> {
+    let margin = interaction::RESET_WAIT_MARGIN.as_secs();
     let mut recorded: BTreeMap<&String, u64> = BTreeMap::new();
     let mut spent = BTreeSet::new();
     let mut signalled: Vec<&String> = Vec::new();
@@ -3133,8 +3134,9 @@ fn spent_resets(events: &[TopologyEvent]) -> BTreeSet<String> {
                 if let Some(pool) = crate::capacity::limited_pool(&data.record) {
                     let refused_past = recorded
                         .get(pool)
+                        .and_then(|reset| reset.checked_add(margin))
                         .zip(unix_seconds_of(&event.ts))
-                        .is_some_and(|(reset, at)| at >= *reset);
+                        .is_some_and(|(spent_from, at)| at >= spent_from);
                     if refused_past && !signalled.contains(&pool) {
                         spent.insert(pool.clone());
                     }
