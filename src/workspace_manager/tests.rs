@@ -15286,6 +15286,43 @@ fn kill_git_child_waits_out_its_rung_on_the_clock_and_sleeper_it_is_given() {
     );
 }
 
+/// A wait whose first reading is part-way into its rung sleeps for what is
+/// left of the rung less the margin, and returns at its first reading at or
+/// past the rung. Here a rung of 735.527593 ms is waited out on a fake
+/// clock whose first reading is 200 ms and whose sleeps return
+/// [`RUNG_TEST_OVERSHOOT`] late, a test input and not a measured sleep:
+/// 535.527593 ms are left, the one sleep is for 285.527593 ms and returns
+/// 101.687310 ms short of the rung, inside the 250 ms margin, and the spin
+/// carries the clock the rest of the way.
+///
+/// The two tests above that sleep start their clocks at zero, where what is
+/// left is the whole rung, so a sleep planned from the whole rung passed
+/// them both. From 200 ms in, that sleep returns 98.312690 ms past the rung,
+/// and this test fails on it.
+#[test]
+fn a_wait_begun_part_way_into_its_rung_sleeps_only_for_what_is_left() {
+    let rung = std::time::Duration::from_nanos(735_527_593);
+    let start = std::time::Duration::from_millis(200);
+    let wait = wait_out_rung_on_a_fake_clock(rung, start, RUNG_TEST_OVERSHOOT);
+    // What was left at the first reading, the rung less the 200 ms the clock
+    // had passed, less the 250 ms margin: a number, for the reason
+    // `a_rung_inside_the_spin_margin_is_never_slept` gives.
+    assert_eq!(
+        wait.sleeps,
+        [std::time::Duration::from_nanos(285_527_593)],
+        "the wait for {rung:?} from a clock at {start:?} sleeps once, for what is left of the \
+         rung less the 250 ms margin"
+    );
+    wait.assert_returned_at_first_reading_past(rung);
+    let returned = *wait.readings.last().expect("the wait read the clock");
+    let late = returned.saturating_sub(rung);
+    assert!(
+        late < RUNG_TEST_TICK,
+        "the wait for {rung:?} from a clock at {start:?} returned at {returned:?}, {late:?} \
+         after the rung: the kill after it would fire that late"
+    );
+}
+
 /// Which of [`recover_sample`]'s two removals refused, with its error.
 ///
 /// Returned rather than panicked on inside the recovery, so that the panic
