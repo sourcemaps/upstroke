@@ -1462,9 +1462,10 @@ What one question `exec` asks under the runtime's own bound answered, read
 with its supervisor's fate kept (PR12-J6-OBSERVATION-FATE-DROPPED). Its stop
 answers false, and its outcomes are `read_outcome`'s:
 - a question its supervisor did not answer is read by `unanswered`;
-- a question its bound ended, which the funnel killed and reaped, an answer
-  longer than the runner reads, or a nonzero exit: `Failed`, a nonzero exit
-  through `classify_docker_failure`.
+- a question its bound ended, which the funnel killed and reaped, or an answer
+  longer than the runner reads: `Failed`; a nonzero exit is classified by
+  `classify_docker_failure`: `Unreachable` when its stderr means the daemon
+  was never reached (`is_unreachable_diagnostic`), and `Failed` otherwise.
 
 `answer_within` reads its outcome as that of a question whose stop never fired
 (`QuestionStop::NeverFired`): `exec` asks with a stop that answers false.
@@ -1480,11 +1481,9 @@ invocation's cancellation only when the predicate was asked and answered true,
 and the process funnel property under `unfinished` is what makes such an
 answer the question's end. The record is local to the call, so it is this one
 question's. `exec_within` gives it a question run under the process funnel
-(`question`);
+(`question`), and
 `tests::an_unanswered_docker_question_names_its_cancellation_only_when_its_stop_fired`
-gives it stand-ins that ask the stop or do not, with no `docker` at all; and
-`tests::an_unanswered_docker_question_asked_through_observe_names_its_cancellation`
-asks a question through `observe` under an invocation's bound.
+gives it stand-ins that ask the stop or do not, with no `docker` at all.
 
 ## `impl DockerCli` › `fn read_outcome(`
 
