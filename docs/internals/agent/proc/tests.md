@@ -476,84 +476,198 @@ reclaims it.
 
 ## `fn every_fifo_writer_is_gone_by(`
 
-Whether every writer of the fifo behind `read` is gone by `deadline`,
-as `now` tells the time.
+Whether every writer of the fifo behind `read` is gone, asked until
+`deadline` as `now` tells the time.
 
 A dead process holds no descriptors, so EOF from a non-blocking read of
-a fifo this test opened only for reading is exactly "nothing that opened
-or inherited the writing end is still running" — and unlike
-`kill(pid, 0)` it is not answered `Ok` by a zombie waiting for its
-reparented reaper. `EAGAIN` is the other answer: somebody still holds
-the writing end.
+a fifo this test opened only for reading is exactly "no descriptor that
+can write the fifo is open anywhere" — and unlike `kill(pid, 0)` it is
+not answered `Ok` by a zombie waiting for its reparented reaper. A
+descriptor opened for reading and writing, as the fixture's is, can
+write. `EAGAIN` is the other answer: somebody still holds one.
 
-The verdict is EOF by the deadline, or not, and nothing more: the poll
-does not report what its last read answered. One read is always taken,
-even when the deadline has already passed, and the clock is read after
-every read that is not EOF, so no answer the read gives can carry the
-poll past its deadline. The read and the clock are parameters so that
-`the_fifo_writer_poll_answers_by_its_deadline_whatever_the_reads_say`
+The deadline is when the poll stops asking, not a time by which EOF must
+have arrived. A read that answers EOF makes the poll return `true`
+whenever that read returns, and the clock is not read after it. The
+clock is read after every read that is not EOF, and once a reading is at
+or past the deadline the poll returns `false` without reading again. One
+read is always taken, even when the deadline has already passed. The
+poll does not report what its last read answered. The read and the clock
+are parameters so that
+`the_fifo_writer_poll_stops_asking_at_its_deadline_and_counts_eof_from_its_last_read`
 can script both.
 
 ## `fn every_fifo_writer_is_gone_by(` › `Ok(0) => return true,`
 
-EOF: no descriptor for the writing end exists anywhere.
+EOF: no descriptor that can write the fifo is open anywhere. It counts
+whenever this read returns; no clock reading follows it.
 
 ## `fn every_fifo_writer_is_gone_by(` › `Ok(_) => true,`
 
 Somebody wrote. Bytes are not an answer, so they are drained rather
-than counted, and the poll asks again at once. The fixture writes
-nothing into its fifo; this arm is kept from the stderr pipe this test
-used to read, where one byte of a shell diagnostic or a locale complaint
-sitting in the pipe read as "a writer is still there" for as long as it
-sat there. EOF is a property of the pipe once it is empty.
+than counted, and once the clock says the deadline has not come the poll
+asks again without resting. The fixture writes nothing into its fifo;
+this arm is kept from the stderr pipe this test used to read, where one
+byte of a shell diagnostic or a locale complaint sitting in the pipe
+read as "a writer is still there" for as long as it sat there. EOF is a
+property of the pipe once it is empty.
 
 ## `fn every_fifo_writer_is_gone_by(` › `Err(error) => error.kind() == std::io::ErrorKind::Interrupted,`
 
-`EINTR` is asked again at once rather than taken for a holder, and the
-deadline still binds it: the clock is read before the retry, so an
-endless run of interrupted reads ends at the deadline like any other
-answer. Every other error — `EAGAIN`, a writer holds it, or anything
-else — is "not yet": the poll rests and asks again. That matches the
-predecessor, `every_pipe_writer_is_gone`, which answered "not gone" for
-every error and was asked again after a sleep. Neither distinguishes
-`EAGAIN` from another errno in its verdict.
+`EINTR` is asked again without resting rather than taken for a holder,
+and the deadline still binds it: the clock is read before the retry, so
+an endless run of interrupted reads ends when the poll stops asking,
+like any other answer. Every other error — `EAGAIN`, a writer holds it,
+or anything else — is "not yet": the poll rests and asks again. That
+matches the predecessor, `every_pipe_writer_is_gone`, which answered
+"not gone" for every error and was asked again after a sleep. Neither
+distinguishes `EAGAIN` from another errno in its verdict; the stricter
+question is `a_writer_holds_the_fifo`'s, asked before `kill_tree`.
 
 ## `fn every_fifo_writer_is_gone_by(` › `crate::workspace_manager::fixture::rest_within(`
 
-The rest is the tick or what remains of the bound, whichever is less,
-so the rest taken before the last read never carries the poll past its
-deadline.
+The rest is the tick or what remains until the deadline, whichever is
+less, so no rest ends after the deadline. A rest that uses up what
+remained is still followed by a read: EOF from it counts, and any other
+answer is followed by the clock reading that stops the poll.
 
-## `fn the_fifo_writer_poll_answers_by_its_deadline_whatever_the_reads_say() {`
+## `fn the_fifo_writer_poll_stops_asking_at_its_deadline_and_counts_eof_from_its_last_read() {`
 
-The poll's verdict and its read count against scripted read outcomes
-and a clock that advances one second per reading, with no process or
-descriptor involved. EOF settles at once, after drained bytes, and
-after an interrupted read. A held writer (`EAGAIN`), an endless run of
-interrupted reads (`EINTR`), endless bytes and another errno (`EBADF`)
-each stop at the five-second deadline after five reads. A deadline
-already past still gets its one read.
+The deadline is when the poll stops asking, and EOF from its last read
+counts whenever that read returns. Checked against scripted read
+outcomes and a clock that advances a fixed step per reading, with no
+process or descriptor involved. Each case states the verdict, how many
+reads were taken and how many times the clock was read.
+
+EOF settles at once, after drained bytes, and after an interrupted read.
+A held writer (`EAGAIN`), an endless run of interrupted reads (`EINTR`),
+endless bytes and another errno (`EBADF`) each stop at the five-second
+deadline, one second a reading, after five reads and five clock
+readings. A writer held at 4,999 ms and then EOF is `true` after two
+reads and one clock reading: the poll was short of its deadline when it
+asked again, and it reads no clock after the EOF, so when that read
+returned cannot turn the answer into `false`. A deadline already past
+still gets its one read.
 
 It covers the loop and nothing else. What a real kernel answers on a
 real fifo is the settlement test's question, not this one's.
+
+## `const HELD_WRITER_PROBE_READS: usize = 8;`
+
+How many reads `a_writer_holds_the_fifo` takes at most.
+
+## `fn a_writer_holds_the_fifo(`
+
+The settlement test's premise, asked before `kill_tree`: a writer of the
+fifo behind `read` is open. `WouldBlock` (`EAGAIN`) alone means held. An
+interrupted read (`EINTR`) is asked again, eight reads in all at most.
+Any other answer — EOF, bytes, another errno, or an eighth interruption
+— comes back as `Err`, and the settlement test fails naming it.
+
+The poll above treats every error as "not yet" because it is waiting
+for EOF; this probe guards against a vacuous pass, so only the answer
+that means a writer is open counts. Before it, one read was taken and
+anything but `WouldBlock` failed with "the grandchild holds no writer of
+the fifo": an `EINTR` was reported as a missing writer, and no failure
+named what the read had answered.
+
+## `fn the_held_writer_probe_takes_only_would_block_for_a_holder() {`
+
+The probe against scripted read answers, with no descriptor involved.
+Each case states the answer and how many reads were taken. `WouldBlock`
+is held after one read, `Interrupted, WouldBlock` after two, and seven
+interruptions then `WouldBlock` after eight. Eight interruptions fail on
+the eighth read, naming `EINTR`, and the `WouldBlock` scripted after
+them is never read. EOF, EOF after an interruption, bytes and `EBADF`
+each fail naming that answer. A probe that read past its script panics
+saying so.
+
+## `fn only_while_the_leader_is_uncollected<T>(`
+
+`kill` runs only when `leader` — the answer the fixture's own
+`tree.child.try_wait()` gave, asked at the call site — is `Ok(None)`.
+Any other answer comes back as `Err` naming it, `kill` is not called,
+and nothing is signalled.
+
+THE PREMISE: only this handle waits for the leader. The gate depends on
+it and does not check it. Nothing in the settlement test starts a
+reaper, and the readiness wait is handed this same `tree.child`. Given
+that, `Ok(None)` means the leader has not been collected, so its pid is
+still this process's unreaped child, and the group id `kill_tree`
+signals — that pid — cannot have been issued to anyone else. A leader
+that exits after the question stays a zombie until `kill_tree`'s own
+`wait` collects it, and a zombie pins its pid just the same.
+`Ok(Some(_))` means this handle has already collected the leader, after
+which the number is free to be reissued; `Err` means the question was
+not answered. Either way a signal to the group would not be known to
+reach this fixture, so the test fails instead of sending one.
+
+## `fn kill_tree_is_reached_only_while_the_leader_is_uncollected() {`
+
+The gate against scripted `try_wait` answers, with a counting stand-in
+for the kill and no process involved. `Ok(None)` calls it once. A leader
+already collected after exiting 0, one collected after `SIGKILL`, and a
+question that failed (`ECHILD`) each call it zero times and come back as
+`Err`.
+
+## `const FIFO_WRITER_CLAUSE: &str = "exec 3<>\"$UPSTROKE_FIFO\"";`
+
+The clause with which the settlement fixture's grandchild opens its
+writer on descriptor 3. It is a constant so that
+`the_fifo_writer_clause_exits_on_an_owned_fifo_with_no_reader` runs the
+same clause the fixture runs.
+
+Read-write, `3<>`, rather than `3>`. An open of a fifo for writing alone
+waits until some process opens it for reading, so the fixture used to
+depend on this test having opened its reading end first, and unlinked
+the fifo when the readiness wait failed so that a grandchild reaching
+its open after the reading end had closed would find no path rather
+than wait for a reader that would never come. That arm is gone. An open
+for reading and writing does not wait for a reader on Linux or macOS;
+POSIX leaves it undefined for a fifo, which is why it is measured on
+both rather than cited.
+
+## `fn the_fifo_writer_clause_exits_on_an_owned_fifo_with_no_reader() {`
+
+`FIFO_WRITER_CLAUSE`, run by `sh` on a fifo this test made (`0600`, in a
+scratch tree it acquired) and that no process has open, exits 0 within
+ten seconds. Linux and macOS, the two platforms that run the settlement
+test.
+
+If it has not exited by then, the test opens the fifo's reading end,
+non-blocking, which releases a writer waiting for a reader, collects the
+child with `wait`, and fails naming the last answer it had and what the
+collection returned. No signal is sent: the release is what lets the
+child finish. If the reading end does not open, the test fails saying so
+and leaves the child uncollected rather than wait on one nothing could
+release.
 
 ## `fn kill_tree_settles_the_whole_unix_group_before_it_returns() {`
 
 `kill_tree` settles the child's whole **group**, and does it before it
 returns.
 
-This is the one path on Unix that reaches `kill_tree`, and no test drove
-it: the explicit `kill(-pgid, SIGKILL)` could be deleted outright and
-the suite stayed green, because everywhere the funnel *is* exercised the
+This is the test that drives `kill_tree`'s group signal on Unix with
+nothing else there to settle the group. When it was written no test did:
+the explicit `kill(-pgid, SIGKILL)` could be deleted outright and the
+suite stayed green, because everywhere the funnel *is* exercised the
 per-invocation reaper settles the same group and either mechanism alone
 satisfies every assertion. Nothing here starts a reaper, so `kill_tree`
 is the only thing that can settle this group — which is what tells the
 two apart.
 
-The oracle is `kill_tree`'s own doc comment turned into a question:
-"the real agent process would survive, keep running, and **keep the
-pipes open**". A group member that outlived the call still holds the
-writing end of the fixture's fifo, so the reading end is not at EOF.
+The oracle is `kill_tree_primitive`'s note (`docs/internals/agent/proc.md`)
+turned into a question: "the real agent process would survive, keep
+running, and **keep the pipes open**". Once readiness is published the
+group is the leader and the branch it started. The leader — the outer
+`sh` — runs the branch in the background and then `wait "$!"`, with no
+foreground command of its own. The branch — the inner `sh` and the
+`sleep` it starts — holds the fixture's fifo for writing. Each is
+observed: a branch member that outlived the call still holds the writer,
+so the reading end is not at EOF, and the leader's status, which
+`kill_tree` collects, must be a kill by `SIGKILL`. The leader used to run
+a foreground `sleep 60`, a member that held no writer and was not the
+leader, and nothing observed it.
 
 **Why a private fifo and not the inherited stderr.** The oracle used to
 be the read end of the child's piped stderr. That pipe's writing end
@@ -565,11 +679,11 @@ life if it never does, and past an exec too if the descriptor was not
 yet close-on-exec at the fork: on macOS the standard library marks it
 only after `pipe` returns. A copy held outside the group is a writer
 `kill_tree` is not answerable for, so the old oracle could not say
-*which* process held the pipe. Now the writing end is opened by the
-fixture's grandchild itself, after its fork, from a path handed to
-nobody else: the only processes that can hold it are that grandchild
-and what it starts. This process opens only the reading end, and a copy
-of a reading end held elsewhere keeps no EOF back.
+*which* process held the pipe. Now the writer is opened by the fixture's
+grandchild itself, after its fork, from a path handed only to the
+fixture: the only processes that can hold it are that grandchild and
+what it starts. This process opens only the reading end, and a copy of
+a reading end held elsewhere keeps no EOF back.
 
 **No cleanup by group number once `kill_tree` has returned.** The body
 used to end with an unconditional `kill(-pgid, SIGKILL)`, after the
@@ -578,30 +692,37 @@ the leader, so `pgid` is only a number: once the group has no member
 left the system is free to issue it again, and a signal sent to it is
 not known to reach this fixture. That call is gone, and no signal
 replaces it. The fixture bounds its own lifetime instead. Once readiness
-is published every member is in a `sleep 60` or about to start one, so a
-member that a failing `kill_tree` left behind exits by itself within
-about a minute. A failure before `kill_tree` signals nothing either. The
-same minute bounds the group, though the leader then stays an unreaped
+is published the branch is in a `sleep 60` or about to start one and the
+leader is waiting for the branch, so a member that a failing `kill_tree`
+left behind exits by itself within about a minute. `kill_tree` itself is
+reached only while this test's handle says the leader is uncollected,
+and a failure before it signals nothing. The same minute bounds the
+group, though a leader nothing has collected then stays an unreaped
 zombie until the test binary exits. What cleanup remains acts on things
 this test still owns: the fifo's reading end, `tree` (whose leader
-`kill_tree` has already reaped), and the scratch guard.
+`kill_tree` has already reaped), and the scratch guard. Dropping `tree`
+signals nothing: `ProcessTree` has no `Drop` of its own, and a dropped
+`Child` neither kills nor waits.
 
 **Linux and macOS only.** The gate is
 `cfg(any(target_os = "linux", target_os = "macos"))`, not `cfg(unix)`.
 `test-linux` and `test-macos` run it natively, and `lint` and
 `lint (macos)` check it with Clippy. No CI leg builds for any other
-Unix.
+Unix. `FIFO_WRITER_CLAUSE` and the clause's own test carry the same
+gate.
 
 **What the recorded failures do and do not establish.**
 `findings/P2_correctness_202609131200_the-macos-kill-tree-settle-fingerprint.md`
 records this test's assertion failing on hosted macOS. What those logs
 carry is the assertion's message, with no errno and no pid. They
-establish that the poll did not report the writers gone by its
-five-second cutoff. They do not establish why, whether a writer was
-still open, or which process held one. Neither the fifo nor the removal
-of the group-number cleanup answers those questions. The test keeps the
-original deadline and assertion, so a failure here still says only that
-much. The finding stays open.
+establish that the poll stopped asking at its five-second deadline with
+no read having answered EOF. They do not establish why, whether a writer
+was still open, or which process held one. None of the fixture's changes
+since — the fifo, the removal of the group-number cleanup, the leader's
+`wait`, the read-write open, the gate before `kill_tree` — answers those
+questions. The test keeps the original deadline and assertion, so a
+failure of that assertion still says only that much. The finding stays
+open.
 
 ## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `let parent = std::env::temp_dir();`
 
@@ -613,13 +734,18 @@ The fifo is made there, `0600`, and its path goes only to the fixture.
 
 ## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `let mut command = shell(`
 
-The grandchild — the inner `sh` — opens the fifo for writing on
-descriptor 3 and publishes readiness only if that open succeeded, so
-readiness implies the writer is already held. The direct child never
+The leader — the outer `sh` — starts the branch in the background and
+then `wait "$!"`s for it, so it runs nothing of its own in the
+foreground and every member of the group is the leader or the branch.
+The grandchild — the inner `sh` — opens the fifo on descriptor 3 with
+`FIFO_WRITER_CLAUSE` and publishes readiness only if that open
+succeeded, so readiness implies the writer is already held; the
+`sleep 60` it then starts inherits the descriptor. The leader never
 opens it: a `kill_tree` that killed only the direct child leaves the
-writer open, which is the failure this test exists to see. The open
-does not block, because this test opened the reading end before the
-spawn. Every stream of the child is null; nothing here reads them.
+writer open, which is the failure this test exists to see. The open is
+read-write, so it does not wait for a reader and does not depend on
+this test's reading end being open when the grandchild reaches it. Every
+stream of the child is null; nothing here reads them.
 
 Staged and renamed, not written in place. The waiter below polls for
 the path, and a path that is created and then filled is observable
@@ -632,35 +758,46 @@ Producer-aware: the direct child is the only liveness fact a file
 signal has, and a fixture whose `sh` never started would otherwise
 have spent the whole bound before saying so.
 
-## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `let _ = std::fs::remove_file(&fifo);`
-
-If the wait ends any other way, the fifo is unlinked before the panic
-unwinds through its reading end. Otherwise a grandchild that has not yet
-reached its `exec 3>` could open the fifo after the last reader has
-closed. An open for writing without `O_NONBLOCK` waits for a reader, and
-none would ever come, so that shell would outlive every bound this
-fixture sets. With the path gone, a later open fails and the shell's
-`&&` chain stops there. An open that wins the race against the unlink
-still finds the reading end open and returns at once.
-
 ## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `let holders_group = unsafe { libc::getpgid(holder) };`
 
 The ownership checks are queries, never deliveries. `getpgid` on the
 published pid shows the writer's opener was, when asked, a member of
-the group `kill_tree` targets and not its leader. The single read below
-must answer `EAGAIN`: a writer is open, and the only process that
-opened one is that grandchild. Together they rule out a vacuous pass,
-in which EOF after `kill_tree` would mean nothing because no group
-member ever held the writer.
+the group `kill_tree` targets and not its leader. `a_writer_holds_the_fifo`
+below must then answer that a writer is open — `WouldBlock`, with an
+interrupted read asked again and any other answer failing the test by
+name — and the only process that opened one is that grandchild.
+Together they rule out a vacuous pass, in which EOF after `kill_tree`
+would mean nothing because no group member ever held the writer.
+
+## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `only_while_the_leader_is_uncollected(tree.child.try_wait(), || {`
+
+`kill_tree` signals the group whose id is the leader's pid, so the
+fixture's own handle is asked here, at the call, whether the leader is
+still uncollected. Only `Ok(None)` reaches `kill_tree`; any other answer
+fails the test with nothing signalled. The premise is the one
+`only_while_the_leader_is_uncollected` states: only this handle waits
+for the leader.
 
 ## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `let deadline = Instant::now() + Duration::from_secs(5);`
 
-Five seconds, the bound the stderr oracle had. Bounded rather than
-instantaneous, and the bound is the kernel's: `kill(-pgid, SIGKILL)`
-returns as soon as the signals are queued, so a member can still be
-tearing down when this line runs. What the bound cannot absorb is a
-member that was never signalled — the fixture's survivors sleep for a
-minute.
+Five seconds, the bound the stderr oracle had, and it is when the poll
+stops asking: EOF from the poll's last read counts whenever that read
+returns. Bounded rather than instantaneous, and the bound is the
+kernel's: `kill(-pgid, SIGKILL)` returns as soon as the signals are
+queued, so a member can still be tearing down when this line runs. What
+the bound cannot absorb is a member that was never signalled — the
+fixture's branch sleeps for a minute, and its leader waits for the
+branch.
+
+## `fn kill_tree_settles_the_whole_unix_group_before_it_returns` › `let leader = tree.child.try_wait();`
+
+The leader's status, after the poll. `kill_tree`'s own `wait` collected
+it and this handle kept it, so asking again reaps nothing and signals
+nothing. It must be a kill by `SIGKILL`: the leader only waits for the
+branch, which sleeps for a minute, so within this test it ends only by a
+signal, and the only signals this test sends are `kill_tree`'s. Its
+assertion comes before the poll's own, unchanged, and carries the
+poll's verdict in its message.
 
 ## `fn a_successful_direct_exit_settles_its_group_before_the_transcript_is_collected() {`
 

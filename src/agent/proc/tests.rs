@@ -1200,88 +1200,119 @@ fn every_fifo_writer_is_gone_by(
 
 #[cfg(unix)]
 #[test]
-fn the_fifo_writer_poll_answers_by_its_deadline_whatever_the_reads_say() {
+fn the_fifo_writer_poll_stops_asking_at_its_deadline_and_counts_eof_from_its_last_read() {
     struct Case {
         name: &'static str,
         script: &'static [Result<usize, i32>],
         then: Result<usize, i32>,
         deadline_after: Duration,
+        per_reading: Duration,
         settled: bool,
         reads: usize,
+        readings: u32,
     }
     let five = Duration::from_secs(5);
+    let second = Duration::from_secs(1);
     let cases = [
         Case {
             name: "end of file at once",
             script: &[],
             then: Ok(0),
             deadline_after: five,
+            per_reading: second,
             settled: true,
             reads: 1,
+            readings: 0,
         },
         Case {
             name: "bytes drained, then end of file",
             script: &[Ok(3)],
             then: Ok(0),
             deadline_after: five,
+            per_reading: second,
             settled: true,
             reads: 2,
+            readings: 1,
         },
         Case {
             name: "an interrupted read asked again, then end of file",
             script: &[Err(libc::EINTR)],
             then: Ok(0),
             deadline_after: five,
+            per_reading: second,
             settled: true,
             reads: 2,
+            readings: 1,
         },
         Case {
-            name: "a writer held past the deadline",
+            name: "a writer held at 4,999 ms, then end of file and no further clock reading",
+            script: &[Err(libc::EAGAIN)],
+            then: Ok(0),
+            deadline_after: five,
+            per_reading: Duration::from_millis(4_999),
+            settled: true,
+            reads: 2,
+            readings: 1,
+        },
+        Case {
+            name: "a writer held until the poll stops asking",
             script: &[],
             then: Err(libc::EAGAIN),
             deadline_after: five,
+            per_reading: second,
             settled: false,
             reads: 5,
+            readings: 5,
         },
         Case {
             name: "every read interrupted",
             script: &[],
             then: Err(libc::EINTR),
             deadline_after: five,
+            per_reading: second,
             settled: false,
             reads: 5,
+            readings: 5,
         },
         Case {
             name: "bytes without end",
             script: &[],
             then: Ok(1),
             deadline_after: five,
+            per_reading: second,
             settled: false,
             reads: 5,
+            readings: 5,
         },
         Case {
             name: "a read that fails otherwise",
             script: &[],
             then: Err(libc::EBADF),
             deadline_after: five,
+            per_reading: second,
             settled: false,
             reads: 5,
+            readings: 5,
         },
         Case {
             name: "the deadline already passed, end of file",
             script: &[],
             then: Ok(0),
             deadline_after: Duration::ZERO,
+            per_reading: second,
             settled: true,
             reads: 1,
+            readings: 0,
         },
         Case {
             name: "the deadline already passed, a writer held",
             script: &[],
             then: Err(libc::EAGAIN),
             deadline_after: Duration::ZERO,
+            per_reading: second,
             settled: false,
             reads: 1,
+            readings: 1,
         },
     ];
     for case in cases {
@@ -1289,7 +1320,7 @@ fn the_fifo_writer_poll_answers_by_its_deadline_whatever_the_reads_say() {
         let mut readings = 0_u32;
         let mut clock = || {
             readings += 1;
-            start + Duration::from_secs(u64::from(readings))
+            start + case.per_reading * readings
         };
         let mut outcomes = case.script.iter().copied();
         let mut reads = 0_usize;
@@ -1304,6 +1335,247 @@ fn the_fifo_writer_poll_answers_by_its_deadline_whatever_the_reads_say() {
             every_fifo_writer_is_gone_by(start + case.deadline_after, &mut read, &mut clock);
         assert_eq!(settled, case.settled, "{}", case.name);
         assert_eq!(reads, case.reads, "{}", case.name);
+        assert_eq!(readings, case.readings, "{}", case.name);
+    }
+}
+
+#[cfg(unix)]
+const HELD_WRITER_PROBE_READS: usize = 8;
+
+#[cfg(unix)]
+fn a_writer_holds_the_fifo(
+    read: &mut dyn FnMut(&mut [u8]) -> std::io::Result<usize>,
+) -> Result<(), std::io::Result<usize>> {
+    let mut byte = [0_u8; 1];
+    let mut last = read(&mut byte);
+    let mut reads = 1;
+    while reads < HELD_WRITER_PROBE_READS
+        && matches!(&last, Err(error) if error.kind() == std::io::ErrorKind::Interrupted)
+    {
+        last = read(&mut byte);
+        reads += 1;
+    }
+    match last {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+        last => Err(last),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_held_writer_probe_takes_only_would_block_for_a_holder() {
+    struct Case {
+        name: &'static str,
+        script: &'static [Result<usize, i32>],
+        answer: Result<(), Result<usize, Option<i32>>>,
+        reads: usize,
+    }
+    let cases = [
+        Case {
+            name: "would block",
+            script: &[Err(libc::EAGAIN)],
+            answer: Ok(()),
+            reads: 1,
+        },
+        Case {
+            name: "interrupted, then would block",
+            script: &[Err(libc::EINTR), Err(libc::EAGAIN)],
+            answer: Ok(()),
+            reads: 2,
+        },
+        Case {
+            name: "interrupted seven times, then would block on the eighth read",
+            script: &[
+                Err(libc::EINTR),
+                Err(libc::EINTR),
+                Err(libc::EINTR),
+                Err(libc::EINTR),
+                Err(libc::EINTR),
+                Err(libc::EINTR),
+                Err(libc::EINTR),
+                Err(libc::EAGAIN),
+            ],
+            answer: Ok(()),
+            reads: 8,
+        },
+        Case {
+            name: "interrupted eight times, and the would-block after them never read",
+            script: &[
+                Err(libc::EINTR),
+                Err(libc::EINTR),
+                Err(libc::EINTR),
+                Err(libc::EINTR),
+                Err(libc::EINTR),
+                Err(libc::EINTR),
+                Err(libc::EINTR),
+                Err(libc::EINTR),
+                Err(libc::EAGAIN),
+            ],
+            answer: Err(Err(Some(libc::EINTR))),
+            reads: 8,
+        },
+        Case {
+            name: "end of file",
+            script: &[Ok(0)],
+            answer: Err(Ok(0)),
+            reads: 1,
+        },
+        Case {
+            name: "interrupted, then end of file",
+            script: &[Err(libc::EINTR), Ok(0)],
+            answer: Err(Ok(0)),
+            reads: 2,
+        },
+        Case {
+            name: "bytes",
+            script: &[Ok(1)],
+            answer: Err(Ok(1)),
+            reads: 1,
+        },
+        Case {
+            name: "another errno",
+            script: &[Err(libc::EBADF)],
+            answer: Err(Err(Some(libc::EBADF))),
+            reads: 1,
+        },
+    ];
+    for case in cases {
+        let mut outcomes = case.script.iter().copied();
+        let mut reads = 0_usize;
+        let mut read = |_: &mut [u8]| {
+            reads += 1;
+            outcomes
+                .next()
+                .unwrap_or_else(|| panic!("{}: the probe read past its script", case.name))
+                .map_err(std::io::Error::from_raw_os_error)
+        };
+        let answer = a_writer_holds_the_fifo(&mut read)
+            .map_err(|last| last.map_err(|error| error.raw_os_error()));
+        assert_eq!(answer, case.answer, "{}", case.name);
+        assert_eq!(reads, case.reads, "{}", case.name);
+    }
+}
+
+#[cfg(unix)]
+fn only_while_the_leader_is_uncollected<T>(
+    leader: std::io::Result<Option<std::process::ExitStatus>>,
+    kill: impl FnOnce() -> T,
+) -> Result<T, String> {
+    match leader {
+        Ok(None) => Ok(kill()),
+        Ok(Some(status)) => Err(format!(
+            "the group's leader had already been collected ({status}), so its group id is only \
+             a number: nothing was signalled"
+        )),
+        Err(error) => Err(format!(
+            "asking whether the group's leader had been collected failed ({error}): nothing was \
+             signalled"
+        )),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn kill_tree_is_reached_only_while_the_leader_is_uncollected() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    let answers: [(&str, std::io::Result<Option<ExitStatus>>, usize); 4] = [
+        ("still running", Ok(None), 1),
+        (
+            "collected after exiting 0",
+            Ok(Some(ExitStatus::from_raw(0))),
+            0,
+        ),
+        (
+            "collected after SIGKILL",
+            Ok(Some(ExitStatus::from_raw(libc::SIGKILL))),
+            0,
+        ),
+        (
+            "the question failed",
+            Err(std::io::Error::from_raw_os_error(libc::ECHILD)),
+            0,
+        ),
+    ];
+    for (name, answer, kills_expected) in answers {
+        let mut kills = 0_usize;
+        let reached = only_while_the_leader_is_uncollected(answer, || kills += 1);
+        assert_eq!(kills, kills_expected, "{name}: {reached:?}");
+        assert_eq!(reached.is_ok(), kills_expected == 1, "{name}: {reached:?}");
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const FIFO_WRITER_CLAUSE: &str = "exec 3<>\"$UPSTROKE_FIFO\"";
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn the_fifo_writer_clause_exits_on_an_owned_fifo_with_no_reader() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let parent = std::env::temp_dir();
+    let scratch = match crate::rundir::scratch_tree::acquire(&parent, "fifo-clause") {
+        Ok(scratch) => scratch,
+        Err(refusal) => panic!(
+            "a scratch tree for `fifo-clause` under {}: {refusal:?}",
+            parent.display()
+        ),
+    };
+    let fifo = scratch.path().join("writer");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).expect("a path without NUL");
+    // SAFETY: `name` is a NUL-terminated string that outlives the call.
+    let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+    assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    let mut command = shell(FIFO_WRITER_CLAUSE);
+    command
+        .env("UPSTROKE_FIFO", &fifo)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().expect("spawn the clause's shell");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let answer = loop {
+        match child.try_wait() {
+            Ok(None) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    break Ok(None);
+                }
+                crate::workspace_manager::fixture::rest_within(
+                    Duration::from_millis(10),
+                    deadline.saturating_duration_since(now),
+                );
+            }
+            answer => break answer,
+        }
+    };
+    match answer {
+        Ok(Some(status)) => assert_eq!(
+            status.code(),
+            Some(0),
+            "the clause did not exit 0 on an owned fifo with no reader: {status}"
+        ),
+        waiting => match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)
+        {
+            Ok(_reader) => {
+                let collected = child.wait();
+                panic!(
+                    "the clause had not exited ten seconds after it started on an owned fifo \
+                     with no reader (last answer {waiting:?}); opening the reading end released \
+                     it, and it was collected as {collected:?}"
+                );
+            }
+            Err(error) => panic!(
+                "the clause had not exited ten seconds after it started on an owned fifo with \
+                 no reader (last answer {waiting:?}), and the reading end that would release \
+                 it did not open: {error}"
+            ),
+        },
     }
 }
 
@@ -1312,7 +1584,7 @@ fn the_fifo_writer_poll_answers_by_its_deadline_whatever_the_reads_say() {
 fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::OpenOptionsExt;
-    use std::os::unix::process::CommandExt;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
 
     let parent = std::env::temp_dir();
     let scratch = match crate::rundir::scratch_tree::acquire(&parent, "kill-tree") {
@@ -1333,11 +1605,11 @@ fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
         .custom_flags(libc::O_NONBLOCK)
         .open(&fifo)
         .expect("open the fifo's reading end");
-    let mut command = shell(
-        "sh -c 'exec 3>\"$UPSTROKE_FIFO\" && \
+    let mut command = shell(&format!(
+        "sh -c '{FIFO_WRITER_CLAUSE} && \
          printf \"ready\\n%s\\n\" \"$$\" > \"$UPSTROKE_READY.publishing\" && \
-         mv \"$UPSTROKE_READY.publishing\" \"$UPSTROKE_READY\" && sleep 60' & sleep 60",
-    );
+         mv \"$UPSTROKE_READY.publishing\" \"$UPSTROKE_READY\" && sleep 60' & wait \"$!\""
+    ));
     command
         .env("UPSTROKE_FIFO", &fifo)
         .env("UPSTROKE_READY", &ready)
@@ -1357,13 +1629,7 @@ fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
     let mut tree = ProcessTree::spawn(&mut command, &mut NoHooks).expect("spawn a group leader");
     let pgid = i32::try_from(tree.child.id()).expect("pid fits");
     let waited = readiness::await_signal(&ready, &mut tree.child, Duration::from_secs(10));
-    let published = match waited {
-        readiness::Waited::Ready(fields) => fields,
-        unready => {
-            let _ = std::fs::remove_file(&fifo);
-            unready.or_fail("the grandchild never started")
-        }
-    };
+    let published = waited.or_fail("the grandchild never started");
     let [marker, holder] = published.as_slice() else {
         panic!("the marker became visible with its content, not before it: {published:?}");
     };
@@ -1380,22 +1646,22 @@ fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
         "the fifo's writer is not a non-leading member of the child's group: pid {holder} \
          answered group {holders_group}, the child leads {pgid}"
     );
-    let mut byte = [0_u8; 1];
-    let held_before = matches!(
-        writers.read(&mut byte),
-        Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock
-    );
-    assert!(
-        held_before,
-        "the grandchild holds no writer of the fifo, so this test would pass vacuously"
-    );
+    if let Err(last) = a_writer_holds_the_fifo(&mut |buffer| writers.read(buffer)) {
+        panic!(
+            "the fifo's reading end did not answer that a writer holds it, so this test would \
+             pass vacuously: its last read answered {last:?}"
+        );
+    }
 
-    kill_tree(
-        &mut NoHooks,
-        ProcessSite::Terminate,
-        &mut tree,
-        &std::cell::Cell::new(ProcessFate::Unresolved),
-    )
+    only_while_the_leader_is_uncollected(tree.child.try_wait(), || {
+        kill_tree(
+            &mut NoHooks,
+            ProcessSite::Terminate,
+            &mut tree,
+            &std::cell::Cell::new(ProcessFate::Unresolved),
+        )
+    })
+    .unwrap_or_else(|refusal| panic!("{refusal}"))
     .expect("settle the group");
     let deadline = Instant::now() + Duration::from_secs(5);
     let settled = every_fifo_writer_is_gone_by(
@@ -1403,8 +1669,14 @@ fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
         &mut |buffer| writers.read(buffer),
         &mut Instant::now,
     );
+    let leader = tree.child.try_wait();
     drop(writers);
     drop(tree);
+    assert!(
+        matches!(&leader, Ok(Some(status)) if status.signal() == Some(libc::SIGKILL)),
+        "the group's leader was not collected as killed by SIGKILL: {leader:?} (the poll's \
+         verdict on the fifo's writers: {settled})"
+    );
     assert!(
         settled,
         "kill_tree returned while a member of the child's process group was still \
