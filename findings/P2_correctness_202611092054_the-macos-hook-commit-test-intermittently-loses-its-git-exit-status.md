@@ -55,3 +55,41 @@ native macOS validation.
 Do not skip, weaken, or automatically retry the assertion inside the test. A successful fresh CI
 run permits the ordinary merge checks to proceed but does not resolve this finding. No product
 repair is included here, and the original failures are not regraded.
+
+## Sightings and evidence, 2026-11-11
+
+The test failed in the macOS test job three times on 2026-11-11. Each failure was on a change that
+touches nothing under `src/runner` or `src/agent`:
+
+- job 130375210731, run 42976030457, pull request #365;
+- job 130416735154, run 42988928017, the first merge-queue run of #365;
+- job 130469246954, pull request #367.
+
+In the three jobs whose Git Trace2 dumps were read, the commit in the linked checkout ends 7 to
+10 milliseconds after its hook exits with code 0:
+
+| Hook `child_exit` | Last event of the commit |
+| --- | --- |
+| 07:25:31.607236 | 07:25:31.614849 |
+| 09:12:09.781390 | 09:12:09.788499 |
+| 11:04:49.605867 | 11:04:49.615496 |
+
+None of the three traces has an `exit`, `atexit` or `signal` event. Every inner Git command the hook
+started exits 0. In the same runs the commit in the main checkout reaches `exit` code 0.
+
+By its code, the supervising funnel does not signal the group in this case: it kills the group only
+after the child is already reaped, or on a timeout, an output limit or a stop, and the failing
+output shows none of those.
+
+**Hypothesis, not established:** the commit's process group is hung up by the kernel under macOS's
+rule for an orphaned process group that holds a stopped member. Every supervised child's group
+holds a member that stops itself (`spawn_group_anchor` in `src/agent/proc.rs` raises `SIGSTOP`),
+and the hook's helper leaves short-lived children in the commit's group when it exits. This is the
+mechanism another open finding records,
+`findings/P2_correctness_202609281056_a-daemonizing-descendant-hangs-up-the-role-on-macos.md`. If
+it is right, the defect is in the supervising code and this test is a witness of it.
+
+What would settle it is the number of the signal that ends the commit. The hypothesis predicts 1,
+`SIGHUP`. A change made beside this one makes the test's failure message carry that number.
+
+Nothing is repaired by this section.
