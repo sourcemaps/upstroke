@@ -1499,7 +1499,8 @@ chooses nothing and says nothing.
 With no wait held and no known reset in range, the arm is the plain
 backoff, unchanged. That covers a limit naming a reset more than
 `interaction::RESET_WAIT_BOUND` ahead (the weekly one, usually), a pool
-exhausted with no reset recorded, a recorded reset the clock had already
+exhausted with no reset recorded, a recorded reset that does not read as
+a date ([`unix_seconds_of`]), a recorded reset the clock had already
 passed when the back-off began, and a deferred queue verification, which
 names no pool. A reset the clock passes during a held wait is not one of
 these: that wait is continued to its target.
@@ -1523,7 +1524,8 @@ of exhausted pools:
 3. the pool that attempt's failure names, as `capacity::retire_signals`
    chooses it (`capacity::limited_pool`);
 4. that pool's recorded reset in `exhausted_pools`, read as Unix seconds
-   by [`unix_seconds_of`];
+   by [`unix_seconds_of`]. A reset that does not read, such as one on a
+   day its month lacks, is no known reset and is dropped here;
 5. the earliest of those resets that is ahead of the run's clock by at
    most `interaction::RESET_WAIT_BOUND`, the one
    `interaction::reset_wait_until` waits for. With none ahead within the
@@ -2183,7 +2185,25 @@ falls back to the host clock, which is what the sequential engine reads.
 ## `fn unix_seconds_of(reading: &str) -> Option<u64> {`
 
 `YYYY-MM-DDTHH:MM:SS[.fraction]Z` in Unix seconds, or `None` for
-anything else.
+anything else, a date its month lacks included.
+
+**A day its month lacks is no date** (`PR390-INVALID-RESET-DRIVES-WAIT`).
+The range checks admit a day from 1 to 31 in any month, and
+`util::days_from_civil` counts a day past the month's end on into the
+next month, so `2026-02-31T01:00:00Z` read as 01:00 on 3 March. A reset
+read back from the log comes through here ([`TopologyRun::awaited_reset`]),
+and no fold validates `pool_exhausted.reset_at`, because the field is
+informational. So a corrupted or hand-edited log could start a wait of
+hours toward a reset no limit named. The parser now keeps a date only when
+`util::civil_from_days` gives the same year, month and day back, which is
+the check `agent::adapter` makes on a date it reads from a limit message.
+29 February reads in a leap year and in no other.
+
+A reset that does not read is no known reset, so a deferred task whose
+pool records one backs off as if no reset were recorded. The run's own
+clock goes through the same parser ([`unix_seconds`]), and a reading
+refused here falls back to the host clock, as any other unreadable
+reading does.
 
 ## `fn promote_candidate<O: Operator + ?Sized>(`
 

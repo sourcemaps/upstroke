@@ -3039,7 +3039,11 @@ fn unix_seconds_of(reading: &str) -> Option<u64> {
     if !in_range {
         return None;
     }
-    let days = u64::try_from(crate::util::days_from_civil(year, month, day)).ok()?;
+    let days = crate::util::days_from_civil(year, month, day);
+    if crate::util::civil_from_days(days) != (year, month, day) {
+        return None;
+    }
+    let days = u64::try_from(days).ok()?;
     days.checked_mul(86_400)?
         .checked_add(hour * 3_600 + minute * 60 + second)
 }

@@ -637,6 +637,33 @@ The five-hour limit is read at 03:00, so the pool is recorded exhausted until 05
 backs off at 06:00. A reset already behind the clock is not waited for (`reset_wait_until`), so
 the back-off is the plain one.
 
+## `fn a_reset_on_a_day_its_month_lacks_is_not_read() {`
+
+`PR390-INVALID-RESET-DRIVES-WAIT` (P2): the witness. `unix_seconds_of` checked a day only against
+1 to 31, so 31 February 2026 read as 3 March, 29 February 2026 (not a leap year) as 1 March, and
+31 April as 1 May. Each of the three now reads as `None`. 29 February 2028 is a leap day and still
+reads, at one hour past `util::days_from_civil`'s count for that date. The five-hour limit's
+`2026-11-11T05:30:00Z` reads as it always did. On the code before the repair the test fails on its
+first reading: `Some(1772499600)`, 01:00 on 3 March 2026, where it expects `None`.
+
+## `struct OnMarchThird;`
+
+The run's clock at midnight UTC on 3 March 2026. The old parser read `2026-02-31T01:00:00Z` as an
+hour after this, well inside `interaction::RESET_WAIT_BOUND`.
+
+## `fn a_recorded_reset_on_a_day_its_month_lacks_backs_off_as_before() {`
+
+The same defect at the level of the run. The pool's recorded reset is replaced with
+`2026-02-31T01:00:00Z`, as a corrupted or hand-edited log would leave it, and the run backs off on
+`OnMarchThird`. A reset that does not read is no known reset, so the back-off is the plain one.
+On the code before the repair the run instead waited toward 01:02 on 3 March, in slices of
+600 seconds six times and then 120, 3,720 seconds where the plain back-off sleeps 60.
+
+The test sets `exhausted_pools` directly. It does not resume from a log that holds the reset,
+because a resume wakes the deferred task and runs it again before any back-off. A resumed run
+reaches `back_off` only after a second limit, and that limit records its own reset over the one
+under test. Either way, `exhausted_pools` is what `back_off` reads.
+
 ## `struct AnsweredAfterSlices<'a> {`
 
 An answer source that has nothing to say until the sleeper has slept `slices` slices, and then

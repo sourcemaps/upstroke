@@ -2255,6 +2255,57 @@ fn a_recorded_reset_already_passed_backs_off_as_before() {
     assert_backs_off_as_before("passed", &steps, &sleeper);
 }
 
+#[test]
+fn a_reset_on_a_day_its_month_lacks_is_not_read() {
+    for reading in [
+        "2026-02-31T01:00:00Z",
+        "2026-02-29T01:00:00Z",
+        "2026-04-31T00:00:00Z",
+    ] {
+        assert_eq!(
+            unix_seconds_of(reading),
+            None,
+            "{reading} names a day its month lacks, so it is no instant at all"
+        );
+    }
+    let leap_day = u64::try_from(crate::util::days_from_civil(2028, 2, 29) * 86_400 + 3_600)
+        .expect("29 February 2028 is after the epoch");
+    assert_eq!(
+        unix_seconds_of("2028-02-29T01:00:00Z"),
+        Some(leap_day),
+        "2028 is a leap year, so its 29 February is read"
+    );
+    assert_eq!(
+        unix_seconds_of("2026-11-11T05:30:00Z"),
+        Some(1_794_375_000),
+        "the five-hour limit's reset reads as it always did"
+    );
+}
+
+struct OnMarchThird;
+
+impl TimeSource for OnMarchThird {
+    fn now_rfc3339(&self) -> String {
+        "2026-03-03T00:00:00Z".to_owned()
+    }
+}
+
+#[test]
+fn a_recorded_reset_on_a_day_its_month_lacks_backs_off_as_before() {
+    use crate::engine::topology::scaffold::WideTask;
+
+    let mut wide = deferred_on_claude_max(
+        "reset-wait-no-such-day",
+        &[WideTask::independent("alpha")],
+        FIVE_HOUR_LIMIT,
+    );
+    wide.run.exhausted_pools = [signal("2026-02-31T01:00:00Z")].into_iter().collect();
+    let mut hooks = wide.env.hooks();
+    let sleeper = RecordingSleeper::default();
+    let steps = stepped_until_waited(&mut wide, &OnMarchThird, &sleeper, None, &mut hooks);
+    assert_backs_off_as_before("no such day", &steps, &sleeper);
+}
+
 struct AnsweredAfterSlices<'a> {
     sleeper: &'a RecordingSleeper,
     slices: usize,
