@@ -405,8 +405,9 @@ failed task and the retry ladder punishes the implementer for it.
 
 ## `pub enum ReviewResult` › `limit_message: Option<String>,`
 
-The reviewer's stderr, when the reviewer was rate-limited and that stderr is
-what signalled the limit; `None` on every other unavailable result.
+The text that signalled a rate-limited reviewer's limit, whole: its stderr
+when that stderr signals the limit, and otherwise its full result text when
+that result signals it. `None` on every other unavailable result.
 `engine::attempt::review_failure` hands it to the failure through
 `AttemptFailure::with_limit_message`. That is the same in-memory carrier a
 worker's stderr rides on, so the coordinator can read the reviewer's reset
@@ -524,6 +525,19 @@ review, and the text that did is already in the detail. Before, only the
 status and the detail were kept, and a reviewer whose limit was on stderr
 recorded its pool exhausted with no reset
 (`PR380-REVIEWER-STDERR-RESET-DROPPED`).
+
+When stderr does not signal the limit, the detail, the full result text, is
+kept instead if it signals the limit. That text is already behind the
+failure's reason, but `review_failure` puts only its first 400 bytes there,
+and a limit later in the result was cut off before anything read its reset.
+A result reading `MCP cache resets 9am (UTC)`, then more than 400 bytes of
+diagnostics, then `You've hit your 5-hour limit · resets 5:30am (UTC)` left
+the reason only the unrelated reset; it once recorded 09:00, and since the
+parser stopped reading a reset no limit gives, `None`. Kept whole, the
+result is read before anything shortens it, and the reset is 05:30. The
+reason keeps its 400-byte head, so nothing displayed changes. Stderr comes
+first because, when it signals, the result is the unrelated text beside it
+(`request failed`), as above.
 
 ## `Ok(ReviewOutcome {`
 

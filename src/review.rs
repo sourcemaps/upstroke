@@ -612,9 +612,15 @@ pub fn run_review(
             });
         }
         if outcome.status != OutcomeStatus::Completed {
-            let limit_message = (outcome.status == OutcomeStatus::RateLimited
-                && crate::agent::looks_rate_limited(&output.stderr))
-            .then(|| output.stderr.clone());
+            let limit_message = (outcome.status == OutcomeStatus::RateLimited)
+                .then(|| {
+                    [Some(&output.stderr), outcome.detail.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .find(|text| crate::agent::looks_rate_limited(text))
+                        .cloned()
+                })
+                .flatten();
             return Ok(ReviewOutcome {
                 result: ReviewResult::Unavailable {
                     status: outcome.status,

@@ -297,12 +297,14 @@ inside it: see `engine::topology::integrate::infrastructure`.
 
 ## `pub(super) fn review_failure(` › `let failure = match limit_message {`
 
-A rate-limited reviewer's stderr, when `review::run_review` kept it because
-it signalled the limit, rides on the failure as `limit_message`, as a
-worker's does from `evaluate_outcome` below, so `record_pool_exhausted` can
-read the reviewer's reset from it (`PR380-REVIEWER-STDERR-RESET-DROPPED`).
-The reason is the result's detail, as it was, and like the worker's the text
-is in memory only.
+The text `review::run_review` kept for a rate-limited reviewer rides on the
+failure as `limit_message`, as a worker's stderr does from `evaluate_outcome`
+below, so `record_pool_exhausted` can read the reviewer's reset from it
+(`PR380-REVIEWER-STDERR-RESET-DROPPED`). That text is the reviewer's stderr
+when the stderr signalled the limit, and otherwise its whole result when the
+result did. The reason is the result's detail cut to its first 400 bytes, as
+it was, and a limit past those bytes is read from the uncut `limit_message`
+instead. Like the worker's, the text is in memory only.
 
 ## `pub(super) fn review_failure(` › `if verdict.needs_human {`
 

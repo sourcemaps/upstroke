@@ -481,12 +481,14 @@ still counts one rule per observation.
 
 ## `pub struct AttemptFailure {` › `limit_message: Option<String>,`
 
-The text that signalled a rate limit, when it is not the text in `reason`.
+The text that signalled a rate limit, when `reason` does not hold it whole.
 `engine::attempt::evaluate_outcome` sets it to a worker's stderr when that
 stderr signals the limit (`PR380-RESET-SIGNAL-CHANNEL-DROPPED`), and
-`engine::attempt::review_failure` to a reviewer's, which `review::run_review`
-keeps on `ReviewResult::Unavailable` under the same rule
-(`PR380-REVIEWER-STDERR-RESET-DROPPED`). The coordinator's
+`engine::attempt::review_failure` to the text `review::run_review` keeps on
+`ReviewResult::Unavailable`: a reviewer's stderr under the same rule
+(`PR380-REVIEWER-STDERR-RESET-DROPPED`), or else its full result text when
+that signals the limit, since the reason holds only that result's first 400
+bytes. The coordinator's
 `record_pool_exhausted` reads a Claude Code reset from it before the reason,
 and from the reason only when it names none, so an unrelated reset in the
 reason cannot stand in for the limit's

@@ -158,10 +158,18 @@ names a reset that is not the limit's.
 
 `worker_limit_on_stderr` for a reviewer. When set, a review whose script says
 `ReviewBehavior::RateLimited` runs a real process that prints
-[`CLAUDE_REVIEW_REQUEST_FAILED`] on stdout and this text on stderr and exits
-1, and `parse` hands that output to the real `ClaudeCodeAdapter::parse`.
-Both constructors leave it `None`, and then a rate-limited review reports the
-scripted `5-hour limit reached` detail, as before.
+`review_limit_result` on stdout and this text on stderr and exits 1, and
+`parse` hands that output to the real `ClaudeCodeAdapter::parse`. Both
+constructors leave it `None`, and then a rate-limited review reports the
+scripted `5-hour limit reached` detail, as before. A text that signals no
+limit makes a review whose result alone carries it.
+
+## `review_limit_result: &'static str,`
+
+`worker_limit_result` for a reviewer: the JSON result stdout carries beside
+`review_limit_on_stderr`, and only then. Both constructors set it to
+[`CLAUDE_REVIEW_REQUEST_FAILED`]; a result set here must hold
+[`REVIEW_MARKER`] too, or `parse` does not know it for a review's output.
 
 ## `const FIVE_HOUR_LIMIT_REACHED: &str = "5-hour limit reached";`
 
@@ -273,7 +281,8 @@ invocation (including its Windows quoting) rather than a parallel one.
 ## `fn limit_on_stderr_spec(result: &str, limit: &str) -> CommandSpec {`
 
 The process `worker_limit_on_stderr` and `review_limit_on_stderr` both run:
-a JSON result on stdout, a limit on stderr, a failing exit. One spelling for
+a JSON result on stdout, a limit (or, for a limit the result carries, other
+text) on stderr, a failing exit. One spelling for
 both, so the worker's and the reviewer's limit reach `claude::parse_output`
 the same way, and the comment in it says why the spelling is the one both
 shells share.
@@ -5261,6 +5270,21 @@ the reviewer, with the reason `reviewer unavailable: request failed`, and the on
 names `claude-max` and `claude-code`, carries that reason as its detail, and has a `reset_at` ending
 `T05:30:00Z`. Before `run_review` kept the stderr, the reviewer's result held only its status and
 detail, and the reset was `None`.
+
+## `fn a_reviewers_limit_in_the_result_past_the_reasons_head_records_its_reset_on_pool_exhausted() {`
+
+The test above with the limit moved from stderr into the result, past the 400 bytes of it a
+reviewer's reason keeps. Through `review_limit_result` the refused review prints a JSON result
+reading `MCP cache resets 9am (UTC). `, five lines of MCP diagnostics, then `You've hit your 5-hour
+limit - resets 5:30am (UTC)`; its stderr, through `review_limit_on_stderr`, is `request failed`,
+which signals nothing. The test first checks that the limit starts past byte 400 of the result and
+that the reason built from the result's 400-byte head gives no reset, so reading only the reason
+records none. The first attempt's failure is `RateLimited`, from the reviewer, with exactly that
+reason, so what is displayed has not changed; the one `pool_exhausted` names `claude-max` and
+`claude-code`, carries that reason's own head as its detail, and has a `reset_at` ending
+`T05:30:00Z`. Before `run_review` kept the whole result as the limit's text, `limit_message` was
+`None`, only the cut reason was read, and the reset was 09:00 and then, once the parser stopped
+reading a reset no limit gives, `None`.
 
 ## `fn a_rate_limited_failure_carries_a_limit_from_stderr_without_changing_its_reason() {`
 

@@ -918,7 +918,12 @@ recorded `None`. The two cases are
 `a_limit_on_stderr_outranks_an_unrelated_reset_in_the_result_on_pool_exhausted`
 and
 `a_reviewers_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_pool_exhausted`
-in `engine::tests`.
+in `engine::tests`. When the stderr does not signal the limit and the
+reviewer's result does, `run_review` keeps the whole result instead, since a
+reviewer's reason holds only its first 400 bytes and a limit after them was
+cut off before this read it;
+`a_reviewers_limit_in_the_result_past_the_reasons_head_records_its_reset_on_pool_exhausted`
+holds that case.
 
 ## `impl Run<'_>` › `.find(|text| names_a_quota_limit(text))`
 
