@@ -3167,7 +3167,7 @@ fn an_unavailable_reviewer_is_not_a_rejection() {
     assert_eq!(failure.origin, FailureOrigin::Reviewer);
     assert!(failure.is_outage(), "defers instead of blaming the worker");
     assert!(failure.reason.contains("reviewer unavailable"));
-    assert_eq!(failure.limit_message, None);
+    assert_eq!(failure.limit_message(), None);
 
     let failure = review_failure(
         review::ReviewResult::Unavailable {
@@ -3182,7 +3182,7 @@ fn an_unavailable_reviewer_is_not_a_rejection() {
     assert_eq!(failure.origin, FailureOrigin::Reviewer);
     assert_eq!(failure.reason, "reviewer unavailable: request failed");
     assert_eq!(
-        failure.limit_message.as_deref(),
+        failure.limit_message(),
         Some(LIMIT),
         "the reviewer's stderr limit rides on its failure as a worker's does"
     );
@@ -4672,7 +4672,7 @@ fn a_rate_limited_failure_carries_a_limit_from_stderr_without_changing_its_reaso
     assert_eq!(failure.kind, FailureKind::RateLimited);
     assert_eq!(failure.reason, "pool rate-limited: request failed");
     assert_eq!(failure.feedback, None);
-    assert_eq!(failure.limit_message.as_deref(), Some(LIMIT));
+    assert_eq!(failure.limit_message(), Some(LIMIT));
 
     let quiet = output("warning: telemetry disabled\n");
     let outcome = fake_outcome(
@@ -4685,7 +4685,8 @@ fn a_rate_limited_failure_carries_a_limit_from_stderr_without_changing_its_reaso
     let failure = evaluate_outcome(&outcome, &quiet).expect("a rate limit is a failure");
     assert_eq!(failure.reason, "pool rate-limited: 5-hour limit reached");
     assert_eq!(
-        failure.limit_message, None,
+        failure.limit_message(),
+        None,
         "stderr that did not signal the limit is not carried"
     );
 }

@@ -41,7 +41,7 @@ pub struct AttemptFailure {
     pub reason: String,
     pub feedback: Option<String>,
     pub never_started: bool,
-    pub limit_message: Option<String>,
+    limit_message: Option<String>,
 }
 
 impl AttemptFailure {
@@ -66,6 +66,11 @@ impl AttemptFailure {
     pub fn with_limit_message(mut self, text: String) -> Self {
         self.limit_message = Some(text);
         self
+    }
+
+    #[must_use]
+    pub fn limit_message(&self) -> Option<&str> {
+        self.limit_message.as_deref()
     }
 
     pub fn with_feedback(mut self, feedback: String) -> Self {

@@ -1047,8 +1047,7 @@ impl Run<'_> {
         let reset_at = if agent == claude::ADAPTER_ID {
             let now = util::unix_seconds_now();
             failure
-                .limit_message
-                .as_deref()
+                .limit_message()
                 .into_iter()
                 .chain(std::iter::once(failure.reason.as_str()))
                 .find_map(|text| reset_at_from_limit_message(text, now))

@@ -407,9 +407,10 @@ failed task and the retry ladder punishes the implementer for it.
 
 The reviewer's stderr, when the reviewer was rate-limited and that stderr is
 what signalled the limit; `None` on every other unavailable result.
-`engine::attempt::review_failure` hands it to the failure as
-`AttemptFailure::limit_message`, the same in-memory field a worker's stderr
-rides on, so the coordinator can read the reviewer's reset from it
+`engine::attempt::review_failure` hands it to the failure through
+`AttemptFailure::with_limit_message`. That is the same in-memory carrier a
+worker's stderr rides on, so the coordinator can read the reviewer's reset
+from it through `AttemptFailure::limit_message()`
 (`PR380-REVIEWER-STDERR-RESET-DROPPED`). Nothing stores it.
 
 ## `pub struct ReviewOutcome` › `pub invocations: u32,`
