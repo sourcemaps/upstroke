@@ -27,10 +27,12 @@
 //! of either. The write is atomic and not durable: a crash can lose the newest
 //! report, and the next refresh writes it again. A failed refresh leaves the
 //! stored report alone, since an older reading is still a valid ceiling until
-//! its window resets (`capacity::machine::reading`). That holds of one account:
-//! each report records the account it was asked about, where the provider
-//! reports per account (`capacity::usage::account_for`), and once the pool
-//! names another, the old report bounds nothing.
+//! its window resets (`capacity::machine::reading`). That holds of one source:
+//! each report records the name of the variable its credential was read from
+//! (`capacity::usage::token_env_for`) and, where the provider reports per
+//! account, the account it was asked about (`capacity::usage::account_for`),
+//! and once the pool names another of either, the old report bounds nothing.
+//! It records names only, never the credential.
 
 // Allowlist placement: the funnel section of `effects/allowlist.toml`, which
 // carries this module's review clause.
@@ -150,7 +152,7 @@ fn refresh_pool(
     let Some(source) = &pool.usage else {
         return Outcome::Skipped("the pool names no `usage_provider`".to_owned());
     };
-    let Some(variable) = &source.token_env else {
+    let Some(variable) = usage::token_env_for(source) else {
         return Outcome::Skipped(
             "the pool names no `usage_token_env`, so there is no credential to ask with".to_owned(),
         );
@@ -188,6 +190,7 @@ fn refresh_pool(
         pool: pool.name.clone(),
         provider: source.provider.to_string(),
         account: usage::account_for(source).map(str::to_owned),
+        token_env: Some(variable.to_owned()),
         fetched_at: now_unix,
         windows,
     };
@@ -402,6 +405,29 @@ agent = \"claude-code\"
                 .find(|estimate| estimate.pool == pool)
                 .unwrap_or_else(|| panic!("`{pool}` is estimated"));
             (gathered, estimate)
+        }
+
+        /// What `upstroke capacity` reports at `now_unix` from the reports
+        /// stored so far, with no refresh first and no agent probed.
+        fn capacity_report(&self, now_unix: u64) -> crate::capacity::CapacityReport {
+            struct NoAdapters;
+            impl crate::agent::AdapterSource for NoAdapters {
+                fn get(&self, _id: &str) -> Option<&dyn crate::agent::AgentAdapter> {
+                    None
+                }
+            }
+            let options = self.options();
+            crate::capacity::report(
+                &crate::capacity::CapacityOptions {
+                    config_path: None,
+                    pools_path: options.pools_path,
+                    repo_root: options.repo_root,
+                    scope: None,
+                    now_unix: Some(now_unix),
+                },
+                &NoAdapters,
+            )
+            .expect("the capacity report")
         }
     }
 
@@ -680,6 +706,226 @@ agent = \"claude-code\"
         );
     }
 
+    /// A pools file whose one pool, `anthropic-api`, reads Anthropic's cost
+    /// report with the admin key in `variable` against an allowance of 100,
+    /// with no margin and no reserve.
+    fn anthropic_with(variable: &str) -> String {
+        format!(
+            "[pools.anthropic-api]\nkind = \"api-key\"\nagent = \"claude-code\"\n\
+             monthly_allowance = 100\nsafety_margin = 0.0\nreserve = 0.0\n\
+             usage_provider = \"anthropic-cost\"\nusage_token_env = \"{variable}\"\n"
+        )
+    }
+
+    /// Anthropic's answer for an organization that has spent `dollars` this
+    /// month, which it reports in cents.
+    fn anthropic_spent(dollars: u32) -> String {
+        format!(
+            r#"{{"data":[{{"results":[{{"amount":"{}","currency":"USD"}}]}}],"has_more":false}}"#,
+            dollars * 100
+        )
+    }
+
+    /// Two organizations' admin keys, each in a variable of its own.
+    fn two_organizations(name: &str) -> Option<String> {
+        match name {
+            "ORG_A_ADMIN_KEY" => Some("sk-ant-admin-org-a-test".to_owned()),
+            "ORG_B_ADMIN_KEY" => Some("sk-ant-admin-org-b-test".to_owned()),
+            _ => None,
+        }
+    }
+
+    /// Finding PR409-USAGE-CACHE-CREDENTIAL-IDENTITY's witness, ported into
+    /// the crate. A per-key provider records no account, so its report is
+    /// one key's organization's reading with nothing to say whose: with the
+    /// key in `ORG_A_ADMIN_KEY` at 90 of 100 spent and the pool then switched
+    /// to `ORG_B_ADMIN_KEY`, another organization's key, the views showed
+    /// organization A's "≤10% [provider-reported]" for it, with no note,
+    /// until the window reset.
+    #[test]
+    fn changing_the_admin_key_variable_invalidates_its_cached_report() {
+        let machine = Machine::new("tracker-key-switch", &anthropic_with("ORG_A_ADMIN_KEY"));
+        let ninety = anthropic_spent(90);
+        let table = Table::new(&[("api.anthropic.com", Ok((200, ninety.as_str())))]);
+        refresh(&machine.options(), &table, &two_organizations).expect("a refresh with key A");
+        assert_eq!(
+            table.asked.borrow()[0].credential.secret.expose(),
+            "sk-ant-admin-org-a-test"
+        );
+        let stored = machine
+            .stored("anthropic-api")
+            .expect("a report was stored");
+        assert_eq!(
+            stored.token_env.as_deref(),
+            Some("ORG_A_ADMIN_KEY"),
+            "the report records the variable its credential was read from"
+        );
+        assert_eq!(
+            stored.account, None,
+            "and no account, which it does not read"
+        );
+        let written =
+            std::fs::read_to_string(usage::report_path(&machine.store(), "anthropic-api"))
+                .expect("the stored report reads");
+        assert!(written.contains("\"ORG_A_ADMIN_KEY\""), "{written}");
+        assert!(
+            !written.contains("sk-ant-admin"),
+            "the variable's name is stored, never the credential: {written}"
+        );
+
+        let later = NOON + 3_600;
+        let (gathered, anthropic) = machine.gathered("anthropic-api", later);
+        assert!(
+            gathered.reported.contains_key("anthropic-api"),
+            "the pool still names ORG_A_ADMIN_KEY, so its reading binds: {:?}",
+            gathered.report_notes
+        );
+        assert!(
+            anthropic
+                .describe()
+                .starts_with("anthropic-api: ≤10% [provider-reported]"),
+            "{}",
+            anthropic.describe()
+        );
+
+        std::fs::write(
+            machine.tree.path().join("pools.toml"),
+            anthropic_with("ORG_B_ADMIN_KEY"),
+        )
+        .expect("the pools file now names ORG_B_ADMIN_KEY");
+        let (gathered, anthropic) = machine.gathered("anthropic-api", later);
+        assert!(
+            !gathered.reported.contains_key("anthropic-api"),
+            "organization A's reading is not organization B's: {:?}",
+            gathered.reported
+        );
+        assert_eq!(anthropic.remaining, crate::capacity::Remaining::Unknown);
+        assert!(
+            anthropic.notes.iter().any(|note| {
+                note.contains(
+                    "the stored provider report was fetched with the credential in \
+                     `ORG_A_ADMIN_KEY` and the pool's `usage_token_env` now names \
+                     `ORG_B_ADMIN_KEY`, so it bounds nothing",
+                ) && note.ends_with("`upstroke capacity --refresh` replaces it")
+            }),
+            "organization A's reading is not shown for organization B without saying why: {:?}",
+            anthropic.notes
+        );
+        assert!(
+            !anthropic
+                .notes
+                .iter()
+                .any(|note| note.contains("sk-ant-admin")),
+            "a note names variables, never a credential: {:?}",
+            anthropic.notes
+        );
+        assert_eq!(
+            table.asked.borrow().len(),
+            1,
+            "nothing was refreshed in between"
+        );
+
+        let thirty = anthropic_spent(30);
+        let again = Table::new(&[("api.anthropic.com", Ok((200, thirty.as_str())))]);
+        refresh(&machine.options(), &again, &two_organizations).expect("a refresh with key B");
+        assert_eq!(
+            again.asked.borrow()[0].credential.secret.expose(),
+            "sk-ant-admin-org-b-test"
+        );
+        let (gathered, anthropic) = machine.gathered("anthropic-api", later);
+        assert!(gathered.reported.contains_key("anthropic-api"));
+        assert!(
+            anthropic
+                .describe()
+                .starts_with("anthropic-api: ≤70% [provider-reported]"),
+            "the refresh replaced the report with organization B's own: {}",
+            anthropic.describe()
+        );
+        assert!(
+            !anthropic
+                .notes
+                .iter()
+                .any(|note| note.contains("fetched with the credential in")),
+            "{:?}",
+            anthropic.notes
+        );
+    }
+
+    /// Finding PR409-USAGE-CACHE-MISSING-ACCOUNT's second witness, ported
+    /// into the crate: a GitHub report stored before accounts were recorded,
+    /// for a pool that names no `usage_account`, as `upstroke capacity` shows
+    /// it. It showed "copilot: ≤10% [provider-reported]" with no note, and a
+    /// refresh skips the pool, so nothing would ever have replaced it.
+    #[test]
+    fn missing_identity_is_not_a_ceiling_in_the_capacity_report() {
+        let machine = Machine::new(
+            "tracker-missing-identity",
+            "[pools.copilot]\nkind = \"credits\"\nagent = \"copilot\"\nmonthly_allowance = 100\n\
+             safety_margin = 0.0\nreserve = 0.0\nusage_provider = \"github-ai-credits\"\n\
+             usage_token_env = \"GH_PLAN_TOKEN\"\n",
+        );
+        let legacy = serde_json::json!({
+            "schema": 1,
+            "pool": "copilot",
+            "provider": "github-ai-credits",
+            "fetched_at": crate::util::rfc3339_utc(NOON),
+            "windows": [{
+                "label": "month",
+                "used_amount": 90.0,
+                "resets_at": crate::util::rfc3339_utc(NOON + 200 * 3_600),
+            }],
+        })
+        .to_string();
+        let path = usage::report_path(&machine.store(), "copilot");
+        std::fs::create_dir_all(machine.store()).expect("the report directory");
+        std::fs::write(&path, &legacy).expect("a report stored before accounts were recorded");
+        assert_eq!(
+            machine
+                .stored("copilot")
+                .map(|stored| (stored.account, stored.token_env)),
+            Some((None, None)),
+            "it still decodes, of no known account"
+        );
+
+        let report = machine.capacity_report(NOON + 3_600);
+        assert!(
+            !report.gathered.reported.contains_key("copilot"),
+            "a report of no known account is no account's ceiling: {:?}",
+            report.gathered.reported
+        );
+        let copilot = estimate_of(&report, "copilot");
+        assert_eq!(copilot.remaining, crate::capacity::Remaining::Unknown);
+        let note = "the stored provider report predates account recording and the pool names no \
+                    `usage_account`, so which account it measured is not known and it bounds \
+                    nothing; `upstroke capacity --refresh` will not run for this pool until it \
+                    names one";
+        assert!(
+            copilot.notes.iter().any(|said| said == note),
+            "{:?}",
+            copilot.notes
+        );
+        let rendered = report.render();
+        assert!(
+            !rendered.contains("[provider-reported]"),
+            "the capacity report shows no provider ceiling for the pool: {rendered}"
+        );
+        assert!(rendered.contains(&format!("  - {note}\n")), "{rendered}");
+
+        let ninety = github_drew(90);
+        let table = Table::new(&[("api.github.com", Ok((200, ninety.as_str())))]);
+        let refreshed = refresh(&machine.options(), &table, &environment).expect("a refresh");
+        match outcome(&refreshed, "copilot") {
+            Outcome::Skipped(why) => assert!(why.contains("no `usage_account`"), "{why}"),
+            other => panic!("a pool that names no account is skipped, as the note says: {other:?}"),
+        }
+        assert!(table.asked.borrow().is_empty(), "nothing is asked for it");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the stored report reads"),
+            legacy,
+            "so the legacy report stands, and stays a note and never a ceiling"
+        );
+    }
+
     #[test]
     fn a_pool_with_no_credential_or_no_account_is_skipped_and_nothing_is_asked() {
         let machine = Machine::new(
@@ -778,6 +1024,7 @@ agent = \"claude-code\"
             pool: "team/claude".to_owned(),
             provider: "anthropic-cost".to_owned(),
             account: None,
+            token_env: Some("ANTHROPIC_ADMIN_KEY".to_owned()),
             fetched_at: NOON,
             windows: vec![UsageWindow {
                 label: "month".to_owned(),
@@ -816,6 +1063,7 @@ agent = \"claude-code\"
             pool: "p".to_owned(),
             provider: "anthropic-cost".to_owned(),
             account: None,
+            token_env: Some("ANTHROPIC_ADMIN_KEY".to_owned()),
             fetched_at: NOON,
             windows: vec![UsageWindow {
                 label: "month".to_owned(),
@@ -836,6 +1084,7 @@ agent = \"claude-code\"
             pool: "p".to_owned(),
             provider: "anthropic-cost".to_owned(),
             account: None,
+            token_env: Some("ANTHROPIC_ADMIN_KEY".to_owned()),
             fetched_at: NOON,
             windows: Vec::new(),
         };
