@@ -13,7 +13,9 @@ use crate::error::UpstrokeError;
 use crate::runner::{AgentId, ExecutionRole};
 use crate::workspace_manager::NO_REPLACEMENT_OBJECTS;
 
-use super::{RESERVED_ALWAYS, credential_location, reserved_keys, supplies_credentials};
+use super::{
+    RESERVED_ALWAYS, WITHHELD_ALWAYS, credential_location, reserved_keys, supplies_credentials,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum KeyCase {
@@ -420,6 +422,9 @@ impl HostEnvironment {
         for reserved in reserved_keys() {
             composed.retain(|(name, _)| !self.case.same_key(name, OsStr::new(reserved)));
         }
+        for withheld in WITHHELD_ALWAYS {
+            composed.retain(|(name, _)| !self.case.same_key(name, OsStr::new(withheld)));
+        }
         for (key, value) in self.reserved_values(role, agent, profile) {
             upsert(&mut composed, self.case, OsString::from(key), value);
         }
@@ -491,11 +496,22 @@ impl HostEnvironment {
 }
 
 fn upsert(into: &mut Vec<(OsString, OsString)>, case: KeyCase, key: OsString, value: OsString) {
-    if let Some(slot) = into.iter_mut().find(|(name, _)| case.same_key(name, &key)) {
-        slot.1 = value;
-        return;
+    let mut value = Some(value);
+    into.retain_mut(|(name, slot)| {
+        if !case.same_key(name, &key) {
+            return true;
+        }
+        match value.take() {
+            Some(first) => {
+                *slot = first;
+                true
+            }
+            None => false,
+        }
+    });
+    if let Some(value) = value {
+        into.push((key, value));
     }
-    into.push((key, value));
 }
 
 #[cfg(test)]

@@ -48,6 +48,8 @@ pub const CREDENTIAL_LOCATIONS: &[(&str, &str)] = &[
     (codex::ADAPTER_ID, "CODEX_HOME"),
 ];
 
+pub const WITHHELD_ALWAYS: &[&str] = &["UPSTROKE_CLAUDE_RESET_TOKEN"];
+
 #[must_use]
 pub fn reserved_keys() -> Vec<&'static str> {
     let mut keys: Vec<&'static str> = RESERVED_ALWAYS.to_vec();

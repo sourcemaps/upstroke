@@ -816,6 +816,249 @@ agent = \"claude-code\"
         }
     }
 
+    /// The subscription probe exactly as `read_cli` asks for it, captured by a
+    /// recording Runner that starts nothing.
+    fn subscription_probe() -> crate::runner::RunnerRequest {
+        let runner = subscription_runner(None);
+        let report = subscription_usage(
+            subscription::Auth::Cli,
+            &runner,
+            &Table::new(&[]),
+            &|_| panic!("CLI must never resolve the bearer"),
+            &|_| false,
+            Some(NOON),
+        );
+        assert_eq!(
+            report,
+            subscription::Report::Unavailable(reset::Unavailable::CliNotStarted)
+        );
+        let mut seen = runner.seen.lock().expect("seen lock");
+        assert_eq!(seen.len(), 1, "one probe");
+        seen.pop().expect("one probe")
+    }
+
+    /// Finding PR441-RESET-BEARER-REACHES-OTHER-CHILDREN's witness. An operator
+    /// who exported the dedicated reset bearer and then ran ordinary `capacity`
+    /// with a Codex pool, or a run with a host gate, handed the bearer unchanged
+    /// to the Codex probe and to the gate: only the subscription probe asked for
+    /// it blank. With a synthetic marker under that name in a supplied base, no
+    /// child the host runner composes carries it, under either name rule, and
+    /// the reset reader's own request carries it on curl's standard input alone.
+    #[test]
+    fn the_reset_bearer_reaches_no_child_from_the_ambient_environment() {
+        use crate::runner::host::{HostEnvironment, KeyCase};
+        use crate::runner::{AgentId, CommandSpec, ExecutionRole, RunnerRequest};
+        use std::ffi::{OsStr, OsString};
+
+        const MARKER: &str = "synthetic-reset-bearer-marker";
+
+        let recording = subscription_runner(None);
+        assert!(
+            crate::agent::by_id(crate::agent::codex::ADAPTER_ID)
+                .expect("the Codex adapter ships")
+                .probe(&recording)
+                .is_err(),
+            "the recording Runner starts nothing"
+        );
+        let codex_probe = {
+            let mut seen = recording.seen.lock().expect("seen lock");
+            assert_eq!(seen.len(), 1, "the Codex probe is one request");
+            seen.pop().expect("the Codex probe")
+        };
+        let gate = crate::runner::gate_request(
+            crate::gates::ShellKind::native().spec("exit 0"),
+            crate::agent::probe_workspace(),
+            transport::PROCESS_TIMEOUT,
+            crate::runner::InvocationId::legacy_attempt(
+                crate::topology::registry::TaskKey(0),
+                crate::topology::events::AttemptNumber(1),
+                crate::runner::invocation::AttemptRole::Gate(0),
+                0,
+            ),
+        );
+
+        let reader = subscription_runner(None);
+        let unread = reset_credits(
+            &CurlTransport::new(&reader),
+            &|name| {
+                assert_eq!(name, reset::TOKEN_ENV);
+                Some(MARKER.to_owned())
+            },
+            Some(NOON),
+        );
+        assert!(matches!(unread, reset::ResetReport::Unavailable(_)));
+        let own = {
+            let mut seen = reader.seen.lock().expect("seen lock");
+            assert_eq!(seen.len(), 1, "the reset reader's one request");
+            seen.pop().expect("the reset reader's request")
+        };
+        assert!(
+            String::from_utf8_lossy(&own.command.stdin).contains(MARKER),
+            "the reset reader's own request carries its bearer on standard input"
+        );
+        assert!(
+            !own.command
+                .args
+                .iter()
+                .any(|argument| argument.contains(MARKER)),
+            "and in no argument"
+        );
+
+        let mut children: Vec<(String, RunnerRequest)> = vec![
+            ("the Codex probe".to_owned(), codex_probe),
+            ("a host gate".to_owned(), gate.clone()),
+            ("the subscription probe".to_owned(), subscription_probe()),
+            ("the reset reader's own curl request".to_owned(), own),
+        ];
+        for role in ExecutionRole::all() {
+            for agent in [
+                None,
+                Some(crate::agent::codex::ADAPTER_ID),
+                Some(crate::agent::claude::ADAPTER_ID),
+            ] {
+                children.push((
+                    format!("{role} bound to {agent:?}"),
+                    RunnerRequest {
+                        command: CommandSpec::new("synthetic-child"),
+                        role: role.clone(),
+                        agent: agent.map(AgentId::new),
+                        ..gate.clone()
+                    },
+                ));
+            }
+        }
+
+        let mut rows = 0_usize;
+        for case in KeyCase::ALL {
+            let name = match case {
+                KeyCase::Sensitive => reset::TOKEN_ENV.to_owned(),
+                KeyCase::Insensitive => reset::TOKEN_ENV.to_ascii_lowercase(),
+            };
+            let base = vec![
+                (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+                (OsString::from(name), OsString::from(MARKER)),
+                (
+                    OsString::from("CODEX_HOME"),
+                    OsString::from("/synthetic/codex"),
+                ),
+                (OsString::from("LANG"), OsString::from("C.UTF-8")),
+            ];
+            let environment = HostEnvironment::with_base(base, *case);
+            for (child, request) in &children {
+                let composed = environment
+                    .compose(
+                        &request.role,
+                        request.agent.as_ref(),
+                        request.credential_profile.as_deref(),
+                        &request.command.env,
+                    )
+                    .unwrap_or_else(|error| panic!("{child} ({case:?}) was refused: {error}"));
+                assert!(
+                    !composed
+                        .iter()
+                        .any(|(_, value)| value.to_string_lossy().contains(MARKER)),
+                    "{child} ({case:?}) received the reset bearer the operator exported"
+                );
+                let named: Vec<&OsStr> = composed
+                    .iter()
+                    .filter(|(key, _)| case.same_key(key, OsStr::new(reset::TOKEN_ENV)))
+                    .map(|(_, value)| value.as_os_str())
+                    .collect();
+                let overlaid = request
+                    .command
+                    .env
+                    .iter()
+                    .any(|(key, _)| key == reset::TOKEN_ENV);
+                let expected: Vec<&OsStr> = if overlaid {
+                    vec![OsStr::new("")]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(
+                    named, expected,
+                    "{child} ({case:?}): the name reaches a child only as its own overlay sets it"
+                );
+                assert_eq!(
+                    composed
+                        .iter()
+                        .find(|(key, _)| case.same_key(key, OsStr::new("LANG")))
+                        .map(|(_, value)| value.as_os_str()),
+                    Some(OsStr::new("C.UTF-8")),
+                    "{child} ({case:?}): the rest of the base was withheld with it"
+                );
+                rows += 1;
+            }
+        }
+        assert_eq!(
+            rows,
+            (4 + ExecutionRole::all().len() * 3) * KeyCase::ALL.len(),
+            "four production requests and every role crossed with three bindings, both rules"
+        );
+    }
+
+    /// Finding PR441-BLANK-OVERRIDE-MISSES-DUPLICATE-ENTRY's witness. A Unix
+    /// process environment can carry one name twice. A blank override replaced
+    /// the first entry and left the second, and `Command::envs`, where a later
+    /// entry of a name replaces an earlier one, installed the second's nonempty
+    /// value. With two marked entries in a supplied base, the subscription
+    /// probe's blank override and a blank override of any other name each leave
+    /// one entry of that name, and it is empty.
+    #[test]
+    fn a_blank_override_empties_every_same_named_entry_in_the_base() {
+        use crate::runner::host::{HostEnvironment, KeyCase};
+        use std::ffi::{OsStr, OsString};
+
+        const OTHER: &str = "UPSTROKE_SYNTHETIC_OVERRIDE";
+        let probe = subscription_probe();
+        let mut rows = 0_usize;
+        for case in KeyCase::ALL {
+            for key in [reset::TOKEN_ENV, OTHER] {
+                let again = match case {
+                    KeyCase::Sensitive => key.to_owned(),
+                    KeyCase::Insensitive => key.to_ascii_lowercase(),
+                };
+                let base = vec![
+                    (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+                    (
+                        OsString::from(key),
+                        OsString::from("synthetic-first-marker"),
+                    ),
+                    (OsString::from("LANG"), OsString::from("C.UTF-8")),
+                    (
+                        OsString::from(again),
+                        OsString::from("synthetic-second-marker"),
+                    ),
+                ];
+                let mut overlay = probe.command.env.clone();
+                if key == OTHER {
+                    overlay.push((OTHER.to_owned(), String::new()));
+                }
+                let composed = HostEnvironment::with_base(base, *case)
+                    .compose(&probe.role, probe.agent.as_ref(), None, &overlay)
+                    .unwrap_or_else(|error| panic!("{key} ({case:?}) was refused: {error}"));
+                let named: Vec<&OsStr> = composed
+                    .iter()
+                    .filter(|(name, _)| case.same_key(name, OsStr::new(key)))
+                    .map(|(_, value)| value.as_os_str())
+                    .collect();
+                assert_eq!(
+                    named,
+                    [OsStr::new("")],
+                    "{key} ({case:?}): a blank override leaves one entry of its name, and it is \
+                     empty, so the value a child is started with is empty"
+                );
+                assert!(
+                    !composed
+                        .iter()
+                        .any(|(_, value)| value.to_string_lossy().contains("marker")),
+                    "{key} ({case:?}): a marked entry survived the override"
+                );
+                rows += 1;
+            }
+        }
+        assert_eq!(rows, 2 * KeyCase::ALL.len());
+    }
+
     /// Finding PR441-READER-UNRELATED-RESPONSE-FIELD's witness, ported into the
     /// crate. A typed progress event carrying its own `response` field was read
     /// as a control response before its type was checked, so the 12% reading

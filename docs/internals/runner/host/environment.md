@@ -11,9 +11,9 @@ as it is in the source, so the heading is the grep string that finds the code.
 `host-v1`'s environment contract: the platform's name rule, and the composition of base,
 reserved values and overlay (`design/08_design_trait_surface.md:65-76`).
 
-The vocabulary it composes over -- `RESERVED_ALWAYS`, `CREDENTIAL_LOCATIONS`, `reserved_keys` and
-`supplies_credentials` -- stays in the parent, `src/runner/host.rs`, because that is the one list
-`runner::container::env` also reads. This module decides which variables a request gets and in
+The vocabulary it composes over -- `RESERVED_ALWAYS`, `CREDENTIAL_LOCATIONS`, `reserved_keys`,
+`WITHHELD_ALWAYS` and `supplies_credentials` -- stays in the parent, `src/runner/host.rs`, because
+that is the one list `runner::container::env` also reads. This module decides which variables a request gets and in
 what order, and performs no effect: the base is handed in.
 
 ## `#![forbid(`
@@ -419,6 +419,17 @@ prevent -- and would make the supply step output-equivalent to deleting it, sinc
 `Self::reserved_values` reads its values from the same base. So reserved keys arrive from the
 role-scoped supply step or not at all.
 
+The names in `WITHHELD_ALWAYS` are dropped from the base in the same way, and nothing supplies them,
+so they reach a child only if its own overlay names them. That list holds the reset reader's
+dedicated bearer, which no child reads: the reader sends it to `curl` on standard input. Without
+the drop, a Codex probe or a gate inherited the bearer the operator exported
+(`PR441-RESET-BEARER-REACHES-OTHER-CHILDREN`). `Self::base` still returns the base unchanged.
+Only the composed vector omits them.
+
+Every write after the base goes through `upsert`, which leaves one entry per name. So a value the
+supply step, the overlay or the object graph writes is the value the child starts with, even when
+the base carried that name more than once.
+
 `profile` goes to that step unchanged (`HostRunner` passes the request's `credential_profile`).
 It arrives through the supply step, not the overlay, so the overlay's refusal of a reserved key is
 unchanged: an overlay naming `CLAUDE_CONFIG_DIR` is refused whether or not the request carries a
@@ -465,3 +476,19 @@ environment.
 ### Errors
 
 `UpstrokeError::Refused` naming the offending key and the reserved key it collides with.
+
+## `fn upsert(into: &mut Vec<(OsString, OsString)>, case: KeyCase, key: OsString, value: OsString) {`
+
+Sets `key` to `value`, matching names by `case`. The first entry of that name keeps its place and
+its spelling and takes the value. Every later entry of that name is removed. With none, the pair is
+appended.
+
+The removal matters because a base can name one variable twice. `std::env::vars_os` yields every
+entry of a Unix process environment, duplicates included, and on Windows two spellings of one name
+can arrive in an explicit base. The runner hands the result to `Command::envs`, where a later entry
+of a name replaces an earlier one. Rewriting only the first entry left the second in force. With
+two marked entries in a synthetic Unix base, the subscription probe's blank override of the reset
+bearer blanked the first, and the child started with the second's value
+(`PR441-BLANK-OVERRIDE-MISSES-DUPLICATE-ENTRY`, P2). An override now decides the value whatever
+the base holds. `tracker::tests::a_blank_override_empties_every_same_named_entry_in_the_base`
+pins it, for the bearer's name and for another name, under both key rules.

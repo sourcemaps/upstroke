@@ -26,7 +26,8 @@ Three things live here that are not in the funnel:
   supplies the reserved keys, and `CommandSpec.env` is an overlay applied last and refused
   pre-flight if it names a reserved key. A request's credential profile
   (`RunnerRequest::credential_profile`) replaces the base's credential location for its agent, for
-  a role that `supplies_credentials`.
+  a role that `supplies_credentials`. The names in `WITHHELD_ALWAYS`, the reset reader's dedicated
+  bearer, are dropped from the base for every request and never supplied.
 * **The `RunnerPreflight` shell probe** (INV-23): the recorded shell executing `exit 0` through the
   Runner, role `probe(shell)`, non-slotted, a registered invocation. Only a spawn can establish
   that a shell is available.
@@ -50,6 +51,7 @@ What each item guarantees and refuses. The source carries no rustdoc; this secti
 |---|---|
 | `RESERVED_ALWAYS` | The environment keys `host-v1` owns: `PATH`, `HOME`, `USERPROFILE`. |
 | `CREDENTIAL_LOCATIONS` | Each agent's credential *location* variable — a config **directory**, never a token. |
+| `WITHHELD_ALWAYS` | The names no child inherits from the base, for any role or binding: `UPSTROKE_CLAUDE_RESET_TOKEN`, the reset reader's dedicated bearer. Not reserved: an overlay may still name one, and only the subscription probe does, with an empty value. |
 | `reserved_keys()` | Every key an overlay may not name: `RESERVED_ALWAYS` plus every credential location. |
 | `credential_location(agent)` | The credential-location variable of one agent, if the host knows one. |
 | `supplies_credentials(role)` | Whether `host-v1` tells this role where an agent's credentials live. Exhaustive with no wildcard, so a new role must be classified rather than defaulting into the side that hands out credentials. |
@@ -475,6 +477,38 @@ The [credential profiles passage in the capacity notes](../capacity.md#credentia
 All three are reserved for every request, not only for the agent a request binds: the narrower rule
 would let a gate — repository-controlled code, which no agent permission surface bounds — point
 another agent's CLI at a directory of its choosing.
+
+## `WITHHELD_ALWAYS`
+
+`UPSTROKE_CLAUDE_RESET_TOKEN` holds the bearer an operator exports for the capacity tracker's reset
+reader, and nothing a host child runs reads it. The reader resolves it in the coordinator and sends
+it to `curl` on standard input, never through the child's environment, so no request needs the
+variable. Before it was withheld, every child inherited it with the rest of the base: with a
+synthetic marker exported under that name, ordinary `capacity` with a Codex pool handed it
+unchanged to the Codex probe, and a host gate, which is repository-controlled code, received it
+too. Only the subscription probe asked for it blank, through its overlay
+(`PR441-RESET-BEARER-REACHES-OTHER-CHILDREN`, P2).
+
+It is a list in the runner rather than a reference to the tracker's own constant because nothing
+but `src/main.rs` may name the tracker (`tracker::tests::only_the_cli_reaches_the_tracker`). The
+two spellings are held together by
+`tracker::tests::the_reset_bearer_reaches_no_child_from_the_ambient_environment`, which exports
+the tracker's name with a synthetic marker in a supplied base, under both key rules, and composes
+the Codex adapter's own probe, a host gate, the subscription probe, the reset reader's own `curl`
+request and every role under three bindings. No composed environment carries the marker. The name
+appears only where a request's own overlay sets it, and then empty.
+
+Withheld, not reserved. A reserved key is a value the runner re-supplies role-scoped, so an overlay
+may not restate it. A withheld name has nothing to re-supply, and the subscription probe's empty
+overlay value is still accepted. What the list governs is the base: it is dropped there by key
+under the runner's `KeyCase`, every copy of it, before the reserved values and the overlay are
+applied.
+
+It covers the children this runner composes. The engine's own Git commands
+(`src/workspace.rs`'s `git_command`, `src/workspace_manager.rs`'s builders) and the container
+runner's `docker` client are built with `std::process::Command` and inherit the coordinator's
+environment as they always have. A container's own environment is composed from the image, not
+from the coordinator's.
 
 ## `supplies_credentials`
 
