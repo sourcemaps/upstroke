@@ -125,24 +125,27 @@ pub struct WindowHistory {
 #[must_use]
 pub fn observed_burn(readings: &[Reading], now_unix: u64) -> Vec<WindowHistory> {
     let mut grouped: BTreeMap<(&AccountId, WindowId), Vec<&Reading>> = BTreeMap::new();
-    let mut plans: BTreeMap<&AccountId, Vec<(u64, &PlanId)>> = BTreeMap::new();
+    let mut accounts: BTreeMap<&AccountId, Vec<&Reading>> = BTreeMap::new();
     for reading in readings {
         grouped
             .entry((&reading.account, reading.window))
             .or_default()
             .push(reading);
-        if let Some(plan) = &reading.plan {
-            plans
-                .entry(&reading.account)
-                .or_default()
-                .push((reading.observed_at_unix, plan));
-        }
+        accounts.entry(&reading.account).or_default().push(reading);
     }
+    let plans: BTreeMap<&AccountId, Vec<(u64, &PlanId)>> = accounts
+        .into_iter()
+        .map(|(account, readings)| (account, plan_log(&readings)))
+        .collect();
     grouped
         .into_iter()
         .map(|((account, window), readings)| {
             let reported = plans.get(account).map_or(&[][..], Vec::as_slice);
-            let (segments, latest) = history(readings, reported, now_unix);
+            let (segments, latest) = history(
+                readings,
+                |from, to| named_between(reported, from, to),
+                now_unix,
+            );
             WindowHistory {
                 account: account.clone(),
                 window,
@@ -153,9 +156,32 @@ pub fn observed_burn(readings: &[Reading], now_unix: u64) -> Vec<WindowHistory> 
         .collect()
 }
 
-fn history(
+fn plan_log<'a>(readings: &[&'a Reading]) -> Vec<(u64, &'a PlanId)> {
+    let mut log: Vec<(u64, &PlanId)> = readings
+        .iter()
+        .filter_map(|reading| Some((reading.observed_at_unix, reading.plan.as_ref()?)))
+        .collect();
+    log.sort_by_key(|(at, _)| *at);
+    log
+}
+
+fn named_between<'p, 'a>(
+    plans: &'p [(u64, &'a PlanId)],
+    from: u64,
+    to: u64,
+) -> &'p [(u64, &'a PlanId)] {
+    let start = plans.partition_point(|(at, _)| *at < from);
+    let end = plans.partition_point(|(at, _)| *at <= to);
+    plans.get(start..end).unwrap_or_default()
+}
+
+fn names_another(named: &[(u64, &PlanId)], plan: &PlanId) -> bool {
+    named.iter().any(|(_, other)| *other != plan)
+}
+
+fn history<'p>(
     mut readings: Vec<&Reading>,
-    plans: &[(u64, &PlanId)],
+    named: impl Fn(u64, u64) -> &'p [(u64, &'p PlanId)],
     now_unix: u64,
 ) -> (Vec<Segment>, Latest) {
     let from_future = readings
@@ -188,15 +214,18 @@ fn history(
         let opened_by = match segments.last_mut() {
             None if broken => Boundary::Discontinuity,
             None => Boundary::First,
-            Some(segment) => match split(segment, plan, point, resets, plans) {
-                Some(boundary) => boundary,
-                None if broken => Boundary::Discontinuity,
-                None => {
-                    segment.last = point;
-                    segment.readings += 1;
-                    continue;
+            Some(segment) => {
+                let since = named(segment.last.observed_at_unix, point.observed_at_unix);
+                match split(segment, plan, point, resets, since) {
+                    Some(boundary) => boundary,
+                    None if broken => Boundary::Discontinuity,
+                    None => {
+                        segment.last = point;
+                        segment.readings += 1;
+                        continue;
+                    }
                 }
-            },
+            }
         };
         broken = false;
         segments.push(Segment {
@@ -236,14 +265,10 @@ fn split(
     plan: &PlanId,
     point: Point,
     resets: u64,
-    plans: &[(u64, &PlanId)],
+    since: &[(u64, &PlanId)],
 ) -> Option<Boundary> {
     let moved = resets != segment.resets_at_unix;
-    let since = segment.last.observed_at_unix..=point.observed_at_unix;
-    let switched = plans
-        .iter()
-        .any(|(at, other)| since.contains(at) && **other != segment.plan);
-    if *plan != segment.plan || switched {
+    if *plan != segment.plan || names_another(since, &segment.plan) {
         Some(Boundary::PlanChange)
     } else if point.used_percent < segment.last.used_percent
         || (moved && segment.resets_at_unix <= point.observed_at_unix)
@@ -327,9 +352,10 @@ fn window_state(
     window: WindowId,
     history: Option<&WindowHistory>,
     plan: &PlanEvidence<'_>,
+    named: &[(u64, &PlanId)],
     freshness: &Freshness,
 ) -> WindowState {
-    match forecast(window, history, plan, freshness) {
+    match forecast(window, history, plan, named, freshness) {
         Ok(forecast) => WindowState::Known(forecast),
         Err(reason) => WindowState::Unknown(reason),
     }
@@ -339,6 +365,7 @@ fn forecast(
     window: WindowId,
     history: Option<&WindowHistory>,
     plan: &PlanEvidence<'_>,
+    named: &[(u64, &PlanId)],
     freshness: &Freshness,
 ) -> Result<WindowForecast, WindowUnknown> {
     if window == WindowId::Model(ModelLabel::Unknown) {
@@ -357,7 +384,8 @@ fn forecast(
         PlanEvidence::Contradictory => return Err(WindowUnknown::PlanContradiction),
         PlanEvidence::Absent => return Err(WindowUnknown::NoReading),
     };
-    if segment.plan != *plan {
+    let since = named_between(named, segment.last.observed_at_unix, freshness.now_unix);
+    if segment.plan != *plan || names_another(since, &segment.plan) {
         return Err(WindowUnknown::PlanChanged);
     }
     let age = freshness
@@ -485,7 +513,10 @@ fn covered_effect(
 ) -> Effect {
     let rule = effect(provider, kind, window);
     let Some(coverage) = coverage else {
-        return rule;
+        return match provider {
+            Provider::Claude => rule,
+            Provider::Codex => Effect::Unknown,
+        };
     };
     match plan.and_then(|plan| coverage.get(plan)) {
         Some(covered) if covered.contains(&window) => rule,
@@ -733,13 +764,15 @@ pub fn plan(input: &Input) -> Vec<AccountPlan> {
                 .filter(|reading| reading.account == account.id)
                 .collect();
             let plan_evidence = current_plan(&readings, input.now_unix);
+            let named = plan_log(&readings);
             let mut ids: BTreeSet<WindowId> = BTreeSet::from([WindowId::Session, WindowId::Weekly]);
             ids.extend(readings.iter().map(|reading| reading.window));
             let windows: Vec<(WindowId, WindowState)> = ids
                 .into_iter()
                 .map(|id| {
                     let history = by_window.get(&(&account.id, id)).copied();
-                    (id, window_state(id, history, &plan_evidence, &freshness))
+                    let state = window_state(id, history, &plan_evidence, &named, &freshness);
+                    (id, state)
                 })
                 .collect();
             let queue: Vec<Ranked> = ranked
@@ -1243,6 +1276,7 @@ fn whole_secs_up(value: f64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     const NOW: u64 = 1_800_000_000;
     const HOUR: u64 = 3_600;
@@ -2123,11 +2157,14 @@ mod tests {
             decision(&claude(readings.clone(), grant.clone(), &one_job(3.0))),
             Decision::Redeem
         );
-        let mut fixture = input(Provider::Codex, readings, vec![grant], &one_job(3.0));
-        for reading in &mut fixture.readings {
-            reading.source = Source::Fixture;
-        }
+        let mut fixture = input(
+            Provider::Codex,
+            on_plan("pro", readings),
+            vec![grant],
+            &one_job(3.0),
+        );
         for account in &mut fixture.accounts {
+            account.coverage = Some(codex_covered_allowances());
             if let InventoryEvidence::Known(inventory) = &mut account.inventory {
                 inventory.source = Source::Fixture;
             }
@@ -2368,5 +2405,122 @@ mod tests {
             state(&states(changed), WindowId::Weekly),
             WindowState::Unknown(WindowUnknown::InsufficientHistory)
         );
+    }
+
+    #[test]
+    fn plan_roundtrip_without_weekly_reread() {
+        let scene = |between: &str| {
+            let readings = vec![
+                reading_on("max", WindowId::Weekly, 50 * 60, 98.0, 72 * HOUR),
+                reading_on("max", WindowId::Weekly, 40 * 60, 100.0, 72 * HOUR),
+                reading_on(between, WindowId::Session, 30 * 60, 5.0, 4 * HOUR),
+                reading_on("max", WindowId::Session, 20 * 60, 5.0, 4 * HOUR),
+                reading_on("max", WindowId::Session, 0, 10.0, 4 * HOUR),
+            ];
+            claude(
+                readings,
+                usable(GrantKind::Weekly, 240 * HOUR),
+                &one_job(4.0),
+            )
+        };
+
+        let unchanged = scene("max");
+        assert!(matches!(
+            state(&only_plan(&unchanged), WindowId::Weekly),
+            WindowState::Known(_)
+        ));
+        assert_eq!(decision(&unchanged), Decision::Redeem);
+
+        let roundtrip = scene("pro");
+        let planned = only_plan(&roundtrip);
+        assert!(matches!(
+            state(&planned, WindowId::Session),
+            WindowState::Known(_)
+        ));
+        assert_eq!(
+            state(&planned, WindowId::Weekly),
+            WindowState::Unknown(WindowUnknown::PlanChanged)
+        );
+        assert_eq!(
+            decision(&roundtrip),
+            Decision::Unknown(Undecided::Window(
+                WindowId::Weekly,
+                WindowUnknown::PlanChanged
+            ))
+        );
+    }
+
+    #[test]
+    fn no_codex_coverage() {
+        let mut readings = burning(WindowId::Session, 100.0, 25.0, 2 * HOUR);
+        readings.extend(burning(WindowId::Weekly, 0.0, 0.0, 100 * HOUR));
+        let covered_by = |coverage: Option<BTreeMap<PlanId, BTreeSet<WindowId>>>| {
+            let mut scene = input(
+                Provider::Codex,
+                on_plan("plus", readings.clone()),
+                vec![usable(GrantKind::Full, 48 * HOUR)],
+                &one_job(1.0),
+            );
+            for account in &mut scene.accounts {
+                account.coverage.clone_from(&coverage);
+            }
+            decision(&scene)
+        };
+        assert_eq!(
+            covered_by(Some(codex_covered_allowances())),
+            Decision::LetExpire(ExpireReason::NoUnlock)
+        );
+        assert_eq!(covered_by(None), Decision::Unknown(Undecided::Effect));
+        for window in [WindowId::Session, WindowId::Weekly] {
+            assert_eq!(
+                covered_effect(
+                    Provider::Codex,
+                    GrantKind::Full,
+                    window,
+                    None,
+                    Some(&plan_id("plus"))
+                ),
+                Effect::Unknown
+            );
+            assert_eq!(
+                covered_effect(
+                    Provider::Claude,
+                    GrantKind::Full,
+                    window,
+                    None,
+                    Some(&plan_id("max"))
+                ),
+                Effect::Restores
+            );
+        }
+    }
+
+    #[test]
+    fn plan_history_comparison_count() {
+        let examined = |count: u64| {
+            let readings: Vec<Reading> = (0..count)
+                .map(|index| reading(WindowId::Weekly, count - index, 10.0, 72 * HOUR))
+                .collect();
+            let refs: Vec<&Reading> = readings.iter().collect();
+            let log = plan_log(&refs);
+            let visits = Cell::new(0_usize);
+            let (segments, latest) = history(
+                refs,
+                |from, to| {
+                    let named = named_between(&log, from, to);
+                    visits.set(visits.get() + named.len());
+                    named
+                },
+                NOW,
+            );
+            assert_eq!(latest, Latest::Usable);
+            let [segment] = segments.as_slice() else {
+                panic!("one unchanged plan is one segment, got {segments:#?}");
+            };
+            assert_eq!(segment.readings, readings.len());
+            visits.get()
+        };
+        assert_eq!(examined(128), 2 * 127);
+        assert_eq!(examined(256), 2 * 255);
     }
 }

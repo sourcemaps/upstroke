@@ -34,7 +34,7 @@ caller knows. This module takes them as values and never invokes a reader.
 | `Reading::window` | `five_hour` → `WindowId::Session`, `seven_day` → `WindowId::Weekly`, a `ModelWindow` label → `WindowId::Model` (`"unknown model"` → `ModelLabel::Unknown`) |
 | `Reading::observed_at_unix` | the `now_unix` the reader was called with |
 | `Reading::account`, `Reading::plan` | caller-supplied: the reader reports neither |
-| `Account::coverage` | caller-supplied: for Codex, the windows each plan's banked reset covers (`None` applies `effect` unnarrowed) |
+| `Account::coverage` | caller-supplied: for Codex, the windows each plan's banked reset covers (`None` applies `effect` unnarrowed on Claude and leaves every Codex effect `Unknown`) |
 | `Grant { resets_left, ends_at_unix, kind, availability }` | `tracker::reset::Grant`'s fields of the same names; `GrantKind` is `reset::Kind` variant for variant, `Availability` is `reset::Availability` |
 | `Inventory::observed_at_unix`, `Inventory::grants` | `tracker::reset::Inventory`'s fields of the same names |
 | `InventoryEvidence::Unknown` | `ResetReport::Unavailable(_)`, or no read at all |
@@ -96,6 +96,10 @@ second, give no rate. The plan is the account's, not the window's: a weekly read
 a session reading under another and a weekly reading under the first again put the two weekly
 readings in different segments, so no rate is taken across the change.
 
+The account's plan observations, from readings in every window, are kept sorted by second. Each
+pair of adjacent readings finds the observations of its own interval by binary search and examines
+only those, so a longer history adds work in proportion to its length rather than to its square.
+
 ## `fn forecast(`
 
 Only the newest segment forecasts, and only when every one of these holds; otherwise the window is
@@ -103,8 +107,11 @@ Only the newest segment forecasts, and only when every one of these holds; other
 
 - the window is not an unlabeled model window (`UnlabeledModel`) and has a reading (`NoReading`);
 - its latest reading is usable (`Incomplete`, `Contradictory`, `FromFuture`);
-- the account's newest plan is unambiguous (`PlanContradiction`: two plans in one second) and is
-  the segment's plan (`PlanChanged`);
+- the account's newest plan is unambiguous (`PlanContradiction`: two plans in one second), is the
+  segment's plan, and no reading of the account, in any window, from the segment's last reading
+  through `now_unix` names another plan (`PlanChanged`). This is the `PlanChange` rule above,
+  applied up to now: a change and a change back leave the window unread under the plan it is on
+  again, so its forecast waits for a reading of its own;
 - the segment's last reading is no older than `stale_after_secs` (`Stale`);
 - its reset has not passed by `now_unix` (`Refilled`: the window refilled since it was read, and
   its new state is unread);
@@ -140,6 +147,10 @@ plan covers keeps the rule, a window it does not cover is `Unchanged`, and every
 when the plan is not listed. The simulation takes each window's effect from that narrowed rule, so
 a Codex `plus` reset, which covers the weekly allowance only, restores nothing in an exhausted
 session window.
+
+Without `Account::coverage`, a Claude account takes the rule unnarrowed. A Codex account's banked
+reset covers plan-specific allowances (§13), so with no map its every effect is `Unknown`: the
+generic rule is not assumed to hold on whatever plan the account is on.
 
 ## `pub const fn schedule_after_restore(provider: Provider, window: WindowId) -> Schedule {`
 
@@ -265,8 +276,9 @@ An unknown is never filled with a guess:
 - The schedule a restarted window gets after a redemption is unknown. Its lower bound (no refill)
   may choose a redemption; a no-benefit answer stands only when the best schedule gains nothing
   either, and is `Unknown(Schedule)` otherwise.
-- Where the grant has an `Effect::Unknown` on any of the account's windows (by rule, or because the
-  account's plan is missing from its `Account::coverage`), the comparison runs twice. The cautious bound assumes the unknown windows are not restored; the hopeful bound assumes
+- Where the grant has an `Effect::Unknown` on any of the account's windows (by rule, because the
+  account's plan is missing from its `Account::coverage`, or because a Codex account has none),
+  the comparison runs twice. The cautious bound assumes the unknown windows are not restored; the hopeful bound assumes
   they are fully restored with their schedule kept. The decision stands only when both bounds agree,
   and is `Unknown(Effect)` otherwise.
 
@@ -307,7 +319,8 @@ readings, one hour apart, ending at `NOW`. All other helpers build on it:
 - `one_job(hours)`: one feature run of priority 5. Every demand item the helpers build has the model
   `ModelLabel::Unknown`, so it draws on every model window; a test that names a model sets it.
 - `input(..)` and `claude(..)`: one `operator` account with a fresh `Source::Reader` inventory, no
-  `Account::coverage`, and `stale_after_secs` of one hour.
+  `Account::coverage`, and `stale_after_secs` of one hour. A Codex test that expects known effects
+  sets `codex_covered_allowances()` (below).
 - `claude_fable_exhausted()`: the Fable model window at 100% (10%/h, refills in 50 h), session at
   20% (10%/h, 3 h) and weekly at 40% (1%/h, 72 h). Only work that draws on the Fable window waits.
 - `codex_covered_allowances()`: the windows a Codex banked reset covers, per plan: `plus` covers
@@ -326,15 +339,21 @@ Worked examples the tests pin:
 | weekly exhausted and session exhausted until 2 h | `Defer` to `NOW + 2 h` |
 | weekly 90% at 10%/h, grant ending in 30 min, 5 h job | `Defer` to the last second; the restored allowance is spent for hours after expiry |
 | session grant, alpha (p10, 2 h) before beta (p1, 10 h); then the priorities swapped | `Redeem`; then `Defer` to `NOW + 10 h` |
-| weekly exhausted, refilling in 1 h, 3 h job: Claude (kept clock) vs a Codex fixture (restart) | `Redeem` vs `Defer` to `NOW + 3 h` |
+| weekly exhausted, refilling in 1 h, 3 h job: Claude (kept clock) vs a Codex `pro` fixture with `codex_covered_allowances()` (restart) | `Redeem` vs `Defer` to `NOW + 3 h` |
 | several usable grants on one exhausted account | `Redeem` for the earliest-ending one; `Unknown(AwaitsReRead)` for the rest |
 | session at 100% (25%/h) until 3 h, session grant ending in 30 min: 6 h job; 3 h job; and a session at 10% (10%/h) with a 2 h job | `Unknown(Schedule)`: with no refill after the restart the job stays incomplete, while a refill the new schedule may bring beats the baseline's 10 h; `Redeem`; `LetExpire(NoUnlock)`, since even the best schedule gains nothing |
 | `exhausted_weekly`, weekly grant, 4 h job: inventory read `NotUsable` at `NOW - 1`, then `Usable` at `NOW` | `Unknown(Availability)`, then `Redeem` |
 | session at 100% refilling `MAX_STEPS + 1` weeks out, weekly at 30% (72 h) recurring, weekly grant, 1 h job; then refilling 2 weeks out | `Unknown(Bound)`: the weekly refills passed in the one wait exceed `MAX_STEPS`; `LetExpire(NoUnlock)` |
 | Codex `plus` with `codex_covered_allowances()`, full grant ending in 48 h: weekly at 0% (100 h), uncovered session at 100% (25%/h, 2 h), 1 h job | `LetExpire(NoUnlock)`: on `plus` the reset leaves the session unchanged, and the weekly has no use to restore |
+| the same `plus` scene with no `Account::coverage` | `Unknown(Effect)`: every effect is unknown, and the hopeful bound redeems where the cautious one does not |
+| weekly under `max` at 98% and 100% (50 and 40 min ago), weekly grant, 4 h job, session readings 30 min ago, 20 min ago and now, the first under `pro`, the others under `max` | the weekly is `Unknown(PlanChanged)` and the grant `Unknown(Window(Weekly, PlanChanged))`; with the first session reading under `max` too, the weekly is forecast and the grant is `Redeem` |
 | `claude_fable_exhausted()`, Fable grant ending in 48 h, 1 h of Sonnet work; then the same hour as Fable work | `LetExpire(NoUnlock)`: the Sonnet work runs now on the existing session and weekly balance; `Redeem` for the Fable work |
 
 A planner test pins the history rule above: weekly readings under `max` two hours apart, with a
 session reading under `pro` between them, are two segments (`First`, `PlanChange`) and the weekly
 window is `Unknown(InsufficientHistory)`; with that session reading under `max` they are one
 segment at 10%/h.
+
+Another counts the plan observations the history examines, with no timing: 128 and 256 weekly
+readings on one unchanged plan, a second apart, are one segment each, and the history examines
+exactly the two observations in each adjacent pair's interval, 254 and 510 in all.
