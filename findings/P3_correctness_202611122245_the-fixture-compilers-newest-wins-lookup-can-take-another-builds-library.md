@@ -36,8 +36,9 @@ Reasoned, not run:
     -> the lookup returns Y's newer library
     -> X's fixtures compile against Y's code
 
-The old layout had the same rule (newest wins); the per-unit layout makes two library builds in one directory routine,
-even between checkouts with identical dependency graphs. CI builds once per job and is not affected.
+The old layout had the same rule and the same exposure: two library builds, one from a test build and one from a build
+with no test target, sit side by side in `deps/` there too, and the newest wins. The per-unit layout changes where the
+two builds sit, not whether there are two. CI builds once per job and is not affected.
 
 A related open finding, `PR262-WARM-BUILD-SLOT-SERVES-ANOTHER-WORKTREE`, concerns the build machine's slot tool outside
 this repository; this one is the repository's own lookup.
