@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A schema-4 run now records `pool_exhausted` when a usage limit stops an attempt, with the reset
+  Claude Code reported, as a resumed older run already did; nothing schedules on it yet. A schema-4
+  run appends it before the attempt's settlement, so a known reset is not lost when the run stops
+  between the two.
 - The startup census reclaims a marker-less run directory only on a complete listing, and removes
   it as listed. A listing that fails now retains the directory, and `upstroke status <run-id>`
   says it cannot be listed, with the error; it used to read as empty, so a transient failure could

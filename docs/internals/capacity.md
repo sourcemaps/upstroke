@@ -291,9 +291,16 @@ which is right: the pool went down again. The retiring half is
 
 ## `fn retire_signals` › `if let Some(failure) = &record.failure {`
 
-The attempt settlement itself is the durable source of a rate-limit
-signal. `pool_exhausted` remains useful detail, but a crash between the
-two appends must not make replay forget which subscription refused work.
+In a legacy log the attempt settlement itself is the durable source of a
+rate-limit signal. The legacy writer, which runs only when a run of
+schemas 1–3 resumes, appends `pool_exhausted` after the attempt's
+`attempt_finished` (`record_pool_exhausted`). `pool_exhausted` remains
+useful detail, but a crash between the two appends must not make replay
+forget which subscription refused work. The schema-4 engine appends the
+signal first (`settle_failure`), so a crash between the two there leaves
+the signal durable and the settlement not, and `exhausted_pools_of` holds
+the pool at the signal's reset. In either log a rate-limited settlement
+that no signal accompanies still marks its pool here.
 
 ## `fn retire_signals` › `exhausted.entry(pool.clone()).or_insert(None);`
 
