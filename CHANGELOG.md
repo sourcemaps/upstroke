@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A `[routing.strategy]` table with an unknown key is now refused at load, naming the key and the
+  accepted `mode` and `spend_down_after`. It used to load with the key silently dropped, so a
+  misspelled `spend_down_afer = 0.7` left `spend_down_after` unset with nothing said. An
+  unrecognised `mode` value still warns and loads (`SWEEP-CONFIG-PARSE-008`).
 - `upstroke run` now creates schema-4 runs on the execution topology: a worktree per task, the
   compare-and-swap merge queue, `max_parallel` above 1 bounded by `max_per_agent` and
   `max_per_pool` slots, and the optional container runner. `upstroke resume` continues one from

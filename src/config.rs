@@ -125,6 +125,7 @@ struct RawRoleEffort {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawStrategy {
     mode: Option<String>,
     spend_down_after: Option<f64>,
@@ -1065,6 +1066,36 @@ mod tests {
                 "{typo}: this is a refusal, not a degraded warning"
             );
         }
+    }
+
+    #[test]
+    fn a_misspelled_routing_strategy_key_is_refused_not_dropped() {
+        let body = "[routing.strategy]\nmode = \"value-max\"\nspend_down_afer = 0.7\n";
+        let captured = CapturedConfig {
+            repo: FileSnapshot {
+                path: PathBuf::from("upstroke.toml"),
+                required: true,
+                content: Ok(Some(body.as_bytes().to_vec())),
+            },
+            pools: None,
+        };
+        let mut warnings = Vec::new();
+        let err = load_captured(&captured, EngineLimits::Fresh, &mut warnings)
+            .expect_err("an unknown [routing.strategy] key is a typo, not silence");
+        assert!(matches!(err, UpstrokeError::Config { .. }), "{err}");
+        let message = err.to_string();
+        assert!(
+            message.contains("`spend_down_afer`"),
+            "the refusal names the misspelled key: {message}"
+        );
+        assert!(
+            message.contains("`mode`") && message.contains("`spend_down_after`"),
+            "the refusal lists the accepted keys: {message}"
+        );
+        assert!(
+            warnings.is_empty(),
+            "this is a refusal, not a degraded warning: {warnings:?}"
+        );
     }
 
     #[test]
