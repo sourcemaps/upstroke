@@ -285,12 +285,15 @@ pub fn plan_for(
 
     if !cfg.review_enabled {
         if let Some(index) = demanded.iter().position(Option::is_some) {
+            let subject = plan
+                .tasks
+                .get(index)
+                .map_or_else(|| "a task".to_owned(), |task| format!("task `{}`", task.id));
             return Err(UpstrokeError::Refused {
                 message: format!(
-                    "task `{}` matches a [[routing.overrides]] asking for a cross-vendor second \
+                    "{subject} matches a [[routing.overrides]] asking for a cross-vendor second \
                      opinion, but [routing] review = {{ enabled = false }} turns review off \
-                     entirely. Remove one of the two — they cannot both be what you meant.",
-                    plan.tasks[index].id
+                     entirely. Remove one of the two — they cannot both be what you meant."
                 ),
             });
         }
