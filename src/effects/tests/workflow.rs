@@ -4089,3 +4089,39 @@ fn mutate_job(text: &str, job: &str, anchor: &str, replacement: &str) -> String 
         &rest[end..]
     )
 }
+
+pub(super) fn shard_selections(filters: &[&str]) -> Vec<String> {
+    (0..=filters.len())
+        .map(|shard| {
+            let skips = filters
+                .iter()
+                .take(shard)
+                .flat_map(|earlier| ["--skip", *earlier]);
+            filters
+                .get(shard)
+                .copied()
+                .into_iter()
+                .chain(skips)
+                .collect::<Vec<&str>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+pub(super) fn libtest_runs(selection: &str, name: &str) -> bool {
+    let mut filters: Vec<&str> = Vec::new();
+    let mut skips: Vec<&str> = Vec::new();
+    let mut words = selection.split_whitespace();
+    while let Some(word) = words.next() {
+        if word != "--skip" {
+            filters.push(word);
+            continue;
+        }
+        let Some(skipped) = words.next() else {
+            return false;
+        };
+        skips.push(skipped);
+    }
+    (filters.is_empty() || filters.iter().any(|filter| name.contains(*filter)))
+        && !skips.iter().any(|skip| name.contains(*skip))
+}

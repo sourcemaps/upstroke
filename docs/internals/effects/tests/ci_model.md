@@ -585,6 +585,67 @@ reason; the operator removed it on 2026-11-12. A pull request sent to the
 twin twice is the one run that would have gained. Measured,
 `MUT-TEST-WINDOWS-HOSTED-CACHE-RESTORED`.
 
+## `pub(super) const WINDOWS_SHARD_FILTERS: [&str; 4] = [`
+
+The ordered filters that divide the Windows suite into five shards, as data:
+the list a hosted shard matrix is to be built from. Nothing in `ci.yml` reads
+it yet. The twin still runs the suite as one job
+([`TEST_WINDOWS_HOSTED_JOB`]), and the table is here first, with the proof
+that it loses no test and repeats none, so that a matrix can be derived from
+it rather than written beside it.
+
+The rule is `shard_selections`' in `super::workflow`. Shard `k` runs the tests
+whose names contain filter `k` and none of the filters before it, and one
+more shard, after the last filter's, runs the tests that contain none of
+them. Four filters make five shards:
+
+1. `engine::topology::coordinator::tests::a`: everything in the
+   coordinator's `tests` module whose name begins with `a`;
+2. the rest of `engine::topology::coordinator::`;
+3. the rest of `engine::topology::`;
+4. the rest of `engine::`;
+5. everything else, the bin harness's tests among them.
+
+The order is part of the rule. libtest's filter is a substring of a test's
+whole path, not a prefix and not a module, and each filter here contains the
+one after it, so the narrowest comes first: placed after a wider one it would
+find every test it names already skipped, and its shard would select nothing.
+For the same reason a name that only contains `engine::` -- a module called
+`engine` anywhere else in the tree -- runs in shard 4, which is still exactly
+one shard. `the_shard_tables_run_every_test_in_exactly_one_shard` holds the
+five derived argument strings to literals, places eight names of those kinds
+in the shard each belongs to, and holds every filter to one word that libtest
+reads as a filter, none of them twice.
+
+## `pub(super) const WINDOWS_SHARD_FLOORS: [u32; 5] = [95, 30, 340, 150, 1085];`
+
+The count each Windows shard must report before it may succeed, in shard
+order: [`WINDOWS_TEST_FLOOR`] divided among the five.
+
+They sum to that floor, 1700, and
+`the_shard_tables_run_every_test_in_exactly_one_shard` holds the sum, one
+entry for each shard, and every entry above zero. The hosted shards together
+must not accept fewer passing tests than the guest's one job does; and a
+shard whose floor is zero passes having executed nothing, which is the
+arrival the count exists to refuse ([`WINDOWS_TEST_WITNESS`]).
+
+Each floor is about half of its shard's passing count as the sharding
+measurement gives it: 193, 59, 684, 304 and 2,188. Those are 3,428 together,
+the guest's count for the whole suite, of which its 1700 is about half in the
+same way. The last two are counted as the witness counts them, child-harness
+result lines included. Shards 2 and 3 divide the measurement's second shard,
+whose 776 tests took 1,669 s; their two counts come from the per-test lines of
+a whole-suite control in the same run.
+
+## `pub(super) const MACOS_SHARD_FILTERS: [&str; 2] = ["engine::topology::", "engine::"];`
+
+The same kind of list for the macOS suite, under the same rule: two filters,
+three shards -- `engine::topology::`, the rest of `engine::`, and everything
+else. Nothing in `ci.yml` reads it yet either.
+`the_shard_tables_run_every_test_in_exactly_one_shard` holds its three
+derived argument strings to literals and places the same eight names, and
+holds its filters to the same shape.
+
 ## `pub(super) const PICK_WINDOWS_HOME_JOB: &str = "pick-windows-home";`
 
 The job that decides where this run's Windows suite goes, `guest` or

@@ -5379,18 +5379,19 @@ mod ci_model;
 mod workflow;
 
 use ci_model::{
-    CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, MSRV_COMMAND, MSRV_JOB, OVERRIDING_REPO_FILES,
-    PICK_WINDOWS_HOME_NAME, PICK_WINDOWS_HOME_SCRIPT, RUSTFLAGS_KEY, TEST_COMMAND,
-    TEST_WINDOWS_CONDITION, TEST_WINDOWS_HOSTED_CONDITION, TEST_WINDOWS_HOSTED_JOB,
-    TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM, WINDOWS_TEST_FLOOR,
-    WINDOWS_TEST_WITNESS,
+    CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, MACOS_SHARD_FILTERS, MSRV_COMMAND, MSRV_JOB,
+    OVERRIDING_REPO_FILES, PICK_WINDOWS_HOME_NAME, PICK_WINDOWS_HOME_SCRIPT, RUSTFLAGS_KEY,
+    TEST_COMMAND, TEST_WINDOWS_CONDITION, TEST_WINDOWS_HOSTED_CONDITION, TEST_WINDOWS_HOSTED_JOB,
+    TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM, WINDOWS_SHARD_FILTERS,
+    WINDOWS_SHARD_FLOORS, WINDOWS_TEST_FLOOR, WINDOWS_TEST_WITNESS,
 };
 use workflow::{
     WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_pick_windows_home_complaints,
     ci_test_job_complaints, ci_test_windows_hosted_job_complaints, ci_test_windows_job_complaints,
     ci_windows_build_witness_complaints, ci_workflow_text, complaint_codes,
-    declared_msrv_toolchain, declared_rust_version, field, field_names, mutate_workflow,
-    parse_workflow, rustflags_complaints, scalar, steps_of, three_component, workflow_complaints,
+    declared_msrv_toolchain, declared_rust_version, field, field_names, libtest_runs,
+    mutate_workflow, parse_workflow, rustflags_complaints, scalar, shard_selections, steps_of,
+    three_component, workflow_complaints,
 };
 
 #[test]
@@ -6638,6 +6639,139 @@ fn the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler() {
         TEST_WINDOWS_HOSTED_CONDITION,
         "the two Windows suite jobs' conditions are not one comparison of the picker's answer \
          with its two values"
+    );
+}
+
+#[test]
+fn the_shard_tables_run_every_test_in_exactly_one_shard() {
+    let windows = shard_selections(&WINDOWS_SHARD_FILTERS);
+    assert_eq!(
+        windows,
+        [
+            "engine::topology::coordinator::tests::a",
+            "engine::topology::coordinator:: --skip engine::topology::coordinator::tests::a",
+            "engine::topology:: --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator::",
+            "engine:: --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::",
+            "--skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology:: --skip engine::",
+        ],
+        "the Windows shards' libtest arguments are not the five written out here: each shard's \
+         are its filter and a `--skip` for every filter before it, and the last shard's are \
+         only the skips"
+    );
+    let macos = shard_selections(&MACOS_SHARD_FILTERS);
+    assert_eq!(
+        macos,
+        [
+            "engine::topology::",
+            "engine:: --skip engine::topology::",
+            "--skip engine::topology:: --skip engine::",
+        ],
+        "the macOS shards' libtest arguments are not the three written out here"
+    );
+    let unsharded = shard_selections(&[]);
+    assert_eq!(
+        unsharded,
+        [""],
+        "a table with no filter is not one shard with no arguments, which is the whole suite"
+    );
+
+    for (name, windows_shard, macos_shard) in [
+        (
+            "engine::topology::coordinator::tests::a_budget_stop_drains",
+            1,
+            1,
+        ),
+        (
+            "engine::topology::coordinator::tests::halt_cancels_in_flight_attempt_at_width_three",
+            2,
+            1,
+        ),
+        (
+            "engine::topology::coordinator::tests::interleaving::a_budget_stop_under_every_seed",
+            2,
+            1,
+        ),
+        (
+            "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+            3,
+            1,
+        ),
+        ("engine::tests::host_acceptance_record", 4, 2),
+        (
+            "workspace_manager::tests::engine::a_name_with_a_filter_inside_it",
+            4,
+            2,
+        ),
+        (
+            "effects::tests::the_workflow_shape_oracle_refuses_every_escape_the_ledger_names",
+            5,
+            3,
+        ),
+        ("tests::a_test_of_the_binary_harness", 5, 3),
+    ] {
+        for (table, selections, expected) in [
+            ("Windows", &windows, windows_shard),
+            ("macOS", &macos, macos_shard),
+            ("empty", &unsharded, 1),
+        ] {
+            let running: Vec<usize> = selections
+                .iter()
+                .enumerate()
+                .filter(|(_, selection)| libtest_runs(selection, name))
+                .map(|(index, _)| index + 1)
+                .collect();
+            assert_eq!(
+                running,
+                [expected],
+                "`{name}` runs in shards {running:?} of the {table} table, not in shard \
+                 {expected} alone. A test no shard runs is one the sharded suite never executes \
+                 while every shard reports success, and a test two shards run is run twice."
+            );
+        }
+    }
+
+    for (table, filters) in [
+        ("WINDOWS_SHARD_FILTERS", WINDOWS_SHARD_FILTERS.as_slice()),
+        ("MACOS_SHARD_FILTERS", MACOS_SHARD_FILTERS.as_slice()),
+    ] {
+        let malformed: Vec<&str> = filters
+            .iter()
+            .copied()
+            .filter(|filter| {
+                filter.is_empty() || filter.contains(char::is_whitespace) || filter.starts_with('-')
+            })
+            .collect();
+        assert!(
+            malformed.is_empty(),
+            "`{table}` holds {malformed:?}. Each filter is one word of a libtest command line: \
+             an empty one is no word at all, so its own shard has no filter and a later shard's \
+             `--skip` takes the next word as its string; one with whitespace in it is two words; \
+             and one that starts with `-` is read as an option."
+        );
+        let distinct: BTreeSet<&str> = filters.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            filters.len(),
+            "`{table}` names a filter twice, so the later of the two shards skips its own \
+             filter and selects no test"
+        );
+    }
+
+    assert_eq!(
+        WINDOWS_SHARD_FLOORS.len(),
+        windows.len(),
+        "`WINDOWS_SHARD_FLOORS` does not hold one floor for each Windows shard"
+    );
+    assert!(
+        WINDOWS_SHARD_FLOORS.iter().all(|floor| *floor > 0),
+        "a floor in {WINDOWS_SHARD_FLOORS:?} is zero, which a shard that executed nothing clears"
+    );
+    assert_eq!(
+        WINDOWS_SHARD_FLOORS.iter().sum::<u32>(),
+        WINDOWS_TEST_FLOOR,
+        "the Windows shards' floors {WINDOWS_SHARD_FLOORS:?} do not sum to the guest's floor: \
+         the hosted shards together must not accept fewer passing tests than the guest's one \
+         job does"
     );
 }
 

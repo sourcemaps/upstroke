@@ -964,3 +964,54 @@ Scoped to the block, and the anchor must occur in it exactly once: a mutation
 that lands somewhere unintended, or that no longer matches because the
 workflow moved, is a mutation nobody measured. Both are failures here rather
 than a quietly weaker test.
+
+## `pub(super) fn shard_selections(filters: &[&str]) -> Vec<String> {`
+
+The libtest arguments of each shard an ordered filter list makes: the shard
+rule, in one place.
+
+A list of `n` filters makes `n + 1` shards. Shard `k` gets filter `k`, then
+`--skip F` for each filter `F` before it, in list order; the last shard gets
+only the skips, one for every filter. The words of each are joined by single
+spaces. So `["a::", "b::"]` gives `a::`, `b:: --skip a::` and
+`--skip a:: --skip b::`, and an empty list gives one empty string: one shard
+with no arguments, which is the whole suite.
+
+That divides any set of test names, whatever the filters are, provided each
+is one word libtest reads as a filter. libtest runs a test when its name
+contains a filter, or no filter was given, and contains no skip string. Take
+the first filter in the list that a name contains. Every shard before that
+filter's asks for a filter the name does not contain; that filter's own shard
+asks for it and skips only filters the name does not contain; and every shard
+after it, the last included, skips it. A name that contains no filter is run
+by the last shard and by no other. So each name runs in exactly one shard,
+and nothing about prefixes or modules is assumed, which is as well: a filter
+is a substring of the whole path.
+
+The proviso is the caller's. An empty filter is no word at all, one with
+whitespace in it is two, and one that starts with `-` is an option;
+`the_shard_tables_run_every_test_in_exactly_one_shard` in `super` refuses
+each in the two tables of `super::ci_model`, and a filter listed twice, whose
+second shard skips its own filter and selects nothing. The same test holds
+both tables' strings to written-out literals.
+
+One function, so that the tables and anything derived from them cannot
+disagree about the rule.
+
+## `pub(super) fn libtest_runs(selection: &str, name: &str) -> bool {`
+
+Whether libtest, handed one of [`shard_selections`]' strings as its
+arguments, selects the test called `name`: a model of its rule, so that a
+table can be shown to divide a set of names without a harness being run.
+
+The selection is split on whitespace. The word after each `--skip` is a skip
+string and every other word is a filter. The answer is true when there is no
+filter or the name contains one, and the name contains no skip string.
+Containment, not equality and not a prefix: that is libtest's rule without
+`--exact`. A `--skip` with no word after it selects nothing, since a string
+the model cannot read as a selection must not count as one that runs a test.
+
+It models those two kinds of word and no other. Any other option would be
+read as a filter, and [`shard_selections`] emits none. It also says nothing
+of `#[ignore]`: a selected test that is ignored is reported ignored by its
+shard, as it is by the whole suite.

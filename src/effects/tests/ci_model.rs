@@ -141,6 +141,17 @@ pub(super) const CACHE_ACTION: &str = "Swatinem/rust-cache@";
 pub(super) const TEST_WINDOWS_HOSTED_CONDITION: &str =
     "needs.pick-windows-home.outputs.home == 'hosted'";
 
+pub(super) const WINDOWS_SHARD_FILTERS: [&str; 4] = [
+    "engine::topology::coordinator::tests::a",
+    "engine::topology::coordinator::",
+    "engine::topology::",
+    "engine::",
+];
+
+pub(super) const WINDOWS_SHARD_FLOORS: [u32; 5] = [95, 30, 340, 150, 1085];
+
+pub(super) const MACOS_SHARD_FILTERS: [&str; 2] = ["engine::topology::", "engine::"];
+
 pub(super) const PICK_WINDOWS_HOME_JOB: &str = "pick-windows-home";
 pub(super) const PICK_WINDOWS_HOME_NAME: &str = "pick windows home";
 pub(super) const PICK_WINDOWS_HOME_RUNNER: &str = "ubuntu-latest";

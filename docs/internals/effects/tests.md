@@ -2530,6 +2530,60 @@ setting the twin's install back to `stable` in the workflow and restoring
 it: this test and the oracle's clean-workflow check both failed, each with
 the twin's toolchain complaint.
 
+## `fn the_shard_tables_run_every_test_in_exactly_one_shard() {`
+
+The two shard tables of the CI model, `WINDOWS_SHARD_FILTERS` and
+`MACOS_SHARD_FILTERS`, each divide the suite: every test runs in exactly one
+shard. The test reads no workflow. No line of `ci.yml` is derived from the
+tables yet, and this is the proof that comes before one is.
+
+Five claims.
+
+1. The Windows table's five selections, as [`shard_selections`] derives
+   them, are the five strings written out here. Literals, not a second
+   derivation: the rule is then stated twice in two forms, and a reader sees
+   the arguments a shard is handed.
+2. The macOS table's three are likewise written out, and a table with no
+   filter gives one empty string -- one shard, no arguments, the whole suite.
+3. Each of eight names is run by exactly one selection of each table under
+   [`libtest_runs`], and by the one named beside it; under the empty table's
+   one selection every name runs. The names are the boundaries of the rule,
+   in Windows shard order:
+   - a coordinator test named `a...` (shard 1), one that is not (2), and one
+     named `a...` in a child module of the coordinator's tests (2), which
+     the first filter does not reach because it is a substring that ends at
+     `tests::a`;
+   - a topology test outside the coordinator (3) and an engine test outside
+     topology (4);
+   - `workspace_manager::tests::engine::a_name_with_a_filter_inside_it` (4),
+     a name outside the engine that contains `engine::`. libtest's filter is
+     a substring, so the engine's shard runs it, and the last shard skips it:
+     once, as for any other name;
+   - a library test that contains no filter (5), and a name with no module
+     before `tests::`, which is how a harness lists a test at its crate's
+     root, the bin harness's among them (5).
+
+   On macOS the same eight fall in shards 1, 1, 1, 1, 2, 2, 3 and 3.
+4. In both lists no filter is empty, contains whitespace or starts with `-`,
+   and none repeats. Each filter is one word of a command line: an empty one
+   is no word, so its own shard has no filter and a later shard's `--skip`
+   takes the next word as its string; one with whitespace is two words; one
+   that starts with `-` is an option. A repeated filter gives a second shard
+   that skips its own filter and selects nothing.
+5. `WINDOWS_SHARD_FLOORS` has one entry for each Windows shard, each above
+   zero, and they sum to [`WINDOWS_TEST_FLOOR`]: the hosted shards together
+   must not accept fewer passing tests than the guest's one job does.
+
+Eight names are examples, not a census of the suite, and the test does not
+ask whether a test of each name exists. That the rule divides every set of
+names is the argument in the workflow notes, under `shard_selections`; these
+are the cases that argument turns on, executed.
+
+Measured by making [`libtest_runs`] read a skip string as a prefix of the
+name rather than a substring, and restoring it: this test failed on
+`workspace_manager::tests::engine::a_name_with_a_filter_inside_it`, run by
+Windows shards 4 and 5.
+
 ## `mod merge_gate_answers {`
 
 The aggregate's script, executed. Linux only, for the reason
