@@ -2962,11 +2962,11 @@ the answer `probe_git` gives the same command, to the byte.
 
 ## `fn the_gate_role_probe_stand_in_writer_leaves_no_writer_in_another_threads_fork() {`
 
-Linux only. The deterministic witness of this branch's repair of
+Linux only. The deterministic witness of pull request #368's repair of
 `CI-FLAKE-GATE-PROBE-TEXT-FILE-BUSY`, described under the gate role's test
 below. It runs `gate_probe_writer_helper` in an isolated child through
-`agent::proc::test_support::run_test_isolated`, with no environment and a
-180-second deadline, and asserts that the child succeeded and that its output
+`agent::proc::test_support::run_test_isolated`, with no added environment
+variables and a 180-second deadline, and asserts that the child succeeded and that its output
 reports "1 passed", as `runner::host::tests`'
 `the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork` does for the
 container relay writer. The child keeps the oracle's held fork away from the
@@ -3036,8 +3036,8 @@ of the stand-in failed with "Text file busy"
 (`CI-FLAKE-GATE-PROBE-TEXT-FILE-BUSY`), and `fs::set_permissions` then gives it
 mode 0700, as before that fix (the helper makes it 0755). The helper's end
 waits for its reaper without a bound. This test's call to it is bounded, by the
-isolated child it runs in and that child's deadline (`FUA-I4-RELAY`). On `master`
-the test wrote the stand-in with `fs::write`; only this branch's first round
+isolated child it runs in and that child's deadline (`FUA-I4-RELAY`). Before #368
+the test wrote the stand-in with `fs::write`; only #368's first review round
 called the helper from the test's own process. Other callers of the helper are
 not all bounded: ordinary tests call it with no outer bound at nine sites,
 through `git_shim`, `a_fake_cmd` and `delivery_program` and two Docker-stub
