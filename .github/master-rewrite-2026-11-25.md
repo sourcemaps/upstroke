@@ -26,9 +26,12 @@ From this date `upstroke-pr-policy` refuses a pull request whose own commits cre
 
 ## Old and new commit ids
 
-A commit id cited before this date (in `findings/`, a pull request, a review or a ruling) that
-appears in the left column is the commit in the right column on today's `master`. One that does not
-appear was not rewritten.
+The map covers the commits that were on `master` at the rewrite. A commit id from the old `master`,
+cited before this date in `findings/`, a pull request, a review or a ruling, that appears in the left
+column is the commit in the right column on today's `master`; one from the old `master` that does not
+appear was not rewritten. Commits on the pull-request branches open at the time were moved onto the
+new history the same way and also have new ids; they are not listed here, and a pull request's own
+page names its current commits.
 
 | Before | After |
 |---|---|
