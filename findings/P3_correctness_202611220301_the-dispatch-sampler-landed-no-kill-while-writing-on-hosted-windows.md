@@ -52,8 +52,8 @@ Read from the raw job log (`evidence/job-137065317614.log`, SHA256
   - the probe measured **58.9378 ms**, and the ladder followed **one completion**: sample 5
     completed in **34.013 ms**, `After`;
   - every later kill was aimed between **3.779 ms and 30.234 ms**;
-  - of the 63 kills, **62 found nothing written** (`None`). **One**, sample 54, was killed at
-    44.15 ms and found `After`. Because it did not count as landing while writing, `MERGE_MSG` was
+  - of the 63 kills, **62 found nothing written** (`None`). **One**, sample 54, was aimed at
+    26.45 ms, its kill returned at 44.15 ms, and it found `After`. Because it did not count as landing while writing, `MERGE_MSG` was
     in place: the pick had finished.
 - Line 2469: `test result: FAILED. 2020 passed; 1 failed; 39 ignored; 0 measured; 1607 filtered out;
   finished in 549.87s`. This test was the job's only failure.
@@ -88,13 +88,26 @@ was the empty commit `fe4bfa4e` on that tree.
 **Inferred, not established: the aim missed the write window because neither measurement predicts
 when a pick writes on a loaded hosted runner.** The probe's 58.9 ms and the one completed pick's
 34.0 ms do not say when a pick begins and ends writing on this runner. 62 kills aimed as late as
-30.2 ms found nothing written, yet sample 5 had finished within 34.0 ms. So either the write window
-lies in the few milliseconds after the latest aim, or it moved from sample to sample as the runner's
-load changed. The log has no utilisation data: nothing records the runner's CPU load, or what else
-was running beside the test. **What would establish it:** per-sample write-start times, meaning when
-each child first wrote (its `index.lock`) and when it wrote `MERGE_MSG`, beside the aim and the
-time the kill returned. These would show where the write window was relative to the aims, and
-whether it moved.
+30.2 ms found nothing written, yet sample 5 had finished within 34.0 ms. The log permits more than
+one reading of this, and the readings below are not exhaustive:
+
+- The write window lies in the few milliseconds after the latest aim.
+- Sample 54's kill landed after the write, not inside it. The parent reached the 26.45 ms aim and
+  was descheduled before or during the kill call while Git wrote `MERGE_MSG`. The kill then landed
+  after the write, giving `Killed` with `After`. The log cannot tell this apart from a kill that
+  landed late for another reason. The only kill clock it records is `KillableGitChild::fired`, read
+  once the system call had returned, and that clock "orders the attempt and bounds nothing"
+  (`src/workspace_manager/fixture.rs`, the doc comment at line 3400).
+- *Unsupported:* the window moved from sample to sample as the runner's load changed. The log has
+  no utilisation data: nothing records the runner's CPU load, or what else was running beside the
+  test.
+
+**What would establish it:** per-sample write-start times, meaning when each child first wrote (its
+`index.lock`) and when it wrote `MERGE_MSG`, beside the aim, the time the kill call was entered,
+and the time the kill returned. These would show where the write window was relative to the aims,
+and whether it moved. Write times beside only the return clock would not remove the ambiguity: a
+kill that returned after `MERGE_MSG` was written could have been entered before the write or after
+it. The kill call's entry time is also needed.
 
 **Not established: the rate.** One sighting on a hosted runner. The other runs of this test on
 2026-11-22 were not counted.
