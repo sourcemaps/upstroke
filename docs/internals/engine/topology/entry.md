@@ -938,17 +938,27 @@ therefore asserts the exact number of runtimes each call constructed, and
 fails rather than silently missing one. Thread-local, so parallel tests never
 see each other's arming. Nothing of it is compiled into a production build.
 
-## `pub(crate) mod container_runtime {` › `pub(crate) struct Armed(PhantomData<*const ()>);`
+## `pub(crate) mod container_runtime {` › `pub(crate) struct Armed(PhantomData<MutexGuard<'static, ()>>);`
 
 The guard `arm` returns. Its `Drop` clears the `ARMED` slot of the thread it
-runs on, so it must drop on the thread that armed it. The `PhantomData<*const ()>`
-field makes it not `Send`, so the compiler refuses to move it to another thread,
-and the drop can only clear the slot `arm` filled. This is how
-`runner::container`'s tests and `workspace_manager::fixture` mark their
-thread-bound fixtures. Every caller compiles unchanged, so none of them moves
-the guard to another thread. `entry::tests` holds a compile-time witness:
-a `const` item whose trait lookup is ambiguous for a `Send` type, so the test
-build stops compiling if the field goes back to `()`.
+runs on, so it must drop on the thread that armed it. The
+`PhantomData<MutexGuard<'static, ()>>` field makes it not `Send`, so the
+compiler refuses to move it to another thread, and the drop can only clear the
+slot `arm` filled. It leaves the guard `Sync`: the standard library's
+`MutexGuard<'_, T>` is never `Send` and is `Sync` when `T` is, and
+`PhantomData` takes both from its parameter. A raw-pointer marker
+(`PhantomData<*const ()>`) would also have removed `Sync`, which nothing
+requires: the guard needs only to be dropped on its arming thread, and a shared
+borrow from another thread drops nothing. Without `Sync`, a scoped thread could
+not borrow `&Armed` while the arming thread keeps the guard and drops it after
+the join. `runner::container`'s tests and `workspace_manager::fixture` mark
+their thread-bound fixtures with the raw-pointer marker; this guard uses the
+mutex-guard marker to keep `Sync`. Every caller compiles unchanged, so none of
+them moves the guard to another thread. `entry::tests` holds two compile-time
+witnesses: a `const` item whose trait lookup is ambiguous for a `Send` type, so
+the test build stops compiling if the field goes back to `()`; and a `const`
+item that calls a function bounded on `Sync` with `Armed`, so the test build
+stops compiling if the field goes back to the raw-pointer marker.
 
 Until G7-M2-REGRESSION-001-TLS-GUARD-SEND the field was `()`, so `Armed` was
 `Send`. A guard moved to another thread would have cleared that thread's slot

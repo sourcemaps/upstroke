@@ -477,3 +477,12 @@ const _: () = {
     impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
     let _ = <container_runtime::Armed as AmbiguousIfSend<_>>::some_item;
 };
+
+/// G7-M2-REGRESSION-001-TLS-GUARD-SEND: `container_runtime::Armed` stays `Sync`, so a scoped
+/// thread can still borrow the guard while the arming thread keeps it and drops it. This is
+/// checked at compile time: if `Armed` is not `Sync`, the bound below fails and so does the test
+/// build.
+const _: () = {
+    const fn assert_sync<T: ?Sized + Sync>() {}
+    assert_sync::<container_runtime::Armed>();
+};
