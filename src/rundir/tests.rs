@@ -12913,10 +12913,15 @@ fn what_the_funnels_write_is_what_the_packet_says_they_write() {
 /// `create.rs` writes `committed.json`'s `run_started_sha256` from
 /// `first_line_digest` at P5b; recovery step (a) recomputes it with
 /// `rundir::run_started_sha256` over the line it replayed and refuses the run if
-/// the two disagree. Nothing asserted that they agree, and every test on either
-/// side computes its oracle with the same function it is testing -- so either
-/// `format!` could change alone and every schema-4 recovery would start refusing
+/// the two disagree. Each once carried its own `format!`, and every test on
+/// either side computes its oracle with the same function it is testing -- so
+/// either could change alone and every schema-4 recovery would start refusing
 /// with two digests that each looked correct where they were computed.
+///
+/// Since `SWEEP-CLASSIFY-011` the spelling has one definition,
+/// `run_started_sha256`, and `first_line_digest` delegates to it. This test
+/// stays as the pin on that delegation: a `format!` reintroduced on either side,
+/// or a change to which bytes `first_line_digest` hands over, fails here.
 ///
 /// The newline is the whole of the difference between the two signatures:
 /// `first_line_digest` is given a log and finds the line, `run_started_sha256`
@@ -12940,6 +12945,61 @@ fn the_two_spellings_of_the_first_line_digest_agree() {
         Some(run_started_sha256(&log)),
         "a digest over the whole log would satisfy the assertion above for the wrong reason"
     );
+}
+
+/// `is_run_started_sha256` recognises the one spelling and nothing else
+/// (`SWEEP-CLASSIFY-011`).
+///
+/// The accepted values are produced by the definition rather than typed out, so
+/// the predicate and the producer cannot drift apart with this test still
+/// passing. Each refused value is one a bare `String` field would have carried
+/// into a digest comparison without complaint.
+#[test]
+fn the_first_line_digest_predicate_accepts_the_one_spelling_only() {
+    let line = committed_line("01DIGEST", 4);
+    let digest = run_started_sha256(line.as_bytes());
+    assert!(
+        is_run_started_sha256(&digest),
+        "the one definition's output is a digest: {digest}"
+    );
+    let mut log = line.into_bytes();
+    log.push(b'\n');
+    let delegated = crate::events::log::first_line_digest(&log).expect("a committed first line");
+    assert!(
+        is_run_started_sha256(&delegated),
+        "the delegating spelling's output is a digest: {delegated}"
+    );
+    assert!(is_run_started_sha256(&run_started_sha256(b"")));
+
+    let hex = digest
+        .strip_prefix("sha256:")
+        .expect("the spelling's prefix");
+    for (refused, why) in [
+        (String::new(), "an empty value"),
+        ("sha256:".to_owned(), "the prefix alone"),
+        (digest[..digest.len() - 1].to_owned(), "a truncated digest"),
+        (format!("{digest}0"), "a digest one digit too long"),
+        (
+            format!("sha256:{}", hex.to_ascii_uppercase()),
+            "an uppercase digest",
+        ),
+        (
+            format!("SHA256:{hex}"),
+            "the prefix in another case, which this spelling never writes",
+        ),
+        (hex.to_owned(), "bare hex without the prefix"),
+        (
+            format!("sha256:{}", "g".repeat(64)),
+            "64 characters, none of them hex",
+        ),
+        (format!(" {digest}"), "a digest with a leading space"),
+        ("refs/heads/master".to_owned(), "a ref name"),
+    ] {
+        assert!(
+            !is_run_started_sha256(&refused),
+            "{why} is not a digest: {refused:?}"
+        );
+    }
 }
 
 #[test]

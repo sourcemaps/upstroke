@@ -238,6 +238,7 @@ effect_free = [
     "classify_run_dir",
     "first_line",
     "first_line_within",
+    "is_run_started_sha256",
     "run_started_sha256",
 ]
 

@@ -457,7 +457,9 @@ pub struct CommitRecord {
     pub repo_key: String,
     pub public_dir: String,
     pub incarnation: String,
-    /// The digest of the exact `run_started` line bytes about to be appended.
+    /// The digest of the exact `run_started` line bytes about to be appended,
+    /// in the one spelling [`run_started_sha256`] writes and
+    /// [`is_run_started_sha256`] recognises.
     pub run_started_sha256: String,
 }
 
@@ -2131,7 +2133,7 @@ pub fn ingest_answer(
 // ===========================================================================
 
 mod classify;
-pub use classify::{RunDirClass, classify_run_dir, run_started_sha256};
+pub use classify::{RunDirClass, classify_run_dir, is_run_started_sha256, run_started_sha256};
 
 // ===========================================================================
 // The private half's ownership
