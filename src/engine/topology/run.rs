@@ -10,7 +10,7 @@ use crate::topology::events::Answer4;
 use crate::topology::events::TopologyEventBody;
 use crate::topology::fold::QuestionOrigin;
 
-use crate::capacity::client::{AwaitedReset, BuiltinClient, CapacityClient, DeferredLimit};
+use crate::capacity::client::{AwaitedReset, CapacityClient, DeferredLimit};
 use crate::events::AttemptRecord;
 use crate::interaction::{self, Notifier, Sleeper};
 use crate::topology::events::{
@@ -1426,7 +1426,7 @@ pub struct TopologyRun {
     /// ([`Self::with_spend_approval`]).
     approve_spend_over: Option<f64>,
     notifiers: Vec<&'static dyn Notifier>,
-    capacity: Box<dyn CapacityClient>,
+    capacity_client: Box<dyn CapacityClient>,
 }
 
 impl TopologyRun {
@@ -1439,7 +1439,8 @@ impl TopologyRun {
         };
         let spend = Spend::replay(&handle.events);
         let brief = Brief::replay(&handle.events);
-        let capacity = Box::new(BuiltinClient::replay(&handle.events));
+        let capacity_client =
+            crate::capacity::client::builtin_capacity_client_from_log(&handle.events);
         let broker = PermitBroker::for_run(&Entitlements::of(&handle.fold));
         Self {
             handle,
@@ -1455,7 +1456,7 @@ impl TopologyRun {
             stopped: None,
             approve_spend_over: None,
             notifiers: Vec::new(),
-            capacity,
+            capacity_client,
         }
     }
 
@@ -1838,7 +1839,7 @@ impl TopologyRun {
             .map(TaskKey)
             .filter_map(|key| self.deferred_limit(key, plans))
             .collect();
-        self.capacity
+        self.capacity_client
             .awaited_reset(&limits, &self.handle.events, now_unix)
     }
 
@@ -2552,7 +2553,7 @@ impl TopologyRun {
         let pool = if run_as.announced {
             run_as.pool
         } else {
-            self.capacity.grant(
+            self.capacity_client.grant(
                 &seams.plans.pools_for(&binding.agent),
                 &self.handle.events,
                 unix_seconds(seams.clock),
@@ -2706,21 +2707,21 @@ impl TopologyRun {
         }
         self.spend.record(site.key, &settled.event.record);
         self.brief.record(site.key, &settled.event.record);
-        self.capacity.served(&settled.event.record);
+        self.capacity_client.served(&settled.event.record);
         if failure.kind == crate::ladder::FailureKind::RateLimited {
-            if let Some(exhausted) = self.capacity.exhaustion(
+            if let Some(exhausted) = self.capacity_client.exhaustion(
                 failure,
                 &settled.event.record,
                 &plan.binding.agent,
                 unix_seconds(seams.clock),
             ) {
-                let held = exhausted.clone();
+                let (pool, reset_at) = (exhausted.pool.clone(), exhausted.reset_at.clone());
                 self.emit(
                     TopologyEventBody::PoolExhausted { data: exhausted },
                     seams,
                     hooks,
                 )?;
-                self.capacity.held(&held);
+                self.capacity_client.held(pool, reset_at);
             }
         }
         let closed = matches!(
@@ -2744,7 +2745,7 @@ impl TopologyRun {
         agent: &str,
         plans: &dyn AttemptPlans,
     ) -> bool {
-        self.capacity
+        self.capacity_client
             .fails_over(failure, record, &plans.pools_for(agent))
     }
 
@@ -2785,7 +2786,7 @@ impl TopologyRun {
     fn record_promoted(&mut self, key: TaskKey, record: &AttemptRecord) {
         self.spend.record(key, record);
         self.brief.record(key, record);
-        self.capacity.served(record);
+        self.capacity_client.served(record);
     }
 
     fn with_journal<T>(

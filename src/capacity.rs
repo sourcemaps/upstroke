@@ -14,7 +14,7 @@ use crate::events::{AttemptRecord, Event, PoolExhausted, ReviewPassOutcome, Revi
 use crate::ladder::{AttemptFailure, FailureKind, FailureOrigin};
 use crate::topology::events::TopologyEvent;
 
-pub mod client;
+pub(crate) mod client;
 pub mod evidence;
 pub mod machine;
 pub mod usage;

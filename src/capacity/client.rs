@@ -23,10 +23,10 @@ use crate::ladder::AttemptFailure;
 use crate::topology::events::{TopologyEvent, TopologyEventBody};
 use crate::util::unix_seconds_of;
 
-pub use super::{Pool, drain_of, pool_for};
+pub(crate) use super::{Pool, drain_of, pool_for};
 
 /// The questions the engine asks about capacity while a run is live.
-pub trait CapacityClient {
+pub(crate) trait CapacityClient {
     /// The pool an attempt binds, among its agent's pools in file order
     /// (`candidates`), judged at `now_unix` against what the run's `events`
     /// say of spent resets. `None` when the agent names no pool.
@@ -73,42 +73,53 @@ pub trait CapacityClient {
         now_unix: u64,
     ) -> Option<PoolExhausted>;
 
-    /// A `pool_exhausted` signal the run has just recorded: its pool is held,
-    /// with the reset it named.
-    fn held(&mut self, exhausted: &PoolExhausted);
+    /// The `pool` and `reset_at` of a `pool_exhausted` signal the run has
+    /// just recorded: the pool is held, with the reset the signal named.
+    fn held(&mut self, pool: String, reset_at: Option<String>);
 }
 
 /// A task the fold holds `Deferred` whose last settled attempt failed
 /// `RateLimited`, as the engine reads it for [`CapacityClient::awaited_reset`].
 #[derive(Debug, Clone)]
-pub struct DeferredLimit<'a> {
+pub(crate) struct DeferredLimit<'a> {
     /// The last settled attempt's record, whose failure is the rate limit.
-    pub record: &'a AttemptRecord,
+    pub(crate) record: &'a AttemptRecord,
     /// The pools of the agent bound on the task's rung, in file order, when
     /// the failure's origin is the worker. Empty for a reviewer's limit.
-    pub worker_pools: Vec<String>,
+    pub(crate) worker_pools: Vec<String>,
 }
 
 /// What [`CapacityClient::awaited_reset`] chose: the pool and reset a
 /// deferred run waits for, and the unix second the wait runs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AwaitedReset {
+pub(crate) struct AwaitedReset {
     /// The pool whose reset the run waits for.
-    pub pool: String,
+    pub(crate) pool: String,
     /// The reset as its signal recorded it.
-    pub reset_at: String,
+    pub(crate) reset_at: String,
     /// The unix second the wait runs to: the reset plus the margin.
     ///
     /// The run's deferral is given it when the wait starts
     /// (`Deferral::wait_toward`) and holds it while later slices are slept
     /// toward it (`Deferral::held_until`), and `Progress::Waiting` reports it.
-    pub until_unix: u64,
+    pub(crate) until_unix: u64,
+}
+
+/// The client a resumed run starts from: the built-in one, holding the pools
+/// its `events` hold exhausted ([`BuiltinClient::replay`]). It is the one way
+/// to build a [`BuiltinClient`] outside this file, so the client a run
+/// installs is the only one it asks.
+#[must_use]
+pub(crate) fn builtin_capacity_client_from_log(
+    events: &[TopologyEvent],
+) -> Box<dyn CapacityClient> {
+    Box::new(BuiltinClient::replay(events))
 }
 
 /// The built-in client: each pool the run's signals hold exhausted, with the
 /// reset its latest signal named.
 #[derive(Debug, Default)]
-pub struct BuiltinClient {
+struct BuiltinClient {
     exhausted_pools: BTreeMap<String, Option<String>>,
 }
 
@@ -116,7 +127,7 @@ impl BuiltinClient {
     /// The client a resumed run starts from: the pools its `events` hold
     /// exhausted, as `capacity::observe` reads them.
     #[must_use]
-    pub fn replay(events: &[TopologyEvent]) -> Self {
+    fn replay(events: &[TopologyEvent]) -> Self {
         Self {
             exhausted_pools: super::exhausted_pools_of(events),
         }
@@ -260,8 +271,7 @@ impl CapacityClient for BuiltinClient {
         super::pool_exhausted_to_record(failure, record, agent, &self.exhausted_pools, now_unix)
     }
 
-    fn held(&mut self, exhausted: &PoolExhausted) {
-        let (pool, reset_at) = (exhausted.pool.clone(), exhausted.reset_at.clone());
+    fn held(&mut self, pool: String, reset_at: Option<String>) {
         self.exhausted_pools.insert(pool, reset_at);
     }
 }
@@ -378,7 +388,7 @@ fn spent_resets(events: &[TopologyEvent]) -> BTreeSet<String> {
 ///
 /// A pool that is held but is not a candidate is another agent's and
 /// changes nothing.
-pub(crate) fn serving_pool<'a>(
+fn serving_pool<'a>(
     candidates: &'a [String],
     held: &BTreeMap<String, Option<String>>,
     now_unix: u64,
@@ -397,32 +407,64 @@ pub(crate) fn serving_pool<'a>(
         .or_else(|| candidates.first())
 }
 
+/// What a test outside this file reaches the built-in client through: each
+/// function hands back a `dyn CapacityClient` or plain values, never the
+/// client's own type.
 #[cfg(test)]
-mod test_support {
+pub(crate) mod test_support {
     use std::collections::BTreeMap;
 
-    use super::BuiltinClient;
+    use super::{BuiltinClient, CapacityClient};
     use crate::topology::events::TopologyEvent;
 
-    impl BuiltinClient {
-        /// A client holding `exhausted_pools`, for a test that sets the map.
-        pub(crate) fn holding(exhausted_pools: BTreeMap<String, Option<String>>) -> Self {
-            Self { exhausted_pools }
-        }
+    /// A client holding `exhausted_pools`, for a test that sets the map.
+    pub(crate) fn holding(
+        exhausted_pools: BTreeMap<String, Option<String>>,
+    ) -> Box<dyn CapacityClient> {
+        Box::new(BuiltinClient { exhausted_pools })
+    }
 
-        /// The map itself, for a test that takes a pool out or puts one in.
-        pub(crate) fn exhausted_pools_mut(&mut self) -> &mut BTreeMap<String, Option<String>> {
-            &mut self.exhausted_pools
-        }
+    /// The client a resumed run starts from (`BuiltinClient::replay` of
+    /// `events`), with `pool` taken out of its map.
+    pub(crate) fn replayed_releasing(
+        events: &[TopologyEvent],
+        pool: &str,
+    ) -> Box<dyn CapacityClient> {
+        let mut client = BuiltinClient::replay(events);
+        client.exhausted_pools.remove(pool);
+        Box::new(client)
+    }
 
-        /// The map with each spent reset read from `events` dropped, as
-        /// [`super::CapacityClient::grant`] gives it to `serving_pool`.
-        pub(crate) fn held_unspent(
-            &self,
-            events: &[TopologyEvent],
-        ) -> BTreeMap<String, Option<String>> {
-            super::held_unspent(&self.exhausted_pools, events)
-        }
+    /// The client a resumed run starts from (`BuiltinClient::replay` of
+    /// `events`), with `pool` put in its map, held with `reset_at`.
+    pub(crate) fn replayed_holding(
+        events: &[TopologyEvent],
+        pool: String,
+        reset_at: Option<String>,
+    ) -> Box<dyn CapacityClient> {
+        let mut client = BuiltinClient::replay(events);
+        client.exhausted_pools.insert(pool, reset_at);
+        Box::new(client)
+    }
+
+    /// The map of the client a resumed run starts from
+    /// (`BuiltinClient::replay` of `events`), with each spent reset read from
+    /// `events` dropped, as [`super::CapacityClient::grant`] gives it to
+    /// `serving_pool`.
+    pub(crate) fn replayed_held_unspent(
+        events: &[TopologyEvent],
+    ) -> BTreeMap<String, Option<String>> {
+        super::held_unspent(&BuiltinClient::replay(events).exhausted_pools, events)
+    }
+
+    /// The pool `serving_pool` binds among `candidates`, with `held` and
+    /// `now_unix` as [`super::CapacityClient::grant`] gives them.
+    pub(crate) fn serving_pool<'a>(
+        candidates: &'a [String],
+        held: &BTreeMap<String, Option<String>>,
+        now_unix: u64,
+    ) -> Option<&'a String> {
+        super::serving_pool(candidates, held, now_unix)
     }
 }
 
@@ -560,108 +602,6 @@ mod tests {
             .collect()
     }
 
-    /// The byte offsets of the word-bounded occurrences of `word` in `code`.
-    fn word_occurrences(code: &str, word: &str) -> Vec<usize> {
-        code.match_indices(word)
-            .map(|(at, _)| at)
-            .filter(|at| {
-                bounded(code[..*at].chars().next_back())
-                    && bounded(code[at + word.len()..].chars().next())
-            })
-            .collect()
-    }
-
-    /// Each `use` declaration in `code`, from its word-bounded `use` to the
-    /// `;` that ends it.
-    fn use_declarations(code: &str) -> impl Iterator<Item = &str> {
-        word_occurrences(code, "use").into_iter().map(move |at| {
-            let rest = &code[at..];
-            rest.find(';').map_or(rest, |end| &rest[..end])
-        })
-    }
-
-    const BUILTIN_CLIENT: &str = "BuiltinClient";
-
-    /// The engine's production files, but the legacy writer's, that name
-    /// `BuiltinClient` outside a `use` declaration, each with how many times
-    /// it does: every such name is a site that can build a built-in client
-    /// (`BuiltinClient::replay(..)`, `<BuiltinClient as Default>::default()`,
-    /// `type B = BuiltinClient;`).
-    fn builtin_client_sites(sources: &[(String, String)]) -> Vec<(&str, usize)> {
-        engine_production_code(sources)
-            .map(|(path, code)| {
-                let sites = word_occurrences(&code, BUILTIN_CLIENT)
-                    .into_iter()
-                    .filter(|at| !in_a_use_declaration(&code, *at))
-                    .count();
-                (path, sites)
-            })
-            .filter(|(_, sites)| *sites > 0)
-            .collect()
-    }
-
-    /// Whether a `use` declaration renames `BuiltinClient` (`BuiltinClient
-    /// as B`), so the file can build one under a name the sites do not count.
-    fn renames_the_builtin_client(declaration: &str) -> bool {
-        word_occurrences(declaration, BUILTIN_CLIENT)
-            .into_iter()
-            .any(|at| {
-                declaration[at + BUILTIN_CLIENT.len()..]
-                    .trim_start()
-                    .strip_prefix("as")
-                    .is_some_and(|rest| bounded(rest.chars().next()))
-            })
-    }
-
-    /// Whether a `use` declaration, its whitespace dropped, globs the client
-    /// module: `capacity::client::*`, or a `*` among the items of the group
-    /// that follows `capacity::client::` (`capacity::client::{Pool, *}`), so
-    /// the file has `BuiltinClient` without naming it.
-    fn globs_the_client_module(declaration: &str) -> bool {
-        const MODULE: &str = "capacity::client::";
-        let compact: String = declaration
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect();
-        compact.match_indices(MODULE).any(|(at, _)| {
-            let imported = &compact[at + MODULE.len()..];
-            let Some(group) = imported.strip_prefix('{') else {
-                return imported.starts_with('*');
-            };
-            let mut depth = 0_usize;
-            let mut previous = '{';
-            for character in group.chars() {
-                match character {
-                    '*' if depth == 0 && matches!(previous, '{' | ',') => return true,
-                    '{' => depth += 1,
-                    '}' if depth == 0 => return false,
-                    '}' => depth -= 1,
-                    _ => {}
-                }
-                previous = character;
-            }
-            false
-        })
-    }
-
-    /// The engine's production files, but the legacy writer's, with a `use`
-    /// declaration that lets the file build a `BuiltinClient` without naming
-    /// it: one that renames it, or globs the client module.
-    ///
-    /// Like the seam's census, this reads text: a macro that builds the name,
-    /// or a glob through an alias of the module (`use crate::capacity::client
-    /// as c; use c::*;`), is not seen.
-    fn hides_the_builtin_client(sources: &[(String, String)]) -> Vec<&str> {
-        engine_production_code(sources)
-            .filter(|(_, code)| {
-                use_declarations(code).any(|declaration| {
-                    renames_the_builtin_client(declaration) || globs_the_client_module(declaration)
-                })
-            })
-            .map(|(path, _)| path)
-            .collect()
-    }
-
     fn source_of<'a>(sources: &'a [(String, String)], wanted: &str) -> &'a str {
         sources
             .iter()
@@ -781,101 +721,6 @@ mod tests {
                 "src/engine/grouped.rs",
                 "src/engine/rooted.rs",
                 "src/engine/upper.rs",
-            ]
-        );
-    }
-
-    #[test]
-    fn only_the_run_constructor_builds_the_builtin_client() {
-        const RUN: &str = "src/engine/topology/run.rs";
-        let sources = production_sources();
-        assert!(
-            crate::effects::production_code(source_of(&sources, RUN))
-                .contains("BuiltinClient::replay(&handle.events)"),
-            "`TopologyRun::resumed` in `{RUN}` no longer builds the run's client with \
-             `BuiltinClient::replay(&handle.events)`, so the one site this census allows is not \
-             the run's constructor"
-        );
-        assert_eq!(
-            builtin_client_sites(&sources),
-            vec![(RUN, 1)],
-            "the run asks the client it installed (`self.capacity`, which `TopologyRun::resumed` \
-             builds), so a second built-in client, built anywhere else in the engine, answers \
-             capacity questions an installed handler never sees. The legacy writer of schemas \
-             1–3 ({LEGACY_WRITER:?}) is the one named exception"
-        );
-        assert_eq!(
-            hides_the_builtin_client(&sources),
-            Vec::<&str>::new(),
-            "a `use` that renames `BuiltinClient` or globs `capacity::client` lets a file build a \
-             second built-in client without naming it, and that client answers capacity \
-             questions an installed handler never sees"
-        );
-    }
-
-    #[test]
-    fn the_builtin_client_census_sees_a_second_client() {
-        let planted: Vec<(String, String)> = [
-            (
-                "src/engine/topology/run.rs",
-                "use crate::capacity::client::{BuiltinClient, CapacityClient};\n\
-                 fn resumed(handle: H) -> Box<dyn CapacityClient> {\n    \
-                 Box::new(BuiltinClient::replay(&handle.events))\n}\n",
-            ),
-            (
-                "src/engine/second.rs",
-                "fn f(e: &[E]) { BuiltinClient::replay(e).grant(&[], e, 0); }\n",
-            ),
-            (
-                "src/engine/renamed.rs",
-                "use crate::capacity::client::BuiltinClient as B;\n",
-            ),
-            ("src/engine/globbed.rs", "use crate::capacity::client::*;\n"),
-            (
-                "src/engine/grouped.rs",
-                "use crate::capacity::client::{\n    CapacityClient, *,\n};\n",
-            ),
-            (
-                "src/engine/qualified.rs",
-                "fn f() { let _ = <BuiltinClient as Default>::default(); }\n",
-            ),
-            (
-                "src/engine/prose.rs",
-                "// a BuiltinClient answers from the run's signals\n\
-                 const S: &str = \"BuiltinClient::replay(e)\";\n",
-            ),
-            (
-                "src/engine/tested.rs",
-                "fn f() {}\n#[cfg(test)]\nmod tests {\n    \
-                 use crate::capacity::client::BuiltinClient as B;\n    \
-                 fn g(e: &[E]) { B::replay(e); BuiltinClient::replay(e); }\n}\n",
-            ),
-            (
-                "src/engine/coordinator.rs",
-                "fn f(e: &[E]) { BuiltinClient::replay(e); }\n",
-            ),
-            (
-                "src/cli.rs",
-                "use crate::capacity::client::*;\nfn f(e: &[E]) { BuiltinClient::replay(e); }\n",
-            ),
-        ]
-        .into_iter()
-        .map(|(path, source)| (path.to_owned(), source.to_owned()))
-        .collect();
-        assert_eq!(
-            builtin_client_sites(&planted),
-            vec![
-                ("src/engine/topology/run.rs", 1),
-                ("src/engine/second.rs", 1),
-                ("src/engine/qualified.rs", 1),
-            ]
-        );
-        assert_eq!(
-            hides_the_builtin_client(&planted),
-            vec![
-                "src/engine/renamed.rs",
-                "src/engine/globbed.rs",
-                "src/engine/grouped.rs",
             ]
         );
     }
