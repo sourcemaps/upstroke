@@ -199,6 +199,10 @@ the private half is known.
 `RunDir.RemovePublicHusk` on a directory with nothing private bound.
 Nothing private existed by ordering, so nothing private is at risk.
 
+This is also the answer when a `Bare` or `StagedMarkerOnly` directory has
+gained an entry since the census planned its reclaim. The removal refuses
+it, and the entry stays (see `apply`).
+
 ## `pub enum FailedStep` › `PrivateHalf,`
 
 `RunDir.RemovePrivateHusk` under the proof token. **The public half is
@@ -758,6 +762,29 @@ Perform one plan. The only place in this module that has an effect.
 directory's residue cannot end the command that censused it. The retain arm
 keeps a second guarantee it had before: it reaches no funnel at all, which is
 now visible in the signature as well as in the body.
+
+## `fn apply(hooks: &mut dyn RunDirHooks, public: &Path, plan: Planned) -> RunDirOutcome {` › `match rundir::remove_unbound_husk(public, shape, hooks) {`
+
+**The public half alone is removed by the shape the plan carries**, not by
+what the directory holds when `apply` runs. `scan` and `apply` look at the
+directory at two different times, and it can change in between. For `Bare`
+and `StagedMarkerOnly`, `rundir::remove_unbound_husk` does not list the
+directory again. It runs one `remove_dir`, after removing the staged marker
+for `StagedMarkerOnly`, and `remove_dir` refuses a directory that is not
+empty. So an entry that arrived after the plan is an error,
+`FailedStep::PublicHalf`, and the entry and the directory stay for the next
+census to classify again. `TargetAbsent` is decided by the marker's private
+target, not by what the public directory holds, so that shape still lists
+and empties the directory with the marker last, as `remove_public_husk` does.
+
+This arm used to call `remove_public_husk`, which listed the directory again
+and removed everything it found. Take a committed run whose public directory
+is renamed aside while the census scans. Its path is empty, an absent
+directory lists empty, and so the census plans the `Bare` reclaim. If the
+directory is renamed back before `apply`, the second listing finds the run's
+`events.jsonl` and deletes it.
+`a_committed_run_put_back_after_a_bare_plan_keeps_its_event_log` replays that
+sequence.
 
 ## `fn apply(hooks: &mut dyn RunDirHooks, public: &Path, plan: Planned) -> RunDirOutcome {` › `if let Err(error) = rundir::remove_private_husk(proof, hooks) {`
 

@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex};
 
 use super::{
     CensusInputs, FailedStep, Planned, RunDirCensusReport, RunDirEntry, RunDirOutcome,
-    WorktreeLocked, apply, census_run_dirs, scan_classified, startup_census,
+    WorktreeLocked, apply, census_run_dirs, scan, scan_classified, startup_census,
 };
 use crate::error::UpstrokeError;
 use crate::events::log::EventLog;
@@ -2075,6 +2075,76 @@ fn a_husk_whose_public_removal_erred_after_completing_is_gone_for_the_next_censu
         "and executes no run-directory funnel: {:?}",
         seen.coverage()
     );
+}
+
+/// A committed run whose public directory was moved aside when the census
+/// planned and put back before it acted keeps its `events.jsonl`, byte for
+/// byte.
+///
+/// `scan` and `apply` look at the directory at two different times. With
+/// the directory renamed aside, its path holds nothing. An absent directory
+/// lists empty, so the census plans the `Bare` husk's reclaim. With the
+/// directory renamed back, the same path holds a committed run.
+/// `remove_public_husk`, which this arm called before, lists the directory
+/// again when it acts, empties it and deletes the log; this test fails
+/// against that arm. Removed by its planned shape, `Bare` is one `remove_dir`
+/// and nothing else, which a non-empty directory refuses. The arm then
+/// answers `Unreclaimable` at the public half and the run is untouched.
+#[test]
+fn a_committed_run_put_back_after_a_bare_plan_keeps_its_event_log() {
+    let fixture = Fixture::new("put-back-after-bare-plan");
+    let run_id = "01PUTBACK00000000000000000";
+    let husk = Husk::at_p0(&fixture, run_id)
+        .create_private()
+        .publish_owner()
+        .publish_commit_record()
+        .commit_log();
+    let public = husk.public();
+    let log = public.join(rundir::EVENT_LOG);
+    assert_eq!(rundir::classify_run_dir(&public), RunDirClass::Committed);
+    let log_before = fs::read(&log).expect("the committed log");
+    let public_before = tree_bytes(&public);
+    let private_before = tree_bytes(&husk.private());
+
+    let aside = fixture.root.join("aside");
+    crate::workspace_manager::fixture::rename(&public, &aside);
+    let scanned = scan(run_id, &fixture.inputs(), None);
+    assert!(
+        matches!(scanned.plan, Planned::ReclaimPublicOnly(UnboundShape::Bare)),
+        "an absent public directory is planned as the bare husk: {:?}",
+        scanned.plan
+    );
+    crate::workspace_manager::fixture::rename(&aside, &public);
+
+    let outcome = apply(&mut rundir::NoHooks, &scanned.public, scanned.plan);
+
+    assert!(
+        matches!(
+            outcome,
+            RunDirOutcome::Unreclaimable {
+                step: FailedStep::PublicHalf,
+                ..
+            }
+        ),
+        "a bare plan refuses a directory that is no longer bare: {outcome:?}"
+    );
+    assert!(!outcome.reclaimed_anything());
+    assert_eq!(
+        fs::read(&log).expect("the log is still there"),
+        log_before,
+        "events.jsonl is byte-identical afterwards"
+    );
+    assert_eq!(
+        tree_bytes(&public),
+        public_before,
+        "so is the rest of the public half"
+    );
+    assert_eq!(
+        tree_bytes(&husk.private()),
+        private_before,
+        "and the private half"
+    );
+    assert_eq!(rundir::classify_run_dir(&public), RunDirClass::Committed);
 }
 
 /// Gate 5's audit, rows 69 and 129: the creation prefix P2, the marker
