@@ -3429,6 +3429,7 @@ fn reaper_container_cells(
             cell,
             tree: dir,
             published: &reaper_path,
+            written_after: &agent_path,
             coordinator: Some(
                 coordinator
                     .spawn()
@@ -3440,10 +3441,10 @@ fn reaper_container_cells(
         };
 
         before_arming(dir, &reaper_path);
+        let agent_pid = read_pid(&agent_path, Duration::from_secs(30));
         let reaper_pid = read_pid(&reaper_path, Duration::from_secs(30));
         drain.reaper = Some(reaper_pid);
         reapers.push(reaper_pid);
-        let agent_pid = read_pid(&agent_path, Duration::from_secs(30));
         let coordinator = drain
             .coordinator
             .as_mut()
@@ -3582,6 +3583,7 @@ struct ReaperDrain<'a> {
     cell: &'a str,
     tree: &'a Path,
     published: &'a Path,
+    written_after: &'a Path,
     coordinator: Option<ChildGuard>,
     reaper: Option<i32>,
     on_wait: &'a mut dyn FnMut(i32),
@@ -3591,8 +3593,13 @@ struct ReaperDrain<'a> {
 impl ReaperDrain<'_> {
     const BOUND: Duration = Duration::from_secs(30);
 
-    fn published_pid(path: &Path) -> Option<i32> {
-        std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    fn published_pid(record: &Path, written_after: &Path) -> Option<i32> {
+        std::fs::symlink_metadata(written_after).ok()?;
+        Self::final_record(record)
+    }
+
+    fn final_record(record: &Path) -> Option<i32> {
+        std::fs::read_to_string(record).ok()?.trim().parse().ok()
     }
 }
 
@@ -3605,7 +3612,7 @@ impl Drop for ReaperDrain<'_> {
         if self.reaper.is_none() {
             let settled_by = Instant::now() + Self::BOUND;
             loop {
-                self.reaper = Self::published_pid(self.published);
+                self.reaper = Self::published_pid(self.published, self.written_after);
                 if self.reaper.is_some()
                     || !matches!(coordinator.try_wait(), Ok(None))
                     || Instant::now() >= settled_by
@@ -3617,7 +3624,23 @@ impl Drop for ReaperDrain<'_> {
         }
         drop(coordinator);
         if self.reaper.is_none() {
-            self.reaper = Self::published_pid(self.published);
+            self.reaper = Self::published_pid(self.published, self.written_after);
+        }
+        let unconfirmed = if self.reaper.is_none() {
+            Self::final_record(self.published)
+        } else {
+            None
+        };
+        if let Some(pgid) = unconfirmed {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[{}] the reaper's record at {} was read after its writer was collected and with \
+                 no agent record beside it, so it is final but not established whole; process \
+                 group {pgid} is drained on that footing",
+                self.cell,
+                self.published.display()
+            );
+            self.reaper = Some(pgid);
         }
         let failure = match self.reaper {
             None => format!(
@@ -4102,7 +4125,9 @@ fn a_cell_failing_before_it_arms_its_drain_drains_its_reaper_before_its_reclaim(
                 |cell_tree, published| {
                     tree = Some(cell_tree.to_path_buf());
                     let published_by = Instant::now() + Duration::from_secs(30);
-                    while after_publication && ReaperDrain::published_pid(published).is_none() {
+                    while after_publication
+                        && ReaperDrain::published_pid(published, &cell_tree.join("agent")).is_none()
+                    {
                         assert!(
                             Instant::now() < published_by,
                             "{case}: the coordinator never published its reaper's pid at {}",
@@ -4890,6 +4915,37 @@ fn a_drains_gate_that_cannot_be_created_is_reported_and_never_panics() {
         std::fs::symlink_metadata(&gate).is_ok_and(|metadata| metadata.is_file()),
         "the gate was not published at {}",
         gate.display()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_reapers_record_is_read_only_once_the_record_written_after_it_exists() {
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "reaper-record")
+        .expect("a scratch tree");
+    let reaper = tree.path().join("reaper");
+    let agent = tree.path().join("agent");
+    std::fs::write(&reaper, "482").expect("write a record that parses as a pid");
+
+    assert_eq!(
+        ReaperDrain::published_pid(&reaper, &agent),
+        None,
+        "the reaper's record at {} was read while the record written after it, {}, did not \
+         exist: a prefix of a longer pid parses as well as the whole of it",
+        reaper.display(),
+        agent.display()
+    );
+    assert_eq!(
+        ReaperDrain::final_record(&reaper),
+        Some(482),
+        "the control is sharp: the record itself parses as a pid"
+    );
+
+    std::fs::write(&agent, "1").expect("write the record written after the reaper's");
+    assert_eq!(
+        ReaperDrain::published_pid(&reaper, &agent),
+        Some(482),
+        "the reaper's record was not read once the record written after it existed"
     );
 }
 

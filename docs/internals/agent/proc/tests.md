@@ -1133,9 +1133,9 @@ exits, by the time its drain probes, so on the passing path the hook
 runs for dying cells only.
 
 `before_arming` runs in every cell once the coordinator has been
-spawned and before the cell reads its reaper's pid, the drain's arming
-point, and is handed the cell's tree and the path the coordinator
-publishes that pid at. A hook that does nothing changes nothing;
+spawned and before the cell reads its agent's pid and then its
+reaper's, the drain's arming point, and is handed the cell's tree and
+the path the coordinator publishes the reaper's pid at. A hook that does nothing changes nothing;
 `a_cell_failing_before_it_arms_its_drain_drains_its_reaper_before_its_reclaim`
 fails the cell there.
 
@@ -1177,22 +1177,45 @@ spawn. The tree drops after the drain, so on every way out of a cell,
 the end of its iteration, the live cell's `continue` and an unwind
 alike, the drain's drop runs to its end before the tree is reclaimed:
 it ends and collects the coordinator, then waits for the reaper's
-group. The cell arms it with the reaper's pid as soon as that is read,
-and the reaper's pid is read before the agent's: the coordinator
-records it before it spawns the agent, so a failure reading the agent's
-pid finds the drain armed. Past 30 s, the bound of the test's other
-waits, it fails naming the cell, the group and the tree, and it signals
-nothing; while a failure unwinds it reports that on stderr instead of
-panicking again (`ReaperDrain`'s drop).
+group. The cell arms it with the reaper's pid once both pids are read,
+the agent's first and the reaper's second. The reaper's record is the
+pid's digits with no terminator, written in place, so nothing in it
+tells a whole record from a prefix (`ReaperDrain`); the coordinator
+creates the agent's record only after its write of the reaper's has
+returned (`Supervisor::begin` returns only once `fork_reaper` has), so
+once the agent's record exists the reaper's is whole. Read the other
+way round, the cell could take a prefix of the reaper's pid, arm the
+drain with a group that has no member, and have the tree reclaimed
+while the real reaper's group still writes into it. The consequence of
+this order: a failure reading the agent's pid leaves the drain unarmed,
+and its drop's handshake arms it. In that case the handshake waits up
+to its own 30 s for the agent's record before it ends the coordinator.
+Past 30 s, the bound of the test's other waits, the drain fails naming
+the cell, the group and the tree, and it signals nothing; while a
+failure unwinds it reports that on stderr instead of panicking again
+(`ReaperDrain`'s drop).
 
 A cell can also fail between the coordinator's spawn and the arming,
 while the coordinator is starting its reaper or once the reaper has
-started and the cell has not read its pid. The drain then arms itself
+started and the cell has not read both pids. The drain then arms itself
 through a startup handshake, its drop's first step: it ends nothing
-until the coordinator has published its reaper's pid or has exited,
-because ending a coordinator in between would set going a reaper whose
-group no one could name. Once the coordinator has been collected, the
-published file says all it ever will, and the drain reads it again.
+until the coordinator has published its reaper's pid, which it takes
+as published only once the agent's record exists beside it, or has
+exited, because ending a coordinator in between would set going a
+reaper whose group no one could name. Once the coordinator has been
+collected, the published files say all they ever will, and the drain
+reads them again, the agent's record first. With the agent's record
+still absent, the drain reads the reaper's record alone, and a pid
+there arms it, with a line on stderr saying the record is not
+established whole. What is not established about such a record: it is
+final once the coordinator is collected, since nothing writes it any
+more, but it is whole only if the coordinator's write had returned.
+Where the coordinator exited by itself the write call had returned, and
+a write that failed makes production cancel that reaper
+(`reaper.cancel()` in `fork_reaper`) before `begin` fails. Where the
+drain ended the coordinator at its bound, a kill between two `write`
+calls of the one `std::fs::write` would leave a short record, and
+nothing here detects that.
 The second shape of this drain was armed only by the cell's own read,
 so a failure before that read ended the coordinator, which set its
 reaper going against the tree, and the unarmed drain returned at once.
@@ -1263,19 +1286,27 @@ then dies like any other.
 What this does not settle: a writer outside the analysed fixture paths
 is not excluded by the wait, and the macOS red that filed the finding
 has no established cause. The handshake is bounded too: a coordinator
-that has neither published nor exited 30 s after the drain began to
-wait is ended anyway, and if no pid has been published by its
-collection the drain reports that a reaper it started may still write
-into the tree. `fork_reaper` bounds its own startup well inside that
-(`HELPER_READY_BUDGET`, then the reaper is abandoned), so only a
-coordinator wedged outside the reaper's startup reaches that report.
+that has neither published both records nor exited 30 s after the drain
+began to wait is ended anyway, and if no reaper's pid can be read by
+its collection the drain reports that a reaper it started may still
+write into the tree. `fork_reaper` bounds its own startup well inside
+that (`HELPER_READY_BUDGET`, then the reaper is abandoned), so only a
+coordinator wedged outside the reaper's startup reaches that report; one
+wedged between its two records is ended at the bound and drained on
+the reaper's record read alone. Nor is such a record established
+whole: read with no agent record beside it, it is final once the
+coordinator is collected, and whole only if the coordinator's write had
+returned. That holds where the coordinator exited by itself, a failed
+write making production cancel that reaper; where the drain ended the
+coordinator at its bound, a kill between two `write` calls would leave
+a short record, and nothing here detects that.
 
 ## `fn reaper_container_cells` › `.map(ChildGuard::new)`
 
 The coordinator is a `ChildGuard`'s from its spawn, and the cell's drain
 holds that guard. Every step until the cell collects the coordinator
-can fail: the hook before the drain is armed, reading the reaper's and
-the agent's pids, the join's member spawn, each assertion before the
+can fail: the hook before the drain is armed, reading the agent's and
+the reaper's pids, the join's member spawn, each assertion before the
 coordinator is killed. A failure at any of them unwinds through the
 drain, after the hold's release where a hold exists. The drain lets the
 coordinator's startup settle if it is not yet armed, then drops the
@@ -1370,34 +1401,57 @@ answering `ESRCH`, and nothing else. A group the caller may not signal
 ## `struct ReaperDrain<'a> {`
 
 A container cell's drain, owned by the cell: the cell's name and tree,
-for its report, the path the coordinator publishes its reaper's pid at,
-the coordinator's `ChildGuard`, the reaper's pid once it is known, and
-the caller's `on_drain_wait`. Its bound, `BOUND`, is the 30 s of the
-test's other waits. `published_pid` reads the published file and
-answers a pid only when the whole of it parses as one, so a write in
-progress reads as nothing published yet. Why the cell needs the drain,
-and where it is declared, is the note on `let mut drain = ReaperDrain {`
-above.
+for its report, the path the coordinator publishes its reaper's pid at
+(`published`), the path of the record the coordinator writes after that
+one, the agent's (`written_after`), the coordinator's `ChildGuard`, the
+reaper's pid once it is known, and the caller's `on_drain_wait`. Its
+bound, `BOUND`, is the 30 s of the test's other waits.
+
+The reaper's record has no terminator, and production writes it in
+place (`std::fs::write` straight into the final path, in
+`fork_reaper`), so its contents cannot show it whole: a write in
+progress can read as a prefix that parses, `482` of `48291`. What shows
+it whole is the agent's record, which the coordinator creates only after
+its write of the reaper's has returned. `published_pid` therefore first
+requires that `written_after` exists (`symlink_metadata`, which needs no
+descriptor; any error reads as absent), and only then reads the
+reaper's record. The order is the repair: checked the other way round,
+the agent's record could appear between a read of a prefix and the
+check. `final_record` is that read alone: a pid when the whole of the
+file parses as one, nothing otherwise. The drain calls it bare only once
+its coordinator has been collected and no agent record is there, and
+says on stderr that the pid it read is not established whole (the
+drop, step 4). Why the cell needs the drain, and where it is declared,
+is the note on `let mut drain = ReaperDrain {` above.
 
 ## `impl Drop for ReaperDrain<'_>` › `fn drop(&mut self) {`
 
-Four steps, in order, whether the cell is ending normally or a failure
+Five steps, in order, whether the cell is ending normally or a failure
 is unwinding through it.
 
 1. Unarmed, it lets the coordinator's startup settle: every 10 ms it
-   reads the published pid and asks the coordinator whether it has
+   reads the published pid through `published_pid`, so only once the
+   agent's record exists, and asks the coordinator whether it has
    exited (`try_wait`, which collects it if so), and stops at a pid, at
    an exit, or at `BOUND`. Nothing is signalled while it waits.
 2. It drops the coordinator's guard, which ends the coordinator by its
    own pid if it still runs and collects it.
-3. Still unarmed, it reads the published pid once more: the coordinator
-   has been collected, so the file is final. This also catches a pid
-   published just before an exit that step 1 saw first.
-4. Armed, it runs `drain_reaper_group` over the reaper's group with
+3. Still unarmed, it reads through `published_pid` once more: the
+   coordinator has been collected, so both records are final. This
+   also catches a pid published just before an exit that step 1 saw
+   first.
+4. Still unarmed, it reads the reaper's record alone (`final_record`).
+   A pid there was read after its writer was collected and with no
+   agent record beside it: final, but not established whole (the note
+   on `let mut drain = ReaperDrain {` above says when it is). The drain
+   writes one line saying so to stderr, naming the cell and the
+   record's path, through `writeln!` with its result dropped, and arms
+   itself with that pid, so its group is drained on that footing.
+5. Armed, it runs `drain_reaper_group` over the reaper's group with
    `BOUND`, handing the caller's hook the group's id, and returns once
    the group has no member.
 
-Past the bound in step 4, or with no pid published at all, it builds
+Past the bound in step 5, or with no pid read at all, it builds
 one report naming the cell, the group or the published path, and the
 tree. On the passing path that report is a panic, the assertion the
 drain's first shape made; the passing path always arms, so only the
@@ -1861,15 +1915,20 @@ spawn and its drain's arming, through `reaper_container_cells` itself.
 One `path-dies` cell with `LATE_WRITES_STUB` and a journal and gate in
 a scratch tree of the test's own, run twice. Each time the cell's
 `before_arming` records the cell's tree and panics with a message of
-the test's own, so the cell never reads its reaper's pid:
+the test's own, so the cell never reads its agent's or its reaper's
+pid:
 
 - before its reaper's pid was published: it panics at once, while the
   coordinator it has just spawned is still starting, so only the
   drain's handshake can learn which group to wait for;
-- after its reaper's pid was published: it waits, within 30 s, until
-  the coordinator has published the pid, so the reaper has started, and
-  then panics: the review's case, a failure after the reaper's startup
-  and before the arming point.
+- after its reaper's pid was published: it waits, within 30 s, for both
+  of the coordinator's records, reading them as the drain does,
+  through `ReaperDrain::published_pid` with the agent's record at the
+  cell tree's `agent` (the name repeats the cell's `dir.join("agent")`;
+  the hook is handed only the tree and the reaper's path). So the
+  reaper has started and its record is whole, and then it panics: the
+  review's case, a failure after the reaper's startup and before the
+  arming point.
 
 No limit is lowered and nothing is refused, so it runs in the test
 process, under `catch_unwind`. The drain hook records the group it is
@@ -2250,6 +2309,30 @@ test of this module passed: the call panicked with "publish the drain's
 gate: Os { code: 2, kind: NotFound, message: \"No such file or
 directory\" }", and the test's assertion that the call returned failed.
 With the report restored, it passes.
+
+## `fn a_reapers_record_is_read_only_once_the_record_written_after_it_exists() {`
+
+The witness for the order in `ReaperDrain::published_pid`. In a scratch
+tree of its own it writes `482` to `reaper`: a record that parses as a
+pid and that, as far as its contents show, is as likely a prefix of
+`48291` as the whole of a pid. With no `agent` beside it,
+`published_pid` must answer `None`. `final_record` must answer
+`Some(482)`, so the control is sharp: the record itself parses, and
+only the absent later record keeps it unread. Once `agent` exists,
+with any contents, `published_pid` must answer `Some(482)`.
+
+MEASURED. With the existence check removed from `published_pid`, so
+that it returned `Self::final_record(record)` unconditionally, this
+test failed at its first assertion (`left: Some(482)`, `right: None`)
+and every other test of this module passed (83 passed, 1 failed). With
+the check restored, it passes (84 passed).
+
+Two things have no witness: the order of the two `read_pid` calls in
+`reaper_container_cells`, the agent's before the reaper's, and the
+drop's read of the reaper's record with no agent record beside it
+(`final_record` once the coordinator has been collected). Each needs a
+coordinator staged to stop between its two records, which would need a
+change to the helper's production call sequence or a new helper.
 
 ## `const READINESS_ROLE: &str = "UPSTROKE_READINESS_ROLE";`
 
