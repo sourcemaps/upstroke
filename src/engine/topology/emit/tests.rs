@@ -101,8 +101,9 @@ fn gate_timeout(started: &RunStarted4) -> Duration {
 /// What a refused reclaim leaves behind.
 ///
 /// **The token**, because a reclaim that did not happen returns it rather than
-/// dropping it ([`ScratchReclaimFailure::into_token`]): the tree is still there
-/// and somebody has to own it. A `Drop` cannot return anything, so it parks the
+/// dropping it ([`ScratchReclaimFailure::into_token`]): a refusal does not say
+/// whether the tree is still there, so nothing may treat it as gone and somebody
+/// has to keep owning it. A `Drop` cannot return anything, so it parks the
 /// token here and the witness that arranged the refusal re-arms a guard over it.
 ///
 /// **A copy of what the arm did with the report**, so that a witness can assert
@@ -110,7 +111,7 @@ fn gate_timeout(started: &RunStarted4) -> Duration {
 /// report goes out through the scratch subsystem's reporter or is raised, and
 /// `PR78-EMIT-UNWIND-REPORT-LOST` is what it cost when this slot was the whole
 /// of it — an ordinary fixture holds no external handle on its own slot, so the
-/// slot died with the tree's owner and the leak was silent.
+/// slot died with the tree's owner and the refusal went unreported.
 #[derive(Debug, Default)]
 struct Parked {
     /// The token handed back, for the holder to reclaim with.
@@ -119,7 +120,7 @@ struct Parked {
     reported: Option<Report>,
 }
 
-/// What became of a lost tree's report.
+/// What became of a refused reclaim's report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Report {
     /// Raised, on the normal path, where a panic is the report.
