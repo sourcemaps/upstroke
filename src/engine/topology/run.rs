@@ -1423,6 +1423,10 @@ pub struct TopologyRun {
     /// ([`Self::with_spend_approval`]).
     approve_spend_over: Option<f64>,
     notifiers: Vec<&'static dyn Notifier>,
+    /// The pools this process has written `pool_exhausted` for, each with the reset it
+    /// recorded, as the sequential engine's `exhausted_pools` holds them. A settled attempt
+    /// that proves a pool serving again retires it (`capacity::retire_served_pools`).
+    exhausted_pools: BTreeMap<String, Option<String>>,
 }
 
 impl TopologyRun {
@@ -1450,6 +1454,7 @@ impl TopologyRun {
             stopped: None,
             approve_spend_over: None,
             notifiers: Vec::new(),
+            exhausted_pools: BTreeMap::new(),
         }
     }
 
@@ -2604,6 +2609,24 @@ impl TopologyRun {
         }
         self.spend.record(site.key, &settled.event.record);
         self.brief.record(site.key, &settled.event.record);
+        crate::capacity::retire_served_pools(&mut self.exhausted_pools, &settled.event.record);
+        if failure.kind == crate::ladder::FailureKind::RateLimited {
+            if let Some(exhausted) = crate::capacity::pool_exhausted_to_record(
+                failure,
+                &settled.event.record,
+                &plan.binding.agent,
+                &self.exhausted_pools,
+                unix_seconds(seams.clock),
+            ) {
+                let (pool, reset_at) = (exhausted.pool.clone(), exhausted.reset_at.clone());
+                self.emit(
+                    TopologyEventBody::PoolExhausted { data: exhausted },
+                    seams,
+                    hooks,
+                )?;
+                self.exhausted_pools.insert(pool, reset_at);
+            }
+        }
         let closed = matches!(
             settled.event.settlement,
             crate::topology::events::AttemptSettlement::Closed { .. }
@@ -2655,6 +2678,7 @@ impl TopologyRun {
     fn record_promoted(&mut self, key: TaskKey, record: &AttemptRecord) {
         self.spend.record(key, record);
         self.brief.record(key, record);
+        crate::capacity::retire_served_pools(&mut self.exhausted_pools, record);
     }
 
     fn with_journal<T>(
@@ -2908,6 +2932,40 @@ fn escalated_onto(settlement: &AttemptSettlement) -> Option<u32> {
         } => Some(*rung),
         AttemptSettlement::Closed { .. } | AttemptSettlement::Retained { .. } => None,
     }
+}
+
+/// The run's clock in Unix seconds: the "now" a limit message's reset is read against
+/// (`capacity::pool_exhausted_to_record`). It is read through the same seam that stamps
+/// every event. A reading that is not RFC 3339 UTC falls back to the host clock, which is
+/// what the sequential engine reads.
+fn unix_seconds(clock: &dyn TimeSource) -> u64 {
+    unix_seconds_of(&clock.now_rfc3339()).unwrap_or_else(crate::util::unix_seconds_now)
+}
+
+/// `YYYY-MM-DDTHH:MM:SS[.fraction]Z` in Unix seconds, or `None` for anything else.
+fn unix_seconds_of(reading: &str) -> Option<u64> {
+    let (date, time) = reading.strip_suffix('Z')?.split_once('T')?;
+    let mut date = date.split('-');
+    let year: i64 = date.next()?.parse().ok()?;
+    let month: i64 = date.next()?.parse().ok()?;
+    let day: i64 = date.next()?.parse().ok()?;
+    let mut time = time.split(':');
+    let hour: u64 = time.next()?.parse().ok()?;
+    let minute: u64 = time.next()?.parse().ok()?;
+    let second: u64 = time.next()?.split('.').next()?.parse().ok()?;
+    let in_range = date.next().is_none()
+        && time.next().is_none()
+        && (1..=12).contains(&month)
+        && (1..=31).contains(&day)
+        && hour < 24
+        && minute < 60
+        && second < 61;
+    if !in_range {
+        return None;
+    }
+    let days = u64::try_from(crate::util::days_from_civil(year, month, day)).ok()?;
+    days.checked_mul(86_400)?
+        .checked_add(hour * 3_600 + minute * 60 + second)
 }
 
 fn spend_approval_context(

@@ -461,6 +461,20 @@ cancellation, the budget drain, promotion and publication inside closure — was
 refused — and that the retired sentence does not come back. It matches on the prose with its whitespace
 collapsed, as the pins above do.
 
+## `fn a_rate_limited_worker_naming_a_reset_writes_one_pool_exhausted_before_its_attempt_finished() {`
+
+The schema-4 run writes the capacity signal the sequential engine writes, and writes it first.
+The scaffold's `Wide` run settles one attempt through `TopologyRun::step`. Its Claude Code worker
+is rate limited on the pool `claude-max`, and its stderr carries Claude Code's five-hour limit
+message, which names a 05:30 UTC reset. The run's clock is fixed at 03:00 UTC on 11 November
+2026, so the reset read against it is `2026-11-11T05:30:00Z`. The log then holds exactly one
+`pool_exhausted`, for that pool and agent, with that reset. It comes before the attempt's
+`attempt_finished`, so a log cut between the two still records which subscription refused the
+work and when it comes back.
+
+The clock is the run's own seam, not the host's. The reset is read against `RunSeams::clock`,
+which also stamps every event, so the test can fix it and the expected reset is a constant.
+
 ## `fn escalated_log(interrupted_first: bool) -> (TopologyFold, Vec<TopologyEvent>) {`
 
 A schema-4 log replayed into the settle fixture's fold, every event applied, so

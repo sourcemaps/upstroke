@@ -327,7 +327,8 @@ caller to emit. So every rule can be tested on plain values.
   reset. A refusal that names no reset never replaces a known one.
 
 The legacy coordinator keeps its own copy for now. Its code is left as
-it is, and this function is not called yet.
+it is. The schema-4 run calls this one from `settle_failure`, and appends
+the answer before the attempt's `attempt_finished`.
 
 It is effect-free in `effects/wrappers.toml`. The census gate asks for a
 row for every externally reachable function of this module.

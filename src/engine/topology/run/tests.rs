@@ -1355,6 +1355,109 @@ fn the_brief_takes_an_answers_words_from_the_log_live_and_on_replay() {
     assert_eq!(replayed.decisions(TaskKey(0)), [words]);
 }
 
+#[test]
+fn a_rate_limited_worker_naming_a_reset_writes_one_pool_exhausted_before_its_attempt_finished() {
+    use std::sync::Arc;
+
+    use crate::engine::topology::scaffold::{
+        RecordingRunner, ScaffoldAdapters, Wide, WidePlans, WideTask, exited,
+    };
+    use crate::runner::InvocationId;
+    use crate::runner::invocation::AttemptRole;
+
+    struct At(&'static str);
+
+    impl TimeSource for At {
+        fn now_rfc3339(&self) -> String {
+            self.0.to_owned()
+        }
+    }
+
+    const LIMIT: &str = "You've hit your 5-hour limit · resets 5:30am (UTC)";
+    let runner = RecordingRunner::new().answering(Box::new(|request| {
+        Ok(match &request.invocation {
+            InvocationId::Attempt {
+                role: AttemptRole::Worker,
+                ..
+            } => crate::agent::ProcessOutput {
+                stderr: LIMIT.to_owned(),
+                ..exited(1, String::new())
+            },
+            _ => exited(0, String::new()),
+        })
+    }));
+    let mut wide = Wide::started_with(
+        "pool-exhausted-before-settlement",
+        &[WideTask::independent("alpha")],
+        1,
+        WidePlans {
+            pool: Some("claude-max".to_owned()),
+            ..WidePlans::default()
+        },
+        runner,
+    );
+    wide.env.adapters = Arc::new(ScaffoldAdapters::rate_limiting());
+    let clock = At("2026-11-11T03:00:00Z");
+    let seams = RunSeams {
+        clock: &clock,
+        ..wide.env.seams()
+    };
+    let mut hooks = wide.env.hooks();
+    let progress = wide
+        .run
+        .step(&seams, &mut hooks)
+        .expect("the rate-limited attempt settles");
+    assert!(
+        matches!(
+            progress,
+            Progress::Settled {
+                accepted: false,
+                ..
+            }
+        ),
+        "{progress:?}"
+    );
+
+    let events = wide.env.durable_events();
+    let signals: Vec<(usize, &crate::events::PoolExhausted)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(at, event)| match &event.body {
+            TopologyEventBody::PoolExhausted { data } => Some((at, data)),
+            _ => None,
+        })
+        .collect();
+    let [(signalled, signal)] = signals.as_slice() else {
+        panic!("exactly one `pool_exhausted`: {signals:?}");
+    };
+    assert_eq!(signal.pool, "claude-max");
+    assert_eq!(signal.agent, crate::agent::claude::ADAPTER_ID);
+    assert_eq!(
+        signal.reset_at.as_deref(),
+        Some("2026-11-11T05:30:00Z"),
+        "the reset the limit message names, read against the run's clock: {signal:?}"
+    );
+    let finished = events
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.body,
+                TopologyEventBody::AttemptFinished { data }
+                    if data.key == TaskKey(0) && data.attempt == AttemptNumber(1)
+            )
+        })
+        .expect("the attempt settled with `attempt_finished`");
+    assert!(
+        *signalled < finished,
+        "`pool_exhausted` at {signalled} must come before the attempt's `attempt_finished` at \
+         {finished}: {:?}",
+        events
+            .iter()
+            .map(|event| event.body.kind())
+            .collect::<Vec<_>>()
+    );
+}
+
 fn escalated_log(interrupted_first: bool) -> (TopologyFold, Vec<TopologyEvent>) {
     use crate::engine::topology::settle::tests::{
         ALEPH, apply, attempt_started, dispatch, ev, finished, settle_into, started,

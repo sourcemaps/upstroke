@@ -262,13 +262,6 @@ pub(crate) fn retire_served_pools(
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the legacy coordinator keeps its own copy; this awaits its first caller"
-    )
-)]
 pub(crate) fn pool_exhausted_to_record(
     failure: &AttemptFailure,
     record: &AttemptRecord,
