@@ -3826,11 +3826,13 @@ impl KillBudget {
     /// the aim, which the parent cannot see: on the first, no poll reached
     /// the aim with the child running and no kill was sent — a parent
     /// descheduled across the aim and the exit alike finds the child gone
-    /// at its next poll, whichever of the two came first; on the second, a
-    /// poll reached the aim with the child still running, and the kill sent
-    /// from there missed it, or was not sent at all
-    /// ([`KillableGitChild::kill_error`]). The budget follows what the child
-    /// took either way, as the parent read it.
+    /// at its next poll, whichever of the two came first; on the second, the
+    /// parent read the aim passed with no poll having found the child gone,
+    /// and attempted the kill against a child whose state at that instant it
+    /// had not observed — one that may have exited after the last poll,
+    /// before the aim or after it — and the attempt missed it, or sent
+    /// nothing ([`KillableGitChild::kill_error`]). The budget follows what
+    /// the child took either way, as the parent read it.
     pub(crate) fn completed(&mut self, clock: std::time::Duration) {
         self.completed.push(clock);
     }
