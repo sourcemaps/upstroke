@@ -2218,10 +2218,11 @@ The units Cargo compiles for the host rather than for `--target`, as the
 package at `root` declares them: a `build.rs` at its root, which Cargo
 builds as a build script unless `[package] build` is `false`; any other
 `[package] build`, which declares one; `[lib] proc-macro = true` or
-`proc_macro = true`; and a `[workspace]` table, under which another member
-could be any of these. One complaint per unit found, each naming its cause.
-The manifest goes through TOML's parser, as the workspace check above does,
-so no spelling of a key hides it.
+`proc_macro = true`, or a `[lib] crate-type` (or `crate_type`) list that
+names `proc-macro`, which Cargo treats the same way; and a `[workspace]`
+table, under which another member could be any of these. One complaint per
+unit found, each naming its cause. The manifest goes through TOML's parser,
+as the workspace check above does, so no spelling of a key hides it.
 
 ## `fn no_repository_file_adds_a_host_unit_the_macos_cross_checks_cannot_reach() {`
 
@@ -2244,8 +2245,9 @@ and the same change restores a native `macos-latest` Clippy and MSRV leg
 The check's own witness. The live tree has none of the four, so the test
 above would pass as well against a helper that read none of them. Each
 fixture here declares one host unit and must draw exactly one complaint,
-naming its cause; a plain package, and a `build.rs` that `build = false`
-switches off, are the controls and must draw none.
+naming its cause; a plain package, a `build.rs` that `build = false`
+switches off, and a library whose `crate-type` names no `proc-macro`, are
+the controls and must draw none.
 
 ## `const WINDOWS_SUITE_TIMES: &str = "-Z unstable-options --report-time";`
 

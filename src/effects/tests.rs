@@ -5559,6 +5559,19 @@ fn host_unit_complaints(root: &Path) -> Vec<String> {
             ));
         }
     }
+    for key in ["crate-type", "crate_type"] {
+        let names_proc_macro = manifest
+            .get("lib")
+            .and_then(|lib| lib.get(key))
+            .and_then(toml::Value::as_array)
+            .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("proc-macro")));
+        if names_proc_macro {
+            complaints.push(format!(
+                "`[lib] {key} = [\"proc-macro\", ...]` names `proc-macro`, which makes the \
+                 library a procedural macro crate"
+            ));
+        }
+    }
     if manifest.get("workspace").is_some() {
         complaints.push(
             "a `[workspace]` table, so another member of the workspace could be a host unit"
@@ -5595,7 +5608,7 @@ fn no_repository_file_host_unit_check_names_each_host_unit() {
         }
         tree
     };
-    let cases: [(&str, String, bool, Option<&str>); 7] = [
+    let cases: [(&str, String, bool, Option<&str>); 10] = [
         ("host-unit-plain", PACKAGE.to_owned(), false, None),
         (
             "host-unit-build-file",
@@ -5626,6 +5639,24 @@ fn no_repository_file_host_unit_check_names_each_host_unit() {
             format!("{PACKAGE}\n[lib]\nproc_macro = true\n"),
             false,
             Some("proc_macro"),
+        ),
+        (
+            "host-unit-crate-type-proc-macro",
+            format!("{PACKAGE}\n[lib]\ncrate-type = [\"proc-macro\"]\n"),
+            false,
+            Some("crate-type"),
+        ),
+        (
+            "host-unit-crate-type-underscore-proc-macro",
+            format!("{PACKAGE}\n[lib]\ncrate_type = [\"proc-macro\"]\n"),
+            false,
+            Some("crate_type"),
+        ),
+        (
+            "host-unit-crate-type-library",
+            format!("{PACKAGE}\n[lib]\ncrate-type = [\"cdylib\", \"rlib\"]\n"),
+            false,
+            None,
         ),
         (
             "host-unit-workspace",
