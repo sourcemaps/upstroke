@@ -20627,7 +20627,7 @@ git cat-file -e 'HEAD^{tree}'
         const FIRED: &str = "fired-at";
 
         #[test]
-        #[ignore = "spawned by the two width-3 finalization kill matrices (ST-18)"]
+        #[ignore = "spawned by the four parts of the width-3 finalization kill matrices (ST-18)"]
         fn finalization_kill_child_at_width_three() {
             let dir = PathBuf::from(
                 std::env::var("UPSTROKE_TEST_KILL_DIR").expect("the parent names the handoff"),
@@ -20776,19 +20776,60 @@ git cat-file -e 'HEAD^{tree}'
             }
         }
 
-        #[test]
-        fn a_concurrent_complete_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell()
-         {
-            finalization_kill_matrix(false);
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Parity {
+            Even,
+            Odd,
+        }
+
+        impl Parity {
+            const fn name(self) -> &'static str {
+                match self {
+                    Self::Even => "even",
+                    Self::Odd => "odd",
+                }
+            }
+
+            const fn first(self) -> usize {
+                match self {
+                    Self::Even => 0,
+                    Self::Odd => 1,
+                }
+            }
+
+            const fn share_of(self, cells: usize) -> usize {
+                match self {
+                    Self::Even => cells.div_ceil(2),
+                    Self::Odd => cells / 2,
+                }
+            }
         }
 
         #[test]
-        fn a_concurrent_halted_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell()
+        fn a_concurrent_complete_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell_even_cells()
          {
-            finalization_kill_matrix(true);
+            finalization_kill_matrix(false, Parity::Even);
         }
 
-        fn finalization_kill_matrix(halted: bool) {
+        #[test]
+        fn a_concurrent_complete_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell_odd_cells()
+         {
+            finalization_kill_matrix(false, Parity::Odd);
+        }
+
+        #[test]
+        fn a_concurrent_halted_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell_even_cells()
+         {
+            finalization_kill_matrix(true, Parity::Even);
+        }
+
+        #[test]
+        fn a_concurrent_halted_run_finalizes_through_the_frozen_finalization_and_converges_after_a_kill_at_every_cell_odd_cells()
+         {
+            finalization_kill_matrix(true, Parity::Odd);
+        }
+
+        fn finalization_kill_matrix(halted: bool, parity: Parity) {
             let label = if halted { "halted" } else { "complete" };
             let mut reference = finishing(halted, &format!("interleaving-finalize-{label}"));
             let (outcome, trace) = finish_traced(&mut reference, Killer::default());
@@ -20821,7 +20862,7 @@ git cat-file -e 'HEAD^{tree}'
                  {cells:?}"
             );
             let mut killed = Vec::new();
-            for (cell, expected) in cells.iter().enumerate() {
+            for (cell, expected) in cells.iter().enumerate().skip(parity.first()).step_by(2) {
                 let tag = format!("{label}, cell {cell} ({} {})", expected.0, expected.1);
                 let handoff = crate::engine::topology::scaffold::kill_dir(&format!(
                     "interleaving-finalize-{label}-{cell}"
@@ -20921,6 +20962,14 @@ git cat-file -e 'HEAD^{tree}'
                     "answer_files_untouched": true,
                 }));
             }
+            assert_eq!(
+                killed.len(),
+                parity.share_of(cells.len()),
+                "{label}: the {} cells of the {} after run_finished were killed, each once, and \
+                 the other part's share is the rest: {cells:?}",
+                parity.name(),
+                cells.len()
+            );
             export(
                 "seam/ST-18",
                 &serde_json::json!({
@@ -20931,6 +20980,8 @@ git cat-file -e 'HEAD^{tree}'
                                 run_finished, then two resumes through the frozen recovery order",
                     "outcome": label,
                     "seed": FINALIZE_SEED,
+                    "cells_after_run_finished": cells.len(),
+                    "part": format!("{} cells", parity.name()),
                     "settled": {
                         "outcome": settled.outcome,
                         "retained_candidates": settled.retained_candidates,
