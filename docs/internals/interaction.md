@@ -154,13 +154,9 @@ so.
 Through `Answer.StageWrite` then `Answer.PublishRename` — the two sites the
 frozen inventory gives the answer command. Same two steps, same bytes.
 
-Atomic is not create-once: the rename replaces an existing answer file, and
-`upstroke answer`'s refusal of an answered question is a separate, earlier
-check. On a schema-4 run that check reads the answer file, so only two
-concurrent answers can replace one another; on a schema 1–3 run it reads only
-the question payload, which this writer does not update, so a later answer
-given before ingestion replaces an earlier one and both commands report
-success (`PR381-ANSWER-PUBLISH-RACE`).
+Atomic is not create-once: the rename replaces an answer file that already
+exists, and this writer never refuses to publish over one
+(`PR381-ANSWER-PUBLISH-RACE`).
 
 ## `pub fn read_answer_record(`
 
