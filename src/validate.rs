@@ -915,9 +915,11 @@ mod tests {
 
         assert_eq!(
             review_line(&rendered),
-            "review: claude-code/claude-opus-5-5 (5400s independent timeout per pass) \
-             (cross-family review is turned off by [routing] review = { cross_family = false })"
+            "review: claude-code/claude-opus-5-5 (5400s independent timeout per pass) (the \
+             alternative reviewer for tasks its own family implements is turned off by [routing] \
+             review = { cross_family = false }, so it reviews those tasks itself)"
         );
+        assert!(!rendered.contains("cross-family review"), "{rendered}");
         assert!(
             !rendered.contains("no cross-family reviewer exists"),
             "{rendered}"
@@ -992,10 +994,12 @@ mod tests {
         );
         assert!(!absent.contains("turned off"), "{absent}");
 
-        let turned_off =
-            " (cross-family review is turned off by [routing] review = { cross_family = false })";
+        let turned_off = " (the alternative reviewer for tasks its own family implements is \
+                          turned off by [routing] review = { cross_family = false }, so it \
+                          reviews those tasks itself)";
         let off = render::review_echo(&plan, false);
         assert!(off.ends_with(turned_off), "{off}");
+        assert!(!off.contains("cross-family review"), "{off}");
         assert!(!off.contains("no cross-family reviewer exists"), "{off}");
     }
 

@@ -480,16 +480,20 @@ other family" is not the binding that was asked for.
 The same profile with the switch off. Astra 6 is still in this build and
 would be chosen the moment the switch is unset, so "no cross-family
 reviewer exists in this build" would be false here: the line names the
-configuration that turned the reviewer off, and nothing in the preview
-names Astra 6.
+configuration that turned the alternative off, and nothing in the preview
+names Astra 6. Exact line, and it never says "cross-family review": the
+switch drops only the alternative for tasks Opus 5.5's own family
+implements, which Opus 5.5 then reviews itself; a task another vendor
+implemented is still reviewed across families
+(`PR378-PREVIEW-CROSS-FAMILY-FALSE-CLAIM`).
 
 ## `fn the_preview_says_cross_family_false_leaves_a_demanded_second_opinion_running() {`
 
 The same profile with the switch off, plus one override that demands a
 second opinion on the task's paths. The switch does not remove that pass:
 the row still shows Astra 6 as the second opinion, and creation still
-requires Codex. So the review line must not say "cross-family review is
-turned off" on its own — it names both facts, the alternative turned off by
+requires Codex. So the review line must not stop at the alternative
+being turned off — it names both facts, the alternative turned off by
 the switch and the explicit second opinion still running on
 codex/gpt-6-astra and still needing it installed. Exact line, because the
 contradiction this replaces was a single sentence.
@@ -505,7 +509,9 @@ byte for byte as unset does.
 Driven on a plan rather than a config because no configuration in this
 build reaches the other `None` — every tier in the catalog carries at
 least two families, each behind an adapter this build ships — yet the
-text for it has to survive the day a tier stops having a partner.
+text for it has to survive the day a tier stops having a partner. The
+switch's text is pinned beside it, suffix and all, and kept clear of
+"cross-family review", which the switch does not turn off.
 
 ## `fn the_review_echo_names_each_demanded_second_opinion_once_with_the_switch_off() {`
 
