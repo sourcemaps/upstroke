@@ -88,9 +88,10 @@ P2; the two barrier tests below drive both outcomes since round 5, the round-5 c
 `a_report_rename_without_directory_sync_is_proven_before_pruning`).
 A fault at any site ends the command with the steps before it done and the steps after it not
 started; the next resume's step (b) runs the whole order again and converges (ST-18,
-`kill_after_report_before_each_cleanup_step`, which at every cell of the matrix — both phases of
-every effect's site but the candidate-prepared pin's, the run lock's release included — asserts
-what has and has not been removed at the fault, and
+`kill_after_report_before_each_cleanup_step_before_the_effect` and
+`kill_after_report_before_each_cleanup_step_after_the_effect`, one hook phase each, which between
+them at every cell of the matrix — both phases of every effect's site but the candidate-prepared
+pin's, the run lock's release included — assert what has and has not been removed at the fault, and
 `a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_the_next_resume`,
 which kills a real child inside finalization).
 
