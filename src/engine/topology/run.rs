@@ -10,6 +10,7 @@ use crate::topology::events::Answer4;
 use crate::topology::events::TopologyEventBody;
 use crate::topology::fold::QuestionOrigin;
 
+use crate::capacity::client::{AwaitedReset, BuiltinClient, CapacityClient, DeferredLimit};
 use crate::events::AttemptRecord;
 use crate::interaction::{self, Notifier, Sleeper};
 use crate::topology::events::{
@@ -1409,13 +1410,6 @@ pub enum Progress {
     BudgetExceeded,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AwaitedReset {
-    pool: String,
-    reset_at: String,
-    until_unix: u64,
-}
-
 pub struct TopologyRun {
     handle: RunHandle,
     identity: RunIdentity,
@@ -1432,7 +1426,7 @@ pub struct TopologyRun {
     /// ([`Self::with_spend_approval`]).
     approve_spend_over: Option<f64>,
     notifiers: Vec<&'static dyn Notifier>,
-    exhausted_pools: BTreeMap<String, Option<String>>,
+    capacity: Box<dyn CapacityClient>,
 }
 
 impl TopologyRun {
@@ -1445,7 +1439,7 @@ impl TopologyRun {
         };
         let spend = Spend::replay(&handle.events);
         let brief = Brief::replay(&handle.events);
-        let exhausted_pools = crate::capacity::exhausted_pools_of(&handle.events);
+        let capacity = Box::new(BuiltinClient::replay(&handle.events));
         let broker = PermitBroker::for_run(&Entitlements::of(&handle.fold));
         Self {
             handle,
@@ -1461,7 +1455,7 @@ impl TopologyRun {
             stopped: None,
             approve_spend_over: None,
             notifiers: Vec::new(),
-            exhausted_pools,
+            capacity,
         }
     }
 
@@ -1840,39 +1834,15 @@ impl TopologyRun {
         let len = self.handle.fold.registry().map_or(0, |registry| {
             u32::try_from(registry.len()).unwrap_or(u32::MAX)
         });
-        let spent = spent_resets(&self.handle.events);
-        let known: Vec<(u64, &String, &String)> = (0..len)
+        let limits: Vec<DeferredLimit<'_>> = (0..len)
             .map(TaskKey)
-            .filter_map(|key| self.resets_awaited_by(key, plans, &spent, now_unix))
-            .flatten()
+            .filter_map(|key| self.deferred_limit(key, plans))
             .collect();
-        let margin = interaction::RESET_WAIT_MARGIN.as_secs();
-        let &(earliest, ..) = known.iter().min_by_key(|(reset, ..)| *reset)?;
-        let until_unix = if earliest <= now_unix {
-            let available = earliest.checked_add(margin)?;
-            if available <= now_unix {
-                return None;
-            }
-            available
-        } else {
-            interaction::reset_wait_until(now_unix, known.iter().map(|(reset, ..)| *reset))?
-        };
-        let chosen = until_unix.checked_sub(margin)?;
-        let (_, pool, reset_at) = known.iter().find(|(reset, ..)| *reset == chosen)?;
-        Some(AwaitedReset {
-            pool: (*pool).clone(),
-            reset_at: (*reset_at).clone(),
-            until_unix,
-        })
+        self.capacity
+            .awaited_reset(&limits, &self.handle.events, now_unix)
     }
 
-    fn resets_awaited_by(
-        &self,
-        key: TaskKey,
-        plans: &dyn AttemptPlans,
-        spent: &BTreeSet<String>,
-        now_unix: u64,
-    ) -> Option<Vec<(u64, &String, &String)>> {
+    fn deferred_limit(&self, key: TaskKey, plans: &dyn AttemptPlans) -> Option<DeferredLimit<'_>> {
         let fold = &self.handle.fold;
         let task = fold
             .task(key)
@@ -1882,41 +1852,16 @@ impl TopologyRun {
         if failure.kind != crate::ladder::FailureKind::RateLimited {
             return None;
         }
-        let candidates = match failure.origin {
+        let worker_pools = match failure.origin {
             crate::ladder::FailureOrigin::Worker => {
                 plans.pools_for(&fold.rung_binding(key, task.rung)?.agent)
             }
-            crate::ladder::FailureOrigin::Reviewer => {
-                vec![crate::capacity::limited_pool(record)?.clone()]
-            }
+            crate::ladder::FailureOrigin::Reviewer => Vec::new(),
         };
-        let fails_over =
-            failure.origin == crate::ladder::FailureOrigin::Worker && candidates.len() > 1;
-        let held = candidates
-            .iter()
-            .map(|pool| self.exhausted_pools.get_key_value(pool))
-            .collect::<Option<Vec<_>>>()?;
-        Some(
-            held.into_iter()
-                .filter(|(pool, _)| !spent.contains(*pool))
-                .filter_map(|(pool, reset_at)| {
-                    let reset_at = reset_at.as_ref()?;
-                    let reset = unix_seconds_of(reset_at)?;
-                    (fails_over || reset > now_unix).then_some((reset, pool, reset_at))
-                })
-                .collect(),
-        )
-    }
-
-    fn held_unspent(&self) -> BTreeMap<String, Option<String>> {
-        let spent = spent_resets(&self.handle.events);
-        self.exhausted_pools
-            .iter()
-            .map(|(pool, reset_at)| {
-                let reset_at = reset_at.clone().filter(|_| !spent.contains(pool));
-                (pool.clone(), reset_at)
-            })
-            .collect()
+        Some(DeferredLimit {
+            record,
+            worker_pools,
+        })
     }
 
     fn announce_reset_wait(&self, awaited: &AwaitedReset, now_unix: u64) {
@@ -2607,12 +2552,11 @@ impl TopologyRun {
         let pool = if run_as.announced {
             run_as.pool
         } else {
-            serving_pool(
+            self.capacity.grant(
                 &seams.plans.pools_for(&binding.agent),
-                &self.held_unspent(),
+                &self.handle.events,
                 unix_seconds(seams.clock),
             )
-            .cloned()
         };
 
         let plan = seams.plans.plan(&PlanRequest {
@@ -2762,22 +2706,21 @@ impl TopologyRun {
         }
         self.spend.record(site.key, &settled.event.record);
         self.brief.record(site.key, &settled.event.record);
-        crate::capacity::retire_served_pools(&mut self.exhausted_pools, &settled.event.record);
+        self.capacity.served(&settled.event.record);
         if failure.kind == crate::ladder::FailureKind::RateLimited {
-            if let Some(exhausted) = crate::capacity::pool_exhausted_to_record(
+            if let Some(exhausted) = self.capacity.exhaustion(
                 failure,
                 &settled.event.record,
                 &plan.binding.agent,
-                &self.exhausted_pools,
                 unix_seconds(seams.clock),
             ) {
-                let (pool, reset_at) = (exhausted.pool.clone(), exhausted.reset_at.clone());
+                let held = exhausted.clone();
                 self.emit(
                     TopologyEventBody::PoolExhausted { data: exhausted },
                     seams,
                     hooks,
                 )?;
-                self.exhausted_pools.insert(pool, reset_at);
+                self.capacity.held(&held);
             }
         }
         let closed = matches!(
@@ -2801,18 +2744,8 @@ impl TopologyRun {
         agent: &str,
         plans: &dyn AttemptPlans,
     ) -> bool {
-        if failure.kind != crate::ladder::FailureKind::RateLimited
-            || failure.origin != crate::ladder::FailureOrigin::Worker
-        {
-            return false;
-        }
-        let Some(refused) = &record.pool else {
-            return false;
-        };
-        plans
-            .pools_for(agent)
-            .iter()
-            .any(|pool| pool != refused && !self.exhausted_pools.contains_key(pool))
+        self.capacity
+            .fails_over(failure, record, &plans.pools_for(agent))
     }
 
     fn judged_tree(
@@ -2852,7 +2785,7 @@ impl TopologyRun {
     fn record_promoted(&mut self, key: TaskKey, record: &AttemptRecord) {
         self.spend.record(key, record);
         self.brief.record(key, record);
-        crate::capacity::retire_served_pools(&mut self.exhausted_pools, record);
+        self.capacity.served(record);
     }
 
     fn with_journal<T>(
@@ -3115,123 +3048,8 @@ fn last_settled_record(events: &[TopologyEvent], key: TaskKey) -> Option<&Attemp
     })
 }
 
-fn spent_resets(events: &[TopologyEvent]) -> BTreeSet<String> {
-    let margin = interaction::RESET_WAIT_MARGIN.as_secs();
-    let mut recorded: BTreeMap<&String, u64> = BTreeMap::new();
-    let mut spent = BTreeSet::new();
-    let mut signalled: Vec<&String> = Vec::new();
-    for event in events {
-        match &event.body {
-            TopologyEventBody::PoolExhausted { data } => {
-                spent.remove(&data.pool);
-                match data.reset_at.as_deref().and_then(unix_seconds_of) {
-                    Some(reset) => recorded.insert(&data.pool, reset),
-                    None => recorded.remove(&data.pool),
-                };
-                signalled.push(&data.pool);
-            }
-            TopologyEventBody::AttemptFinished { data } => {
-                if let Some(pool) = crate::capacity::limited_pool(&data.record) {
-                    let refused_past = recorded
-                        .get(pool)
-                        .and_then(|reset| reset.checked_add(margin))
-                        .zip(unix_seconds_of(&event.ts))
-                        .is_some_and(|(spent_from, at)| at >= spent_from);
-                    if refused_past && !signalled.contains(&pool) {
-                        spent.insert(pool.clone());
-                    }
-                }
-                signalled.clear();
-            }
-            _ => signalled.clear(),
-        }
-    }
-    spent
-}
-
-fn serving_pool<'a>(
-    candidates: &'a [String],
-    held: &BTreeMap<String, Option<String>>,
-    now_unix: u64,
-) -> Option<&'a String> {
-    let reset_passed = |pool: &&String| {
-        held.get(*pool)
-            .and_then(Option::as_deref)
-            .and_then(unix_seconds_of)
-            .and_then(|reset| reset.checked_add(interaction::RESET_WAIT_MARGIN.as_secs()))
-            .is_some_and(|serving_from| serving_from <= now_unix)
-    };
-    candidates
-        .iter()
-        .find(|pool| !held.contains_key(*pool))
-        .or_else(|| candidates.iter().find(reset_passed))
-        .or_else(|| candidates.first())
-}
-
 fn unix_seconds(clock: &dyn TimeSource) -> u64 {
-    unix_seconds_of(&clock.now_rfc3339()).unwrap_or_else(crate::util::unix_seconds_now)
-}
-
-fn unix_seconds_of(reading: &str) -> Option<u64> {
-    let [
-        y0,
-        y1,
-        y2,
-        y3,
-        b'-',
-        mo0,
-        mo1,
-        b'-',
-        d0,
-        d1,
-        b'T',
-        h0,
-        h1,
-        b':',
-        mi0,
-        mi1,
-        b':',
-        s0,
-        s1,
-        zone @ ..,
-    ] = reading.as_bytes()
-    else {
-        return None;
-    };
-    let zone_reads = match zone {
-        [b'Z'] => true,
-        [b'.', fraction @ .., b'Z'] => {
-            !fraction.is_empty() && fraction.iter().all(u8::is_ascii_digit)
-        }
-        _ => false,
-    };
-    let number = |digits: &[&u8]| {
-        digits.iter().try_fold(0_u32, |value, digit| {
-            Some(value * 10 + char::from(**digit).to_digit(10)?)
-        })
-    };
-    let year = i64::from(number(&[y0, y1, y2, y3])?);
-    let month = i64::from(number(&[mo0, mo1])?);
-    let day = i64::from(number(&[d0, d1])?);
-    let hour = u64::from(number(&[h0, h1])?);
-    let minute = u64::from(number(&[mi0, mi1])?);
-    let second = u64::from(number(&[s0, s1])?);
-    let in_range = zone_reads
-        && (1..=12).contains(&month)
-        && (1..=31).contains(&day)
-        && hour < 24
-        && minute < 60
-        && second < 60;
-    if !in_range {
-        return None;
-    }
-    let days = crate::util::days_from_civil(year, month, day);
-    if crate::util::civil_from_days(days) != (year, month, day) {
-        return None;
-    }
-    let days = u64::try_from(days).ok()?;
-    days.checked_mul(86_400)?
-        .checked_add(hour * 3_600 + minute * 60 + second)
+    crate::util::unix_seconds_of(&clock.now_rfc3339()).unwrap_or_else(crate::util::unix_seconds_now)
 }
 
 fn spend_approval_context(

@@ -1216,7 +1216,7 @@ Every pool the plans give `agent`, in order: the name of each `pools` entry nami
 `pool` when no entry does. An entry of `None` names the agent and contributes no pool, so an
 agent listed only with `None` has none, as `pool_of` answers for it. Where the agent's first
 entry names a pool, that name is first here and is `pool_of`'s answer. The run chooses a
-worker's pool among these (`run::serving_pool`), which is how `run::tests`' two-pool
+worker's pool among these (`capacity::client::serving_pool`), which is how `run::tests`' two-pool
 witnesses move a rate-limited task onto `claude-max-2`.
 
 ## `impl super::attempt::AttemptPlans for WidePlans` › `pool: request.pool.clone(),`

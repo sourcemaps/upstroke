@@ -1,8 +1,10 @@
 //! Extended notes: `docs/internals/engine/topology/run/tests.md`
 
 use super::*;
+use crate::capacity::client::{AwaitedReset, BuiltinClient, serving_pool};
 use crate::topology::events::{AttemptNumber, DerivedOutcome, GenerationId};
 use crate::topology::registry::TaskKey;
+use crate::util::unix_seconds_of;
 
 #[test]
 fn the_transcribed_loop_branches_are_the_packets_seven() {
@@ -2299,7 +2301,9 @@ fn a_recorded_reset_on_a_day_its_month_lacks_backs_off_as_before() {
         &[WideTask::independent("alpha")],
         FIVE_HOUR_LIMIT,
     );
-    wide.run.exhausted_pools = [signal("2026-02-31T01:00:00Z")].into_iter().collect();
+    wide.run.capacity = Box::new(BuiltinClient::holding(
+        [signal("2026-02-31T01:00:00Z")].into_iter().collect(),
+    ));
     let mut hooks = wide.env.hooks();
     let sleeper = RecordingSleeper::default();
     let steps = stepped_until_waited(&mut wide, &OnMarchThird, &sleeper, None, &mut hooks);
@@ -2422,7 +2426,9 @@ fn a_recorded_reset_outside_the_writers_shape_backs_off_as_before() {
     ] {
         let mut wide =
             deferred_on_claude_max(tag, &[WideTask::independent("alpha")], FIVE_HOUR_LIMIT);
-        wide.run.exhausted_pools = [signal(reset_at)].into_iter().collect();
+        wide.run.capacity = Box::new(BuiltinClient::holding(
+            [signal(reset_at)].into_iter().collect(),
+        ));
         let mut hooks = wide.env.hooks();
         let sleeper = RecordingSleeper::default();
         let steps = stepped_until_waited(&mut wide, &RunClock, &sleeper, None, &mut hooks);
@@ -2921,7 +2927,9 @@ fn a_retained_retry_resumes_on_the_pool_its_session_ran_on() {
         "{steps:?}"
     );
 
-    wide.run.exhausted_pools.remove("claude-max");
+    let mut capacity = BuiltinClient::replay(&wide.run.handle.events);
+    capacity.exhausted_pools_mut().remove("claude-max");
+    wide.run.capacity = Box::new(capacity);
     let retried = served_steps_until_settled(&mut wide, TaskKey(0), &mut hooks);
     assert!(
         matches!(
@@ -3640,6 +3648,16 @@ impl TimeSource for ResumedAt {
     }
 }
 
+impl TopologyRun {
+    /// The pools the run's log holds exhausted, with each spent reset dropped: what
+    /// [`CapacityClient::grant`] gives `serving_pool`. Read from
+    /// [`BuiltinClient::replay`] of the run's own log, the client `resumed` starts from,
+    /// since the run's client is a `dyn CapacityClient` and the map is the built-in's.
+    fn held_unspent(&self) -> BTreeMap<String, Option<String>> {
+        BuiltinClient::replay(&self.handle.events).held_unspent(&self.handle.events)
+    }
+}
+
 fn refused_again_on_resume(tag: &str, at: &'static str) -> crate::engine::topology::scaffold::Wide {
     use crate::engine::topology::scaffold::{ScaffoldAdapters, WideTask};
 
@@ -3832,10 +3850,12 @@ fn a_reviewers_limit_whose_pool_resets_at_the_clock_backs_off_as_before() {
         &mut hooks,
     );
     assert_eq!(deferral_of(&wide, TaskKey(0)), (TaskState::Deferred, 1));
-    wide.run.exhausted_pools.insert(
+    let mut capacity = BuiltinClient::replay(&wide.run.handle.events);
+    capacity.exhausted_pools_mut().insert(
         "copilot-pool".to_owned(),
         Some("2026-11-11T03:00:00Z".to_owned()),
     );
+    wide.run.capacity = Box::new(capacity);
     let now = unix_seconds_of(&RunClock.now_rfc3339()).expect("`RunClock` reads as UTC");
     assert_eq!(wide.run.awaited_reset(now, wide.env.seams().plans), None);
     let sleeper = RecordingSleeper::default();

@@ -309,7 +309,7 @@ the pool it ran on and the first pool in file order need not be that one.
 ## `pub trait AttemptPlans` › `fn pools_for(&self, agent: &str) -> Vec<String> {`
 
 Every pool of `agent`, in file order: the candidates the driver chooses an
-attempt's pool from (`run::serving_pool`). Empty for an agent no pool names.
+attempt's pool from (`capacity::client::serving_pool`). Empty for an agent no pool names.
 
 The provided body answers [`Self::pool_for`]'s one pool, or none. It is
 right for any implementation whose agents have at most one pool each, which

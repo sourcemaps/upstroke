@@ -587,6 +587,71 @@ pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
+/// The unix seconds an RFC 3339 UTC reading (`YYYY-MM-DDTHH:MM:SSZ`, with an
+/// optional fraction of a second) names. `None` for any other shape, a field
+/// out of range, or a day its month lacks. Calendar arithmetic, no clock.
+pub(crate) fn unix_seconds_of(reading: &str) -> Option<u64> {
+    let [
+        y0,
+        y1,
+        y2,
+        y3,
+        b'-',
+        mo0,
+        mo1,
+        b'-',
+        d0,
+        d1,
+        b'T',
+        h0,
+        h1,
+        b':',
+        mi0,
+        mi1,
+        b':',
+        s0,
+        s1,
+        zone @ ..,
+    ] = reading.as_bytes()
+    else {
+        return None;
+    };
+    let zone_reads = match zone {
+        [b'Z'] => true,
+        [b'.', fraction @ .., b'Z'] => {
+            !fraction.is_empty() && fraction.iter().all(u8::is_ascii_digit)
+        }
+        _ => false,
+    };
+    let number = |digits: &[&u8]| {
+        digits.iter().try_fold(0_u32, |value, digit| {
+            Some(value * 10 + char::from(**digit).to_digit(10)?)
+        })
+    };
+    let year = i64::from(number(&[y0, y1, y2, y3])?);
+    let month = i64::from(number(&[mo0, mo1])?);
+    let day = i64::from(number(&[d0, d1])?);
+    let hour = u64::from(number(&[h0, h1])?);
+    let minute = u64::from(number(&[mi0, mi1])?);
+    let second = u64::from(number(&[s0, s1])?);
+    let in_range = zone_reads
+        && (1..=12).contains(&month)
+        && (1..=31).contains(&day)
+        && hour < 24
+        && minute < 60
+        && second < 60;
+    if !in_range {
+        return None;
+    }
+    let days = crate::util::days_from_civil(year, month, day);
+    if crate::util::civil_from_days(days) != (year, month, day) {
+        return None;
+    }
+    let days = u64::try_from(days).ok()?;
+    days.checked_mul(86_400)?
+        .checked_add(hour * 3_600 + minute * 60 + second)
+}
+
 #[cfg(test)]
 pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
     match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {

@@ -764,6 +764,8 @@ effect_free = [
     # Reads the system clock; `rfc3339_utc_now` reads it through this. A clock
     # read is no effect in this classification, as that row already records.
     "unix_seconds_now",
+    # Reads an RFC 3339 UTC string as unix seconds; calendar arithmetic, no clock.
+    "unix_seconds_of",
     "user_upstroke_dir",
 ]
 

@@ -248,7 +248,7 @@ a worker spawned `ReadyOnly` edits nothing while reporting success.
 
 `pool` is passed rather than resolved here because choosing it needs the
 run's config and its signals. The schema-4 driver chooses it
-(`run::serving_pool`) and `FrozenPlans::plan` hands it on from
+(`capacity::client::serving_pool`) and `FrozenPlans::plan` hands it on from
 `PlanRequest::pool`; the legacy coordinator passes its agent's first pool.
 On the schema-4 path it is no longer attribution only. It still says which
 subscription pays for the attempt, so the ledger and the estimator can say
@@ -356,7 +356,7 @@ count at one. `48f2af7a:reviews/FINDINGS.md` §19, claim (4).
 ## `impl AttemptPlans for FrozenPlans<'_>` › `fn pools_for(&self, agent: &str) -> Vec<String> {`
 
 Every pool the frozen table lists for `agent`, by name, in file order: the
-candidates `run::serving_pool` chooses an implementer's pool from. Its first
+candidates `capacity::client::serving_pool` chooses an implementer's pool from. Its first
 entry is `pool_for`'s answer, because both keep the pools whose `agent` is
 this one and neither reorders them. A pool the table marks unusable is listed
 like any other, as `capacity::pool_for` lists it.
@@ -411,7 +411,7 @@ a plan with no pool.
 
 It is looked up from the plan's own pool, by name, and not from the agent a
 second time. The two can differ: the request may name any pool of the agent
-(`run::serving_pool` chooses the first that no signal holds exhausted), and a
+(`capacity::client::serving_pool` chooses the first that no signal holds exhausted), and a
 lookup by agent would give the first pool's credentials to a worker bound to
 the second. Keeping them apart is what makes the pool a plan names and the
 credentials its worker runs under one answer.

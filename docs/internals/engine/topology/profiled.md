@@ -38,7 +38,7 @@ A plan's pool is the one its request names (`PlanRequest::pool`):
 chooses it (`TopologyRun::prepare_attempt`). A new attempt binds the first
 pool of its agent, in file order, that no signal holds exhausted; with every
 one held, the first whose recorded reset is two minutes past, or else the
-first (`serving_pool`). A retry that resumes its session keeps the pool its
+first (`capacity::client::serving_pool`). A retry that resumes its session keeps the pool its
 session ran on. So a worker can run under a later pool's directory, which
 this wrapper would never have stamped. Only on a run with one pool per agent
 is a plan's pool always its agent's first, and there a worker gets the same
@@ -87,7 +87,7 @@ profile, and a worker under its attempt's pool's, which its plan carries
 (see the module section). The first pool is also the one a review pass is
 attributed to and holds its slot on (`FrozenPlans::reviewer_plans` reads
 `pool_for`), but not an attempt's: an attempt plans, and its worker holds
-its slot on, the pool `serving_pool` chose, which may be a later one. A later
+its slot on, the pool `capacity::client::serving_pool` chose, which may be a later one. A later
 pool for the same agent never lends its profile to the first: if the agent's
 bound pool has `profile: None`, the agent contributes nothing.
 

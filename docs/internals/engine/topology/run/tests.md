@@ -640,7 +640,7 @@ off as before.
 The task names an agent whose reset is not read, which is any agent but Claude Code
 (`capacity::pool_exhausted_to_record`). This scaffold's ladder runs Claude Code on every rung,
 so the test gets the same record another way: a Claude Code limit whose message names no reset.
-`back_off` reads only the `exhausted_pools` entry, and either way that entry is
+`back_off` reads only the entry of `BuiltinClient`'s `exhausted_pools`, and either way that entry is
 `("claude-max", None)`, which the test asserts before it steps.
 
 ## `struct AfterTheReset;`
@@ -656,7 +656,7 @@ the back-off is the plain one.
 
 ## `fn a_reset_on_a_day_its_month_lacks_is_not_read() {`
 
-`PR390-INVALID-RESET-DRIVES-WAIT` (P2): the witness. `unix_seconds_of` checked a day only against
+`PR390-INVALID-RESET-DRIVES-WAIT` (P2): the witness. `util::unix_seconds_of` checked a day only against
 1 to 31, so 31 February 2026 read as 3 March, 29 February 2026 (not a leap year) as 1 March, and
 31 April as 1 May. Each of the three now reads as `None`. 29 February 2028 is a leap day and still
 reads, at one hour past `util::days_from_civil`'s count for that date. The five-hour limit's
@@ -676,10 +676,10 @@ The same defect at the level of the run. The pool's recorded reset is replaced w
 On the code before the repair the run instead waited toward 01:02 on 3 March, in slices of
 600 seconds six times and then 120, 3,720 seconds where the plain back-off sleeps 60.
 
-The test sets `exhausted_pools` directly. It does not resume from a log that holds the reset,
+The test sets `BuiltinClient`'s `exhausted_pools` directly. It does not resume from a log that holds the reset,
 because a resume wakes the deferred task and runs it again before any back-off. A resumed run
 reaches `back_off` only after a second limit, and that limit records its own reset over the one
-under test. Either way, `exhausted_pools` is what `back_off` reads.
+under test. Either way, `BuiltinClient`'s `exhausted_pools` is what `back_off` reads.
 
 ## `fn a_reset_reading_outside_the_writers_shape_is_not_read() {`
 
@@ -779,7 +779,7 @@ records only its own minute: on the code before the repair, the one `defer_wait_
 
 ## `fn the_serving_pool_is_the_first_in_file_order_no_signal_holds_exhausted() {`
 
-The rule `serving_pool` applies, case by case, over the candidates `a`, `b` and `c` in that
+The rule `capacity::client::serving_pool` applies, case by case, over the candidates `a`, `b` and `c` in that
 order. The clock is `RunClock`'s 03:00 UTC on 11 November 2026.
 
 | Held | Answer |
@@ -799,11 +799,11 @@ With no candidates the answer is `None`.
 02:58:00 is `interaction::RESET_WAIT_MARGIN`, two minutes, behind the clock to the second, and
 the test asserts that before it uses it. So the fifth row is the boundary of "at or before
 now", and the sixth, one second later, is the first reset that has not passed. The last row is
-a reset on a day its month lacks. `unix_seconds_of` reads it as no date, so it has not passed. A
+a reset on a day its month lacks. `util::unix_seconds_of` reads it as no date, so it has not passed. A
 parser that counted the day on into March would have put it eight months behind the clock and
 answered `b`.
 
-On the code before `serving_pool` existed the test does not compile: the function it calls is
+On the code before `capacity::client::serving_pool` existed the test does not compile: the function it calls is
 not there.
 
 ## `fn on_two_claude_max_pools(`
@@ -856,9 +856,9 @@ Generation 0 never reaches its gate, because its worker is rate limited. Generat
 attempt runs on `claude-max-2` and fails the gate. That is an ordinary failure with a session, so
 the generation is retained and its second attempt resumes the session.
 
-Before the retry the test takes `claude-max` out of `exhausted_pools`, as a review that pool
+Before the retry the test takes `claude-max` out of `BuiltinClient`'s `exhausted_pools`, as a review that pool
 served for another task would. `claude-max` is then first in file order and held by nothing, so
-`serving_pool` would choose it. The retry still records `claude-max-2`, with a `resume_session`,
+`capacity::client::serving_pool` would choose it. The retry still records `claude-max-2`, with a `resume_session`,
 because `retry_request` takes the retained attempt's own pool. A session lives under its pool's
 credential directory, and the first pool's credentials never held this one.
 
@@ -912,7 +912,7 @@ so.
 A reset behind the clock could look like a pool that is free again. It is not: the pool refused
 this attempt a moment ago. The limit fails over, and generation 1 binds `claude-max-2`. The
 failover asks only whether a signal holds a pool (`TopologyRun::another_pool_can_serve`), and
-`serving_pool` takes a pool no signal holds before any held pool whose reset has passed.
+`capacity::client::serving_pool` takes a pool no signal holds before any held pool whose reset has passed.
 
 Had generation 1 gone back to `claude-max`, it would have met the same limit. With
 `claude-max-2` still free, that limit would have failed over again, round after round, with no
@@ -961,7 +961,7 @@ ahead of `RunClock`'s 03:00, and fails over. The run is then stepped at 03:05
 (`AtThreeOhFive`), when `claude-max`'s reset and its two-minute margin have both passed. That
 step tries the spare, `claude-max-2`, which refuses until 07:00, so both pools are held and the
 task is deferred. The back-off that follows is the ordinary one, and the sleeper records exactly
-60 seconds: `claude-max` serves again from 03:03 (`serving_pool`), so there is no reset to wait
+60 seconds: `claude-max` serves again from 03:03 (`capacity::client::serving_pool`), so there is no reset to wait
 for.
 
 Before the failover (`b73d347a`), the first limit deferred the task, so the back-off ran at
@@ -977,7 +977,7 @@ refuses generation 1 with `FIVE_HOUR_LIMIT`'s 05:30. Both pools are then held, e
 own reset, and the task is `Deferred` with `defers` 1.
 
 At 03:00, `primary`'s reset has passed but its two-minute margin has not, so `primary` serves
-again from 03:01 (`serving_pool`). The test asks `awaited_reset` for the target directly,
+again from 03:01 (`capacity::client::serving_pool`). The test asks `awaited_reset` for the target directly,
 because a wait of a single slice answers `Waited` and never the `Progress::Waiting` that
 reports it. The target is 03:01, for `primary` and its 02:59 reset. The run sleeps 60
 seconds and records one `defer_wait_elapsed`, of 60,000 in round 1. The one line the notifier
@@ -1042,7 +1042,7 @@ and generation 2 with `UNREAD_LIMIT`, a limit with no reset read from it.
 The mirror of the reviewer's sequence. `primary` names 03:01 and the task fails over; `spare`
 names 05:30 and the task is deferred. The wait runs to 03:03, and generation 2 binds `primary`,
 which refuses again with no readable reset, so no new `pool_exhausted` is written and
-`exhausted_pools` keeps 03:01. That reset is spent. The wait runs to 05:32 for `spare`, which
+`BuiltinClient`'s `exhausted_pools` keeps 03:01. That reset is spent. The wait runs to 05:32 for `spare`, which
 serves generation 3. The sleeper records 9,120 seconds, and the attempts ran on
 `primary, spare, primary, spare`.
 
@@ -1066,7 +1066,7 @@ margin passed, and the test fails on the pool.
 
 The limits of the regression witness: `MIRRORED`'s, with generation 2 naming 03:01 again
 rather than no reset at all, so the refusal it settles writes no new `pool_exhausted` and is counted
-by `spent_resets` against the 03:01 it names.
+by `capacity::client::spent_resets` against the 03:01 it names.
 
 ## `struct ResumedAt(&'static str);`
 
@@ -1130,7 +1130,7 @@ task as it did before the failover existed: nothing spent, `Deferred` with `defe
 recorded as one `defer_wait_elapsed`. Only one attempt started, on `claude-max`.
 
 This is also the test that the pool which refused is not counted among the pools that could
-take over. `exhausted_pools` does not hold `claude-max` when `settle_failure` decides, and a
+take over. `BuiltinClient`'s `exhausted_pools` does not hold `claude-max` when `settle_failure` decides, and a
 failover that counted it would have retried on it for ever.
 
 It passes on the code before the failover and after it.
