@@ -18,7 +18,9 @@ The capacity engine (DESIGN.md §13) — **read-only in v0.1**.
 
 Three things live here: the pool types `~/.upstroke/pools.toml` parses into,
 the estimator that turns observations into a per-pool remaining figure, and
-the fold that collects those observations from a run's event log.
+the folds that collect those observations from a run's event log: `observe`
+for a legacy log, `observe_topology` for a schema-4 one, and
+`latest_run_observations`, which picks between them by the log's schema.
 
 §13's sequencing is the reason no estimate routes anything yet: v0.1 ships
 the estimator so `upstroke capacity` and the dry-run preview can show what each
@@ -264,7 +266,8 @@ reset time where the signal carried one. Ground truth.
 
 ## `pub fn observe(events: &[Event]) -> Observations {`
 
-Fold a run's events into observations.
+Fold a legacy run's events (schemas 1–3) into observations. A schema-4 log
+is folded by `observe_topology`.
 
 A pure function over events someone else read, so the estimator's inputs are
 derived by exactly the mechanism every other reader uses (§15: the log is
@@ -282,6 +285,28 @@ estimate must report, not the five-hour reset already past. A rate-limited
 settlement, unlike a signal, never replaces a known reset (see
 `retire_signals`).
 
+## `pub fn observe_topology(events: &[TopologyEvent]) -> Observations {`
+
+Fold a schema-4 run's events into observations: `observe`'s sibling for a
+`TopologyEvent` log. `upstroke capacity` and `validate` reach it through
+`latest_run_observations`.
+
+`exhausted` is exactly `exhausted_pools_of(events)`, the map a resumed
+`TopologyRun` starts from, so the report and the run cannot disagree about
+which pools a log holds exhausted.
+
+`self_spend` sums every settled attempt's record through `accumulate`, the
+worker's pool and each review's, as `observe` does. A schema-4 attempt
+settles exactly once. A failed one settles as `attempt_finished`, and the
+fold refuses an `attempt_finished` whose record says success. An accepted
+one settles as `candidate_prepared` and writes no `attempt_finished`. So
+the two arms name disjoint attempts, and reading both counts each attempt
+once. `attempt_interrupted` carries no record in a schema-4 log, so an
+interrupted attempt adds nothing here. The legacy `attempt_interrupted`
+carries one, and `observe` counts it.
+
+It is effect-free in `effects/wrappers.toml`.
+
 ## `pub(crate) fn exhausted_pools_of(events: &[TopologyEvent]) -> BTreeMap<String, Option<String>> {`
 
 The same memory as `observe(..).exhausted`, read from a schema-4 log. A
@@ -289,7 +314,8 @@ resumed `TopologyRun` starts from it, as the legacy resume starts its
 `exhausted_pools` from `observe`. Without it the resumed run forgets every
 signal its log holds, and the next refusal naming the same reset writes a
 second `pool_exhausted`. `observe` reads `Event`, not `TopologyEvent`, so
-this is a sibling rather than a change to it.
+this is a sibling rather than a change to it. `observe_topology` takes its
+`exhausted` from here unchanged.
 
 The rules are `observe`'s. A `pool_exhausted` sets its pool's reset. A
 settled attempt's record retires the pools it proves serving and marks a
@@ -455,9 +481,10 @@ row for every externally reachable function of this module.
 The same fold, over attempt records rather than events — what the ledger
 needs, and what a reader holding folded state rather than raw events has.
 
-Shared with [`observe`] rather than written twice: the ledger's per-pool
-column and the estimator's self-metered source must be the same number, or
-one of them is wrong and nothing says which.
+Shared with [`observe`] and `observe_topology` rather than written twice:
+the ledger's per-pool column and the estimator's self-metered source must
+be the same number, or one of them is wrong and nothing says which. All
+three sum through `accumulate`.
 
 ## `fn accumulate` › `if let Some(pool) = &record.pool {`
 
@@ -654,18 +681,67 @@ probing belongs: `capacity` is allowed to spawn the vendors' CLIs, and
 
 ## `pub struct CapacityReport` › `pub run_id: Option<String>,`
 
-The run the self-metered figures were folded from.
+The latest run in this repository. `Some` whenever there is one, whether or
+not its log could be folded. It used to be `None` for a run whose log could
+not be read, and the report then said "no run in this repository yet" about
+a repository that had one.
+
+## `pub struct CapacityReport` › `pub run_folded: bool,`
+
+Whether the observations behind `estimates` were folded from `run_id`'s
+log. This is the one field added to tell a run that was read from a run
+that could not be: `render` says which, by id, and says "no run" only when
+`run_id` is `None`. It is `false` when there is no run.
+
+## `pub struct LatestRun {`
+
+What `latest_run_observations` answers: the observations, the latest run's
+id, and whether the observations were folded from that run. `Default` is
+the repository with no run: nothing observed, no id, not folded.
+
+## `pub fn latest_run_observations(`
+
+The one way `upstroke capacity` (`report`) and `validate` read "the latest
+run", whichever schema wrote it. Each used to carry its own copy of a
+legacy-only read. A schema-4 log made that read fail, so on a repository
+whose latest run was schema 4 both showed no exhausted pool and no spend,
+and both warned of a log that was in fact intact.
+
+- It asks `engine::topology::observe::observe` first. `Some(observed)` is a
+  schema-4 log, already checked by a full replay, and `observe_topology`
+  folds `observed.events()`.
+- `None` is a legacy log. It is read as before: `events::read_all`, then
+  `observe`. `read_all`'s torn-tail notice goes to `warnings`.
+- An error from either reader answers `Observations::default()`, with the
+  run's id and `folded: false`, and pushes one warning naming the run and
+  the error.
+
+The warning says nothing from that run is shown, neither its signals nor
+its spend. The two copies it replaces said "showing signals only" and
+"rests on rate-limit signals alone". Neither was true: the signals are in
+the same log, and a log that cannot be read yields none of them.
+
+A repository with no run answers `LatestRun::default()` and warns of
+nothing. "The latest run" is `rundir::latest_run`'s answer, with the
+limits its own notes state.
+
+It is effect-free in `effects/wrappers.toml`: it reads through
+`rundir::latest_run`, the topology observer and `events::read_all`, and
+reaches no primitive of its own.
 
 ## `pub fn report(`
 
-Collect everything `upstroke capacity` reports: pools from config, self-metered
-spend from the latest run in this repo, and a live probe per agent.
+Collect everything `upstroke capacity` reports: pools from config, the
+rate-limit signals and self-metered spend of the latest run in this repo,
+legacy or schema 4, and a live probe per agent.
 
-## `let (observations, run_id) = match crate::rundir::latest_run(&opts.repo_root) {`
+## `let latest = latest_run_observations(&opts.repo_root, &mut warnings);`
 
 Self-metering needs a repository with runs in it. Pools are user-level
 (§17), so a listing outside a repo is still worth having — it just cannot
-say what has been drawn. Reporting that beats refusing to run.
+say what has been drawn. Reporting that beats refusing to run. A run that
+is there but cannot be read is reported as that, with a warning, and the
+listing still renders.
 
 ## `let runner = crate::runner::host::HostRunner::new();`
 
@@ -690,6 +766,26 @@ paths §11.3 exists to protect.
 A CLI that is not installed is a fact worth reporting, not a
 reason to refuse the whole listing: an operator asking about
 capacity on a machine missing one vendor still wants the other.
+
+## `Some(run_id) if self.run_folded => {`
+
+The line under the estimates has three forms, and each is true of what the
+figures above it rest on. A run that was folded is named as the source of
+the draw. A run that exists but could not be read is named too: "the
+latest run in this repository (id) could not be read, so estimates rest on
+configuration alone", beside the warning that carries the error. Only a
+repository with no run says "no run in this repository yet". The middle
+form used to be the last one, which told an operator with an unreadable
+log that there was no run to look at.
+
+## `pub(crate) mod tests {`
+
+`pub(crate)` so that `validate`'s tests can write the same run directories
+through `schema_4_run_signalling` and
+`legacy_run_with_a_line_that_is_not_json`. This file forbids the governed
+write primitives in its tests too, so every fixture here writes through a
+funnel (`rundir::create_public_dir`, `rundir::write_plan`, `EventLog`) or
+through `workspace_manager::fixture::write_file`.
 
 ## `fn an_unmeasured_pool_is_unknown_never_full()` › `let estimates = estimate(&[pool("claude-max")], &Observations::default());`
 
@@ -791,6 +887,95 @@ worker's success would retire the signal written just before it, and only
 the settlement's mark, with no reset, would be left. The live run retired
 first and recorded the signal after, so the replay does the same and
 keeps the reset.
+
+## `fn schema_4_run_started(`
+
+The `run_started` of the schema-4 runs these tests write, in the shape of
+`engine::topology::scaffold`'s: two tasks, `alpha` and `beta`, a host
+runner, and one obliged review pass per task. Its registry digest is
+derived from the plan and its plan digest from the bytes written beside
+the log, because `engine::topology::observe::observe` checks both.
+
+## `pub(crate) struct Schema4Run {`
+
+A schema-4 run directory under `<repo>/.upstroke/runs/<id>/`: the frozen
+plan and an `events.jsonl` the topology observer accepts. It is written
+the way `scaffold`'s durable run writes its log: each event goes through
+`TopologyLine::round_trip`, is planned and applied by a live
+`TopologyFold`, and is appended through `EventLog::append_topology`. The
+fold is the check. An event the replay would refuse panics in the fixture
+with the fold's own refusal, so no test here reads a log that
+`upstroke status` could not.
+
+## `fn begin_attempt(&mut self, key: crate::topology::registry::TaskKey, pool: &str) {`
+
+`task_dispatched` and `attempt_started` for a task's first attempt, with
+the region and the rung binding the fold itself derives. The settlement
+that follows is the existing `finished` (task 0) or `prepared` (task 1).
+
+## `fn rewritten_with(self, line: &[u8]) {`
+
+Add a committed line after the log's last one, outside the funnel. It
+consumes the run, so the `EventLog` is closed first.
+
+## `pub(crate) fn schema_4_run_signalling(`
+
+A schema-4 run whose one attempt was refused: `task_dispatched`,
+`attempt_started`, a `pool_exhausted` for the pool at the reset, then the
+rate-limited `attempt_finished`. Nothing after it serves the pool.
+
+## `pub(crate) fn legacy_run_with_a_line_that_is_not_json(`
+
+A run directory the census lists, whose log neither reader accepts: a
+legacy `run_started`, then a committed line that is not JSON. The first
+line has to be a committed `run_started`, or the directory is a husk and
+not a run, and `latest_run` never names it.
+
+## `struct NoAdapters;`
+
+`report` probes the CLI of each pool's agent through its adapter. With no
+adapter it records "no adapter in this build" and spawns nothing, so the
+tests below can call `report` itself and read what it renders.
+
+## `fn the_latest_run_reader_holds_a_schema_4_logs_signalled_pool_at_its_reset() {`
+
+The defect this reader was written for. The latest run is schema 4 and its
+log holds a `pool_exhausted` that nothing later retires. The reader
+answers that pool at that reset, the run's id, and no warning, and
+`report` renders the pool as `exhausted [signal]`. The legacy-only read
+refused the log at its second line (`task_dispatched` is not a legacy
+event), so the pool read `unknown` and the run id was `None`.
+
+## `fn a_schema_4_logs_spend_counts_every_settled_attempt_once_worker_and_reviews_alike() {`
+
+Two attempts on two tasks. One is refused in review and settles as
+`attempt_finished`: $0.50 on the worker's pool, $0.25 on the reviewer's.
+The other is accepted and settles as `candidate_prepared`: $1.25 and
+$0.75. Each pool reads the sum over exactly two attempts: $1.75 and
+$1.00. An accepted attempt has no `attempt_finished`, so a fold reading
+only that arm would report $0.50 and $0.25 over one attempt each.
+
+## `fn the_latest_run_reader_folds_a_legacy_log_as_observe_over_read_all_does() {`
+
+The unchanged half. A legacy log, with a signal and a priced attempt so
+that the comparison is not of two empty values, is answered with exactly
+`observe(&read_all(..))`, its run id, and no warning.
+
+## `fn a_latest_run_neither_reader_accepts_is_reported_unread_and_shows_nothing_of_it() {`
+
+Both ways a log can fail: a legacy log the legacy reader refuses at line
+2, and a schema-4 log the topology observer refuses at line 6. Each
+answers empty observations, the run's id, `folded: false`, and one warning
+that names the run, carries the reader's error, and says nothing from the
+run is shown. It does not say "signals only". `report` then renders "the
+latest run in this repository (id) could not be read" and does not render
+"no run in this repository yet".
+
+## `fn a_repository_with_no_run_reports_no_run_and_warns_of_nothing() {`
+
+The other side of the same line: with no run directory at all the reader
+answers the default, and "no run in this repository yet" is what `report`
+renders.
 
 ## `fn self_metering_cannot_talk_an_exhausted_pool_back_up()` › `let mut p = pool("claude-max");`
 

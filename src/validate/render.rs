@@ -65,18 +65,14 @@ pub(super) fn review_echo(plan: &ReviewPlan, cross_family: bool) -> String {
     line
 }
 
-pub(super) fn capacity_echo(
-    cfg: &Config,
-    obs: &capacity::Observations,
-    run: Option<&str>,
-) -> String {
+pub(super) fn capacity_echo(cfg: &Config, latest: &capacity::LatestRun) -> String {
     use std::fmt::Write as _;
 
     if cfg.pools.is_empty() {
         return "capacity: not connected — run `upstroke connect` to write ~/.upstroke/pools.toml"
             .to_owned();
     }
-    let estimates = capacity::estimate(&cfg.pools, obs);
+    let estimates = capacity::estimate(&cfg.pools, &latest.observations);
     let mut out = format!("capacity: {} pool(s) connected\n", cfg.pools.len());
     for (pool, estimate) in cfg.pools.iter().zip(&estimates) {
         let _ = writeln!(out, "  {}", pool.describe());
@@ -85,11 +81,18 @@ pub(super) fn capacity_echo(
             let _ = writeln!(out, "    - {note}");
         }
     }
-    match run {
-        Some(run_id) => {
+    match &latest.run_id {
+        Some(run_id) if latest.folded => {
             let _ = writeln!(
                 out,
                 "  self-metered draw is folded from run {run_id}, the latest in this repository"
+            );
+        }
+        Some(run_id) => {
+            let _ = writeln!(
+                out,
+                "  the latest run in this repository ({run_id}) could not be read, so estimates \
+                 rest on configuration alone"
             );
         }
         None => {

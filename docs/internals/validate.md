@@ -181,6 +181,13 @@ promise a reviewer the run would then refuse.
 §13's observations, without executing anything: fold the latest run in this
 repository, if there is one.
 
+The read itself is `capacity::latest_run_observations`, the one
+`upstroke capacity` uses, so the two commands cannot disagree about what the
+latest run says. It reads a schema-4 log through the topology observer and
+a legacy log through `events::read_all`. This function used to carry its
+own copy of the legacy read, and a schema-4 latest run then showed no
+exhausted pool here and a warning about a log that was intact.
+
 A missing or unreadable run is not an error here. `validate` describes a
 plan; a broken run directory beside it is somebody else's problem, and
 refusing to preview a plan over one would be a strange trade.
@@ -189,12 +196,21 @@ capacity block is one line and the observations are never consulted, so
 parsing an entire run's log for it is work with no reader — and `validate`
 is the fast, zero-spend iteration loop §18 puts on day one.
 
-## `Err(error) => {`
+## `if latest.run_id.is_some() && !latest.folded {`
 
-A run that exists but cannot be folded is not "no run" — and
-`read_all`'s refusal ("the log has been rewritten…") is exactly the
-loud error the event-log design exists to produce, so swallowing it
-and reporting an empty repository hid two things at once.
+A run that exists but cannot be folded is not "no run" — and the reader's
+refusal ("the log has been rewritten…") is exactly the loud error the
+event-log design exists to produce, so swallowing it and reporting an
+empty repository hid two things at once. The shared reader's warning
+names the run and the error and says nothing from that run is shown, and
+the capacity block says the latest run could not be read. The warning
+used to say the block "rests on rate-limit signals alone", which was not
+true: the signals are in the log that could not be read.
+
+Only that warning is passed on. For a legacy log that did fold, the shared
+reader also reports `read_all`'s torn-tail notice, which
+`upstroke capacity` shows and this preview has never shown: a torn tail in
+another run's log says nothing about the plan being previewed.
 
 ## `pub fn render(&self) -> String {`
 
@@ -539,6 +555,29 @@ A source the estimate did not read must not pass as accounted for.
 
 §18: this command executes nothing, and says which side of that line
 it is on rather than letting a preview read as a promise.
+
+## `rendered.contains("no run in this repository yet"),`
+
+This repository has no run, and the block says so. It is the only case
+that says so: a run that exists and could not be read is named as that
+(`the_capacity_block_says_a_latest_run_it_could_not_read_could_not_be_read`).
+
+## `fn the_capacity_block_shows_the_pool_a_schema_4_latest_run_signalled_as_exhausted() {`
+
+The latest run is schema 4 and its log holds a `pool_exhausted` for
+`claude-max` that nothing later retires. The block renders that pool as
+`exhausted [signal]` at the signal's reset, names the run as the source of
+the draw, and no warning mentions the run. The legacy-only read refused
+the log, so the pool read `unknown [unknown]` under a "could not be
+folded" warning. The run directory is written by `capacity`'s test
+fixture, `schema_4_run_signalling`, through a live fold.
+
+## `fn the_capacity_block_says_a_latest_run_it_could_not_read_could_not_be_read() {`
+
+A latest run whose log neither reader accepts. The preview still renders.
+Its block says the latest run, by id, could not be read and that estimates
+rest on configuration alone, and does not say "no run in this repository
+yet". One warning names the run and carries the reader's error.
 
 ## `let report = run(&opts("fixtures/sample-plan.md")).expect("validates");`
 
