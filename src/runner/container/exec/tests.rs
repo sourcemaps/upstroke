@@ -9383,49 +9383,182 @@ fn stat_of(pid: libc::pid_t) -> Result<(Identified, char), String> {
 }
 
 /// The children of `pid`, read from the children list of each of its tasks
-/// (`/proc/<pid>/task/<tid>/children`). When a listed task's list is not found
-/// it lists the tasks and reads every list again, at most `LISTINGS` listings
-/// in all, and returns the last listing's not-found as its error. An unreadable
-/// list is an error, never an answer of "no children"; and a list read empty
-/// is discovery only, never evidence that no child remains.
+/// (`/proc/<pid>/task/<tid>/children`). An unreadable list is an error, never
+/// an answer of "no children"; and a list read empty is discovery only, never
+/// evidence that no child remains.
 #[cfg(target_os = "linux")]
 fn children_of(pid: &str) -> Result<Vec<libc::pid_t>, String> {
-    const LISTINGS: usize = 5;
-    let mut listing = 1;
-    'relist: loop {
-        let tasks = std::fs::read_dir(format!("/proc/{pid}/task"))
-            .map_err(|error| format!("/proc/{pid}/task: {error}"))?;
+    let task_dir = Path::new("/proc").join(pid).join("task");
+    children_in_passes(
+        || {
+            let mut listed = BTreeSet::new();
+            for task in std::fs::read_dir(&task_dir)? {
+                listed.insert(task?.file_name());
+            }
+            Ok(listed)
+        },
+        |task: &std::ffi::OsString| std::fs::read_to_string(task_dir.join(task).join("children")),
+    )
+    .map_err(|error| format!("{}: {error}", task_dir.display()))
+}
+
+/// The rule of [`children_of`], over `list_tasks`, which lists a process's task
+/// ids, and `read_children`, which reads one task's children list.
+#[cfg(target_os = "linux")]
+fn children_in_passes<T: Ord + std::fmt::Debug>(
+    mut list_tasks: impl FnMut() -> std::io::Result<BTreeSet<T>>,
+    mut read_children: impl FnMut(&T) -> std::io::Result<String>,
+) -> Result<Vec<libc::pid_t>, String> {
+    const PASSES: usize = 5;
+    let mut last = String::new();
+    for _ in 0..PASSES {
+        let before = list_tasks().map_err(|error| error.to_string())?;
         let mut children = Vec::new();
-        for task in tasks {
-            let task = task.map_err(|error| format!("/proc/{pid}/task: {error}"))?;
-            let list = task.path().join("children");
-            let text = match std::fs::read_to_string(&list) {
-                Ok(text) => text,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    if listing == LISTINGS {
-                        return Err(format!(
-                            "{}: {error} (a listed task's list was not found in each of \
-                             {LISTINGS} listings)",
-                            list.display()
-                        ));
+        let mut changed = Vec::new();
+        for task in &before {
+            match read_children(task) {
+                Ok(text) => {
+                    for child in text.split_whitespace() {
+                        let pid = child.parse::<libc::pid_t>().map_err(|error| {
+                            format!("the children list of task {task:?}: {child}: {error}")
+                        })?;
+                        children.push(pid);
                     }
-                    listing += 1;
-                    continue 'relist;
                 }
-                Err(error) => return Err(format!("{}: {error}", list.display())),
-            };
-            for child in text.split_whitespace() {
-                children.push(
-                    child
-                        .parse::<libc::pid_t>()
-                        .map_err(|error| format!("{}: {child}: {error}", list.display()))?,
-                );
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    changed.push(format!(
+                        "the children list of task {task:?} was not found ({error})"
+                    ));
+                }
+                Err(error) => return Err(format!("the children list of task {task:?}: {error}")),
             }
         }
-        children.sort_unstable();
-        children.dedup();
-        return Ok(children);
+        let after = list_tasks().map_err(|error| error.to_string())?;
+        if after != before {
+            changed.push(format!(
+                "the tasks listed after the reads, {after:?}, were not those listed before them, \
+                 {before:?}"
+            ));
+        }
+        if changed.is_empty() {
+            children.sort_unstable();
+            children.dedup();
+            return Ok(children);
+        }
+        last = changed.join(", and ");
     }
+    Err(format!(
+        "none of {PASSES} passes over the tasks counted; in the last, {last}"
+    ))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_engines_children_are_not_lost_when_a_task_ends_after_its_list_was_opened() {
+    // B ends after its list was opened and hands its child to A, already read.
+    let mut listings = [
+        BTreeSet::from(["A", "B"]),
+        BTreeSet::from(["A"]),
+        BTreeSet::from(["A"]),
+        BTreeSet::from(["A"]),
+    ]
+    .into_iter();
+    let mut reads = [("A", ""), ("B", ""), ("A", "4242 ")].into_iter();
+    let mut listed = 0;
+    let answer = children_in_passes(
+        || {
+            listed += 1;
+            listings
+                .next()
+                .ok_or_else(|| std::io::Error::other("no listing is scripted"))
+        },
+        |task| {
+            let (expected, list) = reads.next().expect("a read the script holds");
+            assert_eq!(*task, expected, "the reads follow the listed tasks");
+            Ok(list.to_owned())
+        },
+    );
+    assert_eq!(
+        answer,
+        Ok(vec![4242]),
+        "the child B handed to A is found by a second pass, not lost to a first pass that read \
+         B's list empty after B ended"
+    );
+    assert_eq!(
+        listed, 4,
+        "two passes, each listing the tasks before and after its reads"
+    );
+    assert_eq!(reads.next(), None, "every scripted read was made");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_engines_children_are_read_in_another_pass_when_a_list_is_not_found() {
+    // The listings agree, so the not-found read alone discards the first pass.
+    let mut listings = [
+        BTreeSet::from(["A", "B"]),
+        BTreeSet::from(["A", "B"]),
+        BTreeSet::from(["A"]),
+        BTreeSet::from(["A"]),
+    ]
+    .into_iter();
+    let mut reads = [("A", Some("7 ")), ("B", None), ("A", Some("8 "))].into_iter();
+    let mut listed = 0;
+    let answer = children_in_passes(
+        || {
+            listed += 1;
+            listings
+                .next()
+                .ok_or_else(|| std::io::Error::other("no listing is scripted"))
+        },
+        |task| {
+            let (expected, list) = reads.next().expect("a read the script holds");
+            assert_eq!(*task, expected, "the reads follow the listed tasks");
+            list.map(str::to_owned)
+                .ok_or_else(|| std::io::ErrorKind::NotFound.into())
+        },
+    );
+    assert_eq!(
+        answer,
+        Ok(vec![8]),
+        "a pass in which B's list was not found is discarded whole, its read of A included, and \
+         the next pass's answer is returned"
+    );
+    assert_eq!(
+        listed, 4,
+        "two passes, each listing the tasks before and after its reads"
+    );
+    assert_eq!(reads.next(), None, "every scripted read was made");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_engines_tasks_that_change_under_every_pass_end_in_an_error_after_five_passes() {
+    let mut listed = 0;
+    let answer = children_in_passes(
+        || {
+            listed += 1;
+            if listed > 10 {
+                return Err(std::io::Error::other("a listing after the fifth pass"));
+            }
+            Ok(BTreeSet::from([listed]))
+        },
+        |_| Ok("4242 ".to_owned()),
+    );
+    assert_eq!(
+        answer,
+        Err(
+            "none of 5 passes over the tasks counted; in the last, the tasks listed after the \
+             reads, {10}, were not those listed before them, {9}"
+                .to_owned()
+        ),
+        "tasks that change under every pass end in an error that says what changed in the last \
+         pass, never in the children its reads found"
+    );
+    assert_eq!(
+        listed, 10,
+        "five passes, each listing the tasks before and after its reads"
+    );
 }
 
 /// What is established about a process this harness identified. Only

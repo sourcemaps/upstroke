@@ -2999,41 +2999,103 @@ run's, and the handle fails closed (below).
 
 ## `#[cfg(target_os = "linux")]` › `fn children_of(pid: &str) -> Result<Vec<libc::pid_t>, String> {`
 
-Why a list that is not found sends this helper back to a fresh listing
+Why this helper answers only from a pass over a process's tasks that nothing changed under
 (`CI-FLAKE-HANDOFF-CHILDREN-LIST-RACE`, a defect of the test helper: no product code reads
 these lists). The helper lists a process's tasks, `/proc/<pid>/task`, and then reads each
 listed task's children list. The listing and the reads are separate system calls, not one
-snapshot: a thread that ends between them leaves an entry whose list is gone, and the read
-fails with not-found. Until this change that was the helper's error. In CI run 42918059287,
-job 130185502003 (the Ubuntu test job of pull request #360, a change to documentation
-alone), `handoff_harness_child`'s `expect` on the coordinator's children lists panicked on
-it: no such file or directory. Which of the coordinator's threads had ended is not known.
-One candidate is the thread of `handoff_coordinator_child` that reports the backstops: it
-returns as soon as its report is written, and that report is what the harness waits for
-before it reads the lists.
+snapshot, and a thread can end between them. In CI run 42918059287, job 130185502003 (the
+Ubuntu test job of pull request #360, a change to documentation alone),
+`handoff_harness_child`'s `expect` on the coordinator's children lists panicked on a list
+that was not found: no such file or directory. Which of the coordinator's threads had ended
+is not known. One candidate is the thread of `handoff_coordinator_child` that reports the
+backstops: it returns as soon as its report is written, and that report is what the harness
+waits for before it reads the lists.
 
 **A vanished task is not read as a task with no children.** When a thread ends, the kernel
 hands its children to another live thread of the same process, and that may be a thread
-whose list this pass has already read. Skipping the vanished entry could therefore lose a
-child, which is the answer of "no children" the helper refuses. So a not-found list ends the
-pass: the tasks are listed again and every list is read again, and the helper answers only
-from a pass that read the list of every task it listed.
+whose list the pass has already read. A thread that ends during a pass shows in one of two
+ways. Its list is not found, when it ended before the list was opened. Or its list is read
+empty, when it ended after the list was opened: the read of the already-open file succeeds
+with nothing in it. The first repair answered only the first way, by listing again on a
+not-found read. A review reproduced the second: that repair took the empty read as the
+thread's answer and made no further pass, and the child the thread had handed to a task
+already read was in neither list.
 
-**The retry is bounded, and only a not-found list starts one.** A task whose list was not
-found because it ended is not named by a fresh listing, so a further pass meets a not-found
-only if another task ends during it. `LISTINGS`, five, bounds the listings: one retry answers
-the interleaving that was seen, and the rest absorb a few threads ending in quick
-succession. Five is that allowance, not a measurement. If the last listing also meets a
-not-found list, that error is returned, saying how many listings were made, and never an
-empty answer; a kernel with no children lists at all fails the same way, five listings
-later. Every other failure is returned at once, as before: a task directory that cannot be
-listed (as when the process itself is gone), a list that fails for any other reason, and a
-child that does not parse as a pid. Every caller therefore still receives an error for a list
-that stays unreadable, and what each does with one is unchanged.
+**The rule.** `children_in_passes` holds it, apart from the filesystem. A pass lists the
+task ids, reads every listed task's list, and lists the task ids again. It counts only if no
+read failed with not-found and the second listing holds exactly the task ids of the first:
+a thread that ended during the pass is missing from the second listing, whichever way its
+read went. A pass that does not count is discarded whole, the lists it did read included,
+and another is made. A pass that counts answers its children sorted and without repeats.
 
-**No test witnesses the retry.** The interleaving cannot be produced on demand, so no test
-fails without this change. What was checked instead is that the retry is bounded and that a
-list that stays unreadable is still an error to every caller.
+**The bound.** At most five passes are made. One more pass answers the interleaving that was
+seen, and the rest absorb a few threads ending in quick succession; five is that allowance,
+not a measurement. If the fifth pass does not count either, the helper returns an error that
+says what changed in it, the lists not found and the two listings, and never an answer; a
+kernel with no children lists at all fails the same way, after five passes. Every other
+failure is returned at once, as before: a task directory that cannot be listed (as when the
+process itself is gone), a list that fails for any other reason, and a child that does not
+parse as a pid. Every caller therefore still receives an error for a list that stays
+unreadable, and what each does with one is unchanged. Each error names the task directory,
+`/proc/<pid>/task`, and every path is built by joining `Path` components, never by
+formatting.
+
+**What the rule does not see.** The kernel hands an ending thread's children on
+(`exit_notify`) before it takes the thread out of the task listing (`release_task`). A
+thread between the two is still listed and its list reads empty, so a pass whose read of
+that list and whose second listing both fall between them counts without the children that
+thread handed on. A process's main thread that ends before its other threads stays listed
+the same way, as a zombie, until the whole process ends. Both are read from the kernel's
+exit path, not observed in a run; closing them needs more than the listings and the lists.
+
+**What witnesses it.** The interleavings cannot be produced on demand on a live process, so
+the rule is tested apart from the filesystem: the tests below drive `children_in_passes`
+with scripted closures.
+
+## `#[cfg(target_os = "linux")]` › `fn children_in_passes<T: Ord + std::fmt::Debug>(`
+
+The rule of `children_of`, over two closures: `list_tasks` lists a process's task ids, and
+`read_children` reads one task's children list. `children_of` gives it the two readers of
+the proc filesystem: the entry names of `/proc/<pid>/task`, which are the task ids, and the
+text of `<task>/children`. A read's error keeps its kind, which is how a not-found read is
+told from every other failure, and the two listings of a pass are compared as sets. The
+task id is generic, so the tests below name their tasks (`"A"`, `"B"`, or a number) and read
+no proc filesystem. The core's errors name the task; `children_of` puts the task directory
+in front of each.
+
+## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_not_lost_when_a_task_ends_after_its_list_was_opened() {`
+
+The review's interleaving, scripted. The first listing holds A and B. A's list reads empty;
+B's list, opened before B ended, reads empty too, and B's child, 4242, is now A's, whose
+list this pass has already read; the second listing holds only A. The next pass lists A,
+reads A's list holding 4242, and lists A again. The core must answer 4242 from that second
+pass: four listings, and the reads of A, B and A in that order.
+
+Measured witness, restored byte-for-byte: with the comparison of the two listings made
+`if false`, so that a pass counts without it, this test fails at its first assertion,
+`left: Ok([])` against `right: Ok([4242])`: the first pass counted and the child was lost.
+The test below with tasks changing under every pass fails too, answering `Ok([4242])` where
+the error is required; the not-found test still passes.
+
+## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_read_in_another_pass_when_a_list_is_not_found() {`
+
+A read that fails with not-found makes another pass. The first pass's two listings agree, A
+and B both times, so the not-found read of B's list is the only thing that discards it, and
+its read of A, which found child 7, is discarded with it. The next pass lists A, reads A's
+list holding 8, and lists A again; its answer, 8 alone, is the one returned.
+
+Measured witness, restored byte-for-byte: with the not-found arm returning its error at once
+instead of discarding the pass, this test alone fails at its first assertion,
+`left: Err("the children list of task \"B\" was not found (entity not found)")` against
+`right: Ok([8])`.
+
+## `#[cfg(target_os = "linux")]` › `fn an_engines_tasks_that_change_under_every_pass_end_in_an_error_after_five_passes() {`
+
+Every listing holds a task id that no listing before it held, so the two listings of every
+pass differ, while every read finds a child. The core must answer an error after exactly
+five passes, ten listings, saying what changed in the last pass, and never the child its
+reads found. The scripted lister refuses an eleventh listing, so a core that lost its bound
+fails here rather than looping.
 
 ## `#[cfg(target_os = "linux")]` › `fn helper_reaper_candidates(`
 
