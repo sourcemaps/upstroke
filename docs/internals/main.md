@@ -93,16 +93,24 @@ The inventory is not persisted, redeemed or used in pool arithmetic. Tests injec
 and transport responses rather than reading live credentials.
 
 `execute_with_readers` injects separate reset and subscription reads for CLI dispatch tests;
-production `execute` supplies the Runner-backed tracker operations. Only the selected
-closure is called. A failing configuration path cannot block the result, and ordinary
+production `execute` supplies the Runner-backed tracker operations. `read_subscription_report`
+renders the subscription outcome and appends the independent reset outcome only when
+both data flags select CLI auth. It calls each selected reader once, including after an
+unavailable subscription result. Bearer auth already includes grants and never calls the
+separate reset closure. A failing configuration path cannot block the result, and ordinary
 commands never invoke either closure.
 
 `capacity --subscription-usage claude [--auth cli|bearer]` calls the denied
-`subscription_usage` entry, defaulting to the CLI's own login. The read returns before
-pool/config loading or discovery. It conflicts with the reset reader and all report options;
+`subscription_usage` entry, defaulting to windows only through the CLI's own login. It
+prints no grant status and does not resolve the reset token. The read returns before
+pool/config loading or discovery. Both data flags may be combined, but conflict with all report options;
 `--auth` requires the subscription flag. The CLI child retains its selected config directory
 and native auth but receives an empty reset bearer. Bearer mode reuses the existing fixed
-GET. Neither route retries, falls back, stores a report or uses readings in pool arithmetic.
+GET for windows and grants, even with both flags, and never starts Claude. Missing bearer
+credentials start no external operation. Neither route retries, falls back, stores a report
+or uses readings in pool arithmetic. The composition tests drive real tracker readers and
+curl construction through a synthetic Runner, checking exact call counts, sanitized output,
+partial data and failure independence without reading credential files or live accounts.
 
 ## `enum Command` › `scope: Option<Scope>,`
 
@@ -454,7 +462,8 @@ names. Since 2026-11-23 `capacity --refresh` also starts `curl`, once per
 pool that names a usage provider, through the same host Runner. The opt-in
 `capacity --reset-credits claude` also starts curl, once, with a usable credential;
 it does not probe agents. `capacity --subscription-usage claude` starts one bounded CLI
-control probe, or the same GET with `--auth bearer`. All are capacity operations, so the
+control probe, plus an independent reset GET only when both data flags are selected, or
+just the same single GET with `--auth bearer`. All are capacity operations, so the
 count stands at two.
 
 ## `mod tests` › `fn a_write_command_refuses_before_any_effect_when_containment_fails() {`

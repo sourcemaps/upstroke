@@ -199,7 +199,7 @@ pub(super) fn response_value(response: &UsageResponse) -> Result<Value, Unavaila
     serde_json::from_str(&response.body).map_err(|_| Unavailable::NotReported)
 }
 
-/// The same validated grant representation for native and bearer payloads.
+/// The same validated grant representation for reset-only and combined bearer reads.
 pub(super) fn parse_value(value: &Value, now_unix: u64) -> ResetReport {
     let Some(cedar) = value.get("cedar_ember").and_then(Value::as_object) else {
         return ResetReport::Unavailable(Unavailable::NotReported);

@@ -5,9 +5,10 @@
 //! `capacity --reset-credits claude` for advisory voluntary reset inventory.
 //! The latter needs no pool, reads only an explicitly provider-authorized
 //! operator bearer, and stores nothing. `capacity --subscription-usage claude`
-//! reads independent windows and grants through the CLI's own login or that
-//! same bearer GET, with no fallback or persistence. For each billing pool that names a
-//! `usage_provider`, it asks that provider's documented usage endpoint how
+//! reads windows through the CLI's own login, or windows and grants through that
+//! same bearer GET. Adding `--reset-credits` to the CLI route independently reads
+//! grants with the reset reader. There is no fallback or persistence. For each
+//! billing pool that names a `usage_provider`, it asks its documented endpoint how
 //! much the account has drawn, and stores the answer under the machine
 //! directory (`~/.upstroke/capacity/usage/`). Nothing else: it dispatches no
 //! agent, runs no gate, owns no git and writes no event log.
@@ -97,8 +98,8 @@ fn reset_response(
         .map_err(|error| Unavailable::from_transport(&error))
 }
 
-/// Read advisory subscription windows and grants through exactly one selected
-/// route. CLI auth stays inside Claude; bearer auth resolves only TOKEN_ENV.
+/// Read advisory windows through the CLI, or windows and grants through one
+/// bearer GET. CLI auth stays inside Claude; bearer auth resolves only TOKEN_ENV.
 /// No fallback, persistence, redemption or pool arithmetic occurs here.
 pub fn subscription_usage(
     auth: subscription::Auth,
@@ -726,6 +727,7 @@ agent = \"claude-code\"
             Some(NOON),
         );
         assert!(report.render().contains("five-hour: used: 12%"));
+        assert!(!report.render().contains("reset credits:"));
         assert!(!report.render().contains("synthetic-secret-account"));
         assert!(table.asked.borrow().is_empty());
         let seen = runner.seen.lock().expect("seen lock");

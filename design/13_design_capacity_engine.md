@@ -37,7 +37,8 @@ All four report **spend for the current calendar month**, which is what a billin
 **Credential profiles.** One vendor can back several pools — two Claude Max accounts, say — told apart by each pool's `profile` (§17). A profile is the absolute path of the directory handed to the agent's CLI as its credential location, through the provider's own profile mechanism: an environment variable on the subprocess rather than a token the engine ever handles (invariants 2 and 5). An attempt on a schema-4 run binds the first pool of its agent, in file order, that the run's signals do not hold exhausted. With every one held, it binds the first whose recorded reset is two minutes past, or else the first; a retry that resumes its session keeps that session's pool. `connect` does not enumerate profiles, because no vendor lists them: the operator writes `profile`, and `connect` carries it across a rewrite. A worker runs under the profile of the pool its attempt binds, which the host runner sets as `CLAUDE_CONFIG_DIR`; review and probe processes still use the agent's first pool, whatever is held. A worker's rate limit fails over to another pool of its agent that is not held exhausted (§19). A profile is supported for Claude Code on the host runner only. A profile the run cannot honour, such as a relative path or a missing directory, or one that a set `CLAUDE_CODE_OAUTH_TOKEN` would override, is refused before any agent CLI is started: by a fresh run in `prepare_fresh`, before its lease, and by a resume in its pre-flight, under its locks (§17). Pre-flight then runs the CLI's capability probe under the profile and, for Claude Code alone, its sign-in check (`claude --setting-sources "" auth status --json`), on a fresh run and on a resume, once under each account Claude Code's pools use, in file order: each profile they name, and the default account when any of them names none or Claude Code has no pool. It stops at the first account that is signed out or whose check fails to answer, and that account refuses the run before it starts or resumes; a CLI that cannot say passes. The check asks with no user, project or local settings loaded, as a worker loads none, so a credential that only a settings file supplies (an `apiKeyHelper`, say) does not count. An agent whose pools use more than sixteen distinct accounts is refused before its sign-in is checked. Other agents' sign-in is not checked at pre-flight, so a signed-out Codex fails at its first attempt (`PR408-CODEX-SIGN-IN-NOT-PREFLIGHTED`). Selecting between several same-kind pools is v0.2 capacity work, and it changes three things: estimates must **attribute** usage per profile rather than aggregate it (local-log parsing reads per-account state, so summing reports one healthy pool where there is one exhausted and one fresh); `reserve` becomes asymmetric, since a plan bought for unattended work has no interactive use to protect; and independent reset windows turn a rate limit from *wait* into *rebind and continue* (§10.5) — the single biggest practical gain for an overnight run. Affinity will still govern the order: prompt caches are per-account, so the binder is to drain one pool toward its reserve and then switch, rather than round-robining and paying cache-cold on every task. Of all this, only failover between pools of the same agent on the same model is built (r6, question 7): the order is file order, no estimate enters the choice, and per-profile attribution, the asymmetric reserve and affinity are not built. **Decided 2026-11-25, not built:** a session upstroke runs, bound to a pool other than the one the capacity handler (below) would choose, is moved to that pool between turns, never within one: its transcript is carried into the other pool's profile and the session resumed there through the CLI's own resume, recorded as one event in the run's log, and a session is not moved back and forth between pools whose standing is close, since every move pays the cold cache that affinity avoids. A session a person started outside upstroke is placed by a launcher when it starts; one already running on another pool's account is reported, and moved only when the person asks, or by the handler if a machine setting, off by default, allows it. Claude Code comes first, as the one agent with profiles.
 
 **Subscription usage, as built (2026-11-26).** `capacity --subscription-usage claude
-[--auth cli|bearer]` is a pool-independent advisory report. The default `cli` route asks the
+[--auth cli|bearer]` is a pool-independent advisory report. The default `cli` route reads
+windows only, never grant counts or grant status, and asks the
 signed-in official CLI exactly once, with no shell:
 `claude -p --input-format stream-json --output-format stream-json --verbose
 --no-session-persistence --strict-mcp-config --tools "" --setting-sources ""`.
@@ -54,14 +55,22 @@ The CLI retains its own login and inherited `CLAUDE_CONFIG_DIR` (or its default)
 For example, `CLAUDE_CONFIG_DIR=/absolute/profile upstroke capacity --subscription-usage claude`
 selects an already signed-in profile. Upstroke does not inspect, export or refresh CLI
 credentials; the CLI owns normal authentication. The child receives an empty
-`UPSTROKE_CLAUDE_RESET_TOKEN` override. `--auth bearer` instead uses only that operator-supplied,
-explicitly provider-authorized bearer with the existing fixed reset GET and transport.
-Neither route falls back, retries or makes a second request for missing readings. No CLI
-user-agent is added to HTTP. Endpoint admission does not authorize native token export.
+`UPSTROKE_CLAUDE_RESET_TOKEN` override. Windows alone never resolve this token or send HTTP.
+Adding `--reset-credits claude` independently calls the existing reset reader once, using
+that operator-supplied, explicitly provider-authorized bearer. The two reports are composed
+even if either source fails: windows survive missing/refused credentials or a failed GET,
+and grants survive a CLI failure. No grants are inferred from native CLI output.
+
+`--auth bearer` instead selects an all-bearer report: windows and grants from the existing
+single fixed reset GET and transport, with no CLI call. Both data flags with `--auth bearer`
+use this same one-read report, never a second grant GET. Missing or invalid credentials
+produce unavailable without any external call. Neither flow falls back or retries for
+missing readings. No CLI user-agent is added to HTTP, and this bearer is never tried on
+another endpoint. Endpoint admission does not authorize native token export.
 
 The native payload's `rate_limits_available` controls window reporting; false means disabled
 and missing or malformed means unavailable. `rate_limits` contains independent `five_hour`,
-`seven_day`, optional `model_scoped[]` and optional `cedar_ember`. Percentages are finite
+`seven_day` and optional `model_scoped[]`; any native `cedar_ember` is ignored. Percentages are finite
 numbers from 0 through 100; timestamps use the existing RFC3339 validator and UTC renderer.
 Missing or malformed fields stay unknown. Model labels use a fixed Sonnet/Opus/Haiku/Fable
 allowlist (including their Claude-prefixed and lowercase spellings); other names print
@@ -71,7 +80,7 @@ beside `cedar_ember`; they are not guaranteed by the grant query. An absent `mod
 permits raw `limits[]` with `kind: weekly_scoped`, `scope.model.display_name`, `percent`
 and `resets_at`.
 
-An actual `cedar_ember` object uses the same validated grant parser and renderer as
+An actual `cedar_ember` object in the bearer response uses the same validated grant parser and renderer as
 `--reset-credits`. Null/missing grants never become zero, an empty array stays known empty,
 and window availability never gates grant parsing or vice versa. Automatic window resets
 and utilization percentages are labelled separately from voluntary counts and use-by times.

@@ -58,12 +58,13 @@ pub enum Windows {
 }
 
 /// Advisory output only: never stored or used as a capacity permit.
+/// Grants are absent for native CLI windows; only bearer reads check them.
 #[derive(Debug, PartialEq)]
 pub enum Report {
     Unavailable(Unavailable),
     Read {
         windows: Windows,
-        grants: ResetReport,
+        grants: Option<ResetReport>,
     },
 }
 
@@ -258,7 +259,12 @@ pub(super) fn parse(value: &Value, auth: Auth, now_unix: u64) -> Report {
         Auth::Cli => value.get("rate_limits").unwrap_or(&Value::Null),
         Auth::Bearer => value,
     };
-    let grants = reset::parse_value(limits, now_unix);
+    // Native usage is authoritative only for windows. Grants are requested
+    // separately, or parsed alongside windows from the single bearer GET.
+    let grants = match auth {
+        Auth::Cli => None,
+        Auth::Bearer => Some(reset::parse_value(limits, now_unix)),
+    };
     let available = value.get("rate_limits_available");
     let windows = if available.and_then(Value::as_bool) == Some(false) {
         Windows::Disabled
@@ -352,7 +358,9 @@ impl Report {
                 }
             }
         }
-        text.push_str(&grants.render());
+        if let Some(grants) = grants {
+            text.push_str(&grants.render());
+        }
         text
     }
 }
@@ -389,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn windows_and_grants_are_independent_for_both_wire_routes() {
+    fn subscription_windows_are_shared_but_only_bearer_payloads_report_grants() {
         for auth in [Auth::Cli, Auth::Bearer] {
             for cedar in [
                 Value::Null,
@@ -411,7 +419,10 @@ mod tests {
                 assert!(text.contains("seven-day: used: 100%"), "{text}");
                 assert!(text.contains("Sonnet: used: 0%"), "{text}");
                 assert!(text.contains("automatic reset: 2026-11-23T13:00:00Z"));
-                if cedar.is_null() {
+                if auth == Auth::Cli {
+                    assert!(!text.contains("reset credits:"));
+                    assert!(!text.contains("count:"));
+                } else if cedar.is_null() {
                     assert!(text.contains("reset credits: unavailable"));
                     assert!(!text.contains("count: 0"));
                 } else if cedar["eligible"] == false {
@@ -424,10 +435,11 @@ mod tests {
                 assert!(only_grants.contains("five-hour: used: unknown"));
                 assert!(!only_grants.contains("used: 0%"));
             }
-            assert!(
+            assert_eq!(
                 read(&json!({"five_hour": {"utilization": 9}}), auth)
                     .render()
-                    .contains("reset credits: unavailable")
+                    .contains("reset credits: unavailable"),
+                auth == Auth::Bearer
             );
         }
     }
@@ -456,14 +468,14 @@ mod tests {
             assert!(text.contains("five-hour: used: unknown; automatic reset: unknown"));
             assert!(text.contains("seven-day: used: 70%"));
             assert!(text.contains("unknown model: used: 5%"));
-            assert!(text.contains("reset credits: unavailable"));
+            assert!(!text.contains("reset credits:"));
             assert!(!text.contains("secret"));
             assert!(!text.contains('\u{1b}'));
         }
     }
 
     #[test]
-    fn disabled_or_missing_native_reporting_still_reads_actual_grants() {
+    fn disabled_or_missing_native_reporting_never_reports_grants() {
         for available in [Value::Null, json!(false), json!("true")] {
             let text = parse(
                 &json!({"rate_limits_available": available,
@@ -474,7 +486,7 @@ mod tests {
                 NOW,
             )
             .render();
-            assert!(text.contains("explicitly empty inventory"));
+            assert!(!text.contains("reset credits:"));
             assert!(!text.contains("99%"));
             assert!(text.contains(if available == false {
                 "disabled"

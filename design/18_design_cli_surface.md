@@ -39,14 +39,26 @@ is no daemon.
 
 `capacity --reset-credits claude` is the tracker's separate opt-in read of voluntary account reset grants (§13). It bypasses pool/config loading and agent probes and conflicts with `--refresh`, `--scope`, `--config` and `--pools`. It reads only `UPSTROKE_CLAUDE_RESET_TOKEN`, which must hold an explicitly provider-authorized bearer; ordinary native-app-only credentials are unsuitable without that authorization. Missing credentials send no request. It prints advisory count, kind, use-by, expiry and availability, preserves unknowns and distinguishes an explicit empty inventory from unavailable data. Results, including unavailable, exit `0`; no inventory is stored or redeemed and no pool estimate changes.
 
-`capacity --subscription-usage claude [--auth cli|bearer]` reads advisory subscription
-windows and optional voluntary grants (§13). It defaults to the CLI's own login; select an
-already signed-in profile through `CLAUDE_CONFIG_DIR`, or leave it unset for the CLI default.
-Bearer auth uses only the existing provider-authorized `UPSTROKE_CLAUDE_RESET_TOKEN` and
-fixed GET. No fallback or second request occurs. The command bypasses pool/config loading
-and discovery probes and conflicts with `--reset-credits`, `--refresh`, `--scope`, `--config`
-and `--pools`. `--auth` without `--subscription-usage` is refused. Windows and grants are
-independent, unknown stays unknown, and unavailable results exit 0 without persistence.
+`capacity --subscription-usage claude` reads only advisory subscription windows (§13)
+through the CLI's own login (`--auth cli` is equivalent). Select an already signed-in
+profile through `CLAUDE_CONFIG_DIR`, or leave it unset for the CLI default. It does not
+resolve the reset bearer, send HTTP or print a grant status, even with a token configured.
+
+`capacity --subscription-usage claude --reset-credits claude` composes those same CLI
+windows with one independent call to the existing bearer reset reader. Missing or refused
+credentials and failed grant requests leave the windows visible; CLI failure leaves the
+grant report visible. Unavailable reports include a sanitized reason.
+
+`capacity --subscription-usage claude --auth bearer` instead requests an all-bearer report:
+windows and grants from the same one fixed GET using only the provider-authorized
+`UPSTROKE_CLAUDE_RESET_TOKEN`. Adding `--reset-credits claude` gives the same one-read
+report. No CLI, fallback or second GET occurs, and a missing or invalid token sends no
+request. Absent response groups stay unknown; the grant endpoint may not supply windows.
+
+These operations bypass pool/config loading and discovery probes and conflict with
+`--refresh`, `--scope`, `--config` and `--pools`, including when both data flags are used.
+`--auth` without `--subscription-usage`, including with reset alone, is refused.
+Unavailable results exit 0 without persistence or redemption.
 
 **`capacity serve`, decided 2026-11-25 (not built).** The capacity handler (§13) will be a
 subcommand of the one binary, `upstroke capacity serve`, started explicitly by the operator, under

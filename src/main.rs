@@ -81,8 +81,8 @@ enum Command {
         #[arg(
             long,
             value_enum,
-            conflicts_with_all = ["reset_credits", "refresh", "scope", "config", "pools"],
-            help = "Read advisory Claude subscription windows and reset grants; defaults to the CLI's own login"
+            conflicts_with_all = ["refresh", "scope", "config", "pools"],
+            help = "Read Claude windows through the signed-in CLI; add --reset-credits claude for bearer grants, or --auth bearer for windows and grants in one GET"
         )]
         subscription_usage: Option<ResetProvider>,
         #[arg(long, value_enum, requires = "subscription_usage")]
@@ -331,6 +331,19 @@ fn execute(command: Command, contained: Contained) -> anyhow::Result<ExitCode> {
     )
 }
 
+fn read_subscription_report(
+    auth: tracker::subscription::Auth,
+    include_reset: bool,
+    read_reset: impl FnOnce() -> tracker::reset::ResetReport,
+    read_subscription: impl FnOnce(tracker::subscription::Auth) -> tracker::subscription::Report,
+) -> String {
+    let mut text = read_subscription(auth).render();
+    if include_reset && auth == tracker::subscription::Auth::Cli {
+        text.push_str(&read_reset().render());
+    }
+    text
+}
+
 fn execute_with_readers(
     command: Command,
     _contained: Contained,
@@ -359,8 +372,13 @@ fn execute_with_readers(
             auth,
         } => {
             if let Some(ResetProvider::Claude) = subscription_usage {
-                let report = read_subscription(auth.unwrap_or_default().chosen());
-                print!("{}", report.render());
+                let text = read_subscription_report(
+                    auth.unwrap_or_default().chosen(),
+                    reset_credits.is_some(),
+                    read_reset,
+                    read_subscription,
+                );
+                print!("{text}");
                 return Ok(ExitCode::SUCCESS);
             }
             if let Some(ResetProvider::Claude) = reset_credits {
@@ -830,7 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_credits_is_an_exclusive_opt_in_tracker_command() {
+    fn reset_credits_is_an_opt_in_tracker_command() {
         let command = Cli::try_parse_from(["upstroke", "capacity", "--reset-credits", "claude"])
             .expect("the reset inventory command parses")
             .command;
@@ -904,10 +922,21 @@ mod tests {
     fn subscription_dispatch_selects_one_reader_and_refuses_contradictory_flags() {
         use tracker::subscription::{Auth, Report};
 
-        for (extra, expected) in [
-            (vec![], Auth::Cli),
-            (vec!["--auth", "cli"], Auth::Cli),
-            (vec!["--auth", "bearer"], Auth::Bearer),
+        for (extra, expected, resets) in [
+            (vec![], Auth::Cli, 0),
+            (vec!["--auth", "cli"], Auth::Cli, 0),
+            (vec!["--auth", "bearer"], Auth::Bearer, 0),
+            (vec!["--reset-credits", "claude"], Auth::Cli, 1),
+            (
+                vec!["--reset-credits", "claude", "--auth", "cli"],
+                Auth::Cli,
+                1,
+            ),
+            (
+                vec!["--reset-credits", "claude", "--auth", "bearer"],
+                Auth::Bearer,
+                0,
+            ),
         ] {
             let command = Cli::try_parse_from(
                 ["upstroke", "capacity", "--subscription-usage", "claude"]
@@ -920,10 +949,16 @@ mod tests {
             let contained =
                 containment::establish(&command, || panic!("read only")).expect("no ambient job");
             let called = std::cell::Cell::new(0);
+            let reset_calls = std::cell::Cell::new(0);
             let result = execute_with_readers(
                 command,
                 contained,
-                || panic!("no separate reset call"),
+                || {
+                    reset_calls.set(reset_calls.get() + 1);
+                    tracker::reset::ResetReport::Unavailable(
+                        tracker::reset::Unavailable::MissingCredential,
+                    )
+                },
                 |auth| {
                     assert_eq!(auth, expected);
                     called.set(called.get() + 1);
@@ -932,24 +967,27 @@ mod tests {
             );
             assert_eq!(result.expect("advisory"), ExitCode::SUCCESS);
             assert_eq!(called.get(), 1);
+            assert_eq!(reset_calls.get(), resets);
         }
         for extra in [
             vec!["--refresh"],
-            vec!["--reset-credits", "claude"],
             vec!["--scope", "repo"],
             vec!["--config", "absent"],
             vec!["--pools", "absent"],
             vec!["--auth", "other"],
             vec!["--auth", "cli", "--auth", "bearer"],
         ] {
-            assert!(
-                Cli::try_parse_from(
-                    ["upstroke", "capacity", "--subscription-usage", "claude"]
-                        .into_iter()
-                        .chain(extra)
-                )
-                .is_err()
-            );
+            for reset in [vec![], vec!["--reset-credits", "claude"]] {
+                assert!(
+                    Cli::try_parse_from(
+                        ["upstroke", "capacity", "--subscription-usage", "claude"]
+                            .into_iter()
+                            .chain(reset)
+                            .chain(extra.iter().copied())
+                    )
+                    .is_err()
+                );
+            }
         }
         for args in [
             vec!["capacity", "--auth", "cli"],
@@ -959,6 +997,190 @@ mod tests {
             vec!["resume", "01ABCDEF", "--subscription-usage", "claude"],
         ] {
             assert!(Cli::try_parse_from(std::iter::once("upstroke").chain(args)).is_err());
+        }
+    }
+
+    #[test]
+    fn subscription_composition_preserves_partial_reports_and_exact_external_call_counts() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tracker::subscription::Auth;
+        use upstroke::runner::{RunFuture, Runner, RunnerCall, RunnerRequest};
+
+        struct FixtureRunner {
+            cli_failed: bool,
+            body: &'static str,
+            status: u16,
+            curl_failed: bool,
+            cli_calls: AtomicUsize,
+            curl_calls: AtomicUsize,
+        }
+
+        impl Runner for FixtureRunner {
+            fn run<'a>(
+                &'a self,
+                request: &'a RunnerRequest,
+                _call: RunnerCall<'a>,
+            ) -> RunFuture<'a> {
+                let (failed, stdout) = match request.command.program.as_str() {
+                    "claude" => {
+                        self.cli_calls.fetch_add(1, Ordering::Relaxed);
+                        assert_eq!(
+                            request.command.env,
+                            vec![(tracker::reset::TOKEN_ENV.to_owned(), String::new())]
+                        );
+                        (
+                            self.cli_failed,
+                            concat!(
+                                "{\"type\":\"control_response\",\"response\":{",
+                                "\"request_id\":\"usage-only\",\"subtype\":\"success\",",
+                                "\"response\":{\"rate_limits_available\":true,\"rate_limits\":{",
+                                "\"five_hour\":{\"utilization\":12},",
+                                "\"cedar_ember\":{\"grants\":[{\"resets_left\":99}]}}}}}\n"
+                            )
+                            .to_owned(),
+                        )
+                    }
+                    "curl" => {
+                        self.curl_calls.fetch_add(1, Ordering::Relaxed);
+                        assert_eq!(request.command.args, tracker::transport::arguments());
+                        assert_eq!(
+                            std::str::from_utf8(&request.command.stdin).expect("curl config"),
+                            "url = \"https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1\"\n\
+                             header = \"anthropic-beta: oauth-2025-04-20\"\n\
+                             header = \"Authorization: Bearer synthetic-bearer\"\n"
+                        );
+                        (self.curl_failed, format!("{}\n{}", self.body, self.status))
+                    }
+                    other => panic!("unexpected external operation: {other}"),
+                };
+                Box::pin(async move {
+                    Ok(upstroke::agent::ProcessOutput {
+                        code: Some(if failed { 1 } else { 0 }),
+                        stdout,
+                        stderr: "synthetic-bearer".to_owned(),
+                        duration: std::time::Duration::ZERO,
+                        timed_out: false,
+                        output_limited: false,
+                    })
+                })
+            }
+        }
+
+        for auth in [Auth::Cli, Auth::Bearer] {
+            for include_reset in [false, true] {
+                for token in [None, Some("bad\nsecret"), Some("synthetic-bearer")] {
+                    for cli_failed in [false, true] {
+                        for (body, status, curl_failed, windows, grants) in [
+                            (
+                                r#"{"five_hour":{"utilization":31},"cedar_ember":{"grants":[{"resets_left":2}]}}"#,
+                                200,
+                                false,
+                                true,
+                                true,
+                            ),
+                            (
+                                r#"{"five_hour":{"utilization":31}}"#,
+                                200,
+                                false,
+                                true,
+                                false,
+                            ),
+                            (
+                                r#"{"cedar_ember":{"grants":[{"resets_left":2}]}}"#,
+                                200,
+                                false,
+                                false,
+                                true,
+                            ),
+                            ("{}", 200, false, false, false),
+                            ("synthetic-bearer", 401, false, false, false),
+                            ("synthetic-bearer", 503, false, false, false),
+                            ("synthetic-bearer", 200, false, false, false),
+                            ("synthetic-bearer", 200, true, false, false),
+                        ] {
+                            let runner = FixtureRunner {
+                                cli_failed,
+                                body,
+                                status,
+                                curl_failed,
+                                cli_calls: AtomicUsize::new(0),
+                                curl_calls: AtomicUsize::new(0),
+                            };
+                            let transport = tracker::CurlTransport::new(&runner);
+                            let credential = |name: &str| {
+                                assert_eq!(name, tracker::reset::TOKEN_ENV);
+                                assert!(auth == Auth::Bearer || include_reset);
+                                token.map(str::to_owned)
+                            };
+                            let text = read_subscription_report(
+                                auth,
+                                include_reset,
+                                || tracker::reset_credits(&transport, &credential, Some(0)),
+                                |selected| {
+                                    tracker::subscription_usage(
+                                        selected,
+                                        &runner,
+                                        &transport,
+                                        &credential,
+                                        Some(0),
+                                    )
+                                },
+                            );
+                            let bearer = auth == Auth::Bearer;
+                            let sent =
+                                (bearer || include_reset) && token == Some("synthetic-bearer");
+                            assert_eq!(
+                                runner.cli_calls.load(Ordering::Relaxed),
+                                usize::from(!bearer)
+                            );
+                            assert_eq!(
+                                runner.curl_calls.load(Ordering::Relaxed),
+                                usize::from(sent)
+                            );
+                            assert_eq!(
+                                text.contains("five-hour: used: 12%"),
+                                !bearer && !cli_failed,
+                                "{text}"
+                            );
+                            assert_eq!(
+                                text.contains("five-hour: used: 31%"),
+                                bearer && sent && windows,
+                                "{text}"
+                            );
+                            assert_eq!(text.contains("count: 2;"), sent && grants, "{text}");
+                            assert!(!text.contains("count: 99"), "CLI grants are never read");
+                            assert!(!text.contains("synthetic-bearer"));
+                            assert!(!text.contains("bad\nsecret"));
+                            if !bearer {
+                                assert_eq!(
+                                    text.matches("claude reset credits:").count(),
+                                    usize::from(include_reset)
+                                );
+                                if include_reset && !(sent && grants) {
+                                    assert!(
+                                        text.contains("reset credits: unavailable —"),
+                                        "{text}"
+                                    );
+                                }
+                            } else if sent && status == 200 && !curl_failed && body.starts_with('{')
+                            {
+                                assert_eq!(text.matches("claude reset credits:").count(), 1);
+                                if !windows {
+                                    assert!(text.contains("five-hour: used: unknown"), "{text}");
+                                }
+                                if !grants {
+                                    assert!(text.contains("reset credits: unavailable"), "{text}");
+                                }
+                            } else {
+                                assert!(
+                                    text.contains("subscription usage: unavailable —"),
+                                    "{text}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

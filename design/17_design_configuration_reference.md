@@ -97,7 +97,12 @@ The independent `capacity --reset-credits claude` reader needs no pool or usage 
 `--auth cli` keeps the CLI's own login and inherited `CLAUDE_CONFIG_DIR` (or the CLI default),
 and blanks the reset token in the child. Select an already signed-in profile with, for
 example, `CLAUDE_CONFIG_DIR=/absolute/profile upstroke capacity --subscription-usage claude`.
-`--auth bearer` uses only the reset token and fixed GET above, never the CLI credentials.
+This mode reports windows only and never resolves the bearer or checks grants. Add
+`--reset-credits claude` to read grants independently with the reset token. Either source's
+failure leaves the other's report visible. `--auth bearer` instead reads both windows and
+grants from the single fixed GET above, never the CLI credentials or process. With both
+data flags it still makes just that one GET. Missing bearer credentials send no request;
+missing response groups stay unknown.
 Neither route falls back to the other, and neither stores a report or consumes a grant.
 
 **What the usage keys do.** They opt a pool into the capacity tracker (§13), and only an operator
