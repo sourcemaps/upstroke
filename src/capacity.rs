@@ -170,6 +170,20 @@ pub struct UsageSource {
 
 pub const MAX_USAGE_KEY_CHARS: usize = 128;
 
+pub const MAX_TOKEN_ENV_CHARS: usize = 64;
+
+const CREDENTIAL_PREFIXES: [&str; 9] = [
+    "github_pat_",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "sk-",
+    "sk-ant-",
+    "xoxb-",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum UsageKeyDefect {
     #[error(
@@ -187,11 +201,20 @@ pub enum UsageKeyDefect {
     #[error(
         "`usage_token_env` must be the NAME of an environment variable that holds the \
          credential — letters, digits and underscores, not starting with a digit, at most \
-         {MAX_USAGE_KEY_CHARS} characters. What is written there is not a name, and it is not \
+         {MAX_TOKEN_ENV_CHARS} characters. What is written there is not a name, and it is not \
          repeated here in case it is the credential itself; a credential never belongs in this \
          file"
     )]
     TokenEnvNotAName,
+    #[error(
+        "`usage_token_env` must be the NAME of an environment variable that holds the \
+         credential, and what is written there has the shape of a credential instead: it starts \
+         with a prefix providers give their tokens (`{}`) or is longer than \
+         {MAX_TOKEN_ENV_CHARS} characters. It is not repeated here; a credential never belongs \
+         in this file — put it in an environment variable and write that variable's name",
+        CREDENTIAL_PREFIXES.join("`, `")
+    )]
+    TokenEnvLooksLikeACredential,
     #[error(
         "`usage_account` must be an account name as the provider writes it — letters, digits, \
          `.`, `_` and `-`, not starting with `.` or `-`, at most {MAX_USAGE_KEY_CHARS} \
@@ -226,6 +249,9 @@ impl UsageSource {
             })?;
         if token_env.is_some_and(|name| !names_an_environment_variable(name)) {
             return Err(UsageKeyDefect::TokenEnvNotAName);
+        }
+        if token_env.is_some_and(looks_like_a_credential) {
+            return Err(UsageKeyDefect::TokenEnvLooksLikeACredential);
         }
         if account.is_some_and(|name| !names_an_account(name)) {
             return Err(UsageKeyDefect::AccountNotAName);
@@ -268,6 +294,13 @@ pub fn names_an_environment_variable(text: &str) -> bool {
         .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
         && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
         && text.len() <= MAX_USAGE_KEY_CHARS
+}
+
+fn looks_like_a_credential(text: &str) -> bool {
+    CREDENTIAL_PREFIXES
+        .into_iter()
+        .any(|prefix| text.starts_with(prefix))
+        || text.chars().count() > MAX_TOKEN_ENV_CHARS
 }
 
 pub fn names_an_account(text: &str) -> bool {
@@ -3251,6 +3284,79 @@ pub(crate) mod tests {
             UsageSource::from_keys(Some("github-ai-credits"), Some("KEY"), Some("octo/cat")),
             Err(UsageKeyDefect::AccountNotAName)
         );
+    }
+
+    #[test]
+    fn a_token_env_with_a_credentials_shape_is_refused_and_never_repeated() {
+        use UsageKeyDefect::{TokenEnvLooksLikeACredential, TokenEnvNotAName};
+
+        for (prefix, refusal) in [
+            ("github_pat_", TokenEnvLooksLikeACredential),
+            ("ghp_", TokenEnvLooksLikeACredential),
+            ("gho_", TokenEnvLooksLikeACredential),
+            ("ghu_", TokenEnvLooksLikeACredential),
+            ("ghs_", TokenEnvLooksLikeACredential),
+            ("ghr_", TokenEnvLooksLikeACredential),
+            ("sk-", TokenEnvNotAName),
+            ("sk-ant-", TokenEnvNotAName),
+            ("xoxb-", TokenEnvNotAName),
+        ] {
+            let value = format!("{prefix}EXAMPLE_0nly");
+            assert!(
+                looks_like_a_credential(&value),
+                "a value starting `{prefix}` has a credential's shape"
+            );
+            let defect = match UsageSource::from_keys(Some("openai-cost"), Some(&value), None) {
+                Ok(_) => panic!("a value starting `{prefix}` was taken for a variable's name"),
+                Err(defect) => defect,
+            };
+            assert_eq!(defect, refusal, "a value starting `{prefix}`");
+            let message = defect.to_string();
+            assert!(
+                !message.contains(&value),
+                "the refusal of a value starting `{prefix}` repeats it"
+            );
+            assert!(
+                message
+                    .starts_with("`usage_token_env` must be the NAME of an environment variable"),
+                "{message}"
+            );
+        }
+
+        let over_long = "K".repeat(65);
+        assert!(
+            names_an_environment_variable(&over_long),
+            "by its characters alone a 65-character value is a name"
+        );
+        assert!(looks_like_a_credential(&over_long));
+        let defect = match UsageSource::from_keys(Some("openai-cost"), Some(&over_long), None) {
+            Ok(_) => panic!("a 65-character value was taken for a variable's name"),
+            Err(defect) => defect,
+        };
+        assert_eq!(defect, TokenEnvLooksLikeACredential);
+        assert!(
+            !defect.to_string().contains(&over_long),
+            "the refusal of a 65-character value repeats it"
+        );
+
+        let longest = "K".repeat(64);
+        for ordinary in [
+            "GITHUB_TOKEN",
+            "ANTHROPIC_ADMIN_KEY",
+            "GHP_TOKEN",
+            longest.as_str(),
+        ] {
+            assert!(!looks_like_a_credential(ordinary), "{ordinary}");
+            assert_eq!(
+                UsageSource::from_keys(Some("openai-cost"), Some(ordinary), None),
+                Ok(Some(UsageSource {
+                    provider: UsageProvider::OpenaiCost,
+                    token_env: Some(ordinary.to_owned()),
+                    account: None,
+                })),
+                "{ordinary}"
+            );
+        }
     }
 
     #[test]

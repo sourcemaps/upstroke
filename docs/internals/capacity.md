@@ -215,6 +215,15 @@ Whether the endpoint reports per account, and so needs `usage_account` in its
 address. GitHub's billing usage does; the two organization cost endpoints
 answer for the organization the key belongs to.
 
+## `pub const MAX_TOKEN_ENV_CHARS: usize = 64;`
+
+The longest `usage_token_env` the reader takes; a longer value is refused as
+having a credential's shape ([`looks_like_a_credential`]). `src/tracker.rs`
+reads the same bound and prints a configured name longer than it cut short,
+so whether a name is printed whole is decided by the length the reader
+accepts. It is shorter than `MAX_USAGE_KEY_CHARS`, which still bounds the
+character-class checks and `usage_account`.
+
 ## `pub enum UsageKeyDefect {`
 
 Why three strings from a pools file are not a usage source. The messages are
@@ -226,6 +235,16 @@ why they live here and not in either.
 one is that a key was pasted there; an error that quoted it would put the key
 on a terminal and in whatever captured the output.
 
+`TokenEnvLooksLikeACredential` keeps the same rule for a value that is a name
+by its characters and still has a credential's shape. It lists the shapes it
+refuses and never the value. Like `TokenEnvNotAName` it carries no field, so
+there is nothing it could repeat a pasted key from; the reader prefixes the
+pool's table and `connect` the pool's name. Since 2026-11-23
+`TokenEnvNotAName` states the 64 characters of `MAX_TOKEN_ENV_CHARS` and not
+the 128 of `MAX_USAGE_KEY_CHARS`: a name between the two is refused too, as
+credential-shaped, and the bound worth stating is the one an operator can
+meet.
+
 ## `impl UsageSource` › `pub fn from_keys(`
 
 The one validation of the usage keys, shared by the configuration reader and
@@ -234,12 +253,48 @@ refuses. A key with no provider is a refusal rather than a no-op because the
 likeliest cause is `usage_provider` misspelled, which is otherwise a pool
 that is silently never asked.
 
+`usage_token_env` takes the name of an environment variable, never a
+credential, and two checks hold it to that. `names_an_environment_variable`
+refuses what is not a name by its characters (`TokenEnvNotAName`), and then a
+value with a credential's shape is refused ([`looks_like_a_credential`],
+`TokenEnvLooksLikeACredential`). The first check alone was not enough. A
+GitHub fine-grained token is `github_pat_` followed by letters, digits and
+underscores, so it is a name by its characters. Until 2026-11-23 the reader
+took one, the tracker looked it up as a variable, found nothing, and printed
+it whole in the line saying the variable was not set
+(`PR409-PASTED-GITHUB-TOKEN-LEAK`). The order of the two checks decides only
+which refusal is given to a value that fails both, such as one starting
+`sk-`. Neither refusal repeats the value.
+
 ## `impl UsageSource` › `pub fn gaps(&self) -> Vec<String> {`
 
 What a valid source still lacks for a refresh: no credential variable, or no
 account where the provider needs one. Warnings and not refusals, because the
 tracker's inputs are not a reason to refuse a run, and the tracker says the
 same thing itself when it skips the pool.
+
+## `fn looks_like_a_credential(text: &str) -> bool {`
+
+Whether a value written for `usage_token_env` has the shape of a credential
+and not of a variable's name: it starts with one of `CREDENTIAL_PREFIXES`, or
+it is longer than `MAX_TOKEN_ENV_CHARS` (64) characters.
+
+The prefixes are GitHub's `github_pat_`, `ghp_`, `gho_`, `ghu_`, `ghs_` and
+`ghr_`, the `sk-` of OpenAI's keys and the `sk-ant-` of Anthropic's, and
+Slack's `xoxb-`. They are matched exactly, case included: providers issue them
+in lower case, and an upper-case name such as `GHP_TOKEN` is an ordinary
+variable. `sk-ant-` is already covered by `sk-` and is listed so the list
+names every shape the finding names. The three with a `-` are never names by
+their characters anyway; they are listed so that this rule says what a
+credential looks like by itself, whatever the character check beside it
+allows. The length is the catch-all for a token whose prefix is not listed:
+a variable's name longer than 64 characters is rare, and many credentials are
+longer (a fine-grained GitHub token is 93). The rule leans towards refusing.
+A wrong refusal costs the operator a shorter variable name, and a wrong pass
+prints a credential.
+
+It is private, since nothing outside this module needs it.
+`src/tracker.rs` guards by length alone, through `MAX_TOKEN_ENV_CHARS`.
 
 ## `pub fn names_an_account(text: &str) -> bool {`
 
