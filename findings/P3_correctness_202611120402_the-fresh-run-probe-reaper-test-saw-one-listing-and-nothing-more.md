@@ -25,8 +25,8 @@ creator, waits up to 120 seconds for the reaper's calls, and asserts that they
 were exactly four: a listing, a kill, a removal, and a second listing that
 finds nothing.
 
-It has been seen to fail once, on the operator's build machine and not in CI:
-a full local run of the test suite on 2026-11-12 at about 01:25 UTC, at commit
+It has been seen to fail twice, both times on the operator's build machine
+and not in CI. The first was a full local run of the test suite on 2026-11-12 at about 01:25 UTC, at commit
 `65f87b62` (a documentation-only change on pull request #368's branch), while
 other builds and a Windows guest were using the machine. The suite's result
 was 3736 passed, 1 failed, 204 ignored, in 245.73 s.
@@ -46,7 +46,20 @@ calls that never came.
 The same commit's suite passed when run again an hour later (3737 passed, 0
 failed). No rate can be given, since passing local runs were not counted. The
 test exists from commit `4bc56d21` (2026-10-01); among the operator's retained
-logs of failed local suite runs since then, this is its only failure.
+logs of failed local suite runs since then, it failed in two: the run above
+and the one below.
+
+The second sighting was a pre-push baseline of pull request #381's branch at
+commit `7b2f7e64`, on 2026-11-14 at about 09:53 UTC. The suite's log shows the
+test running for over sixty seconds, then the panic at the same place,
+`src/engine/topology/create/tests.rs:5032:5`, with the same message, and again
+one call only recorded: the first listing (`ps --all --quiet --no-trunc` with
+the two label filters). The suite's result was 3761 passed, 1 failed, 203
+ignored, in 215.51 s. The test, the reaper and the fake runtime it uses
+(`src/engine/topology/create/tests.rs`, `src/agent/proc.rs`,
+`src/runner/container/fake.rs`) are byte-identical between `65f87b62` and
+`7b2f7e64`. A later baseline of the same commit, on 2026-11-14 at about 20:54
+UTC, passed.
 
 Why the reaper stopped after its first listing is not established. From
 reading the reaper (`reclaim_labeled_containers` in `src/agent/proc.rs`), it
