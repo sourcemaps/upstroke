@@ -1642,7 +1642,7 @@ one, and the two Linux strings to written-out literals.
 One function, so that the tables and anything derived from them cannot
 disagree about the rule. The Windows shards' matrix is the first thing derived
 from one: [`windows_shard_legs`] takes each leg's arguments from here, and
-`ci.yml` is held to them. The `test` job's matrix is the second:
+`ci.yml` is held to them. The `test-linux` and `test-macos` matrices are the second:
 [`test_legs`] takes the five macOS legs' arguments and the two Linux legs'
 from here. Until the Linux suite was divided its one leg's came from the
 empty list, whose one string is the whole suite.

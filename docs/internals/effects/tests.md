@@ -2044,7 +2044,7 @@ fifth round every fixture made one.
 evidence is a fixture nothing executes is `PR5-C-DOCTEST-FIXTURES-NEVER-RAN`,
 and the rule adopted from it is to name the command that runs the fixture and
 check that the command is one CI runs. `.github/workflows/ci.yml` installs
-the clippy component in both the `test` and the `lint` job, and
+the clippy component in the `test-linux`, `test-macos` and `lint` jobs, and
 [`the_workflow_that_runs_these_tests_installs_the_compiler_they_need`]
 asserts it.
 
@@ -2996,8 +2996,8 @@ every test runs in exactly one shard. The test reads no workflow. It was the
 proof that came before any line of `ci.yml` was derived from a table. Both
 matrices now are: `windows_shard_matrix_complaints` in the workflow notes is
 what holds the Windows shards' to the Windows table, and
-`test_leg_matrix_complaints` what holds the five macOS legs of `test-macos` to
-the macOS one and its two Linux legs to the Linux one.
+`test_leg_matrix_complaints` what holds `test-macos`'s five legs to the
+macOS table and `test-linux`'s two legs to the Linux table.
 
 Five claims.
 
