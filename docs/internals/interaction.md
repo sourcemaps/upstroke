@@ -410,6 +410,48 @@ An answer that lands during the wait is picked up.
 
 Stands in for an operator running `upstroke answer` mid-wait.
 
+## `impl ArrivingSleeper` › `fn record() -> AnswerRecord {`
+
+The record the double publishes, named once so a test can publish the same record somewhere else
+and take the bytes `write_answer` writes for it rather than spelling them by hand.
+
+## `mod tests` › `fn assert_read_never_took(path: &Path, published: &[u8], read: &str) {`
+
+R21: ingestion is a read, never a take. After a read of a published answer, the file is still
+present and `fs::read` of it equals the bytes taken before the read; each assertion message names
+R21's read-never-take rule and the read under test.
+
+`EventLogAnswers` reads a published answer in exactly three places, and all three go through
+`read_answer`: `poll`; `resolve`'s immediate read, before it waits; and `resolve`'s read inside its
+waiting loop, after each sleep. The three tests below witness one read each. Before them no
+committed test read the file after any of these reads, so a reader that removed or rewrote it
+passed every test.
+
+Measured on this head: removing the file after each of the three reads (in `poll`, in `resolve`'s
+immediate branch, in its waiting branch) fails each read's own test on the presence assertion,
+and `read_answer` rewriting the file as the answer's compact JSON fails all three on the byte
+assertion.
+
+## `fn polling_a_published_answer_reads_it_and_leaves_the_file_byte_identical() {`
+
+The first of `EventLogAnswers`' three reads: `poll` returns the published answer and leaves the
+file present and byte-identical (R21).
+
+## `fn resolving_a_published_answer_reads_it_at_once_and_leaves_the_file_byte_identical() {`
+
+The second: `resolve`'s immediate read. The budget is not zero and the sleeper counts, so a count
+of zero proves the immediate read returned the answer and the waiting loop never ran; the file is
+then present and byte-identical (R21).
+
+## `fn an_answer_published_during_the_wait_is_read_by_the_loop_and_left_byte_identical() {`
+
+The third: the read inside `resolve`'s waiting loop. Nothing is published when `resolve` starts, so
+its immediate read finds nothing; `ArrivingSleeper` publishes `ArrivingSleeper::record()` at the
+first sleep, and the loop's read after that sleep returns it. The file under test appears only
+inside `resolve`, so the published bytes are taken from `write_answer` itself, by publishing the
+same record into a second scratch directory and reading that file. After the read, the file is
+present and equal to those bytes (R21).
+
 ## `fn unattended_parks_rather_than_declining()` › `let answer = UnattendedAnswers.resolve(&question()).expect("resolve");`
 
 The distinction is the whole CI story: Declined fails the task,

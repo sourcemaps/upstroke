@@ -14139,6 +14139,8 @@ fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnatio
     );
     crate::rundir::publish_answer(&paths.answers(), &component, &mut crate::rundir::NoHooks)
         .expect("and published");
+    let answer_file = crate::interaction::answer_path(&paths.answers(), &question.id);
+    let published = std::fs::read(&answer_file).expect("the published answer");
 
     let driven = drive_observing(
         &fixture,
@@ -14146,6 +14148,20 @@ fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnatio
         2,
         &driven_runner(&seams),
         &mut |step, run| {
+            if step == 1 {
+                assert!(
+                    answer_file.is_file(),
+                    "R21's read-never-take rule for the loop's ingestion: the published answer \
+                     {} must still be present after the ingestion",
+                    answer_file.display()
+                );
+                assert_eq!(
+                    std::fs::read(&answer_file).expect("the answer file after the ingestion"),
+                    published,
+                    "R21's read-never-take rule for the loop's ingestion: the published answer \
+                     must be byte-identical to what was published"
+                );
+            }
             if step == 2 {
                 assert_log_replays_twice_equal(&fixture, Some(run.fold()), "after the ingestion");
             }
