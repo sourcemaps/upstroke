@@ -6378,6 +6378,221 @@ fn category_tool(args: &[&std::ffi::OsStr]) -> std::process::Output {
         .expect("run the repository category checker with the runner's Python")
 }
 
+fn category_fixture() -> ScratchTree {
+    let directory = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "categories")
+        .expect("private category fixture directory");
+    for relative in [
+        ".github/scripts/test-categories.py",
+        ".github/workflows/ci.yml",
+        "src/effects/tests/ci_model.rs",
+    ] {
+        let destination = directory.path().join(relative);
+        fs::create_dir_all(destination.parent().expect("fixture file parent"))
+            .expect("create category fixture parents");
+        fs::copy(repo_root().join(relative), destination).expect("copy category fixture input");
+    }
+    directory
+}
+
+fn category_fixture_tool(root: &Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new(if cfg!(windows) { "python" } else { "python3" })
+        .args([
+            "-c",
+            r#"
+import codecs
+import locale
+import runpy
+import subprocess
+import sys
+
+if sys.platform == "linux":
+    assert codecs.lookup(locale.getpreferredencoding(False)).name == "ascii"
+
+def refuse_subprocess(*args, **kwargs):
+    raise AssertionError("the fixture must not start Cargo or a test harness")
+
+subprocess.Popen = refuse_subprocess
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+"#,
+        ])
+        .arg(root.join(".github/scripts/test-categories.py"))
+        .args(args)
+        .env_remove("RUSTC_BOOTSTRAP")
+        .env("LC_ALL", "C")
+        .env("PYTHONUTF8", "0")
+        .env("PYTHONCOERCECLOCALE", "0")
+        .output()
+        .expect("run isolated category fixture with ASCII defaults on Linux")
+}
+
+#[test]
+fn the_category_check_refuses_stale_matrices_and_generation_preserves_workflow_bytes() {
+    let directory = category_fixture();
+    let workflow = directory.path().join(".github/workflows/ci.yml");
+    let source = fs::read_to_string(&workflow)
+        .expect("read the fixture workflow")
+        .replace("\r\n", "\n");
+    for newline in ["\n", "\r\n"] {
+        let synchronized = format!(
+            "# caf\u{e9}\r\n{}# untouched mixed ending\n# no final newline",
+            source.replace('\n', newline)
+        );
+        let stale = synchronized.replacen(
+            &format!("        include:{newline}"),
+            &format!("        include: []{newline}"),
+            1,
+        );
+        assert_ne!(stale, synchronized);
+        fs::write(&workflow, &stale).expect("write a stale fixture matrix");
+        for args in [&["generate", "--check"][..], &["check"][..]] {
+            let output = category_fixture_tool(directory.path(), args);
+            assert_eq!(output.status.code(), Some(1), "{args:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr).trim(),
+                "stale category matrix; run python3 .github/scripts/test-categories.py generate",
+                "{args:?}"
+            );
+            assert_eq!(
+                fs::read(&workflow).expect("read stale bytes"),
+                stale.as_bytes()
+            );
+        }
+        for args in [
+            &["generate"][..],
+            &["generate", "--check"][..],
+            &["generate"][..],
+        ] {
+            let output = category_fixture_tool(directory.path(), args);
+            assert!(
+                output.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                fs::read(&workflow).expect("read synchronized bytes"),
+                synchronized.as_bytes(),
+                "{args:?}: only the marked interiors may change"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_category_inventory_counts_shared_names_in_distinct_harnesses() {
+    let directory = category_fixture();
+    let shared = r#"
+mod util {
+    #[test]
+    fn shared_name() { panic!("listing must never execute a test"); }
+    #[test]
+    #[ignore = "an inert shared registration"]
+    fn shared_ignored() { panic!("listing must never execute an ignored test"); }
+}
+"#;
+    let binary = format!(
+        "{shared}\nmod cli_tests {{\n#[test]\nfn cli() {{ panic!(\"listing only\"); }}\n}}"
+    );
+    let mut harnesses = Vec::new();
+    for (name, kind, body) in [
+        ("library", "lib", shared),
+        ("binary", "bin", binary.as_str()),
+        ("empty_example", "bin", ""),
+    ] {
+        let source = directory.path().join(format!("{name}.rs"));
+        let harness = directory
+            .path()
+            .join(name)
+            .with_extension(std::env::consts::EXE_EXTENSION);
+        fs::write(&source, body).expect("write inert target source");
+        let output = std::process::Command::new("rustc")
+            .args(["--test", "--crate-type", kind])
+            .arg(&source)
+            .arg("-o")
+            .arg(&harness)
+            .output()
+            .expect("compile inert target harness");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        harnesses.push(harness);
+    }
+    let output = std::process::Command::new(if cfg!(windows) { "python" } else { "python3" })
+        .args([
+            "-c",
+            r#"
+from collections import Counter
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("categories", sys.argv[1])
+tool = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tool)
+harnesses = sys.argv[2:]
+artifacts = [dict(reason="compiler-artifact", target=dict(name=name, kind=[kind]),
+                  profile=dict(test=True), executable=harness)
+             for name, kind, harness in zip(
+                 ("fixture", "fixture", "empty_example"), ("lib", "bin", "example"), harnesses)]
+artifacts.append(dict(reason="compiler-artifact", profile=dict(test=False), executable="not-a-test"))
+artifacts.append(dict(reason="build-finished", success=True))
+native_checked = tool.checked
+builds = []
+
+def checked(command):
+    if command[0] == "fixture-cargo":
+        assert command == ["fixture-cargo", "test", "--all-targets", "--all-features",
+                           "--no-run", "--message-format=json"], command
+        builds.append(command)
+        return "\n".join(json.dumps(artifact) for artifact in artifacts)
+    assert command[0] in harnesses and command[1:4] == ["--list", "--format", "terse"], command
+    return native_checked(command)
+
+tool.cargo = lambda: ["fixture-cargo"]
+tool.checked = checked
+assert tool.built_harnesses() == harnesses
+registrations = tool.inventory(harnesses)
+assert Counter(item.harness for item in registrations) == {harnesses[0]: 2, harnesses[1]: 3}
+assert {item.harness for item in registrations if item.name == "util::shared_name"} == set(harnesses[:2])
+assert {item.harness for item in registrations if item.name == "util::shared_ignored"} == set(harnesses[:2])
+assert tool.inventory([harnesses[2]]) == []
+rows = tool.registry()
+for platform in tool.PLATFORMS:
+    assert tool.validate(rows, platform, registrations, require_cli=True) == {("unit", 1): 5}
+    assert all(tool.owner(rows, platform, item.name) == ("unit", 1) for item in registrations)
+try:
+    tool.listed("util::shared_name: test\nutil::shared_name: test\n", harnesses[0])
+except ValueError as error:
+    assert "duplicate test names" in str(error) and harnesses[0] in str(error)
+else:
+    raise AssertionError("a duplicate within one harness was accepted")
+for harness in harnesses[:2]:
+    tool.prove(rows, tool.native_platform(), harness)
+sys.argv = [sys.argv[1], "check", "--explain"]
+tool.main()
+assert len(builds) == 2
+"#,
+        ])
+        .arg(directory.path().join(".github/scripts/test-categories.py"))
+        .args(&harnesses)
+        .env_remove("RUSTC_BOOTSTRAP")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .expect("check target-aware fixture inventory without starting Cargo");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8_lossy(&output.stdout);
+    assert!(report.contains("5 registrations including ignored; uncategorised: 0"));
+    assert!(report.contains("subcategory unit/util: 4"));
+    assert!(report.contains("subcategory unit/cli: 1"));
+}
+
 #[test]
 fn the_category_generator_and_workflow_use_the_rust_registry() {
     let output = category_tool(&["contract".as_ref()]);

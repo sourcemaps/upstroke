@@ -3018,6 +3018,46 @@ Rust representations.
 Run the repository's `test-categories.py` with `python` on Windows and
 `python3` elsewhere, capturing its output for the caller's assertions.
 
+## `fn category_fixture() -> ScratchTree {`
+
+Copy the category script, registry and workflow into an owned scratch tree.
+Generation and stale-input checks write only this fixture, never the caller's
+checkout. The scratch guard owns cleanup.
+
+## `fn category_fixture_tool(root: &Path, args: &[&str]) -> std::process::Output {`
+
+Run the copied script with locale coercion and Python UTF-8 mode disabled.
+On Linux, require the default encoding to be ASCII. The registry and workflow
+still contain UTF-8 text and must be decoded explicitly. Refuse every subprocess:
+generation needs none, and a stale workflow must fail before inventory collection.
+Remove bootstrap only from this child's environment to exercise that stale-input
+path even when the parent harness uses bootstrap for timing.
+
+## `fn the_category_check_refuses_stale_matrices_and_generation_preserves_workflow_bytes() {`
+
+Use both LF and CRLF workflow fixtures, with a UTF-8 comment, mixed outside
+line endings and no final newline. A stale matrix must fail both `generate --check`
+and the standalone `check` entry point with the same diagnostic and unchanged
+bytes. Generating must repair only the marked interiors; a subsequent check and
+second generation must preserve the exact synchronized bytes. All operations
+run under the ASCII-default control on Linux and against private fixture copies.
+
+## `fn the_category_inventory_counts_shared_names_in_distinct_harnesses() {`
+
+Compile a library and binary harness with the same ordinary and ignored names,
+plus a CLI registration in the binary, and an empty example harness. Feed their
+paths through Cargo artifact fixtures, including an unrelated non-test artifact.
+Only Cargo's build response is substituted; every listing uses the real native
+harness, and every fixture body panics if executed. No Cargo process is started.
+
+Require five registrations with distinct harness identities, four util counts
+and one CLI count, including both ignored occurrences. Validate each occurrence's
+owner on all three platforms, retain the empty example, reject a duplicate within
+one harness, and prove the two nonempty harnesses' real selections. Finally run
+the standalone `check --explain` entry point over these artifacts and its copied
+workflow, exercising synchronization, collection, ownership, remainder and reporting
+together without altering the caller's checkout.
+
 ## `fn the_category_generator_and_workflow_use_the_rust_registry() {`
 
 Read the tool's `contract` JSON and compare its parsed registry to the
@@ -3033,9 +3073,13 @@ lists each generated selection, and each set must equal the first-match
 owner's set. Across legs every registration must occur exactly once, and the
 all-skipped list must be empty. Ignored registrations are included. This
 proof starts no Cargo process inside the running test. Separately, standalone
-`check` starts Cargo to build and list the native all-target, all-feature
-inventory across all harnesses and requires nonzero `unit/cli` membership.
-It never runs from a test. These are native proofs, so the other operating
+`check` first compares the committed matrices with the registry, then starts Cargo
+with `--no-run --message-format=json` to build the native all-target, all-feature
+harnesses. Each harness is listed separately, preserving its identity alongside
+each name through ownership and counting. Empty harnesses are allowed; an empty
+aggregate or missing `unit/cli` membership is refused. The Cargo build never runs
+from a test; the standalone entry point's composition is covered by the artifact
+fixture above. These are native proofs, so the other operating
 systems still supply their own inventories in CI.
 
 ## `fn the_category_check_refuses_bootstrap_before_starting_a_subprocess() {`

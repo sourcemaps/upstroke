@@ -1124,17 +1124,26 @@ for every name. Later matches are allowed by the first-match rule and reported b
 a selection that disagrees with the first owner is an error.
 
 `python3 .github/scripts/test-categories.py generate` replaces only the marked
-matrix blocks. `generate --check` refuses drift. The generator reads the literal
+matrix interiors, preserving all outside bytes and each block's LF or CRLF endings.
+A synchronized generation does not write the file. The registry and workflow use
+explicit UTF-8. `generate --check` and standalone `check` share the same comparison
+and refuse drift; `check` does so before building or accepting any inventory.
+The generator reads the literal
 Rust table, and an effects test compares its parsed registry and generated legs
 with the compiled Rust values, including names, selectors and floors. The workflow
 oracle still checks each actual YAML entry, required aggregate context, suite
 command and witness. Its mutation controls still delete, move, widen and narrow
 selectors, lower floors, remove legs, change matrix expansion and remove checks.
 
-`bash .github/scripts/test-categories.sh` obtains Cargo's native all-target,
-all-feature terse list, including ignored tests, validates ownership and exactly
-one named selection, and repeats the native list with every category filter skipped.
-Any remaining name fails with the table location. Empty or failed listings fail.
+`bash .github/scripts/test-categories.sh` builds Cargo's native all-target,
+all-feature harnesses with `--no-run --message-format=json`, then obtains each
+harness's terse list, including ignored tests. A registration is the harness and
+name together: identical names in a library and binary each count and receive an
+owner. A repeated name within one harness is refused. The check validates exactly
+one named selection per registration, then lists every harness with all category
+filters skipped. Any remaining registration fails with its harness and the table
+location. An empty example harness is permitted; an empty aggregate or failed
+listing fails.
 On a build box it uses `upstroke-build`; on CI it uses Cargo directly. Windows uses
 the same Python implementation. Listing occurs before every Linux and Windows suite;
 on macOS the pinned condition runs it before the unit suite. C3's existing equality
@@ -1143,9 +1152,11 @@ new shell gate. This adds listing/build overhead to that existing job, not a tes
 leg. No hosted overhead measurement is claimed.
 
 The standalone `check` builds and lists the native all-target, all-feature
-inventory across all harnesses and requires nonzero CLI membership. It starts
-Cargo, so it never runs from a test. Its `--explain` option prints the count
-for every subcategory and each name also matched by a later row. Separately,
+inventory across all harnesses and requires nonzero CLI membership. Its Cargo
+build never runs from a test; a fixture supplies artifact records to exercise the
+standalone entry point with already built inert harnesses. Its `--explain` option
+prints the count for every subcategory and each registration also matched by a
+later row, identifying its harness. Separately,
 the native-libtest test uses `prove --harness` on the current library executable
 to list each generated selector and compare the sets to first-match ownership,
 without starting Cargo. A compiled

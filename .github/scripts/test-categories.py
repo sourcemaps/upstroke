@@ -6,7 +6,7 @@ inputs to this program. No check ever executes an unmatched test.
 """
 import argparse
 import ast
-from collections import Counter
+from collections import Counter, namedtuple
 import json
 import os
 from pathlib import Path
@@ -19,10 +19,11 @@ ROOT = Path(__file__).resolve().parents[2]
 MODEL = ROOT / "src/effects/tests/ci_model.rs"
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
 PLATFORMS = ("ubuntu", "macos", "windows")
+Registration = namedtuple("Registration", "harness name")
 
 
 def registry():
-    source = MODEL.read_text()
+    source = MODEL.read_text(encoding="utf-8")
     body = source.split("const TEST_CATEGORIES: &[TestCategory] = ", 1)[1].split("\n];", 1)[0] + "\n]"
     # This deliberately accepts only the table's literal Rust records and arrays.
     body = body.replace("TestCategory {", "{").replace("&[", "[")
@@ -130,58 +131,60 @@ def runs(selection, name):
     return (not filters or any(f in name for f in filters)) and not any(f in name for f in skips)
 
 
-def validate(rows, platform, names, require_cli=False):
-    if not names:
+def validate(rows, platform, registrations, require_cli=False):
+    if not registrations:
         raise ValueError("libtest listed no tests; refusing an empty inventory")
     selections = legs(rows, platform)
     errors = []
     counts = Counter()
-    for name in names:
+    for harness, name in registrations:
         try:
             expected = owner(rows, platform, name)
         except ValueError as error:
-            errors.append(str(error))
+            errors.append(f"{error} (harness {harness})")
             continue
         actual = [leg_key(leg) for leg in selections if runs(leg["tests"], name)]
         if actual != [expected]:
-            errors.append(f"category selection: {name} — expected {expected}, selected {actual}; "
+            errors.append(f"category selection: {name} (harness {harness}) — "
+                          f"expected {expected}, selected {actual}; "
                           "update TEST_CATEGORIES (libtest filters are substrings)")
         counts[expected] += 1
     if errors:
         raise ValueError("\n".join(errors))
     if require_cli and not any(
         row["category"] == "unit" and row["subcategory"] == "cli"
-        for row in (category_row(rows, name) for name in names)
+        for row in (category_row(rows, item.name) for item in registrations)
     ):
         raise ValueError("libtest listed no unit/cli registrations; refusing an incomplete all-target inventory")
     return counts
 
 
-def listed(output):
+def listed(output, harness):
     names = [line[:-6] for line in output.splitlines() if line.endswith(": test")]
     if len(set(names)) != len(names):
-        raise ValueError("libtest listed duplicate test names")
-    return names
+        raise ValueError(f"libtest listed duplicate test names in harness {harness}")
+    return [Registration(harness, name) for name in names]
 
 
-def explain(rows, names):
+def explain(rows, registrations):
     counts = Counter()
     collisions = []
-    for name in names:
+    for registration in registrations:
         matches = [(row["category"], row["subcategory"]) for row in rows
-                   if any(f in name for f in row["filters"])]
+                   if any(f in registration.name for f in row["filters"])]
         counts[matches[0]] += 1
         if len(matches) > 1:
-            collisions.append((name, matches))
+            collisions.append((registration, matches))
     for row in rows:
         pair = row["category"], row["subcategory"]
         print(f"subcategory {pair[0]}/{pair[1]}: {counts[pair]}")
-    for name, matches in collisions:
-        print(f"first-match overlap: {name}: {matches[0]} owns it; later matches {matches[1:]}")
+    for (harness, name), matches in collisions:
+        print(f"first-match overlap: {name} (harness {harness}): "
+              f"{matches[0]} owns it; later matches {matches[1:]}")
 
 
 def checked(command):
-    process = subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE)
+    process = subprocess.run(command, cwd=ROOT, encoding="utf-8", stdout=subprocess.PIPE)
     if process.returncode:
         raise ValueError(f"command failed ({process.returncode}): {command}")
     return process.stdout
@@ -197,24 +200,50 @@ def native_platform():
     return {"linux": "ubuntu", "darwin": "macos", "win32": "windows"}[sys.platform]
 
 
+def built_harnesses():
+    output = checked(cargo() + ["test", "--all-targets", "--all-features", "--no-run",
+                                "--message-format=json"])
+    harnesses = []
+    for line in output.splitlines():
+        artifact = json.loads(line)
+        if (artifact.get("reason") == "compiler-artifact"
+                and artifact.get("profile", {}).get("test")
+                and artifact.get("executable")):
+            harness = artifact["executable"]
+            if harness in harnesses:
+                raise ValueError(f"Cargo listed duplicate test harness: {harness}")
+            harnesses.append(harness)
+    if not harnesses:
+        raise ValueError("Cargo listed no test harnesses; refusing an empty inventory")
+    return harnesses
+
+
+def inventory(harnesses, selection=()):
+    return [registration for harness in harnesses
+            for registration in listed(
+                checked([harness, "--list", "--format", "terse", *selection]), harness)]
+
+
 def prove(rows, platform, harness, require_cli=False):
-    names = listed(checked([harness, "--list", "--format", "terse"]))
-    validate(rows, platform, names, require_cli=require_cli)
+    registrations = inventory([harness])
+    validate(rows, platform, registrations, require_cli=require_cli)
     observed = Counter()
     for leg in legs(rows, platform):
-        actual = listed(checked([harness, "--list", "--format", "terse", *leg["tests"].split()]))
-        expected = {name for name in names if owner(rows, platform, name) == leg_key(leg)}
+        actual = inventory([harness], leg["tests"].split())
+        expected = {item for item in registrations
+                    if owner(rows, platform, item.name) == leg_key(leg)}
         if set(actual) != expected:
             raise ValueError(f"{leg['name']}: real libtest differs; missing {sorted(expected-set(actual))}, "
                              f"extra {sorted(set(actual)-expected)}")
         observed.update(actual)
-    if observed != Counter(names):
+    if observed != Counter(registrations):
         raise ValueError("real libtest did not list each registration exactly once")
     skips = [word for row in rows for f in row["filters"] for word in ("--skip", f)]
-    unmatched = listed(checked([harness, "--list", "--format", "terse", *skips]))
+    unmatched = inventory([harness], skips)
     if unmatched:
         raise ValueError(f"uncategorised: {unmatched}")
-    print(f"{platform}: real libtest, {len(names)} registrations, exactly one leg each (ignored included)")
+    print(f"{platform}: real libtest, {len(registrations)} registrations, "
+          "exactly one leg each (ignored included)")
 
 
 def matrix(rows, platform):
@@ -231,14 +260,27 @@ def matrix(rows, platform):
 
 def generated(rows, source):
     for platform in PLATFORMS:
-        start = f"        # BEGIN TEST_CATEGORIES {platform}\n"
-        end = f"        # END TEST_CATEGORIES {platform}\n"
-        if source.count(start) != 1 or source.count(end) != 1:
+        starts = list(re.finditer(rf"(?m)^        # BEGIN TEST_CATEGORIES {platform}(\r?\n)", source))
+        ends = list(re.finditer(rf"(?m)^        # END TEST_CATEGORIES {platform}(?:\r?\n|$)", source))
+        if len(starts) != 1 or len(ends) != 1:
             raise ValueError(f"missing or duplicated matrix markers for {platform}")
-        before, rest = source.split(start)
-        _, after = rest.split(end)
-        source = before + start + "        include:\n" + matrix(rows, platform) + end + after
+        start, end = starts[0], ends[0]
+        if start.end() > end.start():
+            raise ValueError(f"reversed matrix markers for {platform}")
+        block = ("        include:\n" + matrix(rows, platform)).replace("\n", start.group(1))
+        source = source[:start.end()] + block + source[end.start():]
     return source
+
+
+def sync_workflow(rows, check=False):
+    # Decode explicitly without universal-newline translation: only marked
+    # interiors may change, and each block inherits its opening marker's EOL.
+    before = WORKFLOW.read_bytes()
+    after = generated(rows, before.decode("utf-8")).encode("utf-8")
+    if before != after:
+        if check:
+            raise ValueError("stale category matrix; run python3 .github/scripts/test-categories.py generate")
+        WORKFLOW.write_bytes(after)
 
 
 def main():
@@ -258,32 +300,27 @@ def main():
     if args.action == "contract":
         print(json.dumps(dict(registry=rows, legs={p: legs(rows, p) for p in PLATFORMS})))
     elif args.action == "generate":
-        before = WORKFLOW.read_text()
-        after = generated(rows, before)
-        if args.check:
-            if before != after:
-                raise ValueError("stale category matrix; run python3 .github/scripts/test-categories.py generate")
-        else:
-            WORKFLOW.write_text(after)
+        sync_workflow(rows, check=args.check)
     elif args.action == "prove":
         if not args.harness:
             parser.error("prove requires --harness")
         prove(rows, args.platform, args.harness, require_cli=args.require_cli)
     else:
-        names = listed(checked(cargo() + ["test", "--all-targets", "--all-features",
-                                         "--", "--list", "--format", "terse"]))
-        counts = validate(rows, args.platform, names, require_cli=True)
+        sync_workflow(rows, check=True)
+        harnesses = built_harnesses()
+        registrations = inventory(harnesses)
+        counts = validate(rows, args.platform, registrations, require_cli=True)
         skips = [word for row in rows for f in row["filters"] for word in ("--skip", f)]
-        unmatched = listed(checked(cargo() + ["test", "--all-targets", "--all-features",
-                                              "--", "--list", "--format", "terse", *skips]))
+        unmatched = inventory(harnesses, skips)
         if unmatched:
-            raise ValueError("\n".join(f"uncategorised: {name} — update TEST_CATEGORIES in {MODEL}"
-                                       for name in unmatched))
-        print(f"{args.platform}: {len(names)} registrations including ignored; uncategorised: 0")
+            raise ValueError("\n".join(f"uncategorised: {name} (harness {harness}) — "
+                                       f"update TEST_CATEGORIES in {MODEL}"
+                                       for harness, name in unmatched))
+        print(f"{args.platform}: {len(registrations)} registrations including ignored; uncategorised: 0")
         for (category, number), count in sorted(counts.items()):
             print(f"  {category}/{number}: {count}")
         if args.explain:
-            explain(rows, names)
+            explain(rows, registrations)
 
 
 if __name__ == "__main__":

@@ -1402,8 +1402,11 @@ constant, and require its position before the suite step. Otherwise return
 and macOS the entire pinned conditional script, whose unit-leg prefix must
 match a generated label. Step field and script pins still govern the check.
 
-The check lists the native inventory, including ignored registrations, without
-executing test bodies. The ledger removes Linux and Windows checks and changes
+The check first refuses matrices that differ from the registry using the generator's
+comparison, including when invoked independently by lint. It then lists the native
+inventory, including ignored registrations, without executing test bodies. Harness
+identity accompanies each name so shared library/binary names count separately.
+The ledger removes Linux and Windows checks and changes
 the macOS condition to name no leg. First-match ownership and generation live
 in `ci_model::TEST_CATEGORIES` and `ci_model::category_legs`; there is no
 `shard_selections` catch-all builder.
