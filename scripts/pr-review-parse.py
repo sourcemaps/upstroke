@@ -237,6 +237,10 @@ WITNESS_KEYS = ("witness", "reproduction", "repro", "failing_test", "mutation", 
 # or any string field naming MUST as a word.
 MUST_KEY = re.compile(r"(mandatory|deviation|must_)", re.I)
 MUST_WORD = re.compile(r"\bMUST\b", re.ASCII)
+# A finding located in the pull request's body: the review driver hands the reviewer the body as
+# `pr.md`, and every body finding recorded so far is spelled `pr.md:<line>`. The whole value or
+# nothing -- no column, no range, no other file -- so a code finding cannot pass for one.
+BODY_LOCATION = re.compile(r"pr\.md:[1-9][0-9]*\Z")
 
 # THE FORM IS THE COMMENT'S OWN MARKER, not whichever parser gets an answer out of it. The prose
 # form writes this marker, every prose review in the repository carries it, and no workflow-form
@@ -522,6 +526,10 @@ def finding(one):
     the one place where "I could not" is a result rather than a failure: the exit status says
     THERE IS NO COMPLETE RESULT, and a review carrying one unreadable finding among five has a
     complete result that names which one. The audit blocks on every `ERR` row it reads.
+
+    `flags` is a bit field: 1, a witness field is present; 2, a MUST deviation; 4, the finding is
+    located in the pull request's body -- its `location` is a string that is exactly `pr.md:<line>`.
+    Any other location, a missing one or one that is not a string leaves bit 4 clear.
     """
     if not isinstance(one, dict):
         return {"severity": "ERR", "id": "unparsed", "flags": 0}
@@ -541,10 +549,13 @@ def finding(one):
             must = True
         if isinstance(value, str) and MUST_WORD.search(value):
             must = True
+    location = one.get("location")
+    in_body = isinstance(location, str) and BODY_LOCATION.match(location) is not None
     return {
         "severity": severity,
         "id": identifier,
-        "flags": int(witness) + 2 * int(must),
+        # 1 = witness, 2 = MUST, 4 = located in the body (`pr.md:<line>`, whole)
+        "flags": int(witness) + 2 * int(must) + 4 * int(in_body),
     }
 
 

@@ -416,6 +416,14 @@
 #                                `set -e` can see it, and `read` or `mapfile` leaves what it was
 #                                to fill holding whatever it held before. The guard is the class:
 #                                the script carries no here-string and no here-document at all
+#   MUT-BODY-LOCATION-FLAG       bit 4 of a finding's flags, "located in the pull request's body",
+#                                was set by a `location` other than exactly `pr.md:<line>`, or
+#                                moved the witness and MUST bits beside it
+#   MUT-BODY-FIXED-UNREAD        a `fixed` row on a finding the review located in the body, with
+#                                no push outside the ledger, read READY or was enqueued, though no
+#                                commit shows the repair; it is `body-fixed:<id>`, NEEDS-ATTEST,
+#                                and a witness, a MUST, a code location or another row keeps its
+#                                answer of before
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
 # NOTHING HERE WRITES INTO THE TREE IT JUDGES. This gate runs `scripts/pr-review-parse.py`
@@ -6699,13 +6707,14 @@ def main(argv):
 PYSHAPE
 probe_expect elsewhere \
   'decoded=no unrefusing=- unproven=- skipped=- | refusing=- drive=returned:0 swept=- forced=0'
-# AND THEN THE PARSER THE AUDIT ACTUALLY RUNS, DRIVEN OVER ITS OWN WORK. Eight real parses: the
+# AND THEN THE PARSER THE AUDIT ACTUALLY RUNS, DRIVEN OVER ITS OWN WORK. Nine real parses: the
 # workflow form in both renderings, the repeated name it must refuse, the same at three objects
-# down, the older bare object, the frontier form, the frontier form quoting a fenced example, and
-# the ledger subcommand. They are drives rather than assertions -- what the first seven return is
-# asserted by the families above, on these same shapes -- and their job here is that the parser's
-# own code runs, and every scan it makes is answered for. What they leave, the probe takes: a
-# handler the eight never enter is entered, and a branch they take one way only is turned --
+# down, the older bare object, the frontier form, the frontier form quoting a fenced example, a
+# workflow review whose findings carry a location, and the ledger subcommand. They are drives
+# rather than assertions -- what the first eight return is asserted by the families above, on these
+# same shapes -- and their job here is that the parser's own code runs, and every scan it makes is
+# answered for. What they leave, the probe takes: a handler the nine never enter is entered, and a
+# branch they take one way only is turned --
 # measured when this was written, all 118 conditional branches in the 41 code objects of
 # `scripts/pr-review-parse.py` went both ways, over 109 altered runs -- and the verdict line below
 # asserts that every instruction in the file ran. A loop no document enters is the one thing
@@ -6714,8 +6723,8 @@ probe_expect elsewhere \
 #
 # THE QUOTED DRIVE IS THAT RULE, APPLIED. The parser reads a fence run inside a block's content only
 # inside a loop over that content, and resolves a reference in an info string only inside the
-# callback `rendered_language` hands `re.sub`. None of the other seven documents reaches either,
-# and with only those seven this line read
+# callback `rendered_language` hands `re.sub`. None of the other documents reaches either, and
+# without it this line read
 # `unproven=referable,rendered_language.<locals>.resolved,unresolved_material`. The example's nested
 # fence enters the loop, and without it `unresolved_material` stays unproven. Its info string holds
 # one of each path the callback takes: a backslash escape, a named reference, a name no table holds,
@@ -6732,6 +6741,15 @@ printf '%s\n\n| ID | Disposition |\n| --- | --- |\n| PR1-A | fixed |\n' \
     '\*&amp;&notareal;&#110;&#x6a;&#11;'
   printf '1. **P2 -- a finding.** Detail.\n\nVERDICT: CHANGES_REQUIRED\n'
 } > "$tmp/probe-drive-quoted.md"
+# AND THE LOCATED DRIVE IS THE SAME RULE AGAIN. No other document's finding carries a `location`, so
+# `finding` never read one and this line read `unproven=finding`. One finding located in the body and
+# one in code take both ways of the match; what each returns is asserted by MUT-BODY-LOCATION-FLAG.
+printf 'Reviewed head: %s\n\n```json\n{"reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[%s,%s]}\n```\n' \
+  "$revived_head" "$revived_head" "$revived_base" \
+  '{"id":"IN-BODY","severity":"P3","location":"pr.md:12"}' \
+  '{"id":"IN-CODE","severity":"P3","location":"src/x.rs:12"}' > "$tmp/probe-drive-located.md"
+expect MUT-BODY-LOCATION-FLAG "$(review_rows "$tmp/probe-drive-located.md")" \
+  "0|json/$revived_head/CHANGES_REQUIRED/$revived_base/-;P3:IN-BODY:4;P3:IN-CODE:0"
 # Only the verdict line is asserted, and deliberately: which functions refuse and what the drives
 # returned are the parser's own business -- a second decoder that genuinely refuses adds its name
 # to them and must stay green. `decoded=yes` is the limb that makes the rest mean something: a
@@ -6740,7 +6758,7 @@ got="$(decode_probe scripts/pr-review-parse.py \
   "review|$tmp/one-findings.md" "review --nul|$tmp/one-findings.md" \
   "review|$tmp/dup-findings.md" "review|$tmp/dup-deep.md" "review|$tmp/one-bare.md" \
   "review|$tmp/probe-drive-prose.md" "review|$tmp/probe-drive-quoted.md" \
-  "ledger --nul|$tmp/probe-drive-ledger.md")"
+  "review|$tmp/probe-drive-located.md" "ledger --nul|$tmp/probe-drive-ledger.md")"
 [[ "${got%% | *}" == 'decoded=yes unrefusing=- unproven=- skipped=-' ]] \
   || error "MUT-JSON-REPEATED-NAME-CHOSEN: got [$got], want the verdict [decoded=yes unrefusing=- unproven=- skipped=-]"
 # THAT THE SWEEP IS EMPTY IS NOT ASSERTED, and the reason is round 2's finding: an empty sweep
@@ -8177,6 +8195,20 @@ expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of ledger-only)" R
 expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of "" "open-P1:a-manual:thing")" NOT-READY
 expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of "" "verdict:x
 manual:y")" NOT-READY
+# MUT-BODY-FIXED-UNREAD. `body-fixed:<id>` is a repair no commit shows, so it is read like a repair
+# push: neither hard nor manual, NEEDS-ATTEST over a manual blocker and under a hard one, on any
+# head, and never READY. The prefix is tested on the whole element, as the manual one is.
+expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of "" body-fixed:X)" NEEDS-ATTEST
+expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of ledger-only body-fixed:X manual:y)" NEEDS-ATTEST
+expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of merges-only manual:y body-fixed:X)" NEEDS-ATTEST
+expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of "" body-fixed:X draft)" NOT-READY
+expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of repairs body-fixed:X)" NEEDS-ATTEST
+expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of "" "open-P1:a-body-fixed:thing")" NOT-READY
+expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of "" "verdict:x
+body-fixed:y")" NOT-READY
+# and without it, the same heads and the same manual blocker are what they were.
+expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of ledger-only manual:y)" MANUAL
+expect MUT-BODY-FIXED-UNREAD "$(PATH="$empty_path" state_of merges-only)" READY
 
 # --- the newest check run per name -------------------------------------------------------------
 got="$(printf 'upstroke-ci\t100\tsuccess\nupstroke-ci\t250\tfailure\nupstroke-pr-policy\t120\tsuccess\nupstroke-ci\t90\tsuccess\n' | newest_per_name | tr ' ' '\n' | grep . | sort | tr '\n' ' ')"
@@ -9467,6 +9499,155 @@ lp_case "status read [spaces]" ledger-push-new-p3 ledger-push-deferred "$lp_head
   repairs NEEDS-ATTEST 0 spaces
 [[ "$lp_got" == *blockers=* ]] \
   && error "MUT-LEDGER-PUSH-REWRITES-FINDING: [status read spaces] blocked: [$lp_got]"
+
+# --- a finding located in the body -------------------------------------------------------------------
+# MUT-BODY-LOCATION-FLAG. The review driver hands the reviewer the body as `pr.md`, so a finding whose
+# `location` is exactly `pr.md:<line>` is located in the body, and the parser says so in bit 4 of its
+# flags. A column, a range, line 0, another file, a padded or longer string, a number, a null or no
+# key at all is not that, and shows the flags it showed before; the witness and MUST bits beside
+# bit 4 read as they did.
+for bf_flag_row in \
+  '{"id":"F","severity":"P3","location":"pr.md:12"}|4' \
+  '{"id":"F","severity":"P3","location":"pr.md:12","witness":"a failing test"}|5' \
+  '{"id":"F","severity":"P3","location":"pr.md:12","correction":"a MUST deviation"}|6' \
+  '{"id":"F","severity":"P3","location":"pr.md:12:3"}|0' \
+  '{"id":"F","severity":"P3","location":"pr.md:0"}|0' \
+  '{"id":"F","severity":"P3","location":"pr.md:012"}|0' \
+  '{"id":"F","severity":"P3","location":"src/x.rs:12"}|0' \
+  '{"id":"F","severity":"P3","location":"src/x.rs:12","witness":"a failing test"}|1' \
+  '{"id":"F","severity":"P3","location":" pr.md:12"}|0' \
+  '{"id":"F","severity":"P3","location":"pr.md:12\n"}|0' \
+  '{"id":"F","severity":"P3","location":"docs/pr.md:12"}|0' \
+  '{"id":"F","severity":"P3","location":"pr.md:12-14"}|0' \
+  '{"id":"F","severity":"P3","location":12}|0' \
+  '{"id":"F","severity":"P3","location":null}|0' \
+  '{"id":"F","severity":"P3"}|0' \
+  '{"id":"F","severity":"P3","witness":"a failing test"}|1'; do
+  accept_review "$tmp/bf-flag.md" "${bf_flag_row%|*}"
+  got="$(review_rows "$tmp/bf-flag.md")"
+  expect "MUT-BODY-LOCATION-FLAG [${bf_flag_row%|*}]" "${got%%|*}|${got##*;}" "0|P3:F:${bf_flag_row##*|}"
+done
+
+# MUT-BODY-FIXED-UNREAD (AUDIT-FIXED-ROW-NEEDS-A-PUSH-OUTSIDE-THE-LEDGER, its body shape). A `fixed`
+# row on a finding the review located in the body, with nothing pushed outside the ledger, read
+# `fixed-but-head-unmoved` -- or `witnessed`, given a witness -- and only a new frontier verdict
+# cleared it, though the repair was real. It is `body-fixed:<id>` now: NEEDS-ATTEST, never READY,
+# because no commit shows the repair and a person must read it. Run through the ledger-push harness
+# with --enqueue, so "never READY" is a count of `pr merge` calls as well. Each review is of the
+# reviewed head above and raises NEW-P3 (or NEW-P1): `$ledger_push_reviewed` is that head unmoved,
+# `$lp_head_add` is it moved by a push filing NEW-P3 (`ledger-only`), and `$lp_head_outside` is it
+# moved by a repair (`repairs`).
+bf_review() {  # bf_review NAME FINDING-JSON...: a review of the reviewed head, as $tmp/bf-NAME.md
+  local name="$1"
+  shift
+  accept_review "$tmp/bf-$name.md" "$(IFS=,; printf '%s' "$*")" "$ledger_push_reviewed"
+}
+bf_body_p3='"id":"NEW-P3","severity":"P3","location":"pr.md:12"'
+bf_code_p3='"id":"NEW-P3","severity":"P3","location":"src/x.rs:12"'
+bf_witness='"witness":"git rev-list --count prints 5"'
+bf_review body "{$bf_body_p3}"
+bf_review body-witnessed "{$bf_body_p3,$bf_witness}"
+bf_review body-must "{$bf_body_p3,\"correction\":\"a MUST deviation of standards section 7\"}"
+bf_review body-repeated "{$bf_body_p3}" "{$bf_body_p3}"
+bf_review body-witnessed-repeated "{$bf_body_p3,$bf_witness}" "{$bf_body_p3,$bf_witness}"
+bf_review body-witnessed-no-id "{\"severity\":\"P3\",\"location\":\"pr.md:12\",$bf_witness}"
+bf_review code "{$bf_code_p3}"
+bf_review code-witnessed "{$bf_code_p3,$bf_witness}"
+bf_review p1-witnessed "{\"id\":\"NEW-P1\",\"severity\":\"P1\",\"location\":\"pr.md:12\",$bf_witness}"
+accept_ledger "$tmp/bf-fixed.md" NEW-P3 P3 fixed
+accept_ledger "$tmp/bf-p1-fixed.md" NEW-P1 P1 fixed
+for bf_body in bf-fixed bf-p1-fixed; do
+  expect "MUT-BODY-FIXED-UNREAD [$bf_body] policy" "$(body_policy "$tmp/$bf_body.md")" pass
+done
+# The reviews are what they say, by the parser's own flags.
+expect "MUT-BODY-FIXED-UNREAD body review" "$(review_rows "$tmp/bf-body.md")" \
+  "0|json/$ledger_push_reviewed/CHANGES_REQUIRED/$enqueue_base/-;P3:NEW-P3:4"
+expect "MUT-BODY-FIXED-UNREAD witnessed body review" "$(review_rows "$tmp/bf-body-witnessed.md")" \
+  "0|json/$ledger_push_reviewed/CHANGES_REQUIRED/$enqueue_base/-;P3:NEW-P3:5"
+expect "MUT-BODY-FIXED-UNREAD code review" "$(review_rows "$tmp/bf-code.md")" \
+  "0|json/$ledger_push_reviewed/CHANGES_REQUIRED/$enqueue_base/-;P3:NEW-P3:0"
+# bf_case NAME REVIEW BODY HEAD STATE MERGES [WANT...]: one audit, its state, its `pr merge` calls,
+# each WANT in its line, and no unmodelled call
+bf_case() {
+  local name="$1" got want
+  got="$(ledger_push_run "$tmp/$2.md" "$tmp/$3.md" "$4")"
+  contains "MUT-BODY-FIXED-UNREAD $name" "$got" " $5 "
+  expect "MUT-BODY-FIXED-UNREAD $name status" "${got%%|*}" 0
+  expect "MUT-BODY-FIXED-UNREAD $name merge calls" "${got##*|}" "$6"
+  [[ "$5" != READY && "$got" == *" READY "* ]] \
+    && error "MUT-BODY-FIXED-UNREAD: [$name] read READY: [$got]"
+  [[ "$got" == *GH-UNSTUBBED* ]] \
+    && error "MUT-BODY-FIXED-UNREAD: [$name] made a call this case does not model: [$got]"
+  shift 6
+  for want in "$@"; do contains "MUT-BODY-FIXED-UNREAD $name" "$got" "$want"; done
+  bf_got="$got"
+}
+# The neighbours that must not move: a body P3 deferred and filed is READY and enqueued once, so the
+# location changes nothing but a `fixed` row's reading; and a code P3's `fixed` row with nothing
+# pushed outside the ledger is `fixed-but-head-unmoved`, NOT-READY, as before.
+bf_case "body, deferred, ledger-only" bf-body ledger-push-deferred "$lp_head_add" READY 1 \
+  "moved=ledger-only "
+[[ "$bf_got" == *blockers=* ]] \
+  && error "MUT-BODY-FIXED-UNREAD: [body, deferred, ledger-only] blocked: [$bf_got]"
+bf_case "code, fixed, unmoved" bf-code bf-fixed "$ledger_push_reviewed" NOT-READY 0 \
+  "blockers=fixed-but-head-unmoved:NEW-P3 "
+bf_case "code, fixed, ledger-only" bf-code bf-fixed "$lp_head_add" NOT-READY 0 \
+  "moved=ledger-only " "blockers=fixed-but-head-unmoved:NEW-P3 "
+# The body P3's `fixed` row, on the head unmoved and on the head a ledger push moved, with and without
+# a witness: `body-fixed` and nothing else, NEEDS-ATTEST, never enqueued, and no `witnessed`.
+bf_case "body, fixed, unmoved" bf-body bf-fixed "$ledger_push_reviewed" NEEDS-ATTEST 0 \
+  "blockers=body-fixed:NEW-P3 "
+[[ "$bf_got" == *moved=* ]] && error "MUT-BODY-FIXED-UNREAD: [body, fixed, unmoved] moved: [$bf_got]"
+bf_case "body, witnessed, fixed, unmoved" bf-body-witnessed bf-fixed "$ledger_push_reviewed" \
+  NEEDS-ATTEST 0 "blockers=body-fixed:NEW-P3 "
+bf_case "body, fixed, ledger-only" bf-body bf-fixed "$lp_head_add" NEEDS-ATTEST 0 \
+  "moved=ledger-only " "blockers=body-fixed:NEW-P3 "
+bf_case "body, witnessed, fixed, ledger-only" bf-body-witnessed bf-fixed "$lp_head_add" \
+  NEEDS-ATTEST 0 "moved=ledger-only " "blockers=body-fixed:NEW-P3 "
+# A repair push is read already, so there the location adds nothing, witnessed or not.
+bf_case "body, fixed, repairs" bf-body bf-fixed "$lp_head_outside" NEEDS-ATTEST 0 "moved=repairs "
+[[ "$bf_got" == *blockers=* ]] && error "MUT-BODY-FIXED-UNREAD: [body, fixed, repairs] blocked: [$bf_got]"
+bf_case "body, witnessed, fixed, repairs" bf-body-witnessed bf-fixed "$lp_head_outside" \
+  NEEDS-ATTEST 0 "moved=repairs "
+[[ "$bf_got" == *blockers=* ]] \
+  && error "MUT-BODY-FIXED-UNREAD: [body, witnessed, fixed, repairs] blocked: [$bf_got]"
+# A witnessed code finding whose row is `fixed` is let past the witness rule by a repair push, and by
+# nothing less: on the head unmoved, or moved by the ledger alone, it is `witnessed` as before.
+bf_case "code, witnessed, fixed, repairs" bf-code-witnessed bf-fixed "$lp_head_outside" \
+  NEEDS-ATTEST 0 "moved=repairs "
+[[ "$bf_got" == *blockers=* ]] \
+  && error "MUT-BODY-FIXED-UNREAD: [code, witnessed, fixed, repairs] blocked: [$bf_got]"
+bf_case "code, witnessed, fixed, unmoved" bf-code-witnessed bf-fixed "$ledger_push_reviewed" \
+  NOT-READY 0 "blockers=witnessed:NEW-P3 "
+bf_case "code, witnessed, fixed, ledger-only" bf-code-witnessed bf-fixed "$lp_head_add" \
+  NOT-READY 0 "blockers=witnessed:NEW-P3 "
+# Only a `fixed` row lets a witnessed body finding past: `deferred`, `accepted-risk` and no row at
+# all are `witnessed`, as before, on either head.
+for bf_body in ledger-push-deferred ledger-push-accepted no-findings-body; do
+  bf_case "body, witnessed, $bf_body, unmoved" bf-body-witnessed "$bf_body" "$ledger_push_reviewed" \
+    NOT-READY 0 "blockers=witnessed:NEW-P3 "
+  bf_case "body, witnessed, $bf_body, ledger-only" bf-body-witnessed "$bf_body" "$lp_head_add" \
+    NOT-READY 0 "blockers=witnessed:NEW-P3 "
+done
+# A finding with no id, and an id the review repeats, have no row, so they keep today's answers.
+bf_case "body, witnessed, no id" bf-body-witnessed-no-id bf-fixed "$ledger_push_reviewed" \
+  NOT-READY 0 "blockers=witnessed:unnamed "
+bf_case "body, repeated, fixed" bf-body-repeated bf-fixed "$ledger_push_reviewed" NOT-READY 0 \
+  "blockers=duplicate-review-id:NEW-P3 "
+bf_case "body, witnessed, repeated, fixed" bf-body-witnessed-repeated bf-fixed \
+  "$ledger_push_reviewed" NOT-READY 0 \
+  "blockers=duplicate-review-id:NEW-P3,witnessed:NEW-P3,witnessed:NEW-P3 "
+# A MUST deviation is blocked whatever its row and its location, on any head.
+bf_case "body, MUST, fixed, unmoved" bf-body-must bf-fixed "$ledger_push_reviewed" NOT-READY 0 \
+  "blockers=must-deviation:NEW-P3 "
+bf_case "body, MUST, fixed, repairs" bf-body-must bf-fixed "$lp_head_outside" NOT-READY 0 \
+  "moved=repairs " "blockers=must-deviation:NEW-P3 "
+# And a witnessed P1 let past the witness rule meets the must-fix set, which asks a serious P1 for a
+# fresh pass: `open-P1`, as an unwitnessed P1 is, and no `witnessed`.
+bf_case "P1, witnessed, fixed, repairs" bf-p1-witnessed bf-p1-fixed "$lp_head_outside" NOT-READY 0 \
+  "moved=repairs " "blockers=open-P1:NEW-P1 "
+bf_case "P1, witnessed, fixed, unmoved" bf-p1-witnessed bf-p1-fixed "$ledger_push_reviewed" \
+  NOT-READY 0 "blockers=open-P1:NEW-P1 "
 
 # --- every body `ledger_policy_body` built, through main ---------------------------------------------
 # THE BLOCKER APPEARS EXACTLY WHEN `body_policy` SAYS `fail`, over every body this file built with
