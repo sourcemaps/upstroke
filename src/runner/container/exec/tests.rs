@@ -4739,6 +4739,8 @@ const CREDENTIAL_ENV_IMAGE: &str = "upstroke-test/credenv:v1";
 
 const CREDENTIAL_ENV_CONTROL: (&str, &str) = ("GH_CONFIG_DIR", "/image/gh");
 
+const ROOM_FOR_A_SLOW_CONTAINER_START: Duration = Duration::from_secs(30);
+
 fn skipped(reason: &str) {
     assert_eq!(
         reason,
@@ -4855,6 +4857,7 @@ const GATED_RUNS: &[(&str, &str)] = &[
     ("mountro", "01KZP12GATED00000000000004"),
     ("mountrw", "01KZP12GATED00000000000005"),
     ("mountresume", "01KZP12GATED00000000000006"),
+    ("slowstart", "01KZCFGATED000000000000001"),
 ];
 
 fn gated_run(tag: &str) -> &'static str {
@@ -5446,7 +5449,7 @@ fn real_docker_a_containerized_program_reads_its_exact_stdin_then_eof() {
             .stdin(prompt("never-read", 1024 * 1024)),
         workspace,
         claude,
-        Duration::from_secs(30),
+        ROOM_FOR_A_SLOW_CONTAINER_START,
         worker_id(2),
     );
     let started = Instant::now();
@@ -6336,7 +6339,7 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
         Duration::from_secs(120),
         gate_id(0),
     );
-    request.timeout = Duration::from_secs(30);
+    request.timeout = ROOM_FOR_A_SLOW_CONTAINER_START;
 
     let returned = AtomicBool::new(false);
     let seen = std::thread::scope(|scope| {
@@ -6375,6 +6378,125 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
         leader.is_empty(),
         "the invocation's leader survived its container: {leader:?}"
     );
+}
+
+#[cfg(unix)]
+const SLOW_START_SCRATCH: &str = "UPSTROKE_TEST_SLOW_START_SCRATCH";
+
+#[cfg(unix)]
+const SLOW_START_REAL_DOCKER: &str = "UPSTROKE_TEST_SLOW_START_REAL_DOCKER";
+
+#[cfg(unix)]
+#[test]
+fn real_docker_a_container_slow_to_start_still_reaches_its_timeout() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let docker = match docker_gate(
+        "real_docker_a_container_slow_to_start_still_reaches_its_timeout",
+        ContainerTrace::off(),
+    ) {
+        Ok(docker) => docker,
+        Err(reason) => return skipped(&reason),
+    };
+    if let Err(reason) = discover(docker.as_ref(), PREFERRED_IMAGES) {
+        return no_image(&reason);
+    }
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let real = std::env::split_paths(&inherited)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(crate::runner::container::DOCKER_PROGRAM))
+        .find(|candidate| {
+            std::fs::metadata(candidate)
+                .is_ok_and(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
+        })
+        .expect("the `docker` the gate ran is on this process's PATH");
+
+    let tree = repo::scratch("real-slow-start");
+    let bin = tree.path().join("bin");
+    std::fs::create_dir(&bin).expect("the stand-in's directory");
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .expect("a PATH with the stand-in's directory first");
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "runner::container::exec::tests::slow_docker_start_child",
+        &[
+            ("PATH", path.as_os_str()),
+            (SLOW_START_SCRATCH, tree.path().as_os_str()),
+            (SLOW_START_REAL_DOCKER, real.as_os_str()),
+        ],
+        Duration::from_secs(120),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "with `docker start` held five seconds, the helper's never-read invocation did not end \
+         in a timed-out output under {ROOM_FOR_A_SLOW_CONTAINER_START:?}: {ended}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "isolated helper of the slow container start witness"]
+fn slow_docker_start_child() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let scratch = PathBuf::from(
+        std::env::var_os(SLOW_START_SCRATCH).expect("the parent names its scratch directory"),
+    );
+    let real = std::env::var(SLOW_START_REAL_DOCKER).expect("the parent names the real `docker`");
+    let stand_in = scratch
+        .join("bin")
+        .join(crate::runner::container::DOCKER_PROGRAM);
+    std::fs::write(
+        &stand_in,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = start ]; then sleep 5; fi\nexec '{}' \"$@\"\n",
+            real.replace('\'', r"'\''")
+        ),
+    )
+    .expect("the stand-in `docker`");
+    std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755))
+        .expect("the stand-in is executable");
+    assert_eq!(
+        crate::util::find_program(crate::runner::container::DOCKER_PROGRAM),
+        Some(stand_in.clone()),
+        "the stand-in is not the `docker` this process runs, so nothing below is slowed"
+    );
+
+    let docker = crate::runner::container::DockerCli::new(ContainerTrace::off());
+    let (_, image_id) = discover(&docker, PREFERRED_IMAGES).expect("the parent found an image");
+    let root = scratch.as_path();
+    let repo_dir = root.join("repo");
+    repo::repository(&repo_dir);
+    let identity = real_identity(root, &repo_dir, gated_run("slowstart"));
+    let workspace = root.join("ws-slow-start");
+    std::fs::create_dir_all(&workspace).expect("a workspace");
+    let _residue = LeaveNoResidue {
+        docker: docker.clone(),
+        private_root: identity.private_root.clone(),
+    };
+    let runner = ContainerRunner::new(
+        real_policy(&image_id),
+        identity,
+        &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
+        image_environment_of(&docker, &image_id),
+        Box::new(docker.clone()),
+    )
+    .expect("a container policy")
+    .with_poll(Duration::from_millis(10));
+
+    let never = worker_request(
+        ShellKind::Sh
+            .spec("sleep 600")
+            .stdin(prompt("never-read", 1024 * 1024)),
+        workspace,
+        AgentId::new("claude-code"),
+        ROOM_FOR_A_SLOW_CONTAINER_START,
+        worker_id(0),
+    );
+    let output = runner
+        .run_blocking(&never)
+        .expect("a timeout is an output, not an error");
+    assert!(output.timed_out, "{}{}", output.stdout, output.stderr);
 }
 
 #[cfg(unix)]
@@ -6761,8 +6883,9 @@ fn every_gated_test_of_this_lane_is_counted() {
         "real_docker_a_read_only_configured_mount_is_readable_and_not_writable",
         "real_docker_a_read_write_configured_mount_is_writable_as_the_coordinators_user",
         "real_docker_a_resume_with_changed_mount_config_keeps_the_recorded_mounts",
+        "real_docker_a_container_slow_to_start_still_reaches_its_timeout",
     ];
-    assert_eq!(MINE.len(), 16);
+    assert_eq!(MINE.len(), 17);
     assert_eq!(GATED_RUNS.len(), MINE.len(), "one run id per gated test");
     let ids: BTreeSet<&str> = GATED_RUNS.iter().map(|(_, run)| *run).collect();
     assert_eq!(

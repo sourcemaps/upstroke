@@ -1516,6 +1516,7 @@ pub(crate) const DOCKER_GATED_TESTS: &[&str] = &[
     "real_docker_a_read_only_configured_mount_is_readable_and_not_writable",
     "real_docker_a_read_write_configured_mount_is_writable_as_the_coordinators_user",
     "real_docker_a_resume_with_changed_mount_config_keeps_the_recorded_mounts",
+    "real_docker_a_container_slow_to_start_still_reaches_its_timeout",
 ];
 
 pub(crate) fn absent_reason() -> String {

@@ -1607,6 +1607,19 @@ The image variable that is **not** a credential location, so "the
 withheld keys were overridden" is distinguishable from "the image
 environment was wiped".
 
+## `const ROOM_FOR_A_SLOW_CONTAINER_START: Duration = Duration::from_secs(30);`
+
+The deadline the two real-Docker tests that run an invocation to its timeout give it: the
+never-read invocation of `real_docker_a_containerized_program_reads_its_exact_stdin_then_eof` and
+the gate of `real_docker_a_container_contains_a_daemonised_descendant`. An invocation's deadline
+also covers Docker creating and starting its container, and a start the deadline overtakes is
+refused rather than timed out. The two tests had three seconds, so a slow daemon turned the
+timeout they wait for into the runner's refusal of `start`; thirty seconds is room for a slow
+start and still far below what either program sleeps (`CI-FLAKE-REAL-DOCKER-START-DEADLINE`).
+One value for both, named for what it is for, and
+`real_docker_a_container_slow_to_start_still_reaches_its_timeout` is what fails if it shrinks
+back.
+
 ## `fn skipped(reason: &str) {`
 
 What a Docker-gated test does when there is no runtime.
@@ -1691,6 +1704,12 @@ two collided with `Conflict. The container name … is already in use`.
 ## `("credenv", "01KZR3BGATED00000000000001"),`
 
 Repair R3b, with its own round prefix for the reason above.
+
+## `("slowstart", "01KZCFGATED000000000000001"),`
+
+The run id of `slow_docker_start_child`'s container, for
+`real_docker_a_container_slow_to_start_still_reaches_its_timeout`. `CF` for the CI flake it
+guards, `CI-FLAKE-REAL-DOCKER-START-DEADLINE`, a prefix of its own for the reason above.
 
 ## `struct LeaveNoResidue {`
 
@@ -1812,8 +1831,9 @@ Root's D-C on a real runtime, three containers:
   pending, within a bound.
 
 The timeout also covers Docker creating and starting the container, so it is
-thirty seconds: room for a slow daemon to start it, and still far below the
-program's six-hundred-second `sleep` (`CI-FLAKE-REAL-DOCKER-START-DEADLINE`).
+`ROOM_FOR_A_SLOW_CONTAINER_START`, thirty seconds: room for a slow daemon to
+start it, and still far below the program's six-hundred-second `sleep`
+(`CI-FLAKE-REAL-DOCKER-START-DEADLINE`).
 
 ## `struct MountedReal {`
 
@@ -2150,9 +2170,9 @@ own timeout is what stops the container, which is
 the container".
 
 The timeout also covers Docker creating and starting the container, so it
-is thirty seconds: room for a slow daemon to start it, and still far below
-the two `sleep`s, each more than ten days long
-(`CI-FLAKE-REAL-DOCKER-START-DEADLINE`).
+is `ROOM_FOR_A_SLOW_CONTAINER_START`, thirty seconds: room for a slow
+daemon to start it, and still far below the two `sleep`s, each more than
+ten days long (`CI-FLAKE-REAL-DOCKER-START-DEADLINE`).
 
 ## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `let seen = std::thread::scope(|scope| {`
 
@@ -2179,6 +2199,66 @@ only the leader's process group would leave it here.
 The descendant first: it is the invariant's subject, and a leader
 assertion that fires before it would report the wrong thing about a
 cancellation that left both alive.
+
+## `fn real_docker_a_container_slow_to_start_still_reaches_its_timeout() {`
+
+The regression for `CI-FLAKE-REAL-DOCKER-START-DEADLINE`: a container whose `docker start` is
+held five seconds still reaches the timeout `ROOM_FOR_A_SLOW_CONTAINER_START` gives its
+invocation, which ends in a timed-out output and not in the runner's refusal of `start`. Put
+three seconds back in the constant and this test fails, its helper reporting the refusal where it
+expects the output; at thirty it passes. Measured before the commit: at three seconds the
+helper's `expect` met the runner's refusal of `start`, its container "still created when the
+invocation's deadline passed, so it never started", while the other four
+`real_docker_a_contain` tests passed; restored to thirty, all five passed together in 43 seconds.
+
+It skips exactly as every other real-Docker test does: through `docker_gate`, which is why it is
+registered in `DOCKER_GATED_TESTS`, and through `discover` when the runtime holds none of
+`PREFERRED_IMAGES`. It then finds the real `docker` by walking its own `PATH` (the first absolute
+directory holding an executable of that name), makes a scratch tree with an empty `bin` in it,
+and runs `slow_docker_start_child` under `run_test_isolated`, bounded at two minutes: this test
+binary again, selecting that one ignored test with `--exact`, `--ignored` and `--nocapture`,
+with a `PATH` that is the scratch `bin` and then this process's own, and told the scratch tree
+(`UPSTROKE_TEST_SLOW_START_SCRATCH`) and the real program
+(`UPSTROKE_TEST_SLOW_START_REAL_DOCKER`). `DockerCli` runs `docker` by name, so a stand-in
+first on the child's `PATH` is the program every runtime question in it reaches, and only a
+child can be given a `PATH` of its own. The parent requires the child's success and libtest's
+`1 passed`, a misnamed helper running no test at all, and prints the child's output when either
+is missing.
+
+It costs about thirty-five seconds, most of it the thirty-second timeout itself, inside which the
+five-second hold falls; the rest is the helper's repository and the container's removal.
+
+What it shows holds while the runner starts a container with `start` as `docker`'s first
+argument, as it does today (`docker start --attach --interactive` for an invocation with input):
+a start spelled any other way would pass through the stand-in unheld, and this test would no
+longer fail at three seconds.
+
+## `fn slow_docker_start_child() {`
+
+The isolated helper `real_docker_a_container_slow_to_start_still_reaches_its_timeout` runs.
+Ignored, so libtest never runs it in its own process.
+
+Its first act, before it starts any process, is to write the stand-in `docker` into the `bin` its
+parent put first on its `PATH`, and make it executable: a `/bin/sh` script that sleeps five
+seconds when its first argument is `start` and then, whatever the arguments, replaces itself
+(`exec`) with the real program given the same ones. Every other question reaches the daemon
+unchanged, the held start is the real one once the hold ends, and no shell is left between the
+runner and the attached client it supervises. The helper then asserts that the stand-in is the
+`docker` this process resolves, so a `PATH` that put it anywhere but first fails here rather than
+holding nothing.
+
+The helper writes the stand-in, and not the parent, because the parent shares libtest's process
+with tests that start children: a child forked while the new file is open for writing inherits
+that descriptor until it execs, and a file any process holds open for writing cannot be executed
+(`ETXTBSY`). This process runs the one test, and nothing in it has started a child yet.
+
+Then one invocation shaped like the never-read one of
+`real_docker_a_containerized_program_reads_its_exact_stdin_then_eof`: a worker running
+`sleep 600` with a mebibyte of input it never reads, under `ROOM_FOR_A_SLOW_CONTAINER_START`,
+through a `ContainerRunner` built as that test builds its own (the image `discover` finds,
+`real_policy`, `real_identity` over the scratch tree with the `slowstart` run id,
+`image_environment_of`, a `LeaveNoResidue` guard). The result must be an output, and one that
+timed out: a start the deadline overtakes is an error, which fails the `expect`.
 
 ## `fn every_gated_test_of_this_lane_is_counted() {`
 
@@ -2214,6 +2294,12 @@ PR12's D-C.
 Root's recorded-mounts disposition (2026-11-02): the three mount witnesses
 it requires, registered here, in `GATED_RUNS` (`mountro`, `mountrw`,
 `mountresume`) and in `DOCKER_GATED_TESTS`. Sixteen in all.
+
+## `fn every_gated_test_of_this_lane_is_counted()` › `"real_docker_a_container_slow_to_start_still_reaches_its_timeout",`
+
+The regression for `CI-FLAKE-REAL-DOCKER-START-DEADLINE` (2026-11-11), registered here, in
+`GATED_RUNS` (`slowstart`, for its helper's container) and in `DOCKER_GATED_TESTS`. Seventeen in
+all.
 
 ## `fn removal_in_progress_diagnostic(name: &str) -> String {`
 
