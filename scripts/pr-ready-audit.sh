@@ -1180,7 +1180,34 @@ audit_one() {
   fi
   rm -f "$body_file" "$ledger_file"
 
-  local sev id wit unwitnessed_p3=0
+  local sev id wit unwitnessed_p3=0 repeated=()
+  # ONE ID IS ONE FINDING, IN THE REVIEW AS IN findings/. The parser hands the review's findings
+  # over as given, duplicates included, and everything below judges a finding against the ledger BY
+  # ITS ID -- so two distinct unwitnessed P3s sharing `DUP-P3` were both satisfied by the one
+  # `accepted-risk` (or `deferred`) row and the one file that id can have, and the pull request read
+  # READY with the second finding recorded nowhere (PR382-DUPLICATE-REVIEW-ID-REUSES-FILE). One row
+  # and one file cannot stand for two findings, and the audit cannot tell which of the two they
+  # were written for, so an id the review gives more than once is a blocker for that id, raised
+  # here, once, and the findings carrying it never reach the ledger lookup below.
+  #
+  # Decided here and not in the parser, whose payload is the review as written and is asserted as
+  # such: refusing the review there would be `review-parse-failed`, which names no id. An `ERR`
+  # finding's id is the parser's reason, not the review's id, and is blocked on its own below; `-` is
+  # no id at all, and each of those is a manual line of its own. Compared by expansion and whole, as
+  # the ledger lookup compares, so an id is repeated exactly when the lookup would answer both
+  # findings with one row.
+  for ((k = 0; k < ${#finding_sev[@]}; k++)); do repeated+=(0); done
+  for ((k = 0; k < ${#finding_sev[@]}; k++)); do
+    id="${finding_id[k]}"
+    if [[ "${finding_sev[k]}" == ERR || "$id" == "-" || "${repeated[k]}" == 1 ]]; then continue; fi
+    for ((j = k + 1; j < ${#finding_sev[@]}; j++)); do
+      if [[ "${finding_sev[j]}" != ERR && "${finding_id[j]}" == "$id" ]]; then
+        repeated[k]=1; repeated[j]=1
+      fi
+    done
+    if [[ "${repeated[k]}" == 1 ]]; then blockers+=("duplicate-review-id:$id"); fi
+  done
+
   for ((k = 0; k < ${#finding_sev[@]}; k++)); do
     sev="${finding_sev[k]}"; id="${finding_id[k]}"; wit="${finding_flags[k]}"
     [[ "$id" == "-" ]] && id=""   # "-" is how the parser says the finding recorded no id
@@ -1215,6 +1242,11 @@ audit_one() {
       blockers+=("manual:$sev-without-id")
       continue
     fi
+    # An id the review repeats is blocked above as `duplicate-review-id`, and no row is looked up
+    # for it: whichever finding the row was written for, the other has none, and a row answering
+    # both is the defect. Below the two hard rules and the must-fix set, so each of those still
+    # blocks a repeated finding in its own words.
+    if [[ "${repeated[k]}" == 1 ]]; then continue; fi
     # The row with this id. There is at most one: the parser refuses a body with a second ledger
     # heading or an id in two rows, and when it took the first of two a draft section's
     # `accepted-risk` row stood in for the real ledger's. Compared by expansion: a here-string bash

@@ -75,6 +75,20 @@
 #                                one file, or two findings each filed in a file of its own stopped
 #                                reading as before -- or a file that could not be read hid behind a
 #                                `multi` answer instead of refusing the count
+#   MUT-DUPLICATE-REVIEW-ID-ACCEPTED  a review's findings were judged against the ledger by id
+#                                with no check that each id is given once, so two distinct
+#                                unwitnessed P3s sharing one id were both satisfied by its one
+#                                `accepted-risk` row and its one finding file and read READY with
+#                                the second finding recorded nowhere
+#                                (PR382-DUPLICATE-REVIEW-ID-REUSES-FILE) instead of NOT-READY,
+#                                `duplicate-review-id:<id>`, once
+#   MUT-DUPLICATE-REVIEW-ID-DEFERRED  the same review read the same way under the `deferred` arm:
+#                                one `deferred` row and one file stood for both findings and read
+#                                READY instead of `duplicate-review-id:<id>`
+#   MUT-DUPLICATE-REVIEW-ID-OVERREACH  the rule reached past a repeated id: two findings with ids
+#                                of their own, each on its own row and in its own file, stopped
+#                                reading READY as before -- or the repeated id hid a hard rule's
+#                                blocker, a witnessed finding no longer saying `witnessed:<id>`
 #   MUT-LEDGER-SEVERITY-DROPPED  the `ledger` subcommand returned a row's id and disposition and not
 #                                its severity, so the audit had no row severity to hold the
 #                                review's against
@@ -8543,6 +8557,86 @@ for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
     [[ "$got" == *multi-id-file* || "$got" == *no-file:* || "$got" == *NOT-READY* \
        || "$got" == *GH-UNSTUBBED* ]] \
       && error "MUT-MULTI-ID-FILE-OVERREACH: two findings filed separately blocked on [$accept_branch] ($shared_disposition): [$got]"
+  done
+done
+
+# --- one id is one finding, in the review too, through main ------------------------------------------
+# PR382-DUPLICATE-REVIEW-ID-REUSES-FILE. A review reports two distinct unwitnessed P3s and gives both
+# the id DUP-P3; the body records DUP-P3 on one row, and the head files it in one file. The parser
+# keeps the review's findings as given, duplicates included, and the audit judged each against the
+# ledger by id -- so the one row and the one file satisfied both, and the pull request read READY
+# with the second finding recorded nowhere, against one file per finding. An id the review repeats
+# is a blocker for that id, `duplicate-review-id`, raised before any row is looked up, whichever arm
+# the row is in.
+#
+# Two findings with ids of their own, each on its own row and in its own file, is the control:
+# READY, as before, in both arms -- so the NOT-READY above it is the repeated id's doing and not the
+# rows', the files' or the lane's.
+dup_head="$(filed_head_with dup-p3.md=DUP-P3)"
+dup_split_head="$(filed_head_with dup-p3-a.md=DUP-P3-A dup-p3-b.md=DUP-P3-B)"
+# The heads are what they say, counted by the audit's own helper: the repeated id is filed exactly
+# once, so a blocker below is not a missing or doubled file's.
+expect "MUT-DUPLICATE-REVIEW-ID-ACCEPTED one-file head" \
+  "$(cd "$enqueue_repo" && finding_file_count DUP-P3 "$dup_head")" 1
+for dup_id in DUP-P3-A DUP-P3-B; do
+  expect "MUT-DUPLICATE-REVIEW-ID-OVERREACH split head [$dup_id]" \
+    "$(cd "$enqueue_repo" && finding_file_count "$dup_id" "$dup_split_head")" 1
+done
+accept_review "$tmp/dup-review-id.md" \
+  '{"id":"DUP-P3","severity":"P3","location":"src/a.rs:1"},{"id":"DUP-P3","severity":"P3","location":"src/b.rs:2"}' \
+  "$dup_head"
+accept_review "$tmp/dup-review-id-witnessed.md" \
+  '{"id":"DUP-P3","severity":"P3","witness":"a failing test"},{"id":"DUP-P3","severity":"P3"}' \
+  "$dup_head"
+accept_review "$tmp/dup-review-id-split.md" \
+  '{"id":"DUP-P3-A","severity":"P3"},{"id":"DUP-P3-B","severity":"P3"}' "$dup_split_head"
+# The parser hands both findings over, so it is the audit that blocks and not a refusal upstream.
+contains MUT-DUPLICATE-REVIEW-ID-ACCEPTED "$(review_rows "$tmp/dup-review-id.md")" \
+  ';P3:DUP-P3:0;P3:DUP-P3:0'
+for dup_disposition in accepted-risk deferred; do
+  ledger_policy_body "$tmp/dup-$dup_disposition-row.md" "$(
+    printf '## Review finding ledger\n\n'; ledger_table "DUP-P3:P3:$dup_disposition")"
+  ledger_policy_body "$tmp/dup-split-$dup_disposition-rows.md" "$(
+    printf '## Review finding ledger\n\n'
+    ledger_table "DUP-P3-A:P3:$dup_disposition" "DUP-P3-B:P3:$dup_disposition")"
+  # Bodies the validator passes, so the parser and the audit are all that stand before READY.
+  expect "MUT-DUPLICATE-REVIEW-ID-OVERREACH $dup_disposition policy" \
+    "$(body_policy "$tmp/dup-$dup_disposition-row.md")" pass
+  expect "MUT-DUPLICATE-REVIEW-ID-OVERREACH $dup_disposition split policy" \
+    "$(body_policy "$tmp/dup-split-$dup_disposition-rows.md")" pass
+done
+for accept_branch in fix-P0/correctness_a-slug feature/a-slug; do
+  for dup_disposition in accepted-risk deferred; do
+    if [[ "$dup_disposition" == accepted-risk ]]; then dup_case=MUT-DUPLICATE-REVIEW-ID-ACCEPTED
+    else dup_case=MUT-DUPLICATE-REVIEW-ID-DEFERRED; fi
+    # One id twice, one row, one file: NOT-READY, and the blocker names the id, once.
+    got="$(accept_run "$accept_branch" "$tmp/dup-review-id.md" \
+      "$tmp/dup-$dup_disposition-row.md" "$dup_head")"
+    [[ "$got" == *" READY "* ]] \
+      && error "$dup_case: two findings sharing one id read READY on [$accept_branch]: [$got]"
+    contains "$dup_case [$accept_branch]" "$got" " NOT-READY "
+    contains "$dup_case [$accept_branch]" "$got" "duplicate-review-id:DUP-P3"
+    expect "$dup_case once [$accept_branch]" \
+      "$(grep -o 'duplicate-review-id:DUP-P3' <<< "$got" | wc -l | tr -d ' ')" 1
+    [[ "$got" == *GH-UNSTUBBED* ]] \
+      && error "$dup_case: the audit made a call this case does not model: [$got]"
+    # A hard rule still blocks a repeated finding in its own words.
+    got="$(accept_run "$accept_branch" "$tmp/dup-review-id-witnessed.md" \
+      "$tmp/dup-$dup_disposition-row.md" "$dup_head")"
+    contains "MUT-DUPLICATE-REVIEW-ID-OVERREACH witnessed $dup_disposition [$accept_branch]" "$got" \
+      " NOT-READY "
+    contains "MUT-DUPLICATE-REVIEW-ID-OVERREACH witnessed $dup_disposition [$accept_branch]" "$got" \
+      "witnessed:DUP-P3"
+    contains "MUT-DUPLICATE-REVIEW-ID-OVERREACH witnessed $dup_disposition [$accept_branch]" "$got" \
+      "duplicate-review-id:DUP-P3"
+    # Two ids of their own, each on its own row and in its own file: READY, as before.
+    got="$(accept_run "$accept_branch" "$tmp/dup-review-id-split.md" \
+      "$tmp/dup-split-$dup_disposition-rows.md" "$dup_split_head")"
+    contains "MUT-DUPLICATE-REVIEW-ID-OVERREACH $dup_disposition [$accept_branch]" "$got" " READY "
+    expect "MUT-DUPLICATE-REVIEW-ID-OVERREACH $dup_disposition status [$accept_branch]" "${got%%|*}" 0
+    [[ "$got" == *duplicate-review-id* || "$got" == *no-file:* || "$got" == *NOT-READY* \
+       || "$got" == *GH-UNSTUBBED* ]] \
+      && error "MUT-DUPLICATE-REVIEW-ID-OVERREACH: two findings with ids of their own blocked on [$accept_branch] ($dup_disposition): [$got]"
   done
 done
 
