@@ -1,50 +1,78 @@
 <h1><img src="assets/upstroke-wordmark.svg" alt="upstroke" height="80"></h1>
 
 [![CI](https://github.com/sourcemaps/upstroke/actions/workflows/ci.yml/badge.svg)](https://github.com/sourcemaps/upstroke/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/upstroke.svg)](https://crates.io/crates/upstroke)
 [![license](https://img.shields.io/github/license/sourcemaps/upstroke.svg)](LICENSE)
 
-A headless orchestration engine for AI coding agents. You and a frontier model design a piece of
-work; `upstroke` runs it unattended: the plan becomes a dependency graph of typed tasks, each task
-goes to an existing coding-agent CLI with a model chosen per task, gates and a review check every
-result (independent unless configured otherwise; see [Guarantees](#guarantees)), and only what
-passes is committed. It never edits a file, never runs an agentic loop and never calls a model
-API. It is the conductor, not an instrument.
+`upstroke` runs a written plan through the coding-agent CLIs you already use (Claude Code, Codex,
+GitHub Copilot), unattended, and commits a task's work only after it passes the run's gates (your
+build and test commands) and, by default, a model review.
+
+A coding agent will tell you a task is done. Whether it is, you find out yourself: run the tests,
+read the diff, send it back with the failure, try a stronger model, then again for the next task.
+In [a recorded run](https://upstroke.rs/) an agent's fix built cleanly, passed all 722 tests and
+was still wrong; the reviewer rejected it and the retry got it right. `upstroke` does that
+supervision for you.
+
+It is for work you have already designed and written down as a plan. You come back to:
+
+- **Verified work on its own branch**, `upstroke/run-<id>`; your own branch is not touched.
+- **Retries and escalation, done for you.** A failed gate or rejected review sends the task back
+  with the gate log or the reviewer's required changes, then up to a stronger model, and when the
+  chain runs out it becomes a question for you. An agent that needs a decision, or a change that
+  cannot be reviewed, asks sooner. A question holds that task and its dependents while the rest
+  keeps going.
+- **Cheaper models first.** By default fixes, tests, docs and chores start on a small model,
+  implementation on a mid-tier one, design and review on a frontier one.
+- **A full account.** A ledger of every attempt, model and reported cost, and an event log that
+  resumes the run after a crash, a question or a budget stop.
+
+## How it works
+Each task in the plan ([Plans](#plans)) runs in its own git worktree. Gates are your `[[gates]]`
+commands or, with none configured, ones derived from `Cargo.toml`, `go.mod` or a `package.json`
+test script; any other repository has no gates until you add them. A change verified against an
+older head is checked again on the combined tree before it lands.
 
 ## Status
-`0.1.0` is released on crates.io and works end to end. v0.2 (worktree-per-task parallelism, a merge
-queue, capacity-driven routing, more adapters) is in progress on `master` and unreleased. [See a run, start to finish →](https://upstroke.rs/)
+`v0.1.0`, the sequential conductor, is the only tagged release ([CHANGELOG](CHANGELOG.md)). This
+README describes `master`, where v0.2 is in progress and unreleased; capacity is reported, not
+acted on.
 
 ## Install
-`cargo install upstroke` installs the released `0.1.0`; `cargo build --release` in a checkout builds
-`master`. You need Rust 1.85+ (edition 2024), Git 2.41+ (2.40 is refused) and
+From a checkout of `master`, `cargo install --locked --path .` builds `upstroke` and puts it on
+your `PATH`. You need Rust 1.85+ (edition 2024), Git 2.41+ (2.40 is refused) and
 [Claude Code](https://docs.claude.com/en/docs/claude-code/overview) on `PATH`, on Windows, macOS or
-Linux. A default run on `master` also needs the Codex CLI: its review plan names an alternative
-reviewer from another model family, which the run probes before it commits anything, unless
+Linux. A default run also needs the Codex CLI: its review plan names an alternative reviewer from
+another model family, which is probed before the run is created, unless
 `[routing] review = { cross_family = false }` ([design/17](design/17_design_configuration_reference.md), "Which CLIs a schema-4 run needs").
-On Windows every supervised command is assigned to a kill-on-close Job Object before its primary
-thread runs, so its ordinary descendants are terminated after a direct-child exit, a timeout or
-abrupt conductor death.
+On Windows, Codex can review but not implement.
 
 ## Quick start
 | Command | What it does |
 |---|---|
 | `upstroke connect` | Discovers agent CLIs and writes `~/.upstroke/pools.toml`. |
-| `upstroke validate plan.md` | Prints the task graph and sourced model chains, at zero spend. |
-| `upstroke run plan.md --dry-run` | Everything except the agents. |
+| `upstroke validate plan.md` | Prints the task graph, model chains, gates and reviewers, at zero spend. |
+| `upstroke run plan.md --dry-run` | The same preview; no agent is started. |
 | `upstroke capacity` | Checks sign-in once per agent and shows each pool's estimated remaining. |
-| `upstroke run plan.md --budget 15` | Runs for real, committing per task on a `upstroke/run-<id>` branch. |
+| `upstroke run plan.md --budget 15` | Runs for real on a `upstroke/run-<id>` branch; needs a clean working tree. |
 | `upstroke status [<run-id>]` | The ledger: attempts, models, cost. |
 | `upstroke answer <question-id>` | Answers a question that parked a task. |
 | `upstroke resume <run-id> [--budget 30]` | Continues a stopped run from its event log. |
 | `upstroke export-decisions <run-id> [--format csv]` | Exports a finished run's routing decisions. |
 
-Exit codes: `0` complete · `1` a task failed and the run halted · `2` tasks parked on unanswered
-questions · `3` stopped at its budget (raise it and `resume`).
+`run` and `resume` exit `0` when the run is complete, `2` when it is parked on unanswered
+questions, `3` when it stopped at its budget (raise it and `resume`), and `1` when it halted or
+the command failed. A command-line usage error also exits `2`.
+
+A run has no budget unless you set `--budget` or `[budgets]`. A budget stops new work once the
+reported spend of finished work reaches it; work already started, and its reviews, can exceed it.
+Costs are API-equivalent, so notional on a subscription, and a total marked `?` is missing a price
+a CLI did not report.
 
 ## Plans
-Any markdown works; an HTML-comment annotation grammar refines it without changing how it renders
-([design/09](design/09_design_plan_ingestion.md)).
+Tasks are top-level `##`/`###` sections, excluding acceptance headings; a plan with no task
+sections uses its top-level checklist items or numbered steps instead. Dependencies follow document
+order unless annotated: an HTML-comment annotation grammar refines a plan without changing how it
+renders ([design/09](design/09_design_plan_ingestion.md)).
 ```markdown
 ## Design the pagination API
 <!-- upstroke: id=api-design kind=design depends= tier=frontier out=api-contract -->
@@ -71,21 +99,26 @@ cmd = "cargo test"
 ```
 
 ## Guarantees
-- **Agents edit files; the engine owns git.**
-- **The engine never calls a model API.**
-- **Ground truth is the diff, not the transcript.**
-- **Narrow permissions; reviewers are read-only.**
-- **Independent review, with an explicit fallback** ([design/11](design/11_design_verification_ladder.md)).
-  Where a task runs on the model that would review it, the review is rebound to another model
-  family. On `master` a fresh run (schema 4) probes every reviewer its plan names, and is not
-  created if the alternative cannot be probed ([design/17](design/17_design_configuration_reference.md));
-  a run an older binary created (schema 1–3) warns and falls back to the
-  frozen same-model reviewer rather than claiming independence. With
-  `[routing] review = { cross_family = false }`, or where no other family is configured, no
-  alternative is named and the same model can review its own work. A configured blast-radius
-  second opinion is stricter: it needs both families, and both must pass.
+- **Agents edit files; the engine owns git and never pushes.**
+- **The engine never calls a model API.** Models run only inside the vendors' own CLIs.
+- **Ground truth is the diff, not the transcript.** Gates and reviewers get the diff the engine
+  captured.
 - **An empty diff can never pass.**
-- **Estimates are never optimistic.**
+- **Narrow permissions; reviewers are read-only.** Workers get file tools plus exactly your gate
+  commands (on Codex, its workspace sandbox), never a skip-all-permissions flag.
+- **Review is independent unless you configure otherwise** ([design/11](design/11_design_verification_ladder.md)).
+  A task that ran on the reviewer's own CLI and model is reviewed by a model from another family;
+  the same model pinned through a different CLI is not detected. A fresh run is not created if
+  that alternative cannot be probed ([design/17](design/17_design_configuration_reference.md));
+  only a run an older binary created (schema 1–3) warns and falls back to the
+  frozen same-model reviewer. With `[routing] review = { cross_family = false }` a model can
+  review its own work, and the run warns, naming the tasks.
+  A configured blast-radius second opinion is stricter: it needs both families, and both must pass.
+- **Host commands are cleaned up.** On Windows every supervised command is assigned to a
+  kill-on-close Job Object before its primary thread runs, so its ordinary descendants are
+  terminated after a direct-child exit, a timeout or abrupt conductor death; Unix uses a process
+  group and a cleanup reaper. Containers differ: on Windows a killed conductor's containers last
+  until the next `run` or `resume`.
 
 ## Security
 Host-run mode is for trusted repositories and plans, because gates run the candidate's own build
