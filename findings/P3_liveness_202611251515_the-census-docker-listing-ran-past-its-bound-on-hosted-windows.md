@@ -35,7 +35,7 @@ At `50c11ded`:
   > and will not list cannot prove that no labeled container of a dead owner is still running, so this write
   > command refuses rather than admitting over one
 
-- Each Docker question runs under `QUESTION_BOUND` (`src/runner/container.rs:958`, `Duration::from_secs(60)`).
+- The census listing is asked through `DockerCli::containers_with_label` (`src/runner/container.rs:2032`), whose `exec` (`:993`) runs under `own_bound` (`:1021`): the runtime's `question_bound` when one is set, else `QUESTION_BOUND` (`:958`, `Duration::from_secs(60)`). Questions asked through `exec_within` run under the invocation's remaining deadline instead; this record is about the listing alone.
 
 ## The sightings
 
