@@ -4,53 +4,34 @@
 # Refuse a pull request any of whose OWN commits credits Claude, from the repository in the
 # current directory. The owner's direction of 2026-11-25, recorded at
 # .github/master-rewrite-2026-11-25.md: master's history was rewritten to carry no such credit, and
-# this is the check that keeps a pull request from bringing it back. A commit is refused when any
-# of five rules holds, each named by its id in the refusal:
+# this is the check for the listed credit forms.
 #
-#   claude-author      the author's email is noreply@anthropic.com, or the author's name, trimmed,
-#                      is exactly `Claude` -- both case-insensitive;
-#   claude-committer   the same two tests on the committer;
-#   claude-co-author   a message line whose key, after leading whitespace, is `Co-Authored-By`,
-#                      followed by optional whitespace and a `:`, and whose value names Claude BY
-#                      IDENTITY: its mailbox domain is anthropic.com or a subdomain of it, or its
-#                      display name holds `claude` or `anthropic` as a whole name word;
-#   claude-session     a message line whose key, after leading whitespace, is `Claude-Session`,
-#                      followed by optional whitespace and a `:`;
-#   claude-generated   a whole message line `Generated with Claude Code` or `Generated with
-#                      [Claude Code]` (the bracketed label may have a Markdown link destination),
-#                      with an optional final period, surrounding whitespace and leading robot emoji.
+# The gate refuses, in a pull request's own commits, exactly:
 #
-# Every comparison is case-insensitive, because none of these is spelled one way by every tool
-# that writes it, and git preserves whatever case it was given.
+# 1. An author or committer whose email is `noreply@anthropic.com` or whose name is exactly `Claude`.
+# 2. A `Co-Authored-By` line, begun with the key or parsed by git as the trailer, whose mailbox
+#    domain is `anthropic.com` or a subdomain, or whose display name holds `Claude` or `Anthropic`
+#    as a whole word (`:283`, unchanged). A mailbox is what the first `<…>` holds, or a bracket-less
+#    value ending in `@domain`, a trailing parenthesised comment aside. Its domain is what follows
+#    its last `@`, if it has one; its local part is never parsed or searched. A value with no
+#    mailbox is a name only where git parsed the trailer, and prose elsewhere.
+# 3. A `Claude-Session:` line.
+# 4. A whole line `Generated with Claude Code` or `Generated with [Claude Code]`, with an optional
+#    link, final period and leading 🤖.
 #
-# EACH RULE IS THE SHAPE IT IS SO THAT PROSE PASSES. Upstroke drives Claude Code as one of its
-# agents, so a subject such as `fix(agent): the Claude Code adapter reads its version` is a
-# legitimate commit and a rule that refused the words `Claude Code` would refuse it. So:
+# Everything else passes. Listed limits: any other footer prefix or wording; `Claude` joined to
+# other text by a hyphen, apostrophe or non-ASCII character, at another address; a mailbox-less
+# line git does not parse; other keys; identities not listed. Listed false refusals: a person
+# named Claude; any `anthropic.com` address; a sentence git parses as the trailer. A direct run
+# ignores replace refs and fails closed on shallow history and grafts; beyond that the claim is
+# for the workflow's checkout.
 #
-#   AN AUTHOR OR COMMITTER NAME MATCHES ONLY WHOLE. `Claude` and nothing else, after trimming, is
-#   the name Claude Code commits under; a contributor whose name merely begins or contains it is
-#   somebody else. The email is the address Claude Code writes, matched whole for the same reason.
-#
-#   A CO-AUTHOR IS MATCHED BY IDENTITY, NOT BY SUBSTRING. The value is split into its `<address>`,
-#   the first `<...>` in it, and the display name BEFORE it. Text after the closing `>` is a
-#   comment, not a name. Only a mailbox with a nonempty local part, one `@` and a DNS-shaped
-#   domain supplies a domain to compare. A bare mailbox is checked as a mailbox, not as a name;
-#   a following parenthesized comment is not a display name. Without a mailbox the value is a
-#   name. Name words keep ASCII letters, digits, apostrophes, hyphens and UTF-8 bytes together:
-#   non-ASCII letters and compound-name punctuation must not split a human name into `Claude`.
-#   Thus `Claude`, `Claude Fable 5.2` and `Anthropic Claude` are refused, while `Jean-Claude
-#   Example`, `Claudette Example`, `Claudeé Example` and `D’Claude Example` are people.
-#
-#   A TRAILER MATCHES ONLY AT THE START OF ITS LINE. `Co-Authored-By:` and `Claude-Session:` are
-#   trailers, and a trailer is a line that begins with its key. A sentence that mentions
-#   `Claude-Session:` in passing -- this paragraph, a commit message about the rewrite -- is not
-#   one. Leading whitespace is allowed before the key because an indented trailer still reads as a
-#   credit to anyone who looks, and the rule exists for what a reader sees; whitespace is allowed
-#   between the key and its `:` because git itself parses `Co-Authored-By :` as that trailer.
-#
-#   THE GENERATED-WITH FOOTER MATCHES A COMPLETE CREDIT, optionally behind the documented robot
-#   emoji (`🤖 Generated with [Claude Code](...)`). Quotes, blockquotes and sentences discussing
-#   the label are prose, even if the label appears at the start of the line.
+# The five rule IDs are claude-author, claude-committer, claude-co-author, claude-session and
+# claude-generated. Comparisons are case-insensitive; identity names are trimmed. Keys allow
+# leading whitespace and whitespace before the colon. The footer allows surrounding whitespace;
+# only the bracketed label may have a Markdown link destination. The display name precedes the
+# first `<…>`; text after it is a comment. Name words keep ASCII letters, digits, apostrophes,
+# hyphens and UTF-8 bytes together. These matchers are unchanged from r72's starting head.
 #
 # CO-AUTHORS ARE JUDGED ONLY AFTER UNFOLDING, never from an incomplete physical-line prefix:
 #
@@ -82,7 +63,7 @@
 # could do about it. A pull request that merges master in brings those commits along, and they are
 # still not its own: they are reachable from the target, so they are still not judged.
 #
-# SHALLOW OR UNAVAILABLE ANCESTRY, AN END THAT WILL NOT RESOLVE, OR TWO ENDS WITH NO MERGE BASE
+# GRAFTS, SHALLOW OR UNAVAILABLE ANCESTRY, AN END THAT WILL NOT RESOLVE, OR TWO ENDS WITH NO MERGE BASE
 # FAILS CLOSED at exit 2, never with
 # an empty set. An empty set is a pass, and a pass that nothing was checked for is the direction
 # that turns a refusal into an acceptance. Every git command that fails after that is exit 2 too.
@@ -108,7 +89,7 @@
 # the loop must reach it: a short read is exit 2, never fewer lines judged. Object-name lists also
 # account for every byte and require the final newline before any commit is judged. A short read of the
 # merge bases is the dangerous one -- an exclusion list left empty judges the target's own history
-# -- so each of its lines must also be a full object name (40 or 64 hex digits). These are the
+# -- so each of its lines must also be a full object name of the repository's own width. These are the
 # rules .github/scripts/changed-in-range.sh and test-docs-consistency.sh state for their own
 # listings.
 #
@@ -189,9 +170,31 @@ lines_in() {
   echo $(( n ))
 }
 
-object_name_re='^([0-9a-f]{40}|[0-9a-f]{64})$'
+object_format="$(git rev-parse --show-object-format=storage)" \
+  || fail "could not determine the repository object format"
+case "$object_format" in
+  sha1) object_name_re='^[0-9a-f]{40}$' ;;
+  sha256) object_name_re='^[0-9a-f]{64}$' ;;
+  *) fail "could not determine the repository object format" ;;
+esac
 [[ "$target_sha" =~ $object_name_re && "$head_sha" =~ $object_name_re ]] \
   || fail "could not resolve complete commit IDs"
+
+# Grafts change ancestry even with replace refs disabled. Resolve the common git path (also
+# in a linked worktree), respecting Git's explicit graft-file override. Comments are inert.
+grafts="${GIT_GRAFT_FILE-}"
+if [[ ! ${GIT_GRAFT_FILE+set} ]]; then
+  grafts="$(git rev-parse --git-path info/grafts)" \
+    || fail "could not determine history completeness"
+fi
+if [[ -e "$grafts" ]]; then
+  [[ -f "$grafts" && -r "$grafts" ]] || fail "complete local history is unavailable"
+  if grep -q '^[[:space:]]*[^#[:space:]]' -- "$grafts"; then
+    fail "complete local history is unavailable"
+  else
+    [[ "$?" == 1 ]] || fail "complete local history is unavailable"
+  fi
+fi
 
 # A merge base can exist in a shallow checkout even though a merged side branch's offending
 # ancestor is hidden. Walk BOTH ends without exclusions, so missing ancestors below the merge
@@ -276,15 +279,15 @@ co_author_re='^[[:space:]]*co-authored-by[[:space:]]*:(.*)$'
 session_re='^[[:space:]]*claude-session[[:space:]]*:'
 # A value's `<address>`, and the name before it. Held in variables for the same reason as above.
 address_re='^([^<]*)<([^>]*)>(.*)$'
-mailbox_re='^[^[:space:]<>@()]+@([a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*)$'
-bare_mailbox_re='^([^[:space:]<>@()]+@[^[:space:]<>@()]+)([[:space:]]*\(.*\))?$'
+bare_mailbox_re='^([^<>]*@[^[:space:]<>@()]+)([[:space:]]*\(.*\))?$'
 # Keep every UTF-8 byte and compound-name apostrophe/hyphen within a name word. This avoids
 # depending on a UTF-8 locale that need not exist on all supported runners.
 word_re=$'(^|[^A-Za-z0-9\'\200-\377-])(claude|anthropic)($|[^A-Za-z0-9\'\200-\377-])'
 # A whole footer, not an arbitrary punctuation prefix or a sentence beginning with the label.
 footer_re='^[[:space:]]*(🤖[[:space:]]*)?generated with (\[claude code\](\([^()[:space:]]+\))?|claude code)\.?[[:space:]]*$'
 
-# names_claude <co-author value>: the co-author's identity is Claude's or Anthropic's.
+# names_claude <co-author value> <parsed>: only git-parsed trailers treat mailbox-less values
+# as names. Mailbox local parts are opaque, including quotes, spaces and additional @ signs.
 names_claude() {
   local value name address="" domain
   value="$(trim "$1")"
@@ -295,10 +298,11 @@ names_claude() {
     address="${BASH_REMATCH[1]}"
     name=""
   else
+    [[ "$2" == parsed ]] || return 1
     name="$value"
   fi
-  if [[ "$address" =~ $mailbox_re ]]; then
-    domain="${BASH_REMATCH[1]}"
+  if [[ "$address" == *@* ]]; then
+    domain="${address##*@}"
     if [[ "$domain" == "anthropic.com" || "$domain" == *".anthropic.com" ]]; then
       return 0
     fi
@@ -306,9 +310,9 @@ names_claude() {
   [[ "$name" =~ $word_re ]]
 }
 
-# judge_trailer <sha> <line>: the co-author and session rules, the two that read trailers.
+# judge_trailer <sha> <line> <parsed|unparsed>: the two rules that read trailers.
 judge_trailer() {
-  if [[ "$2" =~ $co_author_re ]] && names_claude "${BASH_REMATCH[1]}"; then
+  if [[ "$2" =~ $co_author_re ]] && names_claude "${BASH_REMATCH[1]}" "$3"; then
     refuse "$1" claude-co-author "$2"
   fi
   if [[ "$2" =~ $session_re ]]; then
@@ -318,7 +322,7 @@ judge_trailer() {
 
 # judge_line <sha> <line>: all three message-line rules.
 judge_line() {
-  judge_trailer "$1" "$2"
+  judge_trailer "$1" "$2" unparsed
   if [[ "$2" =~ $footer_re ]]; then
     refuse "$1" claude-generated "$2"
   fi
@@ -410,7 +414,7 @@ judge() {
     || fail "could not measure the trailers of commit $sha"
   while IFS= read -r line; do
     read_trailers=$(( read_trailers + 1 ))
-    judge_trailer "$sha" "$line"
+    judge_trailer "$sha" "$line" parsed
   done < "$trailers"
   (( read_trailers == parsed )) \
     || fail "read $read_trailers of the $parsed trailer lines of commit $sha"

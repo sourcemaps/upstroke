@@ -7116,13 +7116,26 @@ credit_parsing_contracts() {  # <base>
     credit_message_case claude-co-author 'agent/model display name at an independent address' \
       "${prefix}Co-Authored-By: $value <model@example.invalid>"
   done
+  # r72 row 7: this must fail independently of both Claude and the provider domain.
+  credit_message_case claude-co-author 'Anthropic alone at a neutral mailbox' \
+    "${prefix}Co-Authored-By: Anthropic <person@example.invalid>"
+
+  # r72 rows 1-2 are named limits, not promises to recognize more spellings.
+  for value in '1️⃣ Generated with [Claude Code]' \
+    '1️⃣ Generated with [Claude Code](https://example.invalid)' \
+    '✨ Generated with Claude Code'; do
+    credit_message_case pass 'limit: footer prefixes other than the robot emoji' "$prefix$value"
+  done
+  credit_message_case pass 'limit: a hyphen keeps Claude-Opus in one name word' \
+    "${prefix}Co-Authored-By: Claude-Opus <person@example.invalid>"
+  credit_message_case pass 'limit: U+00A0 keeps Claude and Code in one name word' \
+    "${prefix}Co-Authored-By: Claude"$'\xc2\xa0'"Code <person@example.invalid>"
 
   # The display name, mailbox and trailing comment are distinct fields. Bare mailboxes have
   # no display name, and a domain is compared only when the mailbox actually has one.
   for value in 'Mira Example <claude@example.invalid>' \
     'Mira Example <person@anthropic.com.example.invalid>' \
     'Mira Example <anthropic.com>' 'Mira Example <research.anthropic.com>' \
-    'Mira Example <@anthropic.com>' 'Mira Example <person@@anthropic.com>' \
     'claude@example.invalid' 'person@anthropic.example.invalid' \
     'Mira Example <person@example.invalid> (Claude reviewed the patch)' \
     'person@example.invalid (Claude reviewed the patch)'; do
@@ -7130,11 +7143,42 @@ credit_parsing_contracts() {  # <base>
       "${prefix}Co-Authored-By: $value"
   done
   for value in 'Mira Example <person@anthropic.com>' \
+    'Mira Example <@anthropic.com>' 'Mira Example <person@@anthropic.com>' \
     'Mira Example <person@research.anthropic.com>' 'person@anthropic.com' \
     'person@research.anthropic.com (Mira Example)'; do
     credit_message_case claude-co-author 'a syntactically present provider domain' \
       "${prefix}Co-Authored-By: $value"
   done
+
+  # r72 row 3: the local part is opaque, in both directions. Quoting, spaces or another @
+  # cannot hide a provider domain or turn a neutral mailbox's local part into a name.
+  for value in 'Pat Example <"QA Team"@anthropic.com>' \
+    'Mira Example <"Audit Sender"@anthropic.com>' \
+    'Mira Example <"Audit@Sender"@research.anthropic.com>' \
+    '"QA Team"@anthropic.com' '"QA Team"@research.anthropic.com (Mira Example)'; do
+    credit_message_case claude-co-author 'quoted local part retains the last-at provider domain' \
+      "${prefix}Co-Authored-By: $value"
+  done
+  for value in '"Claude Support"@example.invalid' \
+    '"Anthropic Support"@example.invalid (Claude reviewed the patch)' \
+    '"Claude@anthropic.com"@example.invalid' \
+    'Mira Example <"Claude Support"@example.invalid>' \
+    'Mira Example <"person@anthropic.com"@example.invalid>' \
+    'Mira Example <person@example.invalid> <person@anthropic.com>'; do
+    credit_message_case pass 'mailbox local parts and text after the first mailbox are not names' \
+      "${prefix}Co-Authored-By: $value"
+  done
+
+  # r72 row 4: the same mailbox-less sentence is prose outside Git's parsed trailer block,
+  # and a listed false refusal inside it. A mailbox-less credit outside that block is a limit.
+  credit_message_case pass 'mailbox-less explanatory prose before a human sign-off' \
+    "${prefix}Co-Authored-By: is the trailer the Claude Code adapter reads."$'\n\nSigned-off-by: Mira Example <person@example.invalid>'
+  credit_message_case claude-co-author 'listed false refusal: a sentence Git parses as a trailer' \
+    "${prefix}Co-Authored-By: is the trailer the Claude Code adapter reads."
+  credit_message_case pass 'limit: an unparsed mailbox-less mid-body credit' \
+    "${prefix}Co-Authored-By: Claude"$'\n\nLater prose.'
+  credit_message_case claude-co-author 'a Git-parsed mailbox-less name remains a credit' \
+    "${prefix}Co-Authored-By: Claude"
 
   # Folded and unfolded identities must have identical verdicts. The partial physical line
   # ending in <Claude is not a complete name; a completed identity's continuation is a comment.
@@ -7232,6 +7276,20 @@ credit_fail_closed 'a shallow checkout cannot verify even an empty range' "$cred
 rm "$credit_repo/.git/shallow"
 credit_pass 'complete history restored' "$credit_clean" 1
 
+# r72 row 5: a local graft reparents the boundary around its credited ancestor while keeping
+# both tips and their merge base present. Even an empty range cannot be certified under a graft.
+printf '%s %s\n' "$credit_boundary" "$credit_base" > "$credit_repo/.git/info/grafts"
+credit_fail_closed 'a local graft hides the credited side ancestor' "$credit_target" "$credit_shallow_head"
+credit_fail_closed 'an active graft cannot verify an empty range' "$credit_clean" "$credit_clean"
+mv "$credit_repo/.git/info/grafts" "$fixture_dir/credit-grafts"
+GIT_GRAFT_FILE="$fixture_dir/credit-grafts" \
+  credit_fail_closed 'an explicit graft file also changes ancestry' "$credit_target" "$credit_shallow_head"
+printf '# no active grafts\n \t\n  # only comments\n' > "$credit_repo/.git/info/grafts"
+credit_refuse 'comments alone do not hide the credited ancestor' "$credit_shallow_head" "$credit_hidden:claude-session"
+credit_pass 'comments alone permit a complete clean range' "$credit_clean" 1
+rm "$credit_repo/.git/info/grafts"
+credit_refuse 'removing the graft restores the credited ancestor' "$credit_shallow_head" "$credit_hidden:claude-session"
+
 # Even when both tips and their merge base exist, an unavailable ancestor below the base must
 # fail. The object is loose in this fixture and is restored before any later case uses it.
 credit_missing_object="$credit_repo/.git/objects/${credit_old:0:2}/${credit_old:2}"
@@ -7246,6 +7304,10 @@ credit_pass 'missing ancestor restored' "$credit_clean" 1
 credit_fault_env="$fixture_dir/credit-fault-env"
 cat > "$credit_fault_env" <<'EOF'
 git() {
+  if [[ "$CREDIT_PHASE" == resolved-end && "$1" == rev-parse && "${2:-}" == --verify ]]; then
+    printf '%s\n' "$CREDIT_RECORDS"
+    return 0
+  fi
   if [[ "$CREDIT_PHASE" == "$1" ]] &&
       { [[ "$1" != rev-list ]] || [[ "${3:-}" == --not ]]; }; then
     case "$CREDIT_FAULT" in
@@ -7326,6 +7388,37 @@ BASH_ENV="$credit_fault_env" CREDIT_PHASE=none CREDIT_FAULT=setup \
 TMPDIR="$fixture_dir/private@example.com/nonexistent" \
   credit_contract_failure 'real mktemp error is private' 'could not create temporary workspace'
 
+# r72 row 6: producer output has the repository's own width, not either supported width.
+# In SHA-256 the wrong-width record is a resolvable 40-digit abbreviation of the real object.
+credit_width_contracts() {  # <base> <clean> <credited>
+  local credit_target="$1" credit_clean="$2" credited="$3" phase label head record
+  for head in "$credit_clean" "$credited"; do
+    for phase in merge-base rev-list resolved-end; do
+      record="$head" label=commit
+      if [[ "$phase" == merge-base ]]; then
+        record="$credit_target" label=merge-base
+      fi
+      if (( ${#record} == 64 )); then
+        record="${record:0:40}"
+      else
+        record="${record}000000000000000000000000"
+      fi
+      if [[ "$phase" == resolved-end ]]; then
+        BASH_ENV="$credit_fault_env" CREDIT_PHASE="$phase" CREDIT_FAULT=records \
+          CREDIT_RECORDS="$record" credit_contract_failure \
+          'resolved ends must have the repository object width' \
+          'could not resolve complete commit IDs' "$head"
+      else
+        BASH_ENV="$credit_fault_env" CREDIT_PHASE="$phase" CREDIT_FAULT=records \
+          CREDIT_RECORDS="$record"$'\n' credit_contract_failure \
+          'listing IDs must have the repository object width' \
+          "the $label list holds a line that is not an object name" "$head"
+      fi
+    done
+  done
+}
+credit_width_contracts "$credit_base" "$credit_clean" "$credit_first"
+
 # Git's SHA-256 mode exercises the same framing and the unchanged full-ID rule output.
 credit_sha1_repo="$credit_repo"
 credit_repo="$fixture_dir/repo-credit-sha256"
@@ -7338,6 +7431,7 @@ credit_pass 'SHA-256 empty range' "$credit_sha256_base" 0 "$credit_sha256_base"
 credit_sha256_bad="$(plain_commit "$credit_sha256_base" $'SHA-256 credit\n\nClaude-Session: private-session')" || exit 1
 credit_target="$credit_sha256_base" credit_refuse 'SHA-256 rule output' \
   "$credit_sha256_bad" "$credit_sha256_bad:claude-session"
+credit_width_contracts "$credit_sha256_base" "$credit_sha256_clean" "$credit_sha256_bad"
 credit_parsing_contracts "$credit_sha256_base"
 credit_repo="$credit_sha1_repo"
 
