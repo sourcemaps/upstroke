@@ -54,8 +54,10 @@ Graded by ruling r104:
   changed-path listing printed only the destination. `08c80be6` fixed that listing with
   `--no-renames` (`.github/scripts/changed-in-range.sh:91-103`). The audit's own read, there since
   `112c4aff` (line 156 of the audit at `112c4aff`), was left as it was.
-- P2, not P1: the policy gate refuses a file a pull request adds or renames under the ledger unless
-  its name starts `P0_` to `P3_` and its frontmatter severity is one of P0 to P3
+- P2, not P1: the policy gate refuses a file a pull request adds or renames under the ledger, other
+  than the ledger's own `README.md` and `PROCESS.md`, which it exempts by exact path
+  (`.github/scripts/validate-pr-branch.sh:3093-3095`), unless its name starts `P0_` to `P3_` and its
+  frontmatter severity is one of P0 to P3
   (`.github/scripts/changed-in-range.sh:181`, `.github/scripts/validate-pr-branch.sh:3098-3116`),
   and the audit reads READY only with both required contexts green
   (`scripts/pr-ready-audit.sh:1030-1032`). So the push must be shaped on purpose, and CI must stay
