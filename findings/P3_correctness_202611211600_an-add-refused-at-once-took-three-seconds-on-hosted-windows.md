@@ -16,7 +16,7 @@ guard: the change that makes the test's bound on the git-path add measure what r
 ## Failure sequence
 
     an add whose checkout cannot be made (a tree holding a `.git` path) is refused after one attempt
-    -> on a loaded GitHub-hosted windows-latest runner, the add takes 3.39 s from call to refusal
+    -> on a GitHub-hosted windows-latest runner, the add takes 3.39 s from call to refusal
     -> the test bounds that wall time by the registry access deadline, 500 ms in test builds
     -> the test fails though the add made one attempt and was refused as it should be
 

@@ -8,14 +8,14 @@ reviewed_sha: b73d347af70806578051ddd58a439c0db9269a7f
 location: src/workspace_manager/tests.rs:13226
 provenance: undetermined
 first_bad:
-guard: the change that classifies a torn reflog left by a kill during a reflog append, as tolerated residue or by a recovery that repairs it, or that establishes the kill reached only Git for Windows' launcher, in which case this finding merges into PR249-KILL-SAMPLER-WINDOWS-WRAPPER
+guard: the change that makes the sampler report, beside any classifier refusal, that sample's kill error and LaunchEnd, the slot's HEAD reflog bytes, whether the named object exists and whether a Git process of the sample is alive; until such a report shows the kill ended Git, no reflog error is classified as kill residue; a kill that reached only Git for Windows' launcher merges this finding into PR249-KILL-SAMPLER-WINDOWS-WRAPPER; a child that completed or failed before the kill stays a refusal, filed as its own finding
 ---
 
-# The kill sampler's classifier refused a reflog entry after a killed cherry-pick on a hosted Windows runner
+# The kill sampler's classifier refused a reflog entry after a kill fired at a cherry-pick on a hosted Windows runner
 
 ## Failure sequence
 
-    the census sampler kills the `git cherry-pick` child of an `Object.ProposalCherryPick` sample
+    the census sampler fires a kill at the `git cherry-pick` child of an `Object.ProposalCherryPick` sample
     -> the classifier runs `git fsck --unreachable --no-progress --no-dangling --connectivity-only`
     -> fsck exits 2: `worktrees/s1_WG9T4H5MXCSP/HEAD: invalid reflog entry d0236017…`
     -> the classifier refuses (a failed fsck is an error, never an empty listing)
@@ -82,11 +82,11 @@ that merged #392.
 
 ## What is and is not established
 
-**Established.** In one sample of `Object.ProposalCherryPick`, after the kill, the classifier's fsck
-exited 2 on an `invalid reflog entry` in the reflog of a staging worktree's `HEAD`. The classifier
-refused, and the test failed on its refusals assertion. The registration's name,
-`s1_WG9T4H5MXCSP`, has the shape of this site's staging slot. The failing test and the code it
-drives were not changed by #392, and the same test passed on #392's heads before and after.
+**Established.** In one sample of `Object.ProposalCherryPick`, after the kill was fired, the
+classifier's fsck exited 2 on an `invalid reflog entry` in the reflog of a staging worktree's
+`HEAD`. The classifier refused, and the test failed on its refusals assertion. The registration's
+name, `s1_WG9T4H5MXCSP`, has the shape of this site's staging slot. The failing test and the code
+it drives were not changed by #392, and the same test passed on #392's heads before and after.
 
 **Not established: what the kill reached.** `SampledChild::spawn` runs `git` by name. On a Windows
 machine where that name resolves to Git for Windows' launcher (`cmd\git.exe`), the kill ends the
@@ -94,7 +94,7 @@ launcher and the real `git.exe` keeps running
 (`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`). The job log does not record which `git` the hosted runner
 resolved, and it does not show whether the kill reached Git or only its launcher.
 
-**Inferred, not established: what was wrong with the reflog.** There are two readings, and the log
+**Inferred, not established: what was wrong with the reflog.** There are three readings, and the log
 does not tell them apart:
 
 - **The kill reached Git** while it was appending to the worktree's `HEAD` reflog, and left a torn
@@ -102,6 +102,11 @@ does not tell them apart:
 - **The kill reached only the launcher.** The real `git cherry-pick` was still writing when the
   classifier's fsck ran, because on Windows the sampler neither kills nor waits for the launcher's
   child. In that case fsck read a reflog that a live writer was still changing.
+- **The kill did not land.** The sampler allows a child that reaches its own exit before the kill
+  (`LaunchEnd::Completed`) and records one that fails by itself (`LaunchEnd::Failed`). The launch
+  log holding each sample's kill error and `LaunchEnd` is read only after every site passes (near
+  line 13296), so this log shows neither. The entry is then no residue of a kill: it may name a
+  genuinely missing object.
 
 Reasoned from Git's source and not checked against the runner's Git version: fsck prints
 `<ref>: invalid reflog entry <oid>` when a reflog entry names an object that fsck did not find among
@@ -111,6 +116,8 @@ commit, then read the reflog after Git had appended the entry naming it.
 
 **What would establish it:**
 
+- the refused sample's kill error and `LaunchEnd`: `Completed` or `Failed` is the third reading;
+  `Killed`, on Windows any exit code of 1, leaves the first two;
 - the bytes of the worktree's `HEAD` reflog (`.git/worktrees/<slot>/logs/HEAD`), kept beside the
   refusal (the sampler keeps only the error's words);
 - whether object `d0236017…` was in the repository when fsck ran, and whether it was there later;
@@ -148,6 +155,8 @@ counted.
 - **If the kill reached Git**, classify a reflog left torn by a kill during a reflog append: either
   as tolerated residue or by a recovery that repairs it. Do not let it read as an inspection that
   failed.
+- **If the kill did not land**, keep the refusal. Do not classify, repair or delete the entry; file
+  what the record shows as its own correctness finding.
 - **Keep the refusals assertion and `unreachable_objects`' rule** that a failed fsck is an error,
   never an empty listing. **Do not retry or skip the test** to get past this.
 
@@ -161,4 +170,5 @@ counted.
   entry. It would answer that case as `Internal` residue instead of refusing. Its recovery would
   drop that last entry (for example with `git reflog delete`) before the recovery's own fsck.
   Every other fsck error would still refuse. This only applies once the sampler is shown to
-  classify after Git has ended. Otherwise it would hide a live writer instead of naming one.
+  classify after Git has ended. Otherwise it would hide a live writer instead of naming one. Nor
+  does it apply where the child completed or failed: that entry is no residue of a kill.
