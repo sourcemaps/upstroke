@@ -6400,7 +6400,7 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
 const SLOW_START_SCRATCH: &str = "UPSTROKE_TEST_SLOW_START_SCRATCH";
 
 #[cfg(unix)]
-const SLOW_START_REAL_DOCKER: &str = "UPSTROKE_TEST_SLOW_START_REAL_DOCKER";
+const SLOW_START_ORIGINAL_PATH: &str = "UPSTROKE_TEST_SLOW_START_ORIGINAL_PATH";
 
 #[cfg(unix)]
 #[test]
@@ -6416,15 +6416,6 @@ fn real_docker_a_container_slow_to_start_still_reaches_its_timeout() {
         return no_image(&reason);
     }
     let inherited = std::env::var_os("PATH").unwrap_or_default();
-    let found = crate::util::find_program(crate::runner::container::DOCKER_PROGRAM)
-        .expect("the lookup the gate passed finds the same `docker` again");
-    let real = if found.is_absolute() {
-        found
-    } else {
-        std::env::current_dir()
-            .expect("this process's working directory")
-            .join(found)
-    };
 
     let tree = repo::scratch("real-slow-start");
     let bin = tree.path().join("bin");
@@ -6436,7 +6427,7 @@ fn real_docker_a_container_slow_to_start_still_reaches_its_timeout() {
         &[
             ("PATH", path.as_os_str()),
             (SLOW_START_SCRATCH, tree.path().as_os_str()),
-            (SLOW_START_REAL_DOCKER, real.as_os_str()),
+            (SLOW_START_ORIGINAL_PATH, inherited.as_os_str()),
         ],
         Duration::from_secs(120),
     );
@@ -6456,14 +6447,10 @@ fn slow_docker_start_child() {
     let scratch = PathBuf::from(
         std::env::var_os(SLOW_START_SCRATCH).expect("the parent names its scratch directory"),
     );
-    let real = PathBuf::from(
-        std::env::var_os(SLOW_START_REAL_DOCKER).expect("the parent names the real `docker`"),
-    );
     assert!(
-        real.is_absolute() && real.is_file(),
-        "the stand-in runs {} from wherever the runner starts it, so it must be an absolute path \
-         to a file",
-        real.display()
+        std::env::var_os(SLOW_START_ORIGINAL_PATH).is_some(),
+        "the parent hands this process, whose runner runs the stand-in, its own `PATH` in \
+         {SLOW_START_ORIGINAL_PATH}"
     );
     let stand_in = scratch
         .join("bin")
@@ -6471,7 +6458,7 @@ fn slow_docker_start_child() {
     std::fs::write(
         &stand_in,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = start ]; then sleep 5; fi\nexec \"${SLOW_START_REAL_DOCKER}\" \"$@\"\n"
+            "#!/bin/sh\nif [ \"$1\" = start ]; then sleep 5; fi\nPATH=\"${SLOW_START_ORIGINAL_PATH}\" exec docker \"$@\"\n"
         ),
     )
     .expect("the stand-in `docker`");

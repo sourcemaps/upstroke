@@ -2251,17 +2251,15 @@ invocation's deadline passed, so it never started", while the other four
 
 It skips exactly as every other real-Docker test does: through `docker_gate`, which is why it is
 registered in `DOCKER_GATED_TESTS`, and through `discover` when the runtime holds none of
-`PREFERRED_IMAGES`. It then finds the real `docker` with `crate::util::find_program`, the lookup
-`DockerCli::available` and so `docker_gate` rely on, so whatever `PATH` let the gate pass finds
-the same program here, a relative entry included; a relative result is joined to this process's
-working directory, because the stand-in runs it from wherever the runner starts it. The path
-stays a `PathBuf` and then an `OsStr` from here to the stand-in, never a string, so a `docker`
-under a path that is not UTF-8 is carried unchanged. It makes a scratch tree with an empty `bin`
-in it, and runs `slow_docker_start_child` under `run_test_isolated`, bounded at two minutes: this test
-binary again, selecting that one ignored test with `--exact`, `--ignored` and `--nocapture`,
-with a `PATH` that is the scratch `bin` and then this process's own, and told the scratch tree
-(`UPSTROKE_TEST_SLOW_START_SCRATCH`) and the real program
-(`UPSTROKE_TEST_SLOW_START_REAL_DOCKER`). `DockerCli` runs `docker` by name, so a stand-in
+`PREFERRED_IMAGES`. It does not look for the real `docker` itself: it takes its own inherited
+`PATH`, an `OsString` from `std::env::var_os` and never a string, so a `PATH` that is not UTF-8
+is carried unchanged, and the stand-in defers to the ordinary command search under that `PATH`
+(below). No path to the program is computed or written anywhere. It makes a scratch tree with an
+empty `bin` in it, and runs `slow_docker_start_child` under `run_test_isolated`, bounded at two
+minutes: this test binary again, selecting that one ignored test with `--exact`, `--ignored` and
+`--nocapture`, with a `PATH` that is the scratch `bin` and then this process's own, and told the
+scratch tree (`UPSTROKE_TEST_SLOW_START_SCRATCH`) and this process's original `PATH`
+(`UPSTROKE_TEST_SLOW_START_ORIGINAL_PATH`). `DockerCli` runs `docker` by name, so a stand-in
 first on the child's `PATH` is the program every runtime question in it reaches, and only a
 child can be given a `PATH` of its own. The parent requires the child's success and libtest's
 `1 passed`, a misnamed helper running no test at all, and prints the child's output when either
@@ -2280,15 +2278,18 @@ longer fail at three seconds.
 The isolated helper `real_docker_a_container_slow_to_start_still_reaches_its_timeout` runs.
 Ignored, so libtest never runs it in its own process.
 
-It reads the real program with `std::env::var_os`, never as a string, and asserts that it names
-an absolute path to a file. Its first act, before it starts any process, is to write the
+It asserts, with `std::env::var_os`, that its parent set `UPSTROKE_TEST_SLOW_START_ORIGINAL_PATH`
+on it. Its first act, before it starts any process, is to write the
 stand-in `docker` into the `bin` its parent put first on its `PATH`, and make it executable: a
 `/bin/sh` script that sleeps five seconds when its first argument is `start` and then, whatever
-the arguments, replaces itself (`exec`) with the program `UPSTROKE_TEST_SLOW_START_REAL_DOCKER`
-names, given the same ones. The script's text holds the variable's name and no path: the
-parent set the variable, as an `OsStr`, on this process, which is the process whose runner runs
-the stand-in, and the runner starts `docker` (`docker_command`) with the environment it
-inherits, so the stand-in reads the path's bytes as they are, with nothing to quote. Every other
+the arguments, replaces itself with `PATH="$UPSTROKE_TEST_SLOW_START_ORIGINAL_PATH" exec docker
+"$@"`. It runs `docker` by name under the parent's original `PATH`, so the system's own command
+search picks the program exactly as it would with no stand-in, skipping a `docker` that is not
+executable as that search does; the test never decides which program that is. The script's
+text holds the variable's name and no path: the parent set the variable, as an `OsStr`, on this
+process, which is the process whose runner runs the stand-in, and the runner starts `docker`
+(`docker_command`) with the environment it inherits, so the stand-in reads the `PATH`'s bytes as
+they are, with nothing to quote. Every other
 question reaches the daemon unchanged, the held start is the real one once the hold ends, and no
 shell is left between the runner and the attached client it supervises. The helper then asserts that the stand-in is the
 `docker` this process resolves, so a `PATH` that put it anywhere but first fails here rather than
