@@ -103,7 +103,7 @@ weekly = true
 sources = ["signals", "self"]          # trust order
 safety_margin = 0.15                   # usage on your other machines is invisible
 reserve = 0.20                         # headroom kept for your interactive sessions
-profile = "work"                       # optional: which account, when one vendor backs several pools
+# profile = "/home/you/.claude-work"   # optional: an absolute directory, handed to Claude Code as its credential location
 ```
 
 Pools are listed in file order; the first one matching an agent is the one attempts are
