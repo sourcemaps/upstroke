@@ -20,7 +20,8 @@ guard: the change that starts the tracker's curl from a named environment; which
 2. Each request to a provider runs `curl` as an agent probe, `Probe(ProbeTarget::Agent("curl"))`
    (`src/tracker/transport.rs:253-254`; `src/agent/adapter.rs:93-109`). `curl` has no
    credential-location entry (`src/runner/host.rs:58-64`), so its environment is the base without
-   the three location variables (`src/runner/host/environment.rs:419-425`).
+   the three location variables, with `GIT_NO_REPLACE_OBJECTS` set to `1`
+   (`src/runner/host/environment.rs:419-443`).
 3. So one provider's request runs with every other credential the operator exported in its
    environment: another provider's key, `CLAUDE_CODE_OAUTH_TOKEN`, a `GIT_CONFIG_*` setting.
    `src/tracker/transport.rs:16-18` says so: "The Runner's, as for a probe: the process's
@@ -34,8 +35,9 @@ records; this file is the tracker's request alone.
 
 - **Read:** each step, from the code at `d431d220`, not run.
 - *Inferred, not established:* `curl` acts on some inherited variables, and one its manual
-  documents, `SSLKEYLOGFILE`, would have it write the session's TLS secrets to a file, from which a
-  capture of the request, its credential header among it, could be read.
+  documents, `SSLKEYLOGFILE`, would, with the TLS backends that manual names, have it write the
+  session's TLS secrets to a file, so that anyone holding that file and a capture of the traffic
+  could read the request, its credential header among it.
 - **Not run:** a refresh.
 - **Found by** the design note on the capacity reader's credential boundary of 2026-11-28
   (`~/selfhost-design-20261127/reader-credentials.md`, SHA-256
