@@ -656,14 +656,14 @@ into its text, and each name reads its own variable. Measured,
 
 The picker's script, character for character. It answers `hosted` when
 `WINGUEST_BUSY` is exactly `1`; otherwise, when `WINGUEST_QUEUE_LIMIT` is a
-positive whole number, when the guest's queue, as the script reads it in the
+whole number from 1 to 999999, when the guest's queue, as the script reads it in the
 other runs of this workflow, has reached that limit; otherwise `guest`.
 It answers `guest` whenever the API cannot be read, because a failed question
 must not move a run off the machine every lane has run on, and it prints what
 it found: the variables, the limit, the two counts, the answer.
 
 Routing on the queue is opt-in. With `WINGUEST_QUEUE_LIMIT` unset, empty or
-anything but a positive whole number the script counts nothing, calls no API
+anything but a whole number from 1 to 999999 the script counts nothing, calls no API
 and answers `guest`, so with neither variable set every run goes to the guest
 as it did before the twin. The first review of this job (#375, head
 `873ff8c7`) found the default limit of 2 it then had would be reached by one

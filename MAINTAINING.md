@@ -29,8 +29,8 @@ source, documentation, workflows, release machinery and this file.
    `test-windows-hosted` runs on `windows-latest` with the guest image's compiler, installed and
    asserted, and the guest's suite step and passing-test floor, and `upstroke-ci` requires
    exactly one of the two to pass. The answer is `hosted` when the repository variable
-   `WINGUEST_BUSY` is `1`, or when the repository variable `WINGUEST_QUEUE_LIMIT` is a positive
-   whole number and the guest's queue reaches it: the guest's jobs queued or running in other
+   `WINGUEST_BUSY` is `1`, or when the repository variable `WINGUEST_QUEUE_LIMIT` is a whole
+   number from 1 to 999999 and the guest's queue reaches it: the guest's jobs queued or running in other
    runs, together with the runs of a lower run id that have not yet shown where their own suite
    goes. The limit is best effort. While every run's picker can read the API and list the other
    runs, of runs that start together, a merge queue's entries among them, the earliest take the

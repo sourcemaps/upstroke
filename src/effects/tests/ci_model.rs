@@ -206,7 +206,7 @@ if [[ "${WINGUEST_BUSY:-}" == "1" ]]; then
   home=hosted
   echo "WINGUEST_BUSY is 1, so the queue for the guest was not counted."
 elif [[ ! "${WINGUEST_QUEUE_LIMIT:-}" =~ ^0*[1-9][0-9]{0,5}$ ]]; then
-  echo "WINGUEST_BUSY is not 1, and WINGUEST_QUEUE_LIMIT is unset or not a positive whole number, so routing on the queue is off and the queue for the guest was not counted."
+  echo "WINGUEST_BUSY is not 1, and WINGUEST_QUEUE_LIMIT is unset or not a whole number from 1 to 999999, so routing on the queue is off and the queue for the guest was not counted."
 else
   limit=$((10#$WINGUEST_QUEUE_LIMIT))
   echo "WINGUEST_BUSY is not 1. WINGUEST_QUEUE_LIMIT is $limit."

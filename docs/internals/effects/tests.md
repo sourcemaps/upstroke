@@ -2252,8 +2252,8 @@ diff, and this is the leg saying it ran what it says it ran.
 The job that decides where the Windows suite runs matches the contract, and
 three facts inside its pinned script agree with the model. It reads the
 guest's queue in exactly one place -- the function is defined once and called
-once -- after the check that `WINGUEST_QUEUE_LIMIT` is a positive whole
-number, so routing on the queue is opt-in on every platform this test runs
+once -- after the check that `WINGUEST_QUEUE_LIMIT` is a whole number
+from 1 to 999999, so routing on the queue is opt-in on every platform this test runs
 on, not only where the script is executed. And it reads other runs' jobs by
 the two names the oracle holds their `name:` to: `TEST_WINDOWS_NAME`, the
 guest's job, and `PICK_WINDOWS_HOME_NAME`, another run's picker, whose state
@@ -2350,7 +2350,7 @@ one are [`other_runs_still_choosing`].
 The rest: `WINGUEST_BUSY` is `1` exactly and then nothing is asked, and
 `true` is not `1`; an unreadable API; one job below a limit of 2 and two at
 it; this run left out; completed guest jobs and other jobs not counted;
-limits of 3 and 1; and five values that are not positive whole numbers --
+limits of 3 and 1; and five values that are not whole numbers from 1 to 999999 --
 `0`, `-1`, `2.5`, `two`, ` 3` -- each leaving routing on the queue off, so
 nothing is asked and the answer is `guest`, over the deep queue below.
 

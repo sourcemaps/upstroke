@@ -5677,8 +5677,8 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
 
     const BUSY: &str = "WINGUEST_BUSY is 1, so the queue for the guest was not counted.";
     const ROUTING_OFF: &str = "WINGUEST_BUSY is not 1, and WINGUEST_QUEUE_LIMIT is unset or not a \
-                               positive whole number, so routing on the queue is off and the \
-                               queue for the guest was not counted.";
+                               whole number from 1 to 999999, so routing on the queue is off \
+                               and the queue for the guest was not counted.";
     const UNREADABLE: &str = "The GitHub API could not be read, so the queue for the guest is \
                               unknown. A failed question does not move a run off the guest.";
 
