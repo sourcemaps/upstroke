@@ -370,23 +370,23 @@ Establish containment, then execute. The ambient join is a parameter so a
 test can drive a failure that no machine here can produce, and so the
 ordering between the two is testable rather than merely written down.
 
-## `fn execute_with_reset_reader(` › `if report.refused() {`
+## `fn execute_with_readers(` › `if report.refused() {`
 
 A refusal to clobber is not something a retry fixes, and a script
 that cannot tell it from success would go on to run against a
 pools file that says something else entirely.
 
-## `fn execute_with_reset_reader(` › `status::follow(`
+## `fn execute_with_readers(` › `status::follow(`
 
 History first, then live events: dropping a reader into the
 middle of a run tells them less than showing how it got here.
 
-## `fn execute_with_reset_reader(` › `let settled = status::load(&repo_root, Some(&followed))?;`
+## `fn execute_with_readers(` › `let settled = status::load(&repo_root, Some(&followed))?;`
 
 Re-read: the run has moved since the summary would have been
 computed, and the closing summary is the useful one.
 
-## `fn execute_with_reset_reader(` › `(None, None, false) => Reply::Text(prompt_for_answer(&repo_root, &question_id)?),`
+## `fn execute_with_readers(` › `(None, None, false) => Reply::Text(prompt_for_answer(&repo_root, &question_id)?),`
 
 Nothing given: show the question and read one line, so the
 common case is `upstroke answer <id>` and then just type.

@@ -3207,14 +3207,12 @@ mod tests {
         Transition::Observed(observation)
     }
 
-    /// Claude session window exhausted until 2 h; weekly at 30% and slow.
     fn claude_session_exhausted() -> Vec<Reading> {
         let mut readings = burning(WindowId::Session, 100.0, 25.0, 2 * HOUR);
         readings.extend(burning(WindowId::Weekly, 30.0, 1.0, 72 * HOUR));
         readings
     }
 
-    /// Claude Fable model window exhausted until 50 h; session at 20% and weekly at 40%.
     fn claude_fable_exhausted() -> Vec<Reading> {
         let mut readings = burning(FABLE, 100.0, 10.0, 50 * HOUR);
         readings.extend(burning(WindowId::Session, 20.0, 10.0, 3 * HOUR));
@@ -3222,8 +3220,6 @@ mod tests {
         readings
     }
 
-    /// Weekly exhausted until 72 h and session exhausted until 2 h, with the Fable model window
-    /// exhausted until 30 h as well when asked.
     fn crossed(with_fable: bool) -> Vec<Reading> {
         let mut readings = burning(WindowId::Weekly, 100.0, 2.0, 72 * HOUR);
         readings.extend(burning(WindowId::Session, 100.0, 25.0, 2 * HOUR));
@@ -3233,7 +3229,6 @@ mod tests {
         readings
     }
 
-    /// The allowances a Codex banked reset covers, per plan. Synthetic: no Codex reader exists.
     fn codex_covered_allowances() -> BTreeMap<PlanId, BTreeSet<WindowId>> {
         BTreeMap::from([
             (plan_id("plus"), BTreeSet::from([WindowId::Weekly])),
@@ -3255,23 +3250,18 @@ mod tests {
             .collect()
     }
 
-    /// Codex `pro`: the covered session allowance is spent until 3 h; the covered weekly
-    /// allowance is full and refills in 100 h.
     fn codex_pro_session_spent() -> Vec<Reading> {
         let mut readings = burning(WindowId::Session, 100.0, 25.0, 3 * HOUR);
         readings.extend(burning(WindowId::Weekly, 0.0, 0.0, 100 * HOUR));
         on_plan("pro", readings)
     }
 
-    /// Codex `plus`: the covered weekly allowance is spent until 50 h; the session window, at
-    /// 30% and refilling in 2 h, is not covered on this plan.
     fn codex_plus_weekly_spent() -> Vec<Reading> {
         let mut readings = burning(WindowId::Weekly, 100.0, 2.0, 50 * HOUR);
         readings.extend(burning(WindowId::Session, 30.0, 10.0, 2 * HOUR));
         on_plan("plus", readings)
     }
 
-    /// The weekly window read at 0% on its fixed boundary and the weekly grant's count at 0.
     fn spent_weekly(at: u64) -> Vec<Reading> {
         vec![claude_at(WindowId::Weekly, at, 0.0, Some(NOW + 72 * HOUR))]
     }

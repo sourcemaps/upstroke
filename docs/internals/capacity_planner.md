@@ -528,15 +528,17 @@ timeouts for a holder that never replies, and run-specific policy.
 All are synthetic (`Source::Fixture` or the planner fixtures above) and timed from `NOW`, with
 `MIN` = 60 s, a freshness bound of one hour and requests `ALPHA` and `BETA`.
 
-| Fixture | Windows |
+| Fixture | Evidence |
 |---|---|
 | `claude_session_exhausted()` | session 100% (25%/h, refills in 2 h); weekly 30% (1%/h, 72 h) |
 | `exhausted_weekly()` (above) | weekly 100% (2%/h, 72 h); session 10% (10%/h, 4 h) |
-| `claude_fable_exhausted()` | Fable model 100% (10%/h, 50 h); session 20% (3 h); weekly 40% (72 h) |
-| `crossed(with_fable)` | weekly 100% (72 h) and session 100% (2 h), and Fable 100% (30 h) when asked |
-| `codex_covered_allowances()` | Codex plan `plus` covers weekly only; `pro` covers session and weekly |
-| `codex_pro_session_spent()` | `pro`: session 100% (3 h), weekly 0% (full, 100 h) |
-| `codex_plus_weekly_spent()` | `plus`: weekly 100% (2%/h, 50 h), session 30% (2 h, uncovered) |
+| `claude_fable_exhausted()` | Fable model 100% (10%/h, 50 h); session 20% (10%/h, 3 h); weekly 40% (1%/h, 72 h) |
+| `crossed(with_fable)` | weekly 100% (2%/h, 72 h) and session 100% (25%/h, 2 h), and Fable 100% (5%/h, 30 h) when asked |
+| `codex_covered_allowances()` | the windows a Codex banked reset covers, per plan: `plus` covers weekly only; `pro` covers session and weekly. Synthetic, since no Codex reader exists |
+| `codex_pro_session_spent()` | `pro`: covered session 100% (25%/h, 3 h); covered weekly 0% (full, 100 h) |
+| `codex_plus_weekly_spent()` | `plus`: covered weekly 100% (2%/h, 50 h); session 30% (10%/h, 2 h), not covered on this plan |
+| `spent_weekly(at)` | the weekly window alone, read at `at` under `max` at 0% on its fixed boundary (`NOW + 72 h`) |
+| `weekly_count(at, resets_left)` | an inventory read at `at` listing the weekly grant (use-by `NOW + 240 h`) with `resets_left` resets; beside `spent_weekly`, a count of 0 is the spent grant |
 
 | Scene | What the tests pin |
 |---|---|
