@@ -1841,7 +1841,8 @@ funnel = []
 # module that speaks HTTP out of reach of every module that states no allowance
 # (DESIGN.md §4 invariant 2). `refresh` starts `curl` through the Runner for each
 # pool that names a provider and reaches `publish` without leaving its file;
-# `publish` creates the report directory, stages a file and renames it.
+# `publish` creates the report directory, stages a file and renames it, and
+# removes the staged file when the write or the rename fails.
 effectful = [
     "publish",
     "refresh",

@@ -802,16 +802,19 @@ module that asks a provider usage endpoint over HTTPS, and it is not the engine:
 `run` and `resume` never call it (DESIGN.md §4.2). \
 WHAT IT NEEDS THE ALLOWANCE FOR, measured by denying the lint and counting the \
 errors on the library target: `clippy::disallowed_methods`, 5 production sites. \
-Four are in `publish` -- `std::fs::create_dir_all` 1 (the report directory), \
-`std::fs::write` 1 (the staged report), `std::fs::rename` 1 (publication) and \
-`std::fs::remove_file` 1 (the staged file, when the rename fails) -- and the \
-fifth is `refresh` calling `publish`, which is denied by path like any other \
-effectful wrapper (`clippy.toml`). The test region adds 23 more: \
-`std::fs::create_dir_all` 6 and `std::fs::write` 6, which build the pools files, \
-the sequential run directories and the owner records its fixtures read (the \
-schema-4 run they fold is written through the event funnel, by a fixture of \
-`capacity`'s), and 11 calls of the module's own two denied entry points, \
-`refresh` 7 and `publish` 4. \
+Four are the report's own effects -- `std::fs::write` 1 (the staged report, in \
+`publish`'s writer) and, in the private `publish_with` it hands that writer to, \
+`std::fs::create_dir_all` 1 (the report directory), `std::fs::rename` 1 \
+(publication) and `std::fs::remove_file` 1 (the staged file, when the write or \
+the rename fails; a write that failed before creating it leaves nothing, and \
+that `NotFound` is no failure) -- and the fifth is `refresh` calling `publish`, \
+which is denied by path like any other effectful wrapper (`clippy.toml`). The \
+test region adds 37 more, counted the same way with `--all-targets` (42 in all, \
+on master `0161b067`): `std::fs::create_dir_all` 7 and `std::fs::write` 10, \
+which build the pools files, the sequential run directories and the owner \
+records its fixtures read (the schema-4 run they fold is written through the \
+event funnel, by a fixture of `capacity`'s), and 20 calls of the module's own \
+two denied entry points, `refresh` 15 and `publish` 5. \
 `clippy::disallowed_types` and `clippy::disallowed_macros` are FORBIDDEN in this \
 file rather than left to `-D warnings`: it names no `std::process::Command` and \
 prints nothing. \
