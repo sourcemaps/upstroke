@@ -54,6 +54,18 @@ Saying it of the second is false — the same build resolves one the moment
 the switch is unset — so with the switch off the line names the
 configuration that turned the reviewer off instead.
 
+The switch turns off the *alternative* only. A `[[routing.overrides]]`
+entry's `second_opinion` is an explicit demand the switch leaves alone
+(`cross_family_off_leaves_an_explicit_second_opinion_alone`): those passes
+stay in the plan, the task rows show them, and creation still requires
+their agent. So when the switch is off and the plan demands at least one
+second opinion, "cross-family review is turned off" alone would contradict
+the rows beneath it; the line says instead that the switch turned off the
+alternative, and that the second opinions still run on the agents it names
+(each distinct binding once) and still need them installed. With the switch
+off and no second opinion demanded, the line is the plain sentence above,
+unchanged.
+
 ## `pub(super) fn capacity_echo(`
 
 §13's capacity block, for a command that executes nothing.

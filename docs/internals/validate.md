@@ -483,6 +483,17 @@ reviewer exists in this build" would be false here: the line names the
 configuration that turned the reviewer off, and nothing in the preview
 names Astra 6.
 
+## `fn the_preview_says_cross_family_false_leaves_a_demanded_second_opinion_running() {`
+
+The same profile with the switch off, plus one override that demands a
+second opinion on the task's paths. The switch does not remove that pass:
+the row still shows Astra 6 as the second opinion, and creation still
+requires Codex. So the review line must not say "cross-family review is
+turned off" on its own — it names both facts, the alternative turned off by
+the switch and the explicit second opinion still running on
+codex/gpt-6-astra and still needing it installed. Exact line, because the
+contradiction this replaces was a single sentence.
+
 ## `fn the_preview_of_the_opus_5_5_profile_is_unchanged_with_the_switch_unset() {`
 
 And the switch costs the unset profile nothing: its review line is the
@@ -495,6 +506,13 @@ Driven on a plan rather than a config because no configuration in this
 build reaches the other `None` — every tier in the catalog carries at
 least two families, each behind an adapter this build ships — yet the
 text for it has to survive the day a tier stops having a partner.
+
+## `fn the_review_echo_names_each_demanded_second_opinion_once_with_the_switch_off() {`
+
+Also driven on a plan: every second opinion resolves to the one partner of
+the primary's family at the review tier, so no configuration reaches two
+different bindings. The line still names each distinct binding once, in
+plan order, and counts every task that demands one.
 
 ## `assert!(`
 
