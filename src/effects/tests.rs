@@ -129,6 +129,20 @@ pub(in crate::effects) fn crate_roots_of(
         )));
     }
     let relative = CrateRoots::from_metadata_json(metadata, Path::new("Cargo.toml"))?;
+    let omitted: Vec<String> = discoverable_roots(manifest_dir, &source)
+        .map_err(refuse)?
+        .into_iter()
+        .filter(|path| !relative.is_root(Path::new(path)))
+        .map(|path| format!("`{path}`"))
+        .collect();
+    if !omitted.is_empty() {
+        return Err(refuse(format!(
+            "stale pre-test target metadata; Cargo discovers {} by convention and the \
+             snapshot omits it; run python3 .github/scripts/test-categories.py \
+             refresh-targets before testing",
+            omitted.join(", ")
+        )));
+    }
     let targets: Vec<_> = relative
         .roots()
         .map(|path| serde_json::json!({"src_path": manifest_dir.join(path)}))
@@ -137,6 +151,116 @@ pub(in crate::effects) fn crate_roots_of(
         "packages": [{"manifest_path": manifest, "targets": targets}]
     });
     CrateRoots::from_metadata_json(&relocated.to_string(), &manifest)
+}
+
+fn discoverable_roots(manifest_dir: &Path, manifest: &str) -> Result<BTreeSet<String>, String> {
+    let document: toml::Table = toml::from_str(manifest)
+        .map_err(|error| format!("the manifest is not a TOML table: {error}"))?;
+    let package = document
+        .get("package")
+        .and_then(toml::Value::as_table)
+        .ok_or("the manifest has no `[package]` table")?;
+    let name = package
+        .get("name")
+        .and_then(toml::Value::as_str)
+        .ok_or("the manifest's `[package]` has no name")?;
+    let setting = |key: &str| package.get(key).and_then(toml::Value::as_bool);
+    let exists = |relative: &str| manifest_dir.join(relative).exists();
+    let edition_2015 = package
+        .get("edition")
+        .is_none_or(|edition| edition.as_str() == Some("2015"));
+    let mut found = BTreeSet::new();
+
+    let lib = document.get("lib").and_then(toml::Value::as_table);
+    let lib_inferred = match lib {
+        Some(lib) => !lib.contains_key("path"),
+        None => setting("autolib") != Some(false),
+    };
+    if lib_inferred && exists("src/lib.rs") {
+        found.insert("src/lib.rs".to_owned());
+    }
+
+    let mut bins = Vec::new();
+    if exists("src/main.rs") {
+        bins.push((name.to_owned(), "src/main.rs".to_owned()));
+    }
+    bins.extend(conventional_entries(manifest_dir, "src/bin"));
+    for (key, switch, inferred) in [
+        ("bin", "autobins", bins),
+        (
+            "example",
+            "autoexamples",
+            conventional_entries(manifest_dir, "examples"),
+        ),
+        (
+            "test",
+            "autotests",
+            conventional_entries(manifest_dir, "tests"),
+        ),
+        (
+            "bench",
+            "autobenches",
+            conventional_entries(manifest_dir, "benches"),
+        ),
+    ] {
+        let declared = document.get(key).and_then(toml::Value::as_array);
+        let discovers = match declared {
+            None => setting(switch) != Some(false),
+            Some(_) => setting(switch).unwrap_or(!edition_2015),
+        };
+        if !discovers {
+            continue;
+        }
+        let declared: Vec<&toml::Table> = declared
+            .into_iter()
+            .flatten()
+            .filter_map(toml::Value::as_table)
+            .collect();
+        for (target, path) in inferred {
+            let claimed = declared.iter().any(|table| {
+                table.get("name").and_then(toml::Value::as_str) == Some(target.as_str())
+                    || table
+                        .get("path")
+                        .and_then(toml::Value::as_str)
+                        .is_some_and(|named| manifest_dir.join(named) == manifest_dir.join(&path))
+            });
+            if !claimed {
+                found.insert(path);
+            }
+        }
+    }
+
+    let build_script = match package.get("build") {
+        None => manifest_dir.join("build.rs").is_file(),
+        Some(build) => build.as_bool() == Some(true),
+    };
+    if build_script {
+        found.insert("build.rs".to_owned());
+    }
+    Ok(found)
+}
+
+fn conventional_entries(manifest_dir: &Path, directory: &str) -> Vec<(String, String)> {
+    let Ok(entries) = fs::read_dir(manifest_dir.join(directory)) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let file = entry
+                .file_name()
+                .into_string()
+                .ok()
+                .filter(|file| !file.starts_with('.'))?;
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                let main = format!("{directory}/{file}/main.rs");
+                manifest_dir.join(&main).exists().then_some((file, main))
+            } else {
+                let stem = file.strip_suffix(".rs")?.to_owned();
+                Some((stem, format!("{directory}/{file}")))
+            }
+        })
+        .collect()
 }
 
 fn scanned_sources() -> Vec<(String, String)> {
@@ -6953,6 +7077,74 @@ fn the_category_check_refuses_stale_matrices_and_generation_preserves_workflow_b
 #[test]
 fn the_category_inventory_counts_shared_names_in_distinct_harnesses() {
     let directory = category_fixture();
+    count_shared_names_in(directory.path());
+}
+
+#[test]
+fn the_shared_name_fixture_accepts_a_correctly_refreshed_target_snapshot() {
+    let directory = category_fixture();
+    let example = directory.path().join("examples/another.rs");
+    fs::create_dir_all(example.parent().expect("the examples directory"))
+        .expect("create the fixture's examples directory");
+    fs::write(&example, "fn main() {}\n").expect("add an automatically discovered example");
+    let output = std::process::Command::new(if cfg!(windows) { "python" } else { "python3" })
+        .args([
+            "-c",
+            r#"
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+script = sys.argv[1]
+spec = importlib.util.spec_from_file_location("categories", script)
+tool = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tool)
+
+def refuse_subprocess(*args, **kwargs):
+    raise AssertionError("the fixture must not start Cargo")
+
+def recorded(name):
+    snapshot = json.loads(tool.target_constant(
+        tool.TARGET_SOURCE.read_text(encoding="utf-8"), name).group(1))
+    return [target["src_path"] for target in snapshot["packages"][0]["targets"]]
+
+discovered = recorded("REPOSITORY_TARGET_METADATA") + ["examples/another.rs"]
+custom = recorded("CUSTOM_TARGET_METADATA")
+
+def checked(command):
+    assert command[:7] == ["fixture-cargo", "metadata", "--format-version", "1", "--no-deps",
+                           "--offline", "--manifest-path"], command
+    manifest = Path(command[7])
+    paths = discovered if manifest == tool.ROOT / "Cargo.toml" else custom
+    return json.dumps(dict(packages=[dict(manifest_path=str(manifest), targets=[
+        dict(src_path=str(manifest.parent / path)) for path in paths])]))
+
+subprocess.Popen = refuse_subprocess
+tool.cargo = lambda: ["fixture-cargo"]
+tool.checked = checked
+sys.argv = [script, "refresh-targets"]
+tool.main()
+assert "examples/another.rs" in recorded("REPOSITORY_TARGET_METADATA")
+tool.sync_target_metadata()
+"#,
+        ])
+        .arg(directory.path().join(".github/scripts/test-categories.py"))
+        .env_remove("RUSTC_BOOTSTRAP")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .expect("refresh the copied snapshot from Cargo's answer without starting Cargo");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    count_shared_names_in(directory.path());
+}
+
+fn count_shared_names_in(directory: &Path) {
     let shared = r#"
 mod util {
     #[test]
@@ -6971,9 +7163,8 @@ mod util {
         ("binary", "bin", binary.as_str()),
         ("empty_example", "bin", ""),
     ] {
-        let source = directory.path().join(format!("{name}.rs"));
+        let source = directory.join(format!("{name}.rs"));
         let harness = directory
-            .path()
             .join(name)
             .with_extension(std::env::consts::EXE_EXTENSION);
         fs::write(&source, body).expect("write inert target source");
@@ -7014,8 +7205,17 @@ artifacts.append(dict(reason="build-finished", success=True))
 native_checked = tool.checked
 builds = []
 metadata_calls = []
-repository_targets = ["examples/probe.rs", "src/lib.rs", "src/main.rs"]
-custom_targets = ["src/deep/nest/main.rs", "src/lib.rs", "src/tools/odd.rs"]
+
+def recorded(name):
+    snapshot = json.loads(tool.target_constant(
+        tool.TARGET_SOURCE.read_text(encoding="utf-8"), name).group(1))
+    return [target["src_path"] for target in snapshot["packages"][0]["targets"]]
+
+# Cargo's metadata answer is the snapshot this fixture copied, so a correctly
+# refreshed inventory stays current here.
+repository_targets = recorded("REPOSITORY_TARGET_METADATA")
+custom_targets = recorded("CUSTOM_TARGET_METADATA")
+assert {"src/lib.rs", "src/main.rs"} <= set(repository_targets), repository_targets
 
 def checked(command):
     if command[0] == "fixture-cargo":
@@ -7080,7 +7280,7 @@ else:
     raise AssertionError("stale custom-target fixture metadata was accepted")
 "#,
         ])
-        .arg(directory.path().join(".github/scripts/test-categories.py"))
+        .arg(directory.join(".github/scripts/test-categories.py"))
         .args(&harnesses)
         .env_remove("RUSTC_BOOTSTRAP")
         .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -9845,6 +10045,127 @@ fn the_crate_roots_come_from_the_manifest_and_an_arbitrary_bin_path_is_one() {
         ],
         "this package's exact target inventory"
     );
+}
+
+#[test]
+fn the_crate_root_snapshot_refuses_a_target_cargo_discovers_and_it_omits() {
+    use sha2::{Digest, Sha256};
+
+    fn put(root: &Path, relative: &str) {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().expect("a fixture file's parent"))
+            .expect("create the fixture file's parents");
+        fs::write(path, "fn main() {}\n").expect("write a fixture file");
+    }
+    fn snapshot(manifest: &str, targets: &[&str]) -> String {
+        let targets: Vec<_> = targets
+            .iter()
+            .map(|path| serde_json::json!({"src_path": path}))
+            .collect();
+        serde_json::json!({
+            "manifest_sha256": format!("{:x}", Sha256::digest(manifest)),
+            "packages": [{"manifest_path": "Cargo.toml", "targets": targets}],
+        })
+        .to_string()
+    }
+    fn roots_of(scratch: &Path, metadata: &str) -> Result<Vec<PathBuf>, String> {
+        crate_roots_of(scratch, metadata)
+            .map(|roots| roots.roots().map(Path::to_path_buf).collect())
+            .map_err(|refusal| {
+                assert!(
+                    matches!(refusal, InventoryRefusal::Unreadable { .. }),
+                    "{refusal:?}"
+                );
+                refusal.to_string()
+            })
+    }
+
+    let tree = scratch_dir("discovered-targets");
+    let scratch = tree.path();
+    let manifest = scratch.join("Cargo.toml");
+    fs::copy(repo_root().join("Cargo.toml"), &manifest).expect("copy this package's manifest");
+    let recorded = ["examples/probe.rs", "src/lib.rs", "src/main.rs"];
+    for root in recorded {
+        put(scratch, root);
+    }
+    let current: Vec<PathBuf> = recorded.iter().map(|root| scratch.join(root)).collect();
+    assert_eq!(
+        roots_of(scratch, REPOSITORY_TARGET_METADATA),
+        Ok(current.clone()),
+        "the snapshot names every target this package's files give Cargo"
+    );
+
+    put(scratch, "examples/inventory_smoke.rs");
+    let refusal = roots_of(scratch, REPOSITORY_TARGET_METADATA)
+        .expect_err("an example Cargo discovers and the snapshot omits");
+    assert!(
+        refusal.contains("`examples/inventory_smoke.rs`") && refusal.contains("refresh-targets"),
+        "the refusal names the omitted target and the refresh: {refusal}"
+    );
+    fs::remove_file(scratch.join("examples/inventory_smoke.rs")).expect("remove the example");
+
+    for discovered in [
+        "src/bin/tool.rs",
+        "src/bin/suite/main.rs",
+        "examples/walk/main.rs",
+        "tests/smoke.rs",
+        "tests/suite/main.rs",
+        "benches/speed.rs",
+        "benches/group/main.rs",
+        "build.rs",
+    ] {
+        put(scratch, discovered);
+        let refusal = roots_of(scratch, REPOSITORY_TARGET_METADATA).expect_err(discovered);
+        assert!(refusal.contains(&format!("`{discovered}`")), "{refusal}");
+        fs::remove_file(scratch.join(discovered)).expect("remove the discovered target");
+    }
+    for ignored in [
+        "examples/.hidden.rs",
+        "examples/notes.md",
+        "examples/walk/helper.rs",
+        "src/bin/suite/helper.rs",
+        "tests/fixtures/data.rs",
+        "benches/group/mod.rs",
+        "src/tools/stray.rs",
+    ] {
+        put(scratch, ignored);
+        assert_eq!(
+            roots_of(scratch, REPOSITORY_TARGET_METADATA),
+            Ok(current.clone()),
+            "Cargo discovers no target from `{ignored}`"
+        );
+    }
+
+    put(scratch, "examples/inventory_smoke.rs");
+    let package = "[package]\nname = \"fixture\"\nversion = \"0.0.0\"\n";
+    let probe = "\n[[example]]\nname = \"probe\"\n";
+    let claims = "\n[[example]]\nname = \"inventory_smoke\"\npath = \"examples/probe.rs\"\n";
+    let all = &recorded[..];
+    let without_examples = &["src/lib.rs", "src/main.rs"][..];
+    for (text, targets, accepted) in [
+        (format!("{package}edition = \"2021\"\n"), all, false),
+        (
+            format!("{package}edition = \"2021\"\nautoexamples = false\n"),
+            without_examples,
+            true,
+        ),
+        (format!("{package}edition = \"2021\"\n{probe}"), all, false),
+        (format!("{package}{probe}"), all, true),
+        (format!("{package}edition = \"2021\"\n{claims}"), all, true),
+    ] {
+        fs::write(&manifest, &text).expect("write a fixture manifest");
+        let answer = roots_of(scratch, &snapshot(&text, targets));
+        if accepted {
+            let expected: Vec<PathBuf> = targets.iter().map(|root| scratch.join(root)).collect();
+            assert_eq!(answer, Ok(expected), "{text}");
+        } else {
+            let refusal = answer.expect_err(&text);
+            assert!(
+                refusal.contains("`examples/inventory_smoke.rs`"),
+                "{text}: {refusal}"
+            );
+        }
+    }
 }
 
 #[test]

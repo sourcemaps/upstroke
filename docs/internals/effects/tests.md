@@ -79,8 +79,12 @@ standalone category check. Review the two updated metadata constants with the
 manifest change. The refresh rewrites only a stale constant's interior, in the
 line ending that follows it; every other byte, including CRLF endings, stays. `generate`, `contract` and `prove --harness` remain Cargo-free.
 The snapshot is checked in so ordinary local tests need no preparatory command
-or environment variable. Its manifest fingerprint is checked on every acquisition;
-the standalone inventory supplies the independent Cargo comparison.
+or environment variable. Every acquisition checks its manifest fingerprint and
+refuses it when a file Cargo would discover by convention is not among its
+targets. An automatically discovered target added without a refresh leaves the
+manifest's bytes alone, so that second check is what fails the local census for
+it, still without starting Cargo. The standalone inventory supplies the
+independent Cargo comparison.
 
 ### Panics
 
@@ -105,10 +109,46 @@ does with an arbitrary `[[bin]] path` — and an arbitrary `[[bin]] path` is
 the whole of what the stem rule got wrong.
 
 Missing or unreadable manifests, malformed metadata, absent fingerprints and
-stale fingerprints are refusals. Missing packages, missing target paths and empty
-target sets retain the existing parser's refusals. Acquisition never falls back
-to Cargo or to a rule about filenames. The standalone checker uses its existing
+stale fingerprints are refusals. So is a snapshot that omits any path
+[`discoverable_roots`] reports for the files under `manifest_dir`. The refusal
+names each omitted path and the refresh command. Missing packages, missing target
+paths and empty target sets retain the existing parser's refusals. Acquisition
+never falls back to Cargo, and the roots it returns are never inferred from
+filenames. Cargo's discovery conventions can only refuse a snapshot; they never
+add a root to one. The standalone checker uses its existing
 Cargo wrapper selection with `metadata --format-version 1 --no-deps --offline`.
+
+## `fn discoverable_roots(manifest_dir: &Path, manifest: &str) -> Result<BTreeSet<String>, String> {`
+
+The package-relative paths of the targets Cargo adds from files under
+`manifest_dir` without the manifest naming their paths. Cargo's target inference
+is mirrored here, read from the manifest's own text:
+
+* `src/lib.rs` when it exists, if a `[lib]` table names no path or, with no
+  `[lib]` table, `autolib` is not `false`;
+* `src/main.rs` and the [`conventional_entries`] of `src/bin`, `examples`,
+  `tests` and `benches`, under `autobins`, `autoexamples`, `autotests` and
+  `autobenches`. A kind with no declared targets is discovered unless its key is
+  `false`. A kind with declared targets is discovered when its key says so, and
+  otherwise outside edition 2015, the default when `edition` is absent. An
+  inferred target is dropped when a declared target of its kind shares its name
+  or its path, as Cargo drops it;
+* `build.rs` when `build` is absent and it is a file, or when `build = true`.
+
+Explicit paths are left out on purpose. The manifest fingerprint already pins
+them, and the snapshot may list them without this function knowing about them.
+That is why the comparison in [`crate_roots_of`] runs one way only, from what is
+discovered to what is recorded. A manifest without a TOML `[package]` table or
+package name is an error string, which acquisition turns into a refusal.
+
+## `fn conventional_entries(manifest_dir: &Path, directory: &str) -> Vec<(String, String)> {`
+
+Cargo's `infer_from_directory` for one directory: each entry whose name is UTF-8
+and does not start with `.` is either a `.rs` file named by its stem or a
+directory, named by itself, holding a `main.rs`. Anything else is not a target.
+The entry's own file type is read, without following a link, as Cargo reads it.
+A directory that cannot be read contributes nothing, so an absent `tests/` is no
+target rather than an error.
 
 ## `fn scanned_sources() -> Vec<(String, String)> {`
 
@@ -1124,10 +1164,11 @@ refusal of expansion outside a function body;
 `every_macro_invocation_where_a_governed_lint_is_not_forbidden_is_inside_a_function_body`
 is the census for the positions it does not reach.
 
-The domain is every target root `cargo metadata` reports, so a new bin,
-example or test target is read without being named; the three written
-out are asserted as roots so that a metadata reading that lost one cannot
-pass by reading fewer.
+The domain is every target root the checked-in `cargo metadata` snapshot
+records. Acquisition refuses that snapshot when a file Cargo discovers by
+convention is missing from it, so a new bin, example or test target is read
+without being named, or the census stops; the three written out are asserted
+as roots so that a metadata reading that lost one cannot pass by reading fewer.
 
 ## `fn every_crate_root_forbids_non_local_definitions() {` › `for (source, forbidden) in [`
 
@@ -3163,6 +3204,31 @@ the standalone `check --explain` entry point over these artifacts and its copied
 workflow, exercising synchronization, collection, ownership, remainder and reporting
 together without altering the caller's checkout.
 
+The body is [`count_shared_names_in`], which this test runs on a fresh copy of
+the tree.
+
+## `fn the_shared_name_fixture_accepts_a_correctly_refreshed_target_snapshot() {`
+
+`PR439-TARGET-FIXTURE-PINS-LIVE-PATHS`. Add `examples/another.rs` to a fresh
+category fixture, then run the copied tool's real `refresh-targets` with Cargo's
+metadata answer stubbed as the recorded targets plus that example. Python's
+subprocess constructor is refused. The copied snapshot must now record the
+example and pass a following check, and [`count_shared_names_in`] must then pass
+over it. Before the repair, that fixture's Cargo stub still returned the three
+targets it was written with. `check --explain` then reported stale
+`REPOSITORY_TARGET_METADATA`, so a correctly refreshed repository failed an
+unrelated test.
+
+## `fn count_shared_names_in(directory: &Path) {`
+
+The shared-name fixture over the category tree copied into `directory`, as
+described under its test above. Its stubbed `cargo metadata` answers both
+manifests with the targets recorded in the copied `src/effects/tests.rs`. This
+keeps the answer current whenever the repository's snapshot is, and the fixture
+still checks that the snapshot includes `src/lib.rs` and `src/main.rs`. Staleness
+is still exercised: the stub then adds an arbitrary repository target, and later
+a custom one. Each must be refused until it is refreshed.
+
 ## `fn the_category_generator_and_workflow_use_the_rust_registry() {`
 
 Read the tool's `contract` JSON and compare its parsed registry to the
@@ -4522,6 +4588,9 @@ unavailable manifests and absent, malformed or stale metadata, and accepts CRLF
 checkouts of the same manifest. The category inventory's controlled Cargo fixture
 proves that newly discovered arbitrary repository targets and changed custom
 targets are rejected until refreshed, without starting Cargo inside a test.
+`the_crate_root_snapshot_refuses_a_target_cargo_discovers_and_it_omits` proves
+that acquisition itself refuses a snapshot that omits a conventionally discovered
+target, which is what the local census needs.
 
 ## `fn the_crate_roots_come_from_the_manifest_and_an_arbitrary_bin_path_is_one() {` › `fn by_stem(file: &Path) -> PathBuf {`
 
@@ -4569,6 +4638,29 @@ against it.
 And the real package's inventory is the one the census resolves against,
 read through the same reader.
 
+## `fn the_crate_root_snapshot_refuses_a_target_cargo_discovers_and_it_omits() {`
+
+`PR439-CRATE-ROOT-SNAPSHOT-OMITS-TARGET`. The setup copies this package's
+`Cargo.toml` into a scratch tree beside `src/lib.rs`, `src/main.rs` and
+`examples/probe.rs`. The checked-in `REPOSITORY_TARGET_METADATA` must then read
+as exactly those three roots.
+
+* **The reviewer's case.** Adding `examples/inventory_smoke.rs` containing only
+  `fn main() {}` leaves the manifest's bytes and fingerprint unchanged, and must
+  be refused with a message naming that path and `refresh-targets`. Before the
+  repair it was accepted, and `every_crate_root_forbids_non_local_definitions`
+  and the exact-inventory test passed against the three-target snapshot.
+* **Each other convention.** A bin file or directory under `src/bin`, an example
+  directory, a test or bench file or directory, and `build.rs` are each refused
+  on their own.
+* **Files Cargo does not discover.** A dotfile, a non-Rust file, a directory
+  without `main.rs` and a file outside the conventional directories are accepted.
+* **Manifest switches, against fixture manifests and matching snapshots.**
+  `autoexamples = false` admits the example. So does a declared `[[example]]`
+  under the 2015 default, but not under edition 2021. A declared example that
+  claims the inferred one by name, and `examples/probe.rs` by path, admits both.
+
+Every refusal must be `Unreadable`, and Cargo is never started.
 ## `fn the_file_level_lint_reader_is_a_census_instrument_and_not_a_shipped_api() {`
 
 The file-module-level lint reader is a **census instrument**, not a shipped
