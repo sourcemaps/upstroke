@@ -157,6 +157,13 @@ weekly clock does not establish Claude's five-hour scheduling. In the simulation
 window loses its old refill and gains no new one: if it exhausts again, nothing refills it within
 the comparison. That undervalues such a redemption rather than inventing a refill.
 
+That lower bound can show a redemption is worth making, never that it is not. When the comparison
+finds no benefit, `decide` runs it once more under the best schedule (`Assumption::BestSchedule`):
+each restored window whose schedule must be re-read, including a window of unknown effect, which is
+then assumed restored, never limits work again, as if its new schedule refilled it whenever it ran
+out. A benefit there makes the grant `Unknown(Schedule)`; only a redemption that gains nothing even
+then is `LetExpire(NoUnlock)`.
+
 ## `const fn natural_clock(provider: Provider, window: WindowId) -> Clock {`
 
 This is what a window does after the refill its reading reported. Claude's weekly window refills
@@ -191,10 +198,12 @@ from any unknown. Demand for an account that is not listed is not planned.
 
 Checks are applied in this order, and the first that settles the grant decides it:
 
-1. A grant past its `ends_at_unix`, with `resets_left == Some(0)`, or `Availability::NotUsable` is
-   `LetExpire(NotRedeemable)`, whatever the forecast.
-2. `Availability::Unknown`, or a usable grant without a known positive count or end, is
-   `Unknown(Availability)`.
+1. A grant past its `ends_at_unix` or with `resets_left == Some(0)` is `LetExpire(NotRedeemable)`,
+   whatever the forecast.
+2. `Availability::NotUsable` or `Availability::Unknown`, or a usable grant without a known positive
+   count or end, is `Unknown(Availability)`. Not usable now is not evidence that the grant stays
+   unusable until its end: the reader folds states that can change before then, such as
+   `usable_now: false`, into `NotUsable`, and the same count may become usable a second later.
 3. An account with no runnable demand is `LetExpire(NoUnlock)`, since a redemption can unlock
    nothing.
 4. Any of the account's windows unknown is `Unknown(Window(id, reason))`, because any window may be
@@ -214,7 +223,9 @@ moment. The simulation ends when the queue completes or when every exhausted win
 item draws on has nothing left to refill it; the work left over is then incomplete. It never
 stops at the grant's expiry. Expiry is the last moment a redemption may happen, not a deadline for
 spending what it restored, so work that runs after expiry on restored allowance counts in full.
-`MAX_STEPS` bounds the work; a scenario that exceeds it is `Unknown(Bound)`.
+`MAX_STEPS` bounds the work: every step of the simulation and every refill it passes count against
+one budget, so a fixed weekly clock recurring through one long wait is bounded as well. A scenario
+that exceeds it is `Unknown(Bound)`.
 
 ## `impl Scenario` › `fn choose(&self, assumption: Assumption) -> Result<Option<f64>, TooLong> {`
 
@@ -233,8 +244,9 @@ every higher level ties, so useful high-priority work outweighs any amount of lo
 ## Tie behavior
 
 - Within the comparison, differences under one second per item are ties.
-- A redemption that ties the baseline is not chosen: the grant is `LetExpire(NoUnlock)`. A grant is
-  never redeemed for quota that unlocks no work.
+- A redemption that ties the baseline is not chosen: the grant is `LetExpire(NoUnlock)`, or
+  `Unknown(Schedule)` where the best schedule for a restarted window would still beat the baseline
+  (above). A grant is never redeemed for quota that unlocks no work.
 - Among candidate times that tie, the **latest** is chosen. A grant stays banked as long as banking
   it costs no useful work, so `Redeem` means that now is strictly better than every later
   candidate. `Defer` means waiting loses nothing, or gains something. A deferral to the grant's last
@@ -255,7 +267,11 @@ An unknown is never filled with a guess:
 - Unknown inventory (`Grants::Unknown`) is distinct from known-empty inventory
   (`Grants::KnownEmpty`).
 - An unknown window, availability or demand leaves the grant `Decision::Unknown` with the specific
-  reason; no balance, rate, date or spendable grant is invented.
+  reason; no balance, rate, date or spendable grant is invented. A grant not usable now has unknown
+  availability; it is not taken to expire unusable.
+- The schedule a restarted window gets after a redemption is unknown. Its lower bound (no refill)
+  may choose a redemption; a no-benefit answer stands only when the best schedule gains nothing
+  either, and is `Unknown(Schedule)` otherwise.
 - Where the grant has an `Effect::Unknown` on any of the account's windows (by rule, or because the
   account's plan is missing from its `Account::coverage`), the comparison runs twice. The cautious bound assumes the unknown windows are not restored; the hopeful bound assumes
   they are fully restored with their schedule kept. The decision stands only when both bounds agree,
@@ -278,7 +294,8 @@ Each of these can change a decision:
    five-hour window at its next use. Weekly Claude windows refill every seven days from the
    reported reset. Nothing is assumed of model or Codex windows after their reported refill.
 5. **A schedule that must be re-read gains no refill** within the comparison (above). That is a
-   lower bound on such a redemption's worth.
+   lower bound on such a redemption's worth. It may choose a redemption; a `LetExpire(NoUnlock)`
+   stands only if the best schedule gains nothing either.
 6. **One redemption per grant.** A grant with `resets_left > 1` is planned for its next redemption
    only. A later one is planned after the re-read.
 7. **Readings are the account's whole state.** The planner does not know what a provider has not
@@ -312,6 +329,9 @@ Worked examples the tests pin:
 | session grant, alpha (p10, 2 h) before beta (p1, 10 h); then the priorities swapped | `Redeem`; then `Defer` to `NOW + 10 h` |
 | weekly exhausted, refilling in 1 h, 3 h job: Claude (kept clock) vs a Codex fixture (restart) | `Redeem` vs `Defer` to `NOW + 3 h` |
 | several usable grants on one exhausted account | `Redeem` for the earliest-ending one; `Unknown(AwaitsReRead)` for the rest |
+| session at 100% (25%/h) until 3 h, session grant ending in 30 min: 6 h job; 3 h job; and a session at 10% (10%/h) with a 2 h job | `Unknown(Schedule)`: with no refill after the restart the job stays incomplete, while a refill the new schedule may bring beats the baseline's 10 h; `Redeem`; `LetExpire(NoUnlock)`, since even the best schedule gains nothing |
+| `exhausted_weekly`, weekly grant, 4 h job: inventory read `NotUsable` at `NOW - 1`, then `Usable` at `NOW` | `Unknown(Availability)`, then `Redeem` |
+| session at 100% refilling `MAX_STEPS + 1` weeks out, weekly at 30% (72 h) recurring, weekly grant, 1 h job; then refilling 2 weeks out | `Unknown(Bound)`: the weekly refills passed in the one wait exceed `MAX_STEPS`; `LetExpire(NoUnlock)` |
 
 ## `pub struct Ledger {`
 

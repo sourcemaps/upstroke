@@ -674,6 +674,7 @@ pub enum Undecided {
     Window(WindowId, WindowUnknown),
     Demand(DemandProblem),
     Effect,
+    Schedule,
     Bound,
     AwaitsReRead,
 }
@@ -854,8 +855,9 @@ fn decide(context: &Context<'_>, grant: &Grant) -> Decision {
         return Decision::LetExpire(ExpireReason::NotRedeemable);
     }
     match grant.availability {
-        Availability::NotUsable => return Decision::LetExpire(ExpireReason::NotRedeemable),
-        Availability::Unknown => return Decision::Unknown(Undecided::Availability),
+        Availability::NotUsable | Availability::Unknown => {
+            return Decision::Unknown(Undecided::Availability);
+        }
         Availability::Usable => {}
     }
     let (Some(ends_at_unix), Some(1..)) = (grant.ends_at_unix, grant.resets_left) else {
@@ -914,6 +916,16 @@ fn decide(context: &Context<'_>, grant: &Grant) -> Decision {
     } else {
         cautious
     };
+    let resolved = match resolved {
+        Ok(Decision::LetExpire(ExpireReason::NoUnlock)) => {
+            scenario.choose(Assumption::BestSchedule).map(|choice| {
+                choice.map_or(Decision::LetExpire(ExpireReason::NoUnlock), |_| {
+                    Decision::Unknown(Undecided::Schedule)
+                })
+            })
+        }
+        other => other,
+    };
     resolved.unwrap_or(Decision::Unknown(Undecided::Bound))
 }
 
@@ -935,6 +947,7 @@ fn decision(choice: Option<f64>, now_unix: u64) -> Decision {
 enum Assumption {
     NoRestore,
     FullRestore,
+    BestSchedule,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -991,11 +1004,17 @@ impl SimWindow {
         }
     }
 
-    fn refill_due(&mut self, clock: f64, events: &mut Vec<f64>) {
+    fn refill_due(
+        &mut self,
+        clock: f64,
+        events: &mut Vec<f64>,
+        budget: &mut usize,
+    ) -> Result<(), TooLong> {
         while let Some(refill) = self
             .refill
             .filter(|refill| *refill <= clock + TIME_EPSILON_SECS)
         {
+            *budget = budget.checked_sub(1).ok_or(TooLong)?;
             self.used = 0.0;
             events.push(refill);
             (self.refill, self.awaiting_use) = match self.clock {
@@ -1004,6 +1023,7 @@ impl SimWindow {
                 Clock::Unestablished => (None, false),
             };
         }
+        Ok(())
     }
 }
 
@@ -1014,18 +1034,22 @@ fn restore(provider: Provider, windows: &mut [SimWindow], redemption: &Redemptio
             Effect::Restores => true,
             Effect::RestoresBelowFull => window.used > 0.0,
             Effect::Unchanged => false,
-            Effect::Unknown => redemption.assumption == Assumption::FullRestore,
+            Effect::Unknown => redemption.assumption != Assumption::NoRestore,
         };
         if !restored {
             continue;
         }
         window.used = 0.0;
-        if rule != Effect::Unknown
-            && schedule_after_restore(provider, window.id) == Schedule::MustReRead
-        {
-            window.refill = None;
-            window.awaiting_use = false;
+        if schedule_after_restore(provider, window.id) == Schedule::Kept {
+            continue;
         }
+        if redemption.assumption == Assumption::BestSchedule {
+            window.rate = 0.0;
+        } else if rule == Effect::Unknown {
+            continue;
+        }
+        window.refill = None;
+        window.awaiting_use = false;
     }
 }
 
@@ -1092,9 +1116,11 @@ impl Scenario {
         let mut events = Vec::new();
         let mut clock = 0.0_f64;
         let mut current = 0_usize;
-        for _ in 0..MAX_STEPS {
+        let mut budget = MAX_STEPS;
+        loop {
+            budget = budget.checked_sub(1).ok_or(TooLong)?;
             for window in &mut windows {
-                window.refill_due(clock, &mut events);
+                window.refill_due(clock, &mut events, &mut budget)?;
             }
             if let Some(due) = pending.filter(|due| due.at <= clock + TIME_EPSILON_SECS) {
                 restore(self.provider, &mut windows, &due);
@@ -1165,7 +1191,6 @@ impl Scenario {
                 current += 1;
             }
         }
-        Err(TooLong)
     }
 
     fn score(&self, outcome: &Outcome) -> Vec<Level> {
@@ -2556,10 +2581,6 @@ mod tests {
 
     #[test]
     fn an_unredeemable_grant_is_left_to_expire_whatever_the_forecast() {
-        let not_usable = Grant {
-            availability: Availability::NotUsable,
-            ..usable(GrantKind::Weekly, 240 * HOUR)
-        };
         let expired = Grant {
             ends_at_unix: Some(NOW),
             ..usable(GrantKind::Weekly, 240 * HOUR)
@@ -2571,23 +2592,13 @@ mod tests {
         let scene = input(
             Provider::Claude,
             exhausted_weekly(),
-            vec![
-                not_usable,
-                expired,
-                spent,
-                usable(GrantKind::Weekly, 240 * HOUR),
-            ],
+            vec![expired, spent, usable(GrantKind::Weekly, 240 * HOUR)],
             &one_job(4.0),
         );
         let not_redeemable = Decision::LetExpire(ExpireReason::NotRedeemable);
         assert_eq!(
             decisions(&scene),
-            vec![
-                not_redeemable,
-                not_redeemable,
-                not_redeemable,
-                Decision::Redeem
-            ]
+            vec![not_redeemable, not_redeemable, Decision::Redeem]
         );
     }
 
@@ -2849,6 +2860,66 @@ mod tests {
         reversed.readings.reverse();
         assert_eq!(plan(&scene), plan(&scene));
         assert_eq!(plan(&scene), plan(&reversed));
+    }
+
+    #[test]
+    fn unknown_post_reset_schedule_cannot_prove_no_unlock() {
+        let mut readings = burning(WindowId::Session, 100.0, 25.0, 3 * HOUR);
+        readings.extend(burning(WindowId::Weekly, 30.0, 1.0, 72 * HOUR));
+        let grant = usable(GrantKind::Session, 30 * 60);
+        assert_eq!(
+            decision(&claude(readings.clone(), grant.clone(), &one_job(6.0))),
+            Decision::Unknown(Undecided::Schedule)
+        );
+        assert_eq!(
+            decision(&claude(readings, grant.clone(), &one_job(3.0))),
+            Decision::Redeem
+        );
+        let mut unbound = burning(WindowId::Session, 10.0, 10.0, 4 * HOUR);
+        unbound.extend(burning(WindowId::Weekly, 30.0, 1.0, 72 * HOUR));
+        assert_eq!(
+            decision(&claude(unbound, grant, &one_job(2.0))),
+            Decision::LetExpire(ExpireReason::NoUnlock)
+        );
+    }
+
+    #[test]
+    fn temporary_unavailability_cannot_establish_grant_will_expire_unusable() {
+        let read = |observed_at_unix: u64, availability: Availability| {
+            let grant = Grant {
+                availability,
+                ..usable(GrantKind::Weekly, 240 * HOUR)
+            };
+            let mut scene = claude(exhausted_weekly(), grant, &one_job(4.0));
+            for account in &mut scene.accounts {
+                if let InventoryEvidence::Known(inventory) = &mut account.inventory {
+                    inventory.observed_at_unix = observed_at_unix;
+                }
+            }
+            decision(&scene)
+        };
+        assert_eq!(
+            read(NOW - 1, Availability::NotUsable),
+            Decision::Unknown(Undecided::Availability)
+        );
+        assert_eq!(read(NOW, Availability::Usable), Decision::Redeem);
+    }
+
+    #[test]
+    fn weekly_refills_passed_in_one_wait_count_against_the_step_bound() {
+        let week = 7 * 24 * HOUR;
+        let waiting = |weeks: u64| {
+            let mut readings = burning(WindowId::Session, 100.0, 25.0, weeks * week);
+            readings.extend(burning(WindowId::Weekly, 30.0, 1.0, 72 * HOUR));
+            decision(&claude(
+                readings,
+                usable(GrantKind::Weekly, 48 * HOUR),
+                &one_job(1.0),
+            ))
+        };
+        assert_eq!(waiting(2), Decision::LetExpire(ExpireReason::NoUnlock));
+        let horizon = u64::try_from(MAX_STEPS).expect("the step bound fits in u64") + 1;
+        assert_eq!(waiting(horizon), Decision::Unknown(Undecided::Bound));
     }
 
     const MIN: u64 = 60;
