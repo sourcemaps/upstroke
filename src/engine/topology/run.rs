@@ -1423,9 +1423,10 @@ pub struct TopologyRun {
     /// ([`Self::with_spend_approval`]).
     approve_spend_over: Option<f64>,
     notifiers: Vec<&'static dyn Notifier>,
-    /// The pools this process has written `pool_exhausted` for, each with the reset it
-    /// recorded, as the sequential engine's `exhausted_pools` holds them. A settled attempt
-    /// that proves a pool serving again retires it (`capacity::retire_served_pools`).
+    /// The pools this run has written `pool_exhausted` for, each with the reset it recorded,
+    /// as the sequential engine's `exhausted_pools` holds them. A settled attempt that proves
+    /// a pool serving again retires it (`capacity::retire_served_pools`). A resume rebuilds it
+    /// from the run's own log (`capacity::exhausted_pools_of`).
     exhausted_pools: BTreeMap<String, Option<String>>,
 }
 
@@ -1439,6 +1440,7 @@ impl TopologyRun {
         };
         let spend = Spend::replay(&handle.events);
         let brief = Brief::replay(&handle.events);
+        let exhausted_pools = crate::capacity::exhausted_pools_of(&handle.events);
         let broker = PermitBroker::for_run(&Entitlements::of(&handle.fold));
         Self {
             handle,
@@ -1454,7 +1456,7 @@ impl TopologyRun {
             stopped: None,
             approve_spend_over: None,
             notifiers: Vec::new(),
-            exhausted_pools: BTreeMap::new(),
+            exhausted_pools,
         }
     }
 

@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use crate::events::{AttemptRecord, Event, EventBody, PoolExhausted, ReviewPassOutcome};
 use crate::ladder::{AttemptFailure, FailureKind, FailureOrigin};
+use crate::topology::events::{TopologyEvent, TopologyEventBody};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolKind {
@@ -219,6 +220,37 @@ pub fn observe(events: &[Event]) -> Observations {
         }
     }
     obs
+}
+
+pub(crate) fn exhausted_pools_of(events: &[TopologyEvent]) -> BTreeMap<String, Option<String>> {
+    let mut exhausted = BTreeMap::new();
+    let mut signalled: Vec<&PoolExhausted> = Vec::new();
+    for event in events {
+        match &event.body {
+            TopologyEventBody::PoolExhausted { data } => signalled.push(data),
+            TopologyEventBody::AttemptFinished { data } => {
+                retire_signals(&mut exhausted, &data.record);
+                record_signals(&mut exhausted, signalled.drain(..));
+            }
+            body => {
+                record_signals(&mut exhausted, signalled.drain(..));
+                if let TopologyEventBody::CandidatePrepared { data } = body {
+                    retire_served_pools(&mut exhausted, &data.attempt);
+                }
+            }
+        }
+    }
+    record_signals(&mut exhausted, signalled);
+    exhausted
+}
+
+fn record_signals<'a>(
+    exhausted: &mut BTreeMap<String, Option<String>>,
+    signals: impl IntoIterator<Item = &'a PoolExhausted>,
+) {
+    for signal in signals {
+        exhausted.insert(signal.pool.clone(), signal.reset_at.clone());
+    }
 }
 
 fn retire_signals(exhausted: &mut BTreeMap<String, Option<String>>, record: &AttemptRecord) {
@@ -1294,6 +1326,217 @@ mod tests {
                 NOV_11_2026_AT_3AM,
             );
             assert_eq!(answer, None, "{kind:?}");
+        }
+    }
+
+    fn topology(body: TopologyEventBody) -> TopologyEvent {
+        TopologyEvent {
+            ts: "2026-11-11T03:00:00Z".to_owned(),
+            body,
+        }
+    }
+
+    fn signalled(pool: &str, reset_at: Option<&str>) -> TopologyEvent {
+        topology(TopologyEventBody::PoolExhausted {
+            data: PoolExhausted {
+                pool: pool.to_owned(),
+                agent: crate::agent::claude::ADAPTER_ID.to_owned(),
+                reset_at: reset_at.map(str::to_owned),
+                detail: FIVE_HOUR_LIMIT.to_owned(),
+            },
+        })
+    }
+
+    fn failed(record: AttemptRecord, kind: FailureKind, origin: FailureOrigin) -> AttemptRecord {
+        AttemptRecord {
+            failure: Some(crate::events::FailureRecord {
+                kind,
+                origin,
+                reason: FIVE_HOUR_LIMIT.to_owned(),
+                detail: None,
+            }),
+            ..record
+        }
+    }
+
+    fn finished(record: AttemptRecord) -> TopologyEvent {
+        use crate::topology::events::{
+            AttemptFinished4, AttemptNumber, AttemptSettlement, GenerationId, LeaseDisposition,
+            SettlementTransition,
+        };
+        topology(TopologyEventBody::AttemptFinished {
+            data: Box::new(AttemptFinished4 {
+                key: crate::topology::registry::TaskKey(0),
+                generation: GenerationId(0),
+                attempt: AttemptNumber(record.attempt),
+                record: Box::new(record),
+                settlement: AttemptSettlement::Closed {
+                    transition: SettlementTransition::Deferred {
+                        defers: 1,
+                        reason: FIVE_HOUR_LIMIT.to_owned(),
+                    },
+                    lease: LeaseDisposition::PredictedReleased,
+                },
+            }),
+        })
+    }
+
+    fn prepared(record: AttemptRecord) -> TopologyEvent {
+        use crate::topology::events::{
+            CandidateLeaseEffect, CandidatePrepared, CommitSha, GenerationId, GitRef,
+        };
+        use crate::topology::paths::PathSet;
+        let sha = |digit: &str| CommitSha(digit.repeat(40));
+        topology(TopologyEventBody::CandidatePrepared {
+            data: Box::new(CandidatePrepared {
+                key: crate::topology::registry::TaskKey(1),
+                generation: GenerationId(0),
+                attempt: Box::new(record),
+                base_sha: sha("a"),
+                parent_sha: sha("a"),
+                tree_sha: sha("b"),
+                commit_sha: sha("c"),
+                message: "upstroke: beta attempt 1".to_owned(),
+                prepared_ref: GitRef("refs/upstroke/prepared/beta".to_owned()),
+                candidate_ref: GitRef("refs/upstroke/candidates/beta".to_owned()),
+                actual_paths: PathSet::RepoWide,
+                lease_effect: CandidateLeaseEffect::ReplacesPredicted {
+                    paths: PathSet::RepoWide,
+                },
+            }),
+        })
+    }
+
+    fn interrupted() -> TopologyEvent {
+        use crate::topology::events::{
+            AttemptInterrupted4, AttemptNumber, GenerationId, LeaseDisposition,
+        };
+        topology(TopologyEventBody::AttemptInterrupted {
+            data: AttemptInterrupted4 {
+                key: crate::topology::registry::TaskKey(0),
+                generation: GenerationId(0),
+                attempt: AttemptNumber(1),
+                lease: LeaseDisposition::PredictedReleased,
+                detail: "the process ended before the attempt settled".to_owned(),
+            },
+        })
+    }
+
+    fn exhausted(pools: &[(&str, Option<&str>)]) -> BTreeMap<String, Option<String>> {
+        pools
+            .iter()
+            .map(|(pool, reset_at)| ((*pool).to_owned(), reset_at.map(str::to_owned)))
+            .collect()
+    }
+
+    const FIVE_THIRTY: &str = "2026-11-11T05:30:00Z";
+    const NOV_14_AT_9AM: &str = "2026-11-14T09:00:00Z";
+
+    #[test]
+    fn a_topology_log_holds_each_pool_at_the_reset_its_pool_exhausted_recorded() {
+        let limited = || {
+            finished(failed(
+                settled(Some("claude-max"), Vec::new()),
+                FailureKind::RateLimited,
+                FailureOrigin::Worker,
+            ))
+        };
+        let events = [
+            signalled("claude-max", Some(FIVE_THIRTY)),
+            limited(),
+            limited(),
+        ];
+        assert_eq!(
+            exhausted_pools_of(&events),
+            exhausted(&[("claude-max", Some(FIVE_THIRTY))]),
+            "a later rate-limited settlement with no signal of its own keeps the reset"
+        );
+        let events = [
+            signalled("claude-max", Some(FIVE_THIRTY)),
+            limited(),
+            signalled("claude-max", Some(NOV_14_AT_9AM)),
+            limited(),
+        ];
+        assert_eq!(
+            exhausted_pools_of(&events),
+            exhausted(&[("claude-max", Some(NOV_14_AT_9AM))]),
+            "a later signal naming a different reset replaces the earlier one"
+        );
+    }
+
+    #[test]
+    fn a_topology_log_ending_in_pool_exhausted_holds_that_pool_at_that_reset() {
+        for events in [
+            vec![signalled("claude-max", Some(FIVE_THIRTY))],
+            vec![signalled("claude-max", Some(FIVE_THIRTY)), interrupted()],
+        ] {
+            assert_eq!(
+                exhausted_pools_of(&events),
+                exhausted(&[("claude-max", Some(FIVE_THIRTY))]),
+                "{events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pool_exhausted_is_recorded_after_its_own_attempt_retires_the_pools_it_served() {
+        let record = failed(
+            settled(
+                Some("claude-max"),
+                vec![review_on(
+                    crate::agent::claude::ADAPTER_ID,
+                    Some("claude-max"),
+                )],
+            ),
+            FailureKind::RateLimited,
+            FailureOrigin::Reviewer,
+        );
+        let events = [signalled("claude-max", Some(FIVE_THIRTY)), finished(record)];
+        assert_eq!(
+            exhausted_pools_of(&events),
+            exhausted(&[("claude-max", Some(FIVE_THIRTY))]),
+            "the worker served on the pool its reviewer was then refused on; the live run retires \
+             the worker's pool before it writes the reviewer's signal, so the signal stands"
+        );
+    }
+
+    #[test]
+    fn a_rate_limited_settlement_with_no_pool_exhausted_marks_its_pool_with_no_reset() {
+        let events = [finished(failed(
+            settled(Some("codex-pro"), Vec::new()),
+            FailureKind::RateLimited,
+            FailureOrigin::Worker,
+        ))];
+        assert_eq!(
+            exhausted_pools_of(&events),
+            exhausted(&[("codex-pro", None)])
+        );
+    }
+
+    #[test]
+    fn a_later_attempt_the_pool_served_retires_its_signal_settled_or_promoted() {
+        let signal = || signalled("claude-max", Some(FIVE_THIRTY));
+        let limited = || {
+            finished(failed(
+                settled(Some("claude-max"), Vec::new()),
+                FailureKind::RateLimited,
+                FailureOrigin::Worker,
+            ))
+        };
+        let gate_failed = finished(failed(
+            settled(Some("claude-max"), Vec::new()),
+            FailureKind::GateFailed,
+            FailureOrigin::Worker,
+        ));
+        let promoted = prepared(settled(Some("claude-max"), Vec::new()));
+        for served in [gate_failed, promoted] {
+            let events = [signal(), limited(), served.clone()];
+            assert_eq!(
+                exhausted_pools_of(&events),
+                BTreeMap::new(),
+                "{}",
+                served.body.kind()
+            );
         }
     }
 

@@ -477,11 +477,17 @@ which also stamps every event, so the test can fix it and the expected reset is 
 
 ## `fn on_claude_max(`
 
-A `Wide` run of `tasks` on the pool `claude-max` at width 1. Its runner answers the way
-`wide_responder` does, except for the worker of each `(task, generation)` named in `limited`.
-That worker exits 1 with the given limit message on its stderr. Whether an attempt is rate
-limited is the adapters' call, not the runner's, so `step_answered_by` sets the adapters for
-each step. It reads every reset against `RunClock`, 03:00 UTC on 11 November 2026.
+A `Wide` run of `tasks` on the pool `claude-max` at width 1, answered by `limited_runner`.
+Whether an attempt is rate limited is the adapters' call, not the runner's, so
+`step_answered_by` sets the adapters for each step. It reads every reset against `RunClock`,
+03:00 UTC on 11 November 2026.
+
+## `fn limited_runner(`
+
+A runner that answers the way `wide_responder` does, except for the worker of each
+`(task, generation)` named in `limited`. That worker exits 1 with the given limit message on its
+stderr. `on_claude_max` starts a run with it, and the resume tests hand a fresh one to the next
+process.
 
 ## `fn a_second_rate_limit_naming_the_same_reset_writes_no_second_pool_exhausted() {`
 
@@ -509,6 +515,41 @@ same reset.
 Neither failure is a rate limit, so neither writes `pool_exhausted`. One is an agent error whose
 stderr carries the five-hour limit message anyway. The other is a gate failure after the worker
 ran on the pool.
+
+## `fn durable_on_claude_max(`
+
+`on_claude_max`, on the scaffold's durable run, which has the owner and commit records a resume
+needs.
+
+## `fn resumed_limiting(`
+
+The next process. It drops the run, recovers it from its log under the incarnation `inc-2`,
+and hands it a fresh `limited_runner` answering with `limited`.
+
+## `fn a_resumed_run_writes_pool_exhausted_again_only_when_the_limit_names_another_reset() {`
+
+The two dedup tests above, across a resume. The first process is limited once, writes
+`pool_exhausted` for the 05:30 reset, and ends. The next process starts from what its log
+recorded (`capacity::exhausted_pools_of`). Its resume wakes the deferred task, and the task's
+next generation is limited again at once. The same five-hour limit writes nothing more. The weekly limit names another
+reset, so it writes one more `pool_exhausted`. Before the resume read the log, the next process
+started with no pools recorded and wrote the same signal a second time.
+
+## `struct CutAfterPoolExhausted {`
+
+Hooks that leave the log the way this stage's ordering can stop it. Once a `pool_exhausted` has
+been folded, they arm an error return at `Event.append`'s `Written` point. The next append, the
+attempt's `attempt_finished`, then fails before its line is whole. Its torn tail is no committed
+line, so the log ends with the signal and no settlement after it.
+
+## `fn a_run_whose_log_ends_with_pool_exhausted_resumes_with_that_pool_exhausted_at_that_reset() {`
+
+The settlement's append fails after the signal's, so the first process ends with `alpha`'s
+attempt in flight and its `pool_exhausted` durable. The resume settles that attempt as
+interrupted, which carries no record and retires nothing. When `alpha` runs again into the same
+five-hour limit, the log still holds a single `pool_exhausted`. So the resumed run held the pool
+exhausted at 05:30, the reset the cut log recorded. Had it held the pool with no reset, the 05:30
+limit would have counted as a new reset and been written again.
 
 ## `fn escalated_log(interrupted_first: bool) -> (TopologyFold, Vec<TopologyEvent>) {`
 

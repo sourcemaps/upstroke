@@ -1141,6 +1141,18 @@ Read before the handle moves into the struct below it.
 run tells the next worker what the attempts before the crash failed
 on rather than handing it attempt 1's prompt.
 
+## `pub fn resumed(handle: RunHandle, inputs: FrozenInputs, ceiling: Ceiling) -> Self {` › `let exhausted_pools = crate::capacity::exhausted_pools_of(&handle.events);`
+
+**The log's exhausted pools, not an empty map.** The legacy resume
+starts its `exhausted_pools` from `capacity::observe`. This is the same
+memory read from a schema-4 log: each pool a `pool_exhausted` recorded,
+at its reset, minus those a later settled or promoted attempt proved
+serving. Built empty, a resumed run wrote `pool_exhausted` again for a
+limit its log had already recorded. A log that ends with a
+`pool_exhausted` and no settlement after it, which is where
+`settle_failure`'s ordering can stop, resumes with that pool held at that
+reset.
+
 ## `pub fn resumed(handle: RunHandle, inputs: FrozenInputs, ceiling: Ceiling) -> Self {` › `spend,`
 
 **The log's spend, not a fresh counter.** `Spend::replay` is

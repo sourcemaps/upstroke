@@ -1792,6 +1792,7 @@ effect_free = [
     "drain_of",
     "effective_remaining",
     "estimate",
+    "exhausted_pools_of",
     "fmt",
     "is_empty",
     "observe",
