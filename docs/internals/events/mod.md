@@ -18,8 +18,8 @@ The load-bearing decision here is that **there is one fold, not two**.
 engine reaches it the same way replay does — by emitting an event and
 applying it. A live run and a replay of its own log cannot drift, because
 neither has a private path to the state. Any bug is a bug in both, which is
-a property a test can actually pin (see `live_state_equals_replayed_state`
-in `engine.rs`).
+a property a test can actually pin (see
+`live_state_equals_replayed_state_across_every_ladder_path` in `src/engine/tests.rs`).
 
 Two things deliberately do *not* survive replay, both for the same reason:
 a session id and a `resume_next` flag describe a conversation that believed
@@ -29,11 +29,9 @@ tree-retention is broken. `run_resumed` clears both.
 
 ## `pub use log::{EventLog, LogTail, read_all};`
 
-The public paths are unchanged: `crate::events::EventLog`,
-`crate::events::read_all` and `crate::events::LogTail` are what every caller
-outside this module already names, and `decisions.pr_sequence[6].scope`
-requires the first of those to stay put ("EventLog writer moved to
-src/events/log.rs (**public path crate::events::EventLog unchanged**)").
+The writer lives in `src/events/log.rs`; this re-export keeps `crate::events::EventLog`,
+`crate::events::read_all` and `crate::events::LogTail` as the paths every caller outside this
+module names. `decisions.pr_sequence[6].scope` requires the first of those to stay put.
 
 ## `pub const SCHEMA_VERSION: u32 = 3;`
 
@@ -283,8 +281,8 @@ resume would otherwise change the verification standard halfway through
 which is emphatically **not** the same as saying there were none. A
 default-constructed plan has no primary, and every reader treats that as
 `review = { enabled = false }`; a resume that made that mistake would
-finish the run with verification silently switched off (step-6 finding
-#10, from the other direction). Absent means re-derive and say so.
+finish the run with verification silently switched off. Absent means
+re-derive and say so.
 
 ## `#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]`
 
@@ -307,18 +305,16 @@ preserves why the binding was fixed as well as which adapter/model ran it.
 One effective gate as it stood when the run started — everything needed to
 run it again, because a resume does exactly that.
 
-All four fields, not just name and command. An earlier draft recorded the
-pair alone on the theory that `timeout` and `shell` are operational settings
-a resume may re-read; that is wrong about `shell`, which is half of what a
-command *means* (see [`ShellKind`](crate::gates::ShellKind)) — the same
-`cmd = "true"` passes always under `sh` and fails always under `cmd.exe`.
-And it is wrong about `timeout` in the same direction, one step weaker: a
-gate that was given twenty minutes and is given one verifies less.
+All four fields, not just name and command. `shell` is not an operational
+setting a resume may re-read: it is half of what a command *means* (see
+[`ShellKind`](crate::gates::ShellKind)) — the same `cmd = "true"` passes
+always under `sh` and fails always under `cmd.exe`. `timeout` matters in the
+same direction, one step weaker: a gate that was given twenty minutes and is
+given one verifies less.
 
 The portability this costs is smaller than it looks. Resuming a run on a
 machine whose shell it never had is already impossible for an unrelated
-reason — `run_started.private_dir` records an absolute host path — so the
-case the pair-only record was protecting does not exist.
+reason — `run_started.private_dir` records an absolute host path.
 
 ## `pub head_sha: String,`
 
@@ -467,9 +463,8 @@ So the ledger keeps saying `?` for a route that reports no dollars, and
 the evidence survives anyway. That matters more than it sounds: a run
 that did not record its usage can never be re-measured, and §23.2's
 conclusions about where spend goes were drawn entirely from
-cheap-implementer runs. Adapters have been parsing this into
-[`Outcome::usage`](crate::ir::Outcome) since step 3 and the engine threw
-it away.
+cheap-implementer runs. Adapters parse it into
+[`Outcome::usage`](crate::ir::Outcome).
 
 Pure addition, like `pool` above: `#[serde(default)]` means a log
 written before this folds to exactly the state it always did, so
@@ -511,23 +506,17 @@ failure and still hold a review whose outcome is `Failed` or
 configured pass to pass, and a reviewer that could not run "says nothing
 about the code", which is not the same as approving it.
 
-`check_candidate_prepared` enforced only the failure field and
-`check_attempt_finished` enforced neither, so each door checked a
-different half of the same question and a record with a `Failed` review
-was promoted, charged and queued as a candidate. The `b1f54a5` review
-walked it. This is the same "one derivation, not two" that the rung
-allowance needed: the doors now ask one predicate rather than each
-deciding for itself.
+`check_candidate_prepared` and `check_attempt_finished` both ask this one
+predicate rather than each deciding for itself — the same "one derivation,
+not two" that the rung allowance needed.
 
 ## `pub fn review_cost_usd(&self) -> Option<f64> {`
 
-**There is deliberately no `is_failed`.** It was added as the complement
-of the predicate above and never acquired a caller anywhere in the tree.
-Every reader of this question is asking whether a record *claims success*
-— the schema-3 boundary, `check_candidate_prepared`, and both arms of
-`check_attempt_finished` —
-and each asks [`Self::is_successful`] directly, which is the question it
-is actually asking. A named complement would put the same predicate under
+**There is deliberately no `is_failed`.** Every reader of this question is
+asking whether a record *claims success* — the schema-3 boundary,
+`check_candidate_prepared`, and both arms of `check_attempt_finished` — and
+each asks [`Self::is_successful`] directly, which is the question it is
+actually asking. A named complement would put the same predicate under
 two spellings, which is how two readers of one rule begin to disagree.
 
 ## `pub fn review_cost_usd(&self) -> Option<f64> {`
@@ -596,9 +585,8 @@ for future selectors and deliberately have no producer yet.
 
 How one review pass ended.
 
-Three states, not two: step-6 finding #8 established that a reviewer which
-could not run says nothing about the code, and the ladder already dispatches
-on that distinction. Recording it as a plain "did not pass" would put a
+Three states, not two: a reviewer which could not run says nothing about
+the code, and the ladder dispatches on that distinction. Recording it as a plain "did not pass" would put a
 rejection in the ledger against a model that never read the diff — and the
 ledger is what a person reads when deciding whether to trust a run.
 
@@ -631,15 +619,9 @@ this to `None` because nothing judged it. Read by `TopologyRun`'s brief,
 which derives §11.4's accumulated feedback from the log rather than from
 a counter only the live path incremented.
 
-The unqualified sentence was corrected on `classify::attempt_record` in
-the commit that added this field, and written again here in the same
-commit — one copy fixed, one copy created. The 2026-08-26 re-review of
-`c2c0294` found it, finding C.
-
 **And which caller writes it is not a property of this field.**
 `classify::FeedbackCarrier` decides, because the builder is shared with
-the legacy coordinator and the two engines answer differently. A
-sentence here that named one engine would be the §22c class again.
+the legacy coordinator and the two engines answer differently.
 `decisions/2026-08-26-durable-retry-feedback.md` is the Class C
 authorization for this field and states its bounds.
 
@@ -1050,7 +1032,7 @@ The attempt nobody was alive to finish. Recorded — it really ran
 and really drained a pool, and a ledger that hides that is lying
 — but it does not spend the rung's allowance, because nothing
 judged the code. That is the rule §19 applies to an outage and
-step 7 applies to a worker that stopped to ask.
+`refund_attempt` applies to a worker that stopped to ask.
 
 ## `EventBody::AttemptInterrupted { task, data, .. } => {`
 
@@ -1117,12 +1099,11 @@ guidance.
 ## `let canned = self.questions[position]`
 
 The same objection applies to any canned option, whatever the
-kind, and for a reason the first version of this missed: the
-options are the engine's instructions *to the operator*, not the
-operator's instructions to anyone. `upstroke answer <id> --option
-1` on an unblock question resolves to "retry this task with
-guidance you type below" — a sentence about where to type, which
-then reached the implementer as binding guidance and, since §12's
+kind: the options are the engine's instructions *to the operator*,
+not the operator's instructions to anyone. `upstroke answer <id>
+--option 1` on an unblock question resolves to "retry this task
+with guidance you type below" — a sentence about where to type,
+which once reached the implementer as binding guidance and, since §12's
 decisions were routed to the judge, reached the reviewer as "a
 decision from a person… a change that departs from it is a defect
 however well argued". A judge grading a diff against meta-UI text
@@ -1139,10 +1120,11 @@ list is the un-park, and nothing more.
 
 ## `if kind == crate::ir::QuestionKind::Unblock {`
 
-The answer buys a fresh allowance on the rung the task is
-standing on, and clears the deferrals a pool outage racked up.
-It never moves the rung: if the chain exhausted, the task is
-already at the top of it.
+An unblock answer buys a fresh allowance on the rung the task is
+standing on. It never moves the rung: if the chain exhausted, the
+task is already at the top of it. The deferrals a pool outage
+racked up are cleared for every answer that un-parks a task, not
+only an unblock.
 
 ## `progress.resume_next = false;`
 
