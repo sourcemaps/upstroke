@@ -27,7 +27,7 @@ It is for work you have already designed and written down as a plan. You come ba
   resumes the run after a crash, a question or a budget stop.
 
 ## How it works
-Each task in the plan ([Plans](#plans)) runs in its own git worktree. Gates are your `[[gates]]`
+Each task in the plan ([Plans](#plans)) runs in its own git worktree; a run an older binary created (schema 1–3) resumes on the sequential path instead. Gates are your `[[gates]]`
 commands or, with none configured, ones derived from `Cargo.toml`, `go.mod` or a `package.json`
 test script; any other repository has no gates until you add them. A change verified against an
 older head is checked again on the combined tree before it lands.
@@ -38,8 +38,8 @@ README describes `master`, where v0.2 is in progress and unreleased; capacity is
 acted on.
 
 ## Install
-From a checkout of `master`, `cargo install --locked --path .` builds `upstroke` and puts it on
-your `PATH`. You need Rust 1.85+ (edition 2024), Git 2.41+ (2.40 is refused) and
+From a checkout of `master`, `cargo install --locked --path .` builds `upstroke` into Cargo's `bin`
+directory (`~/.cargo/bin` unless you set another root), which must be on your `PATH`. You need Rust 1.85+ (edition 2024), Git 2.41+ (2.40 is refused) and
 [Claude Code](https://docs.claude.com/en/docs/claude-code/overview) on `PATH`, on Windows, macOS or
 Linux. A default run also needs the Codex CLI: its review plan names an alternative reviewer from
 another model family, which is probed before the run is created, unless
