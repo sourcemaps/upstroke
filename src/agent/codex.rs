@@ -819,7 +819,9 @@ pub(crate) use tests::fixture;
 mod tests {
     #[cfg(unix)]
     pub(crate) mod fixture {
+        use std::fmt::Write;
         use std::fs;
+        use std::os::unix::ffi::OsStrExt;
         use std::path::{Path, PathBuf};
 
         use super::*;
@@ -940,17 +942,35 @@ esac
 
             fn command(&self, mut spec: CommandSpec) -> CommandSpec {
                 assert_eq!(spec.program, "codex");
-                if self.directory.join("absent").exists() {
-                    spec.program = self.directory.join("missing-cli").display().to_string();
-                } else {
-                    spec.program = "sh".to_owned();
-                    spec.args
-                        .insert(0, self.directory.join("cli.sh").display().to_string());
+                let mut directory = String::new();
+                for byte in self.directory.as_os_str().as_bytes() {
+                    write!(directory, "\\0{byte:03o}").expect("octal fixture directory");
                 }
-                spec.env.push((
-                    "CODEX_FIXTURE".to_owned(),
-                    self.directory.display().to_string(),
-                ));
+                let mode = if self.directory.join("absent").exists() {
+                    "absent"
+                } else {
+                    "present"
+                };
+                spec.program = "sh".to_owned();
+                let mut args = vec![
+                    "-c".to_owned(),
+                    r#"CODEX_FIXTURE=$(printf '%b_' "$1")
+CODEX_FIXTURE=${CODEX_FIXTURE%_}
+export CODEX_FIXTURE
+mode=$2
+shift 2
+if test "$mode" = absent; then
+  exec "$CODEX_FIXTURE/missing-cli" "$@"
+fi
+exec sh "$CODEX_FIXTURE/cli.sh" "$@"
+"#
+                    .to_owned(),
+                    "codex-fixture".to_owned(),
+                    directory,
+                    mode.to_owned(),
+                ];
+                args.append(&mut spec.args);
+                spec.args = args;
                 spec
             }
         }
@@ -998,6 +1018,58 @@ esac
             fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
                 (id == ADAPTER_ID).then_some(self)
             }
+        }
+
+        #[test]
+        fn configured_fixture_preserves_directory_bytes_through_the_runner() {
+            let tree =
+                crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "codex-fixture-bytes")
+                    .expect("isolated fixture tree");
+            let directory = tree.path().join(std::ffi::OsStr::from_bytes(
+                b"codex-\xff '\"\\$(exit 19);`exit 23`\n\n",
+            ));
+            assert!(directory.to_str().is_none());
+            let codex = ConfiguredCodex::new(&directory);
+            let runner = crate::runner::host::HostRunner::new();
+            let caps = codex
+                .probe(&runner)
+                .expect("probe in a byte-valued directory");
+            assert_eq!(caps.version, "0.147.0");
+            let discovery = codex
+                .discover(&runner, &caps)
+                .expect("discovery in a byte-valued directory");
+            assert_eq!(discovery.auth, AuthState::Authenticated);
+            assert_eq!(discovery.models, catalog::known_models(ADAPTER_ID));
+
+            let mut command = codex
+                .build(&run(PermissionMode::ReadOnly, None))
+                .expect("configured execution command");
+            command.stdin = b"offline fixture prompt".to_vec();
+            let request = probe_request(ADAPTER_ID, command, 12, PROBE_TIMEOUT)
+                .expect("configured execution request");
+            let output = runner
+                .run_blocking(&request)
+                .expect("execute the local stub");
+            assert_eq!(output.code, Some(0), "{output:?}");
+            let outcome = codex.parse(&output).expect("parse the fixture verdict");
+            assert_eq!(outcome.status, OutcomeStatus::Completed);
+            assert!(
+                outcome
+                    .detail
+                    .expect("fixture verdict")
+                    .contains("accepted")
+            );
+
+            let calls = codex.calls();
+            assert!(calls.lines().any(|call| call == "--version"), "{calls}");
+            assert!(calls.lines().any(|call| call == "debug models"), "{calls}");
+            assert!(calls.lines().any(|call| call == "login status"), "{calls}");
+            codex.roster(Roster::Absent);
+            let error = codex.probe(&runner).expect_err("missing local executable");
+            assert!(matches!(error, UpstrokeError::Agent { .. }), "{error}");
+            assert_eq!(codex.calls(), calls, "absence must not enter the stub");
+            codex.roster(Roster::Full);
+            codex.probe(&runner).expect("restored local executable");
         }
     }
 

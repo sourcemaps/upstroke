@@ -193,6 +193,23 @@ the engine and connect tests. It inherits this adapter's filesystem allowances.
 The configured runner clones each request as an owned snapshot, retaining the
 real invocation identity and execution boundary while substituting the local CLI.
 
+## `fn command(&self, mut spec: CommandSpec) -> CommandSpec`
+
+The Unix fixture encodes its directory's raw `OsStr` bytes as ASCII octal escapes
+in a separate argument. A fixed shell wrapper decodes them with `printf %b` and
+exports `CODEX_FIXTURE`; neither the directory nor the script path passes through
+a lossy display string. An underscore appended inside command substitution and
+removed afterward preserves trailing newlines. The original CLI arguments remain
+separate arguments, forwarded with quoted `"$@"`. The absent mode executes the
+missing local `missing-cli` path through the same wrapper, producing an ordinary
+command failure without selecting a provider CLI.
+
+`configured_fixture_preserves_directory_bytes_through_the_runner` exercises probe,
+discovery, execution, absence and restoration under a directory containing invalid
+UTF-8, shell metacharacters and trailing newlines. It checks the local call record
+and parsed verdict through the real host runner. Like the fixture, this regression
+runs on the native Linux and macOS test legs; it is excluded on Windows.
+
 ## `fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError> {` › `json_output: true,`
 
 Asked for and parsed, unlike Copilot's route where the flag's
