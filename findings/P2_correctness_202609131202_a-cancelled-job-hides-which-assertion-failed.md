@@ -731,9 +731,12 @@ answered after the bound as a close within it. It is refused the same way
 `a_sentinel_eof_read_after_the_bound_on_a_real_socket_is_refused`), which changes nothing the
 lifeline or the lease-sentinel tests assert, their bounds being seconds. The twelve polls that
 observe once more after a rest capped at their deadline are a different shape and are unchanged:
-each observation but `await_signal_by`'s is one non-blocking call, so the look after the deadline is
-late only by the wake, not by a socket's tick, and five of them collect a child, whose status a
-refusal would lose. `await_signal_by` makes a blocking read: once it finds the published record
-present it consumes it with a synchronous `read_to_string`, a blocking phase outside the capped
-poll, and answers `Ready` without reading the clock again, so a read that completes after the bound
-still answers `Ready` (`PR320-R8-MAIN-002`).
+each observation but `await_signal_by`'s blocking read and `drain_turn`'s batch of up to 64 reads
+is one non-blocking call, so the look after the deadline is late only by the wake, not by a
+socket's tick, and five of them collect a child, whose status a refusal would lose. With either
+exception the lateness is then not only the scheduler's wake. A drain turn makes up to 64
+non-blocking reads, so with output continuously available its caller can spend the whole batch
+before it checks its deadline. `await_signal_by` makes a blocking read: once it finds the published
+record present it consumes it with a synchronous `read_to_string`, a blocking phase outside the
+capped poll, and answers `Ready` without reading the clock again, so a read that completes after
+the bound still answers `Ready` (`PR320-R8-MAIN-002`).
