@@ -144,6 +144,7 @@ pub fn finalize(
                 RefSite::DeleteCandidatesRef,
             )?,
             CleanupStep::ExecutionRoot => {
+                inputs.manager.remove_staging_leftovers(hooks.effects())?;
                 execution_root_removed = inputs.manager.remove_execution_root(hooks.effects())?;
                 usize::from(execution_root_removed)
             }

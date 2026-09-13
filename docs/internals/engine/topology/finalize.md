@@ -27,7 +27,12 @@ its events for the projection.
 
 The six steps, in `ORDER`, each a row of the outcome equations: task worktrees and intents
 (R9), snapshots (R24), staging (R10), the prepared and candidate-prepared pins (R12, R23), the
-candidates refs (R11), and the execution root (R18) once empty.
+candidates refs (R11), and the execution root (R18) once empty. The root step first removes the
+staging leftovers of `intents/` (`WorkspaceManager::remove_staging_leftovers`, through the
+intent-removal funnel of each leftover's kind): reclaim reports and never removes them, since no
+filename proves who wrote a file, but the finalizer holds the run lock and the cleanup lease, so
+no writer of this root is alive and the ownership proof is in hand — a leftover the emptied
+root would otherwise keep is what blocked the pruning in the round-2 crash lens's P2-3.
 
 ## `impl CleanupStep` › `pub const fn applies_to(self, outcome: &RunOutcome) -> bool {`
 

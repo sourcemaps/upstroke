@@ -2049,13 +2049,62 @@ impl WorkspaceManager {
         })
     }
 
+    /// Remove every staging leftover of `intents/` (see
+    /// [`Self::staging_leftovers`]) through the intent-removal funnel of its
+    /// kind, and return what was removed.
+    ///
+    /// For terminal finalization only: the finalizer holds the run lock and
+    /// the run's cleanup lease, so no writer of this execution root is alive
+    /// and the ownership proof the reclaim rule lacks is in hand. A leftover
+    /// the emptied root would otherwise keep is what blocked R18's pruning
+    /// (the round-2 crash lens of PR10, P2-3).
+    ///
+    /// # Errors
+    ///
+    /// An I/O error other than a leftover already gone, or a funnel refusal.
+    pub fn remove_staging_leftovers(
+        &self,
+        hooks: &mut dyn EffectHooks,
+    ) -> Result<Vec<PathBuf>, UpstrokeError> {
+        self.revalidate()?;
+        let directory = self.execution_root.join("intents");
+        let leftovers = self.staging_leftovers()?;
+        for path in &leftovers {
+            let site = match path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(staging_kind)
+            {
+                Some("staging") => EffectSiteId::Worktree(WorktreeSite::RemoveStagingIntent),
+                Some("snapshot") => EffectSiteId::Snapshot(SnapshotSite::RemoveIntent),
+                _ => EffectSiteId::Worktree(WorktreeSite::RemoveIntent),
+            };
+            let ledger = hooks.durability_ledger();
+            funnel(hooks, site, || {
+                refuse_reparse_points(&self.private_root, &directory, Leaf::Directory)?;
+                refuse_reparse_points(&self.private_root, path, Leaf::Entry)?;
+                match fs::remove_file(path) {
+                    Ok(()) => sync_directory(&directory, &ledger),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(source) => Err(UpstrokeError::Filesystem {
+                        operation: "remove",
+                        path: path.clone(),
+                        source,
+                    }),
+                }
+            })?;
+        }
+        Ok(leftovers)
+    }
+
     /// Every file of the staging shape `write_intent` produces that is still
-    /// in `intents/`, in directory order — reported, never removed.
+    /// in `intents/`, in directory order — reported by reclaim, removed only
+    /// by terminal finalization ([`Self::remove_staging_leftovers`]).
     ///
     /// The §8 staging protocol's recovery rule (see `staging_kind`): a write
     /// interrupted before its rename was not durable, so its leftover is not
     /// an intent and [`Self::intents`] never lists it; and no filename proves
-    /// who wrote a file, so this crate does not delete it either. Reclaim
+    /// who wrote a file, so reclaim does not delete it either. Reclaim
     /// reports the names on its outcome and leaves them where they are.
     fn staging_leftovers(&self) -> Result<Vec<PathBuf>, UpstrokeError> {
         let directory = self.execution_root.join("intents");
