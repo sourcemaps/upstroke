@@ -185,8 +185,8 @@ outlives the round.
 **The discriminator this row's own text refutes.** A first pass separated fixture occurrences from
 genuine ones by elapsed time, on the reading that a genuine READY failure exhausts its budget —
 this row's founding evidence is `waited 10.000190708s of 10s`. **That is wrong, and this file
-disproves it**: the `§ Why the helper exits` paragraph above records a genuine `setpgid`/`EPERM`
-failure at `waited 24.333µs of 2s`. #172 made a reported startup failure return *promptly*, so
+disproves it**: the paragraph above beginning *"Why the helper exits: the parent's `setpgid` raced
+the reaper's own"* records a genuine `setpgid`/`EPERM` failure at `waited 24.333µs of 2s`. #172 made a reported startup failure return *promptly*, so
 after #172 a genuine one is fast by design. Run against the two recorded genuine failures, the
 elapsed-time rule fires on the pre-#172 control (macOS job `101358262737`, exit 0, two matches) and
 **misses** the microsecond one (job `101376577732`, run `33992302665`, exit 1, no match). Elapsed
