@@ -110,7 +110,16 @@ bound, the window read's `Err`, the scan read's own `Err(_)` arm, the seek and t
 Seven is derived rather than counted -- PR #137's body carries the command that enumerates the
 sites, after two frontier passes corrected the number twice. **The `SWEEP-CLASSIFY-001` repair
 folds every one of those seven exactly as master did**; what it moved out of the set is a read that
-did not *finish*, which was never one of them. What it did change is the number of *arms* those
+did not *finish*, which was never one of them.
+
+**One sub-case did move, and it is named here rather than left inside that sentence.** An
+allocation the host refuses while the first line is materialised reached master through
+`read_to_end`'s `Err`, inside the window read and the re-read, and folded to `Husk` with
+everything else. The repair's own loop grows that buffer through `Vec::try_reserve` in
+`classify::append`, and a refused reservation answers `RunDirClass::Indeterminate`. It is a site
+the repair created rather than one of the seven -- the seven are failures the filesystem named,
+and every one of them still folds -- and the alternative measured was not `Husk` but a process
+abort, which is what a bare `extend_from_slice` did for one round of that pull request. What it did change is the number of *arms* those
 seven reach, from seven to six: the window read and the re-read share one `Step::Failed` arm in
 `read_up_to` now, where they were two `read_to_end(..).ok()?` calls before. Six arms, seven
 inspections, by

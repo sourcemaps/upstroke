@@ -634,7 +634,21 @@ read, so what is left undriven is that single line, and
 drives everything below it — including the funnel, on a directory the census
 really does delete when the class is `Husk`.
 
-## `fn scan_classified(` › `if class == RunDirClass::Indeterminate {`
+## `fn scan_classified(` › `match class {`
+
+**Exhaustive, and that is the point rather than a style.** A missed arm here is
+a compile error; the equality guard this replaced compiled unchanged past a new
+classification and silently took the other branch, which is the protection this
+pull request's body claimed before it had it. The three reader predicates in
+`rundir::discovery` are exhaustive `match`es for the same reason, and
+`no_production_dispatch_on_a_classification_is_an_equality_guard` refuses the
+four spellings that would undo it.
+
+`lock_held` is read inside the two arms that use it and not above the `match`.
+The `Indeterminate` arm asks nothing further about the directory, and that is
+the arm's whole content — see below.
+
+## `fn scan_classified(` › `RunDirClass::Indeterminate => Scanned {`
 
 **The retaining answer, taken before any second observation.** The probe could
 not read this directory's `events.jsonl`; the lock probe, the marker read and
@@ -670,7 +684,7 @@ A committed run's private half is bound by
 `run_started.private_dir`, which recovery step (a) verifies. A
 marker on it is stale residue, not a binding to report.
 
-## `fn scan_classified(` › `if lock_held {`
+## `fn scan_classified(` › `if rundir::is_running(&public) {`
 
 Every husk arm is gated on the lock alone. A husk whose lock is held is
 skipped whoever holds it, this process included: under the worktree lock

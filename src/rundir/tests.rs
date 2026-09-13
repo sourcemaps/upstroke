@@ -1764,6 +1764,133 @@ fn the_probe_has_exactly_one_interrupted_retry_site() {
     );
 }
 
+/// The probe grows the line it is going to return through **one** fallible
+/// reservation, and reaches no infallible growth beside it.
+///
+/// The sibling of `the_probe_has_exactly_one_interrupted_retry_site`, and for
+/// a defect of the same shape one adverse condition over.
+/// `by_ref().take(want).read_to_end(&mut into)` grew through `Vec::try_reserve`
+/// inside `std::io` and reported a refusal as an `io::Error`; the hand-written
+/// loop that replaced it grew through `Vec::extend_from_slice`, which aborts
+/// the process. So the census that closed the door replaced an answer with a
+/// death: on a 64 MiB first line under a 48 MiB address-space limit, `231c1aad`
+/// answered `Husk` at exit 0 and that round answered nothing at exit 134.
+///
+/// `a_reservation_the_probe_cannot_make_answers_incomplete_rather_than_aborting`
+/// drives the reservation itself and shows it answers. What it cannot show is
+/// that the loop goes through it, because the only reservation the probe makes
+/// on any host this crate builds for is at most one `SCAN_CHUNK` and succeeds.
+/// This is that half: one `try_reserve` and one `extend_from_slice` in the
+/// whole production region, which `reserve` and `append` are. A second
+/// `extend_from_slice` is a growth that can abort, and a missing `try_reserve`
+/// is the same defect with the helper deleted.
+///
+/// Comments and string literals are blanked and the test region is cut off
+/// first, both through `crate::effects`' own derivations — the same two the
+/// retry-site census uses.
+#[test]
+fn the_probe_grows_the_line_it_returns_through_a_fallible_reservation() {
+    let source = include_str!("classify.rs");
+    let code =
+        crate::effects::blank_comments_and_strings(&crate::effects::production_region(source));
+
+    // The positive control, for the reason the retry-site census has one: a
+    // count of one is only evidence if this search can see the code at all.
+    assert!(
+        code.matches("read_up_to").count() >= 3,
+        "the blanked production region does not contain the probe's own code, so the counts \
+         below measure nothing: {} bytes",
+        code.len()
+    );
+    assert_eq!(
+        code.matches("try_reserve").count(),
+        1,
+        "SWEEP-CLASSIFY-001, one condition over: the probe's answer buffer grows through one \
+         fallible reservation, and without it an allocation the host refuses aborts the \
+         command mid-census instead of classifying"
+    );
+    assert_eq!(
+        code.matches("extend_from_slice").count(),
+        1,
+        "the one append is `append`'s, past a reservation that was granted; a second is a \
+         growth that aborts rather than answers"
+    );
+}
+
+/// Every production site that *dispatches* on a `RunDirClass` is an
+/// exhaustive `match`, so a fourth classification is a compile error rather
+/// than a silent default.
+///
+/// **This is the claim this pull request's body makes about why the signature
+/// change is the safe shape, and round 1 made it while it was false.** The
+/// census's own dispatch was `if class == RunDirClass::Indeterminate`, an
+/// equality guard: adding a variant to one compiles, takes the other branch and
+/// says nothing. Two independent review lenses reached that conclusion by
+/// different routes, and the repair was to make the claim true rather than to
+/// strike it — `scan_classified` and `discovery`'s three reader predicates are
+/// exhaustive `match`es now, and this keeps them that way.
+///
+/// The four spellings refused are the four that compile past a new variant:
+/// `==`, `!=`, `matches!` and `if let`. A `_ =>` arm would too, and is not
+/// refused here — `RunDirClass` has no field to fall through on, so a
+/// catch-all in one of these files would be visible in review as the thing it
+/// is; what a census is for is the shape that reads as ordinary code.
+///
+/// Line-oriented on the blanked production region, which preserves newlines:
+/// each of these forms is one line of `rustfmt` output at these widths.
+#[test]
+fn no_production_dispatch_on_a_classification_is_an_equality_guard() {
+    let sources = [
+        ("src/rundir/discovery.rs", include_str!("discovery.rs")),
+        ("src/rundir/classify.rs", include_str!("classify.rs")),
+        (
+            "src/engine/topology/startup.rs",
+            include_str!("../engine/topology/startup.rs"),
+        ),
+    ];
+    let mut dispatches = 0usize;
+    let mut mentions = 0usize;
+    for (path, source) in sources {
+        let code =
+            crate::effects::blank_comments_and_strings(&crate::effects::production_region(source));
+        // The positive control: a file whose code this search cannot see
+        // reports no guard for the same reason it reports no `match` arm.
+        let named = code.matches("RunDirClass").count();
+        assert!(
+            named >= 3,
+            "{path}: the blanked production region names RunDirClass {named} times, so the \
+             search below measures nothing"
+        );
+        mentions += named;
+        for (number, line) in code.lines().enumerate() {
+            if !line.contains("RunDirClass") {
+                continue;
+            }
+            for guard in ["==", "!=", "matches!", "if let"] {
+                assert!(
+                    !line.contains(guard),
+                    "{path}:{}: `{guard}` on a classification compiles unchanged when a \
+                     fourth one is added, and silently takes the other branch. The body of \
+                     this pull request claims a missed arm is a compile error; only an \
+                     exhaustive `match` makes that true.\n    {}",
+                    number + 1,
+                    line.trim()
+                );
+            }
+            if line.trim_start().starts_with("RunDirClass::") && line.contains("=>") {
+                dispatches += 1;
+            }
+        }
+    }
+    assert!(
+        dispatches >= 12,
+        "only {dispatches} exhaustive match arms over a classification were found across the \
+         three files; the three reader predicates and `scan_classified` are four sites of \
+         three arms each, so the search has stopped seeing them"
+    );
+    assert!(mentions > 20, "{mentions} mentions is not this tree");
+}
+
 /// `RetainReason::PROOF_KINDS` is `KINDS` without the classifier's one, and
 /// nothing else.
 ///

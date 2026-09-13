@@ -408,75 +408,78 @@ fn scan_classified(
     inputs: &CensusInputs<'_>,
     own_run: Option<&str>,
 ) -> Scanned {
-    if class == RunDirClass::Indeterminate {
-        return Scanned {
+    match class {
+        RunDirClass::Indeterminate => Scanned {
             run_id: run_id.to_owned(),
             public,
             locator: None,
             class,
             plan: Planned::Retain(RetainReason::ClassificationIncomplete),
-        };
-    }
+        },
 
-    let lock_held = rundir::is_running(&public);
-
-    if class == RunDirClass::Committed {
-        let own = own_run == Some(run_id);
-        let plan = if !stale_marker_present(&public) {
-            Planned::Committed
-        } else if lock_held && !own {
-            Planned::Skip
-        } else {
-            Planned::RepairStaleMarker
-        };
-        return Scanned {
-            run_id: run_id.to_owned(),
-            public,
-            locator: None,
-            class,
-            plan,
-        };
-    }
-
-    if lock_held {
-        return Scanned {
-            run_id: run_id.to_owned(),
-            public,
-            locator: None,
-            class,
-            plan: Planned::Skip,
-        };
-    }
-
-    let report = rundir::husk_report(
-        inputs.repo_root,
-        run_id,
-        inputs.repo_key,
-        inputs.authorized_root,
-    );
-    let plan = match report.disposition {
-        HuskDisposition::Unstarted(Reclaimable::PublicOnly(shape)) => {
-            Planned::ReclaimPublicOnly(shape)
-        }
-        HuskDisposition::Unstarted(Reclaimable::BothHalves) => {
-            match rundir::prove_private_half_ownership(
-                &report.public,
-                inputs.repo_key,
-                inputs.authorized_root,
-            ) {
-                PrivateHalfOwnership::Proven(proof) => Planned::ReclaimBothHalves(proof),
-                PrivateHalfOwnership::NothingBound(shape) => Planned::ReclaimPublicOnly(shape),
-                PrivateHalfOwnership::Retained(reason) => Planned::Retain(reason),
+        RunDirClass::Committed => {
+            let lock_held = rundir::is_running(&public);
+            let own = own_run == Some(run_id);
+            let plan = if !stale_marker_present(&public) {
+                Planned::Committed
+            } else if lock_held && !own {
+                Planned::Skip
+            } else {
+                Planned::RepairStaleMarker
+            };
+            Scanned {
+                run_id: run_id.to_owned(),
+                public,
+                locator: None,
+                class,
+                plan,
             }
         }
-        HuskDisposition::Retained(reason) => Planned::Retain(reason),
-    };
-    Scanned {
-        run_id: report.run_id,
-        public: report.public,
-        locator: report.locator,
-        class,
-        plan,
+
+        RunDirClass::Husk => {
+            if rundir::is_running(&public) {
+                return Scanned {
+                    run_id: run_id.to_owned(),
+                    public,
+                    locator: None,
+                    class,
+                    plan: Planned::Skip,
+                };
+            }
+
+            let report = rundir::husk_report(
+                inputs.repo_root,
+                run_id,
+                inputs.repo_key,
+                inputs.authorized_root,
+            );
+            let plan = match report.disposition {
+                HuskDisposition::Unstarted(Reclaimable::PublicOnly(shape)) => {
+                    Planned::ReclaimPublicOnly(shape)
+                }
+                HuskDisposition::Unstarted(Reclaimable::BothHalves) => {
+                    match rundir::prove_private_half_ownership(
+                        &report.public,
+                        inputs.repo_key,
+                        inputs.authorized_root,
+                    ) {
+                        PrivateHalfOwnership::Proven(proof) => Planned::ReclaimBothHalves(proof),
+                        PrivateHalfOwnership::NothingBound(shape) => {
+                            Planned::ReclaimPublicOnly(shape)
+                        }
+                        PrivateHalfOwnership::Retained(reason) => Planned::Retain(reason),
+                    }
+                }
+                HuskDisposition::Retained(reason) => Planned::Retain(reason),
+            };
+            Scanned {
+                run_id: report.run_id,
+                public: report.public,
+                locator: report.locator,
+                class,
+                plan,
+            }
+        }
     }
 }
 

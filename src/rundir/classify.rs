@@ -680,7 +680,8 @@ fn read_step<R: Read>(source: &mut R, into: &mut [u8], allowance: &mut Allowance
 /// `Take`'s byte budget, so there was no bound to reach.
 ///
 /// The buffer is the same fixed [`SCAN_CHUNK`] the scan uses; what grows is
-/// `into`, which the caller sized by asking for `want`.
+/// `into`, which the caller sized by asking for `want`, and it grows through
+/// [`append`] because that growth can fail.
 fn read_up_to<R: Read>(
     source: &mut R,
     want: u64,
@@ -711,10 +712,92 @@ fn read_up_to<R: Read>(
         let Some(delivered) = chunk.get(..read) else {
             return Observed::Incomplete;
         };
-        into.extend_from_slice(delivered);
+        // `append` answers `Found` or `Incomplete`, and whatever it could not
+        // do is carried out unchanged rather than folded into an absence --
+        // which is the rule this module implements, one function down.
+        match append(into, delivered) {
+            Observed::Found(()) => {}
+            other => return other,
+        }
         left -= read as u64;
     }
     Observed::Found(())
+}
+
+/// Append `delivered` to `into`, or answer that the observation could not be
+/// completed because the buffer could not grow.
+///
+/// **The one place this module grows the bytes it is going to return, and it is
+/// a function because the growth is fallible.** `Vec::extend_from_slice` is
+/// not: a reservation it cannot satisfy aborts the process, which on the
+/// census's path kills the command mid-walk and answers nothing at all --
+/// neither the retaining classification nor the reclaiming one. That is the
+/// finding's own principle defeated by a second route, and it was a regression
+/// this module introduced: the `by_ref().take(want).read_to_end(..)` this
+/// replaced grew through `Vec::try_reserve` inside `std::io` and reported the
+/// failure as an ordinary `io::Error`.
+///
+/// **Measured, not reasoned.** A valid newline-terminated `run_started`
+/// padded to 64 MiB, classified in a process limited to 48 MiB of address
+/// space: with `extend_from_slice` the process aborts with `memory allocation
+/// of 67108864 bytes failed`, **exit 134**; through this function it returns a
+/// classification, **exit 0**.
+///
+/// **Why [`Observed::Incomplete`] and not [`Observed::Absent`].** `Absent` is
+/// `Husk`, the reclaiming answer, and a buffer that could not grow established
+/// nothing about what the log holds -- which is exactly
+/// [`RunDirClass::Indeterminate`]'s sentence. That is a *narrower* answer than
+/// `read_to_end`'s was here (it folded into `Husk` with every other I/O
+/// failure) and it is deliberately not a re-decision of the other folds, which
+/// stay `Husk` as `SWEEP-CLASSIFY-009` records: this is a site this repair
+/// created, and the rule it is written under is the one the repair
+/// implements.
+///
+/// [`reserve`] then `extend_from_slice`: past a successful reservation the
+/// append cannot allocate again, because the capacity for exactly those bytes
+/// is already there.
+fn append(into: &mut Vec<u8>, delivered: &[u8]) -> Observed<()> {
+    match reserve(into, delivered.len()) {
+        Observed::Found(()) => {
+            into.extend_from_slice(delivered);
+            Observed::Found(())
+        }
+        Observed::Absent => Observed::Absent,
+        Observed::Incomplete => Observed::Incomplete,
+    }
+}
+
+/// Room in `into` for `additional` more bytes, or the answer to give when
+/// there is none.
+///
+/// **Split from [`append`] so the failing answer is one a test can reach**, for
+/// the reason [`class_of`] is split from [`classify_run_dir`]: an allocation
+/// that fails is a property of the machine, not of a fixture, and the only
+/// reservation the probe itself ever makes is at most [`SCAN_CHUNK`] bytes —
+/// which no host this crate builds for refuses. Over this signature the refusal
+/// is a *value a test supplies*: `try_reserve` answers
+/// `TryReserveErrorKind::CapacityOverflow` for any `additional` past
+/// `isize::MAX` without asking the allocator for anything, so
+/// `a_reservation_the_probe_cannot_make_answers_incomplete_rather_than_aborting`
+/// drives this arm on every platform and in microseconds. It is private and its
+/// driver is this file's own test module for the same reason [`class_of`]'s is:
+/// a `pub(super)` here would be an entry in `effects/wrappers.toml`, and this
+/// is a split for testability rather than a surface.
+///
+/// What that test cannot show is that [`read_up_to`] grows through here rather
+/// than through a bare `extend_from_slice`;
+/// `the_probe_grows_the_line_it_returns_through_a_fallible_reservation` in
+/// `rundir::tests` is the census that pins it, and the process-level
+/// reproduction — a 64 MiB first line classified under a 48 MiB address-space
+/// limit — is in this pull request's body. An address-space limit is not taken
+/// in this suite: `setrlimit` is a governed primitive and a shell `ulimit -v`
+/// is enforced differently on the three platforms CI runs, so the test would be
+/// either an allowlist row or a silent pass on two of them.
+fn reserve(into: &mut Vec<u8>, additional: usize) -> Observed<()> {
+    match into.try_reserve(additional) {
+        Ok(()) => Observed::Found(()),
+        Err(_) => Observed::Incomplete,
+    }
 }
 
 /// How much of the scan buffer a budget of `remaining` bytes may use.
@@ -766,7 +849,10 @@ pub fn run_started_sha256(line: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Allowance, INTERRUPTED_ALLOWANCE, Observed, RunDirClass, class_of, header_of};
+    use super::{
+        Allowance, INTERRUPTED_ALLOWANCE, Observed, RunDirClass, SCAN_CHUNK, append, class_of,
+        header_of, reserve,
+    };
 
     /// A valid committed first line, without its terminator, as
     /// [`super::first_line_within`] hands one over.
@@ -862,5 +948,60 @@ mod tests {
             "a first line that is not this header is an absence, which is a completed \
              observation"
         );
+    }
+
+    /// A reservation the probe cannot make answers, rather than killing the
+    /// process that asked.
+    ///
+    /// **The regression this is written against was introduced by the repair
+    /// above it**, in the round that replaced
+    /// `by_ref().take(want).read_to_end(&mut into)` with a hand-written loop:
+    /// `read_to_end` grows through `Vec::try_reserve` inside `std::io` and
+    /// reports a refusal as an `io::Error`, and `extend_from_slice` aborts the
+    /// process instead. Measured on the real crate, a 64 MiB first line
+    /// classified in a process limited to 48 MiB of address space: `231c1aad`
+    /// answered `Husk` at **exit 0**, that round answered nothing at **exit
+    /// 134** — `memory allocation of 67108864 bytes failed` — and this head
+    /// answers `Indeterminate` at **exit 0**.
+    ///
+    /// An address-space limit is not taken in this suite, and [`reserve`] says
+    /// why. What is driven here instead is the refusal itself: `try_reserve`
+    /// answers `CapacityOverflow` for any request past `isize::MAX` without
+    /// asking the allocator for anything, so the failing arm runs on every
+    /// platform, allocates nothing and takes microseconds.
+    ///
+    /// **The answer is the assertion, not merely the return.** A reservation
+    /// that answered [`Observed::Absent`] would also avoid the abort, and
+    /// `Absent` is `Husk` — the reclaiming classification — for an observation
+    /// that established nothing. That is the shape `SWEEP-CLASSIFY-001` is
+    /// about, one adverse condition over.
+    #[test]
+    fn a_reservation_the_probe_cannot_make_answers_incomplete_rather_than_aborting() {
+        let mut into = Vec::new();
+        assert_eq!(
+            reserve(&mut into, usize::MAX),
+            Observed::Incomplete,
+            "a reservation that cannot be satisfied is an observation that could not be \
+             completed"
+        );
+        assert_ne!(
+            reserve(&mut into, usize::MAX),
+            Observed::Absent,
+            "SWEEP-CLASSIFY-001: `Absent` is `Husk`, which is the reclaiming answer"
+        );
+        assert!(
+            into.is_empty(),
+            "a refused reservation leaves the buffer alone"
+        );
+
+        // The control: an ordinary reservation still succeeds, or the rows
+        // above measure a function that refuses everything.
+        assert_eq!(reserve(&mut into, SCAN_CHUNK), Observed::Found(()));
+        assert!(
+            into.capacity() >= SCAN_CHUNK,
+            "a granted reservation is room the append can then use without allocating again"
+        );
+        assert_eq!(append(&mut into, b"first line"), Observed::Found(()));
+        assert_eq!(into, b"first line".to_vec(), "and the bytes are appended");
     }
 }
