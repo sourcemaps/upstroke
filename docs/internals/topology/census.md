@@ -116,9 +116,24 @@ Attempts per generation.
 
 Integration sequences.
 
+## `pub struct CensusBounds` › `pub lineages: u32,`
+
+Distinct lineage roots among the registered repairs — the packet's
+"repairs <= 2 (lineages <= 2)" as its own dimension, measured as the
+number of roots and not inferred from the repair count: two repairs of one
+original are one lineage.
+
 ## `pub struct CensusBounds` › `pub defers: u32,`
 
-Verification defers per candidate — the fixture's `max_defers`.
+Verification defers per candidate, bounded by the fixture's `max_defers`
+(2). The fold parks the `max_defers`th outage rather than deferring it
+(`check_defer_allowance`), so the deferrals a candidate can carry are one
+fewer than the allowance, and one is the bound the census reaches by
+equality; the parked second outage is a class of its own
+(`merge_verification_unavailable/parked`). Until PR10's round 2 the
+dimension was measured from a task's worker backoff (`task.defers`), which
+the packet does not bound; that count is still noted, as `worker_defers`,
+and no bound is declared for it.
 
 ## `pub struct CensusBounds` › `pub questions: u32,`
 
@@ -136,7 +151,7 @@ The longest trace the search will extend.
 
 The most states the search will record before stopping.
 
-## `impl CensusBounds` › `pub const fn dimensions(&self) -> [(&'static str, u32); 9] {`
+## `impl CensusBounds` › `pub const fn dimensions(&self) -> [(&'static str, u32); 10] {`
 
 Every dimension of the *explored space* this census declares, as
 `(name, bound)`.
@@ -686,12 +701,16 @@ The fold parks a lineage's task only with nothing of the
 lineage in flight or under integration; a candidate awaiting
 its merge is where a task raises one on its own.
 
-## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `if fold.pipeline_reservable() && fold.finished().is_none() {`
+## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `if fold.finished().is_none() {`
 
-The ceiling is consulted where the loop selects — with no
-generation open and the run not over — and that is where the
-sequential loop appends `budget_exceeded`; offered in flight it
-doubles every attempt state for the same arm.
+The ceiling's event class is offered at every state of a run that is
+not over: `decisions.bounded_census.event_payload_classes` names
+`budget_exceeded` "as an event class applicable at any state, since its
+trigger is a live ceiling", and the loop appends it at the halting
+drain's settlement as well as where it selects. Until PR10's round 2 it
+was offered only with the pipeline reservable, which withheld the class
+from every in-flight state; the cost is that it creates more states
+than any other class (the round's measurement: 28% of the 20,000).
 
 ## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `let resumes_here = matches!(`
 
@@ -708,17 +727,20 @@ The classes of the integration path alone: what the deep census
 explores from a seed where two originals are merged, so that four
 sequences and two repairs are a few steps away rather than forty.
 
-## `mod tests` › `fn two_merged_prefix() -> (TopologyFold, Vec<TopologyEvent>…`
+## `mod tests` › `fn one_merged_two_candidates_prefix() -> (TopologyFold, Vec<TopologyEvent>…`
 
-A prefix with aleph and bet merged (sequences 0 and 1) and gimel's
-candidate created, applied event by event.
+A prefix with aleph merged (sequence 0) and bet's and gimel's
+candidates created, applied event by event: two originals a rejection
+away from a repair each, so two lineages are as near as two repairs.
 
 ## `mod tests` › `fn deep_census() -> &'static Census {`
 
-The deep census: from [`two_merged_prefix`], the integration path
-alone — gimel's candidate rejected and repaired, the repair rejected
-and repaired again — explored to closure, where the fourth sequence
-and the second repair are.
+The deep census: from [`one_merged_two_candidates_prefix`], the
+integration path alone — each candidate rejected and repaired, the
+repairs integrated — explored to closure, where the fourth sequence,
+the second repair and the second lineage are. Until PR10's round 2 the
+seed had two originals merged and one candidate, whose two repairs were
+one lineage.
 
 ## `mod tests` › `fn reached_dimensions(censuses: &[&Census]) -> BTreeMap<&'s…`
 
@@ -1003,10 +1025,12 @@ first one. Both halves are asserted.
 ## `mod tests` › `fn the_census_runs_at_the_packets_bounds_and_says_where_it_stopped() {`
 
 The bounds the census runs under are the packet's
-(`decisions.bounded_census.bounds`: three originals, two repairs, two
-generations per task, two attempts per generation, four integration
-sequences, two verification defers, two open questions, one review pass,
-two resumes), asserted number by number, and the fixture is what they name:
+(`decisions.bounded_census.bounds`: three originals, two repairs and two
+lineages, two generations per task, two attempts per generation, four
+integration sequences, verification defers per candidate under the
+fixture's `max_defers` of two — one, the allowance's last outage parking —
+two open questions, one review pass, two resumes), asserted number by
+number, and the fixture is what they name:
 three originals fanning out from aleph, rejections registering repairs, a
 repair dispatched, a lineage lease held somewhere in the explored set. And
 the census is truncated at its state ceiling and says so: the space under
@@ -1529,6 +1553,17 @@ lineage and names its source candidate (T-REPAIR-DISPATCH). Both
 prefixes are explored as census states from that seed and classify as
 tabled: nothing to settle for the rejection, an open repair generation
 to recreate at its base for the dispatch.
+
+## `pub(crate) mod tests` › `use crate::engine::topology::reachability::{`
+
+-----------------------------------------------------------------------
+PR10: the resume classifier over every explored state, the fault rows,
+the runner identity in both directions, and the summary (ST-14).
+-----------------------------------------------------------------------
+
+## `fn a_rejection_and_its_repairs_dispatch_are_reachable_prefi…` › `let seeded = Census::explore(`
+
+Both prefixes are census states when explored from the seed.
 
 ## `fn a_rejection_and_its_repairs_dispatch_are_reachable_prefi…` › `assert!(seeded.truncated() && seeded.states().len() < 500);`
 

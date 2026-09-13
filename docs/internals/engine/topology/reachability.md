@@ -27,7 +27,11 @@ The recovery order's steps as a plan read from the fold: what reopens the run (a
 BudgetExceeded end), the in-flight identities to settle interrupted (d), the retained
 generations to close (e), the promoting generations to complete (f), the open generations to
 recreate (g), the pending publication or verification (f), what `run_resumed` wakes, and the
-halt and derivation for the summary.
+halt and derivation for the summary — and, since PR10's round 2, the items the three rows that
+need no recovery event are about: the closed generations whose slots the resume reclaims
+(`reclaims`, T-SCRUB), the tasks whose settlement is read from the prefix (`settled`,
+T-FAILED) and the registered repairs (`repairs`, T-REJECT). A plan that names none of them is
+not those rows' resume action.
 
 ## `pub fn classify(fold: &TopologyFold) -> ResumeAction {`
 
@@ -65,11 +69,15 @@ question count the fold holds for that row (sorted and compared, not merely non-
 a plan that reopens nothing at a run that is ending; T-RESUME and T-FINALIZE the outcome the fold
 recorded.
 
-T-SCRUB, T-FAILED and T-REJECT are satisfied by any recovery. The item these rows are about
-needs no recovery event of its own: a scrubbed candidate is re-scrubbed idempotently, a settled
-task and a registered repair are read from the prefix. Whatever another task in the same state
-needs is that task's row. T-ANSWER's open question is read from the prefix too, and the plan's
-count of it is held to the fold's.
+T-SCRUB, T-FAILED and T-REJECT need no recovery event of their own: a scrubbed candidate is
+re-scrubbed idempotently, a settled task and a registered repair are read from the prefix. Until
+PR10's round 2 any `Recover` satisfied them, and the round's contract lens showed a
+`RecoveryPlan::default()` passing as their resume action; now each holds the plan to the items
+it is about — the closed generations it reclaims, the settled tasks it reads, the repairs it
+carries — sorted and compared like the per-item rows, and the census asserts the empty plan
+rejected wherever those rows are reached. Whatever another task in the same state needs is
+that task's row. T-ANSWER's open question is read from the prefix too, and the plan's count of
+it is held to the fold's.
 
 T-FINISH is a closure in progress: the run is ending (a halting settlement, a budget stop, or
 nothing left to select) and no `run_finished` is durable yet. The next process repeats the
@@ -80,6 +88,10 @@ evaluates `derived_outcome` and appends `run_finished`.
 
 What the G5 gate dumps: every fault row with the states that reach it, every action and every
 outcome counted, the bounds the census ran under and whether live and replay classified alike.
+The three transition counts are each counted from the outcome the census recorded — accepted,
+refused, and the offers the state ceiling truncated (`truncated_offers`) — and sum to the
+transitions; until PR10's round 2 the refusals were the remainder after the acceptances, which
+counted every truncated offer as a refusal.
 
 ## `pub fn summarize(census: &Census, classification_equal_live_and_on_replay: bool) -> CensusSummary {`
 

@@ -19,7 +19,7 @@ use super::report::outcome_label;
 pub enum ResumeAction {
     NotStarted,
     FinalizeThenRefuse { outcome: RunOutcome },
-    Recover(RecoveryPlan),
+    Recover(Box<RecoveryPlan>),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -37,6 +37,9 @@ pub struct RecoveryPlan {
     pub open_questions: u32,
     pub halted: bool,
     pub derived: String,
+    pub reclaims: Vec<GenerationIdentity>,
+    pub settled: Vec<u32>,
+    pub repairs: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -108,6 +111,9 @@ pub fn classify(fold: &TopologyFold) -> ResumeAction {
         if task.state == TaskState::Deferred {
             plan.wakes_deferred_tasks.push(key.0);
         }
+        if settled_from_the_prefix(task) {
+            plan.settled.push(key.0);
+        }
         for generation in &task.generations {
             let lineage = matches!(generation.lease, GenerationLease::InheritedLineage { .. });
             let identity = GenerationIdentity {
@@ -127,10 +133,11 @@ pub fn classify(fold: &TopologyFold) -> ResumeAction {
                 }
                 GenerationClass::RetainedIdle { .. } => plan.close_retained.push(identity),
                 GenerationClass::Promoting => plan.complete_promotions.push(identity),
-                GenerationClass::Closed => {}
+                GenerationClass::Closed => plan.reclaims.push(identity),
             }
         }
     }
+    plan.repairs = registered_repairs(fold);
 
     if let Some(queue) = fold.queue() {
         plan.wakes_deferred_candidates = u32::try_from(
@@ -167,7 +174,7 @@ pub fn classify(fold: &TopologyFold) -> ResumeAction {
         }
     }
 
-    ResumeAction::Recover(plan)
+    ResumeAction::Recover(Box::new(plan))
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -177,11 +184,35 @@ struct FoldView {
     in_flight: Vec<InFlightIdentity>,
     retained: Vec<GenerationIdentity>,
     promoting: Vec<GenerationIdentity>,
+    closed: Vec<GenerationIdentity>,
+    settled: Vec<u32>,
+    repairs: Vec<u32>,
     publication: Option<PendingPublication>,
     verification: Option<PendingVerification>,
     open_questions: u32,
     reopens: Option<RunOutcome>,
     finalizes: Option<RunOutcome>,
+}
+
+fn settled_from_the_prefix(task: &crate::topology::fold::TaskFold) -> bool {
+    matches!(
+        task.state,
+        TaskState::Failed | TaskState::AwaitingInput | TaskState::Deferred
+    ) && task
+        .generations
+        .iter()
+        .any(|generation| generation.attempts > 0)
+}
+
+fn registered_repairs(fold: &TopologyFold) -> Vec<u32> {
+    fold.registry().map_or_else(Vec::new, |registry| {
+        registry
+            .entries()
+            .iter()
+            .filter(|entry| entry.lineage.is_some())
+            .map(|entry| entry.key.0)
+            .collect()
+    })
 }
 
 fn view(fold: &TopologyFold) -> FoldView {
@@ -203,6 +234,9 @@ fn view(fold: &TopologyFold) -> FoldView {
     let mut any_generation = false;
     for key in keys(fold) {
         let Some(task) = fold.task(key) else { continue };
+        if settled_from_the_prefix(task) {
+            seen.settled.push(key.0);
+        }
         for generation in &task.generations {
             any_generation = true;
             let lineage = matches!(generation.lease, GenerationLease::InheritedLineage { .. });
@@ -221,10 +255,11 @@ fn view(fold: &TopologyFold) -> FoldView {
                 }),
                 GenerationClass::RetainedIdle { .. } => seen.retained.push(identity),
                 GenerationClass::Promoting => seen.promoting.push(identity),
-                GenerationClass::Closed => {}
+                GenerationClass::Closed => seen.closed.push(identity),
             }
         }
     }
+    seen.repairs = registered_repairs(fold);
     seen.fresh_start = fold.epoch().is_some()
         && fold.task_count() > 0
         && !any_generation
@@ -304,17 +339,7 @@ pub fn rows_reached(fold: &TopologyFold) -> Vec<FaultRow> {
     }) {
         rows.push(FaultRow::TScrub);
     }
-    if keys(fold).any(|key| {
-        fold.task(key).is_some_and(|task| {
-            matches!(
-                task.state,
-                TaskState::Failed | TaskState::AwaitingInput | TaskState::Deferred
-            ) && task
-                .generations
-                .iter()
-                .any(|generation| generation.attempts > 0)
-        })
-    }) {
+    if !seen.settled.is_empty() {
         rows.push(FaultRow::TFailed);
     }
     match &seen.publication {
@@ -328,12 +353,7 @@ pub fn rows_reached(fold: &TopologyFold) -> Vec<FaultRow> {
             rows.push(FaultRow::TProposal);
         }
     }
-    if fold.registry().is_some_and(|registry| {
-        registry
-            .entries()
-            .iter()
-            .any(|entry| entry.lineage.is_some())
-    }) {
+    if !seen.repairs.is_empty() {
         rows.push(FaultRow::TReject);
     }
     if seen.open_questions > 0 {
@@ -413,7 +433,15 @@ pub fn matches_row(row: FaultRow, fold: &TopologyFold, action: &ResumeAction) ->
         FaultRow::TRetained => {
             !seen.retained.is_empty() && sorted(&plan.close_retained) == sorted(&seen.retained)
         }
-        FaultRow::TScrub | FaultRow::TFailed | FaultRow::TReject => true,
+        FaultRow::TScrub => {
+            !seen.closed.is_empty() && sorted(&plan.reclaims) == sorted(&seen.closed)
+        }
+        FaultRow::TFailed => {
+            !seen.settled.is_empty() && sorted(&plan.settled) == sorted(&seen.settled)
+        }
+        FaultRow::TReject => {
+            !seen.repairs.is_empty() && sorted(&plan.repairs) == sorted(&seen.repairs)
+        }
         FaultRow::TAnswer => seen.open_questions > 0 && plan.open_questions == seen.open_questions,
         FaultRow::TFast | FaultRow::TPrepared => {
             seen.publication.is_some() && plan.publication == seen.publication
@@ -461,6 +489,7 @@ pub struct CensusSummary {
     pub transitions: usize,
     pub accepted: usize,
     pub refused: usize,
+    pub truncated_offers: usize,
     pub truncated: bool,
     pub outcomes: BTreeMap<String, usize>,
     pub actions: BTreeMap<String, usize>,
@@ -513,17 +542,20 @@ pub fn summarize(census: &Census, classification_equal_live_and_on_replay: bool)
             }
         }
     }
-    let accepted = census
-        .transitions()
-        .iter()
-        .filter(|transition| matches!(transition.outcome, TransitionOutcome::Accepted { .. }))
-        .count();
+    let count = |wanted: fn(&TransitionOutcome) -> bool| {
+        census
+            .transitions()
+            .iter()
+            .filter(|transition| wanted(&transition.outcome))
+            .count()
+    };
     CensusSummary {
         bounds: bound_map,
         states: census.states().len(),
         transitions: census.transitions().len(),
-        accepted,
-        refused: census.transitions().len().saturating_sub(accepted),
+        accepted: count(|outcome| matches!(outcome, TransitionOutcome::Accepted { .. })),
+        refused: count(|outcome| matches!(outcome, TransitionOutcome::Refused { .. })),
+        truncated_offers: count(|outcome| matches!(outcome, TransitionOutcome::Truncated)),
         truncated: census.truncated(),
         outcomes,
         actions,

@@ -13,6 +13,7 @@ pub struct CensusBounds {
     pub generations_per_task: u32,
     pub attempts_per_generation: u32,
     pub sequences: u32,
+    pub lineages: u32,
     pub defers: u32,
     pub questions: u32,
     pub review_passes: u32,
@@ -22,13 +23,14 @@ pub struct CensusBounds {
 }
 
 impl CensusBounds {
-    pub const fn dimensions(&self) -> [(&'static str, u32); 9] {
+    pub const fn dimensions(&self) -> [(&'static str, u32); 10] {
         [
             ("originals", self.originals),
             ("repairs", self.repairs),
             ("generations_per_task", self.generations_per_task),
             ("attempts_per_generation", self.attempts_per_generation),
             ("sequences", self.sequences),
+            ("lineages", self.lineages),
             ("defers", self.defers),
             ("questions", self.questions),
             ("review_passes", self.review_passes),
@@ -45,7 +47,8 @@ impl Default for CensusBounds {
             generations_per_task: 2,
             attempts_per_generation: 2,
             sequences: 4,
-            defers: 2,
+            lineages: 2,
+            defers: 1,
             questions: 2,
             review_passes: 1,
             resumes: 2,
@@ -317,7 +320,7 @@ fn intern(table: &mut BTreeMap<String, Arc<str>>, text: String) -> Arc<str> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::OnceLock;
     use std::time::Duration;
@@ -1528,7 +1531,7 @@ mod tests {
                 },
             }),
         ));
-        if fold.pipeline_reservable() && fold.finished().is_none() {
+        if fold.finished().is_none() {
             out.push(Candidate::new(
                 "budget_exceeded",
                 ev(TopologyEventBody::BudgetExceeded {
@@ -1639,7 +1642,7 @@ mod tests {
             .collect()
     }
 
-    fn two_merged_prefix() -> (TopologyFold, Vec<TopologyEvent>) {
+    fn one_merged_two_candidates_prefix() -> (TopologyFold, Vec<TopologyEvent>) {
         let mut fold = started();
         let mut trace = vec![run_started_event()];
         let apply =
@@ -1650,40 +1653,39 @@ mod tests {
                 fold.apply_delta(delta);
                 trace.push(event);
             };
-        for (key, sequence) in [(ALEPH, 0), (BET, 1)] {
-            let events = vec![
+        for event in [
+            dispatch(ALEPH, 0),
+            attempt_started(&fold, ALEPH, 0, 1),
+            candidate_prepared(ALEPH, 0, 1),
+            candidate_created(ALEPH, 0),
+        ] {
+            apply(&mut fold, &mut trace, event);
+        }
+        let prepared = merge_prepared(
+            0,
+            ALEPH,
+            0,
+            PreparedDisposition::Fast,
+            sha("base"),
+            candidate_of(ALEPH, 0).commit_sha,
+            None,
+            VerificationSource::CandidatePrepared {
+                key: ALEPH,
+                generation: GenerationId(0),
+            },
+        );
+        apply(&mut fold, &mut trace, prepared);
+        let merged = task_merged(&fold, 0, ALEPH, 0);
+        apply(&mut fold, &mut trace, merged);
+        for key in [BET, GIMEL] {
+            for event in [
                 dispatch(key, 0),
                 attempt_started(&fold, key, 0, 1),
                 candidate_prepared(key, 0, 1),
                 candidate_created(key, 0),
-            ];
-            for event in events {
+            ] {
                 apply(&mut fold, &mut trace, event);
             }
-            let prepared = merge_prepared(
-                sequence,
-                key,
-                0,
-                PreparedDisposition::Fast,
-                sha("base"),
-                candidate_of(key, 0).commit_sha,
-                None,
-                VerificationSource::CandidatePrepared {
-                    key,
-                    generation: GenerationId(0),
-                },
-            );
-            apply(&mut fold, &mut trace, prepared);
-            let merged = task_merged(&fold, sequence, key, 0);
-            apply(&mut fold, &mut trace, merged);
-        }
-        for event in [
-            dispatch(GIMEL, 0),
-            attempt_started(&fold, GIMEL, 0, 1),
-            candidate_prepared(GIMEL, 0, 1),
-            candidate_created(GIMEL, 0),
-        ] {
-            apply(&mut fold, &mut trace, event);
         }
         (fold, trace)
     }
@@ -1691,7 +1693,7 @@ mod tests {
     fn deep_census() -> &'static Census {
         static DEEP: OnceLock<Census> = OnceLock::new();
         DEEP.get_or_init(|| {
-            let (fold, trace) = two_merged_prefix();
+            let (fold, trace) = one_merged_two_candidates_prefix();
             Census::explore(
                 fold,
                 trace,
@@ -1724,15 +1726,23 @@ mod tests {
                         .filter(|entry| entry.origin == crate::topology::registry::Origin::Original)
                         .count();
                     let repairs = registry.entries().len() - originals;
+                    let lineages: BTreeSet<TaskKey> = registry
+                        .entries()
+                        .iter()
+                        .filter_map(|entry| entry.lineage.map(|lineage| lineage.root))
+                        .collect();
                     note("originals", u32::try_from(originals).unwrap_or(u32::MAX));
                     note("repairs", u32::try_from(repairs).unwrap_or(u32::MAX));
+                    note(
+                        "lineages",
+                        u32::try_from(lineages.len()).unwrap_or(u32::MAX),
+                    );
                     for entry in registry.entries() {
                         if let Some(task) = fold.task(entry.key) {
                             note(
                                 "generations_per_task",
                                 u32::try_from(task.generations.len()).unwrap_or(u32::MAX),
                             );
-                            note("defers", task.defers);
                             for generation in &task.generations {
                                 note("attempts_per_generation", generation.attempts);
                             }
@@ -2397,13 +2407,33 @@ mod tests {
         assert_eq!(bounds.generations_per_task, 2);
         assert_eq!(bounds.attempts_per_generation, 2);
         assert_eq!(bounds.sequences, 4);
-        assert_eq!(bounds.defers, 2);
+        assert_eq!(bounds.lineages, 2);
+        assert_eq!(
+            bounds.defers + 1,
+            run_started().limits.max_defers,
+            "verification defers per candidate are bounded by the fixture's max_defers, whose \
+             last outage parks rather than defers"
+        );
+        assert_eq!(bounds.defers, 1);
         assert_eq!(bounds.questions, 2);
         assert_eq!(bounds.review_passes, 1);
         assert_eq!(bounds.resumes, 2);
         assert_eq!(bounds.max_states, 20_000);
 
         let census = census();
+        let in_flight = census
+            .states()
+            .iter()
+            .find(|state| !state.fold.pipeline_reservable() && state.fold.finished().is_none())
+            .expect("an unfinished state holds the pipeline");
+        assert!(
+            classes(&in_flight.fold)
+                .iter()
+                .any(|candidate| candidate.label == "budget_exceeded"),
+            "state {}: `budget_exceeded` is offered at any state of a run that is not over, the \
+             pipeline held or not",
+            in_flight.id
+        );
         let registry = started().registry().expect("started").len();
         assert_eq!(
             registry, 3,
@@ -2859,6 +2889,20 @@ mod tests {
                 reviews: Vec::new(),
             },
         })
+    }
+
+    pub(crate) fn deferred_verification_fold() -> TopologyFold {
+        let mut trace = queued_candidate_trace(region(ALEPH));
+        trace.push(verification_started(
+            0,
+            ALEPH,
+            0,
+            "prepared/0",
+            sha("moved-head"),
+            sha("proposal-aleph"),
+        ));
+        trace.push(verification_deferred_by_outage(0, 1));
+        replayed(&trace)
     }
 
     fn verification_deferred_by_outage(sequence: u32, defers: u32) -> TopologyEvent {
@@ -3573,6 +3617,10 @@ mod tests {
             "the deep census consumes four sequences"
         );
         assert_eq!(deep["repairs"], 2, "and registers two repairs");
+        assert_eq!(
+            deep["lineages"], 2,
+            "in two lineages: one rejection of each candidate"
+        );
         assert!(
             !deep_census().truncated(),
             "the deep census closes under its ceilings: {} states",
@@ -3718,11 +3766,6 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // PR10: the resume classifier over every explored state, the fault rows,
-    // the runner identity in both directions, and the summary (ST-14).
-    // -----------------------------------------------------------------------
-
     use crate::engine::topology::reachability::{
         self, ResumeAction, classify, matches_row, rows_reached,
     };
@@ -3820,6 +3863,17 @@ mod tests {
                     reachability::row_name(row),
                     reachability::action_label(&action)
                 );
+                if matches!(
+                    row,
+                    FaultRow::TScrub | FaultRow::TFailed | FaultRow::TReject
+                ) {
+                    assert!(
+                        !matches_row(row, &state.fold, &ResumeAction::Recover(Box::default())),
+                        "state {}: a recovery that names nothing passes as {}'s resume action",
+                        state.id,
+                        reachability::row_name(row)
+                    );
+                }
                 *reached.entry(row).or_insert(0) += 1;
             }
         }
@@ -3914,7 +3968,7 @@ mod tests {
         assert_eq!(action, classify(&replayed(&trace)), "live equals replay");
 
         let TopologyEventBody::MergeRejected { data } = &rejection.body else {
-            unreachable!("built above");
+            panic!("`conflict_rejection` builds a merge_rejected: {rejection:?}");
         };
         let dispatch = ev(TopologyEventBody::TaskDispatched {
             data: TaskDispatched {
@@ -3946,7 +4000,6 @@ mod tests {
             vec![(repair.0, 0, true)]
         );
 
-        // Both prefixes are census states when explored from the seed.
         let seeded = Census::explore(
             rejected.clone(),
             trace[..trace.len() - 1].to_vec(),
@@ -4043,10 +4096,9 @@ mod tests {
         generation: u32,
         attempt: u32,
     ) -> TopologyEvent {
-        let TopologyEventBody::AttemptStarted { mut data } =
-            attempt_started(fold, key, generation, attempt).body
-        else {
-            unreachable!("attempt_started builds an attempt_started");
+        let started = attempt_started(fold, key, generation, attempt);
+        let TopologyEventBody::AttemptStarted { mut data } = started.body else {
+            panic!("`attempt_started` builds an attempt_started: {started:?}");
         };
         data.resume_session = Some(crate::topology::events::SessionId(
             RETAINED_SESSION.to_owned(),
@@ -4290,7 +4342,31 @@ mod tests {
         let summary = reachability::summarize(census, true);
         assert_eq!(summary.states, census.states().len());
         assert_eq!(summary.transitions, census.transitions().len());
-        assert!(summary.accepted + summary.refused <= summary.transitions);
+        let counted = |wanted: fn(&TransitionOutcome) -> bool| {
+            census
+                .transitions()
+                .iter()
+                .filter(|transition| wanted(&transition.outcome))
+                .count()
+        };
+        assert_eq!(
+            summary.refused,
+            counted(|outcome| matches!(outcome, TransitionOutcome::Refused { .. })),
+            "the summary's refusals are the fold's refusals and nothing else"
+        );
+        assert_eq!(
+            summary.accepted,
+            counted(|outcome| matches!(outcome, TransitionOutcome::Accepted { .. }))
+        );
+        assert_eq!(
+            summary.truncated_offers,
+            counted(|outcome| matches!(outcome, TransitionOutcome::Truncated)),
+            "an offer the fold accepted and the ceiling discarded is reported as such"
+        );
+        assert_eq!(
+            summary.accepted + summary.refused + summary.truncated_offers,
+            summary.transitions
+        );
         assert!(
             summary.truncated,
             "the summary says the census stopped at its state ceiling"
