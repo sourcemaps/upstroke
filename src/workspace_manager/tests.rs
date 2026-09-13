@@ -4935,14 +4935,33 @@ fn a_registration_git_cannot_enumerate_classifies_as_unpopulated_and_converges()
 /// (the round-4 regression lens, P2-2; the decoder defect for a populated
 /// worktree is `PR128-REVIEW2-PATHS-READ-AS-UTF8`'s and stays filed). A raw
 /// repository, not `Fixture::created`: the fixture's own manager derivation
-/// reaches the same reader. Unix, where such a path exists at all.
+/// reaches the same reader. Unix, where such a path exists at all — and not
+/// on every Unix filesystem: APFS refuses the name with `EILSEQ` ("Illegal
+/// byte sequence", errno 92 on macOS; CI's `test (macos-latest)` job at
+/// `96bf1944`), so the directory is probed first and the test is skipped,
+/// saying why and with the errno it saw, where the name cannot be made — on
+/// such a filesystem the shape the test guards against cannot arise either.
+/// Linux makes the name and measures the decoder.
 #[cfg(unix)]
 #[test]
 fn an_absent_add_target_in_a_byte_named_repository_still_classifies() {
     use std::os::unix::ffi::OsStringExt as _;
     let root = scratch("byte-named-repository");
     let repo = root.join(std::ffi::OsString::from_vec(b"repo-\xff".to_vec()));
-    fs::create_dir_all(&repo).expect("a repository directory Git can name and UTF-8 cannot");
+    match fs::create_dir_all(&repo) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
+            eprintln!(
+                "skipped: this filesystem refuses a directory name that is not UTF-8 — {error} \
+                 (errno {:?}, EILSEQ) — so the byte-named repository the decoder is measured on \
+                 cannot exist here, and neither can the shape this test guards against",
+                error.raw_os_error()
+            );
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
+        Err(error) => panic!("a repository directory Git can name and UTF-8 cannot: {error}"),
+    }
     for args in [
         &["init", "-q", "-b", "main"][..],
         &["config", "user.email", "tests@upstroke.local"],

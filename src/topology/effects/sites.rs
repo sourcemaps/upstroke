@@ -1289,9 +1289,13 @@ impl LockSite {
 /// consults `RunDir.WriteReport` and then this site around the one write, the
 /// two hook executions for one write that the owner's standing finding
 /// `PR3-REPORT-DOUBLE-NAME` (`findings/`, history in `reviews/FINDINGS.md` §2)
-/// said ST-07 would demand. This site's inventory module, `src/util.rs`, holds
-/// the write primitive and no funnel; `effects/funnel-modules.json` records
-/// the disagreement the way it records the answer funnels'. The census
+/// said ST-07 would demand; and `rundir::sync_report_dir` consults the same
+/// two, in the same order, around the directory barrier a finalization that
+/// finds the report current takes before it prunes, so that branch's one
+/// external effect is inside the inventory too (PR10's round 5). This site's
+/// inventory module, `src/util.rs`, holds the write primitive and no funnel;
+/// `effects/funnel-modules.json` records the disagreement the way it records
+/// the answer funnels'. The census
 /// `every_site_the_inventory_declares_has_a_funnel_that_names_it_or_is_recorded_absent`
 /// in `src/effects/tests.rs` is the live answer to which sites a funnel
 /// reaches; this sentence is a pointer to it and goes stale the moment it

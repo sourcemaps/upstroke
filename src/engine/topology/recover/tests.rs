@@ -2212,8 +2212,10 @@ fn resume_finalizes_halted_then_refuses() {
                     EffectSiteId::RunDir(RunDirSite::WriteReport),
                     HookPhase::After
                 ),
-            1,
-            "and `RunDir.WriteReport` did not run again ({tag})"
+            2,
+            "and the second resume consulted the report's sites again — the fresh branch's \
+             directory barrier runs through them since round 5 — and wrote nothing: the bytes \
+             above are byte-identical ({tag})"
         );
         assert_eq!(
             fixture.log_bytes(),
@@ -15559,6 +15561,8 @@ fn kill_after_report_before_each_cleanup_step() {
                 wait_for_cleanup_hold_release(&fixture.public()),
                 "{tag}: the run's cleanup lease is still held"
             );
+            let report_bytes = std::fs::read(fixture.public().join("report.json"))
+                .expect("the report the second resume left current");
             let third = harness();
             let (result, _) = resume(fixture, &third, &given);
             let text = message(&result.expect_err("a finalized run refuses again"));
@@ -15567,6 +15571,26 @@ fn kill_after_report_before_each_cleanup_step() {
             for site in [
                 EffectSiteId::RunDir(RunDirSite::WriteReport),
                 EffectSiteId::Report(crate::topology::effects::ReportSite::Write),
+            ] {
+                for phase in [HookPhase::Before, HookPhase::After] {
+                    assert!(
+                        seen.observed(site, phase),
+                        "{tag}: a converged finalization finds the report current and takes its \
+                         directory barrier through `{site}` ({phase}), the fresh branch's since \
+                         round 5"
+                    );
+                }
+            }
+            assert_eq!(
+                std::fs::read(fixture.public().join("report.json")).expect("the report stands"),
+                report_bytes,
+                "{tag}: and writes nothing: the report is byte-identical"
+            );
+            assert!(
+                !fixture.public().join(rundir::REPORT_STAGED).exists(),
+                "{tag}: nothing was staged"
+            );
+            for site in [
                 EffectSiteId::Worktree(WorktreeSite::Remove),
                 EffectSiteId::Snapshot(crate::topology::effects::SnapshotSite::Remove),
                 EffectSiteId::Worktree(WorktreeSite::RemoveStaging),
@@ -15954,13 +15978,11 @@ fn the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_re
         text.contains("already current") && text.contains("finalized"),
         "{text}"
     );
-    let timeline = hooks.timeline();
-    assert!(
-        timeline.iter().all(|seen| {
-            seen.site != EffectSiteId::RunDir(RunDirSite::WriteReport)
-                && seen.site != EffectSiteId::Report(ReportSite::Write)
-        }),
-        "a current report is not rewritten on the restart: {timeline:?}"
+    assert_fresh_branch_took_the_report_sites(
+        &hooks.timeline(),
+        &hooks.ledger_records(),
+        &fixture.public(),
+        "the restart",
     );
     assert_eq!(
         std::fs::read(&report_path).expect("the report stands"),
@@ -15974,231 +15996,408 @@ fn the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_re
     assert_finalized(&planted, &RunOutcome::Complete, "after the restart");
 }
 
-#[test]
-fn a_report_directory_barrier_that_fails_refuses_pruning_on_every_resume_until_it_holds() {
+#[track_caller]
+fn assert_no_ref_site(timeline: &[BarrierSeen], tag: &str) {
+    assert!(
+        timeline
+            .iter()
+            .all(|seen| !matches!(seen.site, EffectSiteId::Ref(_))),
+        "{tag}: no ref site was reached: {timeline:?}"
+    );
+}
+
+#[track_caller]
+fn assert_report_site_entered_and_not_left(timeline: &[BarrierSeen], tag: &str) {
     use crate::topology::effects::ReportSite;
-    let planted = plant_finished_run_with(
-        "report-dir-barrier-fault",
-        RunOutcome::Complete,
-        AlphaEnd::Published,
-        FinishedResidue {
-            snapshot: true,
-            staging: true,
-            prepared_pin: true,
-        },
-    );
-    let fixture = &planted.fixture;
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(fixture, &runtime, &certifies);
-    let report_path = fixture.public().join(rundir::REPORT);
-    let no_injection = (EffectSiteId::Lock(LockSite::Release), HookPhase::After);
-    let fault = crate::util::fail_barriers_at(&fixture.public());
-
-    let first = harness();
-    let mut hooks = BarrierHooks::armed(&first, no_injection, Injection::Proceed);
-    let (result, _) = resume_with(fixture, &mut hooks, &given);
-    let error = message(&result.expect_err("the failed directory barrier ends the command"));
-    assert!(error.contains("injected barrier fault"), "{error}");
-    let timeline = hooks.timeline();
-    assert!(
-        timeline.iter().any(|seen| {
-            seen.site == EffectSiteId::Report(ReportSite::Write) && seen.phase == HookPhase::Before
-        }) && timeline.iter().all(|seen| {
-            !(seen.site == EffectSiteId::Report(ReportSite::Write)
-                && seen.phase == HookPhase::After)
-        }),
-        "the report site was entered and not left: the barrier failed inside it: {timeline:?}"
-    );
+    let report = EffectSiteId::Report(ReportSite::Write);
     assert!(
         timeline
             .iter()
-            .all(|seen| !matches!(seen.site, EffectSiteId::Ref(_))),
-        "no ref site was reached: {timeline:?}"
+            .any(|seen| seen.site == report && seen.phase == HookPhase::Before)
+            && timeline
+                .iter()
+                .all(|seen| !(seen.site == report && seen.phase == HookPhase::After)),
+        "{tag}: the report site was entered and not left — the barrier failed inside it: \
+         {timeline:?}"
     );
-    let bytes = std::fs::read(&report_path).expect("the renamed report is visible under its name");
-    assert!(
-        report_of(fixture).is_fresh_against(&bytes),
-        "and current by digest — the shape the next resume takes the fresh branch on"
-    );
-    assert!(!fixture.public().join(rundir::REPORT_STAGED).exists());
-    assert_eq!(
-        candidates_refs_of(fixture).len(),
-        1,
-        "the candidates ref stands: nothing was pruned behind an unproven name"
-    );
-    assert!(
-        wait_for_cleanup_hold_release(&fixture.public()),
-        "the run's cleanup lease is still held"
-    );
+}
 
-    let second = harness();
-    let mut hooks = BarrierHooks::armed(&second, no_injection, Injection::Proceed);
-    let (result, _) = resume_with(fixture, &mut hooks, &given);
-    let error = message(&result.expect_err(
-        "the fresh report's name is still not proven durable: the barrier refuses again",
-    ));
-    assert!(error.contains("injected barrier fault"), "{error}");
-    let timeline = hooks.timeline();
-    assert!(
-        timeline.iter().all(|seen| {
-            seen.site != EffectSiteId::RunDir(RunDirSite::WriteReport)
-                && seen.site != EffectSiteId::Report(ReportSite::Write)
-        }),
-        "a current report is not rewritten: {timeline:?}"
-    );
-    assert!(
+#[track_caller]
+fn assert_fresh_branch_took_the_report_sites(
+    timeline: &[BarrierSeen],
+    records: &[crate::util::DurableRecord],
+    public: &Path,
+    tag: &str,
+) {
+    use crate::topology::effects::ReportSite;
+    let run_dir = EffectSiteId::RunDir(RunDirSite::WriteReport);
+    let report = EffectSiteId::Report(ReportSite::Write);
+    let position = |site: EffectSiteId, phase: HookPhase| {
         timeline
             .iter()
-            .all(|seen| !matches!(seen.site, EffectSiteId::Ref(_))),
-        "and no ref site was reached: {timeline:?}"
-    );
-    assert_eq!(
-        std::fs::read(&report_path).expect("the report stands"),
-        bytes
-    );
-    assert_eq!(
-        candidates_refs_of(fixture).len(),
-        1,
-        "the candidates ref still stands"
+            .position(|seen| seen.site == site && seen.phase == phase)
+            .unwrap_or_else(|| {
+                panic!("{tag}: `{site}`/{phase} was not reached on the fresh branch: {timeline:?}")
+            })
+    };
+    let outer_before = position(run_dir, HookPhase::Before);
+    let inner_before = position(report, HookPhase::Before);
+    let inner_after = position(report, HookPhase::After);
+    let outer_after = position(run_dir, HookPhase::After);
+    assert!(
+        outer_before < inner_before && inner_before < inner_after && inner_after < outer_after,
+        "{tag}: `Report.Write` inside `RunDir.WriteReport`, as the write is: {timeline:?}"
     );
     assert!(
-        wait_for_cleanup_hold_release(&fixture.public()),
-        "the run's cleanup lease is still held"
-    );
-
-    drop(fault);
-    let third = harness();
-    let mut hooks = BarrierHooks::armed(&third, no_injection, Injection::Proceed);
-    let (result, _) = resume_with(fixture, &mut hooks, &given);
-    let text = message(&result.expect_err("with the barrier holding, finalize then refuse"));
-    assert!(
-        text.contains("already current") && text.contains("finalized"),
-        "{text}"
-    );
-    let timeline = hooks.timeline();
-    let first_deletion = timeline
-        .iter()
-        .position(|seen| {
-            matches!(seen.site, EffectSiteId::Ref(_)) && seen.phase == HookPhase::Before
-        })
-        .expect("a ref deletion was reached");
-    assert!(
-        timeline[first_deletion]
+        !timeline[inner_before]
             .synced_dirs
             .iter()
-            .any(|dir| *dir == fixture.public()),
-        "the public directory was synced before the first ref deletion: {:?}",
-        timeline[first_deletion].synced_dirs
+            .any(|dir| dir == public)
+            && timeline[inner_after]
+                .synced_dirs
+                .iter()
+                .any(|dir| dir == public),
+        "{tag}: the public directory's barrier ran between the report site's two phases: {:?} \
+         -> {:?}",
+        timeline[inner_before].synced_dirs,
+        timeline[inner_after].synced_dirs
+    );
+    let under_public: Vec<_> = records
+        .iter()
+        .filter(|record| record.path.starts_with(public))
+        .collect();
+    assert!(
+        !under_public.is_empty()
+            && under_public
+                .iter()
+                .all(|record| record.step == crate::util::DurableStep::SyncedDirectory),
+        "{tag}: under the public directory the fresh branch synced and staged, wrote or renamed \
+         nothing: {under_public:?}"
     );
     assert!(
-        candidates_refs_of(fixture).is_empty(),
-        "the refs are pruned behind the barrier that held"
+        !public.join(rundir::REPORT_STAGED).exists(),
+        "{tag}: no staged report"
     );
-    assert_eq!(
-        std::fs::read(&report_path).expect("the report stands"),
-        bytes
-    );
-    assert_finalized(&planted, &RunOutcome::Complete, "after the barrier held");
+}
+
+#[test]
+fn a_report_directory_barrier_that_fails_refuses_pruning_on_every_resume_until_it_holds() {
+    for (outcome, alpha) in [
+        (RunOutcome::Complete, AlphaEnd::Published),
+        (RunOutcome::Halted, AlphaEnd::Queued),
+    ] {
+        let tag = outcome_short(&outcome);
+        let planted = plant_finished_run_with(
+            &format!("report-dir-barrier-fault-{tag}"),
+            outcome.clone(),
+            alpha,
+            FinishedResidue {
+                snapshot: true,
+                staging: true,
+                prepared_pin: true,
+            },
+        );
+        let fixture = &planted.fixture;
+        let runtime = runtime_holding_the_record();
+        let certifies = AlwaysCertifies;
+        let given = Given::healthy(fixture, &runtime, &certifies);
+        let report_path = fixture.public().join(rundir::REPORT);
+        let no_injection = (EffectSiteId::Lock(LockSite::Release), HookPhase::After);
+        let pins_before = pins_of(fixture);
+        assert_eq!(
+            pins_before.len(),
+            2,
+            "{tag}: a prepared pin and a candidate-prepared pin stand to be pruned"
+        );
+        let fault = crate::util::fail_barriers_at(&fixture.public());
+
+        let first = harness();
+        let mut hooks = BarrierHooks::armed(&first, no_injection, Injection::Proceed);
+        let (result, _) = resume_with(fixture, &mut hooks, &given);
+        let error = message(&result.expect_err("the failed directory barrier ends the command"));
+        assert!(error.contains("injected barrier fault"), "{tag}: {error}");
+        let timeline = hooks.timeline();
+        assert_report_site_entered_and_not_left(
+            &timeline,
+            &format!("{tag}: the first finalization"),
+        );
+        assert_no_ref_site(&timeline, &format!("{tag}: the first finalization"));
+        let bytes =
+            std::fs::read(&report_path).expect("the renamed report is visible under its name");
+        assert!(
+            report_of(fixture).is_fresh_against(&bytes),
+            "{tag}: and current by digest — the shape the next resume takes the fresh branch on"
+        );
+        assert!(!fixture.public().join(rundir::REPORT_STAGED).exists());
+        assert_eq!(
+            candidates_refs_of(fixture).len(),
+            1,
+            "{tag}: the candidates ref stands: nothing was pruned behind an unproven name"
+        );
+        assert_eq!(
+            pins_of(fixture),
+            pins_before,
+            "{tag}: and both pin families stand"
+        );
+        assert!(
+            wait_for_cleanup_hold_release(&fixture.public()),
+            "{tag}: the run's cleanup lease is still held"
+        );
+
+        let second = harness();
+        let mut hooks = BarrierHooks::armed(&second, no_injection, Injection::Proceed);
+        let (result, _) = resume_with(fixture, &mut hooks, &given);
+        let error = message(&result.expect_err(
+            "the fresh report's name is still not proven durable: the barrier refuses again",
+        ));
+        assert!(error.contains("injected barrier fault"), "{tag}: {error}");
+        let timeline = hooks.timeline();
+        assert_report_site_entered_and_not_left(
+            &timeline,
+            &format!(
+                "{tag}: the restart's fresh branch, whose barrier runs inside the report site"
+            ),
+        );
+        assert_no_ref_site(&timeline, &format!("{tag}: the restart"));
+        assert_eq!(
+            std::fs::read(&report_path).expect("the report stands"),
+            bytes,
+            "{tag}: a current report is not rewritten"
+        );
+        assert_eq!(
+            candidates_refs_of(fixture).len(),
+            1,
+            "{tag}: the candidates ref still stands"
+        );
+        assert_eq!(
+            pins_of(fixture),
+            pins_before,
+            "{tag}: both pin families still stand"
+        );
+        assert!(
+            wait_for_cleanup_hold_release(&fixture.public()),
+            "{tag}: the run's cleanup lease is still held"
+        );
+
+        drop(fault);
+        let third = harness();
+        let mut hooks = BarrierHooks::armed(&third, no_injection, Injection::Proceed);
+        let (result, _) = resume_with(fixture, &mut hooks, &given);
+        let text = message(&result.expect_err("with the barrier holding, finalize then refuse"));
+        assert!(
+            text.contains("already current") && text.contains("finalized"),
+            "{tag}: {text}"
+        );
+        let timeline = hooks.timeline();
+        assert_fresh_branch_took_the_report_sites(
+            &timeline,
+            &hooks.ledger_records(),
+            &fixture.public(),
+            &format!("{tag}: the barrier held"),
+        );
+        let first_deletion = timeline
+            .iter()
+            .position(|seen| {
+                matches!(seen.site, EffectSiteId::Ref(_)) && seen.phase == HookPhase::Before
+            })
+            .expect("a ref deletion was reached");
+        assert!(
+            timeline[first_deletion]
+                .synced_dirs
+                .iter()
+                .any(|dir| *dir == fixture.public()),
+            "{tag}: the public directory was synced before the first ref deletion: {:?}",
+            timeline[first_deletion].synced_dirs
+        );
+        assert_eq!(
+            std::fs::read(&report_path).expect("the report stands"),
+            bytes,
+            "{tag}: byte for byte"
+        );
+        assert_finalized(
+            &planted,
+            &outcome,
+            &format!("{tag}: after the barrier held"),
+        );
+    }
 }
 
 #[test]
 fn a_report_rename_without_directory_sync_is_proven_before_pruning() {
     use crate::topology::effects::ReportSite;
-    let planted = plant_finished_run_with(
-        "report-rename-unsynced",
-        RunOutcome::Complete,
-        AlphaEnd::Published,
-        FinishedResidue {
-            snapshot: true,
-            staging: true,
-            prepared_pin: true,
-        },
-    );
-    let fixture = &planted.fixture;
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(fixture, &runtime, &certifies);
-    let report_path = fixture.public().join(rundir::REPORT);
+    for (outcome, alpha) in [
+        (RunOutcome::Complete, AlphaEnd::Published),
+        (RunOutcome::Halted, AlphaEnd::Queued),
+    ] {
+        let tag = outcome_short(&outcome);
+        let planted = plant_finished_run_with(
+            &format!("report-rename-unsynced-{tag}"),
+            outcome.clone(),
+            alpha,
+            FinishedResidue {
+                snapshot: true,
+                staging: true,
+                prepared_pin: true,
+            },
+        );
+        let fixture = &planted.fixture;
+        let runtime = runtime_holding_the_record();
+        let certifies = AlwaysCertifies;
+        let given = Given::healthy(fixture, &runtime, &certifies);
+        let report_path = fixture.public().join(rundir::REPORT);
+        let pins_before = pins_of(fixture);
+        assert_eq!(
+            pins_before.len(),
+            2,
+            "{tag}: a prepared pin and a candidate-prepared pin stand to be pruned"
+        );
 
-    {
-        let _fault = crate::util::fail_barriers_at(&fixture.public());
-        let first = harness();
-        let (result, _) = resume(fixture, &first, &given);
-        let error = message(&result.expect_err("the failed directory barrier ends the command"));
-        assert!(error.contains("injected barrier fault"), "{error}");
-    }
-    let bytes =
-        std::fs::read(&report_path).expect("the rename landed: the report is under its name");
-    assert!(
-        report_of(fixture).is_fresh_against(&bytes),
-        "and current by digest"
-    );
-    assert_eq!(
-        candidates_refs_of(fixture).len(),
-        1,
-        "the candidates ref stands"
-    );
-    assert!(
-        wait_for_cleanup_hold_release(&fixture.public()),
-        "the run's cleanup lease is still held"
-    );
+        {
+            let _fault = crate::util::fail_barriers_at(&fixture.public());
+            let first = harness();
+            let (result, _) = resume(fixture, &first, &given);
+            let error =
+                message(&result.expect_err("the failed directory barrier ends the command"));
+            assert!(error.contains("injected barrier fault"), "{tag}: {error}");
+        }
+        let bytes =
+            std::fs::read(&report_path).expect("the rename landed: the report is under its name");
+        assert!(
+            report_of(fixture).is_fresh_against(&bytes),
+            "{tag}: and current by digest"
+        );
+        assert_eq!(
+            candidates_refs_of(fixture).len(),
+            1,
+            "{tag}: the candidates ref stands"
+        );
+        assert_eq!(
+            pins_of(fixture),
+            pins_before,
+            "{tag}: both pin families stand"
+        );
+        assert!(
+            wait_for_cleanup_hold_release(&fixture.public()),
+            "{tag}: the run's cleanup lease is still held"
+        );
 
-    let second = harness();
-    let mut hooks = BarrierHooks::armed(
-        &second,
-        (EffectSiteId::Lock(LockSite::Release), HookPhase::After),
-        Injection::Proceed,
-    );
-    let (result, _) = resume_with(fixture, &mut hooks, &given);
-    let text = message(&result.expect_err("the restart finalizes then refuses"));
-    assert!(
-        text.contains("already current") && text.contains("finalized"),
-        "{text}"
-    );
-    let timeline = hooks.timeline();
-    assert!(
-        timeline.iter().all(|seen| {
-            seen.site != EffectSiteId::RunDir(RunDirSite::WriteReport)
-                && seen.site != EffectSiteId::Report(ReportSite::Write)
-        }),
-        "the current report is not rewritten: {timeline:?}"
-    );
-    let first_deletion = timeline
-        .iter()
-        .position(|seen| {
-            matches!(seen.site, EffectSiteId::Ref(_)) && seen.phase == HookPhase::Before
-        })
-        .expect("a ref deletion was reached");
-    let synced = &timeline[first_deletion].synced_dirs;
-    assert!(
-        synced.iter().any(|dir| *dir == fixture.public()),
-        "the public directory — that directory, not a count of directories — was synced before \
-         the first ref deletion: {synced:?}"
-    );
-    let at_public: Vec<_> = hooks
-        .ledger_records()
-        .into_iter()
-        .filter(|record| record.path.starts_with(fixture.public()))
-        .collect();
-    assert!(
-        !at_public.is_empty()
-            && at_public
+        let armed = harness();
+        let mut hooks = BarrierHooks::armed(
+            &armed,
+            (EffectSiteId::Report(ReportSite::Write), HookPhase::Before),
+            Injection::Error,
+        );
+        let (result, _) = resume_with(fixture, &mut hooks, &given);
+        let error = message(&result.expect_err(
+            "an injected error at the report site's before phase ends the restart before its \
+             barrier",
+        ));
+        assert!(
+            error.contains("was made to fail") && error.contains("Report.Write"),
+            "{tag}: the error names the injected coordinate: {error}"
+        );
+        let timeline = hooks.timeline();
+        assert!(
+            timeline.iter().any(|seen| {
+                seen.site == EffectSiteId::Report(ReportSite::Write)
+                    && seen.phase == HookPhase::Before
+            }),
+            "{tag}: the armed coordinate was observed on the fresh branch: {timeline:?}"
+        );
+        assert!(
+            timeline.iter().any(|seen| {
+                seen.site == EffectSiteId::RunDir(RunDirSite::WriteReport)
+                    && seen.phase == HookPhase::Before
+            }),
+            "{tag}: inside `RunDir.WriteReport`, as the write is: {timeline:?}"
+        );
+        assert!(
+            timeline.iter().all(|seen| seen.phase != HookPhase::After
+                || !(seen.site == EffectSiteId::Report(ReportSite::Write)
+                    || seen.site == EffectSiteId::RunDir(RunDirSite::WriteReport))),
+            "{tag}: neither report site was left: {timeline:?}"
+        );
+        assert_no_ref_site(&timeline, &format!("{tag}: the refused coordinate"));
+        assert!(
+            hooks
+                .ledger_records()
                 .iter()
-                .all(|record| record.step == crate::util::DurableStep::SyncedDirectory),
-        "under the public directory the restart synced and staged or renamed nothing: \
-         {at_public:?}"
-    );
-    assert!(
-        candidates_refs_of(fixture).is_empty(),
-        "the refs are pruned behind the proven name"
-    );
-    assert_eq!(
-        std::fs::read(&report_path).expect("the report stands"),
-        bytes,
-        "byte for byte"
-    );
-    assert_finalized(&planted, &RunOutcome::Complete, "after the restart");
+                .all(|record| !record.path.starts_with(fixture.public())),
+            "{tag}: nothing under the public directory was synced, staged or renamed: the \
+             barrier was never reached: {:?}",
+            hooks.ledger_records()
+        );
+        assert_eq!(
+            std::fs::read(&report_path).expect("the report stands"),
+            bytes,
+            "{tag}: byte for byte"
+        );
+        assert_eq!(
+            candidates_refs_of(fixture).len(),
+            1,
+            "{tag}: the candidates ref stands behind the refused coordinate"
+        );
+        assert_eq!(
+            pins_of(fixture),
+            pins_before,
+            "{tag}: and both pin families stand"
+        );
+        assert!(
+            wait_for_cleanup_hold_release(&fixture.public()),
+            "{tag}: the run's cleanup lease is still held"
+        );
+
+        let second = harness();
+        let mut hooks = BarrierHooks::armed(
+            &second,
+            (EffectSiteId::Lock(LockSite::Release), HookPhase::After),
+            Injection::Proceed,
+        );
+        let (result, _) = resume_with(fixture, &mut hooks, &given);
+        let text = message(&result.expect_err("the restart finalizes then refuses"));
+        assert!(
+            text.contains("already current") && text.contains("finalized"),
+            "{tag}: {text}"
+        );
+        let timeline = hooks.timeline();
+        assert_fresh_branch_took_the_report_sites(
+            &timeline,
+            &hooks.ledger_records(),
+            &fixture.public(),
+            &format!("{tag}: the restart"),
+        );
+        let first_deletion = timeline
+            .iter()
+            .position(|seen| {
+                matches!(seen.site, EffectSiteId::Ref(_)) && seen.phase == HookPhase::Before
+            })
+            .expect("a ref deletion was reached");
+        let synced = &timeline[first_deletion].synced_dirs;
+        assert!(
+            synced.iter().any(|dir| *dir == fixture.public()),
+            "{tag}: the public directory — that directory, not a count of directories — was \
+             synced before the first ref deletion: {synced:?}"
+        );
+        let at_public: Vec<_> = hooks
+            .ledger_records()
+            .into_iter()
+            .filter(|record| record.path.starts_with(fixture.public()))
+            .collect();
+        assert!(
+            !at_public.is_empty()
+                && at_public
+                    .iter()
+                    .all(|record| record.step == crate::util::DurableStep::SyncedDirectory),
+            "{tag}: under the public directory the restart synced and staged or renamed \
+             nothing: {at_public:?}"
+        );
+        assert_eq!(
+            std::fs::read(&report_path).expect("the report stands"),
+            bytes,
+            "{tag}: byte for byte"
+        );
+        assert_finalized(&planted, &outcome, &format!("{tag}: after the restart"));
+    }
 }
 
 const FINALIZATION_KILL_CHILD: &str = "engine::topology::recover::tests::finalization_kill_child";

@@ -544,10 +544,16 @@ fn canonical(path: PathBuf) -> Result<PathBuf, UpstrokeError> {
 ///
 /// The staging half of every atomic publication here: `run_creation` says
 /// "write `<name>.tmp`, fsync, rename, fsync the directory", and this is the
-/// first two steps. `preserve` is the permissions the staged file takes
-/// before its sync, when the publication replaces a file whose mode is the
-/// operator's to keep (the report, see [`write_report`]); `None` leaves the
-/// mode `File::create` gave it.
+/// first two steps. `preserve` is the permissions the staged file carries
+/// **from its creation**, when the publication replaces a file whose mode is
+/// the operator's to keep (the report, see [`write_report`]); `None` leaves
+/// the mode the create gave it. Until PR10's round 5 the mode was applied by
+/// a `set_permissions` after the write, which left the bytes readable at the
+/// umask's mode until then — by whoever opened the file in between, and
+/// for good after a death in between (the round-5 regression lens, P2). The
+/// ledger's [`DurableStep::Staged`] entry is taken before the first byte and
+/// carries the mode the file had then, so a test can hold the mode from
+/// creation rather than read the source order.
 fn stage_json<T: Serialize>(
     path: &Path,
     value: &T,
@@ -562,12 +568,65 @@ fn stage_json<T: Serialize>(
         path: path.to_path_buf(),
         source,
     };
-    let mut file = File::create(path).map_err(io)?;
+    let mut file = create_staged(path, preserve.as_ref()).map_err(io)?;
+    let after_write = settle_mode(&file, preserve).map_err(io)?;
+    ledger.record(DurableStep::Staged, path, 0);
     file.write_all(json.as_bytes()).map_err(io)?;
-    if let Some(permissions) = preserve {
+    if let Some(permissions) = after_write {
         file.set_permissions(permissions).map_err(io)?;
     }
     sync_file_recorded(&file, path, ledger)
+}
+
+/// Open the staged file, empty, at the mode it will carry its bytes at.
+///
+/// On Unix the preserved mode is the `open`'s own creation mode
+/// (`OpenOptions::mode`), so no instant exists at which the file is wider
+/// than the file it replaces; the umask still narrows it and a leftover
+/// staged file keeps the mode it had, both of which [`settle_mode`] corrects
+/// before the first byte. Elsewhere a `Permissions` is the read-only bit,
+/// which is set after the write as it always was.
+fn create_staged(path: &Path, preserve: Option<&fs::Permissions>) -> std::io::Result<File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    if let Some(permissions) = preserve {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        options.mode(permissions.mode() & 0o7777);
+    }
+    #[cfg(not(unix))]
+    let _ = preserve;
+    options.open(path)
+}
+
+/// Give the empty staged file its preserved mode before any byte reaches it,
+/// and hand back what is left to apply after the write.
+///
+/// On Unix that is nothing: the creation mode is corrected here — the umask
+/// masks a requested mode and a leftover keeps its own — and the answer is
+/// `None`. On the other platforms the read-only bit is the whole
+/// `Permissions`, no umask reads it, and it is set after the write as before,
+/// so `preserve` is handed back for [`stage_json`] to apply then.
+fn settle_mode(
+    file: &File,
+    preserve: Option<fs::Permissions>,
+) -> std::io::Result<Option<fs::Permissions>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Some(permissions) = preserve {
+            let created = file.metadata()?.permissions().mode() & 0o7777;
+            if created != permissions.mode() & 0o7777 {
+                file.set_permissions(permissions)?;
+            }
+        }
+        Ok(None)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        Ok(preserve)
+    }
 }
 
 /// fsync `file` and record what was made durable, in one call.
@@ -964,16 +1023,44 @@ pub fn write_report<T: Serialize>(
 /// runs after a first finalization that may have died, or failed, between the
 /// rename and that barrier. DESIGN.md §26 prunes only after a durable report,
 /// so the fresh branch takes this before its first pruning effect (the
-/// round-4 crash lens, P2). No site of its own: the report's two sites are the
-/// write's, and a restart that writes no bytes reaches neither; the hooks are
-/// taken for their [`DurabilityLedger`], which records the directory synced.
+/// round-4 crash lens, P2). Through the report's own two sites, exactly as
+/// [`write_report`] is — `RunDir.WriteReport` and then `Report.Write` around
+/// the barrier, which is the funnel's whole primitive on this branch — so a
+/// fault matrix can select the coordinate on a restart and the typed
+/// inventory accounts for every external effect a finalization makes; until
+/// PR10's round 5 it took the hooks for their ledger alone and reached no
+/// site (the round-5 contract lens, F1). The hooks' [`DurabilityLedger`]
+/// records the directory synced, as before.
 ///
 /// # Errors
 ///
-/// The barrier's I/O error, naming the directory.
+/// An injected error at either phase of either site, or the barrier's I/O
+/// error naming the directory.
 pub fn sync_report_dir(public: &Path, hooks: &mut dyn RunDirHooks) -> Result<(), UpstrokeError> {
+    let run_dir = EffectSiteId::RunDir(RunDirSite::WriteReport);
+    let report_site = EffectSiteId::Report(ReportSite::Write);
     let ledger = hooks.durability_ledger();
-    sync_dir(public, &ledger)
+    apply(
+        hooks.hook(run_dir, HookPhase::Before),
+        run_dir,
+        HookPhase::Before,
+    )?;
+    apply(
+        hooks.hook(report_site, HookPhase::Before),
+        report_site,
+        HookPhase::Before,
+    )?;
+    sync_dir(public, &ledger)?;
+    apply(
+        hooks.hook(report_site, HookPhase::After),
+        report_site,
+        HookPhase::After,
+    )?;
+    apply(
+        hooks.hook(run_dir, HookPhase::After),
+        run_dir,
+        HookPhase::After,
+    )
 }
 
 /// `RunDir.WriteQuestionPayload` — written before the question is announced.

@@ -134,6 +134,7 @@ pub enum DurableStep {
     Flushed,
     SyncedData,
     Truncated,
+    Staged,
     SyncedFile,
     Renamed,
     SyncedDirectory,
@@ -144,6 +145,7 @@ pub struct DurableRecord {
     pub step: DurableStep,
     pub path: PathBuf,
     pub len: u64,
+    pub mode: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -173,6 +175,7 @@ impl DurabilityLedger {
                     step,
                     path: path.to_path_buf(),
                     len,
+                    mode: permission_bits(path),
                 });
         }
     }
@@ -209,6 +212,19 @@ impl DurabilityLedger {
                 .clear();
         }
     }
+}
+
+#[cfg(unix)]
+fn permission_bits(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path)
+        .ok()
+        .map(|metadata| metadata.permissions().mode() & 0o7777)
+}
+
+#[cfg(not(unix))]
+fn permission_bits(_path: &Path) -> Option<u32> {
+    None
 }
 
 pub fn read_file_bounded(path: &Path) -> std::io::Result<Vec<u8>> {

@@ -457,8 +457,9 @@ funnel = [
     "stage_marker",
     "stage_owner_record",
     # The directory barrier of `Report.Write` alone, for a finalization that
-    # finds the report current: takes the hooks for their ledger and reaches no
-    # site, since it writes no bytes (the sites are the write's).
+    # finds the report current: consults the report's two sites around the
+    # barrier exactly as `write_report` does around the write (PR10's round 5;
+    # until then it took the hooks for their ledger and reached no site).
     "sync_report_dir",
     "write_plan",
     "write_question_payload",
@@ -1558,6 +1559,9 @@ not_an_effect = [
     "EAGAIN",
     "EBADF",
     "ECHILD",
+    # The errno APFS answers a directory name that is not UTF-8 with; the
+    # byte-named-repository test probes for it and skips where it is answered.
+    "EILSEQ",
     "EINTR",
     "EINVAL",
     "EIO",

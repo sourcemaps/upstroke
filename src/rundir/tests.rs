@@ -3035,8 +3035,11 @@ fn every_atomic_publication_syncs_the_staged_file_then_renames_then_syncs_its_di
         // One expectation for every platform (`PR5-CONF-013`). This used to
         // fork on `cfg!(unix)` because `sync_dir` was a documented no-op on
         // Windows; `run_creation`'s "fsync the directory" carries no
-        // platform exception, and now neither does this.
+        // platform exception, and now neither does this. The `Staged` entry
+        // is the staged file's creation, taken before its first byte (PR10's
+        // round 5): the mode it carries is what the mode test below reads.
         let expected: Vec<DurableStep> = vec![
+            DurableStep::Staged,
             DurableStep::SyncedFile,
             DurableStep::Renamed,
             DurableStep::SyncedDirectory,
@@ -3047,7 +3050,12 @@ fn every_atomic_publication_syncs_the_staged_file_then_renames_then_syncs_its_di
             "{which}: the durability sequence run_creation names, in order"
         );
         assert_eq!(
-            records[0].path,
+            (records[0].path.as_path(), records[0].len),
+            (dir.join(staged_name).as_path(), 0),
+            "{which}: the staged file is recorded at its creation, empty"
+        );
+        assert_eq!(
+            records[1].path,
             dir.join(staged_name),
             "{which}: the sync is of the STAGED file, before it has its published name"
         );
@@ -3056,22 +3064,23 @@ fn every_atomic_publication_syncs_the_staged_file_then_renames_then_syncs_its_di
             .len();
         assert!(published_len > 0, "{which}: the record has bytes at all");
         assert_eq!(
-            records[0].len, published_len,
+            records[1].len, published_len,
             "{which}: the whole staged file was synced, not a prefix of it"
         );
         assert_eq!(
-            records[1].path,
+            records[2].path,
             dir.join(published_name),
             "{which}: the rename lands on the published name"
         );
         assert_eq!(
-            records[2].path, dir,
+            records[3].path, dir,
             "{which}: the directory sync is of the directory the rename changed"
         );
     }
 
     // Four publications, each recording one file sync and one directory
-    // sync: eight ledger entries that each claim a barrier was performed.
+    // sync (and one creation, which is no barrier): eight ledger entries
+    // that each claim a barrier was performed.
     let claimed = 8;
     let performed = util::barriers_performed().saturating_sub(barriers_before);
     assert!(
@@ -3110,6 +3119,63 @@ fn a_report_whose_staged_file_will_not_sync_is_not_published() {
     }
     write_report(&public, &payload, &mut NoHooks).expect("with the barrier holding, published");
     assert!(public.join(REPORT).is_file() && !public.join(REPORT_STAGED).exists());
+}
+
+/// The staged report carries the existing report's mode **from its
+/// creation**, not from a `chmod` after its bytes are written (the round-5
+/// regression lens, P2): a `report.json.tmp` created at the umask's mode and
+/// narrowed afterwards is readable by whoever opens it in between, and a
+/// death in between leaves it so. The ledger's `Staged` entry is taken
+/// before the first byte and carries the mode the file had then, so the
+/// window is an observable rather than a reading of the source order. Two
+/// modes: the lens's `0600`, which this box's umask of `077` gives every
+/// fresh file anyway, so on its own it is a witness under `umask 022` only;
+/// and `0400`, narrower than any umask's default, which is one under either.
+#[cfg(unix)]
+#[test]
+fn a_private_report_is_staged_at_its_mode_before_any_byte_is_written() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = scratch("report-staged-mode");
+    let public = root.join("public");
+    create_dir(&public).expect("public");
+    let payload = serde_json::json!({"run_id": "01MODE", "outcome": "parked"});
+    let path = public.join(REPORT);
+    write_report(&public, &payload, &mut NoHooks).expect("the first report");
+    for mode in [0o600, 0o400] {
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("make it private");
+        let mut hooks = HarnessHooks::default().recording_durability();
+        let ledger = hooks.ledger();
+        write_report(&public, &payload, &mut hooks).expect("the report, written again");
+        let staged: Vec<_> = ledger
+            .records_for(&public.join(REPORT_STAGED))
+            .into_iter()
+            .filter(|record| record.step == DurableStep::Staged)
+            .collect();
+        assert_eq!(
+            staged.len(),
+            1,
+            "{mode:o}: the staged file was recorded once, at its creation"
+        );
+        assert_eq!(
+            (staged[0].mode, staged[0].len),
+            (Some(mode), 0),
+            "{mode:o}: at the existing report's mode before any byte reached it — a file \
+             created at the umask's mode and narrowed after the write is readable in between"
+        );
+        assert_eq!(
+            fs::metadata(&path)
+                .expect("the published report")
+                .permissions()
+                .mode()
+                & 0o777,
+            mode,
+            "{mode:o}: and published at that mode"
+        );
+        assert!(
+            !public.join(REPORT_STAGED).exists(),
+            "{mode:o}: the staged file was renamed onto its name"
+        );
+    }
 }
 
 #[test]
