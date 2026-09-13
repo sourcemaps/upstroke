@@ -107,6 +107,13 @@ distinct from [`Self::SyncedFile`]'s `sync_all`.
 
 A file was truncated to `len` bytes.
 
+## `Staged,`
+
+A staged file was created, empty, at the mode it will carry its bytes at
+(`rundir::stage_json`; PR10's round 5). No barrier: the entry exists so a
+test can read the record's `mode` from before the first byte rather than
+from the source order of a create and a `chmod`.
+
 ## `SyncedFile,`
 
 A staged file's own bytes were made durable (`fsync` / `FlushFileBuffers`).
@@ -150,6 +157,16 @@ number of bytes handed to `write_all`, which is the quantity the claim
 "one `write_all` containing both the JSON and its LF commit marker" is
 about. Zero when the path has no length to report.
 
+## `pub mode: Option<u32>,`
+
+The permission bits (`st_mode & 0o7777`) the path had when the entry was
+taken, read from the filesystem by `record` itself; `None` off Unix or when
+the path could not be read. What [`DurableStep::Staged`] is for: a staged
+report that took the existing report's mode by a `chmod` after its bytes
+were written was readable at the umask's mode in between, and every
+observation taken after the publication read the mode as preserved (the
+round-5 regression lens, P2).
+
 ## `#[derive(Debug, Clone, Default)]`
 
 An ordered record of the durability primitives a funnel performed.
@@ -173,7 +190,7 @@ Whether this ledger records at all.
 
 ## `pub fn record(&self, step: DurableStep, path: &Path, len: u64) {`
 
-Append one entry.
+Append one entry, with the mode the path has at that moment.
 
 ## `#[must_use]`
 

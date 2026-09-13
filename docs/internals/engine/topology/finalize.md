@@ -60,11 +60,15 @@ whose outcome or runner is not the derived report's (`TopologyReport::is_fresh_a
 the steps run. The write is `rundir::write_report`'s staged, synced, renamed publication, so a
 report present under its name holds durable bytes and the refs the steps prune go only after it
 (DESIGN.md §26); a report found current is not written again, and its directory's barrier is
-taken again (`rundir::sync_report_dir`) before the first pruning effect: the rename that made it
-current was made after its bytes were synced, so the bytes are durable, but the *name* is durable
-only once the directory's barrier completed, and a first finalization may have died or failed
-between the rename and that barrier — until PR10's round 4 the fresh branch pruned behind a name
-proven visible, not durable (the round-4 crash lens, P2;
+taken again (`rundir::sync_report_dir`, through the report's two sites exactly as the write is —
+`Report.Write` inside `RunDir.WriteReport` around the barrier — so the fault matrix selects it on a
+restart and the typed inventory holds the branch's one external effect; until PR10's round 5 it
+reached no site, the round-5 contract lens's F1) before the first pruning effect, at Complete and
+at Halted alike: the rename that made it current was made after its bytes were synced, so the
+bytes are durable, but the *name* is durable only once the directory's barrier completed, and a
+first finalization may have died or failed between the rename and that barrier — until PR10's
+round 4 the fresh branch pruned behind a name proven visible, not durable (the round-4 crash lens,
+P2; the two barrier tests below drive both outcomes since round 5, the round-5 crash lens's P1;
 `the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_rewritten`,
 `a_report_directory_barrier_that_fails_refuses_pruning_on_every_resume_until_it_holds`,
 `a_report_rename_without_directory_sync_is_proven_before_pruning`).

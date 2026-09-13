@@ -111,8 +111,10 @@ src/interaction.rs", and PR5's lane B put the bodies in `src/rundir.rs`,
 leaving `interaction::{write_question, write_answer, read_answer}` as thin
 delegations; and `ReportSite::Write` maps to `src/util.rs`, which holds the
 write primitive, while PR10 funnels the site in `src/rundir.rs`
-(`rundir::write_report`, around the one write `RunDir.WriteReport` also
-names). Every file involved is in the allowlist's funnel section; the
+(`rundir::write_report`, around the staged publication `RunDir.WriteReport`
+also names, and `rundir::sync_report_dir`, around the directory barrier a
+finalization that finds the report current takes — PR10's round 5). Every
+file involved is in the allowlist's funnel section; the
 answer disagreement is section J of `reconciliation-D.md` and the report
 one is `PR3-REPORT-DOUBLE-NAME` come true. Both are recorded here rather
 than resolved by silence, because silently searching the right file would
@@ -133,8 +135,11 @@ and every one of the eight is taken by value by an API in it.
 holds the write primitive, and until PR10 the report write this tree ships
 was `RunDir.WriteReport` alone; ST-07 over the full inventory demands both
 names executed, so `rundir::write_report` now consults `Report.Write`
-inside `RunDir.WriteReport` around the one `util::write_json` —
-`PR3-REPORT-DOUBLE-NAME`'s "two hook executions for one write", made and
+inside `RunDir.WriteReport` around the report's staged publication
+(`stage_json` of `report.json.tmp`, synced, then `publish`: the rename onto
+`report.json` and the directory's barrier; one `util::write_json` until
+PR10's round 3) — `PR3-REPORT-DOUBLE-NAME`'s "two hook executions for one
+write", made and
 recorded in `effects/funnel-modules.json` the way the answer funnels'
 disagreement is.
 

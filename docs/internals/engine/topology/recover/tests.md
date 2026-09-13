@@ -896,14 +896,17 @@ itself left byte-identical, since nothing on disk binds it to the slot.
 
 ### About the word "finalizes" in this test's name
 
-Step (b) is "terminal finalization **then** refuse continuation", and this
-slice implements the refusal only: `RunDir.WriteReport` carries
-`fault_row: t_finalize`, which is not one of PR7's eleven rows, so writing a
-report here would be an out-of-row effect with no fault coverage in this
-slice. The name is the packet's and is kept unchanged so the row and the
-test still correspond; what it asserts is the half in range, and it asserts
-the other half's **absence** explicitly rather than leaving it unstated —
-no `report.json`, and no `RunDir.WriteReport`.
+Step (b) is "terminal finalization **then** refuse continuation", and since
+PR10 the test asserts both halves: the report written through
+`RunDir.WriteReport` once, every cleanup step's residue gone, the refusal
+naming the outcome and what finalization did; and on the second resume the
+report found current and left byte-identical while the report's sites are
+consulted again for the fresh branch's directory barrier (round 5), nothing
+appended. Until PR10 the slice implemented the refusal only —
+`RunDir.WriteReport` carries `fault_row: t_finalize`, which was not one of
+PR7's eleven rows — and the test asserted the other half's absence, no
+`report.json` and no `RunDir.WriteReport`; the name is the packet's and was
+kept so the row and the test still correspond.
 
 ## `fn resume_rebuilds_runner_from_record_and_warns_on_config_drift() {`
 
@@ -4277,7 +4280,9 @@ every finalization site, before and after the effect, for Complete and
 for Halted — 26 and 24 cells, the report's two sites among them. The
 faulted resume ends there with the log untouched and exactly the effects
 before the fault done; the next resume finalizes the rest and refuses; a
-third finds nothing to do.
+third finds nothing to do — it finds the report current, takes its
+directory barrier through the report's two sites (round 5) and writes
+nothing, the bytes byte-identical, and runs no other site again.
 
 ## `fn a_fault_at_a_staging_leftovers_own_removal_stops_finaliz…`
 
@@ -4326,32 +4331,71 @@ DESIGN.md §26 lets the refs be pruned only after the report is durable
 first ref deletion shows the file and the directory barriers both rise
 between `Report.Write`'s two phases, that phase pair preceding every ref
 site, the report present under its name and current by digest, and the
-candidates ref still there. The restart finds the report current, reaches
-neither report site, leaves the bytes byte-identical and prunes the refs:
-the durability of a report the restart does not rewrite is the rename's
-for its bytes — made after the sync, so a name that survived holds synced
+candidates ref still there. The restart finds the report current, takes
+its directory barrier through the report's two sites — `Report.Write`
+inside `RunDir.WriteReport`, the public directory synced between the inner
+site's phases, nothing staged, written or renamed under the public
+directory — leaves the bytes byte-identical and prunes the refs: the
+durability of a report the restart does not rewrite is the rename's for
+its bytes — made after the sync, so a name that survived holds synced
 bytes — and the directory barrier's for its name, which the fresh branch
 takes again before it prunes (the two tests below; until PR10's round 4 it
-carried no barrier of its own, the round-4 crash lens, P2).
+carried no barrier of its own, the round-4 crash lens, P2; until round 5
+the barrier reached no site, the round-5 contract lens, F1).
+
+## `fn assert_no_ref_site(timeline: &[BarrierSeen], tag: &str) {`
+
+No ref site in a barrier timeline: nothing was pruned.
+
+## `fn assert_report_site_entered_and_not_left(timeline: &[BarrierSeen], tag: &str) {`
+
+`Report.Write` entered and not left: the barrier failed inside the site —
+the shape both a first finalization whose directory barrier fails and a
+restart whose fresh branch meets the same fault leave, since the fresh
+branch's barrier runs inside the report's sites too (round 5).
+
+## `fn assert_fresh_branch_took_the_report_sites(`
+
+What a restart that finds the report current does, read from the barrier
+timeline and the run-directory ledger: `RunDir.WriteReport` then
+`Report.Write` entered and left in that nesting, the public directory
+among the directories synced at the inner site's after phase and not at its
+before phase — the barrier ran between them — and under the public
+directory nothing but that directory sync: no `Staged`, `SyncedFile` or
+`Renamed` entry, no staged report. The fresh branch's one external effect,
+inside the inventory (the round-5 contract lens, F1).
 
 ## `fn a_report_directory_barrier_that_fails_refuses_pruning_on…`
 
-The fresh branch's barrier, refused: the public directory's barrier fails
-at the first finalization (`util::fail_barriers_at`, scoped to that
+The fresh branch's barrier, refused, at Complete and at Halted (the
+round-5 crash lens, P1: until round 5 the Complete fixture alone, so a
+barrier taken at Complete only survived): the public directory's barrier
+fails at the first finalization (`util::fail_barriers_at`, scoped to that
 directory) after the rename landed, so the report is visible under its
-name and current by digest while the candidates ref stands; the next
-resume, the fault still armed, takes the fresh branch, writes nothing,
-and is refused at the same barrier with the ref still standing; with the
-fault cleared the barrier holds, the public directory is among the
-directories synced before the first ref deletion, the refs are pruned and
+name and current by digest while the candidates ref and both pin families
+stand; the next resume, the fault still armed, takes the fresh branch,
+enters the report site and is refused at the same barrier inside it, with
+the ref and the pins still standing; with the fault cleared the barrier
+holds through the report's two sites, the public directory is among the
+directories synced before the first ref deletion, the pins are pruned,
+the candidates ref is pruned at Complete and retained at Halted, and
 finalization converges. A fresh branch without the barrier prunes at the
-second resume instead.
+second resume instead; one that takes it at Complete only prunes the
+Halted run's pins behind an unproven name.
 
 ## `fn a_report_rename_without_directory_sync_is_proven_before_…`
 
-The crash lens's restart case: a rename whose directory barrier failed
-leaves the name visible, not proven; the restart finds the report current,
-reaches neither report site, and the timeline's entry at the first ref
+The crash lens's restart case, at Complete and at Halted: a rename whose
+directory barrier failed leaves the name visible, not proven. Between the
+faulted finalization and the converging restart, the round-5 contract
+lens's recipe: a restart armed with an error at `Report.Write`'s before
+phase observes that coordinate on the fresh branch — inside
+`RunDir.WriteReport`, neither site left — reaches no ref site, syncs,
+stages or renames nothing under the public directory, and leaves the
+candidates ref and both pin families standing; the coordinate is
+selectable, which is what puts the branch inside the typed inventory.
+Then the unarmed restart finds the report current, takes the barrier
+through the report's two sites, and the timeline's entry at the first ref
 deletion carries the public directory itself among the directories the
 run-directory ledger recorded synced — that path, not the aggregate
 directory count, which the worktree and intent removals raise on other
