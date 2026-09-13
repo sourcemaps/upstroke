@@ -1970,6 +1970,48 @@ else
   fi
 fi
 
+# ---- A NAME THIS FILESYSTEM WILL HOLD IS NOT A NAME EVERY CALLER MAY WRITE ---------------------
+#
+# `C:` and `\weird` are ORDINARY FILENAMES here and are ANCHORED PATH SPELLINGS
+# on Windows, which is the whole reason the arms below exist -- and it is also
+# why a fixture that BUILDS a directory called `C:` cannot run there. Measured
+# natively on Windows Server 2025 against the previous head: the backslash case
+# below treats `\weird` as a relative filename and its assertion fails, and the
+# anchored case exits 128, `cannot change to '…/C:': Invalid argument`, BEFORE it
+# reaches the validator at all. A case that cannot run there cannot test
+# behaviour there, and one that dies before the validator runs proves nothing
+# about the validator.
+#
+# So every case that needs such a name is guarded by this probe and says so, and
+# the rule those cases are about is asserted a second way by `path_parent`'s
+# table below -- which touches no filesystem, needs no such name, and therefore
+# RUNS NATIVELY ON WINDOWS. That table is where the backslash and UNC spellings
+# are pinned for the platform they belong to; these cases are the POSIX halves
+# beside it.
+#
+# THE PROBE READS THE NAME BACK OUT OF THE PARENT'S OWN ENTRIES rather than
+# trusting `mkdir`'s status, because on Windows the status is not the question:
+# something may well be made, and what matters is whether the parent then holds
+# an entry spelled exactly the way the fixture asked for.
+odd_name_probe="$fixture_dir/odd-name-probe"
+mkdir -p "$odd_name_probe"
+posix_names=1
+for odd_name in 'C:' '\weird'; do
+  mkdir "$odd_name_probe/$odd_name" 2>/dev/null || posix_names=0
+done
+if (( posix_names )); then
+  odd_entries="$( cd "$odd_name_probe" && printf '%s\n' * )"
+  for odd_name in 'C:' '\weird'; do
+    case $'\n'"$odd_entries"$'\n' in
+      *$'\n'"$odd_name"$'\n'*) ;;
+      *) posix_names=0 ;;
+    esac
+  done
+fi
+if (( ! posix_names )); then
+  echo "note: skipping the cases that need a directory named 'C:' or '\weird'" \
+    "(this platform reads those spellings as anchored paths and not as names)" >&2
+fi
 # AND A DIRECTORY WHOSE NAME BEGINS WITH A BACKSLASH, which is the POSIX half of
 # the anchored set `list_dir` tests. On Windows a leading backslash is
 # `\\server\share\…` or the drive-relative `\Windows\…` and must not be
@@ -1977,24 +2019,28 @@ fi
 # is that leaving it unprefixed still enumerates it -- written relative and
 # written absolute, which must agree. The Windows half cannot be witnessed here
 # and is measured on a guest; the same is true of the drive designator beside it.
-back_parent="$fixture_dir/backslash-listing"
-mkdir -p "$back_parent/\\weird"
-echo one > "$back_parent/\\weird/P2_correctness_202609130001_shared-name.md"
-echo two > "$back_parent/\\weird/P2_correctness_202609130002_shared-name.md"
-back_abs_rc=0
-back_abs_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
-  "$back_parent/\\weird" 2>&1)" || back_abs_rc=$?
-back_rel_rc=0
-back_rel_out="$( cd "$back_parent" \
-  && "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' '\weird' 2>&1 )" \
-  || back_rel_rc=$?
-if [[ "$back_abs_rc" != 1 ]] || [[ "$back_rel_rc" != 1 ]] \
-  || ! grep -q 'names 2 findings' <<< "$back_abs_out" \
-  || ! grep -q 'names 2 findings' <<< "$back_rel_out"; then
-  echo "a directory whose name begins with a backslash must enumerate written either way;" \
-    "got $back_abs_rc absolute and $back_rel_rc relative" >&2
-  printf '%s\n' "$back_abs_out" "$back_rel_out" >&2
-  exit 1
+# RUNS NATIVELY ON WINDOWS: NO -- `\weird` is not a name there, it is a
+# drive-relative path, and this assertion failed when it was run.
+if (( posix_names )); then
+  back_parent="$fixture_dir/backslash-listing"
+  mkdir -p "$back_parent/\\weird"
+  echo one > "$back_parent/\\weird/P2_correctness_202609130001_shared-name.md"
+  echo two > "$back_parent/\\weird/P2_correctness_202609130002_shared-name.md"
+  back_abs_rc=0
+  back_abs_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+    "$back_parent/\\weird" 2>&1)" || back_abs_rc=$?
+  back_rel_rc=0
+  back_rel_out="$( cd "$back_parent" \
+    && "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' '\weird' 2>&1 )" \
+    || back_rel_rc=$?
+  if [[ "$back_abs_rc" != 1 ]] || [[ "$back_rel_rc" != 1 ]] \
+    || ! grep -q 'names 2 findings' <<< "$back_abs_out" \
+    || ! grep -q 'names 2 findings' <<< "$back_rel_out"; then
+    echo "a directory whose name begins with a backslash must enumerate written either way;" \
+      "got $back_abs_rc absolute and $back_rel_rc relative" >&2
+    printf '%s\n' "$back_abs_out" "$back_rel_out" >&2
+    exit 1
+  fi
 fi
 
 
@@ -2024,68 +2070,73 @@ fi
 # never move the anchor -- and a TRACKED directory whose name begins with either
 # token, which never ascends at all, is what holds it to that. One resolves and
 # one is ambiguous, so both verdicts are pinned and not just the refusals.
-anchored_rel_case() {  # anchored_rel_case <label> <parent> <relative path> <branch> <want>
-  local label="$1" parent="$2" rel="$3" branch="$4" want="$5" abs_rc=0 rel_rc=0
-  "$BASH" "$branch_validator" "$branch" "$parent/$rel" >/dev/null 2>&1 || abs_rc=$?
-  ( cd "$parent" && "$BASH" "$branch_validator" "$branch" "$rel" >/dev/null 2>&1 ) || rel_rc=$?
-  if [[ "$rel_rc" != "$abs_rc" ]]; then
-    echo "$label: '$rel' answered $rel_rc where the same directory spelled absolutely" \
-      "answered $abs_rc" >&2
-    exit 1
-  fi
-  if [[ "$rel_rc" != "$want" ]]; then
-    echo "$label: both spellings answered $rel_rc, and $want was expected" >&2
-    exit 1
-  fi
-}
-anchored_repo="$fixture_dir/repo-anchored-spelling"
-new_repo "$anchored_repo"
-echo seed > "$anchored_repo/seed.txt"
-git -C "$anchored_repo" add -A && git -C "$anchored_repo" commit -q -m base
-printf 'C:\n\\\\weird\n' > "$anchored_repo/.git/info/exclude"
-for anchored_name in 'C:' '\weird'; do
-  mkdir -p "$anchored_repo/$anchored_name"
-  git -C "$anchored_repo/$anchored_name" init -q --bare .
-  mkdir -p "$anchored_repo/$anchored_name/holder"
-  printf 'fixture\n' \
-    > "$anchored_repo/$anchored_name/holder/P2_correctness_202609130020_inside-an-anchored-bare-repository.md"
-  if [[ -n "$(git -C "$anchored_repo" status --porcelain)" ]] \
-    || [[ -n "$(git -C "$anchored_repo" ls-files -s -- ":(literal)$anchored_name")" ]] \
-    || [[ "$(git -C "$anchored_repo/$anchored_name" rev-parse --is-inside-work-tree)" != false ]]; then
-    echo "the fixture was meant to be an ignored bare repository named [$anchored_name]" \
-      "that the work tree above records nothing under" >&2
-    exit 1
-  fi
-  anchored_rel_case "a listing inside a bare repository named [$anchored_name]" \
-    "$anchored_repo" "$anchored_name/holder" \
-    'fix-P2/correctness_inside-an-anchored-bare-repository' 1
-done
+# RUNS NATIVELY ON WINDOWS: NO. Every case here needs a real directory named
+# `C:` or `\weird`, which is a name only POSIX holds; there `C:` is a drive
+# designator and the fixture exited 128 before reaching the validator.
+if (( posix_names )); then
+  anchored_rel_case() {  # anchored_rel_case <label> <parent> <relative path> <branch> <want>
+    local label="$1" parent="$2" rel="$3" branch="$4" want="$5" abs_rc=0 rel_rc=0
+    "$BASH" "$branch_validator" "$branch" "$parent/$rel" >/dev/null 2>&1 || abs_rc=$?
+    ( cd "$parent" && "$BASH" "$branch_validator" "$branch" "$rel" >/dev/null 2>&1 ) || rel_rc=$?
+    if [[ "$rel_rc" != "$abs_rc" ]]; then
+      echo "$label: '$rel' answered $rel_rc where the same directory spelled absolutely" \
+        "answered $abs_rc" >&2
+      exit 1
+    fi
+    if [[ "$rel_rc" != "$want" ]]; then
+      echo "$label: both spellings answered $rel_rc, and $want was expected" >&2
+      exit 1
+    fi
+  }
+  anchored_repo="$fixture_dir/repo-anchored-spelling"
+  new_repo "$anchored_repo"
+  echo seed > "$anchored_repo/seed.txt"
+  git -C "$anchored_repo" add -A && git -C "$anchored_repo" commit -q -m base
+  printf 'C:\n\\\\weird\n' > "$anchored_repo/.git/info/exclude"
+  for anchored_name in 'C:' '\weird'; do
+    mkdir -p "$anchored_repo/$anchored_name"
+    git -C "$anchored_repo/$anchored_name" init -q --bare .
+    mkdir -p "$anchored_repo/$anchored_name/holder"
+    printf 'fixture\n' \
+      > "$anchored_repo/$anchored_name/holder/P2_correctness_202609130020_inside-an-anchored-bare-repository.md"
+    if [[ -n "$(git -C "$anchored_repo" status --porcelain)" ]] \
+      || [[ -n "$(git -C "$anchored_repo" ls-files -s -- ":(literal)$anchored_name")" ]] \
+      || [[ "$(git -C "$anchored_repo/$anchored_name" rev-parse --is-inside-work-tree)" != false ]]; then
+      echo "the fixture was meant to be an ignored bare repository named [$anchored_name]" \
+        "that the work tree above records nothing under" >&2
+      exit 1
+    fi
+    anchored_rel_case "a listing inside a bare repository named [$anchored_name]" \
+      "$anchored_repo" "$anchored_name/holder" \
+      'fix-P2/correctness_inside-an-anchored-bare-repository' 1
+  done
 
-# THE LEGITIMATE CALLERS. A TRACKED directory whose name begins with the same
-# token is inside the work tree, so discovery answers `true` at the listing and
-# no ascent happens at all -- which is exactly why it holds the repair to
-# supplying a top and nothing else. These answer the same at the previous head;
-# a repair that broke them would be the false red the arm was written against.
-anchored_ledger="$fixture_dir/repo-anchored-ledger"
-new_repo "$anchored_ledger"
-echo seed > "$anchored_ledger/seed.txt"
-mkdir -p "$anchored_ledger/C:" "$anchored_ledger/\\weird"
-printf 'fixture\n' > "$anchored_ledger/C:/P2_correctness_202609130021_an-anchored-ledger.md"
-printf 'one\n' > "$anchored_ledger/\\weird/P2_correctness_202609130022_an-anchored-twin.md"
-printf 'two\n' > "$anchored_ledger/\\weird/P2_correctness_202609130023_an-anchored-twin.md"
-git -C "$anchored_ledger" add -A
-git -C "$anchored_ledger" commit -q -m 'ledgers in directories named for an anchored token'
-if [[ "$(git -C "$anchored_ledger" ls-files -- ':(literal)C:' | wc -l)" != 1 ]] \
-  || [[ "$(git -C "$anchored_ledger" ls-files -- ':(literal)\weird' | wc -l)" != 2 ]]; then
-  echo 'the fixture was meant to record one finding under C: and two under \weird' >&2
-  exit 1
+  # THE LEGITIMATE CALLERS. A TRACKED directory whose name begins with the same
+  # token is inside the work tree, so discovery answers `true` at the listing and
+  # no ascent happens at all -- which is exactly why it holds the repair to
+  # supplying a top and nothing else. These answer the same at the previous head;
+  # a repair that broke them would be the false red the arm was written against.
+  anchored_ledger="$fixture_dir/repo-anchored-ledger"
+  new_repo "$anchored_ledger"
+  echo seed > "$anchored_ledger/seed.txt"
+  mkdir -p "$anchored_ledger/C:" "$anchored_ledger/\\weird"
+  printf 'fixture\n' > "$anchored_ledger/C:/P2_correctness_202609130021_an-anchored-ledger.md"
+  printf 'one\n' > "$anchored_ledger/\\weird/P2_correctness_202609130022_an-anchored-twin.md"
+  printf 'two\n' > "$anchored_ledger/\\weird/P2_correctness_202609130023_an-anchored-twin.md"
+  git -C "$anchored_ledger" add -A
+  git -C "$anchored_ledger" commit -q -m 'ledgers in directories named for an anchored token'
+  if [[ "$(git -C "$anchored_ledger" ls-files -- ':(literal)C:' | wc -l)" != 1 ]] \
+    || [[ "$(git -C "$anchored_ledger" ls-files -- ':(literal)\weird' | wc -l)" != 2 ]]; then
+    echo 'the fixture was meant to record one finding under C: and two under \weird' >&2
+    exit 1
+  fi
+  anchored_rel_case 'a tracked ledger in a directory named [C:] resolves' \
+    "$anchored_ledger" 'C:' 'fix-P2/correctness_an-anchored-ledger' 0
+  anchored_rel_case 'a tracked ledger in a directory named [\weird] is ambiguous' \
+    "$anchored_ledger" '\weird' 'fix-P2/correctness_an-anchored-twin' 1
+  spelling_case 'a tracked ledger in a directory named [C:], every spelling' \
+    'fix-P2/correctness_an-anchored-ledger' 0 "$anchored_ledger/C:"
 fi
-anchored_rel_case 'a tracked ledger in a directory named [C:] resolves' \
-  "$anchored_ledger" 'C:' 'fix-P2/correctness_an-anchored-ledger' 0
-anchored_rel_case 'a tracked ledger in a directory named [\weird] is ambiguous' \
-  "$anchored_ledger" '\weird' 'fix-P2/correctness_an-anchored-twin' 1
-spelling_case 'a tracked ledger in a directory named [C:], every spelling' \
-  'fix-P2/correctness_an-anchored-ledger' 0 "$anchored_ledger/C:"
 
 # A SUPERPROJECT WHOSE RECORDS CANNOT BE READ IS REFUSED AND NEVER READ AS A
 # SUPERPROJECT THAT RECORDS NOTHING. `rev-parse --show-superproject-working-tree`
@@ -2143,6 +2194,101 @@ else
   done
 fi
 
+# ---- ONE RULE FOR SHORTENING A PATH, AND EVERY SEPARATOR GOES THROUGH IT ------------------------
+#
+# Four walks in the validator step from a path to its parent, and each used to
+# own its arithmetic. Each round taught ONE of them ONE more spelling: round 4
+# gave two of them a drive root, round 6 gave the anchor an anchored set, and the
+# ascent was still stripping a FORWARD SLASH ONLY. On `C:\repo\findings` or
+# `\\server\share\findings` that strip removes NOTHING, so the walk read "did not
+# shorten" as "is a top" and the ascent never ran at all -- the same false green
+# the forward-slash spelling had before round 6, on the arm nobody had been shown
+# yet. THREE ROUNDS, THREE SPELLINGS, and the fourth was only a matter of which
+# one a reviewer wrote down next.
+#
+# `path_parent` is the one place that decides it now, and this is the table it
+# decides. Every walk above and below is driven through it, so a row here is a
+# row for all four. NOTHING ON THIS PLATFORM REACHES THE NATIVE ROWS -- every
+# path those walks are handed here begins with `/` -- so the rule is driven
+# directly, which is the same kind of witness the walks' own root tests have.
+#
+# THE `\ird` ROW IS THE LEGITIMATE SHAPE THE OBVIOUS REPAIR BREAKS. A BACKSLASH
+# IS A LEGAL BYTE IN A POSIX FILENAME, so a rule that always spelled both
+# separators would answer `/tmp/we\ird/x` with `/tmp/we` -- a directory that is
+# not there, which `repository_above` reads as metadata it cannot examine and
+# REFUSES. Which separators divide a path's components is decided by HOW IT IS
+# ROOTED, and that row is what holds it.
+#
+# RUNS NATIVELY ON WINDOWS: YES, and it is the only case here that does. It makes
+# no directory and asks nothing of the filesystem, so the backslash and UNC rows
+# are the same rows there as here -- which matters, because those spellings exist
+# only on that platform and every case that builds one of them as a NAME is
+# skipped there.
+rule_harness="$fixture_dir/path-parent-rule.sh"
+cat > "$rule_harness" <<'RULE'
+set -uo pipefail
+validator="$1"; start="$2"
+rule="$(awk '/^path_parent\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$rule" ]] || { echo 'harness: path_parent was not extracted'; exit 3; }
+bash -n <<< "$rule" || { echo 'harness: the extract does not parse'; exit 3; }
+eval "$rule"
+p="$start"; out="$start"; n=0
+while path_parent "$p"; do
+  p="$parent_path"; out="$out -> $p"; n=$(( n + 1 ))
+  if (( n > 16 )); then echo "harness: $n steps and still at '$p'"; exit 124; fi
+done
+printf '%s\n' "$out"
+RULE
+rule_case() {  # rule_case <path> <the whole chain, ending at its top>
+  local got rc=0
+  got="$("$BASH" "$rule_harness" "$branch_validator" "$1" 2>&1)" || rc=$?
+  if [[ "$rc" != 0 ]] || [[ "$got" != "$2" ]]; then
+    echo "shortening '$1': expected '$2' at exit 0; got '$got' at exit $rc" >&2
+    exit 1
+  fi
+}
+rule_case '/a/b/c' '/a/b/c -> /a/b -> /a -> /'
+rule_case '/a' '/a -> /'
+rule_case '/' '/'
+rule_case '.' '.'
+rule_case 'findings' 'findings'
+rule_case '/tmp/we\ird/x' '/tmp/we\ird/x -> /tmp/we\ird -> /tmp -> /'
+# AND AN ORDINARY RELATIVE PATH IS NOT RESPELLED AS A ROOT. What is left when
+# the last separator goes is a root when there is nothing before it, and on a
+# WINDOWS-rooted path when what is left holds no separator -- which there is
+# exactly the drive designator. On a `/`-rooted path the same test would make
+# `p/q` shorten to `p/`: the same directory, but a spelling this hands to git.
+rule_case 'p/q' 'p/q -> p'
+rule_case 'p/q/r' 'p/q/r -> p/q -> p'
+# A DRIVE ROOT IS A ROOT AND `C:` IS NOT ONE: it names the drive's CURRENT
+# directory, and respelling it as a root would move the question to a different
+# directory. It is a top because the rule cannot shorten it, exactly as `.` is.
+rule_case 'C:/repo/findings' 'C:/repo/findings -> C:/repo -> C:/'
+rule_case 'C:\repo\findings' 'C:\repo\findings -> C:\repo -> C:\'
+rule_case 'C:' 'C:'
+rule_case 'C:/' 'C:/'
+rule_case 'C:\' 'C:\'
+rule_case 'C:findings' 'C:findings'
+# A ROOT IS SPELLED WITH THE SEPARATOR THAT ROOTED IT, and a backslash roots the
+# CURRENT drive exactly as `/` roots the filesystem.
+rule_case '\Windows\System32' '\Windows\System32 -> \Windows -> \'
+rule_case '\' '\'
+# AND A UNC PATH'S TOP IS ITS SHARE, in both spellings. `\\server` names no
+# directory on any host, so a walk that asked about it would turn an ordinary
+# listing on a share, outside any repository, from the filesystem's answer into
+# a refusal about a `.git` nothing could stat.
+rule_case '\\server\share\dir\deep' '\\server\share\dir\deep -> \\server\share\dir -> \\server\share'
+rule_case '\\server\share' '\\server\share'
+rule_case '//server/share/dir' '//server/share/dir -> //server/share'
+rule_case '//server/share' '//server/share'
+# A TRAILING SEPARATOR IS NOT A COMPONENT, because one directory must not have
+# two verdicts. `normalise_listing_path` takes it off a `/` spelling before any
+# walk sees it and knows no other separator, so a native spelling would otherwise
+# arrive with an empty last component and be read as a root -- the ascent
+# skipped, on one spelling of a listing whose other spelling ascends.
+rule_case 'C:\repo\findings\' 'C:\repo\findings\ -> C:\repo -> C:\'
+rule_case '/a/b/' '/a/b/ -> /a -> /'
+
 # ---- A WALK THAT CANNOT SHORTEN THE PATH DOES NOT TERMINATE ------------------------------------
 #
 # `enclosing_work_tree` ascends by `${parent%/*}`, and the test at the top of its
@@ -2192,6 +2338,13 @@ set -uo pipefail
 validator="$1"; start="$2"; true_at="$3"; cap="$4"
 src="$(awk '/^enclosing_work_tree\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
 [[ -n "$src" ]] || { echo 'harness: enclosing_work_tree was not extracted'; exit 3; }
+# THE SHORTENING RULE COMES OUT OF THE VALIDATOR TOO, because it is the thing
+# under test. It used to be written inline in the walk; a harness that stubbed it
+# would assert the harness's arithmetic and not the file's.
+rule="$(awk '/^path_parent\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$rule" ]] || { echo 'harness: path_parent was not extracted'; exit 3; }
+src="$rule
+$src"
 bash -n <<< "$src" || { echo 'harness: the extract does not parse'; exit 3; }
 eval "$src"
 probe_status=0; probe_text=''; probe_stderr=''; unexaminable_git=''
@@ -2290,6 +2443,10 @@ set -uo pipefail
 validator="$1"; start="$2"; cap="$3"
 src="$(awk '/^locate_listing\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
 [[ -n "$src" ]] || { echo 'harness: locate_listing was not extracted'; exit 3; }
+rule="$(awk '/^path_parent\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$rule" ]] || { echo 'harness: path_parent was not extracted'; exit 3; }
+src="$rule
+$src"
 bash -n <<< "$src" || { echo 'harness: the extract does not parse'; exit 3; }
 eval "$src"
 probe_status=0; probe_text=''; probe_stderr=''; unexaminable_git=''
@@ -2316,26 +2473,55 @@ rc=0
 locate_listing "$start" || rc=$?
 echo "rc=$rc world=$listing_world asked=$asked at=[$at]"
 ANCHOR
-anchor_dir="$fixture_dir/anchor-walk"
-mkdir -p "$anchor_dir/C:/a"
-anchor_got="$( cd "$anchor_dir" && "$BASH" "$anchor_harness" "$branch_validator" 'C:/a/b' 40 2>&1 )"
-anchor_rc=$?
-if [[ "$anchor_rc" != 0 ]] \
-  || [[ "$anchor_got" != 'rc=0 world=filesystem asked=2 at=[C:/a C:/]' ]]; then
-  echo "the anchor ascent must strip C:/a to the drive ROOT and stop there; got" \
-    "'$anchor_got' at exit $anchor_rc" >&2
-  exit 1
-fi
-# AND THE ANCHOR THAT EXISTS ARRIVES ROOTED, which is the precondition the walk's
-# own comment rests on: the first directory asked about is absolute, so the chain
-# has a top and the ascent is not cut off at `C:`.
-anchor_rooted="$( cd "$anchor_dir" && "$BASH" "$anchor_harness" "$branch_validator" 'C:/a' 80 2>&1 )"
-anchor_rooted_rc=$?
-if [[ "$anchor_rooted_rc" != 0 ]] || [[ "$anchor_rooted" != *" at=[$anchor_dir/C:/a "* ]] \
-  || [[ "$anchor_rooted" != *' /]' ]]; then
-  echo "an anchor that exists must be rooted and its chain must end at '/'; got" \
-    "'$anchor_rooted' at exit $anchor_rooted_rc" >&2
-  exit 1
+# RUNS NATIVELY ON WINDOWS: NO. The rows need a REAL directory named `C:` for
+# the enter loop to land in, and that is a name only POSIX holds. What they
+# assert about the drive root is asserted a second way by the rule table above,
+# which touches no filesystem and does run there.
+if (( posix_names )); then
+  anchor_dir="$fixture_dir/anchor-walk"
+  mkdir -p "$anchor_dir/C:/a" "$anchor_dir/C:\\a"
+  # A STATUS CAPTURED AFTER THE ASSIGNMENT IS NEVER READ under `set -e`: the
+  # shell leaves on the failing substitution and the row says nothing at all,
+  # which is what the harness's own cap exit looked like. `|| rc=$?` is what
+  # keeps a regression a MESSAGE and not a silent 124.
+  anchor_rc=0
+  anchor_got="$( cd "$anchor_dir" && "$BASH" "$anchor_harness" "$branch_validator" 'C:/a/b' 40 2>&1 )" \
+    || anchor_rc=$?
+  if [[ "$anchor_rc" != 0 ]] \
+    || [[ "$anchor_got" != 'rc=0 world=filesystem asked=2 at=[C:/a C:/]' ]]; then
+    echo "the anchor ascent must strip C:/a to the drive ROOT and stop there; got" \
+      "'$anchor_got' at exit $anchor_rc" >&2
+    exit 1
+  fi
+  # AND THE ANCHOR THAT EXISTS ARRIVES ROOTED, which is the precondition the walk's
+  # own comment rests on: the first directory asked about is absolute, so the chain
+  # has a top and the ascent is not cut off at `C:`.
+  anchor_rooted_rc=0
+  anchor_rooted="$( cd "$anchor_dir" && "$BASH" "$anchor_harness" "$branch_validator" 'C:/a' 80 2>&1 )" \
+    || anchor_rooted_rc=$?
+  if [[ "$anchor_rooted_rc" != 0 ]] || [[ "$anchor_rooted" != *" at=[$anchor_dir/C:/a "* ]] \
+    || [[ "$anchor_rooted" != *' /]' ]]; then
+    echo "an anchor that exists must be rooted and its chain must end at '/'; got" \
+      "'$anchor_rooted' at exit $anchor_rooted_rc" >&2
+    exit 1
+  fi
+
+  # AND THE JOIN THAT ROOTS IT MUST NOT DOUBLE THE SEPARATOR. Run from `/`,
+  # `${PWD}/$path` is `//tmp/…`, and A LEADING RUN OF TWO SEPARATORS IS HOW A UNC
+  # PATH IS SPELLED: the rule above reads `//server/share` as a share root and
+  # stops there, so a join that manufactured one would make `//tmp/<dir>` a top and
+  # report no repository above a directory that has one. The chain must still reach
+  # `/`, and nothing on it may be spelled with a doubled separator.
+  anchor_root_rc=0
+  anchor_root_got="$( cd / && "$BASH" "$anchor_harness" "$branch_validator" \
+    "${anchor_dir#/}/C:/a" 80 2>&1 )" || anchor_root_rc=$?
+  if [[ "$anchor_root_rc" != 0 ]] || [[ "$anchor_root_got" != *' /]' ]] \
+    || [[ "$anchor_root_got" == *'=[//'* ]] || [[ "$anchor_root_got" == *' //'* ]]; then
+    echo "run from '/', the anchor must be joined without doubling the separator and its" \
+      "chain must still end at '/'; got '$anchor_root_got' at exit $anchor_root_rc" >&2
+    exit 1
+  fi
+
 fi
 
 # ---- what git RECORDS, not what the checkout happens to hold -----------------------------------
@@ -3711,9 +3897,15 @@ token_case() {  # token_case <name> <relative too: yes|no>
     exit 1
   fi
 }
-for token_name in '!' '(' ')' ',' '-o' '-a' '-not' '-name' '-H' 'ordinary' 'C:'; do
+for token_name in '!' '(' ')' ',' '-o' '-a' '-not' '-name' '-H' 'ordinary'; do
   token_case "$token_name" yes
 done
+# RUNS NATIVELY ON WINDOWS: the rows above do -- every one of those names is a
+# legal filename there -- and `C:` does not, which is why it is guarded and they
+# are not. It is a drive designator there and no directory can be called it.
+if (( posix_names )); then
+  token_case 'C:' yes
+fi
 token_case '-' no
 
 # `C:` IS IN THAT LIST FOR THE OTHER HALF OF THE RULE, AND IT WITNESSES ONLY THE
