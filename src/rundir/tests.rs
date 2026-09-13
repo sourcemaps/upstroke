@@ -31,11 +31,35 @@ use std::time::{Duration, Instant};
 
 use crate::agent::proc::test_support::readiness;
 
-fn scratch(tag: &str) -> PathBuf {
+/// A scratch tree for one test.
+///
+/// `pub(crate)` for the sibling suite in `discovery.rs`: the fixtures live here
+/// because this file carries the funnel allowance that `std::fs::create_dir_all`
+/// and `std::fs::write` need, and `discovery.rs` denies all three governed
+/// lints and takes no allowlist row. What crosses the boundary is a built
+/// directory, never a primitive.
+pub(crate) fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("upstroke-rundir-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("scratch dir");
     dir
+}
+
+/// Make `<repo>/.upstroke/runs/<run_id>` a husk: a directory whose log holds no
+/// committed `run_started`. `pub(crate)` for the reason [`scratch`] is.
+pub(crate) fn husk_run(repo: &Path, run_id: &str) -> PathBuf {
+    let public = public_dir(repo, run_id);
+    fs::create_dir_all(&public).expect("husk dir");
+    fs::write(public.join(EVENT_LOG), b"{\"event\":\"other\"}\n").expect("an uncommitted log");
+    public
+}
+
+/// Put a question in a committed run's `questions` directory. `pub(crate)` for
+/// the reason [`scratch`] is.
+pub(crate) fn question_in(repo: &Path, run_id: &str, question_id: &str) {
+    let dir = commit_run(repo, run_id).join("questions");
+    fs::create_dir_all(&dir).expect("questions dir");
+    fs::write(dir.join(format!("{question_id}.json")), "{}").expect("question");
 }
 
 fn paths_in(root: &Path, run_id: &str) -> RunPaths {
@@ -59,8 +83,9 @@ fn committed_line(run_id: &str, schema: u32) -> String {
     )
 }
 
-/// Make `<repo>/.upstroke/runs/<run_id>` a committed run.
-fn commit_run(repo: &Path, run_id: &str) -> PathBuf {
+/// Make `<repo>/.upstroke/runs/<run_id>` a committed run. `pub(crate)` for the
+/// reason [`scratch`] is.
+pub(crate) fn commit_run(repo: &Path, run_id: &str) -> PathBuf {
     let public = public_dir(repo, run_id);
     fs::create_dir_all(&public).expect("run dir");
     fs::write(
