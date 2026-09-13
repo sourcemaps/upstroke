@@ -2024,6 +2024,53 @@ else
   echo 'note: skipping the symlinked-component cases (no symlink could be made)' >&2
 fi
 
+# ---- AND THE HOP'S TERMINATION BOUND, DRIVEN BY REAL GIT AND NOT BY A STUB ----------------------
+#
+# The hop happens AT MOST ONCE because a hop shortens nothing, so it may not be
+# the step that repeats. The harness row above shows what an unbounded one costs
+# with a stubbed git directory; this is the shape that does it with a REAL one,
+# and it is not hypothetical. A repository whose `.git` is a DIRECTORY and whose
+# config says `core.bare = true` answers `--is-inside-work-tree` `false` at its
+# own root and `--absolute-git-dir` `<root>/.git`, WHOSE PARENT IS THAT ROOT: a
+# hop from there lands exactly where it started. Measured with git 2.43 here.
+#
+# So the walk must still finish. With the bound it does -- the second `false` at
+# the same directory takes the lexical step, which shortens -- and the assertion
+# is a TIMEOUT, because the failure this pins is a hang in a required check and
+# not a wrong answer.
+#
+# RUNS NATIVELY ON WINDOWS: yes -- every name here is an ordinary one -- provided
+# `timeout` is on PATH, which is what the guard tests.
+if command -v timeout >/dev/null 2>&1; then
+  selfhop_dir="$fixture_dir/bare-config-in-a-git-directory"
+  mkdir -p "$selfhop_dir"
+  new_repo "$selfhop_dir"
+  git -C "$selfhop_dir" config core.bare true
+  mkdir -p "$selfhop_dir/holder"
+  printf 'fixture\n' > "$selfhop_dir/holder/P2_correctness_202609130015_a-hop-that-lands-where-it-started.md"
+  # The fixture is about nothing unless git really answers that way.
+  if [[ "$(git -C "$selfhop_dir" rev-parse --is-inside-work-tree 2>/dev/null)" != false ]] \
+    || [[ "$(git -C "$selfhop_dir" rev-parse --absolute-git-dir 2>/dev/null)" != "$selfhop_dir/.git" ]]; then
+    echo 'note: skipping the self-hop case (this git does not answer false with a .git directory beside it)' >&2
+  else
+    selfhop_rc=0
+    timeout 60 "$BASH" "$branch_validator" \
+      'fix-P2/correctness_a-hop-that-lands-where-it-started' "$selfhop_dir/holder" \
+      >/dev/null 2>&1 || selfhop_rc=$?
+    if [[ "$selfhop_rc" == 124 ]]; then
+      echo 'the ascent did not terminate where git names a git directory whose parent is the anchor' >&2
+      exit 1
+    fi
+    if [[ "$selfhop_rc" != 0 ]]; then
+      echo "a listing inside a bare-configured repository nothing contains is the filesystem's to" \
+        "answer; got $selfhop_rc" >&2
+      exit 1
+    fi
+  fi
+else
+  echo 'note: skipping the self-hop case (no timeout(1) to bound it with)' >&2
+fi
+
 # ---- AND A PATH WHOSE RESOLUTION IS NOT STABLE DOES NOT REACH THE HOP ---------------------------
 #
 # The hop carries a path GIT resolved, which is why it is `--absolute-git-dir`
