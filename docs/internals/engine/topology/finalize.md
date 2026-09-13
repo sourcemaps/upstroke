@@ -59,9 +59,15 @@ disk is missing or stale — a file whose stored digest is not the digest of its
 whose outcome or runner is not the derived report's (`TopologyReport::is_fresh_against`) — then
 the steps run. The write is `rundir::write_report`'s staged, synced, renamed publication, so a
 report present under its name holds durable bytes and the refs the steps prune go only after it
-(DESIGN.md §26); a report found current is not written again and needs no barrier of its own,
-because the rename that made it current was made after its bytes were synced
-(`the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_rewritten`).
+(DESIGN.md §26); a report found current is not written again, and its directory's barrier is
+taken again (`rundir::sync_report_dir`) before the first pruning effect: the rename that made it
+current was made after its bytes were synced, so the bytes are durable, but the *name* is durable
+only once the directory's barrier completed, and a first finalization may have died or failed
+between the rename and that barrier — until PR10's round 4 the fresh branch pruned behind a name
+proven visible, not durable (the round-4 crash lens, P2;
+`the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_rewritten`,
+`a_report_directory_barrier_that_fails_refuses_pruning_on_every_resume_until_it_holds`,
+`a_report_rename_without_directory_sync_is_proven_before_pruning`).
 A fault at any site ends the command with the steps before it done and the steps after it not
 started; the next resume's step (b) runs the whole order again and converges (ST-18,
 `kill_after_report_before_each_cleanup_step`, which at every cell of the matrix — both phases of

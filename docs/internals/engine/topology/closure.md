@@ -46,6 +46,9 @@ unresolved transaction at closure is not closed here and not appended for: `chec
 — "an intermediate build refuses, before any append, any operation whose terminals it does not
 implement" — and the terminals of closure under concurrency (in-flight cancellation, the budget
 drain, promotion and publication completion inside closure) are `tokio_boundary`'s, PR11.
+`TopologyRun::close_run` consults it after the ending outcome and before its first append;
+`closure_refuses_an_in_flight_generation_and_an_unresolved_transaction_before_any_append`
+replays the two logs and holds the refusal.
 
 ## `pub fn unclosable(fold: &TopologyFold) -> Vec<String> {`
 

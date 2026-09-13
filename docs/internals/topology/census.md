@@ -1239,6 +1239,20 @@ PR3-ST14-002 — what the abstraction key must keep
 A stale-clean verification of a candidate, with the three fields the
 `merge_prepared` relations are about named.
 
+## `mod tests` › `fn consumed_verification_defers_survive_publication() {`
+
+R14's `verification_defers` after the candidate it counts is published (the round-4 contract
+lens, F1): the deferred-verification trace observed reads `Present(1)`; the wait elapses, the
+verification starts and prepares stale-clean, and `task_merged` removes the queue entry — and
+the observation still reads `Present(1)`, because the ledger counts the outage events of the
+durable prefix rather than the entries of the current queue, where the unit vanished until PR10's
+round 4.
+
+## `mod tests` › `fn deferred_verification_trace() -> Vec<TopologyEvent> {`
+
+The queued candidate's trace with its verification started and deferred by one outage; the fold
+helper beneath replays it, and the ledger's observers take both.
+
 ## `mod tests` › `fn queued_candidate_trace(paths: PathSet) -> Vec<TopologyEvent> {`
 
 The prefix every abstraction witness below shares: one task's

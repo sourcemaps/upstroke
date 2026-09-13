@@ -1109,6 +1109,12 @@ not, because only the guest sets the lint level.
 
 ## `fn replayed(fixture: &Fixture) -> TopologyFold {`
 
+The fold alone; `replayed_with_events` for the observers that take the
+durable prefix as well (R14's consumed verification deferrals are counted
+from it since round 4).
+
+## `fn replayed_with_events(fixture: &Fixture) -> (TopologyFold…`
+
 ===========================================================================
 (d), (e), (h)
 ===========================================================================
@@ -3962,6 +3968,20 @@ recovery. `with_live_run_hooked` takes the caller's hooks;
 the hooks rather than in the harness (an error at a hook phase) reaches
 the loop.
 
+## `fn closure_refuses_an_in_flight_generation_and_an_unresolve…`
+
+R1's negative witness (the round-4 contract lens, F2: the record named a
+test that constructs an unclosable log, and the only reference was a
+positive fixture). Two logs no sequential process writes — an attempt
+started and never settled, and a verification started and never settled,
+the census's deferred-verification trace without its outage — replayed
+into folds, and `closure::unclosable` names the in-flight generation and
+the unresolved transaction while `closure::refuse_unclosable` refuses
+each, naming the shape, PR11 and "nothing was appended". The refusal is a
+reading of the fold: `TopologyRun::close_run` consults it after the
+ending outcome and before its first append, so what the loop would append
+for such a log is nothing. The promoting shape has no fixture here.
+
 ## `fn a_budget_stopped_run_with_a_retained_generation_is_close…`
 
 `PR7-R4-LOOP-004`: a budget-stopped run with a retained generation
@@ -4272,18 +4292,32 @@ the root is not pruned past it, nothing is appended, and the un-injected
 resume reclaims every leftover and converges. A finalizer that discarded
 the leftovers' error would reach the refusal instead.
 
-## `type BarrierTimeline = Arc<Mutex<Vec<(EffectSiteId, HookPhase, crate::util::BarrierCounts)>>>;`
+## `struct BarrierSeen {`
+
+One entry of the barrier timeline: the site and phase reached, the
+durability barriers this thread had entered by then
+(`util::barriers_on_this_thread`), so a test can read whether a file and
+its directory were synced between two phases, and the directories the
+bundle's durability ledger had recorded synced by then, so a test can name
+*which* directory was synced before a site rather than count directories
+(the round-4 crash lens: the worktree and intent removals sync other
+directories, so a count says nothing about the public one).
+
+## `type BarrierTimeline = Arc<Mutex<Vec<BarrierSeen>>>;`
 
 One timeline of every effect and run-directory hook a finalization
-reaches, each entry stamped with the durability barriers this thread had
-entered by then (`util::barriers_on_this_thread`), so a test can read
-whether a file and its directory were synced between two phases.
+reaches.
+
+## `fn barrier_seen(`
+
+Stamps one entry, from the thread's counters and the ledger's records.
 
 ## `struct BarrierHooks {`
 
 The harness bundle whose effect and run-directory hooks record the
 barrier timeline and answer an `ArmedSite` — one `(site, phase)` armed with
-an injection, or none.
+an injection, or none — and hand both funnel families one recording
+durability ledger, read back through `ledger_records`.
 
 ## `fn the_report_is_durable_before_any_ref_is_pruned_and_a_cur…`
 
@@ -4295,8 +4329,34 @@ site, the report present under its name and current by digest, and the
 candidates ref still there. The restart finds the report current, reaches
 neither report site, leaves the bytes byte-identical and prunes the refs:
 the durability of a report the restart does not rewrite is the rename's
-— made after the sync, so a name that survived holds synced bytes — which
-is why the fresh branch carries no barrier of its own.
+for its bytes — made after the sync, so a name that survived holds synced
+bytes — and the directory barrier's for its name, which the fresh branch
+takes again before it prunes (the two tests below; until PR10's round 4 it
+carried no barrier of its own, the round-4 crash lens, P2).
+
+## `fn a_report_directory_barrier_that_fails_refuses_pruning_on…`
+
+The fresh branch's barrier, refused: the public directory's barrier fails
+at the first finalization (`util::fail_barriers_at`, scoped to that
+directory) after the rename landed, so the report is visible under its
+name and current by digest while the candidates ref stands; the next
+resume, the fault still armed, takes the fresh branch, writes nothing,
+and is refused at the same barrier with the ref still standing; with the
+fault cleared the barrier holds, the public directory is among the
+directories synced before the first ref deletion, the refs are pruned and
+finalization converges. A fresh branch without the barrier prunes at the
+second resume instead.
+
+## `fn a_report_rename_without_directory_sync_is_proven_before_…`
+
+The crash lens's restart case: a rename whose directory barrier failed
+leaves the name visible, not proven; the restart finds the report current,
+reaches neither report site, and the timeline's entry at the first ref
+deletion carries the public directory itself among the directories the
+run-directory ledger recorded synced — that path, not the aggregate
+directory count, which the worktree and intent removals raise on other
+directories — and under the public directory the restart synced and
+staged or renamed nothing.
 
 ## `fn finalization_kill_child() {`
 
@@ -4395,17 +4455,23 @@ replay of the bytes on disk and its report.
 
 What a user sees of their repository: `HEAD`, every tracked file's bytes,
 the porcelain status with untracked files listed, and a digest of every
-untracked file's bytes.
+untracked file's bytes, ignored or not.
 
 ## `fn user_checkout(repo_root: &Path) -> UserCheckout {`
 
 The observation the acceptance subset's "byte-for-byte unchanged" is
 held to. Until PR10's round 3 it ignored untracked files, so a note the
 run overwrote left the assertion green (the round-3 record lens, P2-3);
-the acceptance test now plants one and compares its digest. The engine's
-own run directory lives under the repository and is untracked; what the
-claim is about is the user's checkout, so the engine's `.upstroke/` is the
-one prefix the observation leaves out.
+the acceptance test now plants one and compares its digest. Until round 4
+it listed untracked files with `--exclude-standard` alone, which leaves
+out the files the user's excludes ignore, so an ignored note the run
+overwrote left it green too (the round-4 fix-check and record lenses); the
+ignored files are listed beside them now (`--others --ignored
+--exclude-standard`), and the acceptance test plants one of those as
+well, through `.git/info/exclude`. The engine's own run directory lives
+under the repository and is untracked; what the claim is about is the
+user's checkout, so the engine's `.upstroke/` is the one prefix the
+observation leaves out.
 
 ## `fn max_parallel_one_completes_a_two_task_chain_with_one_lin…`
 
@@ -4414,8 +4480,8 @@ plan with one linear engine commit per plan task, user checkout
 byte-for-byte unchanged" — a two-task chain driven to `run_finished
 (Complete)`, with the live fold and its report compared against a replay
 of the bytes on disk after every step (`projection equivalence`), and the
-checkout — `HEAD`, the tracked bytes, the status, and the untracked note
-the test plants beside them — compared whole before and after.
+checkout — `HEAD`, the tracked bytes, the status, and the untracked and
+ignored notes the test plants beside them — compared whole before and after.
 
 ## `fn with_live_run_hooked_runner<R>(`
 

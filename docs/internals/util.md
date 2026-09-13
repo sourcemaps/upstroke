@@ -319,10 +319,65 @@ check rather than a line each caller is trusted to keep.
 
 [`std::io::Error`] from `fsync`, verbatim.
 
+## `pub(crate) fn fsync_file_at(file: &std::fs::File, path: &Path) -> std::io::Result<()> {`
+
+[`fsync_file`] named by the path it makes durable, so that the barrier fault
+below can refuse exactly one file's barrier. The run-directory publications
+go through this form (`rundir::sync_file_recorded`); the entry counts as
+the file half either way.
+
+# Errors
+
+The injected fault, or [`fsync_file`]'s.
+
+## `static ARMED_BARRIER_FAULTS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());`
+
+The paths whose barrier a test has made fail (`PR10`'s round 4, the crash
+and fix-check lenses: `let _ = stage_json(...)` and a fresh-report branch
+without a directory barrier survived every test, because nothing made a
+barrier fail). Process-wide and keyed by path rather than thread-local,
+because the funnel that meets the fault runs wherever the engine runs it
+and a fixture's directory is its own, so two tests' faults cannot meet;
+guarded by a mutex (§6) because arming and disarming are a test's rare
+writes against the barrier's reads, and the reads pay nothing until a
+fault is armed — the count beside it is the fast path.
+
+Unconditional rather than `#[cfg(test)]`, for the reason [`BARRIERS`] gives:
+a `#[cfg(test)]` item here would move the cut every source census's
+production region stops at.
+
+## `static ARMED_BARRIER_FAULT_COUNT: std::sync::atomic::AtomicUsize =`
+
+How many faults are armed; zero is the production reading and the only
+one a barrier consults before returning to its syscall.
+
+## `#[cfg_attr(not(test), allow(dead_code))]`
+
+The guard [`fail_barriers_at`] hands back: the fault is armed while it is
+held and disarmed by its `drop`, so a test that panics disarms it too.
+
+## `#[cfg_attr(not(test), allow(dead_code))]`
+
+Arm a barrier fault at `path`: every [`fsync_dir`] of that directory and
+every [`fsync_file_at`] of that file returns an `io::Error` naming the path
+instead of performing the barrier, until the guard is dropped. The path
+compares as given and canonicalised, so a funnel handed the same directory
+by another spelling still meets it.
+
+## `impl Drop for BarrierFault {`
+
+Disarms the one entry this guard armed.
+
+## `fn injected_barrier_fault(path: &Path) -> Option<std::io::Error> {`
+
+The fault for `path`, if one is armed; `None` at the cost of one relaxed
+load when none is.
+
 ## `pub(crate) fn fsync_dir(dir: &Path) -> std::io::Result<()> {`
 
 The **directory** half of the durability barrier, on every platform this
-ships on (`PR5-CONF-013`).
+ships on (`PR5-CONF-013`). Consults the armed faults after counting its
+entry, so a refused barrier is still an entered one.
 
 A rename is not durable because the renamed file was synced: the durable
 thing is the *directory entry*, and it needs its own barrier.

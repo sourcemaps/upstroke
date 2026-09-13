@@ -68,9 +68,13 @@ already-unreachable object included.
 One observation per row, with the evidence a disagreement quotes. R1 is the fold's own
 pipeline count; R14 is one fact per consumed counter — the merge sequence, task keys, display
 ids, generations, attempts, lineage indexes, repair budget units, verification defers (the
-queue entries' `defers`, where `apply_verification_unavailable` records them; a task's `defers`
-is its worker backoff, and until PR10's round 2 the part summed that instead) and override
-slots — each held monotone; R21 one fact per persistent output and R27 one per object
+`merge_verification_unavailable` events whose outcome is `Deferred`, counted from the durable
+prefix the observer is handed — each is one unit consumed; a queue entry's `defers` is the same
+number while its candidate is queued and leaves with the entry at `task_merged`, so summing the
+queue, as the part did until PR10's round 4, gave a consumed unit back at publication and read a
+successful lifecycle as non-monotone (the round-4 contract lens, F1;
+`consumed_verification_defers_survive_publication`); a task's `defers` is its worker backoff, and
+until round 2 the part summed that instead) and override slots — each held monotone; R21 one fact per persistent output and R27 one per object
 accounting (`Expectation::parts`); R20 is balanced when no effect site names a volume and the
 recorded volume map is unchanged (operator-owned by classification).
 
