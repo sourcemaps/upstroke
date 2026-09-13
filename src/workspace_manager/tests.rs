@@ -3459,6 +3459,14 @@ fn every_slot_taking_primitive_refuses_a_hostile_slot_name() {
             Box::new(|slot| manager.remove_worktree(&mut NoHooks, slot)),
         ),
         (
+            "remove_worktree_proving",
+            Box::new(|slot| {
+                manager
+                    .remove_worktree_proving(&mut NoHooks, slot, WriterProof::NoWriterAlive)
+                    .map(drop)
+            }),
+        ),
+        (
             "candidate_stage",
             Box::new(|slot| manager.candidate_stage(&mut NoHooks, slot, &[])),
         ),

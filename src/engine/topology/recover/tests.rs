@@ -15630,12 +15630,12 @@ fn a_fault_at_a_staging_leftovers_own_removal_stops_finalization_and_the_next_re
                 );
                 assert_eq!(fixture.log_bytes(), before, "{tag}: nothing appended");
                 assert!(
-                    !rundir::is_running(&fixture.public()),
-                    "{tag}: the faulted resume's guard released the run lock file"
-                );
-                assert!(
                     wait_for_cleanup_hold_release(&fixture.public()),
                     "{tag}: the run's cleanup lease is still held"
+                );
+                assert!(
+                    !rundir::is_running(&fixture.public()),
+                    "{tag}: the faulted resume's guard released the run lock file"
                 );
 
                 let second = harness();

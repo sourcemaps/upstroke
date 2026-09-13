@@ -1414,7 +1414,8 @@ not the derived report's: `TopologyReport::is_fresh_against`), the cleanup
 steps run in their fixed order — then the run lock is released through
 the hooked funnel (`Lock.Release`, the last cell of the ST-18 matrix), and
 then, and only then, continuation is refused with what the finalization
-did in the message (`finalize::refuse_continuation`). Repeated resumes converge:
+did in the message (`finalize::refuse_continuation`) — the registrations it
+passed over among it, when there were any. Repeated resumes converge:
 each finds the report current and nothing left to prune (ST-18,
 `resume_finalizes_halted_then_refuses`).
 
@@ -1490,6 +1491,17 @@ another SHA), the append-error protocol's report, or a Git error.
 Reclaim every verification snapshot, with force, once every terminal a
 snapshot could belong to is durable: the attempts settled at (d), and the
 integration transaction resolved just above.
+
+The forced removals a resume makes — here, the interrupted verification's
+staging above, and the stale staging in `reclaim_stale_residue` — run
+through the plain funnel, which refuses a registration of the repository's
+store that names no checkout (`WorkspaceManager::WriterProof::Unknown`): a
+conductor killed inside an add leaves a child the cleanup lease does not
+cover, so what a resume finds in the store proves nothing about whether
+that add is still writing, and the refusal PR #151 measured the need for
+stands here. Terminal finalization, where a durable `run_finished` proves
+every add of the run passed, passes such a registration over instead
+(`finalize::scrub_slots`).
 
 `C.cancellation`: "snapshots reclaimed"; `[T-VERIFY].resume_action`. The
 live path removes snapshots only after its terminal, so a kill between the

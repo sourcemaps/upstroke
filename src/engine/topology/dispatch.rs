@@ -246,11 +246,7 @@ pub fn verify_or_recreate(
     match verify_reuse(manager, hooks, open, quiescence)? {
         Ok(()) => Ok(Reuse::Verified),
         Err(failure) => {
-            manager.remove_worktree_proving(
-                hooks.effects(),
-                &open.slot,
-                crate::workspace_manager::WriterProof::NoWriterAlive,
-            )?;
+            manager.remove_worktree(hooks.effects(), &open.slot)?;
             create_worktree(manager, hooks, open)?;
             Ok(Reuse::Recreated { failure })
         }
@@ -341,11 +337,7 @@ pub(super) fn scrub(
     hooks: &mut dyn TopologyHooks,
     slot: &Slot,
 ) -> Result<(), UpstrokeError> {
-    manager.remove_worktree_proving(
-        hooks.effects(),
-        slot,
-        crate::workspace_manager::WriterProof::NoWriterAlive,
-    )?;
+    manager.remove_worktree(hooks.effects(), slot)?;
     manager.remove_intent(hooks.effects(), slot)
 }
 

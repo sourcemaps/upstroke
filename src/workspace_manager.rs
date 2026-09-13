@@ -651,15 +651,6 @@ pub struct Reclaimed {
     /// left in place: a write interrupted before its rename was not durable,
     /// but no filename proves who wrote a file, so this crate deletes none.
     pub staging_leftovers: Vec<PathBuf>,
-    /// Linked-worktree registrations the store holds that name no checkout —
-    /// a `locked` file with no `gitdir`, or with an empty one, the two states
-    /// an interrupted `git worktree add` leaves before it has written the
-    /// path — passed over by the removals this reclaim ran under
-    /// [`WriterProof::NoWriterAlive`] and left byte-identical: Git does not
-    /// list, prune or repair such an entry (its lock is what prune skips),
-    /// nothing on disk binds it to a slot, and this crate deletes none of
-    /// them. Sorted, without duplicates.
-    pub passed_over_registrations: Vec<PathBuf>,
 }
 
 /// What a caller of a forced removal can prove about writers of the
@@ -683,15 +674,21 @@ pub enum WriterProof {
     /// registration whose `gitdir` is empty refuses the removal before any
     /// mutation, as [`WorkspaceManager::remove_worktree`] documents.
     Unknown,
-    /// No writer of this execution root is alive. The engine holds it at
-    /// every forced removal it makes: a resume has the run lock and found
-    /// the run's cleanup lease free (R28: every engine Git child holds that
-    /// lease while it lives), the live loop's own adds are synchronous, and
-    /// terminal finalization holds both; the kill samplers hold it once
-    /// their child is reaped. Under it a registration that names nothing is
-    /// passed over — reported on the outcome, never bound by its
-    /// Git-generated, collision-suffixed name, never touched — and the
-    /// contained checkout and the intent converge.
+    /// No add of this execution root's slots is alive — an add being the
+    /// one child that creates a registration, and so the one writer this
+    /// proof is about. Terminal finalization holds it: a durable
+    /// `run_finished` means the loop passed every add it made, each of them
+    /// synchronous, and step (b)'s finalizer holds the run lock and the
+    /// run's cleanup lease besides. The kill samplers hold it once their
+    /// child is reaped. A resume's reclaims do **not** hold it and keep the
+    /// plain funnel's refusal: a conductor killed inside an add leaves a
+    /// child the cleanup lease does not cover, which only `update-ref`
+    /// children hold (`RESIDUE-UNBINDABLE-TASK-REGISTRATION-HAS-NO-DESIGN-SENTENCE`),
+    /// so what a resume finds in the store proves nothing about that child.
+    /// Under the proof a registration that names nothing is passed over —
+    /// reported on the outcome, never bound by its Git-generated,
+    /// collision-suffixed name, never touched — and the contained checkout
+    /// and the intent converge.
     NoWriterAlive,
 }
 
@@ -2080,22 +2077,14 @@ impl WorkspaceManager {
         if slots.is_empty() {
             self.revalidate()?;
         }
-        let mut passed_over_registrations = Vec::new();
         for slot in &slots {
-            passed_over_registrations.extend(self.remove_worktree_proving(
-                hooks,
-                slot,
-                WriterProof::NoWriterAlive,
-            )?);
+            self.remove_worktree(hooks, slot)?;
             self.remove_intent(hooks, slot)?;
         }
-        passed_over_registrations.sort();
-        passed_over_registrations.dedup();
         let staging_leftovers = self.staging_leftovers()?;
         Ok(Reclaimed {
             slots,
             staging_leftovers,
-            passed_over_registrations,
         })
     }
 
