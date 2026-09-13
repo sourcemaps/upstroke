@@ -4,8 +4,7 @@ use std::sync::{Arc, Mutex};
 use super::*;
 use crate::observations::OBSERVATIONS_ENV;
 use crate::topology::effects::{
-    BijectionFailure, ClassHistogram, ObjectResidue, ResidueClass, SamplingRecord, SyntheticRecord,
-    check_bijection,
+    ClassHistogram, ObjectResidue, ResidueClass, SamplingRecord, SyntheticRecord, check_bijection,
 };
 
 fn repo_root() -> PathBuf {
@@ -85,62 +84,65 @@ fn expected_files(test: &str) -> Vec<String> {
 
 /// The residue-class evidence the registry embeds, read from the three
 /// tracked files the tests that produce it write.
+fn tracked(path: &str) -> String {
+    std::fs::read_to_string(repo_root().join(path))
+        .unwrap_or_else(|error| panic!("`{path}` is tracked: {error}"))
+}
+
 fn evidence() -> ResidueEvidence {
-    let read = |path: &str| {
-        std::fs::read_to_string(repo_root().join(path))
-            .unwrap_or_else(|error| panic!("`{path}` is tracked: {error}"))
+    ResidueEvidence::declared(
+        &tracked(crate::effects::RESIDUE_SYNTHETIC_JSON),
+        &tracked(crate::effects::RESIDUE_CLASSES_JSON),
+    )
+    .expect("the two tracked evidence files parse and name sites the enums generate")
+}
+
+fn exported_evidence() -> ResidueEvidence {
+    let written = |path: &str| {
+        std::fs::read_to_string(repo_root().join(path)).unwrap_or_else(|error| {
+            panic!("`{path}` is written by the sampler a full suite run executes: {error}")
+        })
     };
     ResidueEvidence::parse(
-        &read(crate::effects::RESIDUE_SYNTHETIC_JSON),
+        &tracked(crate::effects::RESIDUE_SYNTHETIC_JSON),
         &[
-            &read(crate::effects::RESIDUE_HISTOGRAM_JSON),
-            &read(crate::effects::SEQUENTIAL_RESIDUE_HISTOGRAM_JSON),
+            &written(crate::effects::RESIDUE_HISTOGRAM_JSON),
+            &written(crate::effects::SEQUENTIAL_RESIDUE_HISTOGRAM_JSON),
         ],
     )
     .expect("the three evidence files parse and name sites the enums generate")
 }
 
 /// The non-ignored half of the merge check: every required coordinate of
-/// every site of the inventory, on both hosts, has exactly one claim or is
-/// declared unobservable (never both); every claim is inside the inventory
-/// and names a funnel execution; and the document builds with one entry per
-/// claim, per residue class and per fast-path site.
+/// every site of the inventory, on both hosts, has exactly one claim; every
+/// claim is inside the inventory and names a funnel execution; and the
+/// document builds with one entry per claim, per residue class and per
+/// fast-path site.
 #[test]
-fn the_inventory_is_claimed_at_every_required_phase_on_both_hosts_or_declared() {
-    let declared = declared_unobservable();
+fn the_inventory_is_claimed_at_every_required_phase_on_both_hosts() {
     let registry = registry(&evidence()).expect("every claim and every evidence entry is accepted");
     let sites = inventory();
     assert_eq!(sites.len(), 68, "the Topology- and Shared-scoped sites");
     let mut required = 0;
-    let mut excused = 0;
     for host in Host::ALL {
         for site in &sites {
             for phase in required_phases(*site, *host) {
                 let claimed = CLAIMS
                     .iter()
                     .any(|claim| claim.site == *site && claim.phase == phase);
-                if declared.iter().any(|entry| entry.covers(*site, phase)) {
-                    excused += 1;
-                    assert!(
-                        !claimed,
-                        "{host}: `{site}`/`{phase}` is declared unobservable and claimed"
-                    );
-                } else {
-                    required += 1;
-                    assert!(claimed, "{host}: `{site}` has no claim for `{phase}`");
-                }
+                required += 1;
+                assert!(claimed, "{host}: `{site}` has no claim for `{phase}`");
             }
         }
     }
-    assert_eq!(excused, 12, "six coordinates, on each of two hosts");
     assert_eq!(
-        required, 315,
-        "163 Unix and 164 Windows coordinates, six excused on each"
+        required, 327,
+        "163 Unix and 164 Windows coordinates, none excused"
     );
     assert_eq!(
         CLAIMS.len(),
-        162,
-        "153 shared, four Unix-only and five Windows-only points"
+        168,
+        "159 shared, four Unix-only and five Windows-only points"
     );
     for claim in CLAIMS {
         assert!(
@@ -203,19 +205,6 @@ fn the_inventory_is_claimed_at_every_required_phase_on_both_hosts_or_declared() 
             "`{site}` has no no-execution record naming every fast sequence"
         );
     }
-    for entry in &declared {
-        assert!(
-            sites.contains(&entry.site),
-            "`{}` is declared and not in the inventory",
-            entry.site
-        );
-        assert!(!entry.reason.trim().is_empty());
-    }
-    assert_eq!(
-        checked_inventory().len(),
-        sites.len() - 2,
-        "two sites are declared unobservable as a whole"
-    );
 }
 
 #[test]
@@ -279,7 +268,6 @@ fn the_sequential_registry_is_pinned() {
             .map(EffectSiteId::name)
             .collect::<Vec<_>>()
     );
-    assert_eq!(pinned.unobservable.len(), 3);
     assert_eq!(pinned.fast_sequences, FAST_SEQUENCES);
     for entry in &pinned.entries {
         if let Evidence::RecoveryProven { sampling, .. } = &entry.evidence {
@@ -296,93 +284,11 @@ fn the_sequential_registry_is_pinned() {
 #[test]
 #[ignore = "rewrites effects/sequential-registry.json from the claims and the evidence files; run on purpose"]
 fn write_the_sequential_registry() {
-    let generated = registry_json(&evidence()).expect("the document serializes");
+    let generated = registry_json(&exported_evidence()).expect("the document serializes");
     crate::workspace_manager::fixture::write_file(
         &repo_root().join(REGISTRY_JSON),
         generated.as_bytes(),
     );
-}
-
-/// Each declared-unobservable coordinate's reason is a fact about the
-/// code, and the code is read here: the report module names no
-/// `ReportSite`, the process funnel consults no hook phase, and
-/// termination consults no hook at all.
-#[test]
-fn every_declared_unobservable_coordinate_has_its_reason_in_the_code() {
-    use crate::effects::blank_comments_and_strings;
-
-    let source = |path: &str| {
-        blank_comments_and_strings(
-            &std::fs::read_to_string(repo_root().join(path))
-                .unwrap_or_else(|error| panic!("`{path}` reads: {error}"))
-                .replace("\r\n", "\n"),
-        )
-    };
-    let declared = declared_unobservable();
-    assert_eq!(declared.len(), 3);
-
-    let report = EffectSiteId::Report(ReportSite::Write);
-    assert!(
-        declared
-            .iter()
-            .any(|entry| entry.site == report && entry.phases.is_empty())
-    );
-    assert!(
-        !source("src/util.rs").contains("ReportSite"),
-        "`Report.Write`'s inventoried module names its site: it has a funnel now, so the \
-         declaration is false"
-    );
-    assert!(
-        source("src/rundir.rs").contains("RunDirSite::WriteReport"),
-        "the report is written through `RunDir.WriteReport`"
-    );
-
-    let spawn = EffectSiteId::Process(ProcessSite::Spawn);
-    assert!(declared.iter().any(
-        |entry| entry.site == spawn && entry.phases == [EntryPhase::Before, EntryPhase::After]
-    ));
-    let hooks = source("src/agent/proc/hooks.rs");
-    let trait_body = hooks
-        .split("pub trait SpawnHooks")
-        .nth(1)
-        .and_then(|rest| rest.split_once("\n}\n"))
-        .map(|(body, _)| body.to_owned())
-        .expect("the trait is defined there");
-    assert!(
-        !trait_body.contains("HookPhase") && !trait_body.contains("fn phase"),
-        "`SpawnHooks` grew a phase hook: {trait_body}"
-    );
-    let proc = source("src/agent/proc.rs");
-    assert!(
-        !proc.contains("HookPhase::"),
-        "the process funnel consults a hook phase now; the declaration is false"
-    );
-
-    let terminate = EffectSiteId::Process(ProcessSite::Terminate);
-    assert!(
-        declared
-            .iter()
-            .any(|entry| entry.site == terminate && entry.phases.is_empty())
-    );
-    let kill_tree = proc
-        .split("fn kill_tree(")
-        .nth(1)
-        .and_then(|rest| rest.split_once("\n}\n"))
-        .map(|(body, _)| body.to_owned())
-        .expect("kill_tree is defined there");
-    assert!(
-        !kill_tree.contains("hooks"),
-        "`kill_tree` consults a hook now; the declaration is false: {kill_tree}"
-    );
-    for site in [report, terminate] {
-        assert!(
-            EffectSiteId::Process(ProcessSite::Terminate)
-                .sub_effects()
-                .is_empty()
-                && site.sub_effects().len() <= 1,
-            "a whole-site declaration covers a site with points; declare them one by one"
-        );
-    }
 }
 
 /// SWEEP-BIJECTION-005: the frozen `N` comes from the declarations file, and
@@ -538,13 +444,12 @@ fn an_observation_record_merges_by_the_larger_count_and_round_trips() {
 /// ST-07's merge check over the whole inventory: run the suite with
 /// `UPSTROKE_HOOK_OBSERVATIONS=<dir>` first (every adapter exports on drop and
 /// before a kill, and the kill children inherit the variable), then this test
-/// with the same variable. The bijection over the checked inventory must be
-/// empty but for the declared coordinates, no declared coordinate may have
-/// been observed, the export's fast sequences must be the ones the
-/// no-execution record names, every claim this host requires must be
-/// witnessed by its named test, and every recovery-proven entry's N must be
-/// the declarations'. The name keeps the range ST-07 called "sequential";
-/// the range is the inventory.
+/// with the same variable. The bijection over the whole inventory must be
+/// empty, the export's fast sequences must be the ones the no-execution
+/// record names, every claim this host requires must be witnessed by its
+/// named test, and every recovery-proven entry's N must be the
+/// declarations'. The name keeps the range ST-07 called "sequential"; the
+/// range is the inventory.
 #[test]
 #[ignore = "reads the observation export a full suite run wrote under UPSTROKE_HOOK_OBSERVATIONS"]
 fn st07_the_sequential_range_is_a_bijection_over_the_exported_observations() {
@@ -562,31 +467,12 @@ fn st07_the_sequential_range_is_a_bijection_over_the_exported_observations() {
         .cloned()
         .collect();
     let harness = harness_from(&executions);
-    let evidence = evidence();
+    let evidence = exported_evidence();
     let registry = registry(&evidence).expect("the document builds");
-    let declared = declared_unobservable();
     let host = Host::current();
-    let inventory = checked_inventory();
+    let inventory = inventory();
     let failures = check_bijection(&inventory, &harness, registry.entries(), host);
-    let unexcused: Vec<&BijectionFailure> = failures
-        .iter()
-        .filter(|failure| !excused(failure, &declared))
-        .collect();
-    assert!(unexcused.is_empty(), "{unexcused:#?}");
-    for entry in &declared {
-        for phase in required_phases(entry.site, host) {
-            if !entry.covers(entry.site, phase) {
-                continue;
-            }
-            if let Some(hook) = phase.hook_phase() {
-                assert!(
-                    !harness.observed(entry.site, hook),
-                    "`{}`/`{phase}` is declared unobservable and the export observed it",
-                    entry.site
-                );
-            }
-        }
-    }
+    assert!(failures.is_empty(), "{failures:#?}");
     let mut sequences: Vec<&str> = harness
         .fast_sequences()
         .iter()
@@ -643,11 +529,9 @@ fn st07_the_sequential_range_is_a_bijection_over_the_exported_observations() {
             "records": records.len(),
             "funnel_executions": executions.len(),
             "inventory": inventory.len(),
-            "declared_unobservable": declared.len(),
             "entries": registry.entries().len(),
             "host": host.name(),
             "failures": failures.len(),
-            "excused_failures": failures.len() - unexcused.len(),
             "witnessed_claims": witnessed,
             "fast_sequences": sequences,
         });
@@ -1040,6 +924,82 @@ fn trivial_request(workspace: &Path) -> crate::runner::RunnerRequest {
             0,
         ),
     )
+}
+
+/// The child `the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter`
+/// runs past its timeout: it sleeps until the funnel terminates it.
+#[test]
+#[ignore = "spawned as a subprocess by the process hook-phase witness"]
+fn sleeps_until_terminated() {
+    std::thread::sleep(std::time::Duration::from_secs(120));
+}
+
+/// `Process.Spawn` and `Process.Terminate` at their two hook phases, through
+/// the production adapter: one command that ends on its own is spawned
+/// through the host runner and observed at `Process.Spawn`'s `Before` and
+/// `After`; one that outlives its timeout is terminated by the funnel and
+/// observed at `Process.Terminate`'s `Before` and `After`.
+#[test]
+fn the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter() {
+    use crate::workspace_manager::fixture;
+
+    let spawn = crate::runner::SPAWN_SITE;
+    let terminate = EffectSiteId::Process(ProcessSite::Terminate);
+    let harness = shared_harness();
+    let hooks = crate::runner::HarnessHooks::new(Arc::clone(&harness));
+    let runner = crate::runner::host::HostRunner::new().with_hooks(Box::new(hooks));
+
+    let dir = fixture::scratch("st07-process-phases");
+    let ended = crate::runner::Runner::run(&runner, &trivial_request(&dir))
+        .expect("the trivial command runs");
+    assert!(
+        !ended.timed_out,
+        "the trivial command ends on its own: {ended:?}"
+    );
+    {
+        let seen = harness
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(seen.observed(spawn, HookPhase::Before));
+        assert!(seen.observed(spawn, HookPhase::After));
+        assert!(
+            !seen.observed(terminate, HookPhase::Before)
+                && !seen.observed(terminate, HookPhase::After),
+            "a command that ended on its own was not terminated"
+        );
+    }
+
+    let exe = std::env::current_exe().expect("this test binary");
+    let mut command = crate::runner::CommandSpec::new(exe.to_string_lossy().into_owned());
+    command.args = vec![
+        "--exact".to_owned(),
+        "engine::topology::coverage::tests::sleeps_until_terminated".to_owned(),
+        "--ignored".to_owned(),
+    ];
+    let request = crate::runner::gate_request(
+        command,
+        dir.clone(),
+        std::time::Duration::from_secs(1),
+        crate::runner::InvocationId::attempt(
+            crate::topology::registry::TaskKey(0),
+            crate::topology::events::GenerationId(0),
+            crate::topology::events::AttemptNumber(2),
+            crate::runner::invocation::AttemptRole::Gate(1),
+            0,
+        ),
+    );
+    let terminated = crate::runner::Runner::run(&runner, &request).expect("the timeout terminates");
+    assert!(
+        terminated.timed_out,
+        "the sleeping child outlives its timeout: {terminated:?}"
+    );
+    let seen = harness
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(seen.observed(terminate, HookPhase::Before));
+    assert!(seen.observed(terminate, HookPhase::After));
+    assert_eq!(seen.count(spawn, HookPhase::Before), 2);
+    assert_eq!(seen.count(spawn, HookPhase::After), 2);
 }
 
 /// The child of `every_kill_point_of_the_process_funnel_kills_the_child_on_this_host`:

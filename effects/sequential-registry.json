@@ -1,5 +1,5 @@
 {
-  "note": "decisions.fault_injection_registry, ST-07 for the sequential topology over the full claimed inventory (every Topology- and Shared-scoped site effect_sites.json generates): one entry per site x hook phase x parent-side point x injection mode, built through FaultRegistry::insert, each naming the committed test the suite's observation export shows executing it; one recovery-proven entry per residue class, its synthetic records from effects/residue-synthetic.json and its sampling record from effects/residue-histogram.json or effects/residue-histogram-sequential.json (the histogram counts are the machine-varying half: they are what the files held when this document was regenerated, the pin compares everything but them, and the merge check reads the files); and one no-execution record per site the exact-base fast path skips, naming every fast sequence the export records. The Windows-only points of Process.Spawn name the tests that execute them on that host; `hosts` lists both, and the merge check on each host holds the document to the points that host requires. `unobservable` declares, per coordinate and with the reason, the six coordinates no test can observe executed. The frozen sampling N a recovery-proven entry cites is effects/residue-classes.json's (SWEEP-BIJECTION-005).",
+  "note": "decisions.fault_injection_registry, ST-07 for the sequential topology over the full claimed inventory (every Topology- and Shared-scoped site effect_sites.json generates): one entry per site x hook phase x parent-side point x injection mode, built through FaultRegistry::insert, each naming the committed test the suite's observation export shows executing it; one recovery-proven entry per residue class, its synthetic records from effects/residue-synthetic.json and its sampling record from effects/residue-histogram.json or effects/residue-histogram-sequential.json (the histogram counts are the machine-varying half: they are what the files held when this document was regenerated, the pin compares everything but them, and the merge check reads the files); and one no-execution record per site the exact-base fast path skips, naming every fast sequence the export records. The Windows-only points of Process.Spawn name the tests that execute them on that host; `hosts` lists both, and the merge check on each host holds the document to the points that host requires. The frozen sampling N a recovery-proven entry cites is effects/residue-classes.json's (SWEEP-BIJECTION-005).",
   "range": [
     "Worktree.CreateExecutionRoot",
     "Worktree.RemoveExecutionRoot",
@@ -73,26 +73,6 @@
   "hosts": [
     "windows",
     "unix"
-  ],
-  "unobservable": [
-    {
-      "site": "Report.Write",
-      "phases": [],
-      "reason": "no funnel names this site: `report.json` is written through `RunDir.WriteReport` (src/rundir.rs), and `Report.Write` is the one entry of `SITES_WITHOUT_A_FUNNEL` in src/effects/tests/artifacts.rs (PR3-REPORT-DOUBLE-NAME), so no hook of it can be called"
-    },
-    {
-      "site": "Process.Spawn",
-      "phases": [
-        "before",
-        "after"
-      ],
-      "reason": "the process funnel (src/agent/proc.rs) consults `SpawnHooks::point` at its parent-side points only; `SpawnHooks` (src/agent/proc/hooks.rs) has no before/after phase hook, so the two phases have no call to observe"
-    },
-    {
-      "site": "Process.Terminate",
-      "phases": [],
-      "reason": "termination (`kill_tree` in src/agent/proc.rs) consults no hook: the site is inventoried and row-mapped and `SpawnHooks` exposes nothing for it"
-    }
   ],
   "fast_sequences": [
     "s0",
@@ -1694,6 +1674,44 @@
       }
     },
     {
+      "site": "Report.Write",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Report.Write",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
       "site": "RunDir.WriteQuestionPayload",
       "phase": "before",
       "order": "effect_before_event",
@@ -2860,6 +2878,82 @@
     },
     {
       "site": "Process.Spawn",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Process.Spawn",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [
+          "r22"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Process.Terminate",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [
+          "r22"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Process.Terminate",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the removal is durable and released no object; the row that accounted for what it removed holds nothing"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Process.Spawn",
       "phase": {
         "point": {
           "point": "ambient_job_joined",
@@ -3496,9 +3590,9 @@
           "sampling": {
             "n": 8,
             "histogram": {
-              "none": 2,
+              "none": 1,
               "internal": 6,
-              "after": 0
+              "after": 1
             },
             "unclassified": 0,
             "recovered": true
@@ -3550,8 +3644,8 @@
             "n": 8,
             "histogram": {
               "none": 0,
-              "internal": 2,
-              "after": 6
+              "internal": 1,
+              "after": 7
             },
             "unclassified": 0,
             "recovered": true

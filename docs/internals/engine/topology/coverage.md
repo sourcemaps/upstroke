@@ -12,21 +12,28 @@ excerpt within the preceding item when a heading names both an item and a line i
 
 ST-07 for the sequential topology over the full claimed inventory: the claims — for every hook
 phase and every parent-side point in every injection mode of every Topology- and Shared-scoped
-site, the committed test the suite's observation export shows executing it — the coordinates
-declared unobservable with their reasons, the residue-class evidence read from the files the
-tests that produce it write, the fast-path no-execution record, the registry document built
-from all of them through `FaultRegistry::insert` and pinned at `effects/sequential-registry.json`,
-and the authority for a recovery-proven entry's frozen N (`SWEEP-BIJECTION-005`).
+site, the committed test the suite's observation export shows executing it — the residue-class
+evidence (the declarations for the ordinary tests, the observed histograms for the merge check
+and the regenerator), the fast-path no-execution record, the registry document built from all
+of them through `FaultRegistry::insert` and pinned at `effects/sequential-registry.json`, and
+the authority for a recovery-proven entry's frozen N (`SWEEP-BIJECTION-005`). Nothing is
+declared unobservable: the round-1 document excused six coordinates (`Report.Write`'s two
+phases, `Process.Spawn`'s and `Process.Terminate`'s) with reasons held to the code, and PR10's
+round 2 made each execute instead — the report funnel consults `Report.Write` around the one
+write, the process funnel consults `SpawnHooks::phase` before and after the spawn and around
+every termination — so the bijection is over the whole inventory with no exclusion.
 
 The export itself is `src/observations.rs`'s: every harness adapter writes what its harness
 observed under `UPSTROKE_HOOK_OBSERVATIONS` when its last clone drops and just before a kill
 injection is handed back. The merge check (`coverage/tests.rs`,
 `st07_the_sequential_range_is_a_bijection_over_the_exported_observations`, ignored) rebuilds one
 harness from the funnel executions of a full run's export, runs `check_bijection` over the
-checked inventory at the current host, excuses only the declared coordinates, requires every
-declared coordinate to be unobserved, holds the fast sequences and every claim this host requires
-to the export, and holds every recovery-proven N to the declarations. The non-ignored tests hold
-the document to the tree and the declarations to the code.
+whole inventory at the current host and requires it empty, holds the fast sequences and every
+claim this host requires to the export, and holds every recovery-proven N to the declarations.
+The non-ignored tests hold the document to the tree, and read only tracked files: the residue
+half of their evidence is built from `effects/residue-classes.json` (the frozen N, an empty
+histogram, nothing unclassified), so a fresh checkout with no observed histogram passes them —
+the round-2 regression lens found them reading the gitignored histogram.
 
 ## `pub fn load_observations(dir: &Path) -> Result<Vec<ObservationRecord>, String> {`
 
@@ -71,26 +78,6 @@ point executed on Unix.
 
 Every Topology- and Shared-scoped site the enums generate: 68 at this head.
 
-## `pub struct Unobservable {`
-
-A coordinate no test can observe executed, with the reason. Three declarations: `Report.Write`
-as a whole (no funnel names it; `report.json` is written through `RunDir.WriteReport`),
-`Process.Spawn`'s two hook phases (the process funnel consults `SpawnHooks::point` at its
-parent-side points only, and the trait has no phase hook) and `Process.Terminate` as a whole
-(`kill_tree` consults no hook). `every_declared_unobservable_coordinate_has_its_reason_in_the_code`
-reads the three sources and fails the moment a reason stops being true; the merge check fails if
-a declared coordinate is observed.
-
-## `pub fn checked_inventory() -> Vec<EffectSiteId> {`
-
-The inventory minus the sites declared unobservable as a whole. `Process.Spawn` stays in — its
-points are required and observed — and its two declared phases are the only findings
-[`excused`] removes.
-
-## `pub fn excused(failure: &BijectionFailure, declared: &[Unob…`
-
-Whether a bijection failure is about a declared-unobservable coordinate.
-
 ## `pub const FAST_PATH_TEST: &str = "engine::topology::integra…`
 
 The test whose fast-path assertion the no-execution record cites, and
@@ -126,6 +113,14 @@ what it constructed, classified and recovered; the sampling records from
 module's tests, which kill-samples the five residue-classified sites PR5's sampler does not run,
 each through the argv its funnel shares with it).
 
+## `impl ResidueEvidence` › `pub fn declared(synthetic_json: &str, declarations_json: &str) -> …`
+
+The evidence the ordinary tests build from tracked files alone: the synthetic records, and for
+every declared site a sampling record carrying the declarations' frozen N with nothing observed
+— an empty histogram, nothing unclassified, recovered — which is what the sampler asserts of
+every run and what the pin sets aside anyway. The observed histograms are read by `parse`, for
+the merge check and the regenerator only.
+
 ## `impl ResidueEvidence` › `pub fn parse(synthetic_json: &str, histograms: &[&str]) -> …`
 
 # Errors
@@ -149,9 +144,12 @@ nine at this head — refusing a site whose class lacks either half.
 ## `pub const CLAIMS: &[Claim] = &[`
 
 The evidence: for every required phase and point of every site of the inventory on either host,
-the committed test that executes it, chosen from the suite's own observation export — 162
-claims: 153 coordinates both hosts require, the four Unix-only and the five Windows-only points
-of `Process.Spawn`. A claim is a statement the merge check holds against a fresh export on the
+the committed test that executes it, chosen from the suite's own observation export — 168
+claims: 159 coordinates both hosts require, the four Unix-only and the five Windows-only points
+of `Process.Spawn`. The six PR10's round 2 added are `Report.Write`'s two phases, claimed by the
+finalization kill matrix like `RunDir.WriteReport`'s, and the two phases of `Process.Spawn` and
+of `Process.Terminate`, claimed by this suite's own witness, which spawns one command that ends
+and one that outlives its timeout through the host runner under the production adapter. A claim is a statement the merge check holds against a fresh export on the
 host that requires it; the non-ignored tests hold every claim against the tree. The run-end
 sites keep the claims the first document made; the coordinates no other suite executes under
 the production adapters are claimed by this module's own witnesses (the question and answer

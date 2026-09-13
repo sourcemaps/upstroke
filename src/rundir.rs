@@ -38,7 +38,7 @@ use sha2::{Digest, Sha256};
 use crate::error::UpstrokeError;
 use crate::runner::policy::runner_policy_sha256;
 use crate::topology::effects::{
-    AnswerSite, EffectSiteId, HookHarness, HookPhase, Injection, LockSite, RunDirSite,
+    AnswerSite, EffectSiteId, HookHarness, HookPhase, Injection, LockSite, ReportSite, RunDirSite,
 };
 use crate::topology::events::RunnerPolicy;
 use crate::util::{self, DurabilityLedger, DurableStep};
@@ -889,9 +889,29 @@ pub fn write_report<T: Serialize>(
     report: &T,
     hooks: &mut dyn RunDirHooks,
 ) -> Result<(), UpstrokeError> {
-    funnel(hooks, EffectSiteId::RunDir(RunDirSite::WriteReport), || {
-        util::write_json(&public.join("report.json"), report)
-    })
+    let run_dir = EffectSiteId::RunDir(RunDirSite::WriteReport);
+    let report_site = EffectSiteId::Report(ReportSite::Write);
+    apply(
+        hooks.hook(run_dir, HookPhase::Before),
+        run_dir,
+        HookPhase::Before,
+    )?;
+    apply(
+        hooks.hook(report_site, HookPhase::Before),
+        report_site,
+        HookPhase::Before,
+    )?;
+    util::write_json(&public.join("report.json"), report)?;
+    apply(
+        hooks.hook(report_site, HookPhase::After),
+        report_site,
+        HookPhase::After,
+    )?;
+    apply(
+        hooks.hook(run_dir, HookPhase::After),
+        run_dir,
+        HookPhase::After,
+    )
 }
 
 /// `RunDir.WriteQuestionPayload` — written before the question is announced.

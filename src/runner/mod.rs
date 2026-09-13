@@ -280,6 +280,10 @@ impl SpawnHooks for HarnessHooks {
         self.harness
             .hook(SPAWN_SITE, HookPhase::Point { point, mode })
     }
+
+    fn phase(&mut self, site: ProcessSite, phase: HookPhase) -> Injection {
+        self.harness.hook(EffectSiteId::Process(site), phase)
+    }
 }
 
 #[cfg(test)]

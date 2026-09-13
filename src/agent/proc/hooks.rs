@@ -7,7 +7,7 @@
 )]
 
 use crate::error::UpstrokeError;
-use crate::topology::effects::{Injection, InjectionMode, SubEffectPoint};
+use crate::topology::effects::{HookPhase, Injection, InjectionMode, ProcessSite, SubEffectPoint};
 
 pub trait SpawnHooks {
     fn point(&mut self, point: SubEffectPoint) -> Injection;
@@ -15,6 +15,11 @@ pub trait SpawnHooks {
     fn point_mode(&mut self, point: SubEffectPoint, mode: InjectionMode) -> Injection {
         let _ = mode;
         self.point(point)
+    }
+
+    fn phase(&mut self, site: ProcessSite, phase: HookPhase) -> Injection {
+        let _ = (site, phase);
+        Injection::Proceed
     }
 
     fn child_created(&mut self, _pid: u32) {}
@@ -26,6 +31,23 @@ pub struct NoHooks;
 impl SpawnHooks for NoHooks {
     fn point(&mut self, _point: SubEffectPoint) -> Injection {
         Injection::Proceed
+    }
+}
+
+pub(super) fn apply_phase(
+    injection: Injection,
+    site: ProcessSite,
+    phase: HookPhase,
+) -> Result<(), UpstrokeError> {
+    match injection {
+        Injection::Proceed => Ok(()),
+        Injection::Kill => std::process::abort(),
+        Injection::Error => Err(UpstrokeError::Refused {
+            message: format!(
+                "the process funnel was made to fail at `{}` ({phase})",
+                site.name()
+            ),
+        }),
     }
 }
 

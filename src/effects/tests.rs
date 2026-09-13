@@ -1962,11 +1962,21 @@ fn the_checked_in_funnel_module_record_states_where_the_bodies_are() {
         .collect();
     assert_eq!(
         disagreements,
-        ["Answer.StageWrite", "Answer.PublishRename", "Answer.Ingest"],
+        [
+            "Answer.StageWrite",
+            "Answer.PublishRename",
+            "Answer.Ingest",
+            "Report.Write"
+        ],
         "the set of sites whose funnel bodies are not where the inventory says          moved. Each one is a claim a gate report carries about this tree."
     );
     for entry in parsed["disagreements"].as_array().expect("an array") {
-        assert_eq!(entry["inventory_module"], "src/interaction.rs");
+        let inventory_module = if entry["group"] == "Report" {
+            "src/util.rs"
+        } else {
+            "src/interaction.rs"
+        };
+        assert_eq!(entry["inventory_module"], inventory_module);
         assert_eq!(entry["funnel_module"], "src/rundir.rs");
     }
 }

@@ -63,6 +63,18 @@ it there is no handle to close.
 The default answers with [`Self::point`], so an observer that does not
 distinguish modes behaves exactly as it did.
 
+## `pub trait SpawnHooks` › `fn phase(&mut self, site: ProcessSite, phase: HookPhase) -> Injection {`
+
+The funnel reached one of the two hook phases of `Process.Spawn` or
+`Process.Terminate`: before and after the spawn primitive, before and after
+a termination. The two process sites had every parent-side point observed
+and neither hook phase (`PR10`'s round-2 contract lens, ST-07 over the full
+inventory), because the trait had nothing to consult for a phase; this is
+that consultation, with the same answer vocabulary as a point. The default
+proceeds, so every observer that only distinguishes points behaves as it
+did; [`crate::runner::HarnessHooks`] records the phase under the site's own
+key, which is what the merge check's bijection reads.
+
 ## `pub trait SpawnHooks` › `fn child_created(&mut self, _pid: u32) {}`
 
 The funnel created a child and has not yet contained it.
@@ -76,6 +88,15 @@ funnel knows the pid before it dies.
 ## `pub struct NoHooks;`
 
 What production passes: nothing is armed and nothing is recorded.
+
+## `pub(super) fn apply_phase(`
+
+[`apply`] for a hook phase: the same three answers, the refusal naming the
+site and the phase instead of a point. The funnel applies a `Spawn` before
+answer before anything is created and an after answer once the child is
+registered — an error there kills the tree it just made, as the
+register-failure arm does, so an injected fault after the spawn leaves no
+process behind; the `Terminate` phases bracket the kill itself.
 
 ## `pub(super) fn apply(injection: Injection, point: SubEffectPoint) -> Result<(), UpstrokeError> {`
 

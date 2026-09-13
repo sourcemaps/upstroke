@@ -1284,21 +1284,18 @@ impl LockSite {
 /// The report funnel.
 ///
 /// One site, and `report.json` is named twice in the frozen inventory: here and
-/// at [`RunDirSite::WriteReport`]. Both are declared because both are named —
-/// not because both are reached. At this head one of the two has a funnel:
-/// `RunDir.WriteReport` is funnelled in `src/rundir.rs`, while this site's
-/// module, `src/util.rs`, names no `ReportSite` at all, which is what makes
-/// `Report.Write` the single entry of `SITES_WITHOUT_A_FUNNEL` in
-/// `src/effects/tests/artifacts.rs`. That census —
+/// at [`RunDirSite::WriteReport`]. Both are declared because both are named,
+/// and since PR10 both are reached: `rundir::write_report` in `src/rundir.rs`
+/// consults `RunDir.WriteReport` and then this site around the one write, the
+/// two hook executions for one write that the owner's standing finding
+/// `PR3-REPORT-DOUBLE-NAME` (`findings/`, history in `reviews/FINDINGS.md` §2)
+/// said ST-07 would demand. This site's inventory module, `src/util.rs`, holds
+/// the write primitive and no funnel; `effects/funnel-modules.json` records
+/// the disagreement the way it records the answer funnels'. The census
 /// `every_site_the_inventory_declares_has_a_funnel_that_names_it_or_is_recorded_absent`
-/// in `src/effects/tests.rs` — is the live answer to which sites a funnel
+/// in `src/effects/tests.rs` is the live answer to which sites a funnel
 /// reaches; this sentence is a pointer to it and goes stale the moment it
 /// disagrees.
-///
-/// One durable object under two inventory names is the owner's standing
-/// finding `PR3-REPORT-DOUBLE-NAME` (`findings/`, history in
-/// `reviews/FINDINGS.md` §2): ST-07 will demand two hook executions for one
-/// write. It is not this module's to resolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ReportSite {
     /// Writing `report.json`.

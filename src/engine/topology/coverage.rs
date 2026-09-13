@@ -5,10 +5,10 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::topology::effects::{
-    AnswerSite, BijectionFailure, ContainerSite, EffectSiteId, EntryPhase, EventSite, Evidence,
-    EvidenceLabel, ExpectedResidue, FaultRegistry, HookHarness, HookPhase, Host, InjectionMode,
-    LockSite, ObjectSite, ProcessSite, RefSite, RegistryEntry, RegistryError, ReportSite,
-    RunDirSite, SamplingRecord, SnapshotSite, SubEffectPoint, SyntheticRecord, WorktreeSite,
+    AnswerSite, ContainerSite, EffectSiteId, EntryPhase, EventSite, Evidence, EvidenceLabel,
+    ExpectedResidue, FaultRegistry, HookHarness, HookPhase, Host, InjectionMode, LockSite,
+    ObjectSite, ProcessSite, RefSite, RegistryEntry, RegistryError, ReportSite, RunDirSite,
+    SamplingRecord, SnapshotSite, SubEffectPoint, SyntheticRecord, WorktreeSite,
 };
 
 use crate::observations::ObservationRecord;
@@ -179,79 +179,6 @@ pub fn inventory() -> Vec<EffectSiteId> {
     EffectSiteId::claimed()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Unobservable {
-    pub site: EffectSiteId,
-    pub phases: &'static [EntryPhase],
-    pub reason: &'static str,
-}
-
-impl Unobservable {
-    #[must_use]
-    pub fn covers(&self, site: EffectSiteId, phase: EntryPhase) -> bool {
-        self.site == site && (self.phases.is_empty() || self.phases.contains(&phase))
-    }
-}
-
-const BOTH_HOOK_PHASES: &[EntryPhase] = &[EntryPhase::Before, EntryPhase::After];
-
-#[must_use]
-pub fn declared_unobservable() -> Vec<Unobservable> {
-    vec![
-        Unobservable {
-            site: EffectSiteId::Report(ReportSite::Write),
-            phases: &[],
-            reason: "no funnel names this site: `report.json` is written through \
-                     `RunDir.WriteReport` (src/rundir.rs), and `Report.Write` is the one entry \
-                     of `SITES_WITHOUT_A_FUNNEL` in src/effects/tests/artifacts.rs \
-                     (PR3-REPORT-DOUBLE-NAME), so no hook of it can be called",
-        },
-        Unobservable {
-            site: EffectSiteId::Process(ProcessSite::Spawn),
-            phases: BOTH_HOOK_PHASES,
-            reason: "the process funnel (src/agent/proc.rs) consults `SpawnHooks::point` at its \
-                     parent-side points only; `SpawnHooks` (src/agent/proc/hooks.rs) has no \
-                     before/after phase hook, so the two phases have no call to observe",
-        },
-        Unobservable {
-            site: EffectSiteId::Process(ProcessSite::Terminate),
-            phases: &[],
-            reason: "termination (`kill_tree` in src/agent/proc.rs) consults no hook: the site \
-                     is inventoried and row-mapped and `SpawnHooks` exposes nothing for it",
-        },
-    ]
-}
-
-#[must_use]
-pub fn checked_inventory() -> Vec<EffectSiteId> {
-    let declared = declared_unobservable();
-    inventory()
-        .into_iter()
-        .filter(|site| {
-            !declared
-                .iter()
-                .any(|entry| entry.site == *site && entry.phases.is_empty())
-        })
-        .collect()
-}
-
-#[must_use]
-pub fn excused(failure: &BijectionFailure, declared: &[Unobservable]) -> bool {
-    let (site, phase) = match failure {
-        BijectionFailure::Unobserved { site, phase } => (
-            *site,
-            match *phase {
-                HookPhase::Before => EntryPhase::Before,
-                HookPhase::After => EntryPhase::After,
-                HookPhase::Point { point, mode } => EntryPhase::Point { point, mode },
-            },
-        ),
-        BijectionFailure::MissingEntry { site, phase, .. } => (*site, *phase),
-        _ => return false,
-    };
-    declared.iter().any(|entry| entry.covers(site, phase))
-}
-
 pub const FAST_PATH_TEST: &str = "engine::topology::integrate::tests::fast_path_publishes_exact_candidate_without_staging_or_proposal_object";
 
 pub const FAST_SEQUENCES: &[&str] = &["s0", "exact-base-fast"];
@@ -320,7 +247,37 @@ struct HistogramSite {
     recovered: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct DeclarationsFile {
+    sites: Vec<DeclaredSite>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeclaredSite {
+    site: String,
+    sampling_n: u32,
+}
+
 impl ResidueEvidence {
+    pub fn declared(synthetic_json: &str, declarations_json: &str) -> Result<Self, String> {
+        let mut evidence = Self::parse(synthetic_json, &[])?;
+        let declared: DeclarationsFile = serde_json::from_str(declarations_json)
+            .map_err(|error| format!("the residue declarations do not parse: {error}"))?;
+        for site in declared.sites {
+            let id = EffectSiteId::from_name(&site.site).map_err(|error| error.to_string())?;
+            evidence.sampling.push((
+                id,
+                SamplingRecord {
+                    n: site.sampling_n,
+                    histogram: crate::topology::effects::ClassHistogram::default(),
+                    unclassified: 0,
+                    recovered: true,
+                },
+            ));
+        }
+        Ok(evidence)
+    }
+
     pub fn parse(synthetic_json: &str, histograms: &[&str]) -> Result<Self, String> {
         let synthetic: SyntheticFile = serde_json::from_str(synthetic_json)
             .map_err(|error| format!("the synthetic evidence does not parse: {error}"))?;
@@ -822,6 +779,16 @@ pub const CLAIMS: &[Claim] = &[
         test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
     },
     Claim {
+        site: EffectSiteId::Report(ReportSite::Write),
+        phase: EntryPhase::Before,
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+    },
+    Claim {
+        site: EffectSiteId::Report(ReportSite::Write),
+        phase: EntryPhase::After,
+        test: "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+    },
+    Claim {
         site: EffectSiteId::RunDir(RunDirSite::WriteQuestionPayload),
         phase: EntryPhase::Before,
         test: "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
@@ -1161,6 +1128,26 @@ pub const CLAIMS: &[Claim] = &[
     },
     Claim {
         site: EffectSiteId::Process(ProcessSite::Spawn),
+        phase: EntryPhase::Before,
+        test: "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+    },
+    Claim {
+        site: EffectSiteId::Process(ProcessSite::Spawn),
+        phase: EntryPhase::After,
+        test: "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+    },
+    Claim {
+        site: EffectSiteId::Process(ProcessSite::Terminate),
+        phase: EntryPhase::Before,
+        test: "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+    },
+    Claim {
+        site: EffectSiteId::Process(ProcessSite::Terminate),
+        phase: EntryPhase::After,
+        test: "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+    },
+    Claim {
+        site: EffectSiteId::Process(ProcessSite::Spawn),
         phase: EntryPhase::Point {
             point: SubEffectPoint::AmbientJobJoined,
             mode: InjectionMode::Kill,
@@ -1326,19 +1313,10 @@ pub fn registry(evidence: &ResidueEvidence) -> Result<FaultRegistry, String> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct UnobservableRecord {
-    pub site: String,
-    pub phases: Vec<String>,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RegistryDocument {
     pub note: String,
     pub range: Vec<String>,
     pub hosts: Vec<String>,
-    pub unobservable: Vec<UnobservableRecord>,
     pub fast_sequences: Vec<String>,
     pub entries: Vec<RegistryEntry>,
 }
@@ -1359,8 +1337,7 @@ pub fn registry_document(evidence: &ResidueEvidence) -> Result<RegistryDocument,
                skips, naming every fast sequence the export records. The Windows-only points \
                of Process.Spawn name the tests that execute them on that host; `hosts` lists \
                both, and the merge check on each host holds the document to the points that \
-               host requires. `unobservable` declares, per coordinate and with the reason, the \
-               six coordinates no test can observe executed. The frozen sampling N a \
+               host requires. The frozen sampling N a \
                recovery-proven entry cites is effects/residue-classes.json's \
                (SWEEP-BIJECTION-005)."
             .to_owned(),
@@ -1368,14 +1345,6 @@ pub fn registry_document(evidence: &ResidueEvidence) -> Result<RegistryDocument,
         hosts: Host::ALL
             .iter()
             .map(|host| host.name().to_owned())
-            .collect(),
-        unobservable: declared_unobservable()
-            .iter()
-            .map(|entry| UnobservableRecord {
-                site: entry.site.name(),
-                phases: entry.phases.iter().map(ToString::to_string).collect(),
-                reason: entry.reason.to_owned(),
-            })
             .collect(),
         fast_sequences: FAST_SEQUENCES
             .iter()

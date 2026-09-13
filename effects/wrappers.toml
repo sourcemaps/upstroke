@@ -52,6 +52,7 @@ funnel = [
     "remove_execution_root",
     "remove_intent_site",
     "remove_site",
+    "remove_staging_leftovers",
     "repair_materialize",
     "snapshot_commit_tree",
     "verify_worktree",
@@ -1133,6 +1134,12 @@ effect_free = [
     "child_created",
     "point",
     "point_mode",
+    # PR10 (ST-07 over the full inventory): `phase` is the default body for
+    # the two hook phases of `Process.Spawn` and `Process.Terminate`, which
+    # answers `Proceed` and touches nothing; `apply_phase` is `apply` for a
+    # phase rather than a point, with the same one non-returning path.
+    "apply_phase",
+    "phase",
 ]
 
 # The ambient Job Object and the cleanup reapers' reclaim scope, out of line
