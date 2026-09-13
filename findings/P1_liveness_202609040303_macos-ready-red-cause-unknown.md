@@ -173,3 +173,86 @@ The steward's retained later logs have these SHA256 hashes:
 
 Native job references are [#152's failure](https://github.com/eventloops/upstroke/actions/runs/33967513991/job/101310118921)
 and [#149's failed attempt](https://github.com/eventloops/upstroke/actions/runs/33968085235/job/101311639429).
+
+## 2026-09-13: the week was swept, and the confirmation is one observation short
+
+#172 merged at `2026-09-06T00:06:54Z` (`c663fb8e`). 7.45 days and 80 merged pull requests later the
+window the `guard:` names has passed, so the sweep was run. **It does not close the row**, and the
+reason is one macOS job whose failure the evidence cannot identify. What the sweep established, and
+where it stops, is recorded here rather than in a pull request body, because the row is what
+outlives the round.
+
+**The discriminator this row's own text refutes.** A first pass separated fixture occurrences from
+genuine ones by elapsed time, on the reading that a genuine READY failure exhausts its budget —
+this row's founding evidence is `waited 10.000190708s of 10s`. **That is wrong, and this file
+disproves it**: the paragraph above beginning *"Why the helper exits: the parent's `setpgid` raced
+the reaper's own"* records a genuine `setpgid`/`EPERM` failure at `waited 24.333µs of 2s`. #172 made a reported startup failure return *promptly*, so
+after #172 a genuine one is fast by design. Run against the two recorded genuine failures, the
+elapsed-time rule fires on the pre-#172 control (macOS job `101358262737`, exit 0, two matches) and
+**misses** the microsecond one (job `101376577732`, run `33992302665`, exit 1, no match). Elapsed
+time does not separate them and must not be used.
+
+**What does separate them: the injected failure and the assertion.** An occurrence of
+`Unix cleanup reaper did not initialize` belongs to a fixture when the test that observes it is the
+test that caused it.
+
+| shape | who caused it | how it reads | ending |
+|---|---|---|---|
+| `sigchld_target_setup_failure_helper` | its caller sets `UPSTROKE_TEST_HELPER_EXIT_BEFORE_READY=7` (`src/agent/proc.rs:4947`), read at `:2328` | panic prefixed `forced reaper startup refusal`, `the acknowledgement pipe closed with no report` | `having already exited with status 7` |
+| `a_reaper_refused_its_cleanup_lease_says_which_lease_and_why` | the test takes the lease `LOCK_EX \| LOCK_NB` itself | `the reaper reported that taking the shared lock on the cleanup lease … (os error 35)` | `killed by signal 9` |
+| **a genuine READY failure** | nothing in the observing test | the reaper's own report, or no report at all | `having already exited with status 1` |
+
+**Exit status 7 is the discriminator that owes nothing to time**: it is the injected code, and the
+reaper's own pre-READY `_exit(1)` sites cannot produce it. Both recorded genuine failures end
+`status 1`, one after 2.001 s and one after 24 µs.
+
+**Swept under that rule: 296 distinct macOS job logs, 194 occurrences, every one injected.** 80
+`master` logs, the 34 failed pull-request and merge-queue logs, and — newly — the 185 retrievable
+logs of the **314 cancelled** `test (macos-latest)` jobs in the window: 299 rows, 296 distinct,
+the three `master` reds appearing in two sets each. **Occurrences are counted once per distinct
+job.** Jobs `101614908628`, `102390406978` and `102482993424` each appear in two of the three sets,
+byte-identical in both (one SHA-256 each across the pair), and each carries one forced occurrence;
+classifying all 299 rows counted those three twice and returned 197. Run once per distinct log the
+classifier exits 0 and returns **194** occurrences of `reaper did not initialize` — 73 in the
+`master` set, 32 in the failed set, 89 in the cancelled set: **192** the forced fixture, every one
+`status 7` with its injecting caller `a_parked_sigchld_target_exits_after_parent_setup_failure`
+reported `ok` in the same log, and **2** the lease fixture, already filed as
+`PR274-REAPER-EXIT-ASSERTION-RACES-THE-PARENTS-SIGKILL`. **Not one non-injected occurrence.**
+
+**Why that is not yet the answer.** A READY failure is only visible as this string when the failing
+test's assertion happens to print it. Executed at `2467df32` on Linux:
+`UPSTROKE_TEST_HELPER_EXIT_BEFORE_READY=7 cargo test --lib
+engine::topology::recover::tests::a_host_integration_reaper_holds_the_runs_cleanup_lease` fails at
+`src/engine/topology/recover/tests.rs:8339` with *"the re-verification ran its gate through the
+production host runner and the gate's exit 1 rejected it: [Ok(Unavailable { … })]"* and **no reaper
+string anywhere in the log** — `Supervisor::begin` fails before `hooks.point(ReaperStarted)`
+(`src/agent/proc.rs:198-204`), and the engine folds the launch failure into `Progress::Unavailable`.
+The same test passes unaltered. So a grep for the string cannot clear a job; only reading the
+failing assertion can.
+
+**The observation that stops the closure.** macOS job `103617998766` (run `34717696893`, PR #276,
+head `8f0f203a`, 2026-09-12) prints
+`engine::topology::recover::tests::a_host_integration_reaper_holds_the_runs_cleanup_lease ... FAILED`
+and is cancelled at `20:45:57Z` before libtest prints the assertion. The run-level archive is
+byte-identical to the job log (151991 bytes both), so the text does not exist anywhere. That test
+fails one way under a READY failure (`:8339`, above) and another way otherwise; **which fired cannot
+be read**. The attribution available, and it is an attribution and not a demonstration: the `:8339`
+text has never appeared in any of the 296 macOS logs; the only readable failure of this test in the
+window (job `103674713617`, 2026-09-13) is `:8356`, *"the hold outlived the reaper that took it"* —
+which is reached only after the reaper started and took the lease; the identical tree passed the
+macOS leg twice within 20 minutes (runs `34717981738`, `34718562096`); and the `:8356` shape
+**reproduces locally under the full suite on Linux** (one of four runs at `7e214b4`, same assertion,
+same location, on a platform where the Darwin race cannot occur), where the `:8339` shape appears
+only under deliberate injection. That is a strong attribution and it is still not a classification:
+the job's own assertion does not exist.
+
+**A second, smaller gap.** Of the 129 cancelled macOS jobs that retain no log, 127 never started a
+step and one had `Run cargo test` still `pending`; **one did not** — job `101535666637` held that
+step `in_progress` for 157 s from `2026-09-06T18:21:33Z`. Measured over 20 `master` logs, macOS CI
+takes 42–87 s to compile before its first test, so roughly 70–115 s of test execution on that job is
+unrecorded.
+
+**So the `guard:`'s first path — a week that has *shown* no READY failure — is not established.** Its
+second path is untouched: the owner may still read the evidence above as sufficient. Nothing here
+weakens #172; the two halves of the cause remain measured and repaired, and 296 macOS logs carry no
+non-injected occurrence. What is missing is one assertion GitHub did not retain.
