@@ -1565,7 +1565,7 @@ fn kill_tree_observes_the_windows_job_empty_before_it_returns() {
         );
     }
 
-    kill_tree(ProcessSite::Terminate, &mut tree).expect("settle the tree");
+    kill_tree(&mut NoHooks, ProcessSite::Terminate, &mut tree).expect("settle the tree");
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut escaped = process_alive(pid, created);
     while escaped && Instant::now() < deadline {
