@@ -4926,6 +4926,62 @@ fn a_registration_git_cannot_enumerate_classifies_as_unpopulated_and_converges()
     }
 }
 
+/// The registration reader the classifier gained in PR10's round 3
+/// (`registration_for`) enters `common_git_dir`, which read Git's answer as
+/// UTF-8: in a repository whose path holds a byte no UTF-8 spells, an absent
+/// add target — no registration, no checkout, the shape every first `add`
+/// starts from — errored where the merge base's reader, which decoded Git's
+/// NUL-delimited enumeration byte for byte, answered `ObjectResidue::None`
+/// (the round-4 regression lens, P2-2; the decoder defect for a populated
+/// worktree is `PR128-REVIEW2-PATHS-READ-AS-UTF8`'s and stays filed). A raw
+/// repository, not `Fixture::created`: the fixture's own manager derivation
+/// reaches the same reader. Unix, where such a path exists at all.
+#[cfg(unix)]
+#[test]
+fn an_absent_add_target_in_a_byte_named_repository_still_classifies() {
+    use std::os::unix::ffi::OsStringExt as _;
+    let root = scratch("byte-named-repository");
+    let repo = root.join(std::ffi::OsString::from_vec(b"repo-\xff".to_vec()));
+    fs::create_dir_all(&repo).expect("a repository directory Git can name and UTF-8 cannot");
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["config", "user.email", "tests@upstroke.local"],
+        &["config", "user.name", "upstroke tests"],
+    ] {
+        let output = git_out(&repo, args);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    fs::write(repo.join("a.txt"), "one\n").expect("seed file");
+    for args in [&["add", "-A"][..], &["commit", "-q", "-m", "seed"]] {
+        let output = git_out(&repo, args);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let target = root.join("not-added");
+    assert!(
+        !target.exists(),
+        "the add target is absent: nothing was ever added there"
+    );
+
+    assert_eq!(
+        classify_object_residue(
+            EffectSiteId::Worktree(WorktreeSite::Add),
+            &ResidueTarget::new(&repo).at(&target),
+        )
+        .expect("valid Unix repository path"),
+        ObjectResidue::None,
+        "an absent target in a byte-named repository is unregistered, as at the merge base"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn malformed_gitdir_refuses_before_removal() {
     for (case, bytes) in [("empty", &b""[..]), ("partial", &b"not-a-dot-git-path"[..])] {
@@ -5241,9 +5297,10 @@ fn an_add_killed_before_it_wrote_gitdir_is_unlisted_and_refuses_forced_cleanup()
 }
 
 /// The same two torn registrations under the proof the plain funnel lacks —
-/// no writer of the execution root is alive, which the engine holds at every
-/// forced removal it makes and the kill samplers hold once their child is
-/// reaped (`WriterProof::NoWriterAlive`): each entry that names no checkout
+/// no writer of the execution root is alive, which terminal finalization
+/// holds (a durable `run_finished` proves every add of the run passed) and
+/// the kill samplers hold once their child is reaped
+/// (`WriterProof::NoWriterAlive`), and nothing that resumes: each entry that names no checkout
 /// is passed over and reported, never bound by its Git-generated name and
 /// never touched, and the slot's contained checkout and intent converge.
 /// The two states are the ones an add leaves when killed inside its first
@@ -5333,9 +5390,10 @@ fn a_torn_registration_is_passed_over_and_the_slot_converges_when_no_writer_is_a
         .manager
         .remove_worktree(&mut NoHooks, &other)
         .expect_err("without the proof the plain funnel still refuses over this store");
+    let text = error.to_string();
     assert!(
-        error.to_string().contains("has an empty gitdir"),
-        "the refusal names the empty gitdir: {error}"
+        text.contains("has an empty gitdir") || text.contains("is locked and has no gitdir"),
+        "the refusal names whichever torn entry the scan met first: {text}"
     );
     assert_eq!(tree_bytes(&other_path), other_before, "and changed nothing");
     let unrelated = fixture
@@ -5350,6 +5408,33 @@ fn a_torn_registration_is_passed_over_and_the_slot_converges_when_no_writer_is_a
     assert!(
         stale.join("gitdir").exists() && earlier.join("locked").exists(),
         "the torn entries outlive every removal: Git's, or an operator's, to remove"
+    );
+
+    // The same store with both torn entries in the first shape — `locked`,
+    // no `gitdir` — which the plain funnel skipped instead of refusing until
+    // PR10's round 4, while the rustdoc promised one boundary for both (the
+    // round-4 record lens, P2-2): the refusal names the missing file, the
+    // proof passes both over, and neither is touched.
+    fs::remove_file(stale.join("gitdir")).expect("the second torn entry now lacks gitdir too");
+    let store_before = tree_bytes(&worktrees);
+    let error = fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &other)
+        .expect_err("without the proof the plain funnel refuses a locked entry without gitdir");
+    assert!(
+        error.to_string().contains("is locked and has no gitdir"),
+        "the refusal names the missing gitdir: {error}"
+    );
+    assert_eq!(tree_bytes(&worktrees), store_before, "and changed nothing");
+    let both = fixture
+        .manager
+        .remove_worktree_proving(&mut NoHooks, &other, WriterProof::NoWriterAlive)
+        .expect("under the proof both entries are passed over");
+    assert_eq!(both, passed_over, "the same two, reported");
+    assert_eq!(
+        tree_bytes(&worktrees),
+        store_before,
+        "and neither is touched"
     );
 }
 

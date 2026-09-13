@@ -324,7 +324,9 @@ effect_free = [
     "changed_path_records",
     "decode_changed_paths",
     "decode_index_path",
+    "decode_path",
     "empty_gitdir_refusal",
+    "missing_gitdir_refusal",
     "parse_worktree_records",
     "plain_record_paths",
     "registration_checkout",
@@ -454,6 +456,10 @@ funnel = [
     "stage_commit_record",
     "stage_marker",
     "stage_owner_record",
+    # The directory barrier of `Report.Write` alone, for a finalization that
+    # finds the report current: takes the hooks for their ledger and reaches no
+    # site, since it writes no bytes (the sites are the write's).
+    "sync_report_dir",
     "write_plan",
     "write_question_payload",
     "write_report",
@@ -559,6 +565,9 @@ funnel = []
 effectful = [
     "fsync_dir",
     "fsync_file",
+    # The file half named by the path it makes durable, so a test can refuse
+    # exactly one file's barrier (`fail_barriers_at`); delegates to `fsync_file`.
+    "fsync_file_at",
     "write_text",
     "write_json",
 ]
@@ -570,6 +579,10 @@ effect_free = [
     "barriers_on_this_thread",
     "barriers_performed",
     "clear",
+    # Arms and disarms a process-wide, path-keyed barrier fault (a test's, the
+    # guard's `drop` disarms it); reaches no filesystem effect of its own.
+    "drop",
+    "fail_barriers_at",
     "deserialize",
     "executable_extensions",
     "fence_for",

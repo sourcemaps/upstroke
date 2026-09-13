@@ -273,8 +273,75 @@ pub(crate) fn fsync_file(file: &std::fs::File) -> std::io::Result<()> {
     file.sync_all()
 }
 
+pub(crate) fn fsync_file_at(file: &std::fs::File, path: &Path) -> std::io::Result<()> {
+    if let Some(fault) = injected_barrier_fault(path) {
+        count_barrier(BarrierHalf::File);
+        return Err(fault);
+    }
+    fsync_file(file)
+}
+
+static ARMED_BARRIER_FAULTS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+static ARMED_BARRIER_FAULT_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[must_use = "the fault is armed only while the guard is held"]
+pub(crate) struct BarrierFault {
+    path: PathBuf,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn fail_barriers_at(path: &Path) -> BarrierFault {
+    ARMED_BARRIER_FAULTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(path.to_path_buf());
+    ARMED_BARRIER_FAULT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    BarrierFault {
+        path: path.to_path_buf(),
+    }
+}
+
+impl Drop for BarrierFault {
+    fn drop(&mut self) {
+        let mut armed = ARMED_BARRIER_FAULTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = armed.iter().position(|armed| *armed == self.path) {
+            armed.remove(index);
+            ARMED_BARRIER_FAULT_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+fn injected_barrier_fault(path: &Path) -> Option<std::io::Error> {
+    if ARMED_BARRIER_FAULT_COUNT.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        return None;
+    }
+    let armed = ARMED_BARRIER_FAULTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let resolved = std::fs::canonicalize(path).ok();
+    armed
+        .iter()
+        .any(|armed| {
+            armed == path || (resolved.is_some() && std::fs::canonicalize(armed).ok() == resolved)
+        })
+        .then(|| {
+            std::io::Error::other(format!(
+                "injected barrier fault at {}: the durability barrier was refused",
+                path.display()
+            ))
+        })
+}
+
 pub(crate) fn fsync_dir(dir: &Path) -> std::io::Result<()> {
     count_barrier(BarrierHalf::Directory);
+    if let Some(fault) = injected_barrier_fault(dir) {
+        return Err(fault);
+    }
     #[cfg(unix)]
     {
         std::fs::File::open(dir)?.sync_all()

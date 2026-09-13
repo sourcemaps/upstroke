@@ -5,6 +5,7 @@ use std::fmt;
 
 use serde::Serialize;
 
+use crate::topology::events::{TopologyEvent, TopologyEventBody, UnavailableOutcome};
 use crate::topology::fold::{GenerationClass, TaskState, TopologyFold};
 use crate::topology::leases::LeaseOwner;
 use crate::topology::registry::{Origin, TaskKey, TaskRegistry};
@@ -364,6 +365,7 @@ fn balanced(is: bool) -> Fact {
 #[must_use]
 pub fn observe(
     fold: &TopologyFold,
+    events: &[TopologyEvent],
     physical: &PhysicalInventory,
     process: &ProcessLocal,
 ) -> Ledger {
@@ -424,16 +426,19 @@ pub fn observe(
                 .map(|generation| generation.attempts)
         })
         .fold(0u32, u32::saturating_add);
-    let defers = fold
-        .queue()
-        .map(|queue| {
-            queue
-                .entries()
-                .iter()
-                .map(|entry| entry.defers)
-                .fold(0u32, u32::saturating_add)
-        })
-        .unwrap_or(0);
+    let defers = u32::try_from(
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    &event.body,
+                    TopologyEventBody::MergeVerificationUnavailable { data }
+                        if matches!(data.outcome, UnavailableOutcome::Deferred { .. })
+                )
+            })
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
     let entries = fold
         .registry()
         .map(TaskRegistry::entries)
@@ -598,8 +603,9 @@ pub fn observe(
             evidence: format!(
                 "next sequence {next_sequence}, {} task key(s), {display_ids} display id(s), \
                  {generations} generation(s), {attempts} attempt(s), lineage index {lineage_index}, \
-                 {repairs} repair unit(s), {defers} verification defer(s), {overrides} override \
-                 slot(s); numbers are consumed, never reused",
+                 {repairs} repair unit(s), {defers} verification defer(s) consumed (counted from \
+                 the events, so a candidate's publication does not give them back), {overrides} \
+                 override slot(s); numbers are consumed, never reused",
                 fold.task_count()
             ),
         },

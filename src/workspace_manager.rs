@@ -1568,7 +1568,7 @@ impl WorkspaceManager {
     /// Only these, and not the whole gate: `git worktree list` inside a
     /// primitive would make a removal depend on Git parsing the very
     /// registration that recovery exists to remove (see
-    /// [`Self::revalidate_removal`]), and the worktree comparisons the gate
+    /// [`Self::revalidate_removal_proving`]), and the worktree comparisons the gate
     /// makes need no filesystem effect to stay true. The window this leaves
     /// is the one between this check and the syscall itself: a writer that
     /// exchanges a component in that gap is not seen, and no re-check closes
@@ -2577,8 +2577,9 @@ impl WorkspaceManager {
     /// blocks reclaim.
     ///
     /// A registration the store holds that names no checkout — `locked`
-    /// beside an empty `gitdir`, the state an add killed between opening and
-    /// writing that file leaves — **refuses** here, before any mutation,
+    /// beside an empty `gitdir`, or `locked` with no `gitdir` at all, the two
+    /// states an add killed inside its first two writes leaves — **refuses**
+    /// here, before any mutation,
     /// whichever slot is being removed: the plain funnel proves nothing about
     /// writers of the root, and on disk that state is an add in flight. See
     /// [`WriterProof`]; [`Self::remove_worktree_proving`] is the form a caller
@@ -4668,9 +4669,12 @@ impl WorkspaceManager {
     /// any records. The registration's `gitdir` is still sufficient evidence
     /// when read byte-for-byte: it names the checkout's `.git`, whose parent
     /// must canonical-prefix to the exact slot target. Any unreadable or
-    /// partial `gitdir` refuses, and so does an empty one under
-    /// [`WriterProof::Unknown`]; guessing from the admin directory's basename
-    /// would authorize deletion from a Git-generated, collision-suffixed name.
+    /// partial `gitdir` refuses, and so do an empty one and, beside a
+    /// `locked`, a missing one under [`WriterProof::Unknown`] — one boundary
+    /// for the two states an interrupted add leaves; guessing from the admin
+    /// directory's basename would authorize deletion from a Git-generated,
+    /// collision-suffixed name. An entry with neither `locked` nor `gitdir`
+    /// is what `git worktree prune` removes: it binds nothing and is skipped.
     ///
     /// Under [`WriterProof::NoWriterAlive`] an entry that names nothing — no
     /// `gitdir` beside a `locked`, or an empty `gitdir` — is what Git's own
@@ -4745,11 +4749,19 @@ impl WorkspaceManager {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     // No `gitdir` at all: Git prunes the entry itself unless
                     // its `locked` is there, in which case the add died
-                    // between the two writes and nothing will ever prune it.
-                    if locked_present(&admin)? {
-                        passed_over.push(admin);
+                    // between the two writes and nothing will ever prune it —
+                    // the same unbindable entry an empty `gitdir` is, under
+                    // the same proof.
+                    if !locked_present(&admin)? {
+                        continue;
                     }
-                    continue;
+                    match proof {
+                        WriterProof::Unknown => return Err(missing_gitdir_refusal(&admin)),
+                        WriterProof::NoWriterAlive => {
+                            passed_over.push(admin);
+                            continue;
+                        }
+                    }
                 }
                 Err(source) => {
                     return Err(UpstrokeError::Io {
@@ -4837,7 +4849,8 @@ impl WorkspaceManager {
 mod parsers;
 pub use self::parsers::decode_changed_paths;
 use self::parsers::{
-    empty_gitdir_refusal, parse_worktree_records, registration_checkout, trim_gitdir,
+    decode_path, empty_gitdir_refusal, missing_gitdir_refusal, parse_worktree_records,
+    registration_checkout, trim_gitdir,
 };
 
 mod snapshot_ref;
@@ -5558,15 +5571,25 @@ fn read_prefix(path: &Path, bound: u64) -> std::io::Result<Vec<u8>> {
 }
 
 /// The repository's canonical common git dir.
+///
+/// Git's answer is read as the bytes it is, through the decoder the
+/// registration store's reader uses (`parsers::decode_path`): on Unix every
+/// byte string is a path, and a repository whose path holds a byte no UTF-8
+/// spells is a valid repository — read as text here until PR10's round 4,
+/// an absent add target in such a repository errored where the merge base
+/// classified it (the round-4 regression lens, P2-2; §8).
 fn common_git_dir(inside: &Path) -> Result<PathBuf, UpstrokeError> {
     let output = read_only_git_ok(
         inside,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?;
-    let text = String::from_utf8(output).map_err(|error| UpstrokeError::Git {
-        message: format!("`git rev-parse --git-common-dir` returned non-UTF-8: {error}"),
+    let path = decode_path(output.trim_ascii()).map_err(|error| UpstrokeError::Git {
+        message: format!(
+            "`git rev-parse --git-common-dir` returned a path that is not UTF-8 from byte {}, \
+             which this platform cannot represent exactly",
+            error.valid_up_to()
+        ),
     })?;
-    let path = PathBuf::from(text.trim());
     fs::canonicalize(&path)
         .map(strip_verbatim)
         .map_err(|source| UpstrokeError::Io { path, source })

@@ -500,7 +500,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn inputs() -> FrozenInputs {
+    pub(crate) fn inputs() -> FrozenInputs {
         inputs_for(MAIN_SHAPE)
     }
 
@@ -2940,7 +2940,7 @@ pub(crate) mod tests {
         })
     }
 
-    pub(crate) fn deferred_verification_fold() -> TopologyFold {
+    pub(crate) fn deferred_verification_trace() -> Vec<TopologyEvent> {
         let mut trace = queued_candidate_trace(region(ALEPH));
         trace.push(verification_started(
             0,
@@ -2951,7 +2951,60 @@ pub(crate) mod tests {
             sha("proposal-aleph"),
         ));
         trace.push(verification_deferred_by_outage(0, 1));
-        replayed(&trace)
+        trace
+    }
+
+    pub(crate) fn deferred_verification_fold() -> TopologyFold {
+        replayed(&deferred_verification_trace())
+    }
+
+    #[test]
+    fn consumed_verification_defers_survive_publication() {
+        use crate::engine::topology::ledger::{self, Fact, Row};
+        let mut trace = deferred_verification_trace();
+        let mut fold = replayed(&trace);
+        let defers = |fold: &TopologyFold, trace: &[TopologyEvent]| {
+            ledger::observe(
+                fold,
+                trace,
+                &ledger::PhysicalInventory::default(),
+                &ledger::ProcessLocal::default(),
+            )
+            .observation(Row::R14)
+            .and_then(|observation| observation.part("verification_defers"))
+        };
+        assert_eq!(
+            defers(&fold, &trace),
+            Some(Fact::Present(1)),
+            "one outage deferred the candidate: one unit consumed"
+        );
+        for label in [
+            "defer_wait_elapsed",
+            "merge_verification_started/stale/aleph/g0",
+            "merge_prepared/stale_clean/match/aleph/g0",
+            "task_merged/aleph/g0",
+        ] {
+            let candidate = classes(&fold)
+                .into_iter()
+                .find(|candidate| candidate.label == label)
+                .unwrap_or_else(|| panic!("the classes offer no `{label}` here"));
+            let delta = fold
+                .plan_transition(&candidate.event)
+                .unwrap_or_else(|error| panic!("`{label}` is accepted here: {error}"));
+            fold.apply_delta(delta);
+            trace.push(candidate.event);
+        }
+        assert!(
+            fold.queue()
+                .is_some_and(crate::topology::queue::CandidateQueue::is_empty),
+            "the candidate left the queue at `task_merged`"
+        );
+        assert_eq!(
+            defers(&fold, &trace),
+            Some(Fact::Present(1)),
+            "the consumed unit survives the candidate's publication: R14 reads it from the \
+             durable prefix, not from the queue entry `task_merged` removed"
+        );
     }
 
     fn verification_deferred_by_outage(sequence: u32, defers: u32) -> TopologyEvent {

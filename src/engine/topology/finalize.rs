@@ -102,7 +102,9 @@ pub fn finalize(
             });
         }
     };
-    if !fresh {
+    if fresh {
+        rundir::sync_report_dir(inputs.public, hooks.rundir())?;
+    } else {
         rundir::write_report(inputs.public, &report, hooks.rundir())?;
     }
 

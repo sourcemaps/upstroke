@@ -3001,6 +3001,14 @@ fn every_atomic_publication_syncs_the_staged_file_then_renames_then_syncs_its_di
             COMMIT_RECORD_STAGED,
             COMMIT_RECORD,
         ),
+        // The report joined the atomic publications in PR10's round 3 and
+        // this sequence in round 4 (the crash lens, P1): the two witnesses
+        // that read the barriers across `write_report` count them and check
+        // the staged name is gone, which a writer that never stages —
+        // `report.json` created, synced and its directory synced, no rename —
+        // satisfies. The staged-path and step-sequence assertions below do
+        // not.
+        ("report", public.clone(), REPORT_STAGED, REPORT),
     ];
     for (which, dir, staged_name, published_name) in publications {
         ledger.clear();
@@ -3013,9 +3021,13 @@ fn every_atomic_publication_syncs_the_staged_file_then_renames_then_syncs_its_di
                 stage_owner_record(&private, &owner, &mut hooks).expect("P3a");
                 publish_owner_record(&private, &mut hooks).expect("P3b");
             }
-            _ => {
+            "commit record" => {
                 stage_commit_record(&private, &commit, &mut hooks).expect("P5a");
                 publish_commit_record(&private, &mut hooks).expect("P5b");
+            }
+            _ => {
+                let report = serde_json::json!({"run_id": "01LEDGER", "outcome": "complete"});
+                write_report(&public, &report, &mut hooks).expect("the report");
             }
         }
 
@@ -3058,9 +3070,9 @@ fn every_atomic_publication_syncs_the_staged_file_then_renames_then_syncs_its_di
         );
     }
 
-    // Three publications, each recording one file sync and one directory
-    // sync: six ledger entries that each claim a barrier was performed.
-    let claimed = 6;
+    // Four publications, each recording one file sync and one directory
+    // sync: eight ledger entries that each claim a barrier was performed.
+    let claimed = 8;
     let performed = util::barriers_performed().saturating_sub(barriers_before);
     assert!(
         performed >= claimed,
@@ -3068,6 +3080,36 @@ fn every_atomic_publication_syncs_the_staged_file_then_renames_then_syncs_its_di
              were entered; a ledger that certifies the function it is written by \
              cannot tell the two apart (PR5-CONF-012)"
     );
+}
+
+/// `let _ = stage_json(...)` in `write_report` — the staged file's sync
+/// failing and the failure discarded — survived every test until PR10's
+/// round 4 (the fix-check lens): nothing made a sync fail. This does: the
+/// file half of the barrier is refused at the staged report's own path
+/// (`util::fail_barriers_at`), the publication stops there — no rename, no
+/// report under its name — and says so; with the barrier holding again the
+/// same call publishes.
+#[test]
+fn a_report_whose_staged_file_will_not_sync_is_not_published() {
+    let root = scratch("report-stage-sync-fault");
+    let public = root.join("public");
+    create_dir(&public).expect("public");
+    let payload = serde_json::json!({"run_id": "01FAULT", "outcome": "complete"});
+    {
+        let _fault = util::fail_barriers_at(&public.join(REPORT_STAGED));
+        let error = write_report(&public, &payload, &mut NoHooks)
+            .expect_err("a staged report whose barrier fails is not published");
+        assert!(
+            error.to_string().contains("injected barrier fault"),
+            "the failure is the barrier's, by name: {error}"
+        );
+        assert!(
+            !public.join(REPORT).exists(),
+            "no report under its name: the rename never ran"
+        );
+    }
+    write_report(&public, &payload, &mut NoHooks).expect("with the barrier holding, published");
+    assert!(public.join(REPORT).is_file() && !public.join(REPORT_STAGED).exists());
 }
 
 #[test]
@@ -4399,6 +4441,34 @@ fn the_payload_writers_keep_their_exact_legacy_bytes() {
         expected,
         "report.json is pretty-printed with two-space indentation and ends in a newline"
     );
+    // The v0.1 coordinator publishes through this writer (`drain_and_report`,
+    // schema 3), and until PR10's round 3 it was a plain `fs::write`, which
+    // keeps the mode of the file it truncates. The staged publication creates
+    // a fresh file at the umask default, so a report an operator had made
+    // private was reopened as `0644` on the next write (the round-4
+    // regression lens, P2-1): the existing report's permissions are copied
+    // onto the staged file before it is synced and renamed.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = public.join("report.json");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("make it private");
+        write_report(&public, &payload, &mut NoHooks).expect("report again");
+        assert_eq!(
+            fs::metadata(&path)
+                .expect("report metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "a rewritten report keeps the mode the existing one had, as `fs::write` did"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("report.json"),
+            expected,
+            "with the same bytes"
+        );
+    }
 
     write_question_payload(&questions, "q-1", &payload, &mut NoHooks).expect("question");
     assert_eq!(

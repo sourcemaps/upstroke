@@ -2705,9 +2705,14 @@ fn resume_refused_while_reaper_hold_observed_then_succeeds() {
 }
 
 fn replayed(fixture: &Fixture) -> TopologyFold {
+    replayed_with_events(fixture).0
+}
+
+fn replayed_with_events(fixture: &Fixture) -> (TopologyFold, Vec<TopologyEvent>) {
     let bytes = fixture.log_bytes();
     let events = TopologyFold::parse_log(&bytes).expect("the log parses");
-    TopologyFold::replay(fixture.inputs(), &events).expect("and folds")
+    let fold = TopologyFold::replay(fixture.inputs(), &events).expect("and folds");
+    (fold, events)
 }
 
 #[test]
@@ -13157,6 +13162,64 @@ fn parked_settlement(attempt: u32, question: &str) -> TopologyEventBody {
 }
 
 #[test]
+fn closure_refuses_an_in_flight_generation_and_an_unresolved_transaction_before_any_append() {
+    use crate::engine::topology::closure;
+
+    let in_flight = Fixture::build(
+        "closure-in-flight",
+        Damage {
+            extra: vec![dispatched(), attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let fold = replayed(&in_flight);
+    let shapes = closure::unclosable(&fold);
+    assert!(
+        shapes.len() == 1 && shapes[0].contains("is in flight"),
+        "an attempt started and never settled is the in-flight shape: {shapes:?}"
+    );
+    let text = closure::refuse_unclosable(&fold)
+        .expect_err("closure refuses a log with an attempt in flight")
+        .to_string();
+    assert!(
+        text.contains("is in flight")
+            && text.contains("PR11")
+            && text.contains("nothing was appended"),
+        "{text}"
+    );
+
+    let mut trace = crate::topology::census::tests::deferred_verification_trace();
+    let outage = trace
+        .pop()
+        .expect("the trace ends in the outage that deferred the candidate");
+    assert!(
+        matches!(
+            outage.body,
+            TopologyEventBody::MergeVerificationUnavailable { .. }
+        ),
+        "{:?}",
+        outage.body.kind()
+    );
+    let unresolved = TopologyFold::replay(crate::topology::census::tests::inputs(), &trace)
+        .expect("a verification started and never settled replays");
+    assert!(unresolved.transaction().is_some());
+    let shapes = closure::unclosable(&unresolved);
+    assert!(
+        shapes.len() == 1 && shapes[0].contains("is unresolved"),
+        "a verification started and never settled is the unresolved-transaction shape: {shapes:?}"
+    );
+    let text = closure::refuse_unclosable(&unresolved)
+        .expect_err("closure refuses a log with an integration sequence open")
+        .to_string();
+    assert!(
+        text.contains("is unresolved")
+            && text.contains("PR11")
+            && text.contains("nothing was appended"),
+        "{text}"
+    );
+}
+
+#[test]
 fn a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends() {
     use crate::engine::topology::closure;
     use crate::engine::topology::select::Ceiling;
@@ -13652,6 +13715,7 @@ fn run_finished_parked_or_complete_refused_while_deferred_items_exist() {
     refuses_end(&fold, RunOutcome::Parked, None);
     let observed = ledger::observe(
         &fold,
+        &replayed_with_events(&fixture).1,
         &ledger::PhysicalInventory::default(),
         &ledger::ProcessLocal::default(),
     );
@@ -15656,22 +15720,56 @@ fn a_fault_at_a_staging_leftovers_own_removal_stops_finalization_and_the_next_re
     }
 }
 
-type BarrierTimeline = Arc<Mutex<Vec<(EffectSiteId, HookPhase, crate::util::BarrierCounts)>>>;
+#[derive(Debug, Clone)]
+struct BarrierSeen {
+    site: EffectSiteId,
+    phase: HookPhase,
+    barriers: crate::util::BarrierCounts,
+    synced_dirs: Vec<PathBuf>,
+}
+
+type BarrierTimeline = Arc<Mutex<Vec<BarrierSeen>>>;
+
+fn barrier_seen(
+    timeline: &BarrierTimeline,
+    ledger: &crate::util::DurabilityLedger,
+    site: EffectSiteId,
+    phase: HookPhase,
+) {
+    let synced_dirs = ledger
+        .records()
+        .into_iter()
+        .filter(|record| record.step == crate::util::DurableStep::SyncedDirectory)
+        .map(|record| record.path)
+        .collect();
+    timeline
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(BarrierSeen {
+            site,
+            phase,
+            barriers: crate::util::barriers_on_this_thread(),
+            synced_dirs,
+        });
+}
 
 struct BarrierEffects {
     inner: ArmedSite,
     timeline: BarrierTimeline,
+    ledger: crate::util::DurabilityLedger,
 }
 
 struct BarrierRunDir {
     inner: ArmedSite,
     timeline: BarrierTimeline,
+    ledger: crate::util::DurabilityLedger,
 }
 
 struct BarrierHooks {
     inner: HarnessTopologyHooks,
     effects: BarrierEffects,
     rundir: BarrierRunDir,
+    ledger: crate::util::DurabilityLedger,
 }
 
 impl BarrierHooks {
@@ -15681,6 +15779,7 @@ impl BarrierHooks {
         injection: Injection,
     ) -> Self {
         let timeline: BarrierTimeline = Arc::new(Mutex::new(Vec::new()));
+        let ledger = crate::util::DurabilityLedger::recording();
         let armed = || ArmedSite {
             harness: Arc::clone(harness),
             at,
@@ -15693,44 +15792,53 @@ impl BarrierHooks {
             effects: BarrierEffects {
                 inner: armed(),
                 timeline: Arc::clone(&timeline),
+                ledger: ledger.clone(),
             },
             rundir: BarrierRunDir {
                 inner: armed(),
                 timeline,
+                ledger: ledger.clone(),
             },
+            ledger,
         }
     }
 
-    fn timeline(&self) -> Vec<(EffectSiteId, HookPhase, crate::util::BarrierCounts)> {
+    fn timeline(&self) -> Vec<BarrierSeen> {
         self.effects
             .timeline
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
+
+    fn ledger_records(&self) -> Vec<crate::util::DurableRecord> {
+        self.ledger.records()
+    }
 }
 
 impl crate::workspace_manager::EffectHooks for BarrierEffects {
     fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
-        self.timeline
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push((site, phase, crate::util::barriers_on_this_thread()));
+        barrier_seen(&self.timeline, &self.ledger, site, phase);
         self.inner.consult(site, phase)
     }
 
     fn refusal_cause(&self) -> Option<String> {
         None
     }
+
+    fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+        self.ledger.clone()
+    }
 }
 
 impl rundir::RunDirHooks for BarrierRunDir {
     fn hook(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
-        self.timeline
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push((site, phase, crate::util::barriers_on_this_thread()));
+        barrier_seen(&self.timeline, &self.ledger, site, phase);
         self.inner.consult(site, phase)
+    }
+
+    fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+        self.ledger.clone()
     }
 }
 
@@ -15792,14 +15900,14 @@ fn the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_re
     let position = |site: EffectSiteId, phase: HookPhase| {
         timeline
             .iter()
-            .position(|(seen, at, _)| *seen == site && *at == phase)
+            .position(|seen| seen.site == site && seen.phase == phase)
             .unwrap_or_else(|| panic!("`{site}`/{phase} was not reached: {timeline:?}"))
     };
     let written = position(EffectSiteId::Report(ReportSite::Write), HookPhase::Before);
     let durable = position(EffectSiteId::Report(ReportSite::Write), HookPhase::After);
     assert!(written < durable);
-    let (_, _, before) = timeline[written];
-    let (_, _, after) = timeline[durable];
+    let before = timeline[written].barriers;
+    let after = timeline[durable].barriers;
     assert!(
         after.file > before.file && after.directory > before.directory,
         "between the report site's two phases its file and its directory were synced: {before:?} \
@@ -15807,8 +15915,8 @@ fn the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_re
     );
     let first_deletion = timeline
         .iter()
-        .position(|(site, phase, _)| {
-            matches!(site, EffectSiteId::Ref(_)) && *phase == HookPhase::Before
+        .position(|seen| {
+            matches!(seen.site, EffectSiteId::Ref(_)) && seen.phase == HookPhase::Before
         })
         .expect("a ref deletion was reached");
     assert!(
@@ -15848,9 +15956,9 @@ fn the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_re
     );
     let timeline = hooks.timeline();
     assert!(
-        timeline.iter().all(|(site, _, _)| {
-            *site != EffectSiteId::RunDir(RunDirSite::WriteReport)
-                && *site != EffectSiteId::Report(ReportSite::Write)
+        timeline.iter().all(|seen| {
+            seen.site != EffectSiteId::RunDir(RunDirSite::WriteReport)
+                && seen.site != EffectSiteId::Report(ReportSite::Write)
         }),
         "a current report is not rewritten on the restart: {timeline:?}"
     );
@@ -15862,6 +15970,233 @@ fn the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_re
     assert!(
         candidates_refs_of(fixture).is_empty(),
         "and the refs are pruned behind the report the rename proved durable"
+    );
+    assert_finalized(&planted, &RunOutcome::Complete, "after the restart");
+}
+
+#[test]
+fn a_report_directory_barrier_that_fails_refuses_pruning_on_every_resume_until_it_holds() {
+    use crate::topology::effects::ReportSite;
+    let planted = plant_finished_run_with(
+        "report-dir-barrier-fault",
+        RunOutcome::Complete,
+        AlphaEnd::Published,
+        FinishedResidue {
+            snapshot: true,
+            staging: true,
+            prepared_pin: true,
+        },
+    );
+    let fixture = &planted.fixture;
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(fixture, &runtime, &certifies);
+    let report_path = fixture.public().join(rundir::REPORT);
+    let no_injection = (EffectSiteId::Lock(LockSite::Release), HookPhase::After);
+    let fault = crate::util::fail_barriers_at(&fixture.public());
+
+    let first = harness();
+    let mut hooks = BarrierHooks::armed(&first, no_injection, Injection::Proceed);
+    let (result, _) = resume_with(fixture, &mut hooks, &given);
+    let error = message(&result.expect_err("the failed directory barrier ends the command"));
+    assert!(error.contains("injected barrier fault"), "{error}");
+    let timeline = hooks.timeline();
+    assert!(
+        timeline.iter().any(|seen| {
+            seen.site == EffectSiteId::Report(ReportSite::Write) && seen.phase == HookPhase::Before
+        }) && timeline.iter().all(|seen| {
+            !(seen.site == EffectSiteId::Report(ReportSite::Write)
+                && seen.phase == HookPhase::After)
+        }),
+        "the report site was entered and not left: the barrier failed inside it: {timeline:?}"
+    );
+    assert!(
+        timeline
+            .iter()
+            .all(|seen| !matches!(seen.site, EffectSiteId::Ref(_))),
+        "no ref site was reached: {timeline:?}"
+    );
+    let bytes = std::fs::read(&report_path).expect("the renamed report is visible under its name");
+    assert!(
+        report_of(fixture).is_fresh_against(&bytes),
+        "and current by digest — the shape the next resume takes the fresh branch on"
+    );
+    assert!(!fixture.public().join(rundir::REPORT_STAGED).exists());
+    assert_eq!(
+        candidates_refs_of(fixture).len(),
+        1,
+        "the candidates ref stands: nothing was pruned behind an unproven name"
+    );
+    assert!(
+        wait_for_cleanup_hold_release(&fixture.public()),
+        "the run's cleanup lease is still held"
+    );
+
+    let second = harness();
+    let mut hooks = BarrierHooks::armed(&second, no_injection, Injection::Proceed);
+    let (result, _) = resume_with(fixture, &mut hooks, &given);
+    let error = message(&result.expect_err(
+        "the fresh report's name is still not proven durable: the barrier refuses again",
+    ));
+    assert!(error.contains("injected barrier fault"), "{error}");
+    let timeline = hooks.timeline();
+    assert!(
+        timeline.iter().all(|seen| {
+            seen.site != EffectSiteId::RunDir(RunDirSite::WriteReport)
+                && seen.site != EffectSiteId::Report(ReportSite::Write)
+        }),
+        "a current report is not rewritten: {timeline:?}"
+    );
+    assert!(
+        timeline
+            .iter()
+            .all(|seen| !matches!(seen.site, EffectSiteId::Ref(_))),
+        "and no ref site was reached: {timeline:?}"
+    );
+    assert_eq!(
+        std::fs::read(&report_path).expect("the report stands"),
+        bytes
+    );
+    assert_eq!(
+        candidates_refs_of(fixture).len(),
+        1,
+        "the candidates ref still stands"
+    );
+    assert!(
+        wait_for_cleanup_hold_release(&fixture.public()),
+        "the run's cleanup lease is still held"
+    );
+
+    drop(fault);
+    let third = harness();
+    let mut hooks = BarrierHooks::armed(&third, no_injection, Injection::Proceed);
+    let (result, _) = resume_with(fixture, &mut hooks, &given);
+    let text = message(&result.expect_err("with the barrier holding, finalize then refuse"));
+    assert!(
+        text.contains("already current") && text.contains("finalized"),
+        "{text}"
+    );
+    let timeline = hooks.timeline();
+    let first_deletion = timeline
+        .iter()
+        .position(|seen| {
+            matches!(seen.site, EffectSiteId::Ref(_)) && seen.phase == HookPhase::Before
+        })
+        .expect("a ref deletion was reached");
+    assert!(
+        timeline[first_deletion]
+            .synced_dirs
+            .iter()
+            .any(|dir| *dir == fixture.public()),
+        "the public directory was synced before the first ref deletion: {:?}",
+        timeline[first_deletion].synced_dirs
+    );
+    assert!(
+        candidates_refs_of(fixture).is_empty(),
+        "the refs are pruned behind the barrier that held"
+    );
+    assert_eq!(
+        std::fs::read(&report_path).expect("the report stands"),
+        bytes
+    );
+    assert_finalized(&planted, &RunOutcome::Complete, "after the barrier held");
+}
+
+#[test]
+fn a_report_rename_without_directory_sync_is_proven_before_pruning() {
+    use crate::topology::effects::ReportSite;
+    let planted = plant_finished_run_with(
+        "report-rename-unsynced",
+        RunOutcome::Complete,
+        AlphaEnd::Published,
+        FinishedResidue {
+            snapshot: true,
+            staging: true,
+            prepared_pin: true,
+        },
+    );
+    let fixture = &planted.fixture;
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(fixture, &runtime, &certifies);
+    let report_path = fixture.public().join(rundir::REPORT);
+
+    {
+        let _fault = crate::util::fail_barriers_at(&fixture.public());
+        let first = harness();
+        let (result, _) = resume(fixture, &first, &given);
+        let error = message(&result.expect_err("the failed directory barrier ends the command"));
+        assert!(error.contains("injected barrier fault"), "{error}");
+    }
+    let bytes =
+        std::fs::read(&report_path).expect("the rename landed: the report is under its name");
+    assert!(
+        report_of(fixture).is_fresh_against(&bytes),
+        "and current by digest"
+    );
+    assert_eq!(
+        candidates_refs_of(fixture).len(),
+        1,
+        "the candidates ref stands"
+    );
+    assert!(
+        wait_for_cleanup_hold_release(&fixture.public()),
+        "the run's cleanup lease is still held"
+    );
+
+    let second = harness();
+    let mut hooks = BarrierHooks::armed(
+        &second,
+        (EffectSiteId::Lock(LockSite::Release), HookPhase::After),
+        Injection::Proceed,
+    );
+    let (result, _) = resume_with(fixture, &mut hooks, &given);
+    let text = message(&result.expect_err("the restart finalizes then refuses"));
+    assert!(
+        text.contains("already current") && text.contains("finalized"),
+        "{text}"
+    );
+    let timeline = hooks.timeline();
+    assert!(
+        timeline.iter().all(|seen| {
+            seen.site != EffectSiteId::RunDir(RunDirSite::WriteReport)
+                && seen.site != EffectSiteId::Report(ReportSite::Write)
+        }),
+        "the current report is not rewritten: {timeline:?}"
+    );
+    let first_deletion = timeline
+        .iter()
+        .position(|seen| {
+            matches!(seen.site, EffectSiteId::Ref(_)) && seen.phase == HookPhase::Before
+        })
+        .expect("a ref deletion was reached");
+    let synced = &timeline[first_deletion].synced_dirs;
+    assert!(
+        synced.iter().any(|dir| *dir == fixture.public()),
+        "the public directory — that directory, not a count of directories — was synced before \
+         the first ref deletion: {synced:?}"
+    );
+    let at_public: Vec<_> = hooks
+        .ledger_records()
+        .into_iter()
+        .filter(|record| record.path.starts_with(fixture.public()))
+        .collect();
+    assert!(
+        !at_public.is_empty()
+            && at_public
+                .iter()
+                .all(|record| record.step == crate::util::DurableStep::SyncedDirectory),
+        "under the public directory the restart synced and staged or renamed nothing: \
+         {at_public:?}"
+    );
+    assert!(
+        candidates_refs_of(fixture).is_empty(),
+        "the refs are pruned behind the proven name"
+    );
+    assert_eq!(
+        std::fs::read(&report_path).expect("the report stands"),
+        bytes,
+        "byte for byte"
     );
     assert_finalized(&planted, &RunOutcome::Complete, "after the restart");
 }
@@ -16554,17 +16889,28 @@ fn user_checkout(repo_root: &Path) -> UserCheckout {
     .filter(|line| !line.starts_with("?? .upstroke/"))
     .collect::<Vec<_>>()
     .join("\n");
-    let untracked = git(repo_root, &["ls-files", "--others", "--exclude-standard"])
-        .lines()
-        .filter(|name| !name.starts_with(".upstroke/"))
+    let listed = |args: &[&str]| -> Vec<String> {
+        git(repo_root, args)
+            .lines()
+            .filter(|name| !name.starts_with(".upstroke/"))
+            .map(str::to_owned)
+            .collect()
+    };
+    let mut names = listed(&["ls-files", "--others", "--exclude-standard"]);
+    names.extend(listed(&[
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+    ]));
+    let untracked = names
+        .into_iter()
         .map(|name| {
-            (
-                name.to_owned(),
-                format!(
-                    "{:x}",
-                    Sha256::digest(std::fs::read(repo_root.join(name)).expect("an untracked file"))
-                ),
-            )
+            let digest = format!(
+                "{:x}",
+                Sha256::digest(std::fs::read(repo_root.join(&name)).expect("an untracked file"))
+            );
+            (name, digest)
         })
         .collect();
     UserCheckout {
@@ -16601,15 +16947,24 @@ fn max_parallel_one_completes_a_two_task_chain_with_one_linear_commit_per_task_a
         &fixture.repo_root.join("untracked-user.txt"),
         b"an untracked note the user keeps beside the checkout\n",
     );
+    crate::workspace_manager::fixture::write_file(
+        &fixture.repo_root.join(".git").join("info").join("exclude"),
+        b"ignored-user.txt\n",
+    );
+    crate::workspace_manager::fixture::write_file(
+        &fixture.repo_root.join("ignored-user.txt"),
+        b"an ignored note the user keeps beside the checkout\n",
+    );
     let checkout_before = user_checkout(&fixture.repo_root);
     assert_eq!(
         checkout_before.status.trim(),
         "?? untracked-user.txt",
-        "the fixture's checkout is clean before the run but for the user's untracked note"
+        "the fixture's checkout is clean before the run but for the user's untracked note; \
+         the ignored one is not status's to list"
     );
     assert_eq!(
         checkout_before.untracked.keys().collect::<Vec<_>>(),
-        vec!["untracked-user.txt"]
+        vec!["ignored-user.txt", "untracked-user.txt"]
     );
     let harness = harness();
     let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
@@ -16742,8 +17097,9 @@ fn max_parallel_one_completes_a_two_task_chain_with_one_linear_commit_per_task_a
             && checkout_after.tracked == checkout_before.tracked
             && checkout_after.status == checkout_before.status
             && checkout_after.untracked == checkout_before.untracked,
-        "the user's checkout — HEAD, every tracked file, the index, and every untracked file \
-         with its bytes — is byte-for-byte unchanged: status {:?} -> {:?}, untracked {:?} -> {:?}",
+        "the user's checkout — HEAD, every tracked file, the index, and every untracked file, \
+         ignored or not, with its bytes — is byte-for-byte unchanged: status {:?} -> {:?}, \
+         untracked {:?} -> {:?}",
         checkout_before.status,
         checkout_after.status,
         checkout_before.untracked,
@@ -17180,6 +17536,7 @@ fn observe_live(
 ) -> Ledger {
     ledger::observe(
         run.fold(),
+        run.events(),
         &ledger_inventory(fixture, run.fold(), released, store),
         &process_local_of(run, &fixture.public()),
     )
@@ -17191,9 +17548,10 @@ fn observe_after_drop(
     store_before: &[String],
     last: (bool, u32),
 ) -> Ledger {
-    let fold = replayed(fixture);
+    let (fold, events) = replayed_with_events(fixture);
     ledger::observe(
         &fold,
+        &events,
         &ledger_inventory(fixture, &fold, released, store_before),
         &process_local_after(&fixture.public(), last),
     )

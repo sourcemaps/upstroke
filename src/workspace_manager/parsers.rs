@@ -117,6 +117,23 @@ pub(super) fn empty_gitdir_refusal(admin: &Path) -> UpstrokeError {
     }
 }
 
+/// The refusal of the table's absent row for the one absent shape that is a
+/// registration at all: `locked` beside no `gitdir`, the state an add killed
+/// between its first two writes leaves, which `git worktree prune` skips for
+/// the lock and `git worktree list` skips for the missing path. Read by the
+/// removal's scan of the store alone (`revalidate_removal_proving`), whose
+/// plain form refuses it as it refuses the zero-length row and whose proving
+/// form passes it over; an entry with neither file is what `prune` removes
+/// and binds nothing, so the scan skips it without a word.
+pub(super) fn missing_gitdir_refusal(admin: &Path) -> UpstrokeError {
+    UpstrokeError::Git {
+        message: format!(
+            "worktree registration {} is locked and has no gitdir",
+            admin.display()
+        ),
+    }
+}
+
 pub(super) fn registration_checkout(admin: &Path, bytes: &[u8]) -> Result<PathBuf, UpstrokeError> {
     let bytes = trim_gitdir(bytes);
     if bytes.is_empty() {
@@ -243,7 +260,7 @@ fn resolve_relative(admin: &Path, relative: &Path) -> Option<PathBuf> {
 /// stop being UTF-8. Git for Windows writes UTF-8, so the failing arm is for
 /// hostile or corrupt bytes, and it refuses.
 #[cfg(unix)]
-fn decode_path(bytes: &[u8]) -> Result<PathBuf, Utf8Error> {
+pub(super) fn decode_path(bytes: &[u8]) -> Result<PathBuf, Utf8Error> {
     use std::os::unix::ffi::OsStringExt as _;
     // The one copy in this module: the borrowed bytes becoming the owned path.
     Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec())))
@@ -256,7 +273,7 @@ fn decode_path(bytes: &[u8]) -> Result<PathBuf, Utf8Error> {
 /// compares a spelling with its own normalisation, and the normalisation is
 /// spelled with the platform's separator; so is the recorded path, then.
 #[cfg(not(unix))]
-fn decode_path(bytes: &[u8]) -> Result<PathBuf, Utf8Error> {
+pub(super) fn decode_path(bytes: &[u8]) -> Result<PathBuf, Utf8Error> {
     std::str::from_utf8(bytes)
         .map(|text| PathBuf::from(text.replace('/', std::path::MAIN_SEPARATOR_STR)))
 }

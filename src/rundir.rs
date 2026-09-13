@@ -544,11 +544,15 @@ fn canonical(path: PathBuf) -> Result<PathBuf, UpstrokeError> {
 ///
 /// The staging half of every atomic publication here: `run_creation` says
 /// "write `<name>.tmp`, fsync, rename, fsync the directory", and this is the
-/// first two steps.
+/// first two steps. `preserve` is the permissions the staged file takes
+/// before its sync, when the publication replaces a file whose mode is the
+/// operator's to keep (the report, see [`write_report`]); `None` leaves the
+/// mode `File::create` gave it.
 fn stage_json<T: Serialize>(
     path: &Path,
     value: &T,
     ledger: &DurabilityLedger,
+    preserve: Option<fs::Permissions>,
 ) -> Result<(), UpstrokeError> {
     let mut json = serde_json::to_string_pretty(value).map_err(|error| UpstrokeError::Parse {
         message: format!("serializing {}: {error}", path.display()),
@@ -560,6 +564,9 @@ fn stage_json<T: Serialize>(
     };
     let mut file = File::create(path).map_err(io)?;
     file.write_all(json.as_bytes()).map_err(io)?;
+    if let Some(permissions) = preserve {
+        file.set_permissions(permissions).map_err(io)?;
+    }
     sync_file_recorded(&file, path, ledger)
 }
 
@@ -581,7 +588,7 @@ fn sync_file_recorded(
         path: path.to_path_buf(),
         source,
     };
-    let outcome = util::fsync_file(file);
+    let outcome = util::fsync_file_at(file, path);
     let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
     ledger.record(DurableStep::SyncedFile, path, len);
     outcome.map_err(io)
@@ -689,7 +696,7 @@ pub fn stage_marker(
 ) -> Result<(), UpstrokeError> {
     let ledger = hooks.durability_ledger();
     funnel(hooks, EffectSiteId::RunDir(RunDirSite::StageMarker), || {
-        stage_json(&public.join(MARKER_STAGED), marker, &ledger)
+        stage_json(&public.join(MARKER_STAGED), marker, &ledger, None)
     })
 }
 
@@ -768,7 +775,7 @@ pub fn stage_owner_record(
     funnel(
         hooks,
         EffectSiteId::RunDir(RunDirSite::StageOwnerRecord),
-        || stage_json(&private.join(OWNER_RECORD_STAGED), owner, &ledger),
+        || stage_json(&private.join(OWNER_RECORD_STAGED), owner, &ledger, None),
     )
 }
 
@@ -801,7 +808,7 @@ pub fn stage_commit_record(
     funnel(
         hooks,
         EffectSiteId::RunDir(RunDirSite::StageCommitRecord),
-        || stage_json(&private.join(COMMIT_RECORD_STAGED), record, &ledger),
+        || stage_json(&private.join(COMMIT_RECORD_STAGED), record, &ledger, None),
     )
 }
 
@@ -893,8 +900,18 @@ pub fn write_plan(
 /// durable bytes by construction, which the rename after the sync gives it: a
 /// rename that survives a power loss was made after its file's bytes were,
 /// and one that does not survive leaves no report, which the next finalization
-/// regenerates. Written with a plain `std::fs::write` until PR10's round 3,
-/// which synced nothing (the crash lens, P2).
+/// regenerates. The *name* is durable only once the directory's barrier has
+/// completed, which is why a finalization that finds the report current
+/// still takes [`sync_report_dir`] before it prunes. Written with a plain
+/// `std::fs::write` until PR10's round 3, which synced nothing (the crash
+/// lens, P2).
+///
+/// The v0.1 coordinator publishes through here too (`drain_and_report`,
+/// schema 3): the bytes are the ones `fs::write` wrote, and so is the mode —
+/// an existing report's permissions are copied onto the staged file before
+/// its sync, since `fs::write` truncated in place and kept them while a fresh
+/// file takes the umask's (the round-4 regression lens, P2-1;
+/// `the_payload_writers_keep_their_exact_legacy_bytes` holds both).
 pub fn write_report<T: Serialize>(
     public: &Path,
     report: &T,
@@ -913,8 +930,19 @@ pub fn write_report<T: Serialize>(
         report_site,
         HookPhase::Before,
     )?;
-    stage_json(&public.join(REPORT_STAGED), report, &ledger)?;
-    publish(&public.join(REPORT_STAGED), &public.join(REPORT), &ledger)?;
+    let published = public.join(REPORT);
+    let preserved = match fs::metadata(&published) {
+        Ok(existing) => Some(existing.permissions()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: published,
+                source,
+            });
+        }
+    };
+    stage_json(&public.join(REPORT_STAGED), report, &ledger, preserved)?;
+    publish(&public.join(REPORT_STAGED), &published, &ledger)?;
     apply(
         hooks.hook(report_site, HookPhase::After),
         report_site,
@@ -925,6 +953,27 @@ pub fn write_report<T: Serialize>(
         run_dir,
         HookPhase::After,
     )
+}
+
+/// The directory barrier of `Report.Write`, on its own.
+///
+/// For the finalization that finds `report.json` current and writes nothing:
+/// the rename that put the report under its name was made after its bytes
+/// were synced, so the bytes are durable, but the *name* is durable only once
+/// the directory's barrier completed — and a resume that finds the report
+/// runs after a first finalization that may have died, or failed, between the
+/// rename and that barrier. DESIGN.md §26 prunes only after a durable report,
+/// so the fresh branch takes this before its first pruning effect (the
+/// round-4 crash lens, P2). No site of its own: the report's two sites are the
+/// write's, and a restart that writes no bytes reaches neither; the hooks are
+/// taken for their [`DurabilityLedger`], which records the directory synced.
+///
+/// # Errors
+///
+/// The barrier's I/O error, naming the directory.
+pub fn sync_report_dir(public: &Path, hooks: &mut dyn RunDirHooks) -> Result<(), UpstrokeError> {
+    let ledger = hooks.durability_ledger();
+    sync_dir(public, &ledger)
 }
 
 /// `RunDir.WriteQuestionPayload` — written before the question is announced.
