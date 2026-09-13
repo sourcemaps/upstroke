@@ -235,8 +235,12 @@ fails one way under a READY failure (`:8339`, above) and another way otherwise; 
 be read**. The attribution available, and it is an attribution and not a demonstration: the `:8339`
 text has never appeared in any of the 296 macOS logs; the only readable failure of this test in the
 window (job `103674713617`, 2026-09-13) is `:8356`, *"the hold outlived the reaper that took it"* —
-which is reached only after the reaper started and took the lease; and the identical tree passed the
-macOS leg twice within 20 minutes (runs `34717981738`, `34718562096`).
+which is reached only after the reaper started and took the lease; the identical tree passed the
+macOS leg twice within 20 minutes (runs `34717981738`, `34718562096`); and the `:8356` shape
+**reproduces locally under the full suite on Linux** (one of four runs at `7e214b4`, same assertion,
+same location, on a platform where the Darwin race cannot occur), where the `:8339` shape appears
+only under deliberate injection. That is a strong attribution and it is still not a classification:
+the job's own assertion does not exist.
 
 **A second, smaller gap.** Of the 129 cancelled macOS jobs that retain no log, 127 never started a
 step and one had `Run cargo test` still `pending`; **one did not** — job `101535666637` held that

@@ -27,7 +27,23 @@ after the reaper that took it has ended.
 `2467df32` on Linux, all green. The shape wants the whole suite, which is consistent with a forked
 child of another test inheriting the lease descriptor.
 
-**Under the whole suite the mechanism does appear**, in a neighbour rather than in this test. A
+**Under the whole suite it reproduces, on Linux, at `:8356`.** A full
+`cargo test --all-targets --all-features` at `7e214b4` failed
+
+```
+thread '…a_host_integration_reaper_holds_the_runs_cleanup_lease' panicked at
+src/engine/topology/recover/tests.rs:8356:5:
+the hold outlived the reaper that took it
+```
+
+— the same assertion and the same location as the macOS sighting, on a platform where the Darwin
+READY race this shape is being confused with **cannot occur**. Four full-suite runs at the same
+head: one reproduced it, three did not. So the `:8356` shape is a real full-suite intermittent that
+owes nothing to the reaper's startup, which is what the CI sighting most likely was — **an
+attribution the reproduction strengthens and still does not settle**, because job `103617998766`'s
+own assertion remains unreadable.
+
+**The mechanism also appears in a neighbour.** A
 full `cargo test --all-targets --all-features` at `685957d` on Linux failed
 `engine::topology::recover::tests::repeated_container_launch_outages_before_start_consume_defers_through_the_production_runner`
 at `recover/tests.rs:7939` with
