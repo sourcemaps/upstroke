@@ -3038,14 +3038,15 @@ if (( posix_names )); then
       "'$anchor_nohop' at exit $anchor_nohop_rc" >&2
     exit 1
   fi
-  # AND A PINNED ENVIRONMENT IS THAT SAME ROW AND NOT A SECOND RULE. The test
-  # that stood here was `repository_above`'s first line -- refuse to hop whenever
-  # `GIT_DIR` or `GIT_WORK_TREE` is exported -- and what made it right is that
-  # real git answers rule 5's gate `false` for a pinned directory the anchor is
-  # not inside. THAT IS A FACT ABOUT GIT AND NOT ABOUT THIS FILE, so it is pinned
-  # against real git here rather than restated as a second branch in the walk: if
-  # it ever stopped holding, the row above would still pass and the pinned caller
-  # would start hopping into an unrelated tree.
+  # AND THE GATE THE ROW ABOVE STUBS IS A FACT ABOUT GIT, SO IT IS PINNED AGAINST
+  # REAL GIT. `--is-inside-git-dir` must answer `false` for a git directory the
+  # anchor is not inside and `true` for one it is; the row above stubs both
+  # answers, and a stub proves what the walk does with an answer and nothing
+  # about which answer git gives. An exported `GIT_DIR` is the cheapest way to
+  # build the first shape and is used for that here and for nothing else -- the
+  # validator unsets it at the top of the file, so no pinned caller reaches this
+  # walk any more, but `git init --separate-git-dir` and a `.git` file pointing
+  # elsewhere put metadata outside the anchor with no environment at all.
   pinned_probe_dir="$fixture_dir/pinned-environment"
   mkdir -p "$pinned_probe_dir/outside"
   git init -q --bare "$pinned_probe_dir/pinned.git"
@@ -3054,9 +3055,9 @@ if (( posix_names )); then
   pinned_inside="$( GIT_DIR="$pinned_probe_dir/pinned.git" \
     git -C "$pinned_probe_dir/pinned.git" rev-parse --is-inside-git-dir 2>/dev/null )"
   if [[ "$pinned_outside" != false ]] || [[ "$pinned_inside" != true ]]; then
-    echo "git no longer answers rule 5's gate false for a pinned GIT_DIR the anchor is" \
+    echo "git no longer answers rule 5's gate false for a git directory the anchor is" \
       "outside and true for one it is inside; got '$pinned_outside' and '$pinned_inside'," \
-      "so the walk needs its own reading of a pinned environment again" >&2
+      "so the stubbed row above is stubbing an answer git does not give" >&2
     exit 1
   fi
 fi
@@ -3140,6 +3141,138 @@ if (( posix_names )); then
   above_case 'a backslash-rooted path shortens at all, and at its own separator' \
     'C:\y' 'rc=1 asked=2 at=[C:\y/.git C:\/.git]'
 fi
+
+# ---- AND THE ENVIRONMENT DOES NOT CHOOSE WHICH REPOSITORY ANSWERS ------------------------------
+#
+# Every rule above is about a SPELLING deciding which ledger answers for a
+# directory. `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` decide it without a
+# spelling at all, and all three moved a verdict here before the validator unset
+# them: a clean standalone repository holding one committed finding at its root,
+# spelled `.`, went from exit 0 `conforms` to exit 1 with `GIT_WORK_TREE`
+# exported -- the ascent asks git whether the PARENT is inside a work tree, a
+# pinned work tree makes git answer about the pin, and the 128 that follows was
+# read as a repository above -- while a listing under a 160000 gitlink, which
+# every other spelling refuses, CONFORMED with `GIT_DIR` or `GIT_INDEX_FILE`
+# exported. A false red and two false greens, one variable each.
+#
+# WHAT IS ASSERTED IS THAT THE PINNED RUN AND THE CLEAN RUN ARE THE SAME RUN --
+# the same exit code AND the same bytes on stdout and stderr -- and not merely
+# that each answers what this section expects. A refusal has more than one
+# reason: with `GIT_WORK_TREE` exported the gitlink row below refused at the
+# unrepaired head too, for `git could not say whether '<parent>' is inside a work
+# tree` rather than for the gitlink, and a row reading only the exit code would
+# have called that repair green. It is also what makes the group cheap to extend:
+# a fourth variable is one word in a list.
+#
+# THE CONTROL IS THE CLEAN ENVIRONMENT AND IT IS ASSERTED FIRST, so a fixture
+# that stopped being the shape it is named for cannot pass this by refusing
+# everywhere alike.
+env_case() {  # env_case <label> <cwd> <listing> <branch> <want-exit> <VAR=VALUE>...
+  local label="$1" cwd="$2" listing="$3" branch="$4" want="$5"
+  shift 5
+  local clean_out pinned_out pin clean_rc=0 pinned_rc=0
+  clean_out="$( cd "$cwd" && "$BASH" "$branch_validator" "$branch" "$listing" 2>&1 )" || clean_rc=$?
+  if [[ "$clean_rc" != "$want" ]]; then
+    echo "$label: the clean-environment control answered $clean_rc, and $want was expected" >&2
+    echo "  ${clean_out%%$'\n'*}" >&2
+    exit 1
+  fi
+  for pin in "$@"; do
+    pinned_rc=0
+    pinned_out="$( cd "$cwd" && env "$pin" "$BASH" "$branch_validator" "$branch" "$listing" 2>&1 )" \
+      || pinned_rc=$?
+    if [[ "$pinned_rc" != "$clean_rc" ]] || [[ "$pinned_out" != "$clean_out" ]]; then
+      echo "$label: with ${pin%%=*} exported the run answered $pinned_rc where the same run in a" \
+        "clean environment answered $clean_rc, and a verdict an exported variable can flip is not" \
+        "a verdict" >&2
+      echo "  exported: ${pinned_out%%$'\n'*}" >&2
+      echo "  clean:    ${clean_out%%$'\n'*}" >&2
+      exit 1
+    fi
+  done
+}
+
+# THE FILED REPRODUCTION, which is a LEGITIMATE CALLER and not a hostile one: a
+# clean standalone repository, one committed finding at its root, asked about its
+# own directory, by somebody who exports the variable git documents for exactly
+# that repository. `GIT_DIR` is here beside it because only `GIT_WORK_TREE`
+# reaches the defect -- with a git directory pinned, discovery succeeds from
+# every directory and the 128 never happens -- so a `GIT_DIR` row alone would
+# have passed against the unrepaired code and proved nothing.
+env_standalone="$fixture_dir/env-standalone"
+new_repo "$env_standalone"
+echo fixture > "$env_standalone/P2_correctness_202609130713_an-exported-work-tree.md"
+git -C "$env_standalone" add -A
+git -C "$env_standalone" commit -q -m 'one finding at the root'
+if [[ -n "$(git -C "$env_standalone" status --porcelain)" ]] \
+  || [[ "$(git -C "$env_standalone" ls-files)" \
+    != 'P2_correctness_202609130713_an-exported-work-tree.md' ]]; then
+  echo 'the fixture was meant to be a clean standalone repository holding one committed finding' >&2
+  exit 1
+fi
+env_case 'a standalone repository asked about its own root' \
+  "$env_standalone" . 'fix-P2/correctness_an-exported-work-tree' 0 \
+  "GIT_WORK_TREE=$env_standalone" \
+  "GIT_DIR=$env_standalone/.git" \
+  "GIT_INDEX_FILE=$env_standalone/.git/index"
+
+# AND A DIRECTORY IN NO REPOSITORY AT ALL, which is the same false red one level
+# out: the filesystem is the whole of the evidence there, and an exported work
+# tree turned that into `git could not say what it records`.
+env_loose="$fixture_dir/env-no-repository/listing"
+mkdir -p "$env_loose"
+echo fixture > "$env_loose/P2_correctness_202609130715_no-repository-at-all.md"
+env_case 'a listing in no repository at all' \
+  "$env_loose" . 'fix-P2/correctness_no-repository-at-all' 0 \
+  "GIT_WORK_TREE=$env_standalone" \
+  "GIT_DIR=$env_standalone/.git" \
+  "GIT_INDEX_FILE=$env_standalone/.git/index"
+
+# THE HOSTILE HALF, AND IT IS THE HALF THAT DECIDES WHICH REPAIR IS THE RIGHT
+# ONE. A repository under a 160000 gitlink is refused because the SUPERPROJECT
+# records it, and that refusal is what an exported variable took away: pinning
+# the inner repository's own git directory or its own index makes every probe
+# answer out of the inner repository, which records a matching finding and knows
+# nothing about the gitlink. A repair that read the pin at the one site the row
+# above reaches -- and left the walk otherwise pinned -- turns THIS row green,
+# because the ascent's `--is-inside-work-tree` then answers about the pinned work
+# tree at every level and climbs past the superproject.
+env_super="$fixture_dir/env-superproject"
+new_repo "$env_super"
+new_repo "$env_super/inner"
+echo fixture > "$env_super/inner/P2_correctness_202609130714_under-a-pinned-gitlink.md"
+git -C "$env_super/inner" add -A
+git -C "$env_super/inner" commit -q -m 'the inner ledger'
+git -C "$env_super" update-index --add --cacheinfo \
+  "160000,$(git -C "$env_super/inner" rev-parse HEAD),inner"
+echo seed > "$env_super/seed.txt"
+git -C "$env_super" add seed.txt
+git -C "$env_super" commit -q -m 'a gitlink at inner'
+if ! git -C "$env_super" ls-tree HEAD | grep -q $'^160000 commit [0-9a-f]*\tinner$'; then
+  echo 'the fixture was meant to record inner as a clean 160000 gitlink' >&2
+  exit 1
+fi
+env_case 'a repository the superproject records at 160000' \
+  "$env_super/inner" . 'fix-P2/correctness_under-a-pinned-gitlink' 1 \
+  "GIT_WORK_TREE=$env_super/inner" \
+  "GIT_DIR=$env_super/inner/.git" \
+  "GIT_INDEX_FILE=$env_super/inner/.git/index"
+
+# AND A PIN THAT NAMES NOTHING IS THE SAME RULE AND NOT A REFUSAL OF ITS OWN. A
+# `GIT_DIR` that is not a git directory made every probe exit 128 and the run
+# refused; the path decides, so it conforms exactly as the clean run does.
+env_case 'a standalone repository under a pin that names nothing' \
+  "$env_standalone" . 'fix-P2/correctness_an-exported-work-tree' 0 \
+  "GIT_DIR=$env_standalone/there-is-no-git-directory-here" \
+  "GIT_WORK_TREE=$env_standalone/there-is-no-work-tree-here"
+
+# AND A FOREIGN LEDGER OVER A REPOSITORY THAT HAS ITS OWN is the third variable's
+# other direction: the superproject's index over the standalone repository
+# answered `names no finding anywhere in this pull request` at exit 1, for a
+# ledger that is not the one the path is in.
+env_case 'a standalone repository under another repository index' \
+  "$env_standalone" . 'fix-P2/correctness_an-exported-work-tree' 0 \
+  "GIT_INDEX_FILE=$env_super/.git/index"
 
 # ---- what git RECORDS, not what the checkout happens to hold -----------------------------------
 #

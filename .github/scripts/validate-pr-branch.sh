@@ -567,6 +567,44 @@ export PATH="/usr/bin:/bin:$PATH"
 shopt -s nullglob
 unset GLOBIGNORE
 
+# AND WHICH REPOSITORY ANSWERS IS DECIDED BY THE PATH, NEVER BY THE ENVIRONMENT
+# THE GATE WAS INVOKED IN. `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` each
+# put a different ledger behind the same directory, and a verdict an exported
+# variable can flip is not a verdict -- it is the "one directory, two answers"
+# shape every P1 in this file has had, reached through the environment instead of
+# through a spelling. All three were measured here, one at a time, against the
+# clean-environment control on the same tree:
+#
+#   GIT_WORK_TREE   a clean standalone repository holding one committed finding
+#                   at its root, spelled `.`, went from exit 0 `conforms` to exit
+#                   1, and a plain directory in no repository at all refused the
+#                   same way. A FALSE RED.
+#   GIT_DIR         a listing under a 160000 gitlink -- which the superproject
+#                   records, and which every other spelling and all three tree
+#                   listings refuse at exit 1 -- conformed at exit 0. A FALSE
+#                   GREEN.
+#   GIT_INDEX_FILE  the same false green by the same mechanism one level in: the
+#                   repository is discovered from the path and a foreign index
+#                   answers for it.
+#
+# THEY ARE UNSET HERE, ONCE, ABOVE EVERY PROBE, RATHER THAN READ AT THE SITES
+# THAT TRIP OVER THEM, and that is the whole of the rule. A reading is what the
+# first of these was filed as wanting, and a reading is the wrong shape: the
+# ascent asks git whether the PARENT of a work tree is inside a work tree, and a
+# pinned work tree makes git answer about the pin at every level of that walk,
+# so there is no reading of "the caller selected this work tree" that makes the
+# question answerable -- the pin is what stops it being answered. Clearing them
+# is also what keeps the equivalence property covering these callers at all: the
+# three tree listings are FILES and no variable moves them, so a directory whose
+# answer the environment can change disagrees with them by construction.
+#
+# `GIT_INDEX_FILE` is unset with the other two because it substitutes a LEDGER,
+# which is this gate's whole question. Variables that change how git talks rather
+# than which repository it talks about -- `GIT_CONFIG_*`, the trace variables --
+# are left alone: they cannot move a verdict. This is one process's environment
+# and nothing the caller's own git commands see.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+
 branch="${1:-}"
 merge_base_findings="${2:-}"
 head_findings="${3:-}"
@@ -1117,10 +1155,11 @@ gitdir_pointer() {
 #
 # So a metadata answer becomes an answer about the listing only when a LISTING
 # answer says it contains the listing, and that is `--is-inside-git-dir`. An
-# EXPORTED `GIT_DIR` is the same rule and not a second one: it makes
+# EXPORTED `GIT_DIR` used to be the interesting case of this -- it makes
 # `--absolute-git-dir` answer the pinned directory wherever the anchor is, and
 # `--is-inside-git-dir` is `false` there for exactly the reason the hop must not
-# fire.
+# fire -- and it is no longer reachable: the pins are unset at the top of this
+# file, so every answer below is about the path git was pointed at.
 #
 # AND A STATUS IS NOT AN ANSWER EITHER, which is the same rule about the other
 # half of what git returns: an empty success is not evidence of absence, and
@@ -1323,8 +1362,15 @@ path_parent() {
 # a healthy `.git` file, and a refusal on one that names a gitdir is a repository
 # this cannot read.
 #
-# A GIT_DIR or GIT_WORK_TREE in the environment points git at an index this walk
-# cannot reach, so it counts as a repository in play and the answer is yes.
+# AND A PINNED ENVIRONMENT IS NOT ONE OF THE THREE, because this walk never sees
+# one. The line that stood here answered YES for any `GIT_DIR` or `GIT_WORK_TREE`
+# in the environment -- an index the walk cannot reach is a repository in play --
+# and that is right for `locate_listing`, which asks whether git's failure AT THE
+# LISTING may be read as an absence, and wrong for `enclosing_work_tree`, which
+# asks whether a work tree CONTAINS this one: a work tree the caller selected is
+# not a container of itself, and a clean standalone repository spelled `.` was
+# refused for it. Both readings are gone with the pins, which are unset at the
+# top of the file where nothing has to remember which question is being asked.
 #
 # RULE 4: THE PATH MUST ARRIVE ROOTED AND THIS NO LONGER ROOTS IT, because the
 # join it used to make was `${PWD%/}/$dir` for anything not beginning with `/` -- true of
@@ -1352,7 +1398,6 @@ path_parent() {
 # removed it does not return at all.
 repository_above() {
   local dir="$1" gitdir pointer parent
-  [[ -z "${GIT_DIR:-}" && -z "${GIT_WORK_TREE:-}" ]] || return 0
   # The path is NOT resolved through `cd -P`: that costs a subshell, and
   # `/proc/self` -- a listing the fixtures use precisely because every read of it
   # fails -- resolves there to the SUBSHELL'S pid, a directory that is gone
@@ -1866,20 +1911,16 @@ locate_listing() {
     # step UPWARDS: the anchor is at or below that directory, so the directory's
     # parent is strictly above the anchor.
     #
-    # A PINNED ENVIRONMENT IS THAT SAME RULE AND IS NO LONGER A SECOND TEST. The
-    # test that stood here was `repository_above`'s first line -- refuse to hop
-    # whenever `GIT_DIR` or `GIT_WORK_TREE` is exported -- and it is the special
-    # case of this one: with `GIT_DIR` exported, `--absolute-git-dir` answers the
-    # pinned directory wherever the anchor is, and `--is-inside-git-dir` is
-    # `false` there for precisely the reason the hop must not fire. Measured:
-    # `GIT_DIR` at a bare repository with the anchor in a plain directory
-    # elsewhere answers `false` then `false`; with the anchor INSIDE the pinned
-    # directory it answers `false` then `true`, and there its parent IS a step up
-    # the anchor's own chain, which the old test refused and this one allows. An
-    # exported `GIT_WORK_TREE` with the anchor outside it exits 128 and never
-    # reaches here at all. See
-    # `PR280-ENV-EXPORTED-WORK-TREE-REFUSES-A-VALID-CALLER`, which is the same
-    # reading in the ascent's other half and is still filed and still deferred.
+    # A PINNED ENVIRONMENT IS NOT A SECOND TEST HERE AND IS NOT A FIRST ONE
+    # EITHER. The test that stood here was `repository_above`'s first line --
+    # refuse to hop whenever `GIT_DIR` or `GIT_WORK_TREE` is exported -- then
+    # became the special case of the rule above, and is now unreachable from
+    # either direction: both pins, and `GIT_INDEX_FILE` with them, are unset at
+    # the top of this file, because a verdict an exported variable can flip is
+    # the "one directory, two answers" shape by another route. That was
+    # `PR280-ENV-EXPORTED-WORK-TREE-REFUSES-A-VALID-CALLER`, filed as wanting a
+    # reading of an explicitly selected work tree and repaired by giving the walk
+    # no pin to read; the measurements are with the `unset`.
     #
     # `/proc/self` does not reach here either: git exits 128 for it rather than
     # answering `false`, so the refusal above is what it gets, and the fixtures
