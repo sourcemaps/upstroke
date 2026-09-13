@@ -2020,21 +2020,32 @@ if [[ -L "$symlink_probe" ]]; then
       "answer through a link too; got $loose_alias_rc" >&2
     exit 1
   fi
-  # AND RULE 6'S TWO REFUSALS ARE NOT ONE REFUSAL. The message above is the
-  # shape where the CALLER'S OWN spelling never named its listing's root, and
-  # respelling the listing is the remedy it gives. THIS is the other shape: the
-  # caller's spelling named its listing's root exactly, nothing in that
-  # repository names the listing, authority moves to a work tree ABOVE it, and
-  # the root the walk then has to name the listing in is one THIS WALK chose. A
-  # component of the path is a link out of the written tree, so the caller's
-  # chain does not reach that root and there is nothing for them to respell.
+  # AND RULE 6'S ONE DELIBERATE DIFFERENCE, WITH THE SHAPE THAT BOUNDS IT BESIDE
+  # IT. The refusal above is the shape where the CALLER'S OWN spelling never
+  # named its listing's root, and respelling the listing is the remedy it gives.
+  # THIS is the other shape: the caller's spelling named its listing's root
+  # exactly, nothing in that repository names the listing, the ascent moves
+  # authority to a work tree ABOVE it, and the root the listing must now be named
+  # in is one THIS WALK chose. A component of the path is a link out of the
+  # written tree, so the caller's chain does not reach that root and they wrote
+  # no name inside it at all.
   #
-  # The same directory spelled physically CONFORMS, which is what makes this a
-  # narrowing worth a finding rather than an opinion about links; it is filed as
-  # `PR280-ASCENT-AUTHORITY-MOVES-OFF-THE-WRITTEN-CHAIN`, with the two candidate
-  # repairs and the shape that defeats both. What is asserted here is the pair --
-  # the physical spelling judged, the written one refused AND SAYING WHICH SHAPE
-  # IT IS -- so that a repair flips this row rather than slipping past it.
+  # THAT USED TO REFUSE, AND REFUSING WAS TWO ANSWERS FOR ONE DIRECTORY: the
+  # physical spelling conformed at exit 0 where the written one refused at exit
+  # 1. The name now comes from git's own spelling -- `subject` and the answering
+  # root are both `--show-toplevel` answers, so the segment between them is
+  # exactly what `records_path` has just matched.
+  #
+  # AND THE PAIR IS WHAT KEEPS IT FROM BEING THE GENERAL RULE. Where the caller's
+  # chain DOES reach the new root, their components still decide, because the
+  # index records what they wrote and not what the link lands on: with the
+  # enclosing tree recording `alias` at 120000 pointing at `real` AND a finding
+  # under `real`, and `real` a nested repository of its own, `alias` must be
+  # answered from the caller's name -- mode 120000, no listing, no finding --
+  # while `real` conforms. Both match what a tree listing of that commit gives
+  # for the same path. A repair that took git's spelling whenever it could would
+  # turn the first into the second, which is `04432736`'s own `loop` false green
+  # one level further out.
   auth_ext="$sym_root/authority-physical"
   auth_written="$sym_root/authority-written"
   new_repo "$auth_ext"
@@ -2048,19 +2059,38 @@ if [[ -L "$symlink_probe" ]]; then
   auth_physical_rc=0
   ( cd "$auth_ext" && "$BASH" "$branch_validator" \
     'fix-P2/correctness_an-authority-move' 'project' ) >/dev/null 2>&1 || auth_physical_rc=$?
-  auth_written_out="$( cd "$auth_written" && "$BASH" "$branch_validator" \
-    'fix-P2/correctness_an-authority-move' 'link' 2>&1 )" && auth_written_rc=0 || auth_written_rc=$?
-  if [[ "$auth_physical_rc" != 0 ]]; then
-    echo "the physical spelling must be answered out of the enclosing tree's records;" \
-      "got $auth_physical_rc" >&2
+  auth_written_rc=0
+  ( cd "$auth_written" && "$BASH" "$branch_validator" \
+    'fix-P2/correctness_an-authority-move' 'link' ) >/dev/null 2>&1 || auth_written_rc=$?
+  if [[ "$auth_physical_rc" != 0 ]] || [[ "$auth_written_rc" != "$auth_physical_rc" ]]; then
+    echo "one directory whose authority moved above it must answer the same by either" \
+      "spelling; the physical one answered $auth_physical_rc and the one through a link" \
+      "out of the written tree answered $auth_written_rc" >&2
     exit 1
   fi
-  if [[ "$auth_written_rc" != 1 ]] \
-    || [[ "$auth_written_out" != *'above it is what answers for it'* ]] \
-    || [[ "$auth_written_out" == *'Give the listing as a path that goes through'* ]]; then
-    echo "a listing whose authority moved off the written chain must refuse AND say that" \
-      "is what happened, not tell the caller to respell a root the walk chose; got" \
-      "$auth_written_rc and '${auth_written_out%%$'\n'*}'" >&2
+  # AND THE CALLER'S NAME STILL DECIDES WHERE THEY GAVE ONE.
+  auth_named="$sym_root/authority-named"
+  new_repo "$auth_named"
+  mkdir -p "$auth_named/real"
+  printf 'fixture\n' > "$auth_named/real/P2_correctness_202609130018_a-name-the-caller-gave.md"
+  ln -s real "$auth_named/alias"
+  git -C "$auth_named" add -A \
+    && git -C "$auth_named" commit -q -m 'a link the index records beside the tree it points at'
+  new_repo "$auth_named/real"
+  if [[ "$(git -C "$auth_named" ls-files -s -- alias | cut -d' ' -f1)" != 120000 ]]; then
+    echo 'the fixture was meant to record the link as a symlink, not as whatever it points at' >&2
+    exit 1
+  fi
+  auth_alias_rc=0
+  ( cd "$auth_named" && "$BASH" "$branch_validator" \
+    'fix-P2/correctness_a-name-the-caller-gave' 'alias' ) >/dev/null 2>&1 || auth_alias_rc=$?
+  auth_real_rc=0
+  ( cd "$auth_named" && "$BASH" "$branch_validator" \
+    'fix-P2/correctness_a-name-the-caller-gave' 'real' ) >/dev/null 2>&1 || auth_real_rc=$?
+  if [[ "$auth_alias_rc" != 1 ]] || [[ "$auth_real_rc" != 0 ]]; then
+    echo "a name the caller gave must be answered from the index entry it names: 'alias' is a" \
+      "120000 and holds no finding, 'real' is a tree and conforms; got $auth_alias_rc and" \
+      "$auth_real_rc" >&2
     exit 1
   fi
 else

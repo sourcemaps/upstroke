@@ -1138,16 +1138,16 @@ gitdir_pointer() {
 # caller wrote and not under the one the link lands on -- and above it the
 # caller wrote nothing at all.
 #
-# THE SITE THAT DIFFERS IS THE GITLINK ASCENT, AND THIS IS WHY. When nothing in
-# the listing's own repository names it, authority moves to a work tree ABOVE
-# that root, and the listing must be named in THAT index -- from the caller's
-# components again, because naming is theirs. Where a component of the listing
-# was a symlink OUT of the written tree, the caller's chain does not reach the
-# new root and there is no name to give: the answer is a REFUSAL and not the
-# physical spelling, because the physical spelling is exactly what rule 6 says
-# is not the listing's name. See
-# `PR280-ASCENT-AUTHORITY-MOVES-OFF-THE-WRITTEN-CHAIN`, which records the two
-# candidate repairs and why each reopens something already closed.
+# THE SITE THAT DIFFERS IS THE GITLINK ASCENT, AND THE DIFFERENCE IS EXACTLY
+# "THE CALLER WROTE NO NAME HERE". When nothing in the listing's own repository
+# names it, authority moves to a work tree ABOVE that root and the listing must
+# be named in THAT index. Where the caller's components reach the new root they
+# still decide, because the index records what they wrote and not what a link
+# lands on. Where a component was a symlink OUT of the written tree they do not
+# reach it and the caller named nothing inside it at all -- and there, and only
+# there, the name is git's own spelling of the listing root within that
+# repository, which is the segment `records_path` has just matched. Refusing
+# instead was measured as two answers for one directory.
 #
 # =============================================================================
 
@@ -1587,7 +1587,7 @@ records_path() {
 locate_listing() {
   local path="$1" anchor entered=0 said top spelled prefix rest component index above=0
   local prefixes rests shallow deep named_root segment nameable answering walker named
-  local subject subrel here hopped=0 moved=0
+  local subject subrel here hopped=0 moved=0 answering_rel='' moved_rel='' physical_name=''
   listing_world=''
   listing_toplevel=''
   listing_relpath=''
@@ -2048,30 +2048,44 @@ locate_listing() {
       fi
       index=$(( index + 1 ))
     done
-    # RULE 6, AND THE REFUSAL SAYS WHICH OF ITS TWO SHAPES THIS IS, because the
-    # two have different remedies and the caller can act on only one of them.
-    # BEFORE the authority move it is the caller's own spelling that never named
-    # its listing's root, and respelling the listing fixes it. AFTER the move the
-    # root is one THIS WALK chose -- a work tree above the listing's own, reached
-    # because nothing in the listing's own repository names it -- and the
-    # caller's components stop at a root further in, so there is nothing for them
-    # to respell. Blaming the caller's spelling for a root the walk chose is a
-    # message that cannot be acted on, and it stood here for both.
+    # RULE 6'S ONE DELIBERATE DIFFERENCE, AND IT IS HERE. The written chain names
+    # the listing, and this is the point where a caller may have written no name
+    # at all: the ascent has moved authority to a work tree ABOVE the listing's
+    # own root, the caller's components stop at a root further in -- a component
+    # of the path was a link OUT of the written tree -- and no prefix is that new
+    # root. Refusing was measured: with `EXT` recording `project/P2_…md`,
+    # `EXT/project` its own repository and `W/link -> EXT/project`, `project`
+    # spelled from `EXT` conformed at exit 0 while `link` spelled from `W`
+    # refused at exit 1. One directory, two spellings, two answers, which is the
+    # shape every P1 in this file has been.
+    #
+    # THE NAME IS TAKEN FROM GIT'S OWN SPELLING, AND ONLY BECAUSE THE CALLER GAVE
+    # NONE. `subject` and the root that answers are both `--show-toplevel`
+    # answers, so the segment between them is physical and is exactly what
+    # `records_path` has just matched. It is NOT the general rule, and the
+    # difference is not which case a round was shown: WHERE THE CALLER'S CHAIN
+    # DOES REACH THE NEW ROOT their components still decide, because the index
+    # records what they wrote and not what the link lands on. Measured, with
+    # `EXT` recording `alias` at 120000 pointing at `real` AND `real/P2_…md`
+    # underneath, and `EXT/real` a nested repository: `alias` is answered from
+    # the caller's name -- mode 120000, not a listing, no finding -- while `real`
+    # is a tree and conforms. Both match what a tree listing of that commit gives
+    # for the same path, and this arm does not touch either, because the prefix
+    # match succeeds for both.
+    #
+    # A CALLER'S PATH THAT NEVER NAMED ITS OWN LISTING ROOT IS STILL REFUSED, and
+    # that is the branch below: the ascent has not moved, the root is the
+    # listing's own, and respelling the listing is a remedy the caller can act
+    # on. Blaming the caller's spelling for a root THIS WALK chose is not.
     if (( shallow < 0 )); then
       if (( moved )); then
-        echo "branch-name-policy: nothing in the repository at '$subject' names '$path'," >&2
-        echo "  so the work tree at '$top' above it is what answers for it -- and no part" >&2
-        echo "  of the path as it was written names THAT root, because a component of it" >&2
-        echo "  is a link out of the tree the caller's own spelling walks up. The" >&2
-        echo "  listing's name in that index is not the caller's to give and is not" >&2
-        echo "  taken from the link's target, which is not the name anything records" >&2
-        echo "  it under. That is refused rather than guessed. '$branch' was not judged." >&2
-      else
-        echo "branch-name-policy: '$path' is inside the work tree at '$top' and no part" >&2
-        echo "  of the path as it was written names that root, so what the index records" >&2
-        echo "  for it cannot be worked out. Give the listing as a path that goes through" >&2
-        echo "  the repository's own directory. '$branch' was not judged." >&2
+        physical_name="$moved_rel"
+        break
       fi
+      echo "branch-name-policy: '$path' is inside the work tree at '$top' and no part" >&2
+      echo "  of the path as it was written names that root, so what the index records" >&2
+      echo "  for it cannot be worked out. Give the listing as a path that goes through" >&2
+      echo "  the repository's own directory. '$branch' was not judged." >&2
       return 1
     fi
     named_root=$shallow
@@ -2145,6 +2159,7 @@ locate_listing() {
       fi
       if (( named == 0 )); then
         answering="$enclosing_root"
+        answering_rel="${subrel#/}"
       fi
       walker="$enclosing_root"
     done
@@ -2153,11 +2168,16 @@ locate_listing() {
     # UPWARDS, which is what bounds this.
     [[ "$answering" != "$top" ]] || break
     top="$answering"
+    moved_rel="$answering_rel"
     moved=1
   done
   listing_world=records
   listing_toplevel="$top"
-  listing_relpath="${rests[named_root]}"
+  if [[ -n "$physical_name" ]]; then
+    listing_relpath="$physical_name"
+  else
+    listing_relpath="${rests[named_root]}"
+  fi
   return 0
 }
 
