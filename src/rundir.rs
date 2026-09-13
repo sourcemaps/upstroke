@@ -393,7 +393,7 @@ fn funnel<T>(
 mod names;
 pub use names::{
     COMMIT_RECORD, COMMIT_RECORD_STAGED, EVENT_LOG, MARKER, MARKER_STAGED, OWNER_RECORD,
-    OWNER_RECORD_STAGED, PLAN,
+    OWNER_RECORD_STAGED, PLAN, REPORT, REPORT_STAGED,
 };
 
 // ---------------------------------------------------------------------------
@@ -884,6 +884,17 @@ pub fn write_plan(
 }
 
 /// `RunDir.WriteReport` — the derived projection, never read back as state.
+///
+/// Published the way every other record of the run directory is: staged as
+/// `report.json.tmp`, synced, renamed onto `report.json`, the directory
+/// synced. DESIGN.md §26 lets the refs a finalization prunes go only "after
+/// the report is durable", and a resume that finds the report current prunes
+/// without writing it again — so a report present under its name has to hold
+/// durable bytes by construction, which the rename after the sync gives it: a
+/// rename that survives a power loss was made after its file's bytes were,
+/// and one that does not survive leaves no report, which the next finalization
+/// regenerates. Written with a plain `std::fs::write` until PR10's round 3,
+/// which synced nothing (the crash lens, P2).
 pub fn write_report<T: Serialize>(
     public: &Path,
     report: &T,
@@ -891,6 +902,7 @@ pub fn write_report<T: Serialize>(
 ) -> Result<(), UpstrokeError> {
     let run_dir = EffectSiteId::RunDir(RunDirSite::WriteReport);
     let report_site = EffectSiteId::Report(ReportSite::Write);
+    let ledger = hooks.durability_ledger();
     apply(
         hooks.hook(run_dir, HookPhase::Before),
         run_dir,
@@ -901,7 +913,8 @@ pub fn write_report<T: Serialize>(
         report_site,
         HookPhase::Before,
     )?;
-    util::write_json(&public.join("report.json"), report)?;
+    stage_json(&public.join(REPORT_STAGED), report, &ledger)?;
+    publish(&public.join(REPORT_STAGED), &public.join(REPORT), &ledger)?;
     apply(
         hooks.hook(report_site, HookPhase::After),
         report_site,

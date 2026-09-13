@@ -3087,12 +3087,24 @@ fn every_site_this_module_owns_is_reached_through_a_funnel_in_both_phases() {
     stage_owner_record(&husk.private, &husk.owner, &mut hooks).expect("P3a");
     publish_owner_record(&husk.private, &mut hooks).expect("P3b");
     write_plan(&public, b"{\"tasks\":[]}", &mut hooks).expect("P5");
+    let barriers_before = util::barriers_on_this_thread();
     write_report(
         &public,
         &serde_json::json!({"outcome": "parked"}),
         &mut hooks,
     )
     .expect("report");
+    let barriers_after = util::barriers_on_this_thread();
+    assert!(
+        barriers_after.file > barriers_before.file
+            && barriers_after.directory > barriers_before.directory,
+        "the report write is a durable publication — its file synced, then its directory — \
+         and the barriers this thread entered say so: {barriers_before:?} -> {barriers_after:?}"
+    );
+    assert!(
+        !public.join(REPORT_STAGED).exists() && public.join(REPORT).is_file(),
+        "the staged report was renamed onto its name"
+    );
     let questions = public.join("questions");
     fs::create_dir_all(&questions).expect("questions");
     write_question_payload(&questions, "q-1", &serde_json::json!({}), &mut hooks)
