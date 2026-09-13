@@ -61,10 +61,14 @@ the steps run. The write is `rundir::write_report`'s staged, synced, renamed pub
 report present under its name holds durable bytes and the refs the steps prune go only after it
 (DESIGN.md §26); a report found current is not written again, and its directory's barrier is
 taken again (`rundir::sync_report_dir`, through the report's two sites exactly as the write is —
-`Report.Write` inside `RunDir.WriteReport` around the barrier — so the fault matrix selects it on a
-restart and the typed inventory holds the branch's one external effect; until PR10's round 5 it
-reached no site, the round-5 contract lens's F1) before the first pruning effect, at Complete and
-at Halted alike: the rename that made it current was made after its bytes were synced, so the
+`Report.Write` inside `RunDir.WriteReport` around the barrier — so the typed inventory holds the
+branch's one external effect and each of its four coordinates is selectable on a restart: the
+ST-18 matrix's cells fault the first finalization and its restarts observe the fresh branch's
+coordinates unarmed, and `fresh_report_hook_errors_stop_cleanup_and_retry` arms each of the four
+on a restart, for both outcomes, and holds the injected error to stop cleanup — until PR10's
+round 5 the branch reached no site, the round-5 contract lens's F1, and until round 6 only
+`Report.Write`'s before phase was ever faulted there, the round-6 crash lens) before the first
+pruning effect, at Complete and at Halted alike: the rename that made it current was made after its bytes were synced, so the
 bytes are durable, but the *name* is durable only once the directory's barrier completed, and a
 first finalization may have died or failed between the rename and that barrier — until PR10's
 round 4 the fresh branch pruned behind a name proven visible, not durable (the round-4 crash lens,

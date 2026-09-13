@@ -53,20 +53,36 @@ to them:
   where the loop consults it, the close reasons per generation class with
   the run-ending close on the closure's own precedence, and `run_finished`
   for each outcome.
-- **Two censuses, and where each stops.** The shared census (`census()`)
-  explores the fan-out breadth-first to `max_states` (20,000) and is
-  **truncated** there by design — the space under these bounds is orders of
-  magnitude larger — so every assertion over it is over the explored set,
-  and the census says where it stopped ([`Census::truncated`], set at the
-  state ceiling and at the trace ceiling alike). The deep census
-  (`deep_census()`) seeds the integration path from one merged original and
-  two candidates and reaches the fourth integration sequence, the second repair
-  and the second lineage, which
-  the breadth-first prefix cannot; `every_declared_dimension_is_reached_at_its_bound`
-  holds the two together to every declared bound by equality, and the
-  shared census alone to the seven it reaches on its own. The chain and the
-  join are explored under the same generator to a smaller ceiling
-  (`every_plan_shape_is_explored`).
+- **The census family, and where each member stops.** Since the owner's
+  ST-14 decision of 2026-09-13 (option 3; the packet amendment
+  `2026-09-13-AMENDMENT-st14-census-family.md`) the contract is a family:
+  the breadth-first prefix under the packet's abstraction and bounds
+  explores to a stated state ceiling and reports truncation, one seeded
+  census per dimension the prefix does not reach closes under its own
+  ceiling, and every coverage assertion holds over the union of explored
+  states. `family()` names the members. The prefix (`census()`) explores
+  the fan-out breadth-first to `max_states` (20,000) and is **truncated**
+  there by design — the space under these bounds is orders of magnitude
+  larger — and says so ([`Census::truncated`], set at the state ceiling
+  and at the trace ceiling alike); measured (`reached_dimensions`), it
+  reaches every one of the ten declared bounds on its own at that
+  ceiling, and did at PR10's round-2 code head too. The seeded census
+  (`deep_census()`) seeds the integration path from one merged original
+  and two candidates, explores it under a restricted generator and
+  **closes** — 25 states, no truncation — reaching the fourth integration
+  sequence, the second repair and the second lineage from that seed; it
+  is the family's closing member, kept for those three dimensions, and
+  since the prefix reaches them too it is not the only route to any
+  bound (until round 6 these notes and the record said the prefix could
+  not reach them, which the measurement refutes).
+  `the_prefix_reports_its_truncation_and_every_seeded_census_closes`
+  holds each member to its part of the contract and every dimension the
+  prefix misses to a seeded census that names it — an empty set today, said
+  so; `every_declared_dimension_is_reached_at_its_bound` holds the union to
+  every declared bound by equality and says which member reaches each. The
+  chain and the join are explored under the same generator to a smaller
+  ceiling (`every_plan_shape_is_explored`); they are not members of the
+  family.
 - **Every arm.** `every_plan_transition_arm_is_executed_by_the_census`
   enumerates the arms of the production dispatch from its source
   (`fold/start.rs`) and requires every arm executed by an offer, and every
@@ -751,12 +767,15 @@ away from a repair each, so two lineages are as near as two repairs.
 
 ## `mod tests` › `fn deep_census() -> &'static Census {`
 
-The deep census: from [`one_merged_two_candidates_prefix`], the
-integration path alone — each candidate rejected and repaired, the
-repairs integrated — explored to closure, where the fourth sequence,
-the second repair and the second lineage are. Until PR10's round 2 the
-seed had two originals merged and one candidate, whose two repairs were
-one lineage.
+The seeded census of the family: from [`one_merged_two_candidates_prefix`],
+the integration path alone — each candidate rejected and repaired, the
+repairs integrated — explored to closure (25 states under a ceiling of
+5,000, no truncation), reaching the fourth sequence, the second repair and
+the second lineage from a seed fifteen events deep. Until PR10's round 2
+the seed had two originals merged and one candidate, whose two repairs
+were one lineage. The prefix reaches those three bounds too at its own
+ceiling (measured in round 6), so this member exists as the family's
+closing census for them rather than as the only route to them.
 
 ## `mod tests` › `fn reached_dimensions(censuses: &[&Census]) -> BTreeMap<&'s…`
 
@@ -765,12 +784,48 @@ and traces: the largest value any state holds.
 
 ## `mod tests` › `fn census() -> &'static Census {`
 
-The shared census: the fan-out plan under the packet's bounds, explored
-breadth-first to `CensusBounds::default().max_states` states. The bounded
-space is larger than that ceiling by orders of magnitude, so the census
-stops there and says so (`truncated`); every assertion over it is over the
-explored set, and the bounds the breadth-first prefix cannot reach — four
-integration sequences, two repairs — are reached by `deep_census`.
+The prefix census of the family: the fan-out plan under the packet's
+bounds, explored breadth-first to `CensusBounds::default().max_states`
+states. The bounded space is larger than that ceiling by orders of
+magnitude, so the census stops there and says so (`truncated`); every
+assertion over it is over the explored set. At that ceiling it reaches
+every declared bound on its own (`reached_dimensions`, held by
+`every_declared_dimension_is_reached_at_its_bound`); the seeded
+`deep_census` closes and reaches three of them again from a deep seed.
+
+## `mod tests` › `struct FamilyMember {`
+
+One member of the census family the amended `decisions.bounded_census`
+describes: its name, its census, the dimensions it exists for and reaches
+at their bound, whether its generator is the restricted one of a seeded
+census, and that generator — so a test that re-offers a member's classes
+at its states offers the ones the member was explored under.
+
+## `mod tests` › `fn family() -> [FamilyMember; 2] {`
+
+The family: the prefix and the seeded deep census. The union of their
+explored states is what every coverage assertion of `bounded_census` runs
+over; a member's `reaches` is what
+`the_prefix_reports_its_truncation_and_every_seeded_census_closes` holds it
+to.
+
+## `mod tests` › `fn declared_bound(name: &str) -> u32 {`
+
+The packet's bound for one named dimension, read from
+`CensusBounds::default().dimensions()`.
+
+## `mod tests` › `fn the_prefix_reports_its_truncation_and_every_seeded_census_closes() {`
+
+The amended ST-14, member by member: the prefix explores to its stated
+state ceiling and reports truncation; every seeded census closes — not
+truncated, the frontier exhausted under its state ceiling, no state at the
+trace ceiling — names the dimensions it exists for and reaches each at its
+bound; and every dimension the prefix does not reach at its ceiling is named
+by some seeded census. Measured, that last set is empty: the prefix alone
+reaches all ten bounds at 20,000 states, and the test says so rather than
+leaving the contract's per-dimension clause to hold vacuously in silence — a
+generator change that left a dimension to the prefix's ceiling would fail
+here and would need a seeded census named for it.
 
 Memoised rather than re-explored per test: the search is deterministic
 and the value is shared behind `&`, so a second run would be the same
@@ -823,10 +878,11 @@ the repairs the fold registered, and `blocked` reads the Pending case's
 transitive closure — the fan-out, chain and join shapes all have
 dependencies to fail.
 
-## `fn the_derived_outcome_is_total_over_every_explored_state()` › `let census = census();`
+## `fn the_derived_outcome_is_total_over_every_explored_state()` › `for member in family() {`
 
 ST-14's headline: `NotEnding` or exactly one outcome at every
-explored state, and the `FoldError` arm never reached.
+explored state, and the `FoldError` arm never reached — over every member
+of the family, so over the union.
 
 Run through `TotalityAudit` rather than over `state.outcome`,
 because `state.outcome` is written by the explorer this assertion is
@@ -859,9 +915,12 @@ packet's precedence chain rather than by the function under test.
 The necessary conditions of the two arms the oracle above does
 not compute forwards, asserted backwards.
 
-## `fn a_state_with_admissible_work_and_no_budget_exceeded_clas…` › `let census = census();`
+## `fn a_state_with_admissible_work_and_no_budget_exceeded_clas…` › `for member in family() {`
 
-The pre-`budget_exceeded` counterexample the packet names: a run
+Over every member of the family; the seeded member's restricted generator
+offers no `budget_exceeded`, so it has a pre-budget interval and no
+post-budget state, and the test asserts that rather than skipping it. The
+pre-`budget_exceeded` counterexample the packet names: a run
 with structurally admissible work and no budget record is NotEnding
 *whatever the unmodeled spend*, and BudgetExceeded only after the
 record exists.
@@ -876,8 +935,11 @@ admissible work, and there is no budget record.
 Both halves of the counterexample are populated, so neither branch
 above is vacuous.
 
-## `fn every_deferred_state_has_a_legal_next_transition()` › `let census = census();`
+## `fn every_deferred_state_has_a_legal_next_transition()` › `for member in family() {`
 
+Over every member of the family, each re-offered its own generator's
+classes; the seeded member's generator offers no deferral, so it holds no
+deferred state, and the test asserts that rather than skipping it.
 `coverage_assertions`: "every state with a Deferred task or
 verification-deferred candidate has at least one legal next
 transition (defer_wait_elapsed when neither halting nor
@@ -987,9 +1049,10 @@ applies verbatim: `defer_wait_elapsed` is the way out.
 
 A deferred candidate holds the run open whatever else is true.
 
-## `fn the_publication_relations_are_exercised_in_both_directio…` › `let census = census();`
+## `fn the_publication_relations_are_exercised_in_both_directio…` › `let members = family();`
 
-`coverage_assertions`: every `merge_prepared(fast)` matching the
+The accepted and refused label sets are the unions over the family's
+members. `coverage_assertions`: every `merge_prepared(fast)` matching the
 relation is accepted and every mismatch refused, and the stale_clean
 and already_present relations exercised both ways. Both directions
 of each, over the states the census actually reached.
@@ -1003,9 +1066,12 @@ verification record, whose own hostile candidate
 (`merge_prepared/fast/with-verification`) is asserted refused the same
 way.
 
-## `fn no_offer_is_unmapped_and_every_class_is_offered_everywhe…` › `let census = census();`
+## `fn no_offer_is_unmapped_and_every_class_is_offered_everywhe…` › `for member in family() {`
 
-"no (state, event class) pair is unmapped": every offer produced an
+Over every member of the family, each held to its own generator's offers;
+the prefix explored exactly to its state ceiling and reports truncation,
+the seeded member closed with no truncated offer at all. "no (state, event
+class) pair is unmapped": every offer produced an
 acceptance or a refusal, and the count is the product rather than
 whatever survived.
 
@@ -1014,9 +1080,9 @@ whatever survived.
 Both directions occur for the census as a whole, and the search ran
 to exhaustion rather than stopping at its state ceiling.
 
-## `fn replaying_every_explored_trace_reaches_the_state_it_was_…` › `let census = census();`
+## `fn replaying_every_explored_trace_reaches_the_state_it_was_…` › `for member in family() {`
 
-INV-02 over the whole explored set: the live path and the replay
+INV-02 over the whole explored set of every member of the family: the live path and the replay
 path are one transition function, so a trace folded event by event
 during exploration and the same trace replayed from nothing must be
 the same state.
@@ -1497,12 +1563,15 @@ the explored states themselves (`reached_dimensions`: the registry's
 originals and repairs, the generations and attempts per task, the next
 sequence, the defers, the open questions, the epoch, the review passes a
 verified publication records) and held by **equality**, never merely below:
-the shared and the deep census together reach every declared bound, the
-shared census reaches seven of them on its own, and the deep census is what
-reaches the fourth sequence and the second repair, closing under its
-ceilings. A boundary the censuses did not reach is not evidence they
-explored it — which is what `PR3-ST14-004`'s below-bound assertion used to
-read as, and what the round-1 review of PR10 refused.
+the family's union reaches every declared bound, the test says which
+member reaches each (a member that names a dimension must be among them),
+the prefix reaches all ten on its own at its state ceiling (until round 6
+the assertion covered seven, and the notes said the deep census was the
+only route to the other three; the measurement says otherwise), and the
+deep census reaches the fourth sequence, the second repair and the second
+lineage, closing under its ceilings. A boundary the family did not reach
+is not evidence it explored it — which is what `PR3-ST14-004`'s below-bound
+assertion used to read as, and what the round-1 review of PR10 refused.
 
 ## `mod tests` › `fn production_arms() -> BTreeSet<&'static str> {`
 
@@ -1515,8 +1584,8 @@ through the `kind()` table in `src/topology/events.rs`.
 
 `coverage_assertions[0]`: every `plan_transition` arm executed at
 least once — the arms enumerated from the production source, the
-executions from the census's transitions, whose kinds the explorer
-records as it offers. Both ways: an arm no offer reached fails, and
+executions from the transitions of every member of the family, whose
+kinds the explorer records as it offers. Both ways: an arm no offer reached fails, and
 an offered kind the dispatch has no arm for fails.
 
 ## `mod tests` › `fn every_plan_shape_is_explored() {`
@@ -1559,7 +1628,8 @@ by running the recovery classifier over it (Complete and Halted
 classify as finalize-then-terminal)", and "the classification computed
 during live emission equals the classification recomputed from the
 durable prefix alone": the incremental fold each state was reached
-with, against a replay of its trace.
+with, against a replay of its trace, at every state of every member of
+the family, the three kinds counted over the union.
 
 ## `mod tests` › `fn every_fault_rows_durable_prefix_is_a_reachable_state_classified_as_its_resume_action() {`
 
@@ -1567,8 +1637,9 @@ with, against a replay of its trace.
 fold-derived classification matches the row's resume action". Row
 membership is read from the fold alone (`rows_reached`) and the
 classification checked item by item (`matches_row`), so a classifier that
-drops an item cannot also drop the assertion about it. The shared census
-reaches nineteen of the twenty-one rows on its own — the repair rows
+drops an item cannot also drop the assertion about it, over every state of
+every member of the family. The prefix reaches nineteen of the twenty-one
+rows on its own — the repair rows
 through the rejections the generator offers, the retained and retry rows
 through its retained settlements and resumed attempts, where the
 two-original skeleton reached fifteen and seeded the other four — and the
@@ -1618,13 +1689,20 @@ continuations and the census says so; the state ceiling is not hit.
 
 "every run_resumed with an identical runner identity is accepted and
 every run_resumed with any different field (kind, policy, reference,
-id, digest, volumes) is refused" — offered at every explored state.
-A Complete or Halted state refuses the identical one too, because the
+id, digest, volumes) is refused" — offered at every explored state of
+every member of the family. A Complete or Halted state refuses the
+identical one too, because the
 run is over; every other state accepts it, and the state it reaches
 has the next epoch, no budget stop, no deferral and no end.
 
 ## `mod tests` › `fn the_census_summary_names_every_fault_row_and_serializes() {`
 
-The summary the G5 gate dumps: every fault row, the two outside the
-fold marked, every action and outcome counted, the bounds it ran
-under. Written to `UPSTROKE_CENSUS_SUMMARY` when that names a file.
+The summary the G5 gate dumps, for the prefix as before — every fault
+row, the two outside the fold marked, every action and outcome counted,
+the bounds it ran under — and, since round 6, the family artifact around
+it: one entry per member with its name, whether its generator is
+restricted, whether it closed, the dimensions it reaches at their bound,
+its seed's length and its own summary (ceiling, states, offers,
+truncation), the union's reach in every dimension, and whether the union
+reaches every bound. Written to `UPSTROKE_CENSUS_SUMMARY` when that names
+a file.
