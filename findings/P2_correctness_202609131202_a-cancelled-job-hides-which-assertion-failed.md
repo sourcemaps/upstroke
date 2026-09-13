@@ -37,11 +37,25 @@ the hold outlived the reaper that took it
 ```
 
 — the same assertion and the same location as the macOS sighting, on a platform where the Darwin
-READY race this shape is being confused with **cannot occur**. Four full-suite runs at the same
-head: one reproduced it, three did not. So the `:8356` shape is a real full-suite intermittent that
-owes nothing to the reaper's startup, which is what the CI sighting most likely was — **an
-attribution the reproduction strengthens and still does not settle**, because job `103617998766`'s
-own assertion remains unreadable.
+READY race this shape is being confused with **cannot occur**.
+
+**Measured, with the merge base as a control run under the same conditions.** Two full suites run
+concurrently on one box, four runs each, `46e8be8` against the merge base `231c1aad`:
+
+| | runs | failed | `a_host_integration_reaper_holds_the_runs_cleanup_lease` |
+|---|---|---|---|
+| head `46e8be8` | 4 | 4 | **3** |
+| merge base `231c1aad` | 4 | 3 | 0 — but `repeated_container_launch_outages_…` once, the same lease |
+
+The diff between them is markdown under `findings/` alone
+(`git diff --name-only 231c1aad 46e8be8 -- src/ Cargo.toml Cargo.lock .github/` prints nothing), so
+the binaries are the same; **master fails three of four under this load too**, and which suite loses
+the race for a process-global lease is arbitrary. Run alone, `46e8be8` is green
+(`ALL 9 PASS`, `test result: ok. 2490 passed; 0 failed`).
+
+So the `:8356` shape is a real full-suite intermittent that owes nothing to the reaper's startup,
+which is what the CI sighting most likely was — **an attribution the reproduction strengthens and
+still does not settle**, because job `103617998766`'s own assertion remains unreadable.
 
 **The mechanism also appears in a neighbour.** A
 full `cargo test --all-targets --all-features` at `685957d` on Linux failed
