@@ -2905,6 +2905,11 @@ fn sites_this_module_owns() -> Vec<String> {
                 .iter()
                 .map(|site| EffectSiteId::Lock(*site).to_string()),
         )
+        .chain(
+            crate::topology::effects::ReportSite::ALL
+                .iter()
+                .map(|site| EffectSiteId::Report(*site).to_string()),
+        )
         .collect();
     names.sort_unstable();
     names
