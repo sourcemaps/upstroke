@@ -1454,7 +1454,7 @@ records_path() {
 locate_listing() {
   local path="$1" anchor entered=0 said top spelled prefix rest component index above=0
   local prefixes rests shallow deep named_root segment nameable answering walker named
-  local subject subrel here
+  local subject subrel here hopped=0
   listing_world=''
   listing_toplevel=''
   listing_relpath=''
@@ -1606,6 +1606,66 @@ locate_listing() {
     # Stdout alone, so the answer is `true` or `false` and nothing else: a warning
     # about some other file git could not read is on stderr and is not an answer.
     [[ "$probe_text" != true ]] || break
+    # A `false` IS GIT SAYING WHERE IT IS, AND THE WRITTEN PARENT IS NOT WHERE GIT
+    # WAS. This walk finds a repository by ENTERING directories and names the
+    # listing LEXICALLY, and stepping to the written parent is right for the
+    # second and wrong for the first: `git -C <path>` chdirs and resolves the path
+    # PHYSICALLY, so where a component of the listing is a SYMLINK OUT OF THE
+    # WRITTEN TREE the two chains part and the ascent walks up a tree git was
+    # never in. Measured on this box: a work tree `$EXT` that ignores a bare
+    # repository at `$EXT/bare.git`, a plain directory `$EXT/bare.git/holder`
+    # holding a matching finding, and a plain directory `$W` -- in NO repository
+    # -- holding a symlink `alias` to that bare repository. `alias/holder` from
+    # `$W` conformed at EXIT 0, where the same directory spelled
+    # `$EXT/bare.git/holder` refused at exit 1, and renaming `bare.git/HEAD` away
+    # -- which changes nothing about what any repository RECORDS -- flipped it to
+    # exit 1 and back again. That is the very defect the round before this closed
+    # for a directly spelled path: a file that merely makes a directory LOOK bare
+    # decided the verdict.
+    #
+    # So the hop is to GIT'S OWN POSITION. `--absolute-git-dir` answers where the
+    # git directory it found physically IS -- `$EXT/bare.git` from both spellings
+    # alike, and `<wt>/.git` for a path inside a non-bare `.git` -- and the ascent
+    # continues from that directory's PARENT, which is `$EXT`, where
+    # `--is-inside-work-tree` is `true` and both `HEAD` states then refuse alike.
+    # The path carried is one GIT resolved and not one a subshell resolved, which
+    # is the distinction this function's own header draws: `cd -P` in a subshell
+    # answers `/proc/self` with the SUBSHELL's pid, a directory gone before the
+    # next command runs.
+    #
+    # IT HAPPENS AT MOST ONCE, and that is the whole of the termination argument.
+    # The lexical walk is bounded because every step shortens the path; a hop
+    # shortens nothing, so it may not be the thing that repeats. It does not need
+    # to be: `--absolute-git-dir` is CANONICAL, so the anchor after a hop holds no
+    # symlink and its lexical parents are its physical ones. The written and
+    # physical chains have met and cannot part again, and every later `false` is
+    # the ordinary step above a bare repository or a `.git` -- which the lexical
+    # walk already gets right, because that is what the round before this fixed.
+    #
+    # A PINNED ENVIRONMENT IS NOT HOPPED, on the same test `repository_above`
+    # makes on its first line. With `GIT_DIR` exported, `--absolute-git-dir`
+    # answers the pinned directory wherever the anchor is, and its parent is a
+    # jump to an unrelated tree rather than a step up this one. See
+    # `PR280-ENV-EXPORTED-WORK-TREE-REFUSES-A-VALID-CALLER`, which is the same
+    # reading in the ascent's other half. `/proc/self` does not reach here either:
+    # git exits 128 for it rather than answering `false`, so the refusal above is
+    # what it gets, and the fixtures pin that rather than leave it true by
+    # accident.
+    if (( ! hopped )) && [[ -z "${GIT_DIR:-}" && -z "${GIT_WORK_TREE:-}" ]]; then
+      hopped=1
+      git_probe '0' -- -C "$anchor" rev-parse --absolute-git-dir
+      if [[ -n "$probe_text" ]]; then
+        # The git directory's own parent. A git directory AT a top -- `/.git` is
+        # the shape -- has nothing above it, and that is the same absence running
+        # out of levels is.
+        if ! path_parent "$probe_text"; then
+          listing_world=filesystem
+          return 0
+        fi
+        anchor="$parent_path"
+        continue
+      fi
+    fi
     # THE PARENT, by the one rule every walk in this file shortens a path with.
     # Running out of levels is the absence, and it is the only one. The work tree
     # this lands on is git's own physical path while the caller's components are

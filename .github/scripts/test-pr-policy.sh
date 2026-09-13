@@ -1922,6 +1922,141 @@ if [[ "$loose_nested_rc" != 0 ]]; then
   exit 1
 fi
 
+# ---- A COMPONENT THAT IS A SYMLINK MUST NOT LOSE THE PHYSICAL REPOSITORY ------------------------
+#
+# The ascent above steps to the WRITTEN parent, and that is right for naming the
+# listing and wrong for finding the repository. `git -C <path>` chdirs and
+# resolves the path PHYSICALLY, so where a component of the listing is a SYMLINK
+# OUT OF THE WRITTEN TREE the two chains part and the ascent walks up a tree git
+# was never in.
+#
+# The shape is the section above's, reached the other way round: a work tree that
+# IGNORES a bare repository under it, a plain directory inside that bare
+# repository holding a matching finding, and a directory in NO REPOSITORY AT ALL
+# holding a symlink to the bare one. Git answers `false` for the listing -- it is
+# inside the bare repository the link points at -- the ascent then asked about the
+# written parents, which are in no repository, ran out of levels, chose the
+# `filesystem` world and CONFORMED AT EXIT 0. The same directory spelled
+# physically refused at exit 1: one directory, two spellings, two verdicts.
+#
+# AND THE WITNESS THAT SAYS WHICH DEFECT IT IS is the section above's too.
+# Renaming `bare.git/HEAD` away leaves a directory git no longer reads as a
+# repository, which changes nothing about what any repository RECORDS, and it
+# flipped the verdict. Both states must refuse, and with the same words: the
+# repair is that the ascent asks GIT where the git directory physically is and
+# continues from that directory's parent, so `HEAD` decides nothing either way.
+#
+# RUNS NATIVELY ON WINDOWS: where a symlink can be made there, yes -- every name
+# here is an ordinary one and nothing is spelled with a backslash or a drive
+# designator. Where one cannot, the probe skips it loudly, as it does for every
+# other symlink case in this file.
+if [[ -L "$symlink_probe" ]]; then
+  sym_root="$fixture_dir/symlinked-component"
+  sym_ext="$sym_root/physical"
+  sym_written="$sym_root/written"
+  new_repo "$sym_ext"
+  printf 'bare.git/\n' > "$sym_ext/.gitignore"
+  echo seed > "$sym_ext/seed.txt"
+  git -C "$sym_ext" add -A \
+    && git -C "$sym_ext" commit -q -m 'a work tree that ignores the bare repository'
+  mkdir -p "$sym_ext/bare.git"
+  git -C "$sym_ext/bare.git" init -q --bare .
+  mkdir -p "$sym_ext/bare.git/holder"
+  printf 'fixture\n' \
+    > "$sym_ext/bare.git/holder/P2_correctness_202609130014_through-a-symlinked-component.md"
+  mkdir -p "$sym_written"
+  ln -s "$sym_ext/bare.git" "$sym_written/alias"
+  # The written side must really be outside every repository, or the case is
+  # about nothing: it is the ascent finding NOTHING up the written chain that
+  # chose the filesystem.
+  if [[ -n "$(git -C "$sym_ext" status --porcelain)" ]] \
+    || [[ -n "$(git -C "$sym_ext" ls-files -- bare.git)" ]] \
+    || [[ ! -L "$sym_written/alias" ]] \
+    || git -C "$sym_written" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo 'the fixture was meant to put the link in no repository, over an ignored bare one' >&2
+    exit 1
+  fi
+  sym_case() {  # sym_case -> "<exit> <first line of the refusal>"
+    local rc=0 out
+    out="$( cd "$sym_written" \
+      && "$BASH" "$branch_validator" \
+        'fix-P2/correctness_through-a-symlinked-component' 'alias/holder' 2>&1 )" || rc=$?
+    printf '%s %s\n' "$rc" "${out%%$'\n'*}"
+  }
+  sym_with_head="$(sym_case)"
+  mv "$sym_ext/bare.git/HEAD" "$sym_ext/bare.git/HEAD.renamed"
+  sym_no_head="$(sym_case)"
+  mv "$sym_ext/bare.git/HEAD.renamed" "$sym_ext/bare.git/HEAD"
+  sym_back="$(sym_case)"
+  if [[ "$sym_with_head" != 1\ * ]] || [[ "$sym_no_head" != "$sym_with_head" ]] \
+    || [[ "$sym_back" != "$sym_with_head" ]]; then
+    echo "a listing reached through a symlinked component must refuse whatever" \
+      "bare.git/HEAD is doing; got '$sym_with_head' with it, '$sym_no_head' without" \
+      "it and '$sym_back' with it back" >&2
+    exit 1
+  fi
+  # THE CONTROL IS THE SAME DIRECTORY SPELLED PHYSICALLY, which is the half that
+  # makes this two verdicts for one directory rather than one opinion about a
+  # link.
+  sym_physical_rc=0
+  "$BASH" "$branch_validator" 'fix-P2/correctness_through-a-symlinked-component' \
+    "$sym_ext/bare.git/holder" >/dev/null 2>&1 || sym_physical_rc=$?
+  if [[ "$sym_physical_rc" != 1 ]]; then
+    echo "the physical spelling of the same directory must refuse too; got $sym_physical_rc" >&2
+    exit 1
+  fi
+  # AND THE LEGITIMATE SHAPE THE SAME MECHANISM PRODUCES, because a hop to git's
+  # own position must not turn a listing red that nothing records. The loose bare
+  # repository above has nothing over it, so the filesystem is the whole of the
+  # evidence there whichever way the listing is reached -- and reached through a
+  # link it must still conform, exactly as its direct spelling does.
+  loose_alias="$fixture_dir/loose-bare-alias"
+  ln -s "$loose_bare" "$loose_alias"
+  loose_alias_rc=0
+  "$BASH" "$branch_validator" 'fix-P2/correctness_a-loose-bare-repository' \
+    "$loose_alias/holder" >/dev/null 2>&1 || loose_alias_rc=$?
+  if [[ "$loose_alias_rc" != 0 ]]; then
+    echo "a listing inside a bare repository nothing contains is the filesystem's to" \
+      "answer through a link too; got $loose_alias_rc" >&2
+    exit 1
+  fi
+else
+  echo 'note: skipping the symlinked-component cases (no symlink could be made)' >&2
+fi
+
+# ---- AND A PATH WHOSE RESOLUTION IS NOT STABLE DOES NOT REACH THE HOP ---------------------------
+#
+# The hop carries a path GIT resolved, which is why it is `--absolute-git-dir`
+# and not a `cd -P` in a subshell: that resolves `/proc/self` to the SUBSHELL's
+# pid, a directory gone before the next command runs. `/proc/self` does not reach
+# the hop at all, because git exits 128 for it rather than answering `false` --
+# and that is pinned here rather than left true by accident, since it is a fact
+# about git's behaviour and not about this file.
+#
+# RUNS NATIVELY ON WINDOWS: NO -- there is no `/proc` there, and the skip says so.
+# The property it pins is a property of `/proc`, so there is nothing to assert on
+# a platform that has none.
+proc_listing=/proc/self/fd
+if [[ -d "$proc_listing" ]]; then
+  proc_probe_rc=0
+  proc_probe="$(git -C "$proc_listing" rev-parse --is-inside-work-tree 2>/dev/null)" \
+    || proc_probe_rc=$?
+  if [[ "$proc_probe_rc" == 0 ]]; then
+    echo "git answered '$proc_probe' for '$proc_listing' at exit 0, so the ascent can now" \
+      "hop on a path whose resolution is per-process; the hop needs a reading for it" >&2
+    exit 1
+  fi
+  proc_rc=0
+  "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' "$proc_listing" \
+    >/dev/null 2>&1 || proc_rc=$?
+  if [[ "$proc_rc" == 0 ]]; then
+    echo "a listing whose resolution is per-process conformed" >&2
+    exit 1
+  fi
+else
+  echo 'note: skipping the unstable-resolution case (no /proc/self here)' >&2
+fi
+
 # AND A REPOSITORY ABOVE THAT GIT FAILED ABOUT AND THIS CAN EXAMINE, which is the
 # third of `repository_above`'s three answers and the one no fixture reached: an
 # unreadable `.git/config` fails DISCOVERY at the superproject while
@@ -2440,7 +2575,7 @@ walk_case 'a drive-relative spelling is a top and is asked nothing' \
 anchor_harness="$fixture_dir/anchor-walk.sh"
 cat > "$anchor_harness" <<'ANCHOR'
 set -uo pipefail
-validator="$1"; start="$2"; cap="$3"
+validator="$1"; start="$2"; cap="$3"; gitdir="${4:-}"
 src="$(awk '/^locate_listing\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
 [[ -n "$src" ]] || { echo 'harness: locate_listing was not extracted'; exit 3; }
 rule="$(awk '/^path_parent\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
@@ -2457,15 +2592,25 @@ at=''
 git_probe() {
   [[ "$1" == 0,128 || "$1" == 0 ]] && [[ "$2" == -- ]] && [[ "$3" == -C ]] \
     && [[ "$5" == rev-parse ]] || { echo "harness: unexpected call: git_probe $*"; exit 3; }
-  [[ "$6" == --is-inside-work-tree ]] || { echo "harness: unexpected probe '$6'"; exit 3; }
-  asked=$(( asked + 1 ))
-  at="${at:+$at }$4"
-  if (( asked > cap )); then
-    echo "harness: $asked probes and still asking about '$4'"
-    exit 124
-  fi
   probe_status=0
-  probe_text=false
+  case "$6" in
+    --is-inside-work-tree)
+      asked=$(( asked + 1 ))
+      at="${at:+$at }$4"
+      if (( asked > cap )); then
+        echo "harness: $asked probes and still asking about '$4'"
+        exit 124
+      fi
+      probe_text=false
+      ;;
+    # EVERY DIRECTORY HERE IS A BARE REPOSITORY, which is what `false`
+    # throughout means, and a bare repository's git directory IS the directory
+    # asked about. So the hop to git's own position lands exactly where the
+    # lexical step lands, and these rows measure the arithmetic and not the hop
+    # -- `$gitdir` is what moves them apart, and the row below sets it.
+    --absolute-git-dir) probe_text="${gitdir:-$4}" ;;
+    *) echo "harness: unexpected probe '$6'"; exit 3 ;;
+  esac
 }
 repository_above() { echo 'harness: no probe here fails, so this is unreachable'; exit 3; }
 indent() { :; }
@@ -2522,6 +2667,152 @@ if (( posix_names )); then
     exit 1
   fi
 
+  # AND THE HOP TO GIT'S OWN POSITION, which is the other thing a `false` sets off.
+  # The rows above stub every directory as a bare repository -- which is what
+  # `false` throughout means -- so the hop lands exactly where the lexical step
+  # lands and they measure the arithmetic. Handing the stub a git directory
+  # SOMEWHERE ELSE is what separates the two: the ascent must continue from THAT
+  # directory's parent, because git resolved the anchor physically and the written
+  # parent is in whatever tree the caller's own spelling walks up.
+  #
+  # AND AT MOST ONCE, WHICH IS THE WHOLE OF THE TERMINATION ARGUMENT. A hop
+  # shortens nothing, so it may not be the step that repeats; it does not need to
+  # be, because `--absolute-git-dir` is canonical and the anchor after one hop
+  # holds no symlink. Without that bound this row does not merely answer wrongly --
+  # `/elsewhere` hops to `/elsewhere` for ever and the harness's cap fires at 124.
+  anchor_hop_rc=0
+  anchor_hop="$( cd "$anchor_dir" \
+    && "$BASH" "$anchor_harness" "$branch_validator" 'C:/a/b' 40 '/elsewhere/bare.git' 2>&1 )" \
+    || anchor_hop_rc=$?
+  if [[ "$anchor_hop_rc" != 0 ]] \
+    || [[ "$anchor_hop" != 'rc=0 world=filesystem asked=3 at=[C:/a /elsewhere /]' ]]; then
+    echo "a false must hop to the parent of git's own git directory, once; got" \
+      "'$anchor_hop' at exit $anchor_hop_rc" >&2
+    exit 1
+  fi
+  # AND A BACKSLASH-ROOTED ANCHOR IS SHORTENED AT ALL, which is this function's
+  # TWO walks on one row: the enter loop that descends to a directory it can
+  # stand in, and the ascent that climbs back out of it. `C:\a\b` holds no
+  # forward slash, so a `/`-only strip removes nothing from it -- the descent
+  # read "no separator" as "relative" and fell back to `.`, THE SHELL'S OWN
+  # DIRECTORY, which is not an ancestor of the path at all, and the ascent read
+  # it as a top and chose the filesystem without asking about anything. Both
+  # walks now go through the one rule, and the row is what says so: the anchor
+  # the enter loop lands on is `C:\a`, and the ascent climbs from it to the
+  # drive root.
+  anchor_native_rc=0
+  anchor_native="$( cd "$anchor_dir" \
+    && "$BASH" "$anchor_harness" "$branch_validator" 'C:\a\b' 40 2>&1 )" || anchor_native_rc=$?
+  if [[ "$anchor_native_rc" != 0 ]] \
+    || [[ "$anchor_native" != 'rc=0 world=filesystem asked=2 at=[C:\a C:\]' ]]; then
+    echo "a backslash-rooted anchor must be shortened by the descent and by the ascent;" \
+      "got '$anchor_native' at exit $anchor_native_rc" >&2
+    exit 1
+  fi
+  # AND THE ASCENT KEEPS SHORTENING AFTER THE HOP, which is the half the row
+  # above cannot see: the hop itself goes through the one rule, so a walk whose
+  # LEXICAL step still stripped a forward slash only would be carried over its
+  # first level by the hop and stop at the second. Hopping to a git directory
+  # three components deep is what puts the lexical step on a native path with
+  # somewhere left to go -- `C:\x\y` to `C:\x` to the drive root -- where a
+  # `/`-only strip reads the first as a top and chooses the filesystem at once.
+  anchor_after_hop_rc=0
+  anchor_after_hop="$( cd "$anchor_dir" \
+    && "$BASH" "$anchor_harness" "$branch_validator" 'C:\a\b' 40 'C:\x\y\.git' 2>&1 )" \
+    || anchor_after_hop_rc=$?
+  if [[ "$anchor_after_hop_rc" != 0 ]] \
+    || [[ "$anchor_after_hop" != 'rc=0 world=filesystem asked=4 at=[C:\a C:\x\y C:\x C:\]' ]]; then
+    echo "after the hop the ascent must go on shortening a native path; got" \
+      "'$anchor_after_hop' at exit $anchor_after_hop_rc" >&2
+    exit 1
+  fi
+  # AND A PINNED ENVIRONMENT IS NOT HOPPED, on the same test `repository_above`
+  # makes on its first line: with `GIT_DIR` exported, `--absolute-git-dir` answers
+  # the pinned directory wherever the anchor is, and its parent is a jump to an
+  # unrelated tree rather than a step up this one. The lexical walk is what runs,
+  # and it is the same chain the unpinned rows above measure.
+  anchor_pinned_rc=0
+  anchor_pinned="$( cd "$anchor_dir" \
+    && GIT_DIR="$anchor_dir/pinned.git" "$BASH" "$anchor_harness" "$branch_validator" \
+      'C:/a/b' 40 '/elsewhere/bare.git' 2>&1 )" || anchor_pinned_rc=$?
+  if [[ "$anchor_pinned_rc" != 0 ]] \
+    || [[ "$anchor_pinned" != 'rc=0 world=filesystem asked=2 at=[C:/a C:/]' ]]; then
+    echo "a pinned GIT_DIR must leave the ascent lexical; got" \
+      "'$anchor_pinned' at exit $anchor_pinned_rc" >&2
+    exit 1
+  fi
+fi
+
+# ---- AND repository_above IS THE THIRD WALK ON THAT RULE ----------------------------------------
+#
+# `repository_above` decides whether git's failure at a listing may be read as an
+# absence, and it decides it by WALKING UP asking about each level. It carried
+# its own copy of the shortening arithmetic until this round, and a copy is
+# exactly what lets one spelling be repaired and another left: with a
+# forward-slash strip, `C:\y` shortens to itself, the walk reads "did not
+# shorten" as "is a top" and answers ABSENCE at the first level -- no repository
+# above a directory that may well have one, which is the reading the whole
+# function exists to refuse.
+#
+# IT IS DRIVEN DIRECTLY, like the two walks above, because nothing on this
+# platform hands it a native path -- and with REAL DIRECTORIES under it, because
+# its levels are decided by `-e <level>/.` and a level that is not there is a
+# refusal and not a step. The probe is stubbed to fail at every level, which is
+# what "no repository anywhere" looks like, and WHAT IS ASSERTED IS THE SEQUENCE
+# OF PATHS IT ASKED ABOUT: a walk that terminates tidily while asking about `C:`
+# rather than `C:/` is the same one-character defect the walks above have rows
+# for, and only the sequence can see it.
+#
+# RUNS NATIVELY ON WINDOWS: NO, for the same reason those do -- the rows need
+# real directories named `C:`, `C:\` and `C:\y`, which only POSIX holds.
+above_harness="$fixture_dir/repository-above-walk.sh"
+cat > "$above_harness" <<'ABOVE'
+set -uo pipefail
+validator="$1"; start="$2"; cap="$3"
+src="$(awk '/^repository_above\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$src" ]] || { echo 'harness: repository_above was not extracted'; exit 3; }
+rule="$(awk '/^path_parent\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$rule" ]] || { echo 'harness: path_parent was not extracted'; exit 3; }
+src="$rule
+$src"
+bash -n <<< "$src" || { echo 'harness: the extract does not parse'; exit 3; }
+eval "$src"
+unset GIT_DIR GIT_WORK_TREE
+probe_status=0; probe_text=''; probe_stderr=''; unexaminable_git=''
+asked=0
+at=''
+git_probe() {
+  [[ "$1" == 0,128 ]] && [[ "$2" == -- ]] && [[ "$3" == rev-parse ]] \
+    && [[ "$4" == --resolve-git-dir ]] || { echo "harness: unexpected call: git_probe $*"; exit 3; }
+  asked=$(( asked + 1 ))
+  at="${at:+$at }$5"
+  if (( asked > cap )); then
+    echo "harness: $asked probes and still asking about '$5'"
+    exit 124
+  fi
+  probe_status=128
+}
+rc=0
+repository_above "$start" || rc=$?
+echo "rc=$rc asked=$asked at=[$at]"
+ABOVE
+if (( posix_names )); then
+  above_dir="$fixture_dir/repository-above-walk"
+  mkdir -p "$above_dir/C:/y" "$above_dir/C:\\y" "$above_dir/C:\\" "$above_dir/p/q"
+  above_case() {  # above_case <label> <start> <expected line>
+    local label="$1" got rc=0
+    got="$( cd "$above_dir" && "$BASH" "$above_harness" "$branch_validator" "$2" 20 2>&1 )" || rc=$?
+    if [[ "$rc" != 0 ]] || [[ "$got" != "$3" ]]; then
+      echo "$label: expected '$3' at exit 0; got '$got' at exit $rc" >&2
+      exit 1
+    fi
+  }
+  above_case 'an ordinary path shortens and runs out of levels' \
+    'p/q' 'rc=1 asked=2 at=[p/q/.git p/.git]'
+  above_case 'a drive-rooted path reaches the drive ROOT' \
+    'C:/y' 'rc=1 asked=2 at=[C:/y/.git C://.git]'
+  above_case 'a backslash-rooted path shortens at all, and at its own separator' \
+    'C:\y' 'rc=1 asked=2 at=[C:\y/.git C:\/.git]'
 fi
 
 # ---- what git RECORDS, not what the checkout happens to hold -----------------------------------
