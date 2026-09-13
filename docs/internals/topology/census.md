@@ -133,8 +133,8 @@ fewer than the allowance, and one is the bound the census reaches by
 equality; the parked second outage is a class of its own
 (`merge_verification_unavailable/parked`). Until PR10's round 2 the
 dimension was measured from a task's worker backoff (`task.defers`), which
-the packet does not bound; that count is still noted, as `worker_defers`,
-and no bound is declared for it.
+the packet does not bound; that count is no longer measured, and the
+dimension reads the queue entries alone.
 
 ## `pub struct CensusBounds` › `pub questions: u32,`
 

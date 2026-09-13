@@ -135,42 +135,58 @@ impl Census {
 
         while let Some(id) = frontier.pop_front() {
             let first = transitions.len();
-            if states[id].trace.len() >= bounds.max_trace {
-                if classes(&states[id].fold)
+            let Some(state) = states.get(id) else {
+                continue;
+            };
+            let offers = classes(&state.fold);
+            if state.trace.len() >= bounds.max_trace {
+                if offers
                     .iter()
-                    .any(|candidate| states[id].fold.plan_transition(&candidate.event).is_ok())
+                    .any(|candidate| state.fold.plan_transition(&candidate.event).is_ok())
                 {
                     truncated = true;
                 }
                 continue;
             }
-            for candidate in classes(&states[id].fold) {
-                let kind = candidate.event.body.kind();
-                let label = intern(&mut interned, candidate.label);
-                let outcome = match states[id].fold.plan_transition(&candidate.event) {
-                    Err(error) => TransitionOutcome::Refused {
-                        reason: intern(&mut interned, error.to_string()),
-                    },
-                    Ok(delta) => {
-                        let mut next = states[id].fold.clone();
-                        next.apply_delta(delta);
+            let planned: Vec<Planned> = offers
+                .into_iter()
+                .map(|candidate| {
+                    let kind = candidate.event.body.kind();
+                    let label = intern(&mut interned, candidate.label);
+                    let next = match state.fold.plan_transition(&candidate.event) {
+                        Err(error) => Err(intern(&mut interned, error.to_string())),
+                        Ok(delta) => {
+                            let mut next = state.fold.clone();
+                            next.apply_delta(delta);
+                            Ok(next)
+                        }
+                    };
+                    Planned {
+                        label,
+                        kind,
+                        next,
+                        event: candidate.event,
+                    }
+                })
+                .collect();
+            for planned in planned {
+                let outcome = match planned.next {
+                    Err(reason) => TransitionOutcome::Refused { reason },
+                    Ok(next) => {
                         let key = fingerprint(&next);
                         match seen.get(&key) {
                             Some(existing) => TransitionOutcome::Accepted { to: *existing },
+                            None if states.len() >= bounds.max_states => {
+                                truncated = true;
+                                TransitionOutcome::Truncated
+                            }
                             None => {
-                                if states.len() >= bounds.max_states {
-                                    truncated = true;
-                                    transitions.push(CensusTransition {
-                                        from: id,
-                                        label,
-                                        kind,
-                                        outcome: TransitionOutcome::Truncated,
-                                    });
+                                let Some(parent) = states.get(id) else {
                                     continue;
-                                }
+                                };
                                 let to = states.len();
-                                let mut trace = states[id].trace.clone();
-                                trace.push(candidate.event.clone());
+                                let mut trace = parent.trace.clone();
+                                trace.push(planned.event);
                                 seen.insert(key, to);
                                 states.push(CensusState {
                                     id: to,
@@ -187,8 +203,8 @@ impl Census {
                 };
                 transitions.push(CensusTransition {
                     from: id,
-                    label,
-                    kind,
+                    label: planned.label,
+                    kind: planned.kind,
                     outcome,
                 });
             }
@@ -251,7 +267,10 @@ impl Census {
         self.transitions
             .iter()
             .filter(|transition| {
-                matches!(transition.outcome, TransitionOutcome::Accepted { .. }) == accepted
+                matches!(
+                    transition.outcome,
+                    TransitionOutcome::Accepted { .. } | TransitionOutcome::Truncated
+                ) == accepted
             })
             .map(|transition| &*transition.label)
             .collect()
@@ -304,6 +323,13 @@ impl TotalityAudit {
         }
         audit
     }
+}
+
+struct Planned {
+    label: Arc<str>,
+    kind: &'static str,
+    next: Result<TopologyFold, Arc<str>>,
+    event: TopologyEvent,
 }
 
 fn fingerprint(fold: &TopologyFold) -> String {
@@ -2561,6 +2587,29 @@ pub(crate) mod tests {
         assert!(
             !closed.truncated(),
             "a space that closes under both ceilings is not reported truncated"
+        );
+
+        let stopped = Census::explore(
+            started(),
+            vec![run_started_event()],
+            CensusBounds {
+                max_states: 1,
+                ..CensusBounds::default()
+            },
+            dispatch_once_then_dead,
+        );
+        assert!(stopped.truncated());
+        assert!(
+            !stopped
+                .refused_labels()
+                .contains("task_dispatched/aleph/g0"),
+            "an offer the fold accepted and the state ceiling cut is not a refusal"
+        );
+        assert!(
+            stopped
+                .accepted_labels()
+                .contains("task_dispatched/aleph/g0"),
+            "it is an acceptance of the fold's, whatever became of its destination"
         );
     }
     #[test]
