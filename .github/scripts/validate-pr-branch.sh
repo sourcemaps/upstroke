@@ -596,8 +596,9 @@ unset GLOBIGNORE
 # selected this work tree" that makes the question answerable -- the pin is what
 # stops it being answered. No probe below this line reads any of the three: the
 # lines under it that name them are comments, which `grep -n` says and the
-# environment fixtures then assert from the outside, row by row, by running the
-# pinned and the clean invocation and comparing both the exit code and the bytes.
+# environment fixtures then assert from the outside, row by row -- the pinned run
+# and the clean run compared on exit code AND bytes wherever the records answer,
+# and the pinned run required to refuse with a named reason where they do not.
 # That is also what keeps the equivalence property covering these callers at all:
 # the three tree listings are FILES and no variable moves them, so a directory
 # whose answer the environment can change disagrees with them by construction.
@@ -619,8 +620,8 @@ unset GLOBIGNORE
 # ledger: it is evidence that there is one the path cannot reach, and refusing is
 # the only thing that evidence is allowed to do here. The guard is written on
 # `listing_world`, so where the RECORDS answer it cannot fire and the pinned run
-# and the clean run stay the same run, which is what the fixture rows below the
-# refusing ones assert.
+# and the clean run stay the same run, which is what every `env_case` row in that
+# group asserts.
 #
 # WHAT THIS DOES NOT ENFORCE, MEASURED RATHER THAN ASSUMED, because "cannot move
 # a verdict" stood here as an assertion and two reviews then argued it both ways.
