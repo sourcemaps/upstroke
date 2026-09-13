@@ -2029,6 +2029,29 @@ fn resume_finalizes_halted_then_refuses() {
             .join("intents")
             .join(format!(".stage-task-{}.tmp", crate::ulid::ulid()));
         crate::workspace_manager::fixture::write_file(&orphan, b"{\"half\":");
+        let torn_slot = crate::engine::topology::dispatch::task_slot(
+            crate::topology::registry::TaskKey(9),
+            GEN,
+        );
+        manager
+            .write_intent(&mut crate::workspace_manager::NoHooks, &torn_slot)
+            .expect("the torn add's intent, durable before the add");
+        let torn_path = manager.slot_path(&torn_slot);
+        let torn_admin = manager.common_git_dir().join("worktrees").join(
+            torn_path
+                .file_name()
+                .expect("a slot path has a final component"),
+        );
+        crate::workspace_manager::fixture::write_file(
+            &torn_admin.join("locked"),
+            b"initializing\n",
+        );
+        crate::workspace_manager::fixture::write_file(&torn_admin.join("gitdir"), b"");
+        crate::workspace_manager::fixture::create_dir(&torn_path);
+        let torn_before = (
+            std::fs::read(torn_admin.join("locked")).expect("the torn lock"),
+            std::fs::read(torn_admin.join("gitdir")).expect("the torn gitdir"),
+        );
         let before = fixture.log_bytes();
         let (result, _) = resume(fixture, &harness, &given);
 
@@ -2052,6 +2075,23 @@ fn resume_finalizes_halted_then_refuses() {
             !orphan.exists(),
             "the staging orphan is reclaimed by finalization, which holds the ownership proof \
              reclaim lacks ({tag})"
+        );
+        assert!(
+            text.contains("passed over and left as found")
+                && text.contains(&torn_admin.display().to_string()),
+            "the refusal names the registration finalization could not bind ({tag}): {text}"
+        );
+        assert!(
+            !torn_path.exists(),
+            "the torn add's contained checkout is reclaimed under the finalizer's proof ({tag})"
+        );
+        assert_eq!(
+            (
+                std::fs::read(torn_admin.join("locked")).expect("the torn lock stands"),
+                std::fs::read(torn_admin.join("gitdir")).expect("the torn gitdir stands"),
+            ),
+            torn_before,
+            "the registration nothing binds is left byte-identical ({tag})"
         );
         assert_eq!(
             fixture.log_bytes(),
@@ -12980,10 +13020,6 @@ fn two_lineages_publish_in_lineage_order_and_the_younger_candidate_waits_behind_
     assert_eq!(driven.entitlements_held, 0);
 }
 
-// ---------------------------------------------------------------------------
-// PR10: run-end closure at max_parallel = 1 (T-FINISH, ST-17).
-// ---------------------------------------------------------------------------
-
 fn with_live_run<R>(
     fixture: &Fixture,
     harness: &Arc<Mutex<HookHarness>>,
@@ -13782,6 +13818,226 @@ fn run_finished_halted_and_budget_exceeded_accepted_with_deferred_items() {
         resume_with_real_refs(&fixture, &fresh).expect("a budget-stopped run resumes");
     assert_eq!(handle.fold.task_state(ALPHA), Some(TaskState::Pending));
     assert!(handle.fold.budget_stop().is_none());
+
+    let fixture = Fixture::two_tasks("closure-halted-verification-deferred");
+    let planted = plant_queued_candidate(&fixture);
+    let mut hooks = HarnessTopologyHooks::new(Arc::new(Mutex::new(HookHarness::new())));
+    let (_, mut handle) = resume_as(&fixture, RESUMER, &runtime_holding_the_record(), &mut hooks)
+        .expect("the started run resumes");
+    let pin = plant_live_verification_deferral(&fixture, &mut handle, &planted, &mut hooks);
+    plant_live(
+        &fixture,
+        &mut handle,
+        vec![
+            for_task(BETA, "beta", dispatched()),
+            for_task(BETA, "beta", attempt_started_in(&fixture, 1)),
+            for_task(
+                BETA,
+                "beta",
+                attempt_finished(
+                    1,
+                    AttemptSettlement::Closed {
+                        transition: SettlementTransition::Failed {
+                            halts_run: true,
+                            reason: "the ladder ran out".to_owned(),
+                        },
+                        lease: LeaseDisposition::PredictedReleased,
+                    },
+                ),
+            ),
+        ],
+        &mut hooks,
+    );
+    {
+        let fold = &handle.fold;
+        assert!(
+            verification_deferred(fold),
+            "the candidate is verification-deferred live"
+        );
+        assert!(fold.backoff_pending() && fold.halted_at() == Some(BETA));
+        assert_eq!(
+            fold.derived_outcome(),
+            DerivedOutcome::Ending(RunOutcome::Halted),
+            "a halting settlement yields Halted with a verification deferred"
+        );
+        accepts_end(fold, RunOutcome::Halted, Some(BETA));
+        refuses_end(fold, RunOutcome::Complete, None);
+        refuses_end(fold, RunOutcome::Parked, None);
+    }
+    let seams = DriveSeams::default();
+    let runner = driven_runner(&seams);
+    let driven = drive_handle(&fixture, handle, &seams, 2, &runner, &mut hooks);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Finished {
+                outcome: RunOutcome::Halted,
+                closed: 0,
+                ..
+            }))
+        ),
+        "the halted closure finishes over a verification-deferred candidate: {:?}",
+        driven.progress
+    );
+    assert!(
+        matches!(driven.progress.get(1), Some(Err(error)) if error.to_string().contains("already finished as `halted`")),
+        "{:?}",
+        driven.progress
+    );
+    let ends = finished_events(&driven.log);
+    assert_eq!(ends.len(), 1);
+    assert_eq!(
+        (ends[0].outcome.clone(), ends[0].halted_at),
+        (RunOutcome::Halted, Some(BETA))
+    );
+    assert!(
+        verification_deferred(&replayed(&fixture)),
+        "the deferral is void with the halted run, not woken by it"
+    );
+    assert_eq!(
+        ref_target(&fixture, planted.candidate.candidate_ref.as_str()).as_deref(),
+        Some(planted.commit.as_str()),
+        "Halted retains the deferred candidate's candidates ref (R11)"
+    );
+    assert!(
+        ref_target(&fixture, pin.as_str()).is_none(),
+        "and finalization's step (iv) pruned its prepared pin, as at every outcome"
+    );
+
+    let fixture = Fixture::two_tasks("closure-budget-verification-deferred");
+    let planted = plant_queued_candidate(&fixture);
+    let mut hooks = HarnessTopologyHooks::new(Arc::new(Mutex::new(HookHarness::new())));
+    let (_, mut handle) = resume_as(&fixture, RESUMER, &runtime_holding_the_record(), &mut hooks)
+        .expect("the started run resumes");
+    let epoch = handle.fold.epoch().expect("the resume opened an epoch").0;
+    let pin = plant_live_verification_deferral(&fixture, &mut handle, &planted, &mut hooks);
+    plant_live(
+        &fixture,
+        &mut handle,
+        vec![budget_exceeded(epoch)],
+        &mut hooks,
+    );
+    {
+        let fold = &handle.fold;
+        assert!(verification_deferred(fold) && fold.backoff_pending());
+        assert!(fold.budget_stop().is_some());
+        assert_eq!(
+            fold.derived_outcome(),
+            DerivedOutcome::Ending(RunOutcome::BudgetExceeded),
+            "a pending verification backoff never blocks BudgetExceeded once common holds"
+        );
+        accepts_end(fold, RunOutcome::BudgetExceeded, None);
+        refuses_end(fold, RunOutcome::Parked, None);
+        refuses_end(fold, RunOutcome::Complete, None);
+    }
+    let seams = DriveSeams::default();
+    let runner = driven_runner(&seams);
+    let driven = drive_handle(&fixture, handle, &seams, 1, &runner, &mut hooks);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Finished {
+                outcome: RunOutcome::BudgetExceeded,
+                closed: 0,
+                ..
+            }))
+        ),
+        "the budget closure finishes over a verification-deferred candidate: {:?}",
+        driven.progress
+    );
+    let ends = finished_events(&driven.log);
+    assert_eq!(ends.len(), 1);
+    assert_eq!(ends[0].outcome, RunOutcome::BudgetExceeded);
+    assert!(
+        verification_deferred(&replayed(&fixture)),
+        "step (5b) appends nothing for a deferred candidate: it stays resumably_open"
+    );
+    assert_eq!(
+        ref_target(&fixture, planted.candidate.candidate_ref.as_str()).as_deref(),
+        Some(planted.commit.as_str()),
+        "BudgetExceeded retains the deferred candidate's candidates ref (R11)"
+    );
+    assert!(
+        ref_target(&fixture, pin.as_str()).is_none(),
+        "and its prepared pin is pruned by step (iv)"
+    );
+    let fresh = Arc::new(Mutex::new(HookHarness::new()));
+    let (_, handle) =
+        resume_with_real_refs(&fixture, &fresh).expect("a budget-stopped run resumes");
+    assert!(
+        !verification_deferred(&handle.fold),
+        "the resume wakes the deferred candidate"
+    );
+    assert!(handle.fold.budget_stop().is_none());
+}
+
+fn verification_deferred(fold: &TopologyFold) -> bool {
+    fold.queue().is_some_and(|queue| {
+        queue
+            .entries()
+            .iter()
+            .any(|entry| entry.verification_deferred)
+    })
+}
+
+fn plant_live_verification_deferral(
+    fixture: &Fixture,
+    handle: &mut RunHandle,
+    planted: &PlantedTransaction,
+    hooks: &mut dyn TopologyHooks,
+) -> GitRef {
+    use crate::workspace_manager::fixture::git;
+    let moved = commit_on(
+        fixture,
+        fixture.base_sha.as_str(),
+        "moved.txt",
+        "the head moved\n",
+        "upstroke: the head moved",
+    );
+    let proposal = commit_on(
+        fixture,
+        moved.as_str(),
+        "candidate.txt",
+        "the candidate edit\n",
+        "upstroke: proposal s0",
+    );
+    let pin = crate::engine::topology::integrate::prepared_pin_ref(
+        RUN_ID,
+        crate::topology::events::SequenceId(0),
+    );
+    git(
+        &fixture.repo_root,
+        &["update-ref", pin.as_str(), proposal.as_str()],
+    );
+    plant_live(
+        fixture,
+        handle,
+        vec![
+            TopologyEventBody::MergeVerificationStarted {
+                data: crate::topology::events::MergeVerificationStarted {
+                    sequence: crate::topology::events::SequenceId(0),
+                    candidate: planted.candidate.clone(),
+                    basis: crate::topology::events::VerificationBasis::StaleClean {
+                        prepared_ref: pin.clone(),
+                    },
+                    expected_head: moved,
+                    proposed_sha: proposal,
+                },
+            },
+            TopologyEventBody::MergeVerificationUnavailable {
+                data: crate::topology::events::MergeVerificationUnavailable {
+                    sequence: crate::topology::events::SequenceId(0),
+                    cause: crate::topology::events::UnavailableCause::Infrastructure {
+                        kind: crate::topology::events::InfrastructureKind::RunnerSpawnFailure,
+                    },
+                    outcome: crate::topology::events::UnavailableOutcome::Deferred { defers: 1 },
+                    reviews: Vec::new(),
+                },
+            },
+        ],
+        hooks,
+    );
+    pin
 }
 
 fn publish_alpha(fixture: &Fixture) -> PlantedTransaction {
@@ -13988,11 +14244,15 @@ fn an_append_error_at_the_run_ending_close_ends_the_command_and_the_next_resume_
     use crate::topology::events::GenerationCloseReason;
     use crate::topology::fold::GenerationClass;
 
-    for (point, durable) in [
-        (SubEffectPoint::Written, false),
-        (SubEffectPoint::WrittenFull, true),
+    for (point, durable, fail_barrier) in [
+        (SubEffectPoint::Written, false, false),
+        (SubEffectPoint::WrittenFull, true, false),
+        (SubEffectPoint::WrittenFull, true, true),
     ] {
-        let tag = format!("close-append-{point}");
+        let tag = format!(
+            "close-append-{point}{}",
+            if fail_barrier { "-barrier-fails" } else { "" }
+        );
         let fixture = Fixture::two_tasks(&tag);
         publish_alpha(&fixture);
         let shared = harness();
@@ -14040,6 +14300,14 @@ fn an_append_error_at_the_run_ending_close_ends_the_command_and_the_next_resume_
                         InjectionMode::ErrorReturn,
                     )
                     .expect("the point supports an error return");
+                    if fail_barrier {
+                        seen.arm(
+                            EffectSiteId::Event(EventSite::OpenLog),
+                            SubEffectPoint::SyncPrefix,
+                            InjectionMode::ErrorReturn,
+                        )
+                        .expect("the barrier supports an error return");
+                    }
                     untouched_after
                         .iter()
                         .map(|site| seen.count(*site, HookPhase::Before))
@@ -14055,6 +14323,12 @@ fn an_append_error_at_the_run_ending_close_ends_the_command_and_the_next_resume_
         assert!(
             text.contains("generation_closed"),
             "{tag}: the protocol names the event kind: {text}"
+        );
+        assert_eq!(
+            text.contains("undetermined"),
+            fail_barrier,
+            "{tag}: the outcome is undetermined exactly when the replacement barrier failed \
+             after the whole line was written, and asserted otherwise: {text}"
         );
         assert!(poisoned, "{tag}: the fold is poisoned");
         assert!(
@@ -14680,10 +14954,6 @@ fn kill_inside_closure_recovers() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PR10: terminal finalization (T-FINALIZE, ST-18).
-// ---------------------------------------------------------------------------
-
 struct ArmedFinalization {
     inner: HarnessTopologyHooks,
     effects: ArmedSite,
@@ -14965,7 +15235,7 @@ fn assert_finalized(planted: &FinishedPlanting, outcome: &RunOutcome, tag: &str)
 }
 
 struct FinalizationEffect {
-    site: EffectSiteId,
+    sites: Vec<EffectSiteId>,
     label: &'static str,
     done: fn(&FinishedPlanting) -> bool,
 }
@@ -14989,17 +15259,20 @@ fn finalization_effects(outcome: &RunOutcome) -> Vec<FinalizationEffect> {
     }
     let mut effects = vec![
         FinalizationEffect {
-            site: EffectSiteId::RunDir(RunDirSite::WriteReport),
+            sites: vec![
+                EffectSiteId::RunDir(RunDirSite::WriteReport),
+                EffectSiteId::Report(crate::topology::effects::ReportSite::Write),
+            ],
             label: "report written",
             done: |planted| planted.fixture.public().join("report.json").is_file(),
         },
         FinalizationEffect {
-            site: EffectSiteId::Worktree(WorktreeSite::Remove),
+            sites: vec![EffectSiteId::Worktree(WorktreeSite::Remove)],
             label: "beta's worktree removed",
             done: |planted| !planted.beta_worktree.exists(),
         },
         FinalizationEffect {
-            site: EffectSiteId::Worktree(WorktreeSite::RemoveIntent),
+            sites: vec![EffectSiteId::Worktree(WorktreeSite::RemoveIntent)],
             label: "beta's intent removed",
             done: |planted| {
                 !has_slot(planted, |slot| {
@@ -15008,12 +15281,12 @@ fn finalization_effects(outcome: &RunOutcome) -> Vec<FinalizationEffect> {
             },
         },
         FinalizationEffect {
-            site: EffectSiteId::Snapshot(SnapshotSite::Remove),
+            sites: vec![EffectSiteId::Snapshot(SnapshotSite::Remove)],
             label: "the snapshot removed",
             done: |planted| planted.snapshot.as_ref().is_some_and(|path| !path.exists()),
         },
         FinalizationEffect {
-            site: EffectSiteId::Snapshot(SnapshotSite::RemoveIntent),
+            sites: vec![EffectSiteId::Snapshot(SnapshotSite::RemoveIntent)],
             label: "the snapshot's intent removed",
             done: |planted| {
                 !has_slot(planted, |slot| {
@@ -15022,12 +15295,12 @@ fn finalization_effects(outcome: &RunOutcome) -> Vec<FinalizationEffect> {
             },
         },
         FinalizationEffect {
-            site: EffectSiteId::Worktree(WorktreeSite::RemoveStaging),
+            sites: vec![EffectSiteId::Worktree(WorktreeSite::RemoveStaging)],
             label: "the staging worktree removed",
             done: |planted| planted.staging.as_ref().is_some_and(|path| !path.exists()),
         },
         FinalizationEffect {
-            site: EffectSiteId::Worktree(WorktreeSite::RemoveStagingIntent),
+            sites: vec![EffectSiteId::Worktree(WorktreeSite::RemoveStagingIntent)],
             label: "the staging intent removed",
             done: |planted| {
                 !has_slot(planted, |slot| {
@@ -15036,7 +15309,7 @@ fn finalization_effects(outcome: &RunOutcome) -> Vec<FinalizationEffect> {
             },
         },
         FinalizationEffect {
-            site: EffectSiteId::Ref(RefSite::DeletePreparedPin),
+            sites: vec![EffectSiteId::Ref(RefSite::DeletePreparedPin)],
             label: "the prepared pin deleted",
             done: |planted| {
                 planted
@@ -15046,25 +15319,25 @@ fn finalization_effects(outcome: &RunOutcome) -> Vec<FinalizationEffect> {
             },
         },
         FinalizationEffect {
-            site: EffectSiteId::Ref(RefSite::DeleteCandidatePin),
+            sites: vec![EffectSiteId::Ref(RefSite::DeleteCandidatePin)],
             label: "the candidate-prepared pin deleted",
             done: |planted| !ref_present(planted, planted.prepared_pin.as_str()),
         },
     ];
     if *outcome == RunOutcome::Complete {
         effects.push(FinalizationEffect {
-            site: EffectSiteId::Ref(RefSite::DeleteCandidatesRef),
+            sites: vec![EffectSiteId::Ref(RefSite::DeleteCandidatesRef)],
             label: "the candidates ref deleted",
             done: |planted| candidates_refs_of(&planted.fixture).is_empty(),
         });
     }
     effects.push(FinalizationEffect {
-        site: EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot),
+        sites: vec![EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot)],
         label: "the execution root removed",
         done: |planted| !planted.fixture.manager().execution_root().exists(),
     });
     effects.push(FinalizationEffect {
-        site: EffectSiteId::Lock(LockSite::Release),
+        sites: vec![EffectSiteId::Lock(LockSite::Release)],
         label: "the run lock released",
         done: |planted| !rundir::is_running(&planted.fixture.public()),
     });
@@ -15075,10 +15348,11 @@ fn finalization_sites(outcome: &RunOutcome) -> Vec<(EffectSiteId, HookPhase)> {
     finalization_effects(outcome)
         .iter()
         .flat_map(|effect| {
-            [
-                (effect.site, HookPhase::Before),
-                (effect.site, HookPhase::After),
-            ]
+            effect
+                .sites
+                .iter()
+                .flat_map(|site| [(*site, HookPhase::Before), (*site, HookPhase::After)])
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -15095,15 +15369,16 @@ fn assert_finalization_order(
     let effects = finalization_effects(outcome);
     let faulted = effects
         .iter()
-        .position(|effect| effect.site == cell.0)
+        .position(|effect| effect.sites.contains(&cell.0))
         .expect("the cell names an effect of this outcome");
     let release = EffectSiteId::Lock(LockSite::Release);
     let survivable = cell.0 == release;
     for (index, effect) in effects.iter().enumerate() {
-        let expected = (survivable && effect.site != release)
+        let releases = effect.sites.contains(&release);
+        let expected = (survivable && !releases)
             || index < faulted
             || (index == faulted && cell.1 == HookPhase::After);
-        let done = if effect.site == release {
+        let done = if releases {
             faulted_harness
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -15116,7 +15391,12 @@ fn assert_finalization_order(
             expected,
             "{tag}: after the fault, `{}` ({}) should {}be done — the cleanup order is \
              `CleanupStep::ORDER` and the fault stops it where it fires",
-            effect.site,
+            effect
+                .sites
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("+"),
             effect.label,
             if expected { "" } else { "not " }
         );
@@ -15153,7 +15433,9 @@ fn kill_after_report_before_each_cleanup_step() {
             assert!(
                 finalization_effects(&outcome)
                     .iter()
-                    .filter(|effect| effect.site != EffectSiteId::Lock(LockSite::Release))
+                    .filter(|effect| !effect
+                        .sites
+                        .contains(&EffectSiteId::Lock(LockSite::Release)))
                     .all(|effect| !(effect.done)(&planted)),
                 "{tag}: the residue each step prunes is there to be pruned"
             );
@@ -15220,6 +15502,7 @@ fn kill_after_report_before_each_cleanup_step() {
             let seen = third.lock().unwrap_or_else(PoisonError::into_inner);
             for site in [
                 EffectSiteId::RunDir(RunDirSite::WriteReport),
+                EffectSiteId::Report(crate::topology::effects::ReportSite::Write),
                 EffectSiteId::Worktree(WorktreeSite::Remove),
                 EffectSiteId::Snapshot(crate::topology::effects::SnapshotSite::Remove),
                 EffectSiteId::Worktree(WorktreeSite::RemoveStaging),
@@ -15243,13 +15526,344 @@ fn kill_after_report_before_each_cleanup_step() {
         assert_eq!(
             cells,
             if outcome == RunOutcome::Complete {
-                24
+                26
             } else {
-                22
+                24
             },
-            "{outcome:?}: both phases of every effect's site"
+            "{outcome:?}: both phases of every effect's site, the report's two sites among them"
         );
     }
+}
+
+#[test]
+fn a_fault_at_a_staging_leftovers_own_removal_stops_finalization_and_the_next_resume_converges() {
+    use crate::topology::effects::SnapshotSite;
+    for outcome in [RunOutcome::Halted, RunOutcome::Complete] {
+        for (kind, site) in [
+            ("task", EffectSiteId::Worktree(WorktreeSite::RemoveIntent)),
+            (
+                "snapshot",
+                EffectSiteId::Snapshot(SnapshotSite::RemoveIntent),
+            ),
+            (
+                "staging",
+                EffectSiteId::Worktree(WorktreeSite::RemoveStagingIntent),
+            ),
+        ] {
+            for phase in [HookPhase::Before, HookPhase::After] {
+                let tag = format!("{outcome:?}/{kind}/{phase}");
+                let planted = plant_finished_run_with(
+                    &format!(
+                        "leftover-fault-{kind}-{}-{}",
+                        outcome_short(&outcome),
+                        if phase == HookPhase::Before {
+                            "before"
+                        } else {
+                            "after"
+                        }
+                    ),
+                    outcome.clone(),
+                    if outcome == RunOutcome::Complete {
+                        AlphaEnd::Published
+                    } else {
+                        AlphaEnd::Queued
+                    },
+                    FinishedResidue {
+                        snapshot: true,
+                        staging: true,
+                        prepared_pin: true,
+                    },
+                );
+                let fixture = &planted.fixture;
+                let manager = fixture.manager();
+                let intents = manager.execution_root().join("intents");
+                let leftovers: BTreeMap<&str, PathBuf> = ["task", "snapshot", "staging"]
+                    .into_iter()
+                    .map(|leftover| {
+                        let path =
+                            intents.join(format!(".stage-{leftover}-{}.tmp", crate::ulid::ulid()));
+                        crate::workspace_manager::fixture::write_file(&path, b"{\"half\":");
+                        (leftover, path)
+                    })
+                    .collect();
+                let faulted_leftover = &leftovers[kind];
+                let before = fixture.log_bytes();
+                let runtime = runtime_holding_the_record();
+                let certifies = AlwaysCertifies;
+                let given = Given::healthy(fixture, &runtime, &certifies);
+
+                let faulted = harness();
+                let mut armed = ArmedFinalization::answering_at_nth(
+                    &faulted,
+                    (site, phase),
+                    Injection::Error,
+                    2,
+                );
+                let (result, _) = resume_with(fixture, &mut armed, &given);
+                let error = message(&result.expect_err("the fault ends the command"));
+                assert!(
+                    error.contains("was made to fail") && error.contains(&site.to_string()),
+                    "{tag}: the error names the injected fault: {error}"
+                );
+                assert!(
+                    !error.contains("already finished"),
+                    "{tag}: the faulted resume did not reach the refusal: {error}"
+                );
+                assert_eq!(
+                    faulted
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .count(site, phase),
+                    2,
+                    "{tag}: the fault fired at the leftover's own removal, the site's second \
+                     occurrence after the ordinary intent's"
+                );
+                assert_eq!(
+                    faulted_leftover.exists(),
+                    phase == HookPhase::Before,
+                    "{tag}: the leftover stands at a fault before its removal and is gone at one \
+                     after it"
+                );
+                assert!(
+                    manager.execution_root().exists(),
+                    "{tag}: the root is not pruned past a fault inside the leftovers' removal"
+                );
+                assert_eq!(fixture.log_bytes(), before, "{tag}: nothing appended");
+                assert!(
+                    !rundir::is_running(&fixture.public()),
+                    "{tag}: the faulted resume's guard released the run lock file"
+                );
+                assert!(
+                    wait_for_cleanup_hold_release(&fixture.public()),
+                    "{tag}: the run's cleanup lease is still held"
+                );
+
+                let second = harness();
+                let (result, _) = resume(fixture, &second, &given);
+                let text = message(&result.expect_err("the next resume finalizes then refuses"));
+                assert!(
+                    text.contains("already finished as") && text.contains("finalized"),
+                    "{tag}: {text}"
+                );
+                assert!(
+                    leftovers.values().all(|path| !path.exists()),
+                    "{tag}: every leftover is reclaimed by the un-injected finalization"
+                );
+                assert_finalized(&planted, &outcome, &tag);
+                assert_eq!(fixture.log_bytes(), before, "{tag}: still nothing appended");
+            }
+        }
+    }
+}
+
+type BarrierTimeline = Arc<Mutex<Vec<(EffectSiteId, HookPhase, crate::util::BarrierCounts)>>>;
+
+struct BarrierEffects {
+    inner: ArmedSite,
+    timeline: BarrierTimeline,
+}
+
+struct BarrierRunDir {
+    inner: ArmedSite,
+    timeline: BarrierTimeline,
+}
+
+struct BarrierHooks {
+    inner: HarnessTopologyHooks,
+    effects: BarrierEffects,
+    rundir: BarrierRunDir,
+}
+
+impl BarrierHooks {
+    fn armed(
+        harness: &Arc<Mutex<HookHarness>>,
+        at: (EffectSiteId, HookPhase),
+        injection: Injection,
+    ) -> Self {
+        let timeline: BarrierTimeline = Arc::new(Mutex::new(Vec::new()));
+        let armed = || ArmedSite {
+            harness: Arc::clone(harness),
+            at,
+            injection,
+            nth: 1,
+            seen: 0,
+        };
+        Self {
+            inner: HarnessTopologyHooks::new(Arc::clone(harness)),
+            effects: BarrierEffects {
+                inner: armed(),
+                timeline: Arc::clone(&timeline),
+            },
+            rundir: BarrierRunDir {
+                inner: armed(),
+                timeline,
+            },
+        }
+    }
+
+    fn timeline(&self) -> Vec<(EffectSiteId, HookPhase, crate::util::BarrierCounts)> {
+        self.effects
+            .timeline
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl crate::workspace_manager::EffectHooks for BarrierEffects {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        self.timeline
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((site, phase, crate::util::barriers_on_this_thread()));
+        self.inner.consult(site, phase)
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        None
+    }
+}
+
+impl rundir::RunDirHooks for BarrierRunDir {
+    fn hook(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        self.timeline
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((site, phase, crate::util::barriers_on_this_thread()));
+        self.inner.consult(site, phase)
+    }
+}
+
+impl TopologyHooks for BarrierHooks {
+    fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+        &mut self.effects
+    }
+
+    fn rundir(&mut self) -> &mut dyn rundir::RunDirHooks {
+        &mut self.rundir
+    }
+
+    fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+        self.inner.events()
+    }
+
+    fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+        self.inner.container()
+    }
+
+    fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+        self.inner.spawn()
+    }
+}
+
+#[test]
+fn the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_rewritten() {
+    use crate::topology::effects::ReportSite;
+    let planted = plant_finished_run_with(
+        "report-durable",
+        RunOutcome::Complete,
+        AlphaEnd::Published,
+        FinishedResidue {
+            snapshot: true,
+            staging: true,
+            prepared_pin: true,
+        },
+    );
+    let fixture = &planted.fixture;
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(fixture, &runtime, &certifies);
+    let report_path = fixture.public().join(rundir::REPORT);
+
+    let first = harness();
+    let mut hooks = BarrierHooks::armed(
+        &first,
+        (
+            EffectSiteId::Ref(RefSite::DeleteCandidatesRef),
+            HookPhase::Before,
+        ),
+        Injection::Error,
+    );
+    let (result, _) = resume_with(fixture, &mut hooks, &given);
+    let error =
+        message(&result.expect_err("the fault before the first ref deletion ends the command"));
+    assert!(error.contains("was made to fail"), "{error}");
+    let timeline = hooks.timeline();
+    let position = |site: EffectSiteId, phase: HookPhase| {
+        timeline
+            .iter()
+            .position(|(seen, at, _)| *seen == site && *at == phase)
+            .unwrap_or_else(|| panic!("`{site}`/{phase} was not reached: {timeline:?}"))
+    };
+    let written = position(EffectSiteId::Report(ReportSite::Write), HookPhase::Before);
+    let durable = position(EffectSiteId::Report(ReportSite::Write), HookPhase::After);
+    assert!(written < durable);
+    let (_, _, before) = timeline[written];
+    let (_, _, after) = timeline[durable];
+    assert!(
+        after.file > before.file && after.directory > before.directory,
+        "between the report site's two phases its file and its directory were synced: {before:?} \
+         -> {after:?}"
+    );
+    let first_deletion = timeline
+        .iter()
+        .position(|(site, phase, _)| {
+            matches!(site, EffectSiteId::Ref(_)) && *phase == HookPhase::Before
+        })
+        .expect("a ref deletion was reached");
+    assert!(
+        durable < first_deletion,
+        "the report was durable before any ref was touched: {timeline:?}"
+    );
+    assert!(
+        !fixture.public().join(rundir::REPORT_STAGED).exists(),
+        "the staged report was renamed onto its name"
+    );
+    let bytes = std::fs::read(&report_path).expect("the report is present under its name");
+    assert!(
+        report_of(fixture).is_fresh_against(&bytes),
+        "and it is the derived report, current by digest"
+    );
+    assert_eq!(
+        candidates_refs_of(fixture).len(),
+        1,
+        "the fault stopped finalization before the candidates ref was pruned"
+    );
+    assert!(
+        wait_for_cleanup_hold_release(&fixture.public()),
+        "the run's cleanup lease is still held"
+    );
+
+    let second = harness();
+    let mut hooks = BarrierHooks::armed(
+        &second,
+        (EffectSiteId::Lock(LockSite::Release), HookPhase::After),
+        Injection::Proceed,
+    );
+    let (result, _) = resume_with(fixture, &mut hooks, &given);
+    let text = message(&result.expect_err("the next resume finalizes then refuses"));
+    assert!(
+        text.contains("already current") && text.contains("finalized"),
+        "{text}"
+    );
+    let timeline = hooks.timeline();
+    assert!(
+        timeline.iter().all(|(site, _, _)| {
+            *site != EffectSiteId::RunDir(RunDirSite::WriteReport)
+                && *site != EffectSiteId::Report(ReportSite::Write)
+        }),
+        "a current report is not rewritten on the restart: {timeline:?}"
+    );
+    assert_eq!(
+        std::fs::read(&report_path).expect("the report stands"),
+        bytes,
+        "byte for byte the report the first finalization published"
+    );
+    assert!(
+        candidates_refs_of(fixture).is_empty(),
+        "and the refs are pruned behind the report the rename proved durable"
+    );
+    assert_finalized(&planted, &RunOutcome::Complete, "after the restart");
 }
 
 const FINALIZATION_KILL_CHILD: &str = "engine::topology::recover::tests::finalization_kill_child";
@@ -15357,7 +15971,12 @@ fn a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_t
         assert!(
             (effect.done)(&planted),
             "`{}` ({}) was done before the kill, or the kill landed earlier than armed",
-            effect.site,
+            effect
+                .sites
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("+"),
             effect.label
         );
     }
@@ -15859,10 +16478,6 @@ fn finalized_report_names_runner_identity() {
     assert!(text.contains("already current"), "{text}");
 }
 
-// ---------------------------------------------------------------------------
-// PR10: projection equivalence and the acceptance subset at max_parallel = 1.
-// ---------------------------------------------------------------------------
-
 struct LiveVsReplay {
     state_equal: bool,
     live_digest: String,
@@ -15911,8 +16526,16 @@ fn assert_live_equals_replay(
     );
 }
 
-fn user_checkout(repo_root: &Path) -> (String, BTreeMap<String, Vec<u8>>, String) {
+struct UserCheckout {
+    head: String,
+    tracked: BTreeMap<String, Vec<u8>>,
+    status: String,
+    untracked: BTreeMap<String, String>,
+}
+
+fn user_checkout(repo_root: &Path) -> UserCheckout {
     use crate::workspace_manager::fixture::git;
+    use sha2::{Digest, Sha256};
     let head = git(repo_root, &["rev-parse", "HEAD"]);
     let tracked = git(repo_root, &["ls-files"])
         .lines()
@@ -15925,9 +16548,31 @@ fn user_checkout(repo_root: &Path) -> (String, BTreeMap<String, Vec<u8>>, String
         .collect();
     let status = git(
         repo_root,
-        &["status", "--porcelain", "--untracked-files=no"],
-    );
-    (head, tracked, status)
+        &["status", "--porcelain", "--untracked-files=all"],
+    )
+    .lines()
+    .filter(|line| !line.starts_with("?? .upstroke/"))
+    .collect::<Vec<_>>()
+    .join("\n");
+    let untracked = git(repo_root, &["ls-files", "--others", "--exclude-standard"])
+        .lines()
+        .filter(|name| !name.starts_with(".upstroke/"))
+        .map(|name| {
+            (
+                name.to_owned(),
+                format!(
+                    "{:x}",
+                    Sha256::digest(std::fs::read(repo_root.join(name)).expect("an untracked file"))
+                ),
+            )
+        })
+        .collect();
+    UserCheckout {
+        head,
+        tracked,
+        status,
+        untracked,
+    }
 }
 
 #[test]
@@ -15952,11 +16597,19 @@ fn max_parallel_one_completes_a_two_task_chain_with_one_linear_commit_per_task_a
             fixture.base_sha.as_str(),
         ],
     );
+    crate::workspace_manager::fixture::write_file(
+        &fixture.repo_root.join("untracked-user.txt"),
+        b"an untracked note the user keeps beside the checkout\n",
+    );
     let checkout_before = user_checkout(&fixture.repo_root);
-    assert!(
-        checkout_before.2.is_empty(),
-        "the fixture's checkout is clean before the run: {}",
-        checkout_before.2
+    assert_eq!(
+        checkout_before.status.trim(),
+        "?? untracked-user.txt",
+        "the fixture's checkout is clean before the run but for the user's untracked note"
+    );
+    assert_eq!(
+        checkout_before.untracked.keys().collect::<Vec<_>>(),
+        vec!["untracked-user.txt"]
     );
     let harness = harness();
     let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
@@ -16083,10 +16736,18 @@ fn max_parallel_one_completes_a_two_task_chain_with_one_linear_commit_per_task_a
         );
     }
 
-    assert_eq!(
-        user_checkout(&fixture.repo_root),
-        checkout_before,
-        "the user's checkout — HEAD, every tracked file, the index — is byte-for-byte unchanged"
+    let checkout_after = user_checkout(&fixture.repo_root);
+    assert!(
+        checkout_after.head == checkout_before.head
+            && checkout_after.tracked == checkout_before.tracked
+            && checkout_after.status == checkout_before.status
+            && checkout_after.untracked == checkout_before.untracked,
+        "the user's checkout — HEAD, every tracked file, the index, and every untracked file \
+         with its bytes — is byte-for-byte unchanged: status {:?} -> {:?}, untracked {:?} -> {:?}",
+        checkout_before.status,
+        checkout_after.status,
+        checkout_before.untracked,
+        checkout_after.untracked
     );
 
     let report = report_of(&fixture);
@@ -16272,10 +16933,6 @@ fn projections_are_equal_between_live_and_replay_at_every_prefix() {
         );
     }
 }
-
-// ---------------------------------------------------------------------------
-// PR10: the sequential ledger — R1–R28 observed at every outcome (ST-09, ST-10).
-// ---------------------------------------------------------------------------
 
 fn referenced_objects(fixture: &Fixture) -> Vec<String> {
     use crate::workspace_manager::fixture::git;

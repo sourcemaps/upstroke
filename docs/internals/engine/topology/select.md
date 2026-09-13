@@ -350,7 +350,9 @@ implemented run-end closure and terminal finalization at `max_parallel =
 fold is not authoritative, and nothing further is selected at all.
 `NotStarted` is a fold without `run_started`, which admits no transition.
 `Finished` is a run whose `run_finished` is durable: the loop refuses to
-continue it, and a resume finalizes it and refuses too (recovery step (b)).
+continue it, and a resume of a Complete or Halted run finalizes it and
+refuses too (recovery step (b)); a Parked or BudgetExceeded run resumes
+through `run_resumed`, which clears `finished`.
 All three are excluded for the same reason — a caller holding an
 `Admitted` may act — and the counts said "nine", "seven" and "two" until
 PR10.
