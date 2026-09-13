@@ -260,7 +260,16 @@ reached it: two different histories that leave the run in the same state
 are one state, which is what makes the search finite and what makes
 "reachable" mean something.
 
-## `pub fn explore<F>(` › `if classes(&states[id].fold)`
+Each state is read once through a checked lookup — the frontier holds ids
+this loop pushed, so each names a state, and the lookup keeps that a fact
+the code establishes rather than one it assumes (§7's indexing rule; PR10's
+round-3 contract lens, F4) — and its offers are planned in one pass over
+that read before the state table grows in a second, since the table is what
+the read borrows. `Planned` is one offer between the two passes: its label,
+its kind, the fold the transition reaches or the reason it was refused, and
+the event, which becomes the new state's trace when the destination is new.
+
+## `pub fn explore<F>(` › `if state.trace.len() >= bounds.max_trace {`
 
 The trace ceiling stops expansion here; if anything legal
 was left to explore, the census says so, the way it says
@@ -310,11 +319,17 @@ against censuses built to make each fail on its own:
 
 ## `impl Census` › `pub fn accepted_labels(&self) -> BTreeSet<&str> {`
 
-Every class that was accepted somewhere.
+Every class the fold accepted somewhere — a `Truncated` transition among
+them, since it is an acceptance whose destination the state ceiling had no
+room for. Until PR10's round 3 the set held `Accepted` alone, and its
+complement counted a truncated offer as a refusal, so the publication tests
+could read "refused / never accepted" of a relation the fold accepts (the
+round-3 contract lens, F1); `a_census_that_hits_its_ceiling_says_so` holds
+the two sets to the fold's answer with a one-state census.
 
 ## `impl Census` › `pub fn refused_labels(&self) -> BTreeSet<&str> {`
 
-Every class that was refused somewhere.
+Every class the fold refused somewhere: `Refused`, and nothing else.
 
 ## `impl Census` › `pub fn states_with(&self, outcome: &DerivedOutcome) -> Vec<&CensusState> {`
 

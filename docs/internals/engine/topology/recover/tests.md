@@ -884,7 +884,15 @@ nothing yet done to it.
 
 ## `fn resume_finalizes_halted_then_refuses() {`
 
-A Halted run does not continue.
+A Halted run does not continue. Since PR10's round 2 the fixture also plants
+a staging orphan under `intents/` and reads it reclaimed; since round 3 it
+plants, beside it, a registration Git cannot list, prune or repair — an
+add of a task slot killed between opening `gitdir` and writing it, with the
+slot's intent durable and its empty checkout directory made, the state the
+ST-07 sampler measured at `1c9ff5a7` — and reads step (b)'s refusal name it
+as passed over, the contained checkout reclaimed under the finalizer's
+proof (`WorkspaceManager::WriterProof::NoWriterAlive`), and the registration
+itself left byte-identical, since nothing on disk binds it to the slot.
 
 ### About the word "finalizes" in this test's name
 
@@ -4035,6 +4043,34 @@ dispatch, closure ending the run with the deferral resumably_open.
 And the resume wakes it (`resume_clears_budget_stop_and_wakes_deferred` is the same
 claim from a planted log).
 
+## `fn run_finished_halted_and_budget_exceeded_accepted_with_de…` › `let fixture = Fixture::two_tasks("closure-halted-verification-deferred");`
+
+The packet's coverage assertion names verification-deferred candidates
+beside deferred tasks, and until PR10's round 3 only the worker deferral
+was driven live (the round-3 contract lens, F2). Two more halves: alpha's
+queued candidate is verification-deferred in the live epoch
+(`plant_live_verification_deferral`), then beta halts, or the ceiling is
+met, and closure finishes with the candidate's queue entry still deferred
+and its candidates ref retained — Halted's forensic output, BudgetExceeded's
+resumably-open one — while step (iv) prunes the prepared pin as at every
+outcome. The resume after BudgetExceeded wakes the candidate
+(`CandidateQueue::wake_deferred`). A closure that refused a deferred
+candidate would fail both `Progress::Finished` assertions.
+
+## `fn verification_deferred(fold: &TopologyFold) -> bool {`
+
+Whether any queue entry is verification-deferred.
+
+## `fn plant_live_verification_deferral(`
+
+A stale-clean verification of the planted candidate started and deferred
+by an infrastructure outage, appended through the production emitter on
+the resumed handle so `run_resumed` cannot have woken it. The fold requires
+the recorded head to differ from the candidate's base (the exact-base case
+is the fast path) and the proposal to differ from the head, so both are
+commits made for the purpose, and the prepared pin the basis names is
+created at the proposal.
+
 ## `fn publish_alpha(fixture: &Fixture) -> PlantedTransaction {`
 
 Alpha merged on the fast path with a real candidates ref behind it: the
@@ -4083,16 +4119,23 @@ opened epoch 2 for the second.
 ## `fn an_append_error_at_the_run_ending_close_ends_the_command…`
 
 The run-ending close's `generation_closed` append errors — the partial
-line at `Written`, and the whole line with the barrier failing at
-`WrittenFull` — and the command ends with the fold poisoned, the
-worktree and intent standing, no removal or report hook reached and
-no report derived; the close is durable exactly when the whole line was
-written. A fresh resume converges either way: it reclaims beta's
-worktree and intent, keeps alpha's candidates ref, clears the stop, and
-the log holds one close for beta — the closure's own (`RunEnding`) when
-the line was durable, the resume's (`ResumeDiscardsRetainedSession`)
-when the torn tail was truncated. Until PR10's round 2 no test guarded
-the error's propagation from this append (the round-2 crash lens, P1-1).
+line at `Written`; the whole line with the append's own flush failing at
+`WrittenFull`; and the whole line with the replacement barrier failing
+too (`Event.OpenLog`'s `SyncPrefix` armed beside the append), which is the
+undetermined outcome the append-error protocol asserts neither way — and
+the command ends with the fold poisoned, the worktree and intent
+standing, no removal or report hook reached and no report derived; the
+close is durable exactly when the whole line was written, and the
+diagnostic says "undetermined" exactly when the barrier failed. A fresh
+resume converges in every case: it reclaims beta's worktree and intent,
+keeps alpha's candidates ref, clears the stop, and the log holds one
+close for beta — the closure's own (`RunEnding`) when the line was
+durable, the resume's (`ResumeDiscardsRetainedSession`) when the torn
+tail was truncated. Until PR10's round 2 no test guarded the error's
+propagation from this append (the round-2 crash lens, P1-1), and until
+round 3 none produced the undetermined outcome at this caller, so a
+close that swallowed exactly that error and scrubbed survived (the
+round-3 fix-check lens, B6).
 
 ## `fn run_finished_budget_exceeded_refused_after_halting_drain…`
 
@@ -4174,8 +4217,14 @@ complete finalization of `planted`.
 Every finalization site and phase a fault can land on, in the order the
 steps run. `Ref.DeleteCandidatesRef` is Complete's alone.
 One durable effect of terminal finalization, in the order
-`CleanupStep::ORDER` performs them: the site whose funnel performs it, and
-how the planted residue shows it done.
+`CleanupStep::ORDER` performs them: the sites whose funnels perform it,
+and how the planted residue shows it done. Every effect has one site but
+the report, which has two: `Report.Write` is consulted inside
+`RunDir.WriteReport`, around the one publication, so both sites' phases
+are cells of the matrix and both share the effect's "done". Until PR10's
+round 3 the report's inner site was observed by the matrix and never
+selected, so an error swallowed at either of its phases left the matrix
+green (the round-3 crash lens, P1).
 
 ## `fn finalization_effects(outcome: &RunOutcome) -> Vec<Finali…`
 
@@ -4205,9 +4254,49 @@ funnel's error), so it leaves every earlier effect done.
 
 `kill_after_report_before_each_cleanup_step` (T-FINALIZE): a fault at
 every finalization site, before and after the effect, for Complete and
-for Halted — 24 and 22 cells. The faulted resume ends there with the log
-untouched and exactly the effects before the fault done; the next resume
-finalizes the rest and refuses; a third finds nothing to do.
+for Halted — 26 and 24 cells, the report's two sites among them. The
+faulted resume ends there with the log untouched and exactly the effects
+before the fault done; the next resume finalizes the rest and refuses; a
+third finds nothing to do.
+
+## `fn a_fault_at_a_staging_leftovers_own_removal_stops_finaliz…`
+
+The matrix's fixture plants no staging leftover, so the removal of a
+leftover at the root step — an intent-removal site's second occurrence,
+after the ordinary intent's — was never faulted (the round-3 crash lens,
+P1). Here a finished run of either outcome carries one leftover of each
+kind, and the kind's own removal site is armed at its second occurrence,
+before and after: the command ends naming the injected fault, the
+leftover stands at a fault before its removal and is gone at one after,
+the root is not pruned past it, nothing is appended, and the un-injected
+resume reclaims every leftover and converges. A finalizer that discarded
+the leftovers' error would reach the refusal instead.
+
+## `type BarrierTimeline = Arc<Mutex<Vec<(EffectSiteId, HookPhase, crate::util::BarrierCounts)>>>;`
+
+One timeline of every effect and run-directory hook a finalization
+reaches, each entry stamped with the durability barriers this thread had
+entered by then (`util::barriers_on_this_thread`), so a test can read
+whether a file and its directory were synced between two phases.
+
+## `struct BarrierHooks {`
+
+The harness bundle whose effect and run-directory hooks record the
+barrier timeline and answer an `ArmedSite` — one `(site, phase)` armed with
+an injection, or none.
+
+## `fn the_report_is_durable_before_any_ref_is_pruned_and_a_cur…`
+
+DESIGN.md §26 lets the refs be pruned only after the report is durable
+(the round-3 crash lens, P2). A Complete finalization faulted before its
+first ref deletion shows the file and the directory barriers both rise
+between `Report.Write`'s two phases, that phase pair preceding every ref
+site, the report present under its name and current by digest, and the
+candidates ref still there. The restart finds the report current, reaches
+neither report site, leaves the bytes byte-identical and prunes the refs:
+the durability of a report the restart does not rewrite is the rename's
+— made after the sync, so a name that survived holds synced bytes — which
+is why the fresh branch carries no barrier of its own.
 
 ## `fn finalization_kill_child() {`
 
@@ -4302,10 +4391,21 @@ Q1's comparison, committed at the G4 gate's request: the live incremental
 fold of a stepped run and the report derived from it, against a fresh
 replay of the bytes on disk and its report.
 
-## `fn user_checkout(repo_root: &Path) -> (String, BTreeMap<Str…`
+## `struct UserCheckout {`
 
 What a user sees of their repository: `HEAD`, every tracked file's bytes,
-and whether anything tracked is modified.
+the porcelain status with untracked files listed, and a digest of every
+untracked file's bytes.
+
+## `fn user_checkout(repo_root: &Path) -> UserCheckout {`
+
+The observation the acceptance subset's "byte-for-byte unchanged" is
+held to. Until PR10's round 3 it ignored untracked files, so a note the
+run overwrote left the assertion green (the round-3 record lens, P2-3);
+the acceptance test now plants one and compares its digest. The engine's
+own run directory lives under the repository and is untracked; what the
+claim is about is the user's checkout, so the engine's `.upstroke/` is the
+one prefix the observation leaves out.
 
 ## `fn max_parallel_one_completes_a_two_task_chain_with_one_lin…`
 
@@ -4313,7 +4413,9 @@ and whether anything tracked is modified.
 plan with one linear engine commit per plan task, user checkout
 byte-for-byte unchanged" — a two-task chain driven to `run_finished
 (Complete)`, with the live fold and its report compared against a replay
-of the bytes on disk after every step (`projection equivalence`).
+of the bytes on disk after every step (`projection equivalence`), and the
+checkout — `HEAD`, the tracked bytes, the status, and the untracked note
+the test plants beside them — compared whole before and after.
 
 ## `fn with_live_run_hooked_runner<R>(`
 

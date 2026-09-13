@@ -46,8 +46,10 @@ report.json)", "BudgetExceeded: resumably_open (never pruned)".
 ## `pub struct Finalized {`
 
 What finalization reports back: the outcome it finalized, whether the report was written or
-found current, what each step removed, whether the root went, and how many candidates refs the
-report lists as retained.
+found current, what each step removed, whether the root went, how many candidates refs the
+report lists as retained, and the linked-worktree registrations the removals passed over —
+entries of the repository's store that name no checkout (`WorkspaceManager::WriterProof`),
+sorted, without duplicates, left as found.
 
 ## `pub fn finalize(`
 
@@ -55,7 +57,11 @@ Refuses without a durable `run_finished` — nothing is written and nothing dele
 that has not ended. Otherwise the report is derived from the fold and written when the file on
 disk is missing or stale — a file whose stored digest is not the digest of its own bytes, or
 whose outcome or runner is not the derived report's (`TopologyReport::is_fresh_against`) — then
-the steps run.
+the steps run. The write is `rundir::write_report`'s staged, synced, renamed publication, so a
+report present under its name holds durable bytes and the refs the steps prune go only after it
+(DESIGN.md §26); a report found current is not written again and needs no barrier of its own,
+because the rename that made it current was made after its bytes were synced
+(`the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_rewritten`).
 A fault at any site ends the command with the steps before it done and the steps after it not
 started; the next resume's step (b) runs the whole order again and converges (ST-18,
 `kill_after_report_before_each_cleanup_step`, which at every cell of the matrix — both phases of
@@ -67,12 +73,16 @@ which kills a real child inside finalization).
 ## `pub fn refuse_continuation(run_id: &str, finalized: &Finalized) -> UpstrokeError {`
 
 Step (b)'s refusal, worded with what the finalization it follows did: the report regenerated or
-already current, and each step's count.
+already current, each step's count, and — when there were any — the registrations passed over,
+by path, so an operator learns what Git cannot list, prune or repair and this run did not
+delete.
 
 ## `fn scrub_slots(`
 
 One namespace of the execution root at a time, by slot kind, through the Worktree and Snapshot
-funnels' remove-then-remove-intent pairs.
+funnels' remove-then-remove-intent pairs. The removal runs under
+`WriterProof::NoWriterAlive` — the finalizer holds the run lock and the run's cleanup lease, so
+no writer of the root is alive — and what it passes over is collected for `Finalized`.
 
 ## `fn delete_refs_under(`
 
