@@ -2818,9 +2818,17 @@ set -uo pipefail
 validator="$1"; start="$2"; cap="$3"
 src="$(awk '/^repository_above\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
 [[ -n "$src" ]] || { echo 'harness: repository_above was not extracted'; exit 3; }
+# THE HELPERS IT CALLS COME OUT WITH IT. `path_parent` is the thing under test;
+# `gitdir_shaped` is reached only where a level HAS a `.git` directory, which no
+# row below builds -- and a harness that would die `command not found` on the
+# first row that did is an instrument with a trapdoor in it, which is the shape
+# this whole file is written against.
 rule="$(awk '/^path_parent\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
 [[ -n "$rule" ]] || { echo 'harness: path_parent was not extracted'; exit 3; }
+shaped="$(awk '/^gitdir_shaped\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$shaped" ]] || { echo 'harness: gitdir_shaped was not extracted'; exit 3; }
 src="$rule
+$shaped
 $src"
 bash -n <<< "$src" || { echo 'harness: the extract does not parse'; exit 3; }
 eval "$src"
