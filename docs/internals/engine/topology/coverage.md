@@ -175,8 +175,9 @@ See [`registry`].
 
 ## `pub fn registry_document(evidence: &ResidueEvidence) -> Result<RegistryDocument, String> {`
 
-The pinned document: a note, the inventory, both hosts, the declared-unobservable coordinates
-with their reasons, the fast sequences and the entries.
+The pinned document: a note, the inventory, both hosts, the fast sequences and the entries.
+Until PR10's round 2 it also carried the declared-unobservable coordinates with their reasons;
+nothing is declared now, and a document that carried the field would not parse.
 
 ## `pub fn registry_json(evidence: &ResidueEvidence) -> Result<…`
 

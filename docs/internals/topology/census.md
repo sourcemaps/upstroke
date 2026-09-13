@@ -59,8 +59,9 @@ to them:
   magnitude larger — so every assertion over it is over the explored set,
   and the census says where it stopped ([`Census::truncated`], set at the
   state ceiling and at the trace ceiling alike). The deep census
-  (`deep_census()`) seeds the integration path from two merged originals
-  and reaches the fourth integration sequence and the second repair, which
+  (`deep_census()`) seeds the integration path from one merged original and
+  two candidates and reaches the fourth integration sequence, the second repair
+  and the second lineage, which
   the breadth-first prefix cannot; `every_declared_dimension_is_reached_at_its_bound`
   holds the two together to every declared bound by equality, and the
   shared census alone to the seven it reaches on its own. The chain and the
