@@ -27,6 +27,22 @@ after the reaper that took it has ended.
 `2467df32` on Linux, all green. The shape wants the whole suite, which is consistent with a forked
 child of another test inheriting the lease descriptor.
 
+**Under the whole suite the mechanism does appear**, in a neighbour rather than in this test. A
+full `cargo test --all-targets --all-features` at `685957d` on Linux failed
+`engine::topology::recover::tests::repeated_container_launch_outages_before_start_consume_defers_through_the_production_runner`
+at `recover/tests.rs:7939` with
+
+```
+Refused { message: "run `01KZ…001` still has a process of its own alive in worktree
+/tmp/upstroke-pr7e-…/repo -- an agent-cleanup reaper, or a Git child writing one of its refs --
+and that process holds the run's cleanup lease; refusing overlapping engine ownership" }
+```
+
+— the same fact, read by a different observer: the run's `cleanup.lock` is held by a process that
+should have ended. The run was contended (a second full suite from a sibling worktree, load average
+16), and the immediately preceding and following runs of the same head did not reproduce it, so this
+is a sighting of the mechanism and not a rate.
+
 ## The second sighting cannot be classified at all, and that is the finding
 
 macOS job `103617998766` (run `34717696893`, PR #276, head `8f0f203a`, 2026-09-12T20:38:49Z) prints
