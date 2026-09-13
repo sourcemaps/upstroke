@@ -2020,24 +2020,78 @@ if [[ -L "$symlink_probe" ]]; then
       "answer through a link too; got $loose_alias_rc" >&2
     exit 1
   fi
+  # AND RULE 6'S TWO REFUSALS ARE NOT ONE REFUSAL. The message above is the
+  # shape where the CALLER'S OWN spelling never named its listing's root, and
+  # respelling the listing is the remedy it gives. THIS is the other shape: the
+  # caller's spelling named its listing's root exactly, nothing in that
+  # repository names the listing, authority moves to a work tree ABOVE it, and
+  # the root the walk then has to name the listing in is one THIS WALK chose. A
+  # component of the path is a link out of the written tree, so the caller's
+  # chain does not reach that root and there is nothing for them to respell.
+  #
+  # The same directory spelled physically CONFORMS, which is what makes this a
+  # narrowing worth a finding rather than an opinion about links; it is filed as
+  # `PR280-ASCENT-AUTHORITY-MOVES-OFF-THE-WRITTEN-CHAIN`, with the two candidate
+  # repairs and the shape that defeats both. What is asserted here is the pair --
+  # the physical spelling judged, the written one refused AND SAYING WHICH SHAPE
+  # IT IS -- so that a repair flips this row rather than slipping past it.
+  auth_ext="$sym_root/authority-physical"
+  auth_written="$sym_root/authority-written"
+  new_repo "$auth_ext"
+  mkdir -p "$auth_ext/project"
+  printf 'fixture\n' > "$auth_ext/project/P2_correctness_202609130017_an-authority-move.md"
+  git -C "$auth_ext" add -A \
+    && git -C "$auth_ext" commit -q -m 'the enclosing tree records the listing root'
+  new_repo "$auth_ext/project"
+  mkdir -p "$auth_written"
+  ln -s "$auth_ext/project" "$auth_written/link"
+  auth_physical_rc=0
+  ( cd "$auth_ext" && "$BASH" "$branch_validator" \
+    'fix-P2/correctness_an-authority-move' 'project' ) >/dev/null 2>&1 || auth_physical_rc=$?
+  auth_written_out="$( cd "$auth_written" && "$BASH" "$branch_validator" \
+    'fix-P2/correctness_an-authority-move' 'link' 2>&1 )" && auth_written_rc=0 || auth_written_rc=$?
+  if [[ "$auth_physical_rc" != 0 ]]; then
+    echo "the physical spelling must be answered out of the enclosing tree's records;" \
+      "got $auth_physical_rc" >&2
+    exit 1
+  fi
+  if [[ "$auth_written_rc" != 1 ]] \
+    || [[ "$auth_written_out" != *'above it is what answers for it'* ]] \
+    || [[ "$auth_written_out" == *'Give the listing as a path that goes through'* ]]; then
+    echo "a listing whose authority moved off the written chain must refuse AND say that" \
+      "is what happened, not tell the caller to respell a root the walk chose; got" \
+      "$auth_written_rc and '${auth_written_out%%$'\n'*}'" >&2
+    exit 1
+  fi
 else
   echo 'note: skipping the symlinked-component cases (no symlink could be made)' >&2
 fi
 
-# ---- AND THE HOP'S TERMINATION BOUND, DRIVEN BY REAL GIT AND NOT BY A STUB ----------------------
+# ---- AND A GIT DIRECTORY THAT IS NOT ABOVE THE ANCHOR IS NOT HOPPED TO -------------------------
 #
-# The hop happens AT MOST ONCE because a hop shortens nothing, so it may not be
-# the step that repeats. The harness row above shows what an unbounded one costs
-# with a stubbed git directory; this is the shape that does it with a REAL one,
-# and it is not hypothetical. A repository whose `.git` is a DIRECTORY and whose
-# config says `core.bare = true` answers `--is-inside-work-tree` `false` at its
-# own root and `--absolute-git-dir` `<root>/.git`, WHOSE PARENT IS THAT ROOT: a
-# hop from there lands exactly where it started. Measured with git 2.43 here.
+# RULE 5: `--absolute-git-dir` says where git's METADATA is, and metadata is not
+# a container. A repository whose `.git` is a DIRECTORY and whose config says
+# `core.bare = true` answers `--is-inside-work-tree` `false` at its own root and
+# `--absolute-git-dir` `<root>/.git` -- a directory that does NOT contain the
+# listing, and whose parent is the anchor itself. Measured with git 2.43 here:
+# `--is-inside-git-dir` is `false` from `<root>/holder` and from `<root>`, so the
+# hop is not taken and the lexical step is what runs.
 #
-# So the walk must still finish. With the bound it does -- the second `false` at
-# the same directory takes the lexical step, which shortens -- and the assertion
-# is a TIMEOUT, because the failure this pins is a hang in a required check and
-# not a wrong answer.
+# THIS FIXTURE USED TO PIN THE OTHER HALF -- that a hop landing where it started
+# still terminates -- and with rule 5's gate in place that shape cannot arise at
+# all: the gate is true only where the anchor is AT OR BELOW the git directory,
+# so the directory's parent is STRICTLY ABOVE the anchor and every hop shortens.
+# The assertion is still a TIMEOUT, because the failure worth pinning here is a
+# hang in a required check and not a wrong answer, and the `hopped` bound is kept
+# in the validator for the same reason: this pull request's own history is six
+# rounds of an argument that held in five shapes and not the sixth.
+#
+# THE PROBE IS A DIRECTORY IDENTITY AND NOT A TEXT MATCH, which is what it had
+# been. Git answers `C:/Users/.../.git` natively on Windows where the fixture
+# holds `/tmp/.../.git`; those name one directory and `-ef` says so, but the text
+# comparison did not, so the case SKIPPED there while reporting that git had not
+# produced the required shape -- a case that never ran on the one platform whose
+# spellings this whole section is about.
 #
 # RUNS NATIVELY ON WINDOWS: yes -- every name here is an ordinary one -- provided
 # `timeout` is on PATH, which is what the guard tests.
@@ -2049,10 +2103,20 @@ if command -v timeout >/dev/null 2>&1; then
   mkdir -p "$selfhop_dir/holder"
   printf 'fixture\n' > "$selfhop_dir/holder/P2_correctness_202609130015_a-hop-that-lands-where-it-started.md"
   # The fixture is about nothing unless git really answers that way.
+  selfhop_gitdir="$(git -C "$selfhop_dir" rev-parse --absolute-git-dir 2>/dev/null)"
   if [[ "$(git -C "$selfhop_dir" rev-parse --is-inside-work-tree 2>/dev/null)" != false ]] \
-    || [[ "$(git -C "$selfhop_dir" rev-parse --absolute-git-dir 2>/dev/null)" != "$selfhop_dir/.git" ]]; then
+    || [[ -z "$selfhop_gitdir" ]] || [[ ! "$selfhop_gitdir" -ef "$selfhop_dir/.git" ]]; then
     echo 'note: skipping the self-hop case (this git does not answer false with a .git directory beside it)' >&2
   else
+    # AND THE GATE ITSELF, ON REAL GIT: the anchor is not inside that git
+    # directory, so rule 5 says the metadata answer is not an answer about the
+    # listing. A `true` here would mean this fixture no longer covers what it
+    # says it covers.
+    if [[ "$(git -C "$selfhop_dir/holder" rev-parse --is-inside-git-dir 2>/dev/null)" != false ]]; then
+      echo 'git says the listing is inside a git directory whose parent is the anchor, so the' \
+        'hop gate no longer separates this shape from the one it is for' >&2
+      exit 1
+    fi
     selfhop_rc=0
     timeout 60 "$BASH" "$branch_validator" \
       'fix-P2/correctness_a-hop-that-lands-where-it-started' "$selfhop_dir/holder" \
@@ -2069,6 +2133,78 @@ if command -v timeout >/dev/null 2>&1; then
   fi
 else
   echo 'note: skipping the self-hop case (no timeout(1) to bound it with)' >&2
+fi
+
+# ---- AND THE GIT DIRECTORY THAT IS SOMEWHERE ELSE ENTIRELY --------------------------------------
+#
+# RULE 5's counter-example, and the P1 the round before this one introduced while
+# repairing the symlinked component. `git init --separate-git-dir` puts the
+# metadata OUTSIDE the tree it records; with `core.bare` true on it, git answers
+# `false` for a listing inside that tree and then names a directory that is no
+# ancestor of the listing at all. Hopping to its parent left the enclosing work
+# tree behind, the walk found no repository over what was left, and THE
+# FILESYSTEM answered: exit 0 `conforms`, where the same commit's superproject
+# records nothing there and the three tree listings refuse at exit 1.
+#
+# The superproject IGNORES `findings/`, so what it records for the listing is
+# nothing -- which is the whole point: the listing is inside a work tree, and a
+# work tree's untracked names are not its ledger. Losing the work tree is what
+# turned that into a conforming answer.
+#
+# RUNS NATIVELY ON WINDOWS: yes. Every name is an ordinary one, nothing is
+# spelled with a backslash or a drive designator, and `--separate-git-dir` is
+# not platform-specific.
+extgd_super="$fixture_dir/external-gitdir-super"
+extgd_meta="$fixture_dir/external-gitdir-metadata"
+new_repo "$extgd_super"
+printf 'findings/\n' > "$extgd_super/.gitignore"
+echo seed > "$extgd_super/seed.txt"
+git -C "$extgd_super" add -A \
+  && git -C "$extgd_super" commit -q -m 'a work tree that ignores the findings directory'
+mkdir -p "$extgd_super/findings/holder"
+git -C "$extgd_super/findings" init -q --separate-git-dir "$extgd_meta"
+git --git-dir="$extgd_meta" config core.bare true
+printf 'fixture\n' \
+  > "$extgd_super/findings/holder/P2_correctness_202609130016_a-git-directory-somewhere-else.md"
+# The fixture is about nothing unless git really answers that way: `false` for
+# the listing, a git directory OUTSIDE the superproject, and `--is-inside-git-dir`
+# `false`, which is the one answer that separates this from the symlinked
+# component above.
+extgd_iwt="$(git -C "$extgd_super/findings/holder" rev-parse --is-inside-work-tree 2>/dev/null)"
+extgd_igd="$(git -C "$extgd_super/findings/holder" rev-parse --is-inside-git-dir 2>/dev/null)"
+extgd_agd="$(git -C "$extgd_super/findings/holder" rev-parse --absolute-git-dir 2>/dev/null)"
+if [[ "$extgd_iwt" != false ]] || [[ "$extgd_igd" != false ]] \
+  || [[ -z "$extgd_agd" ]] || [[ ! "$extgd_agd" -ef "$extgd_meta" ]]; then
+  echo 'note: skipping the external git directory case (this git does not separate the' \
+    "metadata that way: is-inside-work-tree=$extgd_iwt is-inside-git-dir=$extgd_igd" \
+    "absolute-git-dir=$extgd_agd)" >&2
+else
+  extgd_rc=0
+  ( cd "$extgd_super" \
+    && "$BASH" "$branch_validator" \
+      'fix-P2/correctness_a-git-directory-somewhere-else' 'findings/holder' ) \
+    >/dev/null 2>&1 || extgd_rc=$?
+  if [[ "$extgd_rc" != 1 ]]; then
+    echo "a listing whose git directory is outside the work tree over it must be answered by" \
+      "that work tree's records and not by the filesystem; got $extgd_rc" >&2
+    exit 1
+  fi
+  # AND THE SAME QUESTION PUT TO THE SUPERPROJECT'S OWN RECORDS, which is what
+  # makes this two answers for one commit rather than an opinion about a
+  # directory. The superproject tracks one file and it is not a finding.
+  extgd_trees="$fixture_dir/external-gitdir-trees"
+  mkdir -p "$extgd_trees"
+  git -C "$extgd_super" ls-tree -r --name-only HEAD > "$extgd_trees/base"
+  cp "$extgd_trees/base" "$extgd_trees/head"
+  cp "$extgd_trees/base" "$extgd_trees/range"
+  extgd_tree_rc=0
+  "$BASH" "$branch_validator" 'fix-P2/correctness_a-git-directory-somewhere-else' \
+    "$extgd_trees/base" "$extgd_trees/head" "$extgd_trees/range" >/dev/null 2>&1 \
+    || extgd_tree_rc=$?
+  if [[ "$extgd_tree_rc" != 1 ]]; then
+    echo "the superproject's own tree listings must refuse the same name; got $extgd_tree_rc" >&2
+    exit 1
+  fi
 fi
 
 # ---- AND A PATH WHOSE RESOLUTION IS NOT STABLE DOES NOT REACH THE HOP ---------------------------
@@ -2571,6 +2707,24 @@ walk_case() {
 }
 walk_case 'a drive root with no work tree over it must end the ascent' \
   'C:/repo' '' 'rc=0 root= asked=1 at=[C:/]'
+# AND A SHARE ROOT ENDS IT TOO, which is the row THIS ROUND'S MATRIX ASKED FOR.
+# Reversing this walk to the arithmetic it carried before rule 1 to 3 were one
+# rule reded NOTHING in the whole fixture set: every row here spelled its paths
+# `C:/…` or `/…`, and on those two the old walk and `path_parent` agree exactly,
+# so the reversal was invisible and the claim that this walk goes through the one
+# rule rested on reading the code. A WORK TREE ON A UNC SHARE IS A SPELLING GIT
+# REALLY ANSWERS `--show-toplevel` WITH, and it is where the two part: the share
+# IS the top, and the old arithmetic walked past it to `//server` -- a name no
+# host holds, which `repository_above` cannot stat, reads as metadata it cannot
+# examine and REFUSES. An ordinary listing on a share, in no repository, would go
+# from the filesystem's answer to a refusal. Measured through this harness: the
+# rule stops at one probe, the old arithmetic takes three, `at=[//server/share
+# //server /]`.
+walk_case 'a share root with no work tree over it must end the ascent' \
+  '//server/share/repo' '' 'rc=0 root= asked=1 at=[//server/share]'
+walk_case 'a work tree above a share-rooted false must still be reached' \
+  '//server/share/outer/bare/nested' '//server/share/outer' \
+  'rc=0 root=//server/share/outer asked=2 at=[//server/share/outer/bare //server/share/outer]'
 walk_case 'a work tree above a drive-rooted false must still be reached' \
   'C:/outer/bare/nested' 'C:/outer' 'rc=0 root=C:/outer asked=2 at=[C:/outer/bare C:/outer]'
 walk_case 'the same ascent on a POSIX path is unchanged' \
@@ -2622,7 +2776,7 @@ walk_case 'a drive-relative spelling is a top and is asked nothing' \
 anchor_harness="$fixture_dir/anchor-walk.sh"
 cat > "$anchor_harness" <<'ANCHOR'
 set -uo pipefail
-validator="$1"; start="$2"; cap="$3"; gitdir="${4:-}"
+validator="$1"; start="$2"; cap="$3"; gitdir="${4:-}"; insidegitdir="${5:-true}"; pwdas="${6:-}"
 src="$(awk '/^locate_listing\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
 [[ -n "$src" ]] || { echo 'harness: locate_listing was not extracted'; exit 3; }
 rule="$(awk '/^path_parent\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
@@ -2652,15 +2806,23 @@ git_probe() {
       ;;
     # EVERY DIRECTORY HERE IS A BARE REPOSITORY, which is what `false`
     # throughout means, and a bare repository's git directory IS the directory
-    # asked about. So the hop to git's own position lands exactly where the
-    # lexical step lands, and these rows measure the arithmetic and not the hop
-    # -- `$gitdir` is what moves them apart, and the row below sets it.
+    # asked about -- so the anchor IS inside it, which is why the default answer
+    # to rule 5's gate is `true`. The hop then lands exactly where the lexical
+    # step lands, and these rows measure the arithmetic and not the hop;
+    # `$gitdir` is what moves the two apart, and `$insidegitdir` is what decides
+    # whether that directory may be read as an answer about the listing at all.
+    --is-inside-git-dir) probe_text="$insidegitdir" ;;
     --absolute-git-dir) probe_text="${gitdir:-$4}" ;;
     *) echo "harness: unexpected probe '$6'"; exit 3 ;;
   esac
 }
 repository_above() { echo 'harness: no probe here fails, so this is unreachable'; exit 3; }
 indent() { :; }
+# RULE 4'S ONLY INPUT IS THE SHELL'S OWN DIRECTORY, and bash repairs `$PWD` at
+# startup, so the spellings that rule has to defend against cannot be reached by
+# `cd`. `PWD` is an ordinary shell variable and assigning it moves nothing, which
+# is exactly the shape a caller that clobbered it would present.
+[[ -z "$pwdas" ]] || PWD="$pwdas"
 rc=0
 locate_listing "$start" || rc=$?
 echo "rc=$rc world=$listing_world asked=$asked at=[$at]"
@@ -2711,6 +2873,62 @@ if (( posix_names )); then
     || [[ "$anchor_root_got" == *'=[//'* ]] || [[ "$anchor_root_got" == *' //'* ]]; then
     echo "run from '/', the anchor must be joined without doubling the separator and its" \
       "chain must still end at '/'; got '$anchor_root_got' at exit $anchor_root_rc" >&2
+    exit 1
+  fi
+
+  # AND RULE 4: A ROOTING THAT DOES NOT PRODUCE A ROOT IS NOT ONE. `${PWD:-.}`
+  # stood at the one place a caller's spelling is rooted, and a `.` is the one
+  # unrooted spelling that can reach all four walks: the enter loop shortens
+  # `./findings` to `.`, which is not an ancestor of the listing at all, and the
+  # ascent has no top to stop at. `$PWD` is repaired by bash at startup -- unset,
+  # empty, relative and wrong all answer with the current directory -- so the
+  # fallback defended nothing; what it did was contradict the rule, and a caller
+  # that clobbers `PWD` is the shape that reaches it. The answer is the rule: a
+  # shell whose own directory is not rooted cannot root anything against it, and
+  # that is REFUSED rather than walked from a guess.
+  anchor_unrooted_rc=0
+  anchor_unrooted="$( cd "$anchor_dir" \
+    && "$BASH" "$anchor_harness" "$branch_validator" 'C:/a/b' 40 '' true 'not-a-rooted-path' 2>&1 )" \
+    || anchor_unrooted_rc=$?
+  if [[ "$anchor_unrooted_rc" != 0 ]] || [[ "$anchor_unrooted" != *'rc=1 world= asked=0 at=[]'* ]] \
+    || [[ "$anchor_unrooted" != *'is not a'* ]] || [[ "$anchor_unrooted" != *'rooted path'* ]]; then
+    echo "an unrooted current directory must refuse rather than walk from a guess; got" \
+      "'$anchor_unrooted' at exit $anchor_unrooted_rc" >&2
+    exit 1
+  fi
+  # AND A LEADING RUN OF TWO SEPARATORS IS THE OTHER UNROOTED SPELLING, because
+  # rule 1 reads it as a UNC SHARE: `//tmp/findings` IS a share root, so from a
+  # current directory of `//tmp` the enter loop cannot shorten past the listing
+  # and nothing above it is ever asked about. WHICH OF THE TWO READINGS IS RIGHT
+  # IS THE FILESYSTEM'S TO SAY AND NOT A PLATFORM'S: where `//tmp` and `/tmp` are
+  # one directory the run must be one walk, and where they are not -- a real UNC
+  # share, whose first component names a HOST -- the share is the top rule 3 says
+  # it is. Both arms are asserted, and which one runs is decided by `-ef`.
+  # A name nothing can be standing on, because the row is about the walk above
+  # the listing and an enterable listing would shorten nothing.
+  rooting_name='no-such-listing-202609131500'
+  anchor_plain_rc=0
+  anchor_plain="$( cd "$anchor_dir" \
+    && "$BASH" "$anchor_harness" "$branch_validator" "$rooting_name" 40 '' true '/tmp' 2>&1 )" \
+    || anchor_plain_rc=$?
+  anchor_dbl_rc=0
+  anchor_dbl="$( cd "$anchor_dir" \
+    && "$BASH" "$anchor_harness" "$branch_validator" "$rooting_name" 40 '' true '//tmp' 2>&1 )" \
+    || anchor_dbl_rc=$?
+  if [[ "$anchor_plain_rc" != 0 ]] || [[ "$anchor_plain" != 'rc=0 world=filesystem asked=2 at=[/tmp /]' ]]; then
+    echo "the plain spelling of the current directory must walk to '/'; got" \
+      "'$anchor_plain' at exit $anchor_plain_rc" >&2
+    exit 1
+  fi
+  if [[ /tmp -ef //tmp ]]; then
+    if [[ "$anchor_dbl_rc" != 0 ]] || [[ "$anchor_dbl" != "$anchor_plain" ]]; then
+      echo "'//tmp' and '/tmp' are one directory here, so they must be one walk; got" \
+        "'$anchor_dbl' at exit $anchor_dbl_rc against '$anchor_plain'" >&2
+      exit 1
+    fi
+  elif [[ "$anchor_dbl_rc" != 0 ]] || [[ "$anchor_dbl" != *'at=[]'* ]]; then
+    echo "'//tmp' is not '/tmp' here, so it is a share root and nothing above it may be" \
+      "asked about; got '$anchor_dbl' at exit $anchor_dbl_rc" >&2
     exit 1
   fi
 
@@ -2773,19 +2991,42 @@ if (( posix_names )); then
       "'$anchor_after_hop' at exit $anchor_after_hop_rc" >&2
     exit 1
   fi
-  # AND A PINNED ENVIRONMENT IS NOT HOPPED, on the same test `repository_above`
-  # makes on its first line: with `GIT_DIR` exported, `--absolute-git-dir` answers
-  # the pinned directory wherever the anchor is, and its parent is a jump to an
-  # unrelated tree rather than a step up this one. The lexical walk is what runs,
-  # and it is the same chain the unpinned rows above measure.
-  anchor_pinned_rc=0
-  anchor_pinned="$( cd "$anchor_dir" \
-    && GIT_DIR="$anchor_dir/pinned.git" "$BASH" "$anchor_harness" "$branch_validator" \
-      'C:/a/b' 40 '/elsewhere/bare.git' 2>&1 )" || anchor_pinned_rc=$?
-  if [[ "$anchor_pinned_rc" != 0 ]] \
-    || [[ "$anchor_pinned" != 'rc=0 world=filesystem asked=2 at=[C:/a C:/]' ]]; then
-    echo "a pinned GIT_DIR must leave the ascent lexical; got" \
-      "'$anchor_pinned' at exit $anchor_pinned_rc" >&2
+  # AND A GIT DIRECTORY THAT DOES NOT CONTAIN THE ANCHOR IS NOT HOPPED TO, which
+  # is rule 5 and is the row that separates the hop's legitimate shape from the
+  # P1 the round before this introduced. The two rows differ in ONE stubbed
+  # answer: `--is-inside-git-dir`. With `true` the hop runs and the chain is the
+  # row above; with `false` the metadata directory is somewhere else, it is no
+  # answer about where the listing is, and the walk is the purely lexical one the
+  # unpinned rows measure -- the same chain, to the same top, with the hop gone.
+  anchor_nohop_rc=0
+  anchor_nohop="$( cd "$anchor_dir" \
+    && "$BASH" "$anchor_harness" "$branch_validator" 'C:/a/b' 40 '/elsewhere/bare.git' false 2>&1 )" \
+    || anchor_nohop_rc=$?
+  if [[ "$anchor_nohop_rc" != 0 ]] \
+    || [[ "$anchor_nohop" != 'rc=0 world=filesystem asked=2 at=[C:/a C:/]' ]]; then
+    echo "a git directory the anchor is not inside must leave the ascent lexical; got" \
+      "'$anchor_nohop' at exit $anchor_nohop_rc" >&2
+    exit 1
+  fi
+  # AND A PINNED ENVIRONMENT IS THAT SAME ROW AND NOT A SECOND RULE. The test
+  # that stood here was `repository_above`'s first line -- refuse to hop whenever
+  # `GIT_DIR` or `GIT_WORK_TREE` is exported -- and what made it right is that
+  # real git answers rule 5's gate `false` for a pinned directory the anchor is
+  # not inside. THAT IS A FACT ABOUT GIT AND NOT ABOUT THIS FILE, so it is pinned
+  # against real git here rather than restated as a second branch in the walk: if
+  # it ever stopped holding, the row above would still pass and the pinned caller
+  # would start hopping into an unrelated tree.
+  pinned_probe_dir="$fixture_dir/pinned-environment"
+  mkdir -p "$pinned_probe_dir/outside"
+  git init -q --bare "$pinned_probe_dir/pinned.git"
+  pinned_outside="$( GIT_DIR="$pinned_probe_dir/pinned.git" \
+    git -C "$pinned_probe_dir/outside" rev-parse --is-inside-git-dir 2>/dev/null )"
+  pinned_inside="$( GIT_DIR="$pinned_probe_dir/pinned.git" \
+    git -C "$pinned_probe_dir/pinned.git" rev-parse --is-inside-git-dir 2>/dev/null )"
+  if [[ "$pinned_outside" != false ]] || [[ "$pinned_inside" != true ]]; then
+    echo "git no longer answers rule 5's gate false for a pinned GIT_DIR the anchor is" \
+      "outside and true for one it is inside; got '$pinned_outside' and '$pinned_inside'," \
+      "so the walk needs its own reading of a pinned environment again" >&2
     exit 1
   fi
 fi
