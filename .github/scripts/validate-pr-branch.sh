@@ -1176,15 +1176,32 @@ recorded_tree() {
 # where the submodule query answered empty and conformed.
 enclosing_root=''
 enclosing_work_tree() {
-  local root="$1" listing="$2" parent above
+  local root="$1" listing="$2" parent child above
   enclosing_root=''
   parent="$root"
   while :; do
-    # RUNNING OUT OF LEVELS IS THE ONLY ABSENCE, and that is this test: the
-    # filesystem root contains everything and is contained by nothing.
+    # RUNNING OUT OF LEVELS IS THE ONLY ABSENCE, and that is these two tests: the
+    # filesystem root contains everything and is contained by nothing, and A DRIVE
+    # OR SHARE ROOT IS A ROOT TOO -- a path with no separator left to strip is at
+    # the top of whatever rooted it. Both are absences and both return the same
+    # one, because running out of levels is running out of levels however the path
+    # was rooted.
+    #
+    # THE SECOND TEST IS WHAT THIS FUNCTION'S OWN COMMENT BELOW ASKS FOR AND DID
+    # NOT HAVE. `${parent%/*}` shortens every POSIX path, so the `/` test was the
+    # whole of the bound for as long as a `false` ENDED the walk. It stopped being
+    # the whole of it when a `false` became a reason to CONTINUE: `C:/repo` strips
+    # to `C:` and `C:` strips to `C:`, so a drive root outside any work tree --
+    # `false`, the ordinary answer there -- asks about the same directory for ever.
+    # Unbounded rather than slow, in a required check, on the one platform this
+    # repository cannot execute. `repository_above` and `locate_listing` each make
+    # this test on the same arithmetic; this walk is the third and had only the
+    # comment.
     [[ "$parent" != / ]] || return 0
+    child="$parent"
     parent="${parent%/*}"
     [[ -n "$parent" ]] || parent='/'
+    [[ "$parent" != "$child" ]] || return 0
     git_probe '0,128' -- -C "$parent" rev-parse --is-inside-work-tree
     if (( probe_status != 0 )); then
       above=0

@@ -2053,6 +2053,88 @@ else
   done
 fi
 
+# ---- A WALK THAT CANNOT SHORTEN THE PATH DOES NOT TERMINATE ------------------------------------
+#
+# `enclosing_work_tree` ascends by `${parent%/*}`, and the test at the top of its
+# loop is `$parent != /`. That pair bounds every POSIX path, because stripping a
+# component off one always shortens it and `/` is what is left. IT DOES NOT BOUND
+# A DRIVE ROOT: `C:/repo` strips to `C:`, and `C:` strips to `C:`.
+#
+# While a `false` from `--is-inside-work-tree` ENDED the walk, that was a wrong
+# answer at such a root and nothing worse. The section above makes a `false` a
+# reason to CONTINUE -- which is the right repair, and this is its cost -- and the
+# same input is then an UNBOUNDED LOOP asking about `C:` for ever. Unbounded
+# rather than slow, in a required check. `repository_above` and `locate_listing`
+# both make the shortening test on the same arithmetic; this walk carried the
+# comment that every step must move strictly upwards and not the test.
+#
+# NOTHING ON THIS PLATFORM CAN REACH IT -- every path git hands this ascent here
+# begins with `/` -- so the function is driven directly with `git_probe` stubbed,
+# which is what a native `C:/...` work-tree root would produce. That is the same
+# kind of witness the walk's other root test has, and it is written down here
+# rather than run by hand because a hand-run witness is not a gate.
+#
+# THE HARNESS IS BOUNDED BY A CALL CAP, NOT BY WALL CLOCK, so a regression FAILS
+# rather than hangs CI, and it needs no `timeout` to do it: every turn of this
+# loop probes, so counting probes counts turns, and the stub exits 124 on the
+# cap+1'th. It asserts the probe's argument shape before reading it, so a call
+# that stops looking like the one this stubs is a loud failure and not a silent
+# pass.
+#
+# TWO DRIVE-ROOTED CASES, BECAUSE THEY PULL IN OPPOSITE DIRECTIONS: the walk must
+# STOP at a drive root, and it must NOT stop at the bare boundary the section
+# above is about -- a `false` under a work tree that does record the listing has
+# to keep ascending. A POSIX row runs the same harness to show the terminator
+# moved nothing there.
+walk_harness="$fixture_dir/drive-root-walk.sh"
+cat > "$walk_harness" <<'WALK'
+set -uo pipefail
+validator="$1"; start="$2"; true_at="$3"; cap="$4"
+src="$(awk '/^enclosing_work_tree\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$src" ]] || { echo 'harness: enclosing_work_tree was not extracted'; exit 3; }
+bash -n <<< "$src" || { echo 'harness: the extract does not parse'; exit 3; }
+eval "$src"
+probe_status=0; probe_text=''; probe_stderr=''; unexaminable_git=''
+branch='fix-P1/security-trust_x'
+asked=0
+git_probe() {
+  [[ "$1" == 0,128 || "$1" == 0 ]] && [[ "$2" == -- ]] && [[ "$3" == -C ]] \
+    && [[ "$5" == rev-parse ]] || { echo "harness: unexpected call: git_probe $*"; exit 3; }
+  probe_status=0
+  case "$6" in
+    --is-inside-work-tree)
+      asked=$(( asked + 1 ))
+      if (( asked > cap )); then
+        echo "harness: $asked probes and still asking about '$4'"
+        exit 124
+      fi
+      if [[ -n "$true_at" && "$4" == "$true_at" ]]; then probe_text=true; else probe_text=false; fi
+      ;;
+    --show-toplevel) probe_text="$true_at" ;;
+    *) echo "harness: unexpected probe '$6'"; exit 3 ;;
+  esac
+}
+repository_above() { echo 'harness: no probe here fails, so this is unreachable'; exit 3; }
+enclosing_root=''
+rc=0
+enclosing_work_tree "$start" "$start/findings" || rc=$?
+echo "rc=$rc root=$enclosing_root asked=$asked"
+WALK
+walk_case() {
+  local name="$1" start="$2" true_at="$3" want="$4" got rc=0
+  got="$("$BASH" "$walk_harness" "$branch_validator" "$start" "$true_at" 40 2>&1)" || rc=$?
+  if [[ "$rc" != 0 ]] || [[ "$got" != "$want" ]]; then
+    echo "$name: expected '$want' at exit 0; got '$got' at exit $rc" >&2
+    exit 1
+  fi
+}
+walk_case 'a drive root with no work tree over it must end the ascent' \
+  'C:/repo' '' 'rc=0 root= asked=1'
+walk_case 'a work tree above a drive-rooted false must still be reached' \
+  'C:/outer/bare/nested' 'C:/outer' 'rc=0 root=C:/outer asked=2'
+walk_case 'the same ascent on a POSIX path is unchanged' \
+  '/outer/bare/nested' '/outer' 'rc=0 root=/outer asked=2'
+
 # ---- what git RECORDS, not what the checkout happens to hold -----------------------------------
 #
 # A TRACKED finding need not be in the working tree, and the candidate names
