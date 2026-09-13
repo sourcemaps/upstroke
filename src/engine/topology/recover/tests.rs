@@ -16400,6 +16400,144 @@ fn a_report_rename_without_directory_sync_is_proven_before_pruning() {
     }
 }
 
+#[test]
+fn fresh_report_hook_errors_stop_cleanup_and_retry() {
+    use crate::topology::effects::ReportSite;
+    for (outcome, alpha) in [
+        (RunOutcome::Complete, AlphaEnd::Published),
+        (RunOutcome::Halted, AlphaEnd::Queued),
+    ] {
+        let tag = outcome_short(&outcome);
+        let planted = plant_finished_run_with(
+            &format!("fresh-report-hooks-{tag}"),
+            outcome.clone(),
+            alpha,
+            FinishedResidue {
+                snapshot: true,
+                staging: true,
+                prepared_pin: true,
+            },
+        );
+        let fixture = &planted.fixture;
+        let runtime = runtime_holding_the_record();
+        let certifies = AlwaysCertifies;
+        let given = Given::healthy(fixture, &runtime, &certifies);
+        let report_path = fixture.public().join(rundir::REPORT);
+        let pins_before = pins_of(fixture);
+        assert_eq!(
+            pins_before.len(),
+            2,
+            "{tag}: a prepared pin and a candidate-prepared pin stand to be pruned"
+        );
+
+        {
+            let _fault = crate::util::fail_barriers_at(&fixture.public());
+            let first = harness();
+            let (result, _) = resume(fixture, &first, &given);
+            let error =
+                message(&result.expect_err("the failed directory barrier ends the command"));
+            assert!(error.contains("injected barrier fault"), "{tag}: {error}");
+        }
+        let bytes =
+            std::fs::read(&report_path).expect("the rename landed: the report is under its name");
+        assert!(
+            report_of(fixture).is_fresh_against(&bytes),
+            "{tag}: and current by digest"
+        );
+        assert!(
+            wait_for_cleanup_hold_release(&fixture.public()),
+            "{tag}: the run's cleanup lease is still held"
+        );
+
+        for (site, phase) in [
+            (
+                EffectSiteId::RunDir(RunDirSite::WriteReport),
+                HookPhase::Before,
+            ),
+            (EffectSiteId::Report(ReportSite::Write), HookPhase::Before),
+            (EffectSiteId::Report(ReportSite::Write), HookPhase::After),
+            (
+                EffectSiteId::RunDir(RunDirSite::WriteReport),
+                HookPhase::After,
+            ),
+        ] {
+            let cell = format!("{tag}/{site}/{phase}");
+            let armed = harness();
+            let mut hooks = BarrierHooks::armed(&armed, (site, phase), Injection::Error);
+            let (result, _) = resume_with(fixture, &mut hooks, &given);
+            let error = message(&result.expect_err(
+                "an injected error at a report coordinate of the fresh branch ends the restart",
+            ));
+            assert!(
+                error.contains("was made to fail")
+                    && error.contains(&site.to_string())
+                    && error.contains(&phase.to_string()),
+                "{cell}: the error names the injected coordinate: {error}"
+            );
+            let timeline = hooks.timeline();
+            assert!(
+                timeline
+                    .iter()
+                    .any(|seen| seen.site == site && seen.phase == phase),
+                "{cell}: the armed coordinate was observed on the fresh branch: {timeline:?}"
+            );
+            assert_no_ref_site(&timeline, &cell);
+            assert_eq!(
+                std::fs::read(&report_path).expect("the report stands"),
+                bytes,
+                "{cell}: the report is byte-identical"
+            );
+            assert!(
+                !fixture.public().join(rundir::REPORT_STAGED).exists(),
+                "{cell}: nothing was staged"
+            );
+            assert_eq!(
+                candidates_refs_of(fixture).len(),
+                1,
+                "{cell}: the candidates ref stands behind the refused coordinate"
+            );
+            assert_eq!(
+                pins_of(fixture),
+                pins_before,
+                "{cell}: both pin families stand"
+            );
+            assert!(
+                wait_for_cleanup_hold_release(&fixture.public()),
+                "{cell}: the run's cleanup lease is still held"
+            );
+        }
+
+        let restart = harness();
+        let mut hooks = BarrierHooks::armed(
+            &restart,
+            (EffectSiteId::Lock(LockSite::Release), HookPhase::After),
+            Injection::Proceed,
+        );
+        let (result, _) = resume_with(fixture, &mut hooks, &given);
+        let text = message(&result.expect_err("the unarmed restart finalizes then refuses"));
+        assert!(
+            text.contains("already current") && text.contains("finalized"),
+            "{tag}: {text}"
+        );
+        assert_fresh_branch_took_the_report_sites(
+            &hooks.timeline(),
+            &hooks.ledger_records(),
+            &fixture.public(),
+            &format!("{tag}: the unarmed restart"),
+        );
+        assert_eq!(
+            std::fs::read(&report_path).expect("the report stands"),
+            bytes,
+            "{tag}: byte for byte"
+        );
+        assert_finalized(
+            &planted,
+            &outcome,
+            &format!("{tag}: after the unarmed restart"),
+        );
+    }
+}
+
 const FINALIZATION_KILL_CHILD: &str = "engine::topology::recover::tests::finalization_kill_child";
 
 #[test]

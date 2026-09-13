@@ -551,9 +551,12 @@ fn canonical(path: PathBuf) -> Result<PathBuf, UpstrokeError> {
 /// a `set_permissions` after the write, which left the bytes readable at the
 /// umask's mode until then — by whoever opened the file in between, and
 /// for good after a death in between (the round-5 regression lens, P2). The
-/// ledger's [`DurableStep::Staged`] entry is taken before the first byte and
-/// carries the mode the file had then, so a test can hold the mode from
-/// creation rather than read the source order.
+/// ledger's [`DurableStep::Staged`] entry is taken from the file's own
+/// metadata the moment it exists — before [`settle_mode`] and before the
+/// first byte — and carries the creation mode and the real length, zero, so
+/// a test holds the mode from creation rather than reading the source order
+/// (until PR10's round 6 it was taken after `settle_mode` could chmod, with a
+/// literal zero for the length: the round-6 fix-check and regression lenses).
 fn stage_json<T: Serialize>(
     path: &Path,
     value: &T,
@@ -569,8 +572,9 @@ fn stage_json<T: Serialize>(
         source,
     };
     let mut file = create_staged(path, preserve.as_ref()).map_err(io)?;
+    let created = file.metadata().map_err(io)?;
+    ledger.record(DurableStep::Staged, path, created.len());
     let after_write = settle_mode(&file, preserve).map_err(io)?;
-    ledger.record(DurableStep::Staged, path, 0);
     file.write_all(json.as_bytes()).map_err(io)?;
     if let Some(permissions) = after_write {
         file.set_permissions(permissions).map_err(io)?;
@@ -578,17 +582,24 @@ fn stage_json<T: Serialize>(
     sync_file_recorded(&file, path, ledger)
 }
 
-/// Open the staged file, empty, at the mode it will carry its bytes at.
+/// Open the staged file, empty, at the mode it will carry its bytes at — a
+/// file of this writer's own making.
 ///
-/// On Unix the preserved mode is the `open`'s own creation mode
-/// (`OpenOptions::mode`), so no instant exists at which the file is wider
-/// than the file it replaces; the umask still narrows it and a leftover
-/// staged file keeps the mode it had, both of which [`settle_mode`] corrects
-/// before the first byte. Elsewhere a `Permissions` is the read-only bit,
-/// which is set after the write as it always was.
+/// `create_new`, after a stale staging file of the writer's own kind is
+/// cleared by [`clear_stale_staging`], so a name that is somebody else's — a
+/// hard link to an operator's file, a symlink, a directory — is never
+/// truncated or written through (the round-6 regression lens, P2-1: until
+/// PR10's round 6 the path was opened `create(true).truncate(true)`, which
+/// truncated an alias and filled the operator's file with report bytes, on
+/// the schema-3 path too). On Unix the preserved mode is the `open`'s own
+/// creation mode (`OpenOptions::mode`), so no instant exists at which the
+/// file is wider than the file it replaces; the umask still narrows it, which
+/// [`settle_mode`] corrects before the first byte. Elsewhere a `Permissions`
+/// is the read-only bit, which is set after the write as it always was.
 fn create_staged(path: &Path, preserve: Option<&fs::Permissions>) -> std::io::Result<File> {
+    clear_stale_staging(path)?;
     let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     if let Some(permissions) = preserve {
         use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
@@ -599,11 +610,67 @@ fn create_staged(path: &Path, preserve: Option<&fs::Permissions>) -> std::io::Re
     options.open(path)
 }
 
+/// Clear a staging file an earlier writer of this protocol left, and nothing
+/// else.
+///
+/// The protocol writes `<name>.tmp` as a fresh regular file with one link
+/// and renames it away, so the only thing it can leave at the name is a
+/// regular file with one link — a death between the write and the rename —
+/// and that is removed, its bytes nobody's, so the name is free for
+/// `create_new`. Anything else at the name is refused, by name, and left as
+/// found: a symbolic link (not followed), a directory, or a regular file with
+/// more than one link, which is one name of somebody's file. The link count
+/// is read where std exposes it (Unix); elsewhere a regular file at the name
+/// is removed — one name, never bytes, since `create_new` then makes a file
+/// of its own — and a symlink or a directory is refused.
+fn clear_stale_staging(path: &Path) -> std::io::Result<()> {
+    let found = match fs::symlink_metadata(path) {
+        Ok(found) => found,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let kind = found.file_type();
+    let not_ours = if kind.is_symlink() {
+        Some("a symbolic link".to_owned())
+    } else if kind.is_dir() {
+        Some("a directory".to_owned())
+    } else if !kind.is_file() {
+        Some("not a regular file".to_owned())
+    } else {
+        link_count(&found)
+            .filter(|links| *links != 1)
+            .map(|links| format!("a regular file with {links} links"))
+    };
+    if let Some(reason) = not_ours {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "{} exists and is not a staging file this writer could have left ({reason}); it \
+                 is neither truncated nor removed",
+                path.display()
+            ),
+        ));
+    }
+    fs::remove_file(path)
+}
+
+#[cfg(unix)]
+fn link_count(found: &fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt as _;
+    Some(found.nlink())
+}
+
+#[cfg(not(unix))]
+fn link_count(_found: &fs::Metadata) -> Option<u64> {
+    None
+}
+
 /// Give the empty staged file its preserved mode before any byte reaches it,
 /// and hand back what is left to apply after the write.
 ///
-/// On Unix that is nothing: the creation mode is corrected here — the umask
-/// masks a requested mode and a leftover keeps its own — and the answer is
+/// On Unix that is nothing: the creation mode, which the umask may have
+/// narrowed, is widened to the preserved mode here — before the first byte,
+/// and after the ledger has recorded the creation mode — and the answer is
 /// `None`. On the other platforms the read-only bit is the whole
 /// `Permissions`, no umask reads it, and it is set after the write as before,
 /// so `preserve` is handed back for [`stage_json`] to apply then.

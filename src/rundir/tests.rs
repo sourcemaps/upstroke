@@ -4481,6 +4481,77 @@ fn a_staged_partial_is_never_ingested_and_a_published_answer_survives_ingestion(
     );
 }
 
+/// A `report.json.tmp` that is not this writer's — here a hard link to an
+/// operator's note outside the run directory — is neither truncated nor
+/// overwritten by staging (the round-6 regression lens, P2-1): the staging
+/// path is opened `create_new`, and a stale staging file is cleared first only
+/// when it is a regular file with one link, which is the only thing this
+/// writer's own protocol can leave; anything else at the name is refused, by
+/// name, and left as found. On Unix the link count tells the alias apart and
+/// the publication is refused; on Windows, where std exposes no link count,
+/// a regular file at the name is removed — one name of the operator's file,
+/// never its bytes, which `create_new` then cannot reach — and the
+/// publication proceeds. Until round 6 the staging path was opened
+/// `create(true).truncate(true)`, which truncated the alias and wrote report
+/// bytes into the operator's file, on the schema-3 path too. A stale staging
+/// file of the writer's own kind is still cleared and the report published.
+#[test]
+fn report_staging_does_not_overwrite_an_unrelated_file() {
+    let root = scratch("report-stage-alias");
+    let public = root.join("public");
+    create_dir(&public).expect("public directory");
+    let note = root.join("operator-note.txt");
+    fs::write(&note, b"keep me\n").expect("operator note");
+    let staged = public.join(REPORT_STAGED);
+    fs::hard_link(&note, &staged).expect("staging alias");
+    let payload = serde_json::json!({"outcome": "parked"});
+
+    let outcome = write_report(&public, &payload, &mut NoHooks);
+    assert_eq!(
+        fs::read(&note).expect("operator note"),
+        b"keep me\n".to_vec(),
+        "the operator's file is byte-identical: staging neither truncated nor wrote through the \
+         alias"
+    );
+    #[cfg(unix)]
+    {
+        let error = outcome.expect_err("a staging name with another link is refused, not reused");
+        let text = error.to_string();
+        assert!(
+            text.contains("report.json.tmp") && text.contains("2 links"),
+            "the refusal names the staging path and why it is not this writer's: {text}"
+        );
+        assert!(
+            staged.exists() && !public.join(REPORT).exists(),
+            "the alias is left as found and no report was published behind it"
+        );
+        fs::remove_file(&staged).expect("the operator's alias removed for the next case");
+    }
+    #[cfg(not(unix))]
+    {
+        outcome.expect(
+            "without a link count the regular file at the name is removed and staging proceeds",
+        );
+        assert!(public.join(REPORT).is_file(), "the report was published");
+        assert_eq!(
+            fs::read(&note).expect("operator note"),
+            b"keep me\n".to_vec()
+        );
+    }
+
+    fs::write(&staged, b"{\"half\":").expect("a stale staging file of this writer's own kind");
+    write_report(&public, &payload, &mut NoHooks).expect("a stale staging file is cleared");
+    assert!(!staged.exists() && public.join(REPORT).is_file());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &fs::read(public.join(REPORT)).expect("report")
+        )
+        .expect("json"),
+        payload,
+        "and the published report is the payload, not the stale bytes"
+    );
+}
+
 /// The moved payload writers keep the **legacy byte shape**
 /// (`PR5-RUNDIR-058`).
 ///
