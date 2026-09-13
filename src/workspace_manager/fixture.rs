@@ -994,6 +994,9 @@ pub(crate) struct KillableGitChild {
     /// The clock once [`Self::wait`] had returned the child's status, or
     /// `None` until it has.
     reaped: Option<std::time::Duration>,
+    /// How long after the leader's reap its whole process group was gone
+    /// ([`await_group_end`]), or `None` until [`Self::wait`] has run.
+    group_ended: Option<std::time::Duration>,
 }
 
 /// The `git` a sampled child runs, so that a kill of the child is a kill of
@@ -1067,6 +1070,7 @@ impl KillableGitChild {
             fired: None,
             kill_error: None,
             reaped: None,
+            group_ended: None,
         }
     }
 
@@ -1099,26 +1103,10 @@ impl KillableGitChild {
         self.kill_error = outcome.err();
     }
 
-    /// The kill itself: the child's whole process group on Unix, where
-    /// `git worktree add` runs its `reset --hard` as a child of its own
-    /// and a kill of the leader alone leaves that child populating the
-    /// worktree after the sample is taken; the direct child elsewhere.
-    #[cfg(unix)]
+    /// The kill itself: [`kill_process_group`] — the child's whole process
+    /// group on Unix, the direct child elsewhere.
     fn kill_group(&mut self) -> std::io::Result<()> {
-        let pid = i32::try_from(self.child.id())
-            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
-        // SAFETY: `spawn` put the child in a new process group whose id is
-        // its pid; a negative pid targets that group only, and the call hands
-        // over no memory.
-        if unsafe { libc::kill(-pid, libc::SIGKILL) } == 0 {
-            return Ok(());
-        }
-        Err(std::io::Error::last_os_error())
-    }
-
-    #[cfg(not(unix))]
-    fn kill_group(&mut self) -> std::io::Result<()> {
-        self.child.kill()
+        kill_process_group(&mut self.child)
     }
 
     /// Whether the child has exited on its own, and when the parent saw it.
@@ -1146,6 +1134,10 @@ impl KillableGitChild {
     pub(crate) fn wait(&mut self) -> std::process::ExitStatus {
         let status = self.child.wait().expect("reap the sampled git child");
         self.reaped = Some(self.origin.elapsed());
+        let pgid = i32::try_from(self.child.id()).expect("a pid fits in i32");
+        self.group_ended = Some(await_group_end(pgid).unwrap_or_else(|outlived| {
+            panic!("the sampled git child's group outlived its leader: {outlived}")
+        }));
         status
     }
 
@@ -1234,6 +1226,100 @@ impl KillableGitChild {
     pub(crate) fn reaped(&self) -> Option<std::time::Duration> {
         self.reaped
     }
+
+    /// How long after the leader's reap its whole process group was gone
+    /// ([`await_group_end`]), once [`Self::wait`] has run.
+    pub(crate) fn group_ended(&self) -> Option<std::time::Duration> {
+        self.group_ended
+    }
+}
+
+/// How long a killed process group is given to be gone after its leader's
+/// reap before [`await_group_end`] gives up.
+pub(crate) const GROUP_END_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A killed process group that still had a member when [`GROUP_END_BOUND`]
+/// ran out.
+#[derive(Debug)]
+pub(crate) struct GroupOutlivedItsLeader {
+    pgid: i32,
+    waited: std::time::Duration,
+}
+
+impl std::fmt::Display for GroupOutlivedItsLeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "process group {} still had a member {:?} after its leader was reaped (the bound is {:?})",
+            self.pgid, self.waited, GROUP_END_BOUND
+        )
+    }
+}
+
+/// `SIGKILL` to the child's whole process group on Unix — `git worktree add`
+/// runs its `reset --hard` as a child of its own, and a kill of the leader
+/// alone leaves that child populating the worktree after the sample is
+/// taken — and to the direct child elsewhere. Both samplers' children are
+/// killed through here since PR10's round 5; until then only
+/// [`KillableGitChild`]'s were (round 2), and PR5's own sampler killed its
+/// leader alone (`PR136`'s first fingerprint, met on CI's macOS leg at
+/// `869e336a`).
+#[cfg(unix)]
+pub(crate) fn kill_process_group(child: &mut std::process::Child) -> std::io::Result<()> {
+    let pid =
+        i32::try_from(child.id()).map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    // SAFETY: the spawn put the child in a new process group whose id is
+    // its pid; a negative pid targets that group only, and the call hands
+    // over no memory.
+    if unsafe { libc::kill(-pid, libc::SIGKILL) } == 0 {
+        return Ok(());
+    }
+    Err(std::io::Error::last_os_error())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn kill_process_group(child: &mut std::process::Child) -> std::io::Result<()> {
+    child.kill()
+}
+
+/// Wait until no process of the group `pgid` exists, and say how long that
+/// took after the leader's reap: the proof that no writer the sampled child
+/// started is alive, which the leader's reap alone is not. A member
+/// `SIGKILL` reached is dead, but its last system call can complete after
+/// the leader's reap and after `remove_dir_all` listed a directory —
+/// `DirectoryNotEmpty` at the forced removal, seen on CI's macOS leg at
+/// `869e336a` — and a member reparented to this process stays a zombie of
+/// the group until reaped, so each poll reaps what it can
+/// (`waitpid(-pgid, WNOHANG)`) and then asks the group (`kill(-pgid, 0)`,
+/// `ESRCH` once it is empty). Bounded by [`GROUP_END_BOUND`]. `cfg(unix)`:
+/// only there is the sampled child a group; elsewhere the kill is the direct
+/// child's and its reap the whole wait, as before.
+#[cfg(unix)]
+pub(crate) fn await_group_end(pgid: i32) -> Result<std::time::Duration, GroupOutlivedItsLeader> {
+    let started = std::time::Instant::now();
+    loop {
+        // SAFETY: a negative pid waits for any child of this process in that
+        // group, `WNOHANG` never blocks, and a null status pointer is
+        // permitted; nothing else is handed over.
+        while unsafe { libc::waitpid(-pgid, std::ptr::null_mut(), libc::WNOHANG) } > 0 {}
+        // SAFETY: signal 0 delivers nothing; the call only asks whether a
+        // process of the group exists, and hands over no memory.
+        if unsafe { libc::kill(-pgid, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            return Ok(started.elapsed());
+        }
+        let waited = started.elapsed();
+        if waited >= GROUP_END_BOUND {
+            return Err(GroupOutlivedItsLeader { pgid, waited });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn await_group_end(_pgid: i32) -> Result<std::time::Duration, GroupOutlivedItsLeader> {
+    Ok(std::time::Duration::ZERO)
 }
 
 /// Whether `status` is the death `std::process::abort()` produces.

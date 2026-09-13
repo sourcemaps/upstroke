@@ -1414,6 +1414,7 @@ fn sample_remaining_site(site: EffectSiteId) -> Vec<RemainingSample> {
         let mut child = KillableGitChild::spawn(&cwd, &argv);
         let _ran = child.run_until(after);
         let status = child.wait();
+        let group_ended = child.group_ended().unwrap_or_default();
         let target = ResidueTarget::new(&fixture.base)
             .at(&worktree)
             .from_base(&fixture.head);
@@ -1430,13 +1431,17 @@ fn sample_remaining_site(site: EffectSiteId) -> Vec<RemainingSample> {
         let recovered = match remaining_recovered(&fixture, &slot) {
             Ok(recovered) => recovered,
             Err(error) => panic!(
-                "{site}: forced removal converges (run {run}): {error}; {}",
+                "{site}: forced removal converges (run {run}): {error}; the killed group was \
+                 gone {group_ended:?} after its leader's reap (the bound is {:?}); {}",
+                crate::workspace_manager::fixture::GROUP_END_BOUND,
                 registration_snapshot(&fixture, &worktree)
             ),
         };
         if !recovered && diagnosis.is_none() {
             diagnosis = Some(format!(
-                "run {run}: not recovered; {}",
+                "run {run}: not recovered; the killed group was gone {group_ended:?} after its \
+                 leader's reap (the bound is {:?}); {}",
+                crate::workspace_manager::fixture::GROUP_END_BOUND,
                 registration_snapshot(&fixture, &worktree)
             ));
         }

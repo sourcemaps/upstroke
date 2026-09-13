@@ -10449,6 +10449,16 @@ fn sampled_git_child_kills_every_residue_classified_and_recovered() {
             "every sampled site must launch exactly its frozen N children, \
                  and an observation is pushed whether or not one was"
         );
+        let group_end = log
+            .iter()
+            .map(|launch| launch.group_ended)
+            .max()
+            .unwrap_or_default();
+        println!(
+            "residue sampling: every killed group was gone within {group_end:?} of its leader's \
+             reap (the bound is {:?})",
+            super::fixture::GROUP_END_BOUND
+        );
         for (label, fixed) in [
             ("git add", WorkspaceManager::CANDIDATE_STAGE_ARGV[0]),
             (
@@ -11482,6 +11492,10 @@ struct SampledLaunch {
     /// asserted on — see the note at that printing.
     kill_error: Option<String>,
     end: LaunchEnd,
+    /// How long after the leader's reap its whole process group was gone
+    /// (`fixture::await_group_end`): zero off Unix, where the child is no
+    /// group.
+    group_ended: std::time::Duration,
 }
 
 /// Every Git child the sampler actually launched, in order.
@@ -11545,24 +11559,40 @@ struct SampledChild {
     /// What the clock said when a kill fired at this child, or `None` if
     /// none ever did. Written only by [`Self::kill`].
     fired: Option<std::time::Duration>,
+    /// How long after the leader's reap its whole process group was gone
+    /// (`fixture::await_group_end`), or `None` until [`Self::wait`] has run.
+    group_ended: Option<std::time::Duration>,
 }
 
 impl SampledChild {
+    /// Spawn the child in a process group of its own on Unix, so that
+    /// [`Self::kill`] reaches the children git starts — `git worktree add`'s
+    /// `reset --hard` — and not the leader alone. Until PR10's round 5 this
+    /// sampler killed the leader alone (round 2's group kill reached
+    /// `fixture::KillableGitChild`, the other samplers' child), and CI's
+    /// macOS leg at `869e336a` met that child still populating the checkout
+    /// — `PR136`'s first fingerprint — at the forced removal.
     fn spawn(cwd: &Path, args: &[String]) -> Self {
-        let child = Command::new("git")
+        let mut command = Command::new("git");
+        command
             .arg("-C")
             .arg(cwd)
             .args(["-c", "core.fsmonitor=false"])
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn the sampled git child");
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
+        let child = command.spawn().expect("spawn the sampled git child");
         Self {
             child,
             spawned: std::time::Instant::now(),
             fired: None,
+            group_ended: None,
         }
     }
 
@@ -11582,13 +11612,24 @@ impl SampledChild {
     /// but a real kill produces.
     fn kill(&mut self) -> std::io::Result<()> {
         let fired = self.spawned.elapsed();
-        let outcome = self.child.kill();
+        let outcome = super::fixture::kill_process_group(&mut self.child);
         self.fired = Some(fired);
         outcome
     }
 
+    /// Reap the leader, then wait until its whole process group is gone
+    /// (`fixture::await_group_end`, bounded): the proof `recover_sample`
+    /// runs under is that no writer the child started is alive, and the
+    /// leader's reap alone is not that proof.
     fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.child.wait()
+        let status = self.child.wait()?;
+        let pgid = i32::try_from(self.child.id()).expect("a pid fits in i32");
+        self.group_ended = Some(
+            super::fixture::await_group_end(pgid).unwrap_or_else(|outlived| {
+                panic!("the sampled git child's group outlived its leader: {outlived}")
+            }),
+        );
+        Ok(status)
     }
 }
 
@@ -11612,6 +11653,7 @@ fn kill_git_child(cwd: &Path, args: &[String], after: std::time::Duration) {
             fired: child.fired,
             kill_error,
             end: launch_end(&status),
+            group_ended: child.group_ended.unwrap_or_default(),
         });
 }
 
@@ -11619,8 +11661,13 @@ fn kill_git_child(cwd: &Path, args: &[String], after: std::time::Duration) {
 /// worktree and its intent, which is the before-phase action every
 /// `Internal` residue routes to and is idempotent for the other two.
 fn recover_sample(fixture: &Fixture, slot: &Slot) -> bool {
-    // The sampled child is reaped before this runs, so no writer of the
-    // execution root is alive: the proof under which a registration the
+    // The sampled child's whole process group is gone before this runs —
+    // the leader reaped and every member it started, `git worktree add`'s
+    // own `reset --hard` among them, dead and reaped
+    // (`fixture::await_group_end`; until PR10's round 5 the leader alone was
+    // killed and reaped here, and CI's macOS leg at `869e336a` met the
+    // member still writing: `PR136`'s first fingerprint) — so no writer of
+    // the execution root is alive: the proof under which a registration the
     // kill left naming nothing is passed over rather than refused.
     fixture
         .manager
