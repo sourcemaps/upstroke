@@ -561,7 +561,7 @@ fn stage_json<T: Serialize>(
     path: &Path,
     value: &T,
     ledger: &DurabilityLedger,
-    preserve: Option<fs::Permissions>,
+    preserve: Option<Preserved>,
 ) -> Result<(), UpstrokeError> {
     let mut json = serde_json::to_string_pretty(value).map_err(|error| UpstrokeError::Parse {
         message: format!("serializing {}: {error}", path.display()),
@@ -574,12 +574,108 @@ fn stage_json<T: Serialize>(
     let mut file = create_staged(path, preserve.as_ref()).map_err(io)?;
     let created = file.metadata().map_err(io)?;
     ledger.record(DurableStep::Staged, path, created.len());
+    let preserve = keep_group(&file, &created, preserve).map_err(io)?;
     let after_write = settle_mode(&file, preserve).map_err(io)?;
     file.write_all(json.as_bytes()).map_err(io)?;
     if let Some(permissions) = after_write {
         file.set_permissions(permissions).map_err(io)?;
     }
     sync_file_recorded(&file, path, ledger)
+}
+
+/// What a rewritten file keeps of the file it replaces.
+///
+/// `fs::write` kept the inode, and with it everything the operator had set
+/// on the file; the staged publication makes a fresh inode, so what is kept
+/// is what this carries: the mode, and on Unix the group. The owner is not
+/// carried — `chown` to another user is the superuser's, and the writer is
+/// the owner of what it wrote — and on Windows an access-control list is
+/// not carried either: the staged file takes the entries its directory
+/// hands a new file, and an entry the operator placed on the report itself
+/// is not copied (a `Permissions` there is the read-only bit alone).
+struct Preserved {
+    permissions: fs::Permissions,
+    /// The group the existing file belongs to, given to the staged file
+    /// before its first byte where the process may ([`keep_group`]).
+    #[cfg(unix)]
+    gid: u32,
+}
+
+impl Preserved {
+    fn of(existing: &fs::Metadata) -> Self {
+        Self {
+            permissions: existing.permissions(),
+            #[cfg(unix)]
+            gid: {
+                use std::os::unix::fs::MetadataExt as _;
+                existing.gid()
+            },
+        }
+    }
+
+    /// The mode the staged file is created at: the preserved mode without
+    /// its group bits, since the group has yet to be given, so that no
+    /// instant exists at which the empty file is open to the writer's own
+    /// group — a reader admitted at that instant would keep its descriptor
+    /// through the write that follows. [`keep_group`] gives the group and
+    /// [`settle_mode`] then widens to the preserved mode. Unix only: the
+    /// other platforms' `Permissions` is the read-only bit, set after the
+    /// write, and [`create_staged`] does not consult this there.
+    #[cfg(unix)]
+    fn creation_permissions(&self) -> fs::Permissions {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::Permissions::from_mode(self.permissions.mode() & 0o7707)
+    }
+}
+
+/// Give the empty staged file the group the file it replaces belongs to,
+/// before any byte reaches it, and hand back the permissions the write
+/// then settles to.
+///
+/// The schema-3 `fs::write` kept the group because it kept the inode, and
+/// an operator who had given `report.json` a group and a group-readable
+/// mode had it replaced, since PR10's round 3, by a file in the writer's
+/// primary group (the round-7 regression lens, P2): the intended readers
+/// lost access and the writer's own group gained it. `fchown` gives the
+/// staged file the existing group where the process may — the owner of the
+/// file, for a group it is a member of. Where it may not (`EPERM`: a group
+/// the operator chose that this process is not in, which no writer outside
+/// the group could ever create a file in) the publication proceeds at the
+/// writer's own group **with the preserved mode's group bits withheld**: the
+/// operator's readers cannot be kept, and the alternative — the mode's
+/// group bits handed to a group the operator did not name — would admit
+/// readers nobody chose, so the file is published readable by its owner and
+/// by whoever the other bits admit, and by no group. Every other error is
+/// the caller's.
+#[cfg(unix)]
+fn keep_group(
+    file: &File,
+    created: &fs::Metadata,
+    preserve: Option<Preserved>,
+) -> std::io::Result<Option<fs::Permissions>> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let Some(kept) = preserve else {
+        return Ok(None);
+    };
+    if created.gid() == kept.gid {
+        return Ok(Some(kept.permissions));
+    }
+    match std::os::unix::fs::fchown(file, None, Some(kept.gid)) {
+        Ok(()) => Ok(Some(kept.permissions)),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(Some(
+            fs::Permissions::from_mode(kept.permissions.mode() & 0o7707),
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+fn keep_group(
+    _file: &File,
+    _created: &fs::Metadata,
+    preserve: Option<Preserved>,
+) -> std::io::Result<Option<fs::Permissions>> {
+    Ok(preserve.map(|kept| kept.permissions))
 }
 
 /// Open the staged file, empty, at the mode it will carry its bytes at — a
@@ -591,19 +687,21 @@ fn stage_json<T: Serialize>(
 /// truncated or written through (the round-6 regression lens, P2-1: until
 /// PR10's round 6 the path was opened `create(true).truncate(true)`, which
 /// truncated an alias and filled the operator's file with report bytes, on
-/// the schema-3 path too). On Unix the preserved mode is the `open`'s own
-/// creation mode (`OpenOptions::mode`), so no instant exists at which the
-/// file is wider than the file it replaces; the umask still narrows it, which
+/// the schema-3 path too). On Unix the preserved mode — less its group bits,
+/// until [`keep_group`] has given the file its group
+/// ([`Preserved::creation_permissions`]) — is the `open`'s own creation
+/// mode (`OpenOptions::mode`), so no instant exists at which the file is
+/// wider than the file it replaces; the umask still narrows it, which
 /// [`settle_mode`] corrects before the first byte. Elsewhere a `Permissions`
 /// is the read-only bit, which is set after the write as it always was.
-fn create_staged(path: &Path, preserve: Option<&fs::Permissions>) -> std::io::Result<File> {
+fn create_staged(path: &Path, preserve: Option<&Preserved>) -> std::io::Result<File> {
     clear_stale_staging(path)?;
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
-    if let Some(permissions) = preserve {
+    if let Some(kept) = preserve {
         use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        options.mode(permissions.mode() & 0o7777);
+        options.mode(kept.creation_permissions().mode() & 0o7777);
     }
     #[cfg(not(unix))]
     let _ = preserve;
@@ -669,9 +767,10 @@ fn link_count(_found: &fs::Metadata) -> Option<u64> {
 /// and hand back what is left to apply after the write.
 ///
 /// On Unix that is nothing: the creation mode, which the umask may have
-/// narrowed, is widened to the preserved mode here — before the first byte,
-/// and after the ledger has recorded the creation mode — and the answer is
-/// `None`. On the other platforms the read-only bit is the whole
+/// narrowed and which withheld the group bits until [`keep_group`] gave the
+/// file its group, is widened to the preserved mode here — before the first
+/// byte, and after the ledger has recorded the creation mode — and the
+/// answer is `None`. On the other platforms the read-only bit is the whole
 /// `Permissions`, no umask reads it, and it is set after the write as before,
 /// so `preserve` is handed back for [`stage_json`] to apply then.
 fn settle_mode(
@@ -1033,11 +1132,14 @@ pub fn write_plan(
 /// lens, P2).
 ///
 /// The v0.1 coordinator publishes through here too (`drain_and_report`,
-/// schema 3): the bytes are the ones `fs::write` wrote, and so is the mode —
-/// an existing report's permissions are copied onto the staged file before
-/// its sync, since `fs::write` truncated in place and kept them while a fresh
-/// file takes the umask's (the round-4 regression lens, P2-1;
-/// `the_payload_writers_keep_their_exact_legacy_bytes` holds both).
+/// schema 3): the bytes are the ones `fs::write` wrote, and so are the mode
+/// and, on Unix, the group — an existing report's permissions are the staged
+/// file's from its creation and its group is given before the first byte
+/// ([`Preserved`], [`keep_group`]), since `fs::write` truncated in place and
+/// kept both while a fresh file takes the umask's mode and the writer's
+/// group (the round-4 regression lens, P2-1, and the round-7 one, P2;
+/// `the_payload_writers_keep_their_exact_legacy_bytes` holds the bytes and
+/// the mode, `rewriting_report_preserves_its_group` the group).
 pub fn write_report<T: Serialize>(
     public: &Path,
     report: &T,
@@ -1058,7 +1160,7 @@ pub fn write_report<T: Serialize>(
     )?;
     let published = public.join(REPORT);
     let preserved = match fs::metadata(&published) {
-        Ok(existing) => Some(existing.permissions()),
+        Ok(existing) => Some(Preserved::of(&existing)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(source) => {
             return Err(UpstrokeError::Io {

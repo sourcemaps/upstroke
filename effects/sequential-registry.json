@@ -1,5 +1,5 @@
 {
-  "note": "decisions.fault_injection_registry, ST-07 for the sequential topology over the full claimed inventory (every Topology- and Shared-scoped site effect_sites.json generates): one entry per site x hook phase x parent-side point x injection mode, built through FaultRegistry::insert, each naming the committed test the suite's observation export shows executing it; one recovery-proven entry per residue class, its synthetic records from effects/residue-synthetic.json and its sampling record from effects/residue-histogram.json or effects/residue-histogram-sequential.json (the histogram counts are the machine-varying half: they are what the files held when this document was regenerated, the pin compares everything but them, and the merge check reads the files); and one no-execution record per site the exact-base fast path skips, naming every fast sequence the export records. The Windows-only points of Process.Spawn name the tests that execute them on that host; `hosts` lists both, and the merge check on each host holds the document to the points that host requires. The frozen sampling N a recovery-proven entry cites is effects/residue-classes.json's (SWEEP-BIJECTION-005).",
+  "note": "decisions.fault_injection_registry, ST-07 for the sequential topology over the full claimed inventory (every Topology- and Shared-scoped site effect_sites.json generates): one entry per site x hook phase x parent-side point x injection mode, built through FaultRegistry::insert, each naming the committed test the suite's observation export shows executing it; one recovery-proven entry per residue class, its synthetic records from effects/residue-synthetic.json and its sampling record from effects/residue-histogram.json or from residue-histogram-sequential.json beside the observation export (the histogram counts are the machine-varying half: they are what the files held when this document was regenerated, the pin compares everything but them, and the merge check reads the files); and one no-execution record per site the exact-base fast path skips, naming every fast sequence the export records. The Windows-only points of Process.Spawn name the tests that execute them on that host; `hosts` lists both, and the merge check on each host holds the document to the points that host requires. The frozen sampling N a recovery-proven entry cites is effects/residue-classes.json's (SWEEP-BIJECTION-005).",
   "range": [
     "Worktree.CreateExecutionRoot",
     "Worktree.RemoveExecutionRoot",
@@ -3509,8 +3509,8 @@
             "n": 8,
             "histogram": {
               "none": 1,
-              "internal": 6,
-              "after": 1
+              "internal": 3,
+              "after": 4
             },
             "unclassified": 0,
             "recovered": true
@@ -3550,8 +3550,8 @@
             "n": 8,
             "histogram": {
               "none": 2,
-              "internal": 6,
-              "after": 0
+              "internal": 5,
+              "after": 1
             },
             "unclassified": 0,
             "recovered": true
@@ -3590,9 +3590,9 @@
           "sampling": {
             "n": 8,
             "histogram": {
-              "none": 1,
+              "none": 2,
               "internal": 6,
-              "after": 1
+              "after": 0
             },
             "unclassified": 0,
             "recovered": true
@@ -3696,8 +3696,8 @@
           "sampling": {
             "n": 8,
             "histogram": {
-              "none": 3,
-              "internal": 5,
+              "none": 5,
+              "internal": 3,
               "after": 0
             },
             "unclassified": 0,
@@ -3866,8 +3866,8 @@
             "n": 8,
             "histogram": {
               "none": 0,
-              "internal": 5,
-              "after": 3
+              "internal": 0,
+              "after": 8
             },
             "unclassified": 0,
             "recovered": true
@@ -3925,8 +3925,8 @@
             "n": 8,
             "histogram": {
               "none": 0,
-              "internal": 8,
-              "after": 0
+              "internal": 7,
+              "after": 1
             },
             "unclassified": 0,
             "recovered": true

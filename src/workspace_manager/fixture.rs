@@ -60,6 +60,9 @@ thread_local! {
     static REMOVAL_ATTEMPTS: Cell<u32> = const { Cell::new(0) };
     static REMOVAL_ATTEMPT_OBSERVER: RefCell<Option<AttemptObserver>> =
         const { RefCell::new(None) };
+    static MARKER_READ_ATTEMPTS: Cell<u32> = const { Cell::new(0) };
+    static MARKER_READ_ATTEMPT_OBSERVER: RefCell<Option<AttemptObserver>> =
+        const { RefCell::new(None) };
 }
 
 /// A live observation of this thread's removal attempts, ended by dropping it.
@@ -117,6 +120,60 @@ pub(crate) fn observe_removal_attempts(observer: AttemptObserver) -> AttemptObse
 pub(crate) fn note_removal_attempt(attempt: u32) {
     REMOVAL_ATTEMPTS.with(|count| count.set(attempt));
     REMOVAL_ATTEMPT_OBSERVER.with(|slot| {
+        if let Ok(mut slot) = slot.try_borrow_mut() {
+            if let Some(observer) = slot.as_mut() {
+                observer(attempt);
+            }
+        }
+    });
+}
+
+/// A live observation of this thread's registration-marker read attempts
+/// (`read_marker_once_handles_close`), ended by dropping it: the removal
+/// seam's twin for the classifier's read, kept apart from it so a control
+/// that counts one is never counting the other.
+pub(crate) struct MarkerReadObservation {
+    /// Not `Send`: the counter and the observer are this thread's.
+    _not_send: PhantomData<*const ()>,
+}
+
+impl MarkerReadObservation {
+    /// Attempts made since the observation began.
+    pub(crate) fn count(&self) -> u32 {
+        MARKER_READ_ATTEMPTS.with(Cell::get)
+    }
+}
+
+impl Drop for MarkerReadObservation {
+    fn drop(&mut self) {
+        MARKER_READ_ATTEMPT_OBSERVER.with(|slot| {
+            if let Ok(mut slot) = slot.try_borrow_mut() {
+                *slot = None;
+            }
+        });
+    }
+}
+
+/// Start counting this thread's marker read attempts, running `observer`
+/// after each — on the reading thread, after the attempt has returned, as
+/// [`observe_removal_attempts`] does, and for the same reason.
+pub(crate) fn observe_marker_read_attempts(observer: AttemptObserver) -> MarkerReadObservation {
+    MARKER_READ_ATTEMPTS.with(|count| count.set(0));
+    MARKER_READ_ATTEMPT_OBSERVER.with(|slot| {
+        if let Ok(mut slot) = slot.try_borrow_mut() {
+            *slot = Some(observer);
+        }
+    });
+    MarkerReadObservation {
+        _not_send: PhantomData,
+    }
+}
+
+/// Record that marker read attempt `attempt` has completed, and run the
+/// observer. Called from `super::note_marker_read_attempt`.
+pub(crate) fn note_marker_read_attempt(attempt: u32) {
+    MARKER_READ_ATTEMPTS.with(|count| count.set(attempt));
+    MARKER_READ_ATTEMPT_OBSERVER.with(|slot| {
         if let Ok(mut slot) = slot.try_borrow_mut() {
             if let Some(observer) = slot.as_mut() {
                 observer(attempt);

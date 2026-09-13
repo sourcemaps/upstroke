@@ -1672,11 +1672,15 @@ not_an_effect = [
     "c_long",
     "c_short",
     "c_void",
+    # Reads the process's own supplementary groups and writes nothing outside
+    # the buffer it is handed; the report-group test picks a second group with it.
+    "getgroups",
     "getpgid",
     "getpgrp",
     "getpid",
     "getppid",
     "getrlimit",
+    "gid_t",
     "id_t",
     "nanosleep",
     "pause",

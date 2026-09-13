@@ -14,7 +14,7 @@ pub const RESIDUE_CLASSES_JSON: &str = "effects/residue-classes.json";
 
 pub const RESIDUE_HISTOGRAM_JSON: &str = "effects/residue-histogram.json";
 pub const RESIDUE_SYNTHETIC_JSON: &str = "effects/residue-synthetic.json";
-pub const SEQUENTIAL_RESIDUE_HISTOGRAM_JSON: &str = "effects/residue-histogram-sequential.json";
+pub const SEQUENTIAL_RESIDUE_HISTOGRAM_JSON: &str = "residue-histogram-sequential.json";
 
 pub const FUNNEL_MODULES_JSON: &str = "effects/funnel-modules.json";
 

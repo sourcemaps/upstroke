@@ -23,7 +23,10 @@ pub fn load_observations(dir: &Path) -> Result<Vec<ObservationRecord>, String> {
         let path = entry
             .map_err(|error| format!("cannot list `{}`: {error}", dir.display()))?
             .path();
-        if path.extension().is_none_or(|extension| extension != "json") {
+        if path.extension().is_none_or(|extension| extension != "json")
+            || path.file_name().and_then(|name| name.to_str())
+                == Some(crate::effects::SEQUENTIAL_RESIDUE_HISTOGRAM_JSON)
+        {
             continue;
         }
         let bytes = std::fs::read(&path)
@@ -1329,11 +1332,12 @@ pub fn registry_document(evidence: &ResidueEvidence) -> Result<RegistryDocument,
                mode, built through FaultRegistry::insert, each naming the committed test the \
                suite's observation export shows executing it; one recovery-proven entry per \
                residue class, its synthetic records from effects/residue-synthetic.json and its \
-               sampling record from effects/residue-histogram.json or \
-               effects/residue-histogram-sequential.json (the histogram counts are the \
-               machine-varying half: they are what the files held when this document was \
-               regenerated, the pin compares everything but them, and the merge check reads \
-               the files); and one no-execution record per site the exact-base fast path \
+               sampling record from effects/residue-histogram.json or from \
+               residue-histogram-sequential.json beside the observation export (the histogram \
+               counts are the machine-varying half: they are what the files held when this \
+               document was regenerated, the pin compares everything but them, and the merge \
+               check reads the files); and one no-execution record per site the exact-base \
+               fast path \
                skips, naming every fast sequence the export records. The Windows-only points \
                of Process.Spawn name the tests that execute them on that host; `hosts` lists \
                both, and the merge check on each host holds the document to the points that \

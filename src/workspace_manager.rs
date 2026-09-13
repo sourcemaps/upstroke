@@ -5273,11 +5273,114 @@ fn locked_present(admin: &Path) -> Result<bool, UpstrokeError> {
     }
 }
 
+/// What one read of a registration marker found.
+enum MarkerRead {
+    /// The marker's bytes.
+    Bytes(Vec<u8>),
+    /// No such name — an actual not-found, or a delete-pending name that
+    /// finished disappearing while the read waited for it.
+    Absent,
+    /// The name is there and its bytes could not be read within the whole
+    /// budget: a handle another process holds — the just-terminated `git
+    /// worktree add` whose last handle is still closing, or a scanner's —
+    /// keeps it. Windows only: the Unix arm never answers it, so the variant
+    /// is not compiled there.
+    #[cfg(windows)]
+    Held,
+}
+
+/// Read a registration marker — Git's `locked` — tolerating, on Windows, the
+/// window in which a just-terminated writer's handle still holds the name.
+///
+/// `git worktree add` writes `locked` first and unlinks it last, and a
+/// process the samplers terminate (`TerminateProcess`, then the reap) can
+/// leave that unlink **delete-pending**: the name stays in the directory
+/// until the last handle on it closes, and every open of it answers
+/// `ERROR_ACCESS_DENIED` until then — the shape
+/// [`remove_tree_once_handles_close`] tolerates for a removal, and the one
+/// `PR247-SAMPLER-REFUSED-A-LOCKED-INDEX-ON-WINDOWS` records for a sampler's
+/// `index.lock`. CI's Windows leg met it at this reader in PR10's round 6
+/// (`Worktree.Add`, one sample of eight, `locked: Access is denied (os error
+/// 5)`), and a classifier that propagated the error left the sample
+/// unclassified for a state the frozen enums register a class for.
+///
+/// So on Windows an `ERROR_ACCESS_DENIED` or `ERROR_SHARING_VIOLATION` answer
+/// is retried on the removal's own budget — [`ATTEMPTS`] attempts, [`STEP`]
+/// asleep between them, `(ATTEMPTS - 1) * STEP` (975 ms) spent sleeping, and
+/// longer on the wall clock under load, for the reasons that budget's doc
+/// gives. A name that has gone by a later attempt is [`MarkerRead::Absent`],
+/// which for a delete-pending marker is the state its deleter meant; a name
+/// still held when the budget is spent is [`MarkerRead::Held`], and the
+/// caller reads it as the lock it is rather than as an inspection that
+/// failed: the classifier is total over the registered classes, and a held
+/// marker is a registration whose lock nobody has released (the
+/// `RegisteredUnpopulatedWorktree` element, the class the inventory names
+/// for a `locked` marker that stands). Every other error is the caller's to
+/// see (§7). On Unix a read either succeeds, finds nothing, or fails for a
+/// reason no wait would change, so the Unix arm makes one attempt and the
+/// retry is not compiled in there; both arms record their attempts through
+/// [`note_marker_read_attempt`], the seam the Windows control observes.
+#[cfg(windows)]
+fn read_marker_once_handles_close(path: &Path) -> std::io::Result<MarkerRead> {
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION};
+
+    let mut attempt = 1_u32;
+    loop {
+        let outcome = fs::read(path);
+        // After the attempt has returned and before its result is interpreted,
+        // as the removal's seam does, so an observer released from here is
+        // released against an attempt that has already happened.
+        note_marker_read_attempt(attempt);
+        let error = match outcome {
+            Ok(bytes) => return Ok(MarkerRead::Bytes(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(MarkerRead::Absent);
+            }
+            Err(error) => error,
+        };
+        let closing = matches!(
+            error.raw_os_error(),
+            Some(code)
+                if code == ERROR_SHARING_VIOLATION as i32 || code == ERROR_ACCESS_DENIED as i32
+        );
+        if !closing {
+            return Err(error);
+        }
+        if attempt >= ATTEMPTS {
+            return Ok(MarkerRead::Held);
+        }
+        attempt += 1;
+        std::thread::sleep(STEP);
+    }
+}
+
+#[cfg(not(windows))]
+fn read_marker_once_handles_close(path: &Path) -> std::io::Result<MarkerRead> {
+    let outcome = fs::read(path);
+    // One attempt, recorded like the Windows arm's, so "how many attempts did
+    // this read make" means the same on both platforms.
+    note_marker_read_attempt(1);
+    match outcome {
+        Ok(bytes) => Ok(MarkerRead::Bytes(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(MarkerRead::Absent),
+        Err(error) => Err(error),
+    }
+}
+
+/// The production half of the marker-read seam; the `#[cfg(test)]` twin is
+/// at the bottom of this file beside the removal seam's, for the reason
+/// [`note_removal_attempt`]'s doc gives.
+#[cfg(not(test))]
+#[inline]
+fn note_marker_read_attempt(_attempt: u32) {}
+
 /// A linked-worktree registration read from the repository's store, the way
 /// the removal binds one: by its `gitdir` bytes.
 struct Registration {
     /// Git's `locked` marker reads `initializing`, which `git worktree add`
-    /// writes first and unlinks last, so an add that never finished holds it.
+    /// writes first and unlinks last, so an add that never finished holds it
+    /// — and so does a marker whose name a terminated add's handle still
+    /// holds past the read's whole budget ([`MarkerRead::Held`]).
     initializing: bool,
 }
 
@@ -5343,9 +5446,14 @@ fn registration_for(
             continue;
         }
         let locked = admin.join("locked");
-        let initializing = match fs::read(&locked) {
-            Ok(reason) => trim_gitdir(&reason) == b"initializing",
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        let initializing = match read_marker_once_handles_close(&locked) {
+            Ok(MarkerRead::Bytes(reason)) => trim_gitdir(&reason) == b"initializing",
+            Ok(MarkerRead::Absent) => false,
+            // A marker still held past the whole budget is a lock nobody has
+            // released: the add's own `initializing` reading, whatever the
+            // bytes behind the held name say.
+            #[cfg(windows)]
+            Ok(MarkerRead::Held) => true,
             Err(source) => {
                 return Err(UpstrokeError::Io {
                     path: locked,
@@ -5627,6 +5735,14 @@ pub(crate) mod fixture;
 #[inline]
 fn note_removal_attempt(attempt: u32) {
     fixture::note_removal_attempt(attempt);
+}
+
+/// The `#[cfg(test)]` half of the marker-read seam; see the
+/// `#[cfg(not(test))]` twin beside `read_marker_once_handles_close`.
+#[cfg(test)]
+#[inline]
+fn note_marker_read_attempt(attempt: u32) {
+    fixture::note_marker_read_attempt(attempt);
 }
 
 #[cfg(test)]

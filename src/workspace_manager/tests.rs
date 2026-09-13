@@ -1176,6 +1176,242 @@ fn a_worktree_whose_killed_child_is_still_closing_is_removed_not_refused() {
     }
 }
 
+/// The classifier's read of a registration marker across a delete-pending
+/// name: the deterministic form of what CI's Windows leg met at random in
+/// PR10's round 6 (`Worktree.Add`, one sample of eight, `locked: Access is
+/// denied (os error 5)`), where a `git worktree add` the sampler had just
+/// terminated still held the marker it was unlinking. The sampler proves the
+/// condition exists and cannot be re-run to prove a fix; here the name is
+/// held delete-pending on purpose, the way the removal control above holds
+/// its file, and released against an attempt the seam reports rather than
+/// against a clock (`PR109-ORACLE-OBSERVES-TIMING-NOT-ATTEMPTS`).
+///
+/// Two cases. **Closing**: the holder closes once the read's first attempt
+/// has provably returned against the delete-pending name, so a later attempt
+/// finds the name gone — the marker its deleter meant to remove — and the
+/// populated worktree classifies `After`. **Held**: the name is held through
+/// the classifier's whole budget, and the classifier answers `Internal` —
+/// the lock the add holds, the class the inventory names for a `locked`
+/// marker that stands — rather than the inspection error CI recorded, since
+/// ST-07 requires every sampled residue classified. The attempt count is
+/// asserted in both, so a read that never retried (one attempt, answering
+/// the held class at once) fails the closing case by its answer and by its
+/// count, and a read that propagated the error after the budget fails the
+/// held case by its answer.
+#[cfg(windows)]
+#[test]
+fn a_locked_marker_a_terminated_add_still_holds_is_read_across_its_closing_and_as_held_past_it() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+        FILE_DISPOSITION_INFO_EX, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FileDispositionInfoEx, SetFileInformationByHandle,
+    };
+
+    /// One deadline per case, the wedge detector the removal control explains.
+    const FAIL_SAFE: std::time::Duration = std::time::Duration::from_secs(600);
+
+    let site = EffectSiteId::Worktree(WorktreeSite::Add);
+    for (releases_after_the_first_attempt, expected) in [
+        (true, ObjectResidue::After),
+        (false, ObjectResidue::Internal),
+    ] {
+        let fixture = Fixture::created("held-locked-marker");
+        let slot = fixture.task("alpha", 1);
+        fixture
+            .manager
+            .write_intent(&mut NoHooks, &slot)
+            .expect("the intent must be durable");
+        let path = fixture
+            .manager
+            .add_worktree(&mut NoHooks, &slot, &fixture.head)
+            .expect("a populated worktree, its add complete");
+        let admin = git_dir_of(&path)
+            .expect("the pointer reads")
+            .expect("a populated worktree has a git dir behind its pointer");
+        let locked = admin.join("locked");
+        fs::write(&locked, b"initializing\n").expect("plant the add's own marker");
+        let base = fixture.base.clone();
+        let target = ResidueTarget::new(&base).at(&path).from_base(&fixture.head);
+        assert_eq!(
+            classify_object_residue(site, &target).expect("the classifier answers"),
+            ObjectResidue::Internal,
+            "premise: a readable `initializing` marker is the unpopulated class"
+        );
+
+        let deadline = Instant::now() + FAIL_SAFE;
+        let (opened, ready) = mpsc::channel::<()>();
+        let (close_now, may_close) = mpsc::channel::<()>();
+        let (closed, has_closed) = mpsc::channel::<()>();
+        let held = locked.clone();
+        let holder = std::thread::spawn(move || {
+            // The marking handle itself is what holds the name: a delete
+            // disposition set through a handle that stays open leaves the
+            // name in the directory, delete-pending, until that handle closes
+            // -- the shape a terminated add's last unlink leaves behind. Not
+            // `fs::remove_file`, which sets the disposition through a handle
+            // of its own and closes it at once, so that the name is gone
+            // before anything can meet it delete-pending (measured on the
+            // guest: the premise below then read `NotFound`). The technique
+            // is `runner::container::tests::windows_posix_delete_pending`'s.
+            let file = fs::OpenOptions::new()
+                .access_mode(DELETE)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .open(&held)
+                .expect("hold the marker open for deletion");
+            let disposition = FILE_DISPOSITION_INFO_EX {
+                Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+            };
+            let size = u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO_EX>())
+                .expect("a small struct");
+            // SAFETY: `file` is open for the duration of the call, `disposition`
+            // is a fully initialised `FILE_DISPOSITION_INFO_EX` and `size` is
+            // its size, which is the contract `FileDispositionInfoEx` documents.
+            let set = unsafe {
+                SetFileInformationByHandle(
+                    file.as_raw_handle(),
+                    FileDispositionInfoEx,
+                    (&raw const disposition).cast(),
+                    size,
+                )
+            };
+            assert_ne!(
+                set,
+                0,
+                "mark the held name delete-pending: {}",
+                std::io::Error::last_os_error()
+            );
+            opened.send(()).expect("announce the delete-pending name");
+            // `Ok` is the closing case, told from inside the read that its
+            // first attempt has returned; `Disconnected` is the held case,
+            // released after the classifier has answered; `Timeout` is the
+            // fail-safe, and the join below re-raises whatever it left.
+            let _ = may_close.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+            drop(file);
+            let _ = closed.send(());
+        });
+        ready
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("the marker is delete-pending before the classifier runs");
+        let premise = fs::read(&locked).expect_err("premise: a delete-pending name refuses a read");
+        assert_eq!(
+            premise.raw_os_error(),
+            Some(ERROR_ACCESS_DENIED as i32),
+            "premise: the kernel answers a read of a delete-pending name with error 5: {premise}"
+        );
+
+        let mut release = Some(close_now);
+        let observing = if releases_after_the_first_attempt {
+            let tell = release.take().expect("the closing case's release");
+            super::fixture::observe_marker_read_attempts(Box::new(move |attempt| {
+                if attempt != 1 {
+                    return;
+                }
+                // Ordered against the attempt rather than a clock: attempt 1
+                // has already returned against the delete-pending name, and
+                // waiting for the close here means attempt 2 runs after it.
+                let _ = tell.send(());
+                let _ = has_closed.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+            }))
+        } else {
+            drop(has_closed);
+            super::fixture::observe_marker_read_attempts(Box::new(|_| {}))
+        };
+        let answer = classify_object_residue(site, &target);
+        let attempts = observing.count();
+        drop(observing);
+        // The held case's release, after the answer: the only thing that
+        // closes its handle. Then the holder is joined on every path, so a
+        // failing assertion never leaves the tree locked against the
+        // fixture's own removal.
+        drop(release);
+        let joined = holder.join();
+        if let Err(payload) = joined {
+            std::panic::resume_unwind(payload);
+        }
+
+        let answer = answer.unwrap_or_else(|error| {
+            panic!(
+                "releases after the first attempt: {releases_after_the_first_attempt}: the \
+                 classifier refused a marker a terminated add still holds, after {attempts} \
+                 attempt(s): {error}"
+            )
+        });
+        assert_eq!(
+            answer, expected,
+            "releases after the first attempt: {releases_after_the_first_attempt}: after \
+             {attempts} attempt(s)"
+        );
+        if releases_after_the_first_attempt {
+            assert!(
+                attempts > 1 && attempts < ATTEMPTS,
+                "the closing case is crossed by a retry, and before the budget is spent: \
+                 {attempts} attempt(s) of {ATTEMPTS}"
+            );
+            assert!(
+                !locked.exists(),
+                "the delete-pending marker is gone once its holder closed"
+            );
+        } else {
+            assert_eq!(
+                attempts, ATTEMPTS,
+                "the held case spends the whole budget before the marker is read as held"
+            );
+        }
+    }
+}
+
+/// The Unix arm of the marker read makes exactly one attempt, and the seam
+/// reports that one — the removal seam's Unix pin, for the classifier's
+/// read: the retry and the held answer exist for the Windows control above,
+/// so on every other leg this pins the seam where CI runs it every time, and
+/// reads the two answers the Unix arm does give through the classifier.
+#[cfg(not(windows))]
+#[test]
+fn a_marker_read_records_the_one_attempt_the_unix_arm_makes() {
+    let site = EffectSiteId::Worktree(WorktreeSite::Add);
+    let fixture = Fixture::created("marker-read-once");
+    let slot = fixture.task("alpha", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &slot)
+        .expect("the intent must be durable");
+    let path = fixture
+        .manager
+        .add_worktree(&mut NoHooks, &slot, &fixture.head)
+        .expect("a populated worktree, its add complete");
+    let admin = git_dir_of(&path)
+        .expect("the pointer reads")
+        .expect("a populated worktree has a git dir behind its pointer");
+    let locked = admin.join("locked");
+    let base = fixture.base.clone();
+    let target = ResidueTarget::new(&base).at(&path).from_base(&fixture.head);
+
+    fs::write(&locked, b"initializing\n").expect("plant the add's own marker");
+    let observing = super::fixture::observe_marker_read_attempts(Box::new(|_| {}));
+    let answer = classify_object_residue(site, &target).expect("the classifier answers");
+    assert_eq!(
+        (answer, observing.count()),
+        (ObjectResidue::Internal, 1),
+        "a readable `initializing` marker is the unpopulated class, read in one attempt"
+    );
+    drop(observing);
+
+    fs::remove_file(&locked).expect("release the marker");
+    let observing = super::fixture::observe_marker_read_attempts(Box::new(|_| {}));
+    let answer = classify_object_residue(site, &target).expect("the classifier answers");
+    assert_eq!(
+        (answer, observing.count()),
+        (ObjectResidue::After, 1),
+        "an absent marker is the populated class, read in one attempt"
+    );
+}
+
 /// The Unix arm makes exactly one attempt, and the seam reports that one.
 ///
 /// The seam exists for the Windows control above, which is the only place a

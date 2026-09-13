@@ -4626,6 +4626,92 @@ fn the_payload_writers_keep_their_exact_legacy_bytes() {
     );
 }
 
+/// The report's group survives its rewrite, as it did under `fs::write`.
+///
+/// A schema-3 run parks; the operator gives `report.json` a group and the
+/// mode `0640` so that group can read it; the run resumes and the report is
+/// written again. Until PR10's round 7 the staged publication replaced it
+/// with a file in the writer's primary group (the round-7 regression lens,
+/// P2): the group the operator chose lost the report and the writer's group
+/// gained it. The group is read back with `MetadataExt::gid` before and
+/// after, and the mode with it. The group is a supplementary group of this
+/// process — a user in two groups is what the case needs, so where the
+/// process has no second group the test says so and stops; on CI's runners
+/// and on the build box the user has several. The `EPERM` arm — a group the
+/// process is not in — cannot be set up without privilege and is reasoned in
+/// `keep_group`'s doc, not driven here. The `Staged` ledger entry is read
+/// too: the file is created without its group bits, which are given only
+/// once the group is.
+#[cfg(unix)]
+#[test]
+fn rewriting_report_preserves_its_group() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let root = scratch("report-group");
+    let public = root.join("public");
+    create_dir(&public).expect("public");
+    let payload = serde_json::json!({"run_id": "01GROUP", "outcome": "parked"});
+    let path = public.join(REPORT);
+    write_report(&public, &payload, &mut NoHooks).expect("the first report");
+    let primary = fs::metadata(&path).expect("report metadata").gid();
+
+    // SAFETY: `getgroups` with a null list and a count of zero answers how
+    // many supplementary groups the process has and writes nothing; the
+    // second call is handed a buffer of exactly that many entries, which it
+    // fills up to the count it returns.
+    let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    assert!(count >= 0, "getgroups answers the group count");
+    let mut groups = vec![0 as libc::gid_t; usize::try_from(count).expect("a small count")];
+    let filled = unsafe { libc::getgroups(count, groups.as_mut_ptr()) };
+    assert!(filled >= 0, "getgroups fills the list");
+    groups.truncate(usize::try_from(filled).expect("a small count"));
+    let Some(other) = groups.iter().copied().find(|gid| *gid != primary) else {
+        println!(
+            "skipped: this process belongs to no group but {primary}, and the case needs a \
+             second one ({groups:?})"
+        );
+        return;
+    };
+
+    std::os::unix::fs::chown(&path, None, Some(other)).expect("give the report the other group");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).expect("group-readable");
+    let before = fs::metadata(&path).expect("report metadata");
+    assert_eq!(
+        before.gid(),
+        other,
+        "premise: the report belongs to the other group"
+    );
+
+    let mut hooks = HarnessHooks::default().recording_durability();
+    let ledger = hooks.ledger();
+    write_report(&public, &payload, &mut hooks).expect("the report, written again");
+    let after = fs::metadata(&path).expect("report metadata");
+    assert_eq!(
+        after.gid(),
+        before.gid(),
+        "a rewritten report keeps the group the existing one had, as `fs::write` did"
+    );
+    assert_eq!(
+        after.permissions().mode() & 0o777,
+        0o640,
+        "and the mode that lets that group read it"
+    );
+    let staged: Vec<_> = ledger
+        .records_for(&public.join(REPORT_STAGED))
+        .into_iter()
+        .filter(|record| record.step == DurableStep::Staged)
+        .collect();
+    assert_eq!(
+        staged.iter().map(|record| record.mode).collect::<Vec<_>>(),
+        vec![Some(0o600)],
+        "the staged file was created without the group bits, which it gets only once the \
+         group is the operator's"
+    );
+    assert!(
+        !public.join(REPORT_STAGED).exists(),
+        "the staged file was renamed onto its name"
+    );
+}
+
 // =======================================================================
 // What `status` says about a husk id
 // =======================================================================

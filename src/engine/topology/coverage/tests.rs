@@ -84,7 +84,8 @@ fn expected_files(test: &str) -> Vec<String> {
 
 /// A tracked evidence file: the synthetic records the workspace manager's
 /// element test holds to what it constructs, and the residue-class
-/// declarations. The two histograms are gitignored and read elsewhere.
+/// declarations. The two histograms — PR5's gitignored one under `effects/`,
+/// the sequential one beside the observation export — are read elsewhere.
 fn tracked(path: &str) -> String {
     std::fs::read_to_string(repo_root().join(path))
         .unwrap_or_else(|error| panic!("`{path}` is tracked: {error}"))
@@ -99,19 +100,117 @@ fn evidence() -> ResidueEvidence {
 }
 
 fn exported_evidence() -> ResidueEvidence {
-    let written = |path: &str| {
-        std::fs::read_to_string(repo_root().join(path)).unwrap_or_else(|error| {
-            panic!("`{path}` is written by the sampler a full suite run executes: {error}")
+    let written = |path: &Path| {
+        std::fs::read_to_string(path).unwrap_or_else(|error| {
+            panic!(
+                "`{}` is written by the sampler a full suite run executes: {error}",
+                path.display()
+            )
         })
     };
     ResidueEvidence::parse(
         &tracked(crate::effects::RESIDUE_SYNTHETIC_JSON),
         &[
-            &written(crate::effects::RESIDUE_HISTOGRAM_JSON),
-            &written(crate::effects::SEQUENTIAL_RESIDUE_HISTOGRAM_JSON),
+            &written(&repo_root().join(crate::effects::RESIDUE_HISTOGRAM_JSON)),
+            &written(&sequential_histogram_path(
+                std::env::var_os(OBSERVATIONS_ENV).as_deref(),
+            )),
         ],
     )
     .expect("the three evidence files parse and name sites the enums generate")
+}
+
+/// Where the sequential sampler writes its histogram and the merge check
+/// reads it: beside the observation export when `UPSTROKE_HOOK_OBSERVATIONS`
+/// names one, and otherwise under the profile directory this test binary
+/// runs from — its own build's, never the source tree's `effects/`.
+///
+/// Until PR10's round 7 the sampler wrote
+/// `effects/residue-histogram-sequential.json` under the manifest directory
+/// with a truncating write, which two builds of one checkout on separate
+/// target directories shared: a suite in one slot truncated the file while
+/// the merge check in another read it (the round-7 regression lens, P3, the
+/// class the box records as "concurrent suites share an unset key"). The
+/// export directory is the run's own, and a build's profile directory is
+/// its slot's, so neither is shared by another build of the same checkout.
+/// PR5's `effects/residue-histogram.json` is PR5's sampler's and keeps its
+/// path.
+fn sequential_histogram_path(observations: Option<&std::ffi::OsStr>) -> PathBuf {
+    let dir = match observations {
+        Some(dir) => PathBuf::from(dir),
+        None => std::env::current_exe()
+            .expect("the test binary knows its own path")
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .expect("the test binary lives under its build's profile directory"),
+    };
+    dir.join(crate::effects::SEQUENTIAL_RESIDUE_HISTOGRAM_JSON)
+}
+
+/// The export directory holds the records and, since round 7, the
+/// sequential histogram beside them; the loader reads the records and
+/// passes the histogram over by its name, rather than refusing the export
+/// as "not an observation record" (which it did on this round's first,
+/// unpushed code head: the first merge check over an export holding the
+/// histogram refused the whole export).
+#[test]
+fn the_export_loader_passes_over_the_histogram_the_sampler_writes_beside_the_records() {
+    let dir = crate::workspace_manager::fixture::scratch("export-with-histogram");
+    let record = ObservationRecord {
+        test: "a::test".to_owned(),
+        ..ObservationRecord::default()
+    };
+    crate::workspace_manager::fixture::write_file(
+        &dir.join(ObservationRecord::file_name(&record.test)),
+        &serde_json::to_vec(&record).expect("a record serializes"),
+    );
+    crate::workspace_manager::fixture::write_file(
+        &sequential_histogram_path(Some(dir.as_os_str())),
+        b"{\n  \"note\": \"not an observation record\",\n  \"sites\": []\n}\n",
+    );
+    let loaded = load_observations(&dir).expect("the export loads with the histogram beside it");
+    assert_eq!(
+        loaded
+            .iter()
+            .map(|held| held.test.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a::test"],
+        "the records, and only the records"
+    );
+}
+
+/// The histogram's home is the export's or the build's, never `effects/`:
+/// the path that made two build slots share one file.
+#[test]
+fn the_sequential_histogram_lives_beside_the_export_or_under_the_build_never_under_effects() {
+    let exported = sequential_histogram_path(Some(std::ffi::OsStr::new("observations-of-a-run")));
+    assert_eq!(
+        exported,
+        Path::new("observations-of-a-run").join("residue-histogram-sequential.json"),
+        "with an export requested the histogram sits beside it"
+    );
+    let unexported = sequential_histogram_path(None);
+    let exe = std::env::current_exe().expect("the test binary knows its own path");
+    assert!(
+        exe.starts_with(unexported.parent().expect("a directory")),
+        "without one it sits under the profile directory this binary runs from: {} is not \
+         above {}",
+        unexported.display(),
+        exe.display()
+    );
+    for path in [&exported, &unexported] {
+        assert!(
+            !path.starts_with(repo_root().join("effects")),
+            "{}: never under the source tree's `effects/`, which every build of this checkout \
+             shares",
+            path.display()
+        );
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("residue-histogram-sequential.json")
+        );
+    }
 }
 
 /// The non-ignored half of the merge check: every required coordinate of
@@ -1190,8 +1289,11 @@ fn the_container_launch_funnels_execute_both_phases_under_the_production_adapter
 // base of this branch. The registry's residue entries need both halves for
 // every class, so this samples each site's own command, through the argv
 // its funnel shares with it, and writes the machine-varying half to
-// `effects/residue-histogram-sequential.json` the way PR5's sampler writes
-// `effects/residue-histogram.json`.
+// `residue-histogram-sequential.json` beside the observation export, or
+// under the build's own profile directory when no export is requested
+// (`sequential_histogram_path`), the way PR5's sampler writes
+// `effects/residue-histogram.json` under the manifest directory — a path
+// every build of one checkout shares, which is why this one does not.
 // ---------------------------------------------------------------------------
 
 const REMAINING_SAMPLING_N: u32 = 8;
@@ -1464,7 +1566,9 @@ fn sample_remaining_site(site: EffectSiteId) -> Vec<RemainingSample> {
 /// sampler leaves without a sampling record are kill-sampled here, each
 /// through its own funnel's argv, every residue classified into a legal
 /// class and recovered by the tabled action; the histogram is written to
-/// `effects/residue-histogram-sequential.json` for the registry to embed.
+/// `residue-histogram-sequential.json` beside the observation export, or
+/// under the build's profile directory (`sequential_histogram_path`), for
+/// the registry to embed.
 #[test]
 fn sampled_git_child_kills_of_the_remaining_residue_sites_are_classified_and_recovered() {
     use crate::topology::effects::ObjectResidue;
@@ -1579,7 +1683,7 @@ fn sampled_git_child_kills_of_the_remaining_residue_sites_are_classified_and_rec
     }))
     .expect("the histogram serializes");
     crate::workspace_manager::fixture::write_file(
-        &repo_root().join(crate::effects::SEQUENTIAL_RESIDUE_HISTOGRAM_JSON),
+        &sequential_histogram_path(std::env::var_os(OBSERVATIONS_ENV).as_deref()),
         format!("{emitted}\n").as_bytes(),
     );
 }
