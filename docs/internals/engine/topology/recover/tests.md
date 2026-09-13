@@ -874,7 +874,11 @@ parked, beta's one attempt failed with the halting policy the outcome
 needs, beta's closed generation still holding its worktree and intent, the
 residue asked for (a snapshot, a staging worktree, a proposal pin), and
 `run_finished` durable — what terminal finalization has to act on, with
-nothing yet done to it.
+nothing yet done to it. Since PR10's round 7 the planting also leaves an
+already-unreachable object in the store (`plant_unreachable_object`) and
+records the objects the run's refs and worktrees reference and the whole
+store as it stands, so that every finalization driven from it is held to
+R27 by `assert_finalized` (`assert_objects_kept`).
 
 ## `fn resume_finalizes_halted_then_refuses() {`
 
@@ -4233,7 +4237,23 @@ finalization kill child dies by — the first time `at` is consulted.
 ## `fn assert_finalized(planted: &FinishedPlanting, outcome: &R…`
 
 The outcome equation's terminal half, as the physical state after a
-complete finalization of `planted`.
+complete finalization of `planted`: the worktrees, intents, pins, refs and
+root, the answer files, the report, the events — and, since PR10's round
+7, the object store (`assert_objects_kept`), which until then no
+finalization the matrix or the real kill drove was held to (the round-7
+crash lens, P1: a terminal resume that found the report current and
+pruned Git's unreachable objects converged).
+
+## `fn assert_objects_kept(planted: &FinishedPlanting, tag: &str) {`
+
+R27 after a finalization, read through the ledger's own inventory
+(`ledger_inventory`, the same accounting the five ledger tests consume):
+nothing the run's refs and worktrees referenced at the planting is
+missing, nothing the store held then is missing (the diagnostic names
+what is), and the already-unreachable object the planting left is still
+in the store and still unreachable — neither pruned nor referenced.
+Called by `assert_finalized`, after the matrix's third resume, and after
+the real kill before and after its restart (the round-7 crash lens, P1).
 
 ## `struct FinalizationEffect {`
 
@@ -4282,7 +4302,12 @@ faulted resume ends there with the log untouched and exactly the effects
 before the fault done; the next resume finalizes the rest and refuses; a
 third finds nothing to do — it finds the report current, takes its
 directory barrier through the report's two sites (round 5) and writes
-nothing, the bytes byte-identical, and runs no other site again.
+nothing, the bytes byte-identical, and runs no other site again. Since
+round 7 the third resume is held to R27 too (`assert_objects_kept`), as the
+second is through `assert_finalized`: it is the resume that takes the fresh
+branch, and a fresh branch that pruned Git's unreachable objects after its
+barrier converged under this matrix until then — the recipe
+`st18-fresh-branch-prunes-objects` fails at exactly that cell.
 
 ## `fn a_fault_at_a_staging_leftovers_own_removal_stops_finaliz…`
 
@@ -4417,7 +4442,10 @@ cleanup step, and is killed right after the execution root is removed —
 before the run lock is released and the guards drop. The log is untouched
 by the death, the lock is free once the child is gone, and the next
 resume finds the report current, nothing left to prune, releases the lock
-through the funnel and refuses.
+through the funnel and refuses. Since round 7 the object store is read
+after the death and again after the restart (`assert_objects_kept`): the
+restart takes the fresh branch, and the same recipe as the matrix's,
+`st18-fresh-branch-prunes-objects-real-kill`, fails it there.
 
 ## `fn kill_after_run_finished_before_report() {`
 

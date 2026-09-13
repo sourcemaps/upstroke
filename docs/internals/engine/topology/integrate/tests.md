@@ -41,7 +41,8 @@ merge_prepared append in `integrate`, so an append that does not complete
 — the stable-prefix barrier's sync failing before it returns is one way —
 aborts the sequence through `?` before any CAS, so no ref moves. What a
 resume then derives from the durable prefix — a lost unsynced line, or a
-kept one — is `recover`'s `unsynced_merge_prepared_lost_to_power_failure`
+kept one — is `recover`'s
+`unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing`
 and `events::log`'s barrier tests; here the point is only that the ref
 never ran ahead of the append.
 

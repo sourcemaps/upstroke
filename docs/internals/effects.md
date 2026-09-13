@@ -110,6 +110,20 @@ and_recovered`, which then reads it back. Not checked in: its contents are a
 property of the machine that produced them, and a stale copy of somebody
 else's numbers would be worse than no copy.
 
+## `pub const SEQUENTIAL_RESIDUE_HISTOGRAM_JSON: &str = "residue-histogram-sequential.json";`
+
+The same half for the five residue-classified sites PR5's four-command sampler does not
+run, written on every run by
+`engine::topology::coverage::tests::sampled_git_child_kills_of_the_remaining_residue_sites_are_classified_and_recovered`.
+A file name rather than a path: that module's tests resolve it (`sequential_histogram_path`)
+against the observation export's directory when `UPSTROKE_HOOK_OBSERVATIONS` names one, and
+otherwise against the profile directory the test binary runs from — never against the source
+tree. Until PR10's round 7 it was `effects/residue-histogram-sequential.json` under the
+manifest directory, gitignored like PR5's, and every build of one checkout shared it: a suite
+in one build slot truncated it while the merge check in another read it (the round-7
+regression lens, P3). The merge check and the regenerator read it where the sampler wrote it;
+the ordinary tests read the declarations.
+
 ## `pub const FUNNEL_MODULES_JSON: &str = "effects/funnel-modules.json";`
 
 Where each site's funnel **bodies** actually are, where that is not what

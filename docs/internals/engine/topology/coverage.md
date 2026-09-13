@@ -37,7 +37,12 @@ the round-2 regression lens found them reading the gitignored histogram.
 
 ## `pub fn load_observations(dir: &Path) -> Result<Vec<ObservationRecord>, String> {`
 
-Every record under the export directory, records of one test merged.
+Every record under the export directory, records of one test merged. The one `.json` there
+that is not a record — `residue-histogram-sequential.json`, which the sequential sampler writes
+beside the records since PR10's round 7 — is passed over by its name; the first merge check
+over an export holding it refused the export as "not an observation record" (on the round's first, unpushed code head),
+and `the_export_loader_passes_over_the_histogram_the_sampler_writes_beside_the_records` holds
+the loader to reading the records and only the records.
 
 ## `pub fn harness_from(records: &[ObservationRecord]) -> HookHarness {`
 
@@ -108,14 +113,19 @@ The two halves of the residue-class evidence. The synthetic records come from on
 `workspace_manager::tests::every_registered_residue_element_is_constructed_and_recovers` holds to
 what it constructs, classifies and recovers on every run (regenerated with
 `UPSTROKE_REGENERATE_EFFECT_ARTIFACTS=1`, never rewritten by an ordinary run). The sampling
-records come from two gitignored, machine-varying files each sampler rewrites on every run:
-`effects/residue-histogram.json` (PR5's four-command sampler) and
-`effects/residue-histogram-sequential.json`
+records come from two machine-varying files each sampler rewrites on every run:
+`effects/residue-histogram.json` (PR5's four-command sampler; gitignored, under the manifest
+directory) and `residue-histogram-sequential.json`
 (`sampled_git_child_kills_of_the_remaining_residue_sites_are_classified_and_recovered` in this
 module's tests, which kill-samples the five residue-classified sites PR5's sampler does not run,
-each through the argv its funnel shares with it). The ordinary tests read the tracked file and
-the declarations (`ResidueEvidence::declared`); only the ignored merge check and the regenerator
-read the histograms.
+each through the argv its funnel shares with it), which since PR10's round 7 lives beside the
+observation export when `UPSTROKE_HOOK_OBSERVATIONS` names one and otherwise under the profile
+directory the test binary runs from (`sequential_histogram_path` in the tests) — never under the
+source tree's `effects/`, which every build of one checkout shares: until round 7 it was
+`effects/residue-histogram-sequential.json`, and a suite in one build slot truncated it while the
+merge check in another read it (the round-7 regression lens, P3). The ordinary tests read the
+tracked file and the declarations (`ResidueEvidence::declared`); only the ignored merge check and
+the regenerator read the histograms, each where its sampler wrote it.
 
 ## `impl ResidueEvidence` › `pub fn declared(synthetic_json: &str, declarations_json: &str) -> …`
 

@@ -20,7 +20,10 @@ carries it out writes nothing afterwards. Outside tests the export is a no-op an
 inert.
 
 `engine::topology::coverage` reads the records back, rebuilds one harness from the ones that
-are funnel executions and holds the sequential registry to it.
+are funnel executions and holds the sequential registry to it. Since PR10's round 7 the
+sequential residue sampler writes its histogram, `residue-histogram-sequential.json`, into the
+same directory when an export is requested (and under the build's profile directory when none
+is), so the merge check reads the run's own histogram beside the run's own records.
 
 ## `pub struct ObservationRecord {`
 

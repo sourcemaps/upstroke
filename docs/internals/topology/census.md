@@ -1223,7 +1223,17 @@ rather than a shorter list that still looks total.
 And the honest list, so the three above are differences rather than
 the only thing this checker ever says.
 
-## `fn the_census_transition_table_is_reproducible_from_the_fol…` › `let census = census();`
+## `fn the_census_transition_table_is_reproducible_from_the_fol…` › `for member in family() {`
+
+Over every member of the family, each under the generator it was
+explored with: until PR10's round 7 this ran over the prefix alone, and
+it is the only test that holds a row's `from` to the state it was
+recorded at, its label to the offer, a refusal to the fold's own reason
+and an acceptance to the fingerprint applying the offer reaches — so a
+seeded census with a wrongly mapped row passed every family-wide check
+(the round-7 fix-check lens, P1; the recipe
+`census-seeded-row-misattributed`, `from = usize::MAX` on the seeded
+census's first row, fails it now at the seeded member's state 0).
 
 PR3-ST14-001, the half no loop over `states()` can reach: a
 successor that was dropped before it was recorded is not in
