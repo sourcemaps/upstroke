@@ -368,6 +368,11 @@ A driver test that means to reach the **candidate sequence** needs a
 non-empty diff: the ladder's cheap rungs reject an empty one, which is
 what `pr_sequence[8]`'s "empty-diff attempt failures" names.
 
+## `struct RecordingRunner` › `per_task: Mutex<bool>,`
+
+Name the edited file by the attempt's task, so two tasks' workers leave
+two different edits and a dependent task's diff is not empty.
+
 ## `impl RecordingRunner` › `fn filtering() -> Self {`
 
 A worker that leaves a change behind **and** a filter declaration, so
@@ -821,6 +826,46 @@ attempt nothing judged. A crash-resume claim is about the other shape: the
 ladder decided something, and §11.4's feedback is on the record it decided
 from. `detail` is what the next attempt is told, and it is the field this
 helper exists to put in a log.
+
+## `enum AlphaEnd {`
+
+How alpha ends in a planted finished run.
+
+## `enum AlphaEnd` › `Queued,`
+
+The candidate queued: `AwaitingMerge`, its candidates ref present.
+
+## `enum AlphaEnd` › `Published,`
+
+The candidate published fast: `Merged`, the integration ref moved.
+
+## `enum AlphaEnd` › `Parked,`
+
+The attempt parked on a question: `AwaitingInput`, the question open.
+
+## `struct FinishedResidue {`
+
+Terminal residue planted beside the finished run, for the cleanup steps
+that prune it: a snapshot (ii), a staging worktree (iii) and a
+`prepared/<seq>` pin (iv).
+
+## `struct FinishedPlanting {`
+
+A run planted at its end: alpha as `alpha` says, beta's one attempt
+failed with the halting policy the outcome needs, beta's closed generation
+still holding its worktree and intent, the residue asked for, and
+`run_finished` durable. What terminal finalization then has to act on,
+with nothing yet done to it.
+
+## `struct PlantedAnswerFiles {`
+
+A published answer and a writer's `.partial` beside it, planted under
+`answers/` by every finished-run fixture and compared byte for byte after
+a fault, after the recovery's finalization (`assert_finalized`) and after
+the repeated finalization, at every terminal outcome; the Complete ledger
+fixture plants them too, so R21's `answer_files` and `partial_files`
+parts observe one each and are held retained. Until PR10's round 2 only
+the Halted test planted them (the round-2 crash lens, P1-2).
 
 ## `fn plant_finished_run_with(`
 
@@ -3168,6 +3213,10 @@ the run, so a test can read the live fold and the process-local ledgers
 before the run is dropped; `drive_handle` is the same loop with a no-op
 observer.
 
+## `fn drive_handle_observing(`
+
+The steps of [`drive_handle`], each followed by `observe`.
+
 ## `fn an_integration_review_is_selected_against_the_candidates_recorded_implementer() {` › `let fixture = Fixture::build(`
 
 The candidate was produced at rung 0 (mid, claude-opus-5) of a two-rung
@@ -3899,21 +3948,130 @@ run first so an arming inside the body lands in the loop and not in
 recovery. `with_live_run_hooked` takes the caller's hooks;
 `with_live_run_hooked_runner` the caller's runner as well.
 
+## `fn with_live_run_hooked<R>(`
+
+[`with_live_run`] through the caller's hooks, so an arming that lives in
+the hooks rather than in the harness (an error at a hook phase) reaches
+the loop.
+
+## `fn a_budget_stopped_run_with_a_retained_generation_is_close…`
+
+`PR7-R4-LOOP-004`: a budget-stopped run with a retained generation
+derives NotEnding while the generation blocks `common`; closure closes it
+`RunEnding { BudgetExceeded }`, re-derives, and ends the run — and the
+residual diagnostic names the retained generation rather than saying
+"closure derives NotEnding" to an operator whose run is budget-stopped.
+
+## `fn a_budget_stopped_run_with_a_retained_generation_is_close…` › `let runtime = runtime_holding_the_record();`
+
+The resumable half: a resume with the same ceiling reopens the run, recreates the root
+it pruned, clears the epoch's stop, and offers alpha again from a fresh generation.
+
+## `fn a_live_worktree_missing_close_reclaims_the_generations_w…`
+
+`G4B-O3-LIVE-WORKTREE-MISSING-CLOSE-KEEPS-THE-INTENT`: the live retry
+path's `Close` arm reclaims the closed generation's worktree and intent
+after the `generation_closed` append, as recovery step (e) does for a
+close it makes — with the intents read `G4G` made.
+
+## `fn a_live_worktree_missing_close_reclaims_the_generations_w…` › `let git_file = std::fs::read_to_string(worktree.join(".git"…`
+
+Residue, not absence: an interrupted command's `index.lock` in the worktree's
+git dir fails `Worktree.Verify` while the checkout is still there.
+
+## `fn over_budget_prefix_without_budget_exceeded_is_not_ending…`
+
+`over_budget_prefix_without_budget_exceeded_is_not_ending` (T-FINISH): a
+structurally admissible state with an exhausted ceiling classifies
+NotEnding, the loop appends `budget_exceeded` first, and only then does
+the closure end the run for budget.
+
+## `fn run_finished_complete_refused_with_queued_candidate() {`
+
+`run_finished_complete_refused_with_queued_candidate` (T-FINISH).
+
+## `fn run_finished_parked_refused_with_admissible_work() {`
+
+`run_finished_parked_refused_with_admissible_work` (T-FINISH): a question
+on alpha does not stop the runnable frontier (`DESIGN.md` §4 (6)); the
+fold refuses `Parked` while beta is admissible, and the loop dispatches
+beta instead of hard-blocking.
+
+## `fn run_finished_parked_or_complete_refused_while_deferred_i…`
+
+`run_finished_parked_or_complete_refused_while_deferred_items_exist`
+(T-FINISH): pending backoff makes Parked and Complete NotEnding, and the
+loop sleeps the backoff rather than closing.
+
+## `fn run_finished_parked_or_complete_refused_while_deferred_i…` › `let fixture = Fixture::healthy("closure-deferred-task");`
+
+(a) A Deferred task, at the fold and at the loop within one epoch.
+
+## `fn run_finished_parked_or_complete_refused_while_deferred_i…` › `let fixture = Fixture::two_tasks("closure-deferred-candidat…`
+
+(b) A verification-deferred candidate, at the fold. The loop half is
+`a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers`,
+whose every deferral is followed by a wait.
+
+## `fn run_finished_halted_and_budget_exceeded_accepted_with_de…`
+
+`run_finished_halted_and_budget_exceeded_accepted_with_deferred_items`
+(T-FINISH, closure step (5b)): a Deferred task never blocks Halted (void
+with the run) or BudgetExceeded (resumably_open, woken by `run_resumed`).
+
 ## `fn run_finished_halted_and_budget_exceeded_accepted_with_de…` › `let fixture = Fixture::two_tasks("closure-halted-deferred");`
 
 Halted: alpha deferred, beta's halting failure — both planted in the
 live epoch, after the resume, so the closure meets alpha Deferred with
 its backoff pending rather than the Pending task `run_resumed` wakes.
 
+## `fn run_finished_halted_and_budget_exceeded_accepted_with_de…` › `let fixture = Fixture::two_tasks("closure-budget-deferred");`
+
+BudgetExceeded: alpha deferred by an outage in this epoch, the ceiling refusing beta's
+dispatch, closure ending the run with the deferral resumably_open.
+
+## `fn run_finished_halted_and_budget_exceeded_accepted_with_de…` › `let fresh = Arc::new(Mutex::new(HookHarness::new()));`
+
+And the resume wakes it (`resume_clears_budget_stop_and_wakes_deferred` is the same
+claim from a planted log).
+
+## `fn publish_alpha(fixture: &Fixture) -> PlantedTransaction {`
+
+Alpha merged on the fast path with a real candidates ref behind it: the
+queued candidate's prepared and candidates refs, `merge_prepared` fast and
+`task_merged` durable, the integration ref moved to the candidate. The
+finished-run planting's Published end and the two closure fixtures below
+share it; the closure fixtures need a candidates ref that outlives the
+closure, so that "every candidates ref is kept" compares something.
+
+## `fn recorded_spend(fixture: &Fixture) -> f64 {`
+
+What the planted log has already spent (`Spend::replay`), so a ceiling
+set just above it admits exactly one live attempt and refuses the retry:
+the planted candidate's attempt record carries a cost, and a ceiling
+chosen by eye met it before any live step (the round-2 rebuild of the
+closure fixtures found that out).
+
+## `fn step_until_budget_stop(`
+
+Drive the loop until `Progress::BudgetExceeded`, at most six steps,
+returning every shape on the way.
+
 ## `fn a_fault_between_the_closure_close_and_its_scrub_is_recla…`
 
-T-FINISH's closure prefix with a fault inside it: the retained
+T-FINISH's closure prefix with a fault inside it: beta's retained
 generation's `generation_closed` is durable and the scrub that follows
 it is refused at `Worktree.Remove`'s before phase, so the command ends
 between the close and the `run_finished`. The next resume finds one
 close for that generation, reclaims its worktree and intent, keeps every
 candidates ref, clears the epoch's budget stop, and the loop meets the
-ceiling again in the new epoch.
+ceiling again in the new epoch. Alpha is published first with a real
+candidates ref (`publish_alpha`), asserted present before the closure:
+until PR10's round 2 the fixture was a single task and "every candidates
+ref is kept" compared two empty lists (the round-2 crash lens, P2-5).
+The fault is armed at the second `Worktree.Remove` before phase, because
+the resume of the planted log scrubs alpha's closed generation first;
+the count of two is asserted, so the faulted execution is the closure's.
 
 ## `fn a_fault_between_the_closure_close_and_its_scrub_is_recla…` › `let log = TopologyFold::parse_log(&fixture.log_bytes()).exp…`
 
@@ -3922,18 +4080,78 @@ opened: the live run above is itself a resume of the planted log, so
 the first stop is epoch 1's, and the resume that reclaimed the closure
 opened epoch 2 for the second.
 
+## `fn an_append_error_at_the_run_ending_close_ends_the_command…`
+
+The run-ending close's `generation_closed` append errors — the partial
+line at `Written`, and the whole line with the barrier failing at
+`WrittenFull` — and the command ends with the fold poisoned, the
+worktree and intent standing, no removal or report hook reached and
+no report derived; the close is durable exactly when the whole line was
+written. A fresh resume converges either way: it reclaims beta's
+worktree and intent, keeps alpha's candidates ref, clears the stop, and
+the log holds one close for beta — the closure's own (`RunEnding`) when
+the line was durable, the resume's (`ResumeDiscardsRetainedSession`)
+when the torn tail was truncated. Until PR10's round 2 no test guarded
+the error's propagation from this append (the round-2 crash lens, P1-1).
+
+## `fn run_finished_budget_exceeded_refused_after_halting_drain…`
+
+`run_finished_budget_exceeded_refused_after_halting_drain_settlement`
+(T-FINISH): a halting settlement recorded after `budget_exceeded` makes
+the derived outcome Halted; `run_finished(BudgetExceeded)` is refused and
+the closure ends the run Halted. At `max_parallel = 1` no drain exists —
+the prefix is one a concurrent build's drain would write — and the
+precedence is the same either way.
+
 ## `fn run_finished_budget_exceeded_refused_after_halting_drain…` › `plant_live(`
 
 Planted in the live epoch: the budget stop and the halting settlement
 after it are what the closure meets, not a budget stop a resume between
 the planting and the loop would have cleared.
 
+## `fn run_finished_halted_accepted_after_declined_verification…`
+
+`run_finished_halted_accepted_after_declined_verification_park`
+(T-FINISH): a declined verification-park question with
+`decline_halts_run` halts the run, and the closure ends it Halted.
+
+## `fn replayed_conflicting_outcome_refused() {`
+
+`replayed_conflicting_outcome_refused` (T-FINISH): a log whose
+`run_finished` names an outcome its state does not derive is refused by
+the checked replay, live and at a resume's stable-prefix barrier.
+
+## `fn append_error_inside_closure_ends_command_and_resume_comp…`
+
+`append_error_inside_closure_ends_command_and_resume_completes_closure`
+(T-FINISH, T-APPEND): the `run_finished` append returns an error; the
+append-error protocol poisons the fold and ends the command with nothing
+finalized from memory; the next process's closure ends the run.
+
+## `fn closure_kill_child() {`
+
+The child `kill_inside_closure_recovers` spawns: resume the run the parent
+planted, then step the loop with a kill armed at the `Written` point of
+`Event.Append`, so the process dies inside the closure's `run_finished`
+append in the shape `UPSTROKE_TEST_KILL_SHAPE` names.
+
+## `fn kill_inside_closure_recovers() {`
+
+`kill_inside_closure_recovers` (T-FINISH): a coordinator killed inside
+the closure's `run_finished` append — the line torn, and the line
+complete — leaves a prefix the next process converges from: a torn line is
+truncated at open and the closure repeats; a complete line is the run's
+end and the next process finalizes it then refuses. Both reach one
+`run_finished`, one report, and the cleanup.
+
 ## `struct ArmedFinalization {`
 
 Hooks that inject an error return at one `(site, phase)` of one
 finalization, the nth time it is reached, so the T-FINALIZE matrix is
 driven at every cleanup site in turn and the next resume is shown to
-converge from each.
+converge from each. `answering` arms the first execution;
+`answering_at_nth` the nth, for a fixture whose resume reaches the site
+before the execution under test does.
 
 ## `struct OrderedHooks {`
 
@@ -3945,6 +4163,19 @@ first.
 
 Armed to answer `injection` — an error return, or the kill the
 finalization kill child dies by — the first time `at` is consulted.
+
+## `fn assert_finalized(planted: &FinishedPlanting, outcome: &R…`
+
+The outcome equation's terminal half, as the physical state after a
+complete finalization of `planted`.
+
+## `struct FinalizationEffect {`
+
+Every finalization site and phase a fault can land on, in the order the
+steps run. `Ref.DeleteCandidatesRef` is Complete's alone.
+One durable effect of terminal finalization, in the order
+`CleanupStep::ORDER` performs them: the site whose funnel performs it, and
+how the planted residue shows it done.
 
 ## `fn finalization_effects(outcome: &RunOutcome) -> Vec<Finali…`
 
@@ -3970,6 +4201,14 @@ through the funnel from a drop; the funnel's after phase can. A fault
 at the release itself is absorbed (`RunLock::release` discards the
 funnel's error), so it leaves every earlier effect done.
 
+## `fn kill_after_report_before_each_cleanup_step() {`
+
+`kill_after_report_before_each_cleanup_step` (T-FINALIZE): a fault at
+every finalization site, before and after the effect, for Complete and
+for Halted — 24 and 22 cells. The faulted resume ends there with the log
+untouched and exactly the effects before the fault done; the next resume
+finalizes the rest and refuses; a third finds nothing to do.
+
 ## `fn finalization_kill_child() {`
 
 The child of `a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_the_next_resume`:
@@ -3987,6 +4226,57 @@ by the death, the lock is free once the child is gone, and the next
 resume finds the report current, nothing left to prune, releases the lock
 through the funnel and refuses.
 
+## `fn kill_after_run_finished_before_report() {`
+
+`kill_after_run_finished_before_report` (T-FINALIZE): the live closure
+faults at `RunDir.WriteReport` after `run_finished` is durable; the run
+is over and unfinalized, and the next resume finalizes it then refuses.
+
+## `fn halted_report_lists_candidate_refs() {`
+
+`halted_report_lists_candidate_refs` (T-FINALIZE): at Halted the report
+lists every candidates ref with its SHA, and the refs are what Git holds.
+
+## `fn publish_answer_file(answers: &Path, id: &crate::ir::Ques…`
+
+Publish an answer the way `upstroke answer` does: `Answer.StageWrite`
+then `Answer.PublishRename`, the two funnels `interaction::write_answer`
+delegates to.
+
+## `fn answer_files_untouched_by_finalization() {`
+
+`answer_files_untouched_by_finalization` (T-FINALIZE, R21): an answer
+published for the open question and a writer's `.partial` residue are
+left byte-identical by finalization, never ingested, and never pruned.
+
+## `fn late_answer_after_finalization_is_inert_and_reported_not…`
+
+`late_answer_after_finalization_is_inert_and_reported_not_live`
+(T-ANSWER): `upstroke answer` after finalization writes its file — through
+the `Answer.StageWrite`/`PublishRename` funnels the command delegates to —
+and finds the run not live by the same `rundir::is_running` probe the
+command reports (`src/answer.rs`,
+`an_answer_lands_where_the_engine_will_find_it`); the file stays inert
+across every later resume.
+
+## `fn late_answer_before_halting_settlement_is_inert_and_retai…`
+
+`late_answer_before_halting_settlement_is_inert_and_retained` (T-ANSWER):
+an answer file published before a halting settlement in the same epoch is
+never ingested — the halt outranks ingestion — and finalization leaves it.
+
+## `fn private_records_untouched_by_finalization() {`
+
+`private_records_untouched_by_finalization` (T-FINALIZE, R21): the
+private owner and commit records are byte-identical after finalization.
+
+## `fn finalized_report_names_runner_identity() {`
+
+`finalized_report_names_runner_identity` (T-FINALIZE, ST-20): the report
+names the run's runner kind, policy, image reference, id and digest from
+`run_started`; the renderer prints them; the status reader over a
+barrier-proven prefix derives the same report.
+
 ## `fn finalized_report_names_runner_identity()` › `assert_eq!(report.tasks.len(), 2);`
 
 INV-13's projections name each task's origin and lineage: two originals here.
@@ -3999,22 +4289,35 @@ the current digest over another image reference, or another outcome,
 is stale: the next resume regenerates it and says so; an untouched file
 is left alone.
 
+## `struct LiveVsReplay {`
+
+The live incremental fold of a stepped run against a fresh replay of the
+bytes on disk, and the report each derives: Q1's comparison, made against
+the live state and not between two replays. The G4 gate ran this as an
+uncommitted measurement (`live_vs_replay`) and asked for it committed.
+
 ## `fn live_vs_replay(`
 
 Q1's comparison, committed at the G4 gate's request: the live incremental
 fold of a stepped run and the report derived from it, against a fresh
 replay of the bytes on disk and its report.
 
-## `fn ledger_inventory(`
+## `fn user_checkout(repo_root: &Path) -> (String, BTreeMap<Str…`
 
-The physical half of the ledger, measured from the fixture: slots by
-namespace, refs and pins, the run directory and the private half (the
-normalized plan, the report, the question, answer and `.partial` files,
-the marker, the owner and commit records), the two lock files, container
-intents, the volume classification, and Git's store: the objects the
-pre-finalization observation saw referenced, checked present after, the
-whole store as that observation listed it, so R27 can ask whether any
-object at all went missing, and what `fsck` reports unreachable.
+What a user sees of their repository: `HEAD`, every tracked file's bytes,
+and whether anything tracked is modified.
+
+## `fn max_parallel_one_completes_a_two_task_chain_with_one_lin…`
+
+`acceptance_subset[0]`: "max_parallel = 1 topology completes a multi-task
+plan with one linear engine commit per plan task, user checkout
+byte-for-byte unchanged" — a two-task chain driven to `run_finished
+(Complete)`, with the live fold and its report compared against a replay
+of the bytes on disk after every step (`projection equivalence`).
+
+## `fn with_live_run_hooked_runner<R>(`
+
+[`with_live_run_hooked`] with the runner chosen by the caller.
 
 ## `fn projections_are_equal_between_live_and_replay_at_every_p…`
 
@@ -4026,6 +4329,17 @@ of that prefix of the bytes on disk, and every durable prefix this
 process appended had such a live comparison. The whole-step comparison
 (`assert_live_equals_replay`) runs beside it, and the last loop checks the
 weaker property it always checked: a prefix replays to one report.
+
+## `fn referenced_objects(fixture: &Fixture) -> Vec<String> {`
+
+Every object the run's refs, pins and worktree HEADs reference: what a
+pruning releases to Git, and what R27 says is still in the store after.
+
+## `fn slots_present(`
+
+Intents and directories of one slot namespace, counted as one set: a
+worktree without its intent and an intent without its worktree are each
+still a held slot.
 
 ## `fn files_under(dir: &Path) -> u32 {`
 
@@ -4043,6 +4357,22 @@ an already-unreachable object to leave alone: R27 says the run never
 deletes one, and a verdict that only checked the objects pruned refs
 released could not see a finalization that pruned Git's own residue.
 
+## `fn ledger_inventory(`
+
+The physical half of the ledger, measured from the fixture: slots by
+namespace, refs and pins, the run directory and the private half (the
+normalized plan, the report, the question, answer and `.partial` files,
+the marker, the owner and commit records), the two lock files, container
+intents, the volume classification, and Git's store: the objects the
+pre-finalization observation saw referenced, checked present after, the
+whole store as that observation listed it, so R27 can ask whether any
+object at all went missing, and what `fsck` reports unreachable.
+
+## `fn ledger_inventory(` › `let no_volume_site = EffectSiteId::all()`
+
+R20 is operator-owned by classification: no site in the inventory creates or removes a
+volume, and the volume map the run recorded at `run_started` is the one it ends with.
+
 ## `fn ledger_inventory(` › `cleanup_lock_file_present: public.join("cleanup.lock").exis…`
 
 `cleanup.lock` is the reaper's Unix hold file beside the run lock.
@@ -4056,6 +4386,16 @@ thread forks in that window can inherit the descriptor and hold the
 lease until it exits. The wait is bounded so a hold that never clears
 still fails the assertion that follows it; the ledger's post-drop
 observation and the finalization matrix's resumes wait through it.
+## `fn process_local_of(`
+
+R3, R4, R13, R17, R22 and R28 as the live process sees them.
+
+## `fn process_local_after(public: &Path, last: (bool, u32)) ->…`
+
+The same rows once the run has been dropped: the process-local ledgers
+as the run last reported them, the locks as the OS reports them — after
+a bounded wait for a lease a concurrently forked child may still hold.
+
 ## `fn observe_live(`
 
 The live observation: the fold as the process holds it, the store as it
@@ -4066,11 +4406,58 @@ is now (`store` lists it for the later observation to compare against).
 The observation once the run has been dropped: the fold replayed from
 the bytes, the store compared with `store_before`.
 
+## `fn assert_ledger(before: &Ledger, after: &Ledger, outcome: …`
+
+The outcome equation, checked; the rendered ledger is written to
+`$UPSTROKE_LEDGER_EXPORT/<tag>.md` when the variable names a directory,
+which is how the record quotes it.
+
+## `fn tree_of(root: &Path) -> Vec<String> {`
+
+Every path under `root`, relative, sorted: what an execution root still
+holds when a finalization reports it not removed.
+
+## `fn the_ledger_balances_at_complete() {`
+
+`resource_accounting.outcome_equations.Complete`: the acceptance chain,
+observed live before the ending step and again from the bytes on disk
+once the process has let go.
+
+## `fn the_ledger_balances_at_parked() {`
+
+`outcome_equations.Parked`: alpha's queued candidate publishes, beta's
+worker asks a question, the hard block finds nobody there and the closure
+ends the run Parked — the candidates ref retained, the question open.
+
+## `fn the_ledger_balances_at_halted() {`
+
+`outcome_equations.Halted`: a declined verification park with the halting
+policy; the ledger after the decline is ingested and after the closure
+ends the run Halted — the candidates ref kept for forensics, the queue
+position and the question consumed, the proposal pin and the staging
+worktree pruned.
+
+## `fn a_closed_settlement_scrubs_the_generations_worktree_and_…`
+
+R9 at the live loop: a `Closed` settlement — here a deferral — closes the
+generation in the fold, and the loop prunes the generation's worktree and
+intent right after the `attempt_finished` append, as the retry path's
+`Close` arm and run-end closure do for the closes they make. Found by
+the ledger at Parked: before this, every closed settlement other than a
+promotion left its slot for the next resume to reclaim.
+
 ## `fn a_closed_settlement_scrubs_the_generations_worktree_and_…` › `let seen = timeline.lock().unwrap_or_else(PoisonError::into…`
 
 The order, observed: the settlement's append is durable
 (`Event.Append` after) before the scrub's first effect
 (`Worktree.Remove` before) is consulted.
+
+## `fn the_ledger_balances_at_budget_exceeded() {`
+
+`outcome_equations.BudgetExceeded`: a spend already over the ceiling
+refuses beta's queued candidate its integration, `budget_exceeded` is
+appended, and the closure ends the run — the queue position, the
+candidate lease and the candidates ref resumably open, the pins pruned.
 
 ## `struct ArmedAppendError {`
 
@@ -4078,6 +4465,22 @@ Hooks that return `Err` from the `Written` point of the nth transaction
 append counted from the moment the countdown is set — the append-error
 protocol, aimed at one line of the test's choosing, which is how the
 NoRunFinished ledger is driven rather than planted.
+
+## `fn the_ledger_is_resumably_open_when_no_run_finished_and_ba…`
+
+`outcome_equations.NoRunFinished`: "a command ended by the append-error
+protocol leaves exactly this shape with the surviving prefix as the fold".
+Alpha publishes; beta's first settlement append errors after
+`attempt_started` is durable, so the surviving prefix holds an in-flight
+generation, its worktree and intent, and the execution root — every row
+resumably open, the process-local rows empty. The next incarnation then
+settles what the fold holds and the run ends Complete, with the ledger
+balanced there too.
+
+## `fn the_ledger_is_resumably_open_when_no_run_finished_and_ba…` › `countdown.store(3, Ordering::SeqCst);`
+
+Beta's dispatch appends `task_dispatched` and `attempt_started`; the third
+append is the first line after the worker ran, and it errors.
 
 ## `fn the_ledger_is_resumably_open_when_no_run_finished_and_ba…` › `let released = referenced_objects(&fixture);`
 

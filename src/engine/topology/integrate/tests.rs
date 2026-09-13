@@ -866,13 +866,6 @@ fn terminal_shape_coverage_table_drives_every_shape_and_each_converges_on_replay
             }
         }
         if matches!(shape, Shape::Conflict | Shape::CodeRejected) {
-            // R11: "protected while the run can resume, whatever the candidate's
-            // state". Read the rejected candidate's candidates ref and its object
-            // after the rejection `integrate` produced, so a production caller of
-            // `Ref.DeleteCandidatesRef` on either rejection arm fails this table
-            // rather than only the dispatch-side `refuse_absent_source`
-            // (`G4-O1-REJECTION-KEEPS-CANDIDATES-REF-UNWITNESSED`; G4 run 3
-            // mutations M22 and M23 survived the suite without these reads).
             let rejected = rejected_of(&run);
             let target = run
                 .fixture
