@@ -1147,7 +1147,12 @@ pub fn finish_integration(
                     proposed,
                 )?;
             }
-            manager.remove_worktree(context.hooks.effects(), &staging)?;
+            let passed_over = manager.remove_worktree_proving(
+                context.hooks.effects(),
+                &staging,
+                crate::workspace_manager::WriterProof::NoWriterAlive,
+            )?;
+            note_passed_over_registrations(context.warnings, &passed_over);
             manager.remove_intent(context.hooks.effects(), &staging)?;
         }
     }
@@ -1160,11 +1165,31 @@ fn reclaim_snapshot_residue(
 ) -> Result<(), UpstrokeError> {
     for slot in manager.intents()? {
         if matches!(slot, crate::workspace_manager::Slot::Snapshot { .. }) {
-            manager.remove_worktree(context.hooks.effects(), &slot)?;
+            let passed_over = manager.remove_worktree_proving(
+                context.hooks.effects(),
+                &slot,
+                crate::workspace_manager::WriterProof::NoWriterAlive,
+            )?;
+            note_passed_over_registrations(context.warnings, &passed_over);
             manager.remove_intent(context.hooks.effects(), &slot)?;
         }
     }
     Ok(())
+}
+
+fn note_passed_over_registrations(warnings: &mut Vec<String>, passed_over: &[std::path::PathBuf]) {
+    for admin in passed_over {
+        let line = format!(
+            "worktree registration {} names no checkout — an interrupted `git worktree add` \
+             left it locked before it wrote the path — so Git does not list, prune or repair \
+             it and this run does not delete what it cannot bind; it was passed over and left \
+             as found",
+            admin.display()
+        );
+        if !warnings.contains(&line) {
+            warnings.push(line);
+        }
+    }
 }
 
 struct PinnedSequence {
@@ -1212,7 +1237,12 @@ fn reclaim_stale_residue(
         if matches!(slot, crate::workspace_manager::Slot::Staging { .. })
             && Some(&slot) != live_staging.as_ref()
         {
-            manager.remove_worktree(context.hooks.effects(), &slot)?;
+            let passed_over = manager.remove_worktree_proving(
+                context.hooks.effects(),
+                &slot,
+                crate::workspace_manager::WriterProof::NoWriterAlive,
+            )?;
+            note_passed_over_registrations(context.warnings, &passed_over);
             manager.remove_intent(context.hooks.effects(), &slot)?;
         }
     }

@@ -8,7 +8,7 @@ use crate::rundir;
 use crate::topology::effects::RefSite;
 use crate::topology::events::TopologyEvent;
 use crate::topology::fold::TopologyFold;
-use crate::workspace_manager::{Slot, WorkspaceManager};
+use crate::workspace_manager::{Slot, WorkspaceManager, WriterProof};
 
 use super::candidate::run_namespace;
 use super::report::{TopologyReport, outcome_label};
@@ -71,6 +71,7 @@ pub struct Finalized {
     pub removed: Vec<(CleanupStep, usize)>,
     pub execution_root_removed: bool,
     pub retained_candidates: usize,
+    pub passed_over_registrations: Vec<std::path::PathBuf>,
 }
 
 pub fn finalize(
@@ -108,20 +109,30 @@ pub fn finalize(
     let namespace = run_namespace(inputs.run_id);
     let mut removed = Vec::with_capacity(CleanupStep::ORDER.len());
     let mut execution_root_removed = false;
+    let mut passed_over_registrations = Vec::new();
     for step in CleanupStep::ORDER {
         if !step.applies_to(&outcome) {
             continue;
         }
         let count = match step {
-            CleanupStep::TaskWorktrees => scrub_slots(inputs.manager, hooks, |slot| {
-                matches!(slot, Slot::Task { .. })
-            })?,
-            CleanupStep::Snapshots => scrub_slots(inputs.manager, hooks, |slot| {
-                matches!(slot, Slot::Snapshot { .. })
-            })?,
-            CleanupStep::Staging => scrub_slots(inputs.manager, hooks, |slot| {
-                matches!(slot, Slot::Staging { .. })
-            })?,
+            CleanupStep::TaskWorktrees => scrub_slots(
+                inputs.manager,
+                hooks,
+                &mut passed_over_registrations,
+                |slot| matches!(slot, Slot::Task { .. }),
+            )?,
+            CleanupStep::Snapshots => scrub_slots(
+                inputs.manager,
+                hooks,
+                &mut passed_over_registrations,
+                |slot| matches!(slot, Slot::Snapshot { .. }),
+            )?,
+            CleanupStep::Staging => scrub_slots(
+                inputs.manager,
+                hooks,
+                &mut passed_over_registrations,
+                |slot| matches!(slot, Slot::Staging { .. }),
+            )?,
             CleanupStep::Pins => {
                 let prepared = delete_refs_under(
                     inputs.manager,
@@ -152,21 +163,39 @@ pub fn finalize(
         removed.push((step, count));
     }
 
+    passed_over_registrations.sort();
+    passed_over_registrations.dedup();
     Ok(Finalized {
         outcome,
         report_written: !fresh,
         removed,
         execution_root_removed,
         retained_candidates: report.retained_candidates.len(),
+        passed_over_registrations,
     })
 }
 
 pub fn refuse_continuation(run_id: &str, finalized: &Finalized) -> UpstrokeError {
+    let passed_over = if finalized.passed_over_registrations.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; {} worktree registration(s) Git cannot list, prune or repair, left by an \
+             interrupted `git worktree add`, passed over and left as found: {}",
+            finalized.passed_over_registrations.len(),
+            finalized
+                .passed_over_registrations
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     UpstrokeError::Refused {
         message: format!(
             "run `{run_id}` already finished as `{}`, and a finished run does not continue. \
-             Recovery step (b) finalized it first: the report was {}, {} and continuation is \
-             refused",
+             Recovery step (b) finalized it first: the report was {}, {}{passed_over} and \
+             continuation is refused",
             outcome_label(&finalized.outcome),
             if finalized.report_written {
                 "regenerated"
@@ -186,6 +215,7 @@ pub fn refuse_continuation(run_id: &str, finalized: &Finalized) -> UpstrokeError
 fn scrub_slots(
     manager: &WorkspaceManager,
     hooks: &mut dyn TopologyHooks,
+    passed_over: &mut Vec<std::path::PathBuf>,
     keep: impl Fn(&Slot) -> bool,
 ) -> Result<usize, UpstrokeError> {
     let mut count = 0;
@@ -193,7 +223,11 @@ fn scrub_slots(
         if !keep(&slot) {
             continue;
         }
-        manager.remove_worktree(hooks.effects(), &slot)?;
+        passed_over.extend(manager.remove_worktree_proving(
+            hooks.effects(),
+            &slot,
+            WriterProof::NoWriterAlive,
+        )?);
         manager.remove_intent(hooks.effects(), &slot)?;
         count += 1;
     }

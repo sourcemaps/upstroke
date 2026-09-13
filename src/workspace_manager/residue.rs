@@ -36,14 +36,17 @@
 //! line above holds for the names this module reads itself. It does not hold
 //! for what it reads *through*: the parent's inspections still fold some Git
 //! failures into an answer before the `?` here ever sees them — a failed
-//! `worktree list` or `cat-file`, a `show-ref` that could not run, a `fsck`
-//! that did not finish. Making those trustworthy means reading a repository
-//! the way Git reads it (its gitfile grammar, its linked-worktree reader, its
-//! trace-polluted streams, with a bound on every read of a
-//! repository-controlled file), which is the parent's work and not a child
-//! classifier's: `findings/` carries a file per case for the sweep of
+//! `cat-file`, a `show-ref` that could not run, a `fsck` that did not finish.
+//! Making those trustworthy means reading a repository the way Git reads it
+//! (its gitfile grammar, its trace-polluted streams, with a bound on every
+//! read of a repository-controlled file), which is the parent's work and not
+//! a child classifier's: `findings/` carries a file per case for the sweep of
 //! `src/workspace_manager.rs`, the queue's last row of this family, and
-//! `reviews/FINDINGS.md` §51 is where they were derived.
+//! `reviews/FINDINGS.md` §51 is where they were derived. The one inspection
+//! this module used to make through `git worktree list` — whether the
+//! repository registers the worktree — is now the parent's byte-safe read of
+//! the store itself (`registration_for`), since a registration an interrupted
+//! add left half-written is exactly what that enumeration cannot report.
 
 // **This child states its own lint level and inherits nothing.** A Rust lint
 // level is scoped by the module tree rather than by the file, so an out-of-line
@@ -69,7 +72,7 @@ use crate::topology::effects::{
 };
 
 use super::{
-    git_dir_of, head_commit, index_differs_from_head, object_exists, record_for,
+    git_dir_of, head_commit, index_differs_from_head, object_exists, registration_for,
     temporary_object_files, unreachable_objects, worktree_has_unstaged_changes,
 };
 
@@ -503,19 +506,26 @@ enum AddState {
     Populated,
 }
 
+/// Which of the three the store shows for `worktree`.
 ///
-/// What it reads is the parent's `record_for` and `git_dir_of`, so it is only
-/// as trustworthy as those are: `record_for` answers `None` for a `worktree
-/// list` that failed, and `git_dir_of` accepts any target text after
-/// `gitdir:`. Both are open findings for the parent's sweep in
-/// `findings/`; this function's own contribution is that the after
-/// phase and the residue element are two arms of one reading rather than two
-/// hand-written complements.
+/// What it reads is the parent's `registration_for` and `git_dir_of`, so it
+/// is only as trustworthy as those are: `registration_for` binds a
+/// registration by its `gitdir` bytes the way the removal does and passes an
+/// entry that names nothing (`locked` with no `gitdir`, or with an empty one,
+/// the two states an add killed before it wrote the path leaves), so that
+/// worktree reads as unregistered — Git's own reading of the store, which
+/// lists no such entry — while the states killed later (an empty `HEAD` or
+/// `commondir`, which make Git's enumeration refuse or die) read as
+/// registered and unpopulated; and `git_dir_of` accepts any target text
+/// after `gitdir:`, an open finding for the parent's sweep in `findings/`.
+/// This function's own contribution is that the after phase and the residue
+/// element are two arms of one reading rather than two hand-written
+/// complements.
 fn add_state(repository: &Path, worktree: &Path) -> Result<AddState, UpstrokeError> {
-    let Some(record) = record_for(repository, worktree)? else {
+    let Some(registration) = registration_for(repository, worktree)? else {
         return Ok(AddState::Unregistered);
     };
-    if record.locked.as_deref() == Some("initializing") || git_dir_of(worktree)?.is_none() {
+    if registration.initializing || git_dir_of(worktree)?.is_none() {
         return Ok(AddState::Unpopulated);
     }
     Ok(AddState::Populated)

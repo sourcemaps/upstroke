@@ -637,7 +637,11 @@ impl AttemptContext<'_> {
     fn discard_residue(&mut self, dispatched: &Dispatched) -> Result<(), UpstrokeError> {
         for slot in self.manager.intents()? {
             if matches!(slot, Slot::Snapshot { .. }) {
-                self.manager.remove_worktree(self.hooks.effects(), &slot)?;
+                self.manager.remove_worktree_proving(
+                    self.hooks.effects(),
+                    &slot,
+                    crate::workspace_manager::WriterProof::NoWriterAlive,
+                )?;
                 self.manager.remove_intent(self.hooks.effects(), &slot)?;
             }
         }

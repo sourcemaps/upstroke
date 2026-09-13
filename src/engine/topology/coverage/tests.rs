@@ -82,8 +82,9 @@ fn expected_files(test: &str) -> Vec<String> {
     vec![format!("src/{module}.rs"), format!("src/{parent}.rs")]
 }
 
-/// The residue-class evidence the registry embeds, read from the three
-/// tracked files the tests that produce it write.
+/// A tracked evidence file: the synthetic records the workspace manager's
+/// element test holds to what it constructs, and the residue-class
+/// declarations. The two histograms are gitignored and read elsewhere.
 fn tracked(path: &str) -> String {
     std::fs::read_to_string(repo_root().join(path))
         .unwrap_or_else(|error| panic!("`{path}` is tracked: {error}"))
@@ -1214,6 +1215,62 @@ struct RemainingSample {
     failed: Option<Option<i32>>,
     class: Option<crate::topology::effects::ObjectResidue>,
     recovered: bool,
+    /// What the classifier or the recovery refused, with the registration
+    /// store as it stood, for the assertion that reads it.
+    diagnosis: Option<String>,
+}
+
+/// The linked-worktree registrations of `base` as bytes, and the checkout
+/// at `worktree`, rendered for a failing sample's diagnostic: which of the
+/// files `git worktree add` writes one at a time is present, and what it
+/// holds.
+fn registration_snapshot(
+    fixture: &crate::workspace_manager::fixture::Fixture,
+    worktree: &Path,
+) -> String {
+    let mut out = Vec::new();
+    let store = fixture.manager.common_git_dir().join("worktrees");
+    match std::fs::read_dir(&store) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let admin = entry.path();
+                let mut line = format!("  {}:", entry.file_name().to_string_lossy());
+                for name in ["locked", "gitdir", "commondir", "HEAD"] {
+                    match std::fs::read(admin.join(name)) {
+                        Ok(bytes) => line.push_str(&format!(
+                            " {name}={:?}",
+                            String::from_utf8_lossy(&bytes).trim_end()
+                        )),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            line.push_str(&format!(" {name}=ABSENT"));
+                        }
+                        Err(error) => line.push_str(&format!(" {name}=ERR({error})")),
+                    }
+                }
+                out.push(line);
+            }
+        }
+        Err(error) => out.push(format!("  {}: {error}", store.display())),
+    }
+    let pointer = worktree.join(".git");
+    let checkout = match std::fs::read(&pointer) {
+        Ok(bytes) => format!(
+            "checkout {} exists, .git={:?}",
+            worktree.display(),
+            String::from_utf8_lossy(&bytes).trim_end()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => format!(
+            "checkout {} {}, .git absent",
+            worktree.display(),
+            if worktree.exists() {
+                "exists"
+            } else {
+                "absent"
+            }
+        ),
+        Err(error) => format!("checkout {}: .git {error}", worktree.display()),
+    };
+    format!("{checkout}\n  registrations:\n{}", out.join("\n"))
 }
 
 fn remaining_slot(
@@ -1312,24 +1369,19 @@ fn prepare_remaining_sample(
 fn remaining_recovered(
     fixture: &crate::workspace_manager::fixture::Fixture,
     slot: &crate::workspace_manager::Slot,
-) -> bool {
-    use crate::workspace_manager::NoHooks;
+) -> Result<bool, crate::error::UpstrokeError> {
+    use crate::workspace_manager::{NoHooks, WriterProof};
     fixture
         .manager
-        .remove_worktree(&mut NoHooks, slot)
-        .expect("forced removal converges");
-    fixture
-        .manager
-        .remove_intent(&mut NoHooks, slot)
-        .expect("intent removal converges");
+        .remove_worktree_proving(&mut NoHooks, slot, WriterProof::NoWriterAlive)?;
+    fixture.manager.remove_intent(&mut NoHooks, slot)?;
     let path = fixture.manager.slot_path(slot);
-    !path.exists()
+    Ok(!path.exists()
         && !fixture
             .manager
-            .worktree_records()
-            .expect("records")
+            .worktree_records()?
             .iter()
-            .any(|record| crate::util::same_path(record.path(), &path))
+            .any(|record| crate::util::same_path(record.path(), &path)))
 }
 
 fn sample_remaining_site(site: EffectSiteId) -> Vec<RemainingSample> {
@@ -1345,7 +1397,7 @@ fn sample_remaining_site(site: EffectSiteId) -> Vec<RemainingSample> {
         let (argv, cwd, _) = prepare_remaining_sample(site, &fixture, &slot);
         probes.push(time_git(&cwd, &argv));
         assert!(
-            remaining_recovered(&fixture, &slot),
+            remaining_recovered(&fixture, &slot).expect("the probe's forced removal converges"),
             "the probe slot is removed"
         );
     }
@@ -1365,8 +1417,29 @@ fn sample_remaining_site(site: EffectSiteId) -> Vec<RemainingSample> {
         let target = ResidueTarget::new(&fixture.base)
             .at(&worktree)
             .from_base(&fixture.head);
-        let class = classify_object_residue(site, &target).ok();
-        let recovered = remaining_recovered(&fixture, &slot);
+        let (class, mut diagnosis) = match classify_object_residue(site, &target) {
+            Ok(class) => (Some(class), None),
+            Err(error) => (
+                None,
+                Some(format!(
+                    "run {run}: the classifier refused: {error}; {}",
+                    registration_snapshot(&fixture, &worktree)
+                )),
+            ),
+        };
+        let recovered = match remaining_recovered(&fixture, &slot) {
+            Ok(recovered) => recovered,
+            Err(error) => panic!(
+                "{site}: forced removal converges (run {run}): {error}; {}",
+                registration_snapshot(&fixture, &worktree)
+            ),
+        };
+        if !recovered && diagnosis.is_none() {
+            diagnosis = Some(format!(
+                "run {run}: not recovered; {}",
+                registration_snapshot(&fixture, &worktree)
+            ));
+        }
         samples.push(RemainingSample {
             argv,
             after,
@@ -1375,6 +1448,7 @@ fn sample_remaining_site(site: EffectSiteId) -> Vec<RemainingSample> {
             failed: (!status.success() && !died_by_kill(&status)).then(|| status.code()),
             class,
             recovered,
+            diagnosis,
         });
     }
     samples
@@ -1420,13 +1494,20 @@ fn sampled_git_child_kills_of_the_remaining_residue_sites_are_classified_and_rec
             u64::from(REMAINING_SAMPLING_N),
             "{site}: every sample is accounted for by exactly one class"
         );
+        let diagnoses: Vec<&str> = samples
+            .iter()
+            .filter_map(|sample| sample.diagnosis.as_deref())
+            .collect();
         assert_eq!(
-            unclassified, 0,
-            "{site}: an unclassifiable residue is durable state no tabled action recovers"
+            unclassified,
+            0,
+            "{site}: an unclassifiable residue is durable state no tabled action recovers: {}",
+            diagnoses.join("\n")
         );
         assert!(
             samples.iter().all(|sample| sample.recovered),
-            "{site}: every sample recovered by its classified action"
+            "{site}: every sample recovered by its classified action: {}",
+            diagnoses.join("\n")
         );
         let failed: Vec<Option<i32>> = samples.iter().filter_map(|sample| sample.failed).collect();
         assert!(

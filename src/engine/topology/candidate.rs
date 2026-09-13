@@ -378,7 +378,11 @@ pub fn reclaim_after_creation(
         )?;
     }
 
-    manager.remove_worktree(hooks.effects(), worktree)?;
+    manager.remove_worktree_proving(
+        hooks.effects(),
+        worktree,
+        crate::workspace_manager::WriterProof::NoWriterAlive,
+    )?;
     manager.remove_intent(hooks.effects(), worktree)?;
 
     Ok(QueuedCandidate { candidate })

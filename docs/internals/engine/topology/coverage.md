@@ -103,15 +103,19 @@ each of them, and the merge check holds this list to the export both ways.
 
 ## `pub struct ResidueEvidence {`
 
-The two halves of the residue-class evidence, read from three tracked files: the synthetic
-records from `effects/residue-synthetic.json`, written by
-`workspace_manager::tests::every_registered_residue_element_is_constructed_and_recovers` from
-what it constructed, classified and recovered; the sampling records from
+The two halves of the residue-class evidence. The synthetic records come from one tracked file,
+`effects/residue-synthetic.json`, which
+`workspace_manager::tests::every_registered_residue_element_is_constructed_and_recovers` holds to
+what it constructs, classifies and recovers on every run (regenerated with
+`UPSTROKE_REGENERATE_EFFECT_ARTIFACTS=1`, never rewritten by an ordinary run). The sampling
+records come from two gitignored, machine-varying files each sampler rewrites on every run:
 `effects/residue-histogram.json` (PR5's four-command sampler) and
 `effects/residue-histogram-sequential.json`
 (`sampled_git_child_kills_of_the_remaining_residue_sites_are_classified_and_recovered` in this
 module's tests, which kill-samples the five residue-classified sites PR5's sampler does not run,
-each through the argv its funnel shares with it).
+each through the argv its funnel shares with it). The ordinary tests read the tracked file and
+the declarations (`ResidueEvidence::declared`); only the ignored merge check and the regenerator
+read the histograms.
 
 ## `impl ResidueEvidence` › `pub fn declared(synthetic_json: &str, declarations_json: &str) -> …`
 

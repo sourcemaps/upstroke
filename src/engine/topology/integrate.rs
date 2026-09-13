@@ -500,7 +500,11 @@ pub fn publish(
         prune_pin(journal.hooks(), manager, pin, &authorized.proposed_sha)?;
     }
     if let Some(staging) = &authorized.staging {
-        manager.remove_worktree(journal.hooks().effects(), staging)?;
+        manager.remove_worktree_proving(
+            journal.hooks().effects(),
+            staging,
+            crate::workspace_manager::WriterProof::NoWriterAlive,
+        )?;
         manager.remove_intent(journal.hooks().effects(), staging)?;
     }
 
@@ -1020,7 +1024,11 @@ fn reclaim_snapshots(
 ) -> Result<(), UpstrokeError> {
     for slot in manager.intents()? {
         if matches!(slot, Slot::Snapshot { .. }) {
-            manager.remove_worktree(journal.hooks().effects(), &slot)?;
+            manager.remove_worktree_proving(
+                journal.hooks().effects(),
+                &slot,
+                crate::workspace_manager::WriterProof::NoWriterAlive,
+            )?;
             manager.remove_intent(journal.hooks().effects(), &slot)?;
         }
     }
@@ -1034,7 +1042,11 @@ fn reclaim_staging(
     pinned: Option<(&GitRef, &CommitSha)>,
 ) -> Result<(), UpstrokeError> {
     reclaim_snapshots(journal, manager)?;
-    manager.remove_worktree(journal.hooks().effects(), staging)?;
+    manager.remove_worktree_proving(
+        journal.hooks().effects(),
+        staging,
+        crate::workspace_manager::WriterProof::NoWriterAlive,
+    )?;
     manager.remove_intent(journal.hooks().effects(), staging)?;
     if let Some((pin, proposed)) = pinned {
         prune_pin(journal.hooks(), manager, pin, proposed)?;

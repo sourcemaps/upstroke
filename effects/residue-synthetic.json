@@ -1,5 +1,5 @@
 {
-  "note": "decisions.effect_site_inventory.outputs, the synthetic-construction half of the residue-class evidence: one record per (site, element) the frozen enums register, written by workspace_manager::tests::every_registered_residue_element_is_constructed_and_recovers on every run from what it constructed, classified and recovered. Deterministic, so it is pinned; effects/sequential-registry.json embeds it.",
+  "note": "decisions.effect_site_inventory.outputs, the synthetic-construction half of the residue-class evidence: one record per (site, element) the frozen enums register, written by workspace_manager::tests::every_registered_residue_element_is_constructed_and_recovers from what it constructed, classified and recovered, and held to on every run. Deterministic, so it is pinned (regenerate with UPSTROKE_REGENERATE_EFFECT_ARTIFACTS=1); effects/sequential-registry.json embeds it.",
   "sites": [
     {
       "site": "Worktree.Add",

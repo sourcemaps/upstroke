@@ -651,6 +651,48 @@ pub struct Reclaimed {
     /// left in place: a write interrupted before its rename was not durable,
     /// but no filename proves who wrote a file, so this crate deletes none.
     pub staging_leftovers: Vec<PathBuf>,
+    /// Linked-worktree registrations the store holds that name no checkout —
+    /// a `locked` file with no `gitdir`, or with an empty one, the two states
+    /// an interrupted `git worktree add` leaves before it has written the
+    /// path — passed over by the removals this reclaim ran under
+    /// [`WriterProof::NoWriterAlive`] and left byte-identical: Git does not
+    /// list, prune or repair such an entry (its lock is what prune skips),
+    /// nothing on disk binds it to a slot, and this crate deletes none of
+    /// them. Sorted, without duplicates.
+    pub passed_over_registrations: Vec<PathBuf>,
+}
+
+/// What a caller of a forced removal can prove about writers of the
+/// execution root, which decides what the removal does with a registration
+/// that names no checkout.
+///
+/// The store of linked-worktree registrations is the repository's, and
+/// `git worktree add` writes its files one at a time — `locked`, `gitdir`,
+/// the checkout's `.git`, `HEAD`, `commondir` — each opened and truncated
+/// before it is written, so a process killed inside the add leaves a
+/// registration in one of two states nothing binds to a slot: `locked`
+/// alone, or `locked` beside an empty `gitdir`. On disk that state is
+/// indistinguishable from an add in flight in the same window, and a
+/// removal that passed it over with a writer alive was measured to delete
+/// the checkout beneath the live writer's registration (PR #151, pass 1):
+/// the plain funnel refuses it, and the refusal is not relaxed on disk state
+/// alone. What relaxes it is a proof about writers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriterProof {
+    /// Nothing: an add of some slot of this root may be in flight. A
+    /// registration whose `gitdir` is empty refuses the removal before any
+    /// mutation, as [`WorkspaceManager::remove_worktree`] documents.
+    Unknown,
+    /// No writer of this execution root is alive. The engine holds it at
+    /// every forced removal it makes: a resume has the run lock and found
+    /// the run's cleanup lease free (R28: every engine Git child holds that
+    /// lease while it lives), the live loop's own adds are synchronous, and
+    /// terminal finalization holds both; the kill samplers hold it once
+    /// their child is reaped. Under it a registration that names nothing is
+    /// passed over — reported on the outcome, never bound by its
+    /// Git-generated, collision-suffixed name, never touched — and the
+    /// contained checkout and the intent converge.
+    NoWriterAlive,
 }
 
 /// The funnel primitives, each with the paths it acts through.
@@ -2038,14 +2080,22 @@ impl WorkspaceManager {
         if slots.is_empty() {
             self.revalidate()?;
         }
+        let mut passed_over_registrations = Vec::new();
         for slot in &slots {
-            self.remove_worktree(hooks, slot)?;
+            passed_over_registrations.extend(self.remove_worktree_proving(
+                hooks,
+                slot,
+                WriterProof::NoWriterAlive,
+            )?);
             self.remove_intent(hooks, slot)?;
         }
+        passed_over_registrations.sort();
+        passed_over_registrations.dedup();
         let staging_leftovers = self.staging_leftovers()?;
         Ok(Reclaimed {
             slots,
             staging_leftovers,
+            passed_over_registrations,
         })
     }
 
@@ -2537,6 +2587,14 @@ impl WorkspaceManager {
     /// clear it would leave exactly the residue this sentence promises never
     /// blocks reclaim.
     ///
+    /// A registration the store holds that names no checkout — `locked`
+    /// beside an empty `gitdir`, the state an add killed between opening and
+    /// writing that file leaves — **refuses** here, before any mutation,
+    /// whichever slot is being removed: the plain funnel proves nothing about
+    /// writers of the root, and on disk that state is an add in flight. See
+    /// [`WriterProof`]; [`Self::remove_worktree_proving`] is the form a caller
+    /// with the proof uses.
+    ///
     /// # Errors
     ///
     /// The containment refusals, or a Git or I/O error.
@@ -2545,8 +2603,30 @@ impl WorkspaceManager {
         hooks: &mut dyn EffectHooks,
         slot: &Slot,
     ) -> Result<(), UpstrokeError> {
+        self.remove_worktree_proving(hooks, slot, WriterProof::Unknown)
+            .map(|_| ())
+    }
+
+    /// [`Self::remove_worktree`] with the caller's [`WriterProof`], returning
+    /// the registrations the removal passed over — every entry of the store
+    /// that names no checkout, sorted, whichever slot they were left by —
+    /// which is empty under [`WriterProof::Unknown`], since that proof
+    /// refuses the first such entry instead.
+    ///
+    /// # Errors
+    ///
+    /// The containment refusals, or a Git or I/O error.
+    pub fn remove_worktree_proving(
+        &self,
+        hooks: &mut dyn EffectHooks,
+        slot: &Slot,
+        proof: WriterProof,
+    ) -> Result<Vec<PathBuf>, UpstrokeError> {
         let path = self.slot_target(slot)?;
-        let registration = self.revalidate_removal(&path)?;
+        let RemovalBinding {
+            admin: registration,
+            passed_over,
+        } = self.revalidate_removal_proving(&path, proof)?;
         funnel(hooks, slot.remove_site(), || {
             self.revalidate_acted_through(
                 Primitive::RemoveWorktree,
@@ -2636,7 +2716,8 @@ impl WorkspaceManager {
                 &[OsString::from("worktree"), OsString::from("prune")],
             )?;
             Ok(())
-        })
+        })?;
+        Ok(passed_over)
     }
 
     // -----------------------------------------------------------------------
@@ -4597,10 +4678,22 @@ impl WorkspaceManager {
     /// A zero-length `commondir` makes `git worktree list` fail before it emits
     /// any records. The registration's `gitdir` is still sufficient evidence
     /// when read byte-for-byte: it names the checkout's `.git`, whose parent
-    /// must canonical-prefix to the exact slot target. Any unreadable, empty or
-    /// partial `gitdir` refuses; guessing from the admin directory's basename
+    /// must canonical-prefix to the exact slot target. Any unreadable or
+    /// partial `gitdir` refuses, and so does an empty one under
+    /// [`WriterProof::Unknown`]; guessing from the admin directory's basename
     /// would authorize deletion from a Git-generated, collision-suffixed name.
-    fn revalidate_removal(&self, target: &Path) -> Result<Option<PathBuf>, UpstrokeError> {
+    ///
+    /// Under [`WriterProof::NoWriterAlive`] an entry that names nothing — no
+    /// `gitdir` beside a `locked`, or an empty `gitdir` — is what Git's own
+    /// reader makes of it: not a registration of any checkout. It binds to no
+    /// slot, is passed over and reported, and is left as it is; the scan
+    /// still reads every entry that does name a checkout, so the containment
+    /// checks run against the list Git itself would enumerate.
+    fn revalidate_removal_proving(
+        &self,
+        target: &Path,
+        proof: WriterProof,
+    ) -> Result<RemovalBinding, UpstrokeError> {
         self.revalidate_chain(&self.execution_root)?;
         let root = canonical_prefix(&self.execution_root)?;
         let target = canonical_prefix(target)?;
@@ -4629,7 +4722,9 @@ impl WorkspaceManager {
                 // registration directory is the I/O failure it looks like,
                 // and a target that cannot be read is its own.
                 return match fs::symlink_metadata(&target) {
-                    Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {
+                        Ok(RemovalBinding::unbound())
+                    }
                     Ok(_) => Err(UpstrokeError::Io {
                         path: worktrees,
                         source: error,
@@ -4648,6 +4743,7 @@ impl WorkspaceManager {
             }
         };
         let mut matched = None;
+        let mut passed_over = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|source| UpstrokeError::Io {
                 path: worktrees.clone(),
@@ -4657,7 +4753,15 @@ impl WorkspaceManager {
             let gitdir = admin.join("gitdir");
             let bytes = match fs::read(&gitdir) {
                 Ok(bytes) => bytes,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // No `gitdir` at all: Git prunes the entry itself unless
+                    // its `locked` is there, in which case the add died
+                    // between the two writes and nothing will ever prune it.
+                    if locked_present(&admin)? {
+                        passed_over.push(admin);
+                    }
+                    continue;
+                }
                 Err(source) => {
                     return Err(UpstrokeError::Io {
                         path: gitdir,
@@ -4665,6 +4769,15 @@ impl WorkspaceManager {
                     });
                 }
             };
+            if trim_gitdir(&bytes).is_empty() {
+                match proof {
+                    WriterProof::Unknown => return Err(empty_gitdir_refusal(&admin)),
+                    WriterProof::NoWriterAlive => {
+                        passed_over.push(admin);
+                        continue;
+                    }
+                }
+            }
             let checkout = registration_checkout(&admin, &bytes)?;
             let worktree = canonical_prefix(&checkout)?;
             if is_at_or_inside(&worktree, &root) {
@@ -4693,7 +4806,11 @@ impl WorkspaceManager {
                 });
             }
         }
-        Ok(matched)
+        passed_over.sort();
+        Ok(RemovalBinding {
+            admin: matched,
+            passed_over,
+        })
     }
 
     /// Re-read the registration identity at the destructive administration
@@ -4730,7 +4847,9 @@ impl WorkspaceManager {
 
 mod parsers;
 pub use self::parsers::decode_changed_paths;
-use self::parsers::{parse_worktree_records, registration_checkout};
+use self::parsers::{
+    empty_gitdir_refusal, parse_worktree_records, registration_checkout, trim_gitdir,
+};
 
 mod snapshot_ref;
 use self::snapshot_ref::SnapshotHead;
@@ -5121,26 +5240,118 @@ fn index_differs_from_head(worktree: &Path) -> Result<bool, UpstrokeError> {
     Ok(!output.status.success())
 }
 
-/// The registration `repository` holds for `worktree`, if any.
-///
-/// The question is asked of the **repository**, never of the worktree: a killed
-/// `git worktree add` can leave a registration whose checkout directory does not
-/// exist, and asking a directory that is not there — or asking its parent, which
-/// is inside the execution root and is not a repository at all — would answer
-/// "nothing is registered" for exactly the residue this is here to see.
-fn record_for(repository: &Path, worktree: &Path) -> Result<Option<WorktreeRecord>, UpstrokeError> {
-    // A non-zero exit is Git failing to enumerate (a zero-length `commondir`
-    // left by an interrupted add makes it fail before any record), and that is
-    // an error carrying Git's stderr, never "not registered": absence is only
-    // the parsed list not naming `worktree`. Each `?` here propagates this
-    // module family's own contextualised error, on which every caller has one
-    // action, refuse.
-    let output = read_only_git_ok(repository, &["worktree", "list", "--porcelain", "-z"])?;
-    let wanted = canonical_prefix(worktree)?;
-    for record in parse_worktree_records(&output)? {
-        if canonical_prefix(record.path())? == wanted {
-            return Ok(Some(record));
+/// What the store binds a slot's removal to: the administrative directory
+/// whose `gitdir` names the slot, if one does, and the entries that name
+/// nothing, which the scan passed over under [`WriterProof::NoWriterAlive`].
+struct RemovalBinding {
+    admin: Option<PathBuf>,
+    passed_over: Vec<PathBuf>,
+}
+
+impl RemovalBinding {
+    const fn unbound() -> Self {
+        Self {
+            admin: None,
+            passed_over: Vec::new(),
         }
+    }
+}
+
+/// Whether `admin` carries Git's `locked` marker, in either form the add
+/// leaves it: written, or opened and never written.
+fn locked_present(admin: &Path) -> Result<bool, UpstrokeError> {
+    let locked = admin.join("locked");
+    match fs::symlink_metadata(&locked) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(UpstrokeError::Io {
+            path: locked,
+            source,
+        }),
+    }
+}
+
+/// A linked-worktree registration read from the repository's store, the way
+/// the removal binds one: by its `gitdir` bytes.
+struct Registration {
+    /// Git's `locked` marker reads `initializing`, which `git worktree add`
+    /// writes first and unlinks last, so an add that never finished holds it.
+    initializing: bool,
+}
+
+/// The registration `repository`'s store holds for `worktree`, if any.
+///
+/// Read from the store's files, not from `git worktree list`: a registration an
+/// interrupted add left with an empty `commondir` makes that enumeration fail
+/// whole (Git reads the zero-length file as a failed read and dies), and one
+/// left with an empty `HEAD` is a record the porcelain prints without a branch
+/// or a detached mark, so a classifier that asked Git could not answer for
+/// exactly the residue it exists to classify (`SWEEP-WORKTREE-012`,
+/// `PR172-SAMPLER-REFUSED-A-TORN-WORKTREE-LIST-RECORD`). The binding is the
+/// removal's own — `registration_checkout` over the bytes, canonical prefixes
+/// compared — and an entry that names nothing (no `gitdir`, or an empty one)
+/// names this worktree no more than any other and is passed, as Git's own
+/// reader passes it. The question is asked of the **repository**, never of the
+/// worktree: a killed add can leave a registration whose checkout directory
+/// does not exist, and asking a directory that is not there would answer
+/// "nothing is registered" for the residue this is here to see.
+///
+/// # Errors
+///
+/// A Git error resolving the repository's common directory, an I/O error
+/// reading the store, or a `gitdir` the platform cannot decode.
+fn registration_for(
+    repository: &Path,
+    worktree: &Path,
+) -> Result<Option<Registration>, UpstrokeError> {
+    let store = common_git_dir(repository)?.join("worktrees");
+    let entries = match fs::read_dir(&store) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: store,
+                source,
+            });
+        }
+    };
+    let wanted = canonical_prefix(worktree)?;
+    for entry in entries {
+        let entry = entry.map_err(|source| UpstrokeError::Io {
+            path: store.clone(),
+            source,
+        })?;
+        let admin = entry.path();
+        let gitdir = admin.join("gitdir");
+        let bytes = match fs::read(&gitdir) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(UpstrokeError::Io {
+                    path: gitdir,
+                    source,
+                });
+            }
+        };
+        if trim_gitdir(&bytes).is_empty() {
+            continue;
+        }
+        let checkout = registration_checkout(&admin, &bytes)?;
+        if canonical_prefix(&checkout)? != wanted {
+            continue;
+        }
+        let locked = admin.join("locked");
+        let initializing = match fs::read(&locked) {
+            Ok(reason) => trim_gitdir(&reason) == b"initializing",
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(source) => {
+                return Err(UpstrokeError::Io {
+                    path: locked,
+                    source,
+                });
+            }
+        };
+        return Ok(Some(Registration { initializing }));
     }
     Ok(None)
 }
