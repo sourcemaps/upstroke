@@ -3459,6 +3459,14 @@ fn every_slot_taking_primitive_refuses_a_hostile_slot_name() {
             Box::new(|slot| manager.remove_worktree(&mut NoHooks, slot)),
         ),
         (
+            "remove_worktree_proving",
+            Box::new(|slot| {
+                manager
+                    .remove_worktree_proving(&mut NoHooks, slot, WriterProof::NoWriterAlive)
+                    .map(drop)
+            }),
+        ),
+        (
             "candidate_stage",
             Box::new(|slot| manager.candidate_stage(&mut NoHooks, slot, &[])),
         ),
@@ -4853,31 +4861,69 @@ fn a_relative_registration_still_binds_its_checkout() {
     );
 }
 
-/// Git failing to enumerate is an error, never "not registered": a zero-length
-/// `commondir`, the interrupted-add residue `revalidate_removal` documents,
-/// makes `git worktree list` fail, and the classifier propagates that rather
-/// than reading the registered-but-unpopulated worktree as absent.
+/// The registration `git worktree add` leaves when it is killed after it has
+/// written `gitdir` but before `commondir` or `HEAD` holds its bytes — the
+/// files it writes one at a time, each opened and truncated before it is
+/// written, so a kill inside either leaves it empty (measured by PR10's ST-07
+/// sampler, `~/pr10-evidence/r3/sampler-prefix-instrumented.log`, runs 20 and
+/// 22 of thirty). Git's own enumeration cannot report it: an empty
+/// `commondir` makes `git worktree list` die before any record, and an empty
+/// `HEAD` prints a record with neither a branch nor a detached mark, which the
+/// parser refuses (`PR172-SAMPLER-REFUSED-A-TORN-WORKTREE-LIST-RECORD`). So a
+/// classifier that asked Git answered an error where the frozen enums
+/// register a class (`SWEEP-WORKTREE-012`). It reads the registration itself,
+/// byte-safe, as the removal binds it, and answers the class the state is:
+/// registered, locked by the add that never finished, unpopulated. Forced
+/// removal converges on both, and Git enumerates again afterwards.
 #[test]
-fn a_failed_worktree_list_is_an_error_not_an_absent_registration() {
-    let fixture = Fixture::created("failed-list");
-    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
-    let path = fixture.manager.slot_path(&slot);
-    let admin = fixture
-        .manager
-        .revalidate_removal(&path)
-        .expect("admin dir")
-        .expect("registered");
-    fs::write(admin.join("commondir"), []).expect("truncate commondir");
-    let error = record_for(&fixture.base, &path).expect_err("Git could not enumerate");
-    assert!(
-        error.to_string().contains("worktree list"),
-        "the error names the command: {error}"
-    );
-    classify_object_residue(
-        EffectSiteId::Worktree(WorktreeSite::Add),
-        &ResidueTarget::new(&fixture.base).at(&path),
-    )
-    .expect_err("the classifier propagates the failure and does not answer for Git");
+fn a_registration_git_cannot_enumerate_classifies_as_unpopulated_and_converges() {
+    for torn in ["commondir", "HEAD"] {
+        let fixture = Fixture::created(&format!("torn-{}", torn.to_lowercase()));
+        let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let path = fixture.manager.slot_path(&slot);
+        let admin = fixture
+            .manager
+            .revalidate_removal(&path)
+            .expect("admin dir")
+            .expect("registered");
+        fs::write(admin.join("locked"), "initializing\n")
+            .expect("the lock the add holds until it finishes");
+        fs::write(admin.join(torn), []).expect("the file the add opened and never wrote");
+        fixture.manager.worktree_records().expect_err(&format!(
+            "{torn}: Git's enumeration cannot report this registration"
+        ));
+
+        let site = EffectSiteId::Worktree(WorktreeSite::Add);
+        let target = ResidueTarget::new(&fixture.base).at(&path);
+        assert_eq!(
+            classify(site, &target),
+            ObjectResidue::Internal,
+            "{torn}: registered, locked by the add that never finished, unpopulated"
+        );
+        assert_eq!(
+            observed_residue_elements(site, &target).expect("observe"),
+            vec![ResidueElement::RegisteredUnpopulatedWorktree],
+            "{torn}"
+        );
+
+        fixture
+            .manager
+            .remove_worktree(&mut NoHooks, &slot)
+            .expect("forced removal converges on a registration that names its checkout");
+        assert!(
+            !path.exists() && !admin.exists(),
+            "{torn}: the checkout and the registration are gone"
+        );
+        assert!(
+            fixture
+                .manager
+                .worktree_records()
+                .expect("Git enumerates again")
+                .iter()
+                .all(|record| !record.path().ends_with("kalpha-g1")),
+            "{torn}"
+        );
+    }
 }
 
 #[test]
@@ -4920,6 +4966,15 @@ enum TreeEntry {
 /// regular file with its bytes, every symbolic link or junction with its target. Nothing
 /// is followed, so replacing a file with a link to equal bytes is a
 /// difference, and so is a deleted empty directory.
+impl WorkspaceManager {
+    /// The binding the plain funnel makes: `revalidate_removal_proving` under
+    /// `WriterProof::Unknown`, its admin directory alone.
+    fn revalidate_removal(&self, target: &Path) -> Result<Option<PathBuf>, UpstrokeError> {
+        self.revalidate_removal_proving(target, WriterProof::Unknown)
+            .map(|binding| binding.admin)
+    }
+}
+
 fn tree_bytes(root: &Path) -> std::collections::BTreeMap<PathBuf, TreeEntry> {
     fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<PathBuf, TreeEntry>) {
         for entry in fs::read_dir(dir).expect("list a directory the test created") {
@@ -5054,7 +5109,10 @@ fn tree_bytes_detects_a_directory_replaced_by_a_link_to_equal_contents() {
 /// indistinguishable from an add in flight in the same window -- `locked` is
 /// present in both -- and a skip here was measured to delete the checkout
 /// beneath a live writer's registration (PR #151 pass 1), so the refusal is
-/// not to be relaxed on disk state alone.
+/// not to be relaxed on disk state alone. What relaxes it is a proof about
+/// writers, `WriterProof::NoWriterAlive`, and the sibling
+/// `a_torn_registration_is_passed_over_and_the_slot_converges_when_no_writer_is_alive`
+/// holds that form to what it may and may not touch.
 ///
 /// What each refusal is checked against is a snapshot -- relative path to
 /// directory, bytes or link target -- of four trees, taken before and compared
@@ -5115,9 +5173,12 @@ fn an_add_killed_before_it_wrote_gitdir_is_unlisted_and_refuses_forced_cleanup()
     let site = EffectSiteId::Worktree(WorktreeSite::Add);
     let target = ResidueTarget::new(&fixture.base).at(&path);
     assert!(
-        record_for(&fixture.base, &path)
+        !fixture
+            .manager
+            .worktree_records()
             .expect("Git enumerates")
-            .is_none(),
+            .iter()
+            .any(|record| canonical_prefix(record.path()).ok() == canonical_prefix(&path).ok()),
         "`git worktree list` skips a zero-length gitdir"
     );
     assert_eq!(classify(site, &target), ObjectResidue::None);
@@ -5176,6 +5237,119 @@ fn an_add_killed_before_it_wrote_gitdir_is_unlisted_and_refuses_forced_cleanup()
             .iter()
             .any(|record| record.path().ends_with("kbeta-g1")),
         "the unrelated slot is still registered"
+    );
+}
+
+/// The same two torn registrations under the proof the plain funnel lacks —
+/// no writer of the execution root is alive, which the engine holds at every
+/// forced removal it makes and the kill samplers hold once their child is
+/// reaped (`WriterProof::NoWriterAlive`): each entry that names no checkout
+/// is passed over and reported, never bound by its Git-generated name and
+/// never touched, and the slot's contained checkout and intent converge.
+/// The two states are the ones an add leaves when killed inside its first
+/// two writes: `locked` alone (opened, never written), and `locked` beside
+/// an empty `gitdir` — PR10's ST-07 sampler measured both
+/// (`~/pr10-evidence/r3/sampler-prefix-instrumented.log`, runs 17 and 22).
+/// What is checked is the whole `.git/worktrees/` store byte for byte, an
+/// unrelated populated slot's checkout, and Git's enumeration; and that the
+/// plain funnel still refuses over the same store.
+#[test]
+fn a_torn_registration_is_passed_over_and_the_slot_converges_when_no_writer_is_alive() {
+    let fixture = Fixture::created("torn-passed-over");
+    let slot = fixture.task("alpha", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &slot)
+        .expect("intent");
+    let path = fixture.manager.slot_path(&slot);
+    let name = path
+        .file_name()
+        .expect("a slot path has a final component")
+        .to_os_string();
+    let worktrees = fixture.manager.common_git_dir.join("worktrees");
+    let stale = worktrees.join(&name);
+    fs::create_dir_all(&stale).expect("the admin directory the add makes first");
+    fs::write(stale.join("locked"), "initializing\n").expect("the lock the add writes next");
+    fs::write(stale.join("gitdir"), []).expect("the gitdir the add opened and never wrote");
+    fs::create_dir_all(&path).expect("the checkout directory the add made, still empty");
+    let earlier = worktrees.join("kalpha-g0");
+    fs::create_dir_all(&earlier).expect("the admin directory of an earlier torn add");
+    fs::write(earlier.join("locked"), []).expect("its lock, opened and never written");
+
+    let other = fixture.add_task(&mut NoHooks, "beta", 1);
+    let other_path = fixture.manager.slot_path(&other);
+    fs::write(other_path.join("witness.txt"), "unrelated slot\n").expect("plant a file");
+    let store_before = tree_bytes(&worktrees);
+    let other_before = tree_bytes(&other_path);
+    assert!(
+        store_before.len() > 6,
+        "the store holds the two torn entries and the unrelated slot's registration: {:?}",
+        store_before.keys().collect::<Vec<_>>()
+    );
+
+    let passed_over = fixture
+        .manager
+        .remove_worktree_proving(&mut NoHooks, &slot, WriterProof::NoWriterAlive)
+        .expect("a registration that names nothing is passed over, not refused");
+    assert_eq!(
+        passed_over,
+        vec![earlier.clone(), stale.clone()],
+        "both torn entries are reported, sorted, whichever slot left them"
+    );
+    assert!(!path.exists(), "the contained checkout is reclaimed");
+    assert_eq!(
+        tree_bytes(&worktrees),
+        store_before,
+        "neither torn entry nor the unrelated slot's registration was touched"
+    );
+    assert_eq!(tree_bytes(&other_path), other_before);
+    fixture
+        .manager
+        .remove_intent(&mut NoHooks, &slot)
+        .expect("intent removal converges");
+    assert_eq!(
+        fixture.manager.intents().expect("intents"),
+        vec![other.clone()],
+        "the torn slot's intent is gone and the unrelated slot's stands"
+    );
+    assert!(
+        fixture
+            .manager
+            .worktree_records()
+            .expect("Git enumerates: it lists neither torn entry")
+            .iter()
+            .all(|record| !record.path().ends_with("kalpha-g1")),
+        "Git registers nothing for the slot"
+    );
+
+    let again = fixture
+        .manager
+        .remove_worktree_proving(&mut NoHooks, &slot, WriterProof::NoWriterAlive)
+        .expect("idempotent");
+    assert_eq!(again, passed_over, "and still reported");
+    assert_eq!(tree_bytes(&worktrees), store_before);
+
+    let error = fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &other)
+        .expect_err("without the proof the plain funnel still refuses over this store");
+    assert!(
+        error.to_string().contains("has an empty gitdir"),
+        "the refusal names the empty gitdir: {error}"
+    );
+    assert_eq!(tree_bytes(&other_path), other_before, "and changed nothing");
+    let unrelated = fixture
+        .manager
+        .remove_worktree_proving(&mut NoHooks, &other, WriterProof::NoWriterAlive)
+        .expect("the unrelated slot converges under the proof");
+    assert_eq!(
+        unrelated, passed_over,
+        "reporting the same two torn entries"
+    );
+    assert!(!other_path.exists());
+    assert!(
+        stale.join("gitdir").exists() && earlier.join("locked").exists(),
+        "the torn entries outlive every removal: Git's, or an operator's, to remove"
     );
 }
 
@@ -9750,6 +9924,63 @@ fn every_registered_residue_element_is_constructed_and_recovers() {
         );
         assert!(!evidence.claims_execution());
     }
+
+    // The synthetic half of the residue-class evidence, the tracked file the
+    // sequential registry (`engine::topology::coverage`) embeds: one record
+    // per (site, element), exactly what this test asserted above.
+    // Deterministic by construction -- every field is what the assertions
+    // required -- so unlike the histogram it is pinned rather than
+    // machine-varying, and this test holds the tracked bytes to what it
+    // constructed instead of rewriting them: an ordinary test that rewrote
+    // a tracked input in place left a truncation window for the ordinary
+    // coverage tests that read it (PR10's round-3 regression lens, P2), and
+    // rewrote it on every machine. `UPSTROKE_REGENERATE_EFFECT_ARTIFACTS=1`
+    // regenerates it, as it does the residue-class declarations.
+    let sites: Vec<serde_json::Value> = residue_classified_sites()
+        .iter()
+        .map(|site| {
+            serde_json::json!({
+                "site": site.name(),
+                "synthetic": records
+                    .iter()
+                    .filter(|(seen, _)| seen == site)
+                    .map(|(_, record)| *record)
+                    .collect::<Vec<SyntheticRecord>>(),
+            })
+        })
+        .collect();
+    let emitted = serde_json::to_string_pretty(&serde_json::json!({
+        "note": "decisions.effect_site_inventory.outputs, the synthetic-construction half of \
+                 the residue-class evidence: one record per (site, element) the frozen enums \
+                 register, written by \
+                 workspace_manager::tests::every_registered_residue_element_is_constructed_and_recovers \
+                 from what it constructed, classified and recovered, and held to on every run. \
+                 Deterministic, so it is pinned (regenerate with \
+                 UPSTROKE_REGENERATE_EFFECT_ARTIFACTS=1); effects/sequential-registry.json \
+                 embeds it.",
+        "sites": sites,
+    }))
+    .expect("the synthetic evidence serializes");
+    let tracked =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(crate::effects::RESIDUE_SYNTHETIC_JSON);
+    let generated = format!("{emitted}\n");
+    if std::env::var_os(crate::effects::REGENERATE).is_some() {
+        write_file(&tracked, generated.as_bytes());
+    }
+    let on_disk = fs::read_to_string(&tracked).unwrap_or_else(|error| {
+        panic!(
+            "{} is tracked; regenerate it with {}=1: {error}",
+            crate::effects::RESIDUE_SYNTHETIC_JSON,
+            crate::effects::REGENERATE
+        )
+    });
+    assert_eq!(
+        on_disk.replace("\r\n", "\n"),
+        generated,
+        "{} is stale against what this test constructed; regenerate it with {}=1",
+        crate::effects::RESIDUE_SYNTHETIC_JSON,
+        crate::effects::REGENERATE
+    );
 }
 
 /// Construct one element at one site, classify it, check quiescence, and
@@ -11284,9 +11515,12 @@ fn kill_git_child(cwd: &Path, args: &[String], after: std::time::Duration) {
 /// worktree and its intent, which is the before-phase action every
 /// `Internal` residue routes to and is idempotent for the other two.
 fn recover_sample(fixture: &Fixture, slot: &Slot) -> bool {
+    // The sampled child is reaped before this runs, so no writer of the
+    // execution root is alive: the proof under which a registration the
+    // kill left naming nothing is passed over rather than refused.
     fixture
         .manager
-        .remove_worktree(&mut NoHooks, slot)
+        .remove_worktree_proving(&mut NoHooks, slot, WriterProof::NoWriterAlive)
         .expect("forced removal converges");
     fixture
         .manager

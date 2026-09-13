@@ -103,5 +103,7 @@ pub const COMMIT_RECORD: &str = "committed.json";
 pub const COMMIT_RECORD_STAGED: &str = "committed.json.tmp";
 /// `<public>/events.jsonl`.
 pub const EVENT_LOG: &str = "events.jsonl";
+pub const REPORT: &str = "report.json";
+pub const REPORT_STAGED: &str = "report.json.tmp";
 /// `<public>/plan.normalized.json`.
 pub const PLAN: &str = "plan.normalized.json";

@@ -1,0 +1,90 @@
+# `src/engine/topology/finalize.rs`
+
+Extended notes for [`src/engine/topology/finalize.rs`](../../../../src/engine/topology/finalize.rs).
+[Source on GitHub](https://github.com/sourcemaps/upstroke/blob/master/src/engine/topology/finalize.rs).
+The relative link works in a checkout or on GitHub; the GitHub link also works from the published site.
+
+The code is the authority for what it does. The explanatory prose is preserved below.
+Each backticked part of a section heading is an exact source excerpt. Search for the final
+excerpt within the preceding item when a heading names both an item and a line inside it.
+
+## Module
+
+Terminal finalization (`run_end_policy.terminal_finalization`): after a durable `run_finished`,
+the report is written and the cleanup steps run in the packet's fixed order. Two callers: the
+loop, once closure has appended the end (`TopologyRun::close_run`), and recovery step (b)
+(`recover::finalize_if_finished`), which finalizes a Complete or Halted run found on disk and
+only then refuses continuation. Both reach the same function with the barrier-proven fold, so a
+finalization is idempotent across incarnations: a step that already ran finds nothing to do.
+
+## `pub struct Finalize<'a> {`
+
+What finalization needs and nothing more: the manager for the execution root and the refs, the
+public run directory for the report, the run id for the ref namespace, and the proven fold with
+its events for the projection.
+
+## `pub enum CleanupStep {`
+
+The six steps, in `ORDER`, each a row of the outcome equations: task worktrees and intents
+(R9), snapshots (R24), staging (R10), the prepared and candidate-prepared pins (R12, R23), the
+candidates refs (R11), and the execution root (R18) once empty. The root step first removes the
+staging leftovers of `intents/` (`WorkspaceManager::remove_staging_leftovers`, through the
+intent-removal funnel of each leftover's kind): reclaim reports and never removes them, since no
+filename proves who wrote a file, but the finalizer holds the run lock and the cleanup lease, so
+no writer of this root is alive and the ownership proof is in hand — a leftover the emptied
+root would otherwise keep is what blocked the pruning in the round-2 crash lens's P2-3.
+
+## `impl CleanupStep` › `pub const fn applies_to(self, outcome: &RunOutcome) -> bool {`
+
+Per outcome, from `resource_accounting.rows[*].at_run_end`. Snapshots, staging, pins and the
+root are pruned at every outcome. Task worktrees are pruned here only at Complete and Halted:
+at Parked and BudgetExceeded every generation closure closed has already been scrubbed with its
+close (record §3 R10), and nothing open is left. The candidates refs are Complete's alone —
+"Parked: resumably_open (never pruned)", "Halted: persistent_output (forensic; listed in
+report.json)", "BudgetExceeded: resumably_open (never pruned)".
+
+## `pub struct Finalized {`
+
+What finalization reports back: the outcome it finalized, whether the report was written or
+found current, what each step removed, whether the root went, how many candidates refs the
+report lists as retained, and the linked-worktree registrations the removals passed over —
+entries of the repository's store that name no checkout (`WorkspaceManager::WriterProof`),
+sorted, without duplicates, left as found.
+
+## `pub fn finalize(`
+
+Refuses without a durable `run_finished` — nothing is written and nothing deleted for a run
+that has not ended. Otherwise the report is derived from the fold and written when the file on
+disk is missing or stale — a file whose stored digest is not the digest of its own bytes, or
+whose outcome or runner is not the derived report's (`TopologyReport::is_fresh_against`) — then
+the steps run. The write is `rundir::write_report`'s staged, synced, renamed publication, so a
+report present under its name holds durable bytes and the refs the steps prune go only after it
+(DESIGN.md §26); a report found current is not written again and needs no barrier of its own,
+because the rename that made it current was made after its bytes were synced
+(`the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_rewritten`).
+A fault at any site ends the command with the steps before it done and the steps after it not
+started; the next resume's step (b) runs the whole order again and converges (ST-18,
+`kill_after_report_before_each_cleanup_step`, which at every cell of the matrix — both phases of
+every effect's site, the run lock's release included — asserts what has and has not been
+removed at the fault, and
+`a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_the_next_resume`,
+which kills a real child inside finalization).
+
+## `pub fn refuse_continuation(run_id: &str, finalized: &Finalized) -> UpstrokeError {`
+
+Step (b)'s refusal, worded with what the finalization it follows did: the report regenerated or
+already current, each step's count, and — when there were any — the registrations passed over,
+by path, so an operator learns what Git cannot list, prune or repair and this run did not
+delete.
+
+## `fn scrub_slots(`
+
+One namespace of the execution root at a time, by slot kind, through the Worktree and Snapshot
+funnels' remove-then-remove-intent pairs. The removal runs under
+`WriterProof::NoWriterAlive` — the finalizer holds the run lock and the run's cleanup lease, so
+no writer of the root is alive — and what it passes over is collected for `Finalized`.
+
+## `fn delete_refs_under(`
+
+Every ref under a prefix of the run's namespace, deleted expected-old at the value just read,
+through the Ref funnel's site for that pin or ref kind.

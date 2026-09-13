@@ -300,6 +300,26 @@ exactly as they were when they were private items of this file.
 
 ## `fn kill_tree`
 
+`Process.Terminate`'s two hook phases around [`kill_tree_primitive`]: the
+hooks are consulted before the kill and after it, so the site the
+inventory carries for termination is observed wherever the funnel
+terminates through this path — the register-failure arm on Unix, and the
+limit, timeout and wait-error arms elsewhere. A before answer of `Error`
+refuses the termination without attempting it; an after answer of `Error`
+reports a kill that happened.
+
+## `fn terminate_supervised`
+
+The Unix termination of a supervised child at the output limit or the
+timeout, with the same two phases around it: the supervisor settles the
+group (`finish`), the leader is killed and reaped, and the fate is `Gone`
+only when the group was established gone. Until PR10 the two arms carried
+this sequence inline and consulted no hook, which is why
+`Process.Terminate` had no observed phase; a before answer of `Error` goes
+through [`settle_failed_supervision`] like a supervisor failure does.
+
+## `fn kill_tree_primitive`
+
 Kill the whole process tree. Killing only the direct child is not enough
 when it is a `cmd.exe` shim: the real agent process would survive, keep
 running, and keep the pipes open.
@@ -316,9 +336,9 @@ an unconditional `Ok` with every result discarded.
 
 ## `fn signal_group_kill(child: &ProcessTree) -> std::io::Result<()> {`
 
-The Unix half of [`kill_tree`]'s evidence: `SIGKILL` to the group the
+The Unix half of [`kill_tree_primitive`]'s evidence: `SIGKILL` to the group the
 child leads, `Ok` when it was delivered or `ESRCH` said the group is
-already empty. Its own function so the non-Windows block of `kill_tree`
+already empty. Its own function so the non-Windows block of `kill_tree_primitive`
 carries one positively gated statement and no `not(unix)` body — the
 platform census (`effects::tests`) refuses a body no CI runner compiles.
 

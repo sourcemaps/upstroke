@@ -977,7 +977,7 @@ definitions, and they live beside this file rather than in it: the CRLF
 discipline every comparison is made under, the module a group's funnel bodies
 are actually in, the sites no funnel names, the frozen sampling N, and the
 two record generators. `artifacts` is the single authority for all six, and
-the three Answer disagreements are its answer rather than this file's.
+the three Answer disagreements and the Report one are its answer rather than this file's.
 
 What stays here is what this section *is*: the six tests -- and the reason
 the boundary is drawn exactly there is that three of them **regenerate**.

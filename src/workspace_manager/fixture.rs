@@ -1044,16 +1044,21 @@ impl KillableGitChild {
     /// says which `git`.
     pub(crate) fn spawn(cwd: &Path, args: &[String]) -> Self {
         let origin = std::time::Instant::now();
-        let child = Command::new(sampled_git())
+        let mut command = Command::new(sampled_git());
+        command
             .arg("-C")
             .arg(cwd)
             .args(["-c", "core.fsmonitor=false"])
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn the sampled git child");
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
+        let child = command.spawn().expect("spawn the sampled git child");
         let spawned = origin.elapsed();
         Self {
             child,
@@ -1089,9 +1094,31 @@ impl KillableGitChild {
     /// to fail on the first kill fed a child still running at 117 µs back
     /// as 117 µs, and the batch collapsed the same way).
     pub(crate) fn kill(&mut self) {
-        let outcome = self.child.kill();
+        let outcome = self.kill_group();
         self.fired = Some(self.origin.elapsed());
         self.kill_error = outcome.err();
+    }
+
+    /// The kill itself: the child's whole process group on Unix, where
+    /// `git worktree add` runs its `reset --hard` as a child of its own
+    /// and a kill of the leader alone leaves that child populating the
+    /// worktree after the sample is taken; the direct child elsewhere.
+    #[cfg(unix)]
+    fn kill_group(&mut self) -> std::io::Result<()> {
+        let pid = i32::try_from(self.child.id())
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        // SAFETY: `spawn` put the child in a new process group whose id is
+        // its pid; a negative pid targets that group only, and the call hands
+        // over no memory.
+        if unsafe { libc::kill(-pid, libc::SIGKILL) } == 0 {
+            return Ok(());
+        }
+        Err(std::io::Error::last_os_error())
+    }
+
+    #[cfg(not(unix))]
+    fn kill_group(&mut self) -> std::io::Result<()> {
+        self.child.kill()
     }
 
     /// Whether the child has exited on its own, and when the parent saw it.

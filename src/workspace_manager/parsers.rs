@@ -56,7 +56,7 @@ use super::worktree::{OpenRecord, WorktreeRecord};
 /// tab stays part of it too. A wider trim here binds a registration to a
 /// checkout that Git does not read from it, and the checkout is what recovery
 /// acts on.
-fn trim_gitdir(mut bytes: &[u8]) -> &[u8] {
+pub(super) fn trim_gitdir(mut bytes: &[u8]) -> &[u8] {
     while let [rest @ .., b' ' | b'\t' | b'\r' | b'\n'] = bytes {
         bytes = rest;
     }
@@ -103,15 +103,24 @@ fn trim_gitdir(mut bytes: &[u8]) -> &[u8] {
 /// [`UpstrokeError::Git`] naming the registration and the row of the table it
 /// fell into. Every refusing row has the same action, refuse before mutation,
 /// so the message is the distinction and one variant carries it.
+/// The refusal of the table's zero-length row, worded once for the two
+/// readers that meet it: the binding of a registration about to be acted on
+/// ([`registration_checkout`]) and the removal's scan of the store
+/// (`WorkspaceManager::revalidate_removal_proving`), whose plain form refuses
+/// it and whose proving form passes it over.
+pub(super) fn empty_gitdir_refusal(admin: &Path) -> UpstrokeError {
+    UpstrokeError::Git {
+        message: format!(
+            "worktree registration {} has an empty gitdir",
+            admin.display()
+        ),
+    }
+}
+
 pub(super) fn registration_checkout(admin: &Path, bytes: &[u8]) -> Result<PathBuf, UpstrokeError> {
     let bytes = trim_gitdir(bytes);
     if bytes.is_empty() {
-        return Err(UpstrokeError::Git {
-            message: format!(
-                "worktree registration {} has an empty gitdir",
-                admin.display()
-            ),
-        });
+        return Err(empty_gitdir_refusal(admin));
     }
     let recorded = match decode_path(bytes) {
         Ok(recorded) => recorded,

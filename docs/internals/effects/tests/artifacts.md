@@ -105,37 +105,38 @@ The companion record, from the enums and from [`funnel_module`].
 
 The module a group's funnel bodies are actually in.
 
-`FunnelGroup::module()` is PR3's answer and is frozen. For one group it is
-not where PR5 put the code: `mechanism` (2) places "the answer funnels in
-src/interaction.rs", and lane B put the bodies in `src/rundir.rs`, leaving
-`interaction::{write_question, write_answer, read_answer}` as thin
-delegations. Both files are in the allowlist's funnel section and the
-disagreement is section J of `reconciliation-D.md`; it is recorded here
-rather than resolved by silence, because silently searching the right file
-would make the inventory's `module` column read as correct.
+`FunnelGroup::module()` is PR3's answer and is frozen. For two groups it is
+not where the code is: `mechanism` (2) places "the answer funnels in
+src/interaction.rs", and PR5's lane B put the bodies in `src/rundir.rs`,
+leaving `interaction::{write_question, write_answer, read_answer}` as thin
+delegations; and `ReportSite::Write` maps to `src/util.rs`, which holds the
+write primitive, while PR10 funnels the site in `src/rundir.rs`
+(`rundir::write_report`, around the one write `RunDir.WriteReport` also
+names). Every file involved is in the allowlist's funnel section; the
+answer disagreement is section J of `reconciliation-D.md` and the report
+one is `PR3-REPORT-DOUBLE-NAME` come true. Both are recorded here rather
+than resolved by silence, because silently searching the right file would
+make the inventory's `module` column read as correct.
 
-## `pub(super) const SITES_WITHOUT_A_FUNNEL: &[&str] = &[`
+## `pub(super) const SITES_WITHOUT_A_FUNNEL: &[&str] = &[];`
 
-The sites the frozen inventory declares that no funnel in this tree names.
+The sites the frozen inventory declares that no funnel in this tree names:
+none, since PR10. The list is kept, empty, because a site arriving here is
+the finding, and *which* site would be the finding — a count would survive
+a swap.
 
-Every one is a row in `reconciliation-D.md`'s site inventory with the packet
-key that defers it. They are written out rather than counted because *which*
-site is missing is the finding: a count would survive a swap.
-
-## `pub(super) const SITES_WITHOUT_A_FUNNEL` › `"Report.Write"`
-
-The **Container group is no longer here.** PR5 recorded all eight as
+The **Container group left first.** PR5 recorded all eight as
 unimplemented because `FunnelGroup::Container.module()` names
-`src/runner/container.rs` and that file was not in the tree; PR6 adds it,
-and every one of the eight is taken by value by an API in it. The group
-leaving this list is the finding that PR6 landed, and a variant coming
-back would mean a funnel stopped naming its site.
-
-`ReportSite::Write` maps to `src/util.rs`, and the report write this slice
-ships is `RunDir.WriteReport` in `src/rundir.rs` (`rundir::write_report`,
-which calls `util::write_json`). `PR3-REPORT-DOUBLE-NAME` in
-`reviews/FINDINGS.md` is the standing entry for the two names on one file
-and is the owner's, not this slice's.
+`src/runner/container.rs` and that file was not in the tree; PR6 added it,
+and every one of the eight is taken by value by an API in it.
+`Report.Write` left last: `ReportSite::Write` maps to `src/util.rs`, which
+holds the write primitive, and until PR10 the report write this tree ships
+was `RunDir.WriteReport` alone; ST-07 over the full inventory demands both
+names executed, so `rundir::write_report` now consults `Report.Write`
+inside `RunDir.WriteReport` around the one `util::write_json` —
+`PR3-REPORT-DOUBLE-NAME`'s "two hook executions for one write", made and
+recorded in `effects/funnel-modules.json` the way the answer funnels'
+disagreement is.
 
 ## `pub(super) const SAMPLING_N: u32 = 8;`
 

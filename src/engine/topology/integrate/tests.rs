@@ -865,6 +865,27 @@ fn terminal_shape_coverage_table_drives_every_shape_and_each_converges_on_replay
                 ));
             }
         }
+        if matches!(shape, Shape::Conflict | Shape::CodeRejected) {
+            let rejected = rejected_of(&run);
+            let target = run
+                .fixture
+                .manager
+                .direct_ref_target(rejected.candidate.candidate_ref.as_str())
+                .expect("the rejected candidate's candidates ref is readable");
+            assert_eq!(
+                target.as_deref(),
+                Some(rejected.candidate.commit_sha.as_str()),
+                "{shape:?}: after `merge_rejected` the rejected candidate's candidates ref \
+                 still names the candidate"
+            );
+            assert!(
+                run.fixture
+                    .manager
+                    .object_exists(rejected.candidate.commit_sha.as_str())
+                    .expect("the object store is readable"),
+                "{shape:?}: the rejected candidate's commit object is still in the store"
+            );
+        }
         if !matches!(shape, Shape::Fast | Shape::Conflict) {
             let started = run
                 .emitter

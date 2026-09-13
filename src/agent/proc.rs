@@ -17,13 +17,14 @@ use std::time::{Duration, Instant};
 use crate::topology::effects::ProcessSite;
 
 use crate::error::{ProcessFate, UpstrokeError};
-use crate::topology::effects::SubEffectPoint;
+use crate::topology::effects::{HookPhase, SubEffectPoint};
 
 mod hooks;
 #[cfg(unix)]
 use self::hooks::apply;
 #[cfg(windows)]
 use self::hooks::apply_io;
+use self::hooks::apply_phase;
 pub use self::hooks::{NoHooks, SpawnHooks};
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -205,6 +206,11 @@ fn run_with_timeout_and_limit(
         #[cfg(unix)]
         termination.prepare(&mut command);
 
+        apply_phase(
+            hooks.phase(spawn_site, HookPhase::Before),
+            spawn_site,
+            HookPhase::Before,
+        )?;
         let started = Instant::now();
         let mut child = ProcessTree::spawn(&mut command, hooks).map_err(|failure| {
             fate.set(failure.fate);
@@ -228,7 +234,7 @@ fn run_with_timeout_and_limit(
         #[cfg(unix)]
         if let Err(error) = termination.register(child.id()) {
             drop(termination);
-            let killed = kill_tree(terminate_site, &mut child);
+            let killed = kill_tree(hooks, terminate_site, &mut child);
             if killed.is_ok() {
                 fate.set(ProcessFate::Gone);
             }
@@ -239,6 +245,19 @@ fn run_with_timeout_and_limit(
             hooks.point(SubEffectPoint::Registered),
             SubEffectPoint::Registered,
         )?;
+        if let Err(error) = apply_phase(
+            hooks.phase(spawn_site, HookPhase::After),
+            spawn_site,
+            HookPhase::After,
+        ) {
+            #[cfg(unix)]
+            drop(termination);
+            let killed = kill_tree(hooks, terminate_site, &mut child);
+            if killed.is_ok() {
+                fate.set(ProcessFate::Gone);
+            }
+            return Err(error.with_cleanup(killed));
+        }
 
         let input_error = |error: input::FeedError| UpstrokeError::Agent {
             message: format!("supervising agent input: {error}"),
@@ -279,7 +298,7 @@ fn run_with_timeout_and_limit(
                 }
                 #[cfg(not(unix))]
                 {
-                    let killed = kill_tree(terminate_site, &mut child);
+                    let killed = kill_tree(hooks, terminate_site, &mut child);
                     if killed.is_ok() {
                         fate.set(ProcessFate::Gone);
                     }
@@ -306,21 +325,23 @@ fn run_with_timeout_and_limit(
                 Ok(false) => {
                     if drain_limit_exceeded(&stdout_drain, &stderr_drain) {
                         output_limited = true;
-                        if let Err(error) = termination.finish() {
-                            return Err(settle_failed_supervision(error, false, &mut child, &fate));
-                        }
-                        fate.set(ProcessFate::Gone);
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        terminate_supervised(
+                            hooks,
+                            terminate_site,
+                            &mut termination,
+                            &mut child,
+                            &fate,
+                        )?;
                         break None;
                     } else if started.elapsed() >= timeout {
                         timed_out = true;
-                        if let Err(error) = termination.finish() {
-                            return Err(settle_failed_supervision(error, false, &mut child, &fate));
-                        }
-                        fate.set(ProcessFate::Gone);
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        terminate_supervised(
+                            hooks,
+                            terminate_site,
+                            &mut termination,
+                            &mut child,
+                            &fate,
+                        )?;
                         break None;
                     }
                     thread::sleep(Duration::from_millis(50));
@@ -351,12 +372,12 @@ fn run_with_timeout_and_limit(
                 Ok(None) => {
                     if drain_limit_exceeded(&stdout_drain, &stderr_drain) {
                         output_limited = true;
-                        kill_tree(terminate_site, &mut child)?;
+                        kill_tree(hooks, terminate_site, &mut child)?;
                         fate.set(ProcessFate::Gone);
                         break None;
                     } else if started.elapsed() >= timeout {
                         timed_out = true;
-                        kill_tree(terminate_site, &mut child)?;
+                        kill_tree(hooks, terminate_site, &mut child)?;
                         fate.set(ProcessFate::Gone);
                         break None;
                     }
@@ -366,7 +387,7 @@ fn run_with_timeout_and_limit(
                     let primary = UpstrokeError::Agent {
                         message: format!("waiting on agent process: {e}"),
                     };
-                    let killed = kill_tree(terminate_site, &mut child);
+                    let killed = kill_tree(hooks, terminate_site, &mut child);
                     if killed.is_ok() {
                         fate.set(ProcessFate::Gone);
                     }
@@ -481,8 +502,54 @@ mod input;
 mod pipe_io;
 mod worker;
 
-fn kill_tree(terminate_site: ProcessSite, child: &mut ProcessTree) -> Result<(), UpstrokeError> {
+fn kill_tree(
+    hooks: &mut dyn SpawnHooks,
+    terminate_site: ProcessSite,
+    child: &mut ProcessTree,
+) -> Result<(), UpstrokeError> {
     debug_assert_eq!(terminate_site, ProcessSite::Terminate);
+    apply_phase(
+        hooks.phase(terminate_site, HookPhase::Before),
+        terminate_site,
+        HookPhase::Before,
+    )?;
+    kill_tree_primitive(child)?;
+    apply_phase(
+        hooks.phase(terminate_site, HookPhase::After),
+        terminate_site,
+        HookPhase::After,
+    )
+}
+
+#[cfg(unix)]
+fn terminate_supervised(
+    hooks: &mut dyn SpawnHooks,
+    terminate_site: ProcessSite,
+    termination: &mut termination::Supervisor,
+    child: &mut ProcessTree,
+    fate: &std::cell::Cell<ProcessFate>,
+) -> Result<(), UpstrokeError> {
+    if let Err(error) = apply_phase(
+        hooks.phase(terminate_site, HookPhase::Before),
+        terminate_site,
+        HookPhase::Before,
+    ) {
+        return Err(settle_failed_supervision(error, false, child, fate));
+    }
+    if let Err(error) = termination.finish() {
+        return Err(settle_failed_supervision(error, false, child, fate));
+    }
+    fate.set(ProcessFate::Gone);
+    let _ = child.kill();
+    let _ = child.wait();
+    apply_phase(
+        hooks.phase(terminate_site, HookPhase::After),
+        terminate_site,
+        HookPhase::After,
+    )
+}
+
+fn kill_tree_primitive(child: &mut ProcessTree) -> Result<(), UpstrokeError> {
     #[cfg(windows)]
     {
         let cleanup = child.job.terminate_and_wait();

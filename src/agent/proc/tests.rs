@@ -861,7 +861,7 @@ fn kill_tree_settles_the_whole_unix_group_before_it_returns() {
         "the fixture holds no pipe, so this test would pass vacuously"
     );
 
-    kill_tree(ProcessSite::Terminate, &mut tree).expect("settle the group");
+    kill_tree(&mut NoHooks, ProcessSite::Terminate, &mut tree).expect("settle the group");
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut settled = every_pipe_writer_is_gone(fd);
     while !settled && Instant::now() < deadline {
@@ -1565,7 +1565,7 @@ fn kill_tree_observes_the_windows_job_empty_before_it_returns() {
         );
     }
 
-    kill_tree(ProcessSite::Terminate, &mut tree).expect("settle the tree");
+    kill_tree(&mut NoHooks, ProcessSite::Terminate, &mut tree).expect("settle the tree");
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut escaped = process_alive(pid, created);
     while escaped && Instant::now() < deadline {
