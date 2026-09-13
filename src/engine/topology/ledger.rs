@@ -424,10 +424,16 @@ pub fn observe(
                 .map(|generation| generation.attempts)
         })
         .fold(0u32, u32::saturating_add);
-    let defers = keys()
-        .filter_map(|key| fold.task(key))
-        .map(|task| task.defers)
-        .fold(0u32, u32::saturating_add);
+    let defers = fold
+        .queue()
+        .map(|queue| {
+            queue
+                .entries()
+                .iter()
+                .map(|entry| entry.defers)
+                .fold(0u32, u32::saturating_add)
+        })
+        .unwrap_or(0);
     let entries = fold
         .registry()
         .map(TaskRegistry::entries)

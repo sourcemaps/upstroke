@@ -236,4 +236,18 @@ fn a_rows_named_facts_are_each_consumed_by_its_verdict() {
     assert!(!row.holds, "the row's verdict is its parts' verdict");
     assert_eq!(row.parts.len(), 13);
     assert!(record.render().contains("R21 › report"));
+
+    let deferred = crate::topology::census::tests::deferred_verification_fold();
+    let observed = observe(
+        &deferred,
+        &PhysicalInventory::default(),
+        &ProcessLocal::default(),
+    );
+    assert_eq!(
+        observed
+            .observation(Row::R14)
+            .and_then(|observation| observation.part("verification_defers")),
+        Some(Fact::Present(1)),
+        "R14's verification_defers part is the candidate's deferral count, read off the queue"
+    );
 }
