@@ -567,13 +567,14 @@ export PATH="/usr/bin:/bin:$PATH"
 shopt -s nullglob
 unset GLOBIGNORE
 
-# AND WHICH REPOSITORY ANSWERS IS DECIDED BY THE PATH, NEVER BY THE ENVIRONMENT
-# THE GATE WAS INVOKED IN. `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` each
-# put a different ledger behind the same directory, and a verdict an exported
-# variable can flip is not a verdict -- it is the "one directory, two answers"
-# shape every P1 in this file has had, reached through the environment instead of
-# through a spelling. All three were measured here, one at a time, against the
-# clean-environment control on the same tree:
+# AND WHICH REPOSITORY ANSWERS IS DECIDED BY THE PATH, NEVER BY `GIT_DIR`,
+# `GIT_WORK_TREE` OR `GIT_INDEX_FILE` -- WHICH ARE THE THREE NAMES THIS ENFORCES
+# AND THE WHOLE OF WHAT IT CLAIMS. Each of them puts a different ledger behind
+# the same directory, and a verdict an exported variable can flip is not a
+# verdict -- it is the "one directory, two answers" shape every P1 in this file
+# has had, reached through the environment instead of through a spelling. All
+# three were measured here, one at a time, against the clean-environment control
+# on the same tree:
 #
 #   GIT_WORK_TREE   a clean standalone repository holding one committed finding
 #                   at its root, spelled `.`, went from exit 0 `conforms` to exit
@@ -588,21 +589,71 @@ unset GLOBIGNORE
 #                   answers for it.
 #
 # THEY ARE UNSET HERE, ONCE, ABOVE EVERY PROBE, RATHER THAN READ AT THE SITES
-# THAT TRIP OVER THEM, and that is the whole of the rule. A reading is what the
-# first of these was filed as wanting, and a reading is the wrong shape: the
-# ascent asks git whether the PARENT of a work tree is inside a work tree, and a
-# pinned work tree makes git answer about the pin at every level of that walk,
-# so there is no reading of "the caller selected this work tree" that makes the
-# question answerable -- the pin is what stops it being answered. Clearing them
-# is also what keeps the equivalence property covering these callers at all: the
-# three tree listings are FILES and no variable moves them, so a directory whose
-# answer the environment can change disagrees with them by construction.
+# THAT TRIP OVER THEM. A reading is what the first of these was filed as wanting,
+# and a reading is the wrong shape: the ascent asks git whether the PARENT of a
+# work tree is inside a work tree, and a pinned work tree makes git answer about
+# the pin at every level of that walk, so there is no reading of "the caller
+# selected this work tree" that makes the question answerable -- the pin is what
+# stops it being answered. No probe below this line reads any of the three: the
+# lines under it that name them are comments, which `grep -n` says and the
+# environment fixtures then assert from the outside, row by row, by running the
+# pinned and the clean invocation and comparing both the exit code and the bytes.
+# That is also what keeps the equivalence property covering these callers at all:
+# the three tree listings are FILES and no variable moves them, so a directory
+# whose answer the environment can change disagrees with them by construction.
 #
-# `GIT_INDEX_FILE` is unset with the other two because it substitutes a LEDGER,
-# which is this gate's whole question. Variables that change how git talks rather
-# than which repository it talks about -- `GIT_CONFIG_*`, the trace variables --
-# are left alone: they cannot move a verdict. This is one process's environment
-# and nothing the caller's own git commands see.
+# CLEARING THEM IS NOT FREE, AND THE COST IS THE ONE WORLD WHERE THE FILESYSTEM
+# ANSWERS. A `git --git-dir=… --work-tree=…` deployment with no `.git` at or
+# above the work tree is reachable through these names and, measured, through
+# nothing else: discovery from that work tree with them cleared is `fatal: not a
+# git repository`. So cleared, the listing is in no repository at all, a
+# directory in no repository is answered by the names the FILESYSTEM holds, and
+# an ignored, untracked file -- `git status` in the deployment says `!! findings/`
+# and `git ls-files -- findings` prints nothing -- was counted as a filed
+# finding: exit 0 `conforms`, where the same fixture under the pins and under
+# `231c1aad` is exit 1 `names no finding`. That was executed. It is the false
+# green this whole file exists to close, introduced by the round that unset them.
+#
+# SO WHERE THE FILESYSTEM WOULD ANSWER AND ONE OF THESE NAMES WAS IN THE
+# ENVIRONMENT, `read_listing` REFUSES. The environment still never selects a
+# ledger: it is evidence that there is one the path cannot reach, and refusing is
+# the only thing that evidence is allowed to do here. The guard is written on
+# `listing_world`, so where the RECORDS answer it cannot fire and the pinned run
+# and the clean run stay the same run, which is what the fixture rows below the
+# refusing ones assert.
+#
+# WHAT THIS DOES NOT ENFORCE, MEASURED RATHER THAN ASSUMED, because "cannot move
+# a verdict" stood here as an assertion and two reviews then argued it both ways.
+# `GIT_CONFIG_*` and the trace variables change how git talks rather than which
+# repository it talks about, and are left alone. What was RUN, at git 2.43.0:
+# injecting `core.bare=true` through `GIT_CONFIG_COUNT`/`_KEY_n`/`_VALUE_n`
+# leaves `--is-inside-work-tree` `true` and `--is-bare-repository` `false`, with
+# `git config --get core.bare` answering `true` as the control that the injection
+# reaches git at all -- git honours the value as CONFIG and still decides
+# bare-ness from the DISCOVERED LAYOUT. That is one key at one version and not a
+# property of the namespace. `GIT_CEILING_DIRECTORIES` DOES move a verdict and is
+# deliberately not enforced: with the repository's own root as a ceiling, a
+# listing that conforms at exit 0 refuses at exit 1 `git could not say what it
+# records`, `GIT_CEILING_DIRECTORIES` naming a path that is not there conforms as
+# the control, and `231c1aad` refuses identically -- a REFUSAL WITH A NAMED
+# REASON, which is the direction this file wants, and not this pull request's
+# regression. The sentence above is narrowed to the three names rather than the
+# gate widened to a fourth. `GIT_DISCOVERY_ACROSS_FILESYSTEM=0` did not move the
+# verdict in the fixture that was run, and that fixture crosses no filesystem
+# boundary: UNTESTED, not cleared.
+#
+# THE NAMES ARE RECORDED BEFORE THEY ARE CLEARED, because the refusal has to say
+# which of them was there, and SET BUT EMPTY IS ONE OF THEM: at git 2.43.0 an
+# empty `GIT_DIR` is `fatal: not a git repository: ''`, an empty `GIT_WORK_TREE`
+# is `fatal: The empty string is not a valid path`, and an empty `GIT_INDEX_FILE`
+# makes `git ls-files` print nothing and exit 0 -- an empty ledger, which is the
+# substitution this gate is about. This is one process's environment and nothing
+# the caller's own git commands see.
+environment_ledger=''
+if [[ -n "${GIT_DIR+set}" ]]; then environment_ledger="$environment_ledger GIT_DIR"; fi
+if [[ -n "${GIT_WORK_TREE+set}" ]]; then environment_ledger="$environment_ledger GIT_WORK_TREE"; fi
+if [[ -n "${GIT_INDEX_FILE+set}" ]]; then environment_ledger="$environment_ledger GIT_INDEX_FILE"; fi
+environment_ledger="${environment_ledger# }"
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
 branch="${1:-}"
@@ -1920,7 +1971,10 @@ locate_listing() {
     # the "one directory, two answers" shape by another route. That was
     # `PR280-ENV-EXPORTED-WORK-TREE-REFUSES-A-VALID-CALLER`, filed as wanting a
     # reading of an explicitly selected work tree and repaired by giving the walk
-    # no pin to read; the measurements are with the `unset`.
+    # no pin to read; the measurements are with the `unset`. WHAT WAS EXPORTED IS
+    # STILL RECORDED, and `read_listing` reads that record at one site and for one
+    # purpose: to refuse where the answer would otherwise come from the
+    # filesystem. No walk reads it, and nothing reads it to choose a repository.
     #
     # `/proc/self` does not reach here either: git exits 128 for it rather than
     # answering `false`, so the refusal above is what it gets, and the fixtures
@@ -2500,6 +2554,32 @@ read_listing() {
     echo "branch-name-policy: findings listing '$listing' is a symlink, so it is" >&2
     echo "  not a findings directory and holds no finding of its own." >&2
     return 0
+  fi
+  # AND A DIRECTORY THE ENVIRONMENT NAMED A LEDGER FOR IS NOT ANSWERED BY THE
+  # FILESYSTEM AT ALL. `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` are
+  # cleared at the top of this file so that no probe can answer about a pin, and
+  # in this one world -- the world where there is no repository and the names the
+  # filesystem holds are the whole of the evidence -- clearing them also hides a
+  # ledger that is real. A `git --git-dir=… --work-tree=…` deployment whose work
+  # tree has no `.git` at or above it is reachable through those names and,
+  # measured, through nothing else, so with them cleared its IGNORED, UNTRACKED
+  # files were counted as filed findings and the run conformed at exit 0 where
+  # the deployment's own repository, and `231c1aad`, say `names no finding`.
+  #
+  # The environment does not get to say WHICH ledger answers -- that is the rule
+  # at the top of this file and it is unchanged. It says that one EXISTS, and
+  # against the filesystem, which cannot see a recorded mode and here cannot see
+  # the repository either, that is enough to refuse. The test is on
+  # `listing_world`, so a listing the records answer for never reaches it.
+  if (( ! is_file )) && [[ "$listing_world" != records ]] && [[ -d "$listing" ]] \
+    && [[ -n "$environment_ledger" ]]; then
+    echo "branch-name-policy: no repository the path reaches records '$listing', and" >&2
+    echo "  the environment names one: $environment_ledger. A directory in no repository is" >&2
+    echo "  answered by the names the filesystem holds, and those are not a ledger: an" >&2
+    echo "  untracked file is not a filed finding wherever its repository is. That is" >&2
+    echo "  refused rather than counted. Ask from inside the work tree its repository is" >&2
+    echo "  found from, or clear those names to ask about the filesystem alone." >&2
+    return 1
   fi
   if (( ! is_file )) && [[ -d "$listing" ]]; then
     list_dir "$listing" || {

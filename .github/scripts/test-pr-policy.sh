@@ -3155,18 +3155,26 @@ fi
 # every other spelling refuses, CONFORMED with `GIT_DIR` or `GIT_INDEX_FILE`
 # exported. A false red and two false greens, one variable each.
 #
-# WHAT IS ASSERTED IS THAT THE PINNED RUN AND THE CLEAN RUN ARE THE SAME RUN --
-# the same exit code AND the same bytes on stdout and stderr -- and not merely
-# that each answers what this section expects. A refusal has more than one
-# reason: with `GIT_WORK_TREE` exported the gitlink row below refused at the
-# unrepaired head too, for `git could not say whether '<parent>' is inside a work
-# tree` rather than for the gitlink, and a row reading only the exit code would
-# have called that repair green. It is also what makes the group cheap to extend:
-# a fourth variable is one word in a list.
+# WHAT IS ASSERTED, WHEREVER THE RECORDS ANSWER, IS THAT THE PINNED RUN AND THE
+# CLEAN RUN ARE THE SAME RUN -- the same exit code AND the same bytes on stdout
+# and stderr -- and not merely that each answers what this section expects. A
+# refusal has more than one reason: with `GIT_WORK_TREE` exported the gitlink row
+# below refused at the unrepaired head too, for `git could not say whether
+# '<parent>' is inside a work tree` rather than for the gitlink, and a row reading
+# only the exit code would have called that repair green. It is also what makes
+# the group cheap to extend: a fourth variable is one word in a list.
 #
-# THE CONTROL IS THE CLEAN ENVIRONMENT AND IT IS ASSERTED FIRST, so a fixture
-# that stopped being the shape it is named for cannot pass this by refusing
-# everywhere alike.
+# AND WHEREVER THE FILESYSTEM ANSWERS, WHAT IS ASSERTED IS A REFUSAL THAT NAMES
+# THE VARIABLE, by `env_refuses` below. The two shapes are one rule: a directory
+# with no repository over it is answered by the names the filesystem holds, and
+# an exported name is evidence of a ledger the path cannot reach, so the
+# filesystem does not get to answer for it. Round 9 asserted the first shape
+# alone, over every world; the row that measured otherwise is the deployment row
+# below.
+#
+# THE CONTROL IS THE CLEAN ENVIRONMENT AND IT IS ASSERTED FIRST IN BOTH SHAPES,
+# so a fixture that stopped being the shape it is named for cannot pass this by
+# refusing everywhere alike.
 env_case() {  # env_case <label> <cwd> <listing> <branch> <want-exit> <VAR=VALUE>...
   local label="$1" cwd="$2" listing="$3" branch="$4" want="$5"
   shift 5
@@ -3216,17 +3224,91 @@ env_case 'a standalone repository asked about its own root' \
   "GIT_DIR=$env_standalone/.git" \
   "GIT_INDEX_FILE=$env_standalone/.git/index"
 
-# AND A DIRECTORY IN NO REPOSITORY AT ALL, which is the same false red one level
-# out: the filesystem is the whole of the evidence there, and an exported work
-# tree turned that into `git could not say what it records`.
+# AND WHERE THE ANSWER WOULD COME FROM THE FILESYSTEM, THE PINNED RUN REFUSES
+# RATHER THAN MATCHING THE CLEAN ONE. That is the second half of the rule and the
+# half the round that unset the names did not have: clearing them is what stops a
+# pin answering for a path nobody asked it about, and in the one world where
+# there is no repository it also hides a ledger that is real. `env_refuses` is
+# `env_case`'s other shape -- the clean control is asserted the same way, and
+# each pinned run must then refuse AND SAY WHY, because every refusal this
+# validator makes is exit 1 and `names no finding` is one of them.
+env_refuses() {  # env_refuses <label> <cwd> <listing> <branch> <clean-exit> <VAR=VALUE>...
+  local label="$1" cwd="$2" listing="$3" branch="$4" want="$5"
+  shift 5
+  local clean_out pinned_out pin clean_rc=0 pinned_rc=0
+  clean_out="$( cd "$cwd" && "$BASH" "$branch_validator" "$branch" "$listing" 2>&1 )" || clean_rc=$?
+  if [[ "$clean_rc" != "$want" ]]; then
+    echo "$label: the clean-environment control answered $clean_rc, and $want was expected" >&2
+    echo "  ${clean_out%%$'\n'*}" >&2
+    exit 1
+  fi
+  for pin in "$@"; do
+    pinned_rc=0
+    pinned_out="$( cd "$cwd" && env "$pin" "$BASH" "$branch_validator" "$branch" "$listing" 2>&1 )" \
+      || pinned_rc=$?
+    if (( pinned_rc != 1 )); then
+      echo "$label: with ${pin%%=*} exported the run answered $pinned_rc, and the names the" \
+        "filesystem holds are not a ledger for a directory the environment names one for" >&2
+      echo "  exported: ${pinned_out%%$'\n'*}" >&2
+      exit 1
+    fi
+    if [[ "$pinned_out" != *"the environment names one: ${pin%%=*}"* ]]; then
+      echo "$label: with ${pin%%=*} exported the run refused for a different reason, and a" \
+        "row that reads the exit code alone cannot tell the two refusals apart" >&2
+      echo "  exported: ${pinned_out%%$'\n'*}" >&2
+      exit 1
+    fi
+  done
+}
+
+# A DIRECTORY IN NO REPOSITORY AT ALL. The filesystem is the whole of the
+# evidence there, and an exported name says there is evidence this cannot see:
+# the clean run counts the names in the directory and conforms, and each pinned
+# run refuses instead. `231c1aad` refuses these three too, for `git could not say
+# what it records` -- so this row is a message changing, not a verdict.
 env_loose="$fixture_dir/env-no-repository/listing"
 mkdir -p "$env_loose"
 echo fixture > "$env_loose/P2_correctness_202609130715_no-repository-at-all.md"
-env_case 'a listing in no repository at all' \
+env_refuses 'a listing in no repository at all' \
   "$env_loose" . 'fix-P2/correctness_no-repository-at-all' 0 \
   "GIT_WORK_TREE=$env_standalone" \
   "GIT_DIR=$env_standalone/.git" \
   "GIT_INDEX_FILE=$env_standalone/.git/index"
+
+# AND THE DEPLOYMENT THE CLEARING HID, WHICH IS THE FALSE GREEN THAT ROUND'S OWN
+# REPAIR INTRODUCED. `git --git-dir=… --work-tree=…` with no `.git` at or above
+# the work tree: the repository is reachable through those names and, measured,
+# through nothing else -- discovery from the work tree with them cleared is
+# `fatal: not a git repository`. It IGNORES `findings/`, so its own answer for
+# this listing is `git ls-files -- findings` printing nothing. Cleared, the
+# listing was a directory in no repository, the filesystem counted an untracked
+# file as a filed finding, and the run CONFORMED at exit 0 where `231c1aad` and
+# the deployment's own repository say `names no finding`. The clean control here
+# is exit 0 for the same reason -- without the names there is nothing to see --
+# which is why the row asserts the pinned runs and not the clean one.
+env_deployment="$fixture_dir/env-separate-deployment"
+mkdir -p "$env_deployment/wt/findings"
+new_repo "$env_deployment/meta"
+printf 'findings/\n' > "$env_deployment/exclude"
+git -C "$env_deployment/meta" config core.excludesFile "$env_deployment/exclude"
+echo fixture > "$env_deployment/wt/findings/P2_correctness_202609131731_a-cleared-pin.md"
+env_refuses 'a work tree reachable only through the environment' \
+  "$env_deployment/wt" findings 'fix-P2/correctness_a-cleared-pin' 0 \
+  "GIT_WORK_TREE=$env_deployment/wt" \
+  "GIT_DIR=$env_deployment/meta/.git" \
+  "GIT_INDEX_FILE=$env_deployment/meta/.git/index"
+
+# AND A NAME SET TO THE EMPTY STRING IS ONE OF THE THREE. Git honours all three
+# empty: `GIT_DIR=` is `fatal: not a git repository: ''`, `GIT_WORK_TREE=` is
+# `fatal: The empty string is not a valid path`, and `GIT_INDEX_FILE=` makes
+# `git ls-files` print nothing and exit 0, which is an empty LEDGER and exactly
+# the substitution this section is about. So the record of what was exported is
+# taken with `${NAME+set}` and not from the value.
+env_refuses 'a name exported empty is still a ledger the path cannot reach' \
+  "$env_deployment/wt" findings 'fix-P2/correctness_a-cleared-pin' 0 \
+  "GIT_WORK_TREE=" \
+  "GIT_DIR=" \
+  "GIT_INDEX_FILE="
 
 # THE HOSTILE HALF, AND IT IS THE HALF THAT DECIDES WHICH REPAIR IS THE RIGHT
 # ONE. A repository under a 160000 gitlink is refused because the SUPERPROJECT
