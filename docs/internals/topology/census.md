@@ -95,7 +95,7 @@ design's own bounds instead of buried in the loop.
 
 ## `pub struct Census {`
 
-A completed exploration.
+An exploration, stopped where a ceiling stopped it or where the space ran out.
 
 ## `pub struct CensusBounds` › `pub originals: u32,`
 
@@ -207,7 +207,7 @@ had already recorded [`CensusBounds::max_states`] states.
 
 Recorded rather than dropped: an offer that vanished because the search
 was full is exactly the kind of silent cap that makes a coverage report
-read as complete when it is not.
+read as exhaustive when it is not.
 
 ## `pub struct CensusTransition {`
 
@@ -286,7 +286,7 @@ because it ran out of new states.
 A truncated census has explored a *subset*, and every assertion over it
 is an assertion about that subset. Reported rather than inferred,
 because a coverage claim over a silently truncated search reads exactly
-like a coverage claim over a complete one.
+like a coverage claim over an exhausted one.
 
 ## `impl Census` › `pub fn outgoing(&self, id: usize) -> impl Iterator<Item = &CensusTransition> {`
 
@@ -1035,8 +1035,9 @@ number, and the fixture is what they name:
 three originals fanning out from aleph, rejections registering repairs, a
 repair dispatched, a lineage lease held somewhere in the explored set. And
 the census is truncated at its state ceiling and says so: the space under
-these bounds does not close under 20,000 states, and a census that stopped
-there must not read as complete.
+these bounds does not close under 20,000 states — nor under the 50,661,094
+abstract states the PR10 orchestrator's research reached without closing —
+and a census that stopped there must not read as exhaustive.
 
 ## `fn the_fixture_varies_every_field_a_relation_reads()` › `let started = run_started();`
 
