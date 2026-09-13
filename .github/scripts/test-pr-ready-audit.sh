@@ -1598,15 +1598,128 @@ got="$(STUB_REVIEW_BODY="$tmp/one-findings.md" STUB_COMMENTS_STATUS=0 run_stub 9
 contains MUT-JSON-REPEATED-NAME-CHOSEN "$got" "open-P1:CRITICAL"
 [[ "$got" == *review-parse-failed* ]] \
   && error "MUT-JSON-REPEATED-NAME-CHOSEN: the control review was refused, got [$got]"
-# THE SHAPE, NOT THE INSTANCE. One `json.loads` reads review content today and the hook is on it;
-# a second one added without the hook is this finding again, in a place no fixture here is
-# pointed at. So the class is named: every `json.loads(` in the parser carries the hook, and at
-# least one of them exists to carry it.
-expect MUT-JSON-REPEATED-NAME-CHOSEN \
-  "$(grep -nE 'json\.loads\(' scripts/pr-review-parse.py \
-     | grep -vcF 'object_pairs_hook=one_reading' || true)" 0
-expect MUT-JSON-REPEATED-NAME-CHOSEN \
-  "$(grep -cE 'json\.loads\(.*object_pairs_hook=one_reading' scripts/pr-review-parse.py || true)" 1
+# THE SHAPE, NOT THE INSTANCE, AND ASKED OF THE SYNTAX TREE. One `json.loads` reads review content
+# today and the hook is on it; a second one added without the hook is this finding again, in a place
+# no fixture here is pointed at. The text scan that used to ask this matched the literal spelling
+# `json.loads(`, and Python allows whitespace before the parenthesis -- so `json.loads (text)` is a
+# working, unhooked decoder that the scan counted in NEITHER direction: zero unguarded calls, one
+# hooked call, green. Measured against that scan at 4cdc041d, with its own spelling as the control:
+# a second decoder written `json.loads(text)` -> exit 1, the same decoder written
+# `json.loads (text)` -> exit 0. A parsed module holds no whitespace, so the call is the same call
+# however it is spelled, split across lines, or commented between.
+#
+# WHAT THIS ENUMERATES, EXACTLY. Calls whose callee is the attribute path `json.loads`, and for each
+# of them whether it passes `object_pairs_hook=one_reading`. That keyword and no other:
+# `object_hook` is handed a dict the decoder has ALREADY built, so the repeated name is resolved and
+# gone before it runs, and a call carrying it is counted UNHOOKED. A `**` unpacking is unhooked too
+# -- what it holds is not decidable from the tree, and this fails closed rather than guessing.
+#
+# WHAT IT DOES NOT REACH, and no sentence here should be read as saying the class is closed. Six
+# spellings of a second decoder were added to the parser and run against THIS guard, and every one
+# of them stays GREEN: `from json import loads`, `import json as j` then `j.loads`, a binding
+# `dec = json.loads`, `getattr(json, "loads")`, `json.load` on an open file, and
+# `json.JSONDecoder().decode`. A decode in any file other than the one named below is outside it as
+# well. What the guard closes is the callee path `json.loads`, and every way of writing it.
+cat > "$tmp/loads-shape.py" <<'LOADSSHAPE'
+import ast, sys
+
+
+def dotted(node):
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+unhooked = hooked = 0
+for node in ast.walk(ast.parse(open(sys.argv[1]).read())):
+    if isinstance(node, ast.Call) and dotted(node.func) == "json.loads":
+        if any(kw.arg == "object_pairs_hook" and isinstance(kw.value, ast.Name)
+               and kw.value.id == "one_reading" for kw in node.keywords):
+            hooked += 1
+        else:
+            unhooked += 1
+# A yes/no and not a count. A SECOND call carrying the hook is built by the same object
+# constructor, so it is not this defect, and the scan this replaces turned RED on it -- the false
+# red of the pair, measured. What must be false is a decode without the hook; what must be TRUE is
+# that a decode exists at all, so `unhooked=0` cannot be satisfied by a parser with no decode left
+# in it to be unhooked. That second limb reds on a decode MOVED off `json.loads` even when the move
+# keeps the hook -- `json.JSONDecoder(object_pairs_hook=one_reading).decode` was run here and reds
+# -- and that is the intended answer: the guard can no longer see what protects the decode, and
+# saying so is the only honest thing left to say.
+print("unhooked=%d any-hooked=%s" % (unhooked, "yes" if hooked else "no"))
+LOADSSHAPE
+loads_shape() { "$parser_python" "$tmp/loads-shape.py" "$1"; }
+# THE ENUMERATOR IS ITSELF UNDER TEST, because a scan that has stopped matching anything agrees
+# with a clean parser and says so in the same words. The grep pair this replaces could be gutted
+# the same way and nothing here would have noticed. So it is run first over FOUR modules whose
+# answers are known -- one hooked call, a hooked call beside the lens's spaced one, an
+# `object_hook` call beside a hooked one, and a module that decodes without `json.loads` at all --
+# and they are what stands between this assertion and a guard that cannot fail.
+cat > "$tmp/decoder-hooked.py" <<'PYSHAPE'
+import json
+
+
+def one_reading(pairs):
+    return dict(pairs)
+
+
+def read(text):
+    return json.loads(text, object_pairs_hook=one_reading)
+PYSHAPE
+expect MUT-JSON-REPEATED-NAME-CHOSEN "$(loads_shape "$tmp/decoder-hooked.py")" 'unhooked=0 any-hooked=yes'
+# THE REVIEWING LENS'S OWN MUTATION, kept as the positive control it was reported as: the second
+# decoder the text scan could not see, spelled with the space that made it invisible.
+cat > "$tmp/decoder-spaced.py" <<'PYSHAPE'
+import json
+
+
+def one_reading(pairs):
+    return dict(pairs)
+
+
+def read(text):
+    return json.loads(text, object_pairs_hook=one_reading)
+
+
+def extra_review_reader(text):
+    return json.loads (text)
+PYSHAPE
+expect MUT-JSON-REPEATED-NAME-CHOSEN "$(loads_shape "$tmp/decoder-spaced.py")" 'unhooked=1 any-hooked=yes'
+# `object_pairs_hook` AND NO OTHER KEYWORD, which is a decision and so is asserted. `object_hook`
+# is handed a dict the decoder has already built, so it runs after the repeated name has been
+# resolved away and it protects nothing; a call carrying it is unhooked.
+cat > "$tmp/decoder-objecthook.py" <<'PYSHAPE'
+import json
+
+
+def one_reading(pairs):
+    return dict(pairs)
+
+
+def read(text):
+    return json.loads(text, object_hook=one_reading)
+
+
+def read_properly(text):
+    return json.loads(text, object_pairs_hook=one_reading)
+PYSHAPE
+expect MUT-JSON-REPEATED-NAME-CHOSEN "$(loads_shape "$tmp/decoder-objecthook.py")" 'unhooked=1 any-hooked=yes'
+# And a module with no decode at all is not "nothing unhooked": it is nothing to vouch for, which
+# is the vacuous reading of the first half and the reason the second half exists.
+cat > "$tmp/decoder-none.py" <<'PYSHAPE'
+import json
+
+
+def read(text):
+    return json.JSONDecoder().decode(text)
+PYSHAPE
+expect MUT-JSON-REPEATED-NAME-CHOSEN "$(loads_shape "$tmp/decoder-none.py")" 'unhooked=0 any-hooked=no'
+# AND THEN THE PARSER THE AUDIT ACTUALLY RUNS.
+expect MUT-JSON-REPEATED-NAME-CHOSEN "$(loads_shape scripts/pr-review-parse.py)" 'unhooked=0 any-hooked=yes'
 
 # --- the frontier form: prose ------------------------------------------------------------------
 cat > "$tmp/prose.md" <<'EOF'
