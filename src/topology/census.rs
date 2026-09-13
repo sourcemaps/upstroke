@@ -1817,6 +1817,53 @@ pub(crate) mod tests {
         })
     }
 
+    struct FamilyMember {
+        name: &'static str,
+        census: &'static Census,
+        reaches: &'static [&'static str],
+        restricted: bool,
+        classes: fn(&TopologyFold) -> Vec<Candidate>,
+    }
+
+    fn family() -> [FamilyMember; 2] {
+        [
+            FamilyMember {
+                name: "prefix",
+                census: census(),
+                reaches: &[
+                    "originals",
+                    "repairs",
+                    "generations_per_task",
+                    "attempts_per_generation",
+                    "sequences",
+                    "lineages",
+                    "defers",
+                    "questions",
+                    "review_passes",
+                    "resumes",
+                ],
+                restricted: false,
+                classes,
+            },
+            FamilyMember {
+                name: "seeded: sequences, repairs, lineages",
+                census: deep_census(),
+                reaches: &["sequences", "repairs", "lineages"],
+                restricted: true,
+                classes: integration_path_classes,
+            },
+        ]
+    }
+
+    fn declared_bound(name: &str) -> u32 {
+        CensusBounds::default()
+            .dimensions()
+            .iter()
+            .find(|(held, _)| *held == name)
+            .map(|(_, bound)| *bound)
+            .unwrap_or_else(|| panic!("`{name}` is not a declared dimension"))
+    }
+
     fn every_key(fold: &TopologyFold) -> Vec<TaskKey> {
         fold.registry()
             .map(|registry| registry.entries().iter().map(|entry| entry.key).collect())
@@ -1877,13 +1924,96 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_derived_outcome_is_total_over_every_explored_state() {
-        let census = census();
-        assert!(!census.states().is_empty());
-        let audit = census.totality_audit();
+    fn the_prefix_reports_its_truncation_and_every_seeded_census_closes() {
+        let bounds = CensusBounds::default();
+        let members = family();
+        let prefix = &members[0];
+        assert_eq!(prefix.name, "prefix");
+        assert!(!prefix.restricted);
+        assert!(
+            prefix.census.truncated() && prefix.census.states().len() == bounds.max_states,
+            "the prefix explores to its stated state ceiling of {} and reports truncation",
+            bounds.max_states
+        );
+        let prefix_reached = reached_dimensions(&[prefix.census]);
+        let mut seeded = 0;
+        for member in members.iter().filter(|member| member.restricted) {
+            seeded += 1;
+            let census = member.census;
+            assert!(
+                !census.truncated(),
+                "{}: a seeded census closes, and this one reports truncation",
+                member.name
+            );
+            assert!(
+                census.states().len() < census.bounds().max_states,
+                "{}: the frontier was exhausted before the state ceiling: {} states under a \
+                 ceiling of {}",
+                member.name,
+                census.states().len(),
+                census.bounds().max_states
+            );
+            assert!(
+                census
+                    .states()
+                    .iter()
+                    .all(|state| state.trace.len() < census.bounds().max_trace),
+                "{}: no explored state sits at the trace ceiling",
+                member.name
+            );
+            assert!(
+                !member.reaches.is_empty(),
+                "{}: a seeded census names the dimensions it exists for",
+                member.name
+            );
+            let reached = reached_dimensions(&[census]);
+            for name in member.reaches {
+                let bound = declared_bound(name);
+                assert_eq!(
+                    reached[name], bound,
+                    "{}: reaches `{name}` at its declared bound {bound}",
+                    member.name
+                );
+            }
+        }
+        assert_eq!(
+            seeded, 1,
+            "one seeded census, closing, for the three dimensions a deep seed reaches at once"
+        );
+        let unreached: Vec<&str> = bounds
+            .dimensions()
+            .iter()
+            .filter(|(name, bound)| prefix_reached[*name] < *bound)
+            .map(|(name, _)| *name)
+            .collect();
+        for name in &unreached {
+            assert!(
+                members
+                    .iter()
+                    .any(|member| member.restricted && member.reaches.contains(name)),
+                "`{name}`: the prefix reaches {} of {} at its ceiling and no seeded census names \
+                 it",
+                prefix_reached[*name],
+                declared_bound(name)
+            );
+        }
+        assert!(
+            unreached.is_empty(),
+            "the prefix alone reaches every declared bound at its state ceiling of {}, so no \
+             dimension is left for a seeded census to exist for; it reached {prefix_reached:?}, \
+             and a dimension it missed would need a seeded census named for it: {unreached:?}",
+            bounds.max_states
+        );
+    }
 
-        let reached: BTreeSet<usize> =
-            std::iter::once(0)
+    #[test]
+    fn the_derived_outcome_is_total_over_every_explored_state() {
+        for member in family() {
+            let census = member.census;
+            assert!(!census.states().is_empty());
+            let audit = census.totality_audit();
+
+            let reached: BTreeSet<usize> = std::iter::once(0)
                 .chain(census.transitions().iter().filter_map(
                     |transition| match transition.outcome {
                         TransitionOutcome::Accepted { to } => Some(to),
@@ -1891,294 +2021,339 @@ pub(crate) mod tests {
                     },
                 ))
                 .collect();
-        assert_eq!(
-            audit.evaluated,
-            (0..census.states().len()).collect::<Vec<_>>(),
-            "one evaluation per explored state, in order, and no more"
-        );
-        assert_eq!(
-            audit.evaluated.iter().copied().collect::<BTreeSet<_>>(),
-            reached,
-            "the states that were evaluated and the states the transitions reach are not the \
+            assert_eq!(
+                audit.evaluated,
+                (0..census.states().len()).collect::<Vec<_>>(),
+                "one evaluation per explored state, in order, and no more"
+            );
+            assert_eq!(
+                audit.evaluated.iter().copied().collect::<BTreeSet<_>>(),
+                reached,
+                "the states that were evaluated and the states the transitions reach are not the \
              same set"
-        );
+            );
 
-        assert!(
-            audit.fold_errors.is_empty(),
-            "the arm the design argues is unreachable was reached at states {:?}, the first after \
+            assert!(
+                audit.fold_errors.is_empty(),
+                "the arm the design argues is unreachable was reached at states {:?}, the first after \
              {:?}",
-            audit.fold_errors,
-            audit.fold_errors.first().map(|id| census.states()[*id]
-                .trace
-                .iter()
-                .map(|event| event.body.kind())
-                .collect::<Vec<_>>())
-        );
-        assert!(
-            audit.disagreements.is_empty(),
-            "the recorded outcome and a fresh evaluation of the same fold disagree at {:?}",
-            audit.disagreements
-        );
-        assert_eq!(
-            audit.not_ending + audit.ending,
-            census.states().len(),
-            "every explored state answered exactly one of the two"
-        );
-        let (not_ending, ending) = (audit.not_ending, audit.ending);
-        assert!(not_ending > 0 && ending > 0, "{not_ending}/{ending}");
+                audit.fold_errors,
+                audit.fold_errors.first().map(|id| census.states()[*id]
+                    .trace
+                    .iter()
+                    .map(|event| event.body.kind())
+                    .collect::<Vec<_>>())
+            );
+            assert!(
+                audit.disagreements.is_empty(),
+                "the recorded outcome and a fresh evaluation of the same fold disagree at {:?}",
+                audit.disagreements
+            );
+            assert_eq!(
+                audit.not_ending + audit.ending,
+                census.states().len(),
+                "every explored state answered exactly one of the two"
+            );
+            let (not_ending, ending) = (audit.not_ending, audit.ending);
+            assert!(not_ending > 0 && ending > 0, "{not_ending}/{ending}");
 
-        for state in census.states() {
-            let fold = &state.fold;
-            let common = common(fold);
-            let halting = fold.halted_at().is_some();
-            let budget = fold
-                .budget_stop()
-                .is_some_and(|stop| Some(stop.epoch) == fold.epoch());
-            if !common {
-                assert_eq!(
-                    state.outcome,
-                    DerivedOutcome::NotEnding,
-                    "state {}: a run with open work is not ending",
-                    state.id
-                );
-            } else if halting {
-                assert_eq!(
-                    state.outcome,
-                    DerivedOutcome::Ending(RunOutcome::Halted),
-                    "state {}: halt outranks everything",
-                    state.id
-                );
-            } else if budget {
-                assert_eq!(
-                    state.outcome,
-                    DerivedOutcome::Ending(RunOutcome::BudgetExceeded),
-                    "state {}: budget outranks parked and complete",
-                    state.id
-                );
-            } else if backoff_pending(fold) {
-                assert_eq!(
-                    state.outcome,
-                    DerivedOutcome::NotEnding,
-                    "state {}: pending backoff blocks Parked and Complete",
-                    state.id
-                );
-            } else if complete_shape(fold) {
-                assert_eq!(
-                    state.outcome,
-                    DerivedOutcome::Ending(RunOutcome::Complete),
-                    "state {}: nothing is open and nothing is asked",
-                    state.id
-                );
-            }
-            let kinds: Vec<&str> = state.trace.iter().map(|event| event.body.kind()).collect();
-            match &state.outcome {
-                DerivedOutcome::Ending(RunOutcome::Parked) => {
-                    assert!(
-                        questions_open(fold),
-                        "state {}: parked with no question open: {kinds:?}",
+            for state in census.states() {
+                let fold = &state.fold;
+                let common = common(fold);
+                let halting = fold.halted_at().is_some();
+                let budget = fold
+                    .budget_stop()
+                    .is_some_and(|stop| Some(stop.epoch) == fold.epoch());
+                if !common {
+                    assert_eq!(
+                        state.outcome,
+                        DerivedOutcome::NotEnding,
+                        "state {}: a run with open work is not ending",
                         state.id
                     );
-                    assert!(!backoff_pending(fold), "state {}: {kinds:?}", state.id);
-                    assert!(common, "state {}: {kinds:?}", state.id);
-                }
-                DerivedOutcome::Ending(RunOutcome::Complete) => {
-                    assert!(
-                        !questions_open(fold),
-                        "state {}: complete with a question open: {kinds:?}",
+                } else if halting {
+                    assert_eq!(
+                        state.outcome,
+                        DerivedOutcome::Ending(RunOutcome::Halted),
+                        "state {}: halt outranks everything",
                         state.id
                     );
-                    assert!(complete_shape(fold), "state {}: {kinds:?}", state.id);
+                } else if budget {
+                    assert_eq!(
+                        state.outcome,
+                        DerivedOutcome::Ending(RunOutcome::BudgetExceeded),
+                        "state {}: budget outranks parked and complete",
+                        state.id
+                    );
+                } else if backoff_pending(fold) {
+                    assert_eq!(
+                        state.outcome,
+                        DerivedOutcome::NotEnding,
+                        "state {}: pending backoff blocks Parked and Complete",
+                        state.id
+                    );
+                } else if complete_shape(fold) {
+                    assert_eq!(
+                        state.outcome,
+                        DerivedOutcome::Ending(RunOutcome::Complete),
+                        "state {}: nothing is open and nothing is asked",
+                        state.id
+                    );
                 }
-                DerivedOutcome::Ending(RunOutcome::Halted) => {
-                    assert!(halting, "state {}: {kinds:?}", state.id);
+                let kinds: Vec<&str> = state.trace.iter().map(|event| event.body.kind()).collect();
+                match &state.outcome {
+                    DerivedOutcome::Ending(RunOutcome::Parked) => {
+                        assert!(
+                            questions_open(fold),
+                            "state {}: parked with no question open: {kinds:?}",
+                            state.id
+                        );
+                        assert!(!backoff_pending(fold), "state {}: {kinds:?}", state.id);
+                        assert!(common, "state {}: {kinds:?}", state.id);
+                    }
+                    DerivedOutcome::Ending(RunOutcome::Complete) => {
+                        assert!(
+                            !questions_open(fold),
+                            "state {}: complete with a question open: {kinds:?}",
+                            state.id
+                        );
+                        assert!(complete_shape(fold), "state {}: {kinds:?}", state.id);
+                    }
+                    DerivedOutcome::Ending(RunOutcome::Halted) => {
+                        assert!(halting, "state {}: {kinds:?}", state.id);
+                    }
+                    DerivedOutcome::Ending(RunOutcome::BudgetExceeded) => {
+                        assert!(budget && !halting, "state {}: {kinds:?}", state.id);
+                    }
+                    DerivedOutcome::NotEnding | DerivedOutcome::FoldError => {}
                 }
-                DerivedOutcome::Ending(RunOutcome::BudgetExceeded) => {
-                    assert!(budget && !halting, "state {}: {kinds:?}", state.id);
-                }
-                DerivedOutcome::NotEnding | DerivedOutcome::FoldError => {}
             }
         }
     }
 
     #[test]
     fn a_state_with_admissible_work_and_no_budget_exceeded_classifies_not_ending() {
-        let census = census();
-        let mut before = 0;
-        let mut after = 0;
-        for state in census.states() {
-            let fold = &state.fold;
-            let has_record = fold.budget_stop().is_some();
-            if !has_record && fold.halted_at().is_none() {
-                assert_ne!(
-                    state.outcome,
-                    DerivedOutcome::Ending(RunOutcome::BudgetExceeded),
-                    "state {}: a run that recorded no budget_exceeded cannot end for budget",
-                    state.id
-                );
+        for member in family() {
+            let census = member.census;
+            let mut before = 0;
+            let mut after = 0;
+            for state in census.states() {
+                let fold = &state.fold;
+                let has_record = fold.budget_stop().is_some();
+                if !has_record && fold.halted_at().is_none() {
+                    assert_ne!(
+                        state.outcome,
+                        DerivedOutcome::Ending(RunOutcome::BudgetExceeded),
+                        "state {}: a run that recorded no budget_exceeded cannot end for budget",
+                        state.id
+                    );
+                }
+                let admissible_work = every_key(fold).iter().any(|key| {
+                    fold.task(*key).is_some_and(|task| {
+                        task.generations
+                            .iter()
+                            .any(|generation| generation.class != GenerationClass::Closed)
+                    })
+                });
+                if admissible_work && !has_record {
+                    assert_eq!(
+                        state.outcome,
+                        DerivedOutcome::NotEnding,
+                        "state {}",
+                        state.id
+                    );
+                    before += 1;
+                }
+                if has_record && fold.halted_at().is_none() && common(fold) {
+                    assert_eq!(
+                        state.outcome,
+                        DerivedOutcome::Ending(RunOutcome::BudgetExceeded),
+                        "state {}: once common holds, the record decides",
+                        state.id
+                    );
+                    after += 1;
+                }
             }
-            let admissible_work = every_key(fold).iter().any(|key| {
-                fold.task(*key).is_some_and(|task| {
-                    task.generations
+            assert!(
+                before > 0,
+                "{}: no pre-budget_exceeded prefix was explored",
+                member.name
+            );
+            if member.restricted {
+                assert!(
+                    census
+                        .states()
                         .iter()
-                        .any(|generation| generation.class != GenerationClass::Closed)
-                })
-            });
-            if admissible_work && !has_record {
-                assert_eq!(
-                    state.outcome,
-                    DerivedOutcome::NotEnding,
-                    "state {}",
-                    state.id
+                        .all(|state| (member.classes)(&state.fold)
+                            .iter()
+                            .all(|candidate| candidate.label != "budget_exceeded")),
+                    "{}: a restricted generator that offers `budget_exceeded` nowhere",
+                    member.name
                 );
-                before += 1;
-            }
-            if has_record && fold.halted_at().is_none() && common(fold) {
                 assert_eq!(
-                    state.outcome,
-                    DerivedOutcome::Ending(RunOutcome::BudgetExceeded),
-                    "state {}: once common holds, the record decides",
-                    state.id
+                    after, 0,
+                    "{}: no post-budget_exceeded state, since its generator offers none",
+                    member.name
                 );
-                after += 1;
+            } else {
+                assert!(
+                    after > 0,
+                    "{}: no post-budget_exceeded state was explored",
+                    member.name
+                );
             }
         }
-        assert!(before > 0, "no pre-budget_exceeded prefix was explored");
-        assert!(after > 0, "no post-budget_exceeded state was explored");
     }
 
     #[test]
     fn every_deferred_state_has_a_legal_next_transition() {
-        let census = census();
-        let mut deferred_states = 0;
-        let mut at_ceiling = 0;
-        let mut below_ceiling = 0;
-        let mut ceiling_wakes = 0;
-        let mut ceiling_closes = 0;
-        for state in census.states() {
-            if !backoff_pending(&state.fold) || state.fold.finished().is_some() {
-                continue;
-            }
-            deferred_states += 1;
-            let at_the_ceiling = state.trace.len() >= census.bounds().max_trace;
-            let accepted: BTreeSet<String> = classes(&state.fold)
-                .into_iter()
-                .filter(|candidate| state.fold.plan_transition(&candidate.event).is_ok())
-                .map(|candidate| candidate.label)
-                .collect();
-            if at_the_ceiling {
-                at_ceiling += 1;
-                assert_eq!(
-                    census.outgoing(state.id).count(),
-                    0,
-                    "state {} sits at the trace ceiling and was extended anyway",
-                    state.id
-                );
-            } else {
-                below_ceiling += 1;
-                let recorded: BTreeSet<String> = census
-                    .outgoing(state.id)
-                    .filter(|transition| {
-                        matches!(
-                            transition.outcome,
-                            TransitionOutcome::Accepted { .. } | TransitionOutcome::Truncated
-                        )
-                    })
-                    .map(|transition| transition.label.to_string())
+        for member in family() {
+            let census = member.census;
+            let mut deferred_states = 0;
+            let mut at_ceiling = 0;
+            let mut below_ceiling = 0;
+            let mut ceiling_wakes = 0;
+            let mut ceiling_closes = 0;
+            for state in census.states() {
+                if !backoff_pending(&state.fold) || state.fold.finished().is_some() {
+                    continue;
+                }
+                deferred_states += 1;
+                let at_the_ceiling = state.trace.len() >= census.bounds().max_trace;
+                let accepted: BTreeSet<String> = (member.classes)(&state.fold)
+                    .into_iter()
+                    .filter(|candidate| state.fold.plan_transition(&candidate.event).is_ok())
+                    .map(|candidate| candidate.label)
                     .collect();
-                assert_eq!(
-                    recorded, accepted,
-                    "state {}: the recorded offers and the fold disagree about what is accepted \
+                if at_the_ceiling {
+                    at_ceiling += 1;
+                    assert_eq!(
+                        census.outgoing(state.id).count(),
+                        0,
+                        "state {} sits at the trace ceiling and was extended anyway",
+                        state.id
+                    );
+                } else {
+                    below_ceiling += 1;
+                    let recorded: BTreeSet<String> = census
+                        .outgoing(state.id)
+                        .filter(|transition| {
+                            matches!(
+                                transition.outcome,
+                                TransitionOutcome::Accepted { .. } | TransitionOutcome::Truncated
+                            )
+                        })
+                        .map(|transition| transition.label.to_string())
+                        .collect();
+                    assert_eq!(
+                        recorded, accepted,
+                        "state {}: the recorded offers and the fold disagree about what is accepted \
                      here",
-                    state.id
-                );
-                assert_eq!(
-                    census.has_legal_transition(state.id),
-                    !accepted.is_empty(),
-                    "state {}: the accessor and the fold disagree about whether anything is \
+                        state.id
+                    );
+                    assert_eq!(
+                        census.has_legal_transition(state.id),
+                        !accepted.is_empty(),
+                        "state {}: the accessor and the fold disagree about whether anything is \
                      accepted here",
-                    state.id
-                );
-            }
-            assert!(
-                !accepted.is_empty(),
-                "state {} has a deferred item and no way out: {:?}",
-                state.id,
-                state
-                    .trace
-                    .iter()
-                    .map(|event| event.body.kind())
-                    .collect::<Vec<_>>()
-            );
-            let halting = state.fold.halted_at().is_some();
-            let stopped = state.fold.budget_stop().is_some();
-            if !halting && !stopped {
+                        state.id
+                    );
+                }
                 assert!(
-                    accepted.contains("defer_wait_elapsed"),
-                    "state {}: an unhalted, unstopped backoff wakes: {accepted:?}",
-                    state.id
-                );
-                ceiling_wakes += usize::from(at_the_ceiling);
-            } else {
-                assert!(
-                    !accepted.contains("defer_wait_elapsed"),
-                    "state {}: halt and budget outrank backoff: {accepted:?}",
-                    state.id
-                );
-                assert!(
-                    accepted.iter().any(|label| {
-                        [
-                            "attempt_finished/",
-                            "attempt_interrupted",
-                            "candidate_prepared/",
-                            "generation_closed/",
-                            "task_candidate_created/",
-                            "merge_prepared/",
-                            "task_merged/",
-                            "run_finished/",
-                        ]
-                        .iter()
-                        .any(|closure| label.starts_with(closure))
-                    }),
-                    "state {}: a halted or stopped backoff closes: {accepted:?}\n  \
-                     outcome={:?} halted={:?} stop={:?}\n  trace={:?}",
+                    !accepted.is_empty(),
+                    "state {} has a deferred item and no way out: {:?}",
                     state.id,
-                    state.outcome,
-                    state.fold.halted_at(),
-                    state.fold.budget_stop(),
                     state
                         .trace
                         .iter()
-                        .map(|e| e.body.kind())
-                        .collect::<Vec<_>>(),
+                        .map(|event| event.body.kind())
+                        .collect::<Vec<_>>()
                 );
-                ceiling_closes += usize::from(at_the_ceiling);
+                let halting = state.fold.halted_at().is_some();
+                let stopped = state.fold.budget_stop().is_some();
+                if !halting && !stopped {
+                    assert!(
+                        accepted.contains("defer_wait_elapsed"),
+                        "state {}: an unhalted, unstopped backoff wakes: {accepted:?}",
+                        state.id
+                    );
+                    ceiling_wakes += usize::from(at_the_ceiling);
+                } else {
+                    assert!(
+                        !accepted.contains("defer_wait_elapsed"),
+                        "state {}: halt and budget outrank backoff: {accepted:?}",
+                        state.id
+                    );
+                    assert!(
+                        accepted.iter().any(|label| {
+                            [
+                                "attempt_finished/",
+                                "attempt_interrupted",
+                                "candidate_prepared/",
+                                "generation_closed/",
+                                "task_candidate_created/",
+                                "merge_prepared/",
+                                "task_merged/",
+                                "run_finished/",
+                            ]
+                            .iter()
+                            .any(|closure| label.starts_with(closure))
+                        }),
+                        "state {}: a halted or stopped backoff closes: {accepted:?}\n  \
+                     outcome={:?} halted={:?} stop={:?}\n  trace={:?}",
+                        state.id,
+                        state.outcome,
+                        state.fold.halted_at(),
+                        state.fold.budget_stop(),
+                        state
+                            .trace
+                            .iter()
+                            .map(|e| e.body.kind())
+                            .collect::<Vec<_>>(),
+                    );
+                    ceiling_closes += usize::from(at_the_ceiling);
+                }
             }
-        }
-        assert!(deferred_states > 0, "no deferred state was explored");
-        assert!(
-            below_ceiling > 0,
-            "every deferred state sat at the trace ceiling, so the recorded table was never \
+            if member.restricted {
+                assert_eq!(
+                    (deferred_states, at_ceiling, below_ceiling),
+                    (0, 0, 0),
+                    "{}: its generator offers no deferral, so no deferred state exists in it, and \
+                 this says so",
+                    member.name
+                );
+                continue;
+            }
+            assert!(
+                deferred_states > 0,
+                "{}: no deferred state was explored",
+                member.name
+            );
+            assert!(
+                below_ceiling > 0,
+                "every deferred state sat at the trace ceiling, so the recorded table was never \
              cross-checked against the fold"
-        );
-        assert_eq!(
-            (at_ceiling, ceiling_wakes, ceiling_closes),
-            (0, 0, 0),
-            "the shared census stops at its state ceiling long before its trace ceiling; the \
-             trace ceiling's own behaviour is `a_census_that_hits_its_ceiling_says_so`'s"
-        );
+            );
+            assert_eq!(
+                (at_ceiling, ceiling_wakes, ceiling_closes),
+                (0, 0, 0),
+                "the prefix stops at its state ceiling long before its trace ceiling; the trace \
+             ceiling's own behaviour is `a_census_that_hits_its_ceiling_says_so`'s"
+            );
 
-        assert!(
-            census.states().iter().any(|state| {
-                state.fold.queue().is_some_and(|queue| {
-                    queue
-                        .entries()
-                        .iter()
-                        .any(|entry| entry.verification_deferred)
-                })
-            }),
-            "the generator's verification deferrals reach a verification-deferred candidate in \
-             the shared census; its way out is asserted above like every other deferred state's"
-        );
+            assert!(
+                census.states().iter().any(|state| {
+                    state.fold.queue().is_some_and(|queue| {
+                        queue
+                            .entries()
+                            .iter()
+                            .any(|entry| entry.verification_deferred)
+                    })
+                }),
+                "the generator's verification deferrals reach a verification-deferred candidate in \
+             the prefix; its way out is asserted above like every other deferred state's"
+            );
+        }
     }
 
     fn deferral_classes(fold: &TopologyFold) -> Vec<Candidate> {
@@ -2262,9 +2437,15 @@ pub(crate) mod tests {
 
     #[test]
     fn the_publication_relations_are_exercised_in_both_directions() {
-        let census = census();
-        let accepted = census.accepted_labels();
-        let refused = census.refused_labels();
+        let members = family();
+        let accepted: BTreeSet<&str> = members
+            .iter()
+            .flat_map(|member| member.census.accepted_labels())
+            .collect();
+        let refused: BTreeSet<&str> = members
+            .iter()
+            .flat_map(|member| member.census.refused_labels())
+            .collect();
 
         for matching in [
             "merge_prepared/fast/match/aleph/g0",
@@ -2297,83 +2478,102 @@ pub(crate) mod tests {
                 "`{mismatching}` was accepted somewhere, and it names a relation the fold must refuse"
             );
         }
-        assert!(census.transitions().iter().any(|transition| {
-            &*transition.label == "merge_prepared/fast/with-pin/aleph/g0"
-                && matches!(transition.outcome, TransitionOutcome::Refused { .. })
+        assert!(members.iter().any(|member| {
+            member.census.transitions().iter().any(|transition| {
+                &*transition.label == "merge_prepared/fast/with-pin/aleph/g0"
+                    && matches!(transition.outcome, TransitionOutcome::Refused { .. })
+            })
         }));
     }
 
     #[test]
     fn no_offer_is_unmapped_and_every_class_is_offered_everywhere() {
-        let census = census();
-        let at_root = classes(&started()).len();
-        assert!(at_root > 100, "{at_root} classes is a thin census");
-        let offered: usize = census
-            .states()
-            .iter()
-            .filter(|state| state.trace.len() < census.bounds().max_trace)
-            .map(|state| classes(&state.fold).len())
-            .sum();
-        assert_eq!(
-            census.transitions().len(),
-            offered,
-            "an offer produced neither an acceptance, a refusal nor a truncation"
-        );
-        let mut truncated = 0usize;
-        for transition in census.transitions() {
-            match &transition.outcome {
-                TransitionOutcome::Accepted { to } => assert!(*to < census.states().len()),
-                TransitionOutcome::Refused { reason } => {
-                    assert!(!reason.is_empty(), "{}", transition.label);
-                }
-                TransitionOutcome::Truncated => truncated += 1,
+        for member in family() {
+            let census = member.census;
+            if !member.restricted {
+                let at_root = classes(&started()).len();
+                assert!(at_root > 100, "{at_root} classes is a thin census");
             }
-        }
-        assert!(!census.accepted_labels().is_empty());
-        assert!(!census.refused_labels().is_empty());
-        assert_eq!(
-            census.truncated(),
-            truncated > 0,
-            "a truncated offer is what the census reports as its truncation, and nothing else is"
-        );
-        assert!(
-            census.truncated(),
-            "the bounded space is larger than the state ceiling; a census that closed under it \
+            let offered: usize = census
+                .states()
+                .iter()
+                .filter(|state| state.trace.len() < census.bounds().max_trace)
+                .map(|state| (member.classes)(&state.fold).len())
+                .sum();
+            assert_eq!(
+                census.transitions().len(),
+                offered,
+                "an offer produced neither an acceptance, a refusal nor a truncation"
+            );
+            let mut truncated = 0usize;
+            for transition in census.transitions() {
+                match &transition.outcome {
+                    TransitionOutcome::Accepted { to } => assert!(*to < census.states().len()),
+                    TransitionOutcome::Refused { reason } => {
+                        assert!(!reason.is_empty(), "{}", transition.label);
+                    }
+                    TransitionOutcome::Truncated => truncated += 1,
+                }
+            }
+            assert!(!census.accepted_labels().is_empty());
+            assert!(!census.refused_labels().is_empty());
+            assert_eq!(
+                census.truncated(),
+                truncated > 0,
+                "a truncated offer is what the census reports as its truncation, and nothing else is"
+            );
+            if member.restricted {
+                assert!(
+                    !census.truncated() && truncated == 0,
+                    "{}: a seeded census closes, and closing is no truncated offer at all",
+                    member.name
+                );
+                continue;
+            }
+            assert!(
+                census.truncated(),
+                "the bounded space is larger than the state ceiling; a prefix that closed under it \
              would mean the generator lost its classes"
-        );
-        assert_eq!(
-            census.states().len(),
-            census.bounds().max_states,
-            "the census explored exactly to its state ceiling"
-        );
+            );
+            assert_eq!(
+                census.states().len(),
+                census.bounds().max_states,
+                "the prefix explored exactly to its state ceiling"
+            );
+        }
     }
     #[test]
     fn replaying_every_explored_trace_reaches_the_state_it_was_explored_at() {
-        let census = census();
-        for state in census.states() {
-            let replayed = TopologyFold::replay(inputs(), &state.trace)
-                .unwrap_or_else(|error| panic!("state {} does not replay: {error}", state.id));
-            assert!(
-                replayed.state() == state.fold.state(),
-                "state {} replays to a different state",
-                state.id
-            );
-            assert_eq!(
-                replayed.derived_outcome(),
-                state.outcome,
-                "state {} classifies differently live and on replay",
-                state.id
-            );
-            let again = TopologyFold::replay(inputs(), &state.trace).expect("replays again");
-            assert!(again.state() == replayed.state(), "state {}", state.id);
+        for member in family() {
+            let census = member.census;
+            for state in census.states() {
+                let replayed = TopologyFold::replay(inputs(), &state.trace)
+                    .unwrap_or_else(|error| panic!("state {} does not replay: {error}", state.id));
+                assert!(
+                    replayed.state() == state.fold.state(),
+                    "state {} replays to a different state",
+                    state.id
+                );
+                assert_eq!(
+                    replayed.derived_outcome(),
+                    state.outcome,
+                    "state {} classifies differently live and on replay",
+                    state.id
+                );
+                let again = TopologyFold::replay(inputs(), &state.trace).expect("replays again");
+                assert!(again.state() == replayed.state(), "state {}", state.id);
+            }
         }
     }
 
     #[test]
     fn the_census_reaches_every_outcome_and_says_what_it_did_not_reach() {
-        let census = census();
-        let reached: BTreeSet<String> = census
-            .states()
+        let members = family();
+        let union: Vec<&CensusState> = members
+            .iter()
+            .flat_map(|member| member.census.states().iter())
+            .collect();
+        let reached: BTreeSet<String> = union
             .iter()
             .filter_map(|state| match &state.outcome {
                 DerivedOutcome::Ending(outcome) => Some(format!("{outcome:?}")),
@@ -2387,7 +2587,7 @@ pub(crate) mod tests {
             );
         }
         let mut compared = 0;
-        for state in census.states() {
+        for state in &union {
             if state.fold.finished().is_some() {
                 for outcome in [
                     RunOutcome::Complete,
@@ -3567,15 +3767,15 @@ pub(crate) mod tests {
     fn every_plan_transition_arm_is_executed_by_the_census() {
         let arms = production_arms();
         assert_eq!(arms.len(), 24, "{arms:?}");
-        let census = census();
-        let executed: BTreeSet<&'static str> = census
-            .transitions()
+        let members = family();
+        let executed: BTreeSet<&'static str> = members
             .iter()
+            .flat_map(|member| member.census.transitions().iter())
             .map(|transition| transition.kind)
             .collect();
-        let accepted: BTreeSet<&'static str> = census
-            .transitions()
+        let accepted: BTreeSet<&'static str> = members
             .iter()
+            .flat_map(|member| member.census.transitions().iter())
             .filter(|transition| {
                 matches!(
                     transition.outcome,
@@ -3678,40 +3878,48 @@ pub(crate) mod tests {
             "a bound the struct declares and `dimensions()` does not"
         );
 
+        let members = family();
         let shared = reached_dimensions(&[census()]);
         let deep = reached_dimensions(&[deep_census()]);
-        let together = reached_dimensions(&[census(), deep_census()]);
+        let together = reached_dimensions(
+            &members
+                .iter()
+                .map(|member| member.census)
+                .collect::<Vec<_>>(),
+        );
         for (name, declared) in bounds.dimensions() {
             assert!(
                 together[name] <= declared,
-                "{name}: the censuses reached {} beyond the declared {declared}",
+                "{name}: the family reached {} beyond the declared {declared}",
                 together[name]
             );
             assert_eq!(
                 together[name], declared,
-                "{name}: declared {declared} and reached {} (shared census {}, deep census {}); a \
-                 boundary the censuses did not reach is not evidence they explored it",
+                "{name}: declared {declared} and reached {} over the family's union (prefix {}, \
+                 seeded {}); a boundary the family did not reach is not evidence it explored it",
                 together[name], shared[name], deep[name]
             );
-        }
-        for name in [
-            "originals",
-            "generations_per_task",
-            "attempts_per_generation",
-            "defers",
-            "questions",
-            "review_passes",
-            "resumes",
-        ] {
-            assert_eq!(
-                shared[name],
-                bounds
-                    .dimensions()
+            let by: Vec<&str> = members
+                .iter()
+                .filter(|member| reached_dimensions(&[member.census])[name] == declared)
+                .map(|member| member.name)
+                .collect();
+            assert!(
+                !by.is_empty(),
+                "{name}: the union reaches the bound and no single member does"
+            );
+            assert!(
+                members
                     .iter()
-                    .find(|(held, _)| *held == name)
-                    .map(|(_, bound)| *bound)
-                    .expect("declared"),
-                "{name}: the shared census reaches this bound on its own"
+                    .filter(|member| member.reaches.contains(&name))
+                    .all(|member| by.contains(&member.name)),
+                "{name}: a member that names this dimension does not reach it: reached by {by:?}"
+            );
+        }
+        for (name, declared) in bounds.dimensions() {
+            assert_eq!(
+                shared[name], declared,
+                "{name}: the prefix reaches this bound on its own at its state ceiling"
             );
         }
         assert_eq!(
@@ -3895,9 +4103,12 @@ pub(crate) mod tests {
 
     #[test]
     fn every_explored_state_classifies_and_the_classification_is_the_same_live_and_on_replay() {
-        let census = census();
+        let members = family();
         let (mut finalize, mut reopen, mut recover) = (0, 0, 0);
-        for state in census.states() {
+        for state in members
+            .iter()
+            .flat_map(|member| member.census.states().iter())
+        {
             let live = classify(&state.fold);
             let from_prefix = classify(&replayed(&state.trace));
             assert_eq!(
@@ -3953,9 +4164,16 @@ pub(crate) mod tests {
 
     #[test]
     fn every_fault_rows_durable_prefix_is_a_reachable_state_classified_as_its_resume_action() {
-        let census = census();
+        let members = family();
         let mut reached: BTreeMap<FaultRow, usize> = BTreeMap::new();
-        for state in census.states() {
+        let mut reached_by_prefix: BTreeMap<FaultRow, usize> = BTreeMap::new();
+        for (member, state) in members.iter().flat_map(|member| {
+            member
+                .census
+                .states()
+                .iter()
+                .map(move |state| (member, state))
+        }) {
             let action = classify(&state.fold);
             for row in rows_reached(&state.fold) {
                 assert!(
@@ -3977,6 +4195,9 @@ pub(crate) mod tests {
                     );
                 }
                 *reached.entry(row).or_insert(0) += 1;
+                if !member.restricted {
+                    *reached_by_prefix.entry(row).or_insert(0) += 1;
+                }
             }
         }
         for row in [
@@ -4009,8 +4230,8 @@ pub(crate) mod tests {
             FaultRow::TRetry,
         ] {
             assert!(
-                reached.get(&row).copied().unwrap_or(0) > 0,
-                "{}: no explored state of the shared census is this row's durable prefix; the \
+                reached_by_prefix.get(&row).copied().unwrap_or(0) > 0,
+                "{}: no explored state of the prefix is this row's durable prefix; the \
                  rejections, retained settlements and resumed attempts the generator offers \
                  reach it without a seed",
                 reachability::row_name(row)
@@ -4369,12 +4590,16 @@ pub(crate) mod tests {
 
     #[test]
     fn run_resumed_is_accepted_with_an_identical_runner_and_refused_with_any_different_field() {
-        let census = census();
+        let members = family();
         let identical = resumed_with(run_started().runner);
         let variants = runner_variants();
         assert_eq!(variants.len(), 7);
         let (mut accepted, mut over, mut refused) = (0, 0, 0);
-        for state in census.states() {
+        let union: Vec<&CensusState> = members
+            .iter()
+            .flat_map(|member| member.census.states().iter())
+            .collect();
+        for state in &union {
             let over_already = matches!(
                 state.fold.finished(),
                 Some(RunOutcome::Complete | RunOutcome::Halted)
@@ -4435,7 +4660,7 @@ pub(crate) mod tests {
             }
         }
         assert!(accepted > 0 && over > 0, "{accepted}/{over}");
-        assert_eq!(refused, census.states().len() * variants.len());
+        assert_eq!(refused, union.len() * variants.len());
     }
 
     #[test]
@@ -4494,10 +4719,76 @@ pub(crate) mod tests {
         assert_eq!(summary.bounds["review_passes"], 1);
         let json = serde_json::to_string_pretty(&summary).expect("serializes");
         assert!(json.contains("\"T-RESUME\"") && json.contains("finalize then refuse"));
+
+        #[derive(serde::Serialize)]
+        struct MemberSummary {
+            name: String,
+            restricted_generator: bool,
+            closed: bool,
+            reaches_at_bound: Vec<String>,
+            seed_events: usize,
+            summary: reachability::CensusSummary,
+        }
+        #[derive(serde::Serialize)]
+        struct FamilySummary {
+            bounds: BTreeMap<String, u64>,
+            union_reaches: BTreeMap<String, u32>,
+            every_bound_reached_over_the_union: bool,
+            members: Vec<MemberSummary>,
+        }
+        let members = family();
+        let union_reaches: BTreeMap<String, u32> = reached_dimensions(
+            &members
+                .iter()
+                .map(|member| member.census)
+                .collect::<Vec<_>>(),
+        )
+        .into_iter()
+        .map(|(name, reached)| (name.to_owned(), reached))
+        .collect();
+        let family_summary = FamilySummary {
+            bounds: summary.bounds.clone(),
+            every_bound_reached_over_the_union: CensusBounds::default()
+                .dimensions()
+                .iter()
+                .all(|(name, bound)| union_reaches[*name] == *bound),
+            union_reaches,
+            members: members
+                .iter()
+                .map(|member| MemberSummary {
+                    name: member.name.to_owned(),
+                    restricted_generator: member.restricted,
+                    closed: !member.census.truncated(),
+                    reaches_at_bound: member
+                        .reaches
+                        .iter()
+                        .map(|name| (*name).to_owned())
+                        .collect(),
+                    seed_events: member.census.states()[0].trace.len(),
+                    summary: reachability::summarize(member.census, true),
+                })
+                .collect(),
+        };
+        assert!(family_summary.every_bound_reached_over_the_union);
+        assert_eq!(family_summary.members.len(), 2);
+        assert!(
+            family_summary.members[0].summary.truncated && !family_summary.members[0].closed,
+            "the prefix member reports its truncation"
+        );
+        assert!(
+            !family_summary.members[1].summary.truncated && family_summary.members[1].closed,
+            "the seeded member reports that it closed"
+        );
+        assert!(
+            family_summary.members[1].summary.states
+                < family_summary.members[1].summary.bounds["max_states"] as usize
+        );
+        let family_json = serde_json::to_string_pretty(&family_summary).expect("serializes");
+        assert!(family_json.contains("\"seeded: sequences, repairs, lineages\""));
         if let Ok(path) = std::env::var("UPSTROKE_CENSUS_SUMMARY") {
             crate::workspace_manager::fixture::write_file(
                 std::path::Path::new(&path),
-                format!("{json}\n").as_bytes(),
+                format!("{family_json}\n").as_bytes(),
             );
         }
     }
