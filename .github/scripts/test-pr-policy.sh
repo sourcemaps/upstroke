@@ -2171,6 +2171,16 @@ fi
 # that stops looking like the one this stubs is a loud failure and not a silent
 # pass.
 #
+# AND COUNTING PROBES IS NOT THE WHOLE OF IT, WHICH IS WHAT THE FIRST CUT OF THIS
+# SECTION MISSED. TERMINATION AND INTERPRETATION ARE DIFFERENT PROPERTIES: a
+# stubbed probe can show that the walk STOPS and can say nothing about WHICH
+# directory each turn asked about, and `C:/repo` stripped to `C:` terminates
+# perfectly well while asking about the drive's current directory instead of the
+# drive root. So the stub records the path it is handed and the rows below assert
+# the sequence, not just its length. What no run on this platform can supply is
+# the fact underneath -- that `C:` and `C:/` are DIFFERENT DIRECTORIES -- because
+# here they are the same one; that is executed natively and the rows say where.
+#
 # TWO DRIVE-ROOTED CASES, BECAUSE THEY PULL IN OPPOSITE DIRECTIONS: the walk must
 # STOP at a drive root, and it must NOT stop at the bare boundary the section
 # above is about -- a `false` under a work tree that does record the listing has
@@ -2187,6 +2197,7 @@ eval "$src"
 probe_status=0; probe_text=''; probe_stderr=''; unexaminable_git=''
 branch='fix-P1/security-trust_x'
 asked=0
+at=''
 git_probe() {
   [[ "$1" == 0,128 || "$1" == 0 ]] && [[ "$2" == -- ]] && [[ "$3" == -C ]] \
     && [[ "$5" == rev-parse ]] || { echo "harness: unexpected call: git_probe $*"; exit 3; }
@@ -2194,6 +2205,11 @@ git_probe() {
   case "$6" in
     --is-inside-work-tree)
       asked=$(( asked + 1 ))
+      # THE PATH IT WAS HANDED IS RECORDED, NOT JUST THE COUNT. Counting probes
+      # bounds the loop and says nothing about WHICH directory each one asked
+      # about, and the two are different properties: `C:` and `C:/` are one probe
+      # either way and are not one directory.
+      at="${at:+$at }$4"
       if (( asked > cap )); then
         echo "harness: $asked probes and still asking about '$4'"
         exit 124
@@ -2208,7 +2224,7 @@ repository_above() { echo 'harness: no probe here fails, so this is unreachable'
 enclosing_root=''
 rc=0
 enclosing_work_tree "$start" "$start/findings" || rc=$?
-echo "rc=$rc root=$enclosing_root asked=$asked"
+echo "rc=$rc root=$enclosing_root asked=$asked at=[$at]"
 WALK
 walk_case() {
   local name="$1" start="$2" true_at="$3" want="$4" got rc=0
@@ -2219,11 +2235,108 @@ walk_case() {
   fi
 }
 walk_case 'a drive root with no work tree over it must end the ascent' \
-  'C:/repo' '' 'rc=0 root= asked=1'
+  'C:/repo' '' 'rc=0 root= asked=1 at=[C:/]'
 walk_case 'a work tree above a drive-rooted false must still be reached' \
-  'C:/outer/bare/nested' 'C:/outer' 'rc=0 root=C:/outer asked=2'
+  'C:/outer/bare/nested' 'C:/outer' 'rc=0 root=C:/outer asked=2 at=[C:/outer/bare C:/outer]'
 walk_case 'the same ascent on a POSIX path is unchanged' \
-  '/outer/bare/nested' '/outer' 'rc=0 root=/outer asked=2'
+  '/outer/bare/nested' '/outer' 'rc=0 root=/outer asked=2 at=[/outer/bare /outer]'
+
+# AND THE SPELLING OF THE ROOT EACH WALK ENDS AT, which is what the count above
+# cannot see and what round 5's harness therefore could not have caught. THE
+# DEFECT IS ONE CHARACTER: `C:/repo` strips to `C:`, and on Windows `C:` is the
+# drive's CURRENT directory while `C:/` is the drive root -- so the first row
+# above asked a real question about the wrong directory, once, and terminated
+# tidily. Executed natively on Windows Server 2025 (bash 5.2.37, git
+# 2.50.1.windows.1), from inside a clean repository directly under `C:/`:
+# `git -C C: rev-parse --show-toplevel` exits 0 and answers THAT REPOSITORY,
+# `git -C C: rev-parse --is-inside-work-tree` exits 0 `true`, and
+# `git -C C:/ rev-parse --is-inside-work-tree` exits 128. The walk read the
+# repository as its own container and refused it, and the same guest runs the
+# validator itself at exit 1 for `04432736`'s exit 0.
+#
+# THE POSIX HALF OF THE SAME ARM IS NOT HYPOTHETICAL EITHER, and it is what
+# makes these rows a witness for the whole rule rather than for one platform:
+# `/repo` strips to the EMPTY STRING, and `git -C ''` is a documented NO-OP that
+# answers about the process's own current directory -- measured here, exit 0
+# answering the cwd's toplevel where `git -C /` exits 128. A root that loses its
+# separator stops naming a root and starts naming a current directory, on both
+# platforms, and one arm now spells both.
+walk_case 'a POSIX root is spelled with its separator too' \
+  '/repo' '' 'rc=0 root= asked=1 at=[/]'
+walk_case 'the descent to a drive root passes through it once' \
+  'C:/a/b' '' 'rc=0 root= asked=2 at=[C:/a C:/]'
+# AND A STRIP THAT REMOVED NOTHING IS NOT A ROOT AND IS NOT RESPELLED. `C:` is
+# drive-relative on Windows exactly as `.` is relative here; calling either a
+# root and appending a separator would move the question to a different
+# directory, which is this defect the other way round. The walk ends there
+# because it cannot shorten the path -- round 5's test, unchanged -- and asks
+# nothing at all.
+walk_case 'a drive-relative spelling is a top and is asked nothing' \
+  'C:' '' 'rc=0 root= asked=0 at=[]'
+
+# AND THE ANCHOR ASCENT IS THE OTHER WALK ON THAT ARITHMETIC, so it gets the same
+# witness. `locate_listing` strips its anchor the same way and hands each level
+# to `git -C`, so `C:/a` strips to `C:` there too. Nothing on this platform
+# reaches it through the whole validator -- the anchor arrives ROOTED wherever the
+# listing exists, and a listing that does not exist is refused before this
+# function is called -- so the function is driven directly, as the walk above is,
+# and with REAL DIRECTORIES under it so the anchor is the one the enter loop
+# actually lands on. The probes are stubbed and say `false` throughout, which is
+# what a bare repository answers; what is asserted is the sequence of directories
+# they were asked about.
+anchor_harness="$fixture_dir/anchor-walk.sh"
+cat > "$anchor_harness" <<'ANCHOR'
+set -uo pipefail
+validator="$1"; start="$2"; cap="$3"
+src="$(awk '/^locate_listing\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$src" ]] || { echo 'harness: locate_listing was not extracted'; exit 3; }
+bash -n <<< "$src" || { echo 'harness: the extract does not parse'; exit 3; }
+eval "$src"
+probe_status=0; probe_text=''; probe_stderr=''; unexaminable_git=''
+listing_world=''; listing_toplevel=''; listing_relpath=''
+branch='fix-P1/security-trust_x'
+asked=0
+at=''
+git_probe() {
+  [[ "$1" == 0,128 || "$1" == 0 ]] && [[ "$2" == -- ]] && [[ "$3" == -C ]] \
+    && [[ "$5" == rev-parse ]] || { echo "harness: unexpected call: git_probe $*"; exit 3; }
+  [[ "$6" == --is-inside-work-tree ]] || { echo "harness: unexpected probe '$6'"; exit 3; }
+  asked=$(( asked + 1 ))
+  at="${at:+$at }$4"
+  if (( asked > cap )); then
+    echo "harness: $asked probes and still asking about '$4'"
+    exit 124
+  fi
+  probe_status=0
+  probe_text=false
+}
+repository_above() { echo 'harness: no probe here fails, so this is unreachable'; exit 3; }
+indent() { :; }
+rc=0
+locate_listing "$start" || rc=$?
+echo "rc=$rc world=$listing_world asked=$asked at=[$at]"
+ANCHOR
+anchor_dir="$fixture_dir/anchor-walk"
+mkdir -p "$anchor_dir/C:/a"
+anchor_got="$( cd "$anchor_dir" && "$BASH" "$anchor_harness" "$branch_validator" 'C:/a/b' 40 2>&1 )"
+anchor_rc=$?
+if [[ "$anchor_rc" != 0 ]] \
+  || [[ "$anchor_got" != 'rc=0 world=filesystem asked=2 at=[C:/a C:/]' ]]; then
+  echo "the anchor ascent must strip C:/a to the drive ROOT and stop there; got" \
+    "'$anchor_got' at exit $anchor_rc" >&2
+  exit 1
+fi
+# AND THE ANCHOR THAT EXISTS ARRIVES ROOTED, which is the precondition the walk's
+# own comment rests on: the first directory asked about is absolute, so the chain
+# has a top and the ascent is not cut off at `C:`.
+anchor_rooted="$( cd "$anchor_dir" && "$BASH" "$anchor_harness" "$branch_validator" 'C:/a' 80 2>&1 )"
+anchor_rooted_rc=$?
+if [[ "$anchor_rooted_rc" != 0 ]] || [[ "$anchor_rooted" != *" at=[$anchor_dir/C:/a "* ]] \
+  || [[ "$anchor_rooted" != *' /]' ]]; then
+  echo "an anchor that exists must be rooted and its chain must end at '/'; got" \
+    "'$anchor_rooted' at exit $anchor_rooted_rc" >&2
+  exit 1
+fi
 
 # ---- what git RECORDS, not what the checkout happens to hold -----------------------------------
 #

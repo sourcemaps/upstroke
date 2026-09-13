@@ -1204,7 +1204,33 @@ enclosing_work_tree() {
     [[ "$parent" != / ]] || return 0
     child="$parent"
     parent="${parent%/*}"
-    [[ -n "$parent" ]] || parent='/'
+    # A STRIP THAT REMOVED THE LAST SEPARATOR LANDS ON A ROOT, AND A ROOT IS
+    # SPELLED WITH ITS SEPARATOR. `/repo` strips to the empty string and has been
+    # respelled `/` since this walk existed; `C:/repo` strips to `C:`, and `C:` IS
+    # NOT THE DRIVE ROOT. It names the drive's CURRENT DIRECTORY -- wherever
+    # something last left it -- so the walk asked about a directory that is not
+    # the one it meant, and the two are the same word apart. Executed natively on
+    # Windows Server 2025 from inside a clean repository directly under `C:/`:
+    # `git -C C: rev-parse --show-toplevel` exits 0 and answers THAT REPOSITORY,
+    # where `git -C C:/ rev-parse --is-inside-work-tree` exits 128. So the walk
+    # read the repository as its own container and refused it: a false red on a
+    # clean standalone checkout spelled `.` from inside it, which `231c1aad` and
+    # `04432736` answered exit 0 `conforms` and `339a238b` onwards answered exit
+    # 1. One arm spells both roots, because it is one rule -- what is left when
+    # the last separator goes is the top of whatever rooted the path.
+    #
+    # ONLY A STRIP THAT ACTUALLY REMOVED ONE, which is the test around it. `C:`
+    # and `.` shorten to themselves, and NEITHER IS A ROOT: `C:` is drive-relative
+    # on Windows exactly as `.` is relative here, so respelling either as a root
+    # would move the question to a different directory -- the same defect the
+    # other way round. They are tops of the walk because it cannot shorten them,
+    # and that test is below, unchanged.
+    if [[ "$parent" != "$child" ]]; then
+      case "$parent" in
+        */*) ;;
+        *) parent="$parent/" ;;
+      esac
+    fi
     [[ "$parent" != "$child" ]] || return 0
     git_probe '0,128' -- -C "$parent" rev-parse --is-inside-work-tree
     if (( probe_status != 0 )); then
@@ -1465,8 +1491,17 @@ locate_listing() {
       listing_world=filesystem
       return 0
     fi
+    # THE SAME ROOT SPELLING enclosing_work_tree MAKES, for the same reason and on
+    # the same arithmetic: a strip that removed the last separator lands on a
+    # root, and `C:` is the drive's CURRENT directory where `C:/` is the drive
+    # root. A strip that removed nothing is a top and is left as it is.
     parent="${anchor%/*}"
-    [[ -n "$parent" ]] || parent='/'
+    if [[ "$parent" != "$anchor" ]]; then
+      case "$parent" in
+        */*) ;;
+        *) parent="$parent/" ;;
+      esac
+    fi
     if [[ "$parent" == "$anchor" ]]; then
       listing_world=filesystem
       return 0
