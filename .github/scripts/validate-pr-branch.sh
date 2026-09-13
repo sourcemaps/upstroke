@@ -442,9 +442,13 @@
 #   anything not beginning with `/` so its walk had a top to stop at; the ascent
 #   then made GIT hand it a native parent, and the false red stopped needing a
 #   native spelling from the caller to reach it at all. The join has moved to
-#   `locate_listing`, which roots the caller's anchor once against the anchored set
-#   above, and the walk has a root test that is not `/` -- see that function's own
-#   paragraphs. Measured on the same guest: a clean standalone repository, one
+#   `locate_listing`, which roots the caller's anchor once -- AGAINST A SET THAT IS
+#   NOT THIS ONE, and reading this one's answer as that one's was a false green:
+#   "can this spelling parse as a find expression" is closed PER GRAMMAR, "does
+#   this spelling have a top of its own" is closed PER PLATFORM, and the second
+#   question with the first's three arms left every POSIX listing spelled `C:/…`
+#   or `\…` unrooted. See that function's own paragraphs. The walk there has a
+#   root test that is not `/`. Measured on the same guest: a clean standalone repository, one
 #   committed finding at its root, spelled `.`, exit 1 `git could not say whether
 #   'C:/Users/…' is inside a work tree` before and exit 0 `conforms` after; and a
 #   LOOSE directory holding two findings, in no repository at all, exit 1 `git
@@ -1321,23 +1325,71 @@ locate_listing() {
   # resolves its own physical path -- so no resolved path is carried between
   # commands, which is what `/proc/self` breaks.
   #
-  # IT IS ROOTED ONCE, HERE, AND AGAINST THE SAME ANCHORED SET `list_dir` TESTS.
+  # IT IS ROOTED ONCE, HERE, AND THE ANCHORED SET IS NOT THE ONE `list_dir` TESTS.
   # The ascent below and `repository_above` both need a path with a top to stop
   # at, and both used to be handed the caller's own spelling and join `$PWD` onto
   # anything not beginning with `/` -- which is every path a POSIX caller writes,
   # and NOT the native `C:/…` a Windows caller may write or git may answer with.
-  # One join, in the one place that knows how the path was spelled, and the
-  # anchored set is the same three arms: a separator, a backslash, a drive
-  # designator. A POSIX directory legitimately named `C:` is the cost -- its
-  # chain stops at `C:` instead of continuing through `$PWD` -- and that is the
-  # ascent not reaching as far as it could, never an answer taken from the wrong
-  # repository, because the walk that stops early reports NO repository above and
-  # the listing keeps its own index, which is what it had before any ascent
-  # existed.
+  # One join, in the one place that knows how the path was spelled.
+  #
+  # THE TWO FUNCTIONS ASK DIFFERENT QUESTIONS AND BORROWING THE ANSWER WAS THE
+  # DEFECT. `list_dir` asks WHETHER A SPELLING CAN PARSE AS A `find` EXPRESSION,
+  # and that is closed PER GRAMMAR: no token of find's begins with `/`, with a
+  # backslash, or with a letter and a colon, on any platform, so leaving those
+  # three arms unprefixed is right on both and costs nothing on POSIX, where
+  # `./C:/x` names the same directory as `C:/x`. THIS asks whether a spelling HAS
+  # A TOP OF ITS OWN, and that is closed PER PLATFORM: `C:/holder` and `\weird`
+  # are anchored on Windows and are ORDINARY RELATIVE NAMES on POSIX. The same
+  # three arms were written here, they matched and did nothing, and every such
+  # POSIX listing was left UNROOTED -- so the ascent ran out of separators at
+  # `C:` and reported no repository above a directory that has one.
+  #
+  # THAT WAS A FALSE GREEN AND THE PARAGRAPH THAT STOOD HERE DENIED IT. It said
+  # the cost was "the ascent not reaching as far as it could, never an answer
+  # taken from the wrong repository, because the walk that stops early reports NO
+  # repository above and the listing keeps its own index". The last clause is
+  # where it fails: a listing INSIDE A BARE REPOSITORY has no index of its own,
+  # so "keeps its own index" degrades to "is answered by the filesystem", which
+  # is the one world that counts names git records nothing for. Measured twice,
+  # from opposite directions:
+  #
+  #   A plain directory `holder` inside an IGNORED BARE REPOSITORY named `C:`, in
+  #   a work tree that records nothing under it, holding one finding that matches
+  #   the branch: `C:/holder` exit 0 `conforms`, and the same directory spelled
+  #   absolutely exit 1 `git records nothing at …`. Two spellings of one
+  #   directory, two verdicts. It answers that way at `231c1aad` too, so the
+  #   unrooted anchor did not introduce it -- it carried it forward.
+  #
+  #   A TRACKED `C:` holding two findings of one description, the second marked
+  #   `skip-worktree` with its checkout copy removed and `.git/config` unreadable
+  #   so discovery exits 128: `C:` exit 0 `conforms` where the records say `names
+  #   2 findings`, the absolute spelling exit 1, and `231c1aad` exit 1. This one
+  #   arrived with the join's move out of `repository_above`, which used to root
+  #   `C:` on the way past; reversing that commit restores the refusal.
+  #
+  # THE JOIN IS MADE WHERE IT PROVABLY CHANGES NOTHING, and that needs no platform
+  # test at all. `$anchor` and `${PWD}/$anchor` ARE THE SAME DIRECTORY exactly
+  # when the spelling is relative, and the filesystem answers that: on POSIX
+  # `C:/holder` is `${PWD}/C:/holder` and `-ef` says so, while on Windows no path
+  # component may hold a `:` or a backslash, so the joined spelling names nothing
+  # and `-ef` is false. The join can therefore only ever SUPPLY A TOP; it can
+  # never move the anchor to another directory, which is what a bare join did to
+  # the native spelling and what this arm doing nothing did to the POSIX one.
+  #
+  # A SPELLING THAT NAMES NOTHING IS LEFT AS IT WAS, and no answer rests on it:
+  # the walk below may then stop early, but `read_listing` has no directory to
+  # enumerate and refuses, where a false green needs a listing that is really
+  # there. `-ef` stats in THIS shell, so `/proc/self` is the same directory in
+  # both operands -- and reaches neither, being absolute.
   anchor="$path"
   case "$anchor" in
-    /* | '\'* | [A-Za-z]:*) ;;
+    /*) ;;
     .) anchor="${PWD:-.}" ;;
+    '\'* | [A-Za-z]:*)
+      if [[ "$anchor" -ef "${PWD:-.}/$anchor" ]]; then
+        anchor="${PWD:-.}/$anchor"
+      fi
+      ;;
     *) anchor="${PWD:-.}/$anchor" ;;
   esac
   while :; do

@@ -1997,6 +1997,96 @@ if [[ "$back_abs_rc" != 1 ]] || [[ "$back_rel_rc" != 1 ]] \
   exit 1
 fi
 
+
+# ---- AN ANCHORED SPELLING IS ANCHORED PER PLATFORM, AND find'S GRAMMAR IS NOT ------------------
+#
+# The case above is `list_dir`'s question -- CAN THIS SPELLING PARSE AS A find
+# EXPRESSION -- and it is closed PER GRAMMAR, so its answer is the same on every
+# platform and POSIX cannot witness the half the prefix exists for.
+# `locate_listing` asked a DIFFERENT question with the same three arms: DOES THIS
+# SPELLING HAVE A TOP OF ITS OWN, which is closed PER PLATFORM. `C:/x` and `\x`
+# are anchored on Windows and are ORDINARY RELATIVE NAMES here, the arm matched
+# them and did nothing, and every such POSIX listing reached the ascent UNROOTED
+# -- it ran out of separators at `C:` and reported no repository above a
+# directory that has one.
+#
+# SO THIS ONE CAN FAIL ON POSIX, unlike the two before it, because the defect IS
+# a POSIX path read as an anchored one. Measured at `7ab8329d`: a plain directory
+# `holder` inside an ignored bare repository named `C:`, in a work tree that
+# records nothing under it, answered exit 0 `conforms` spelled `C:/holder` and
+# exit 1 spelled absolutely -- two spellings of one directory, two verdicts --
+# and the same pair at `231c1aad`.
+#
+# A LEGITIMATE CALLER FOR EACH HOSTILE ONE, because the arm cannot simply be
+# deleted: joining `$PWD` onto a NATIVE `C:/…` builds `/c/…/repo/C:/…`, which
+# names nothing, and that was a measured false red. The repair joins only where
+# `-ef` says the join names the same directory, so it can supply a top and can
+# never move the anchor -- and a TRACKED directory whose name begins with either
+# token, which never ascends at all, is what holds it to that. One resolves and
+# one is ambiguous, so both verdicts are pinned and not just the refusals.
+anchored_rel_case() {  # anchored_rel_case <label> <parent> <relative path> <branch> <want>
+  local label="$1" parent="$2" rel="$3" branch="$4" want="$5" abs_rc=0 rel_rc=0
+  "$BASH" "$branch_validator" "$branch" "$parent/$rel" >/dev/null 2>&1 || abs_rc=$?
+  ( cd "$parent" && "$BASH" "$branch_validator" "$branch" "$rel" >/dev/null 2>&1 ) || rel_rc=$?
+  if [[ "$rel_rc" != "$abs_rc" ]]; then
+    echo "$label: '$rel' answered $rel_rc where the same directory spelled absolutely" \
+      "answered $abs_rc" >&2
+    exit 1
+  fi
+  if [[ "$rel_rc" != "$want" ]]; then
+    echo "$label: both spellings answered $rel_rc, and $want was expected" >&2
+    exit 1
+  fi
+}
+anchored_repo="$fixture_dir/repo-anchored-spelling"
+new_repo "$anchored_repo"
+echo seed > "$anchored_repo/seed.txt"
+git -C "$anchored_repo" add -A && git -C "$anchored_repo" commit -q -m base
+printf 'C:\n\\\\weird\n' > "$anchored_repo/.git/info/exclude"
+for anchored_name in 'C:' '\weird'; do
+  mkdir -p "$anchored_repo/$anchored_name"
+  git -C "$anchored_repo/$anchored_name" init -q --bare .
+  mkdir -p "$anchored_repo/$anchored_name/holder"
+  printf 'fixture\n' \
+    > "$anchored_repo/$anchored_name/holder/P2_correctness_202609130020_inside-an-anchored-bare-repository.md"
+  if [[ -n "$(git -C "$anchored_repo" status --porcelain)" ]] \
+    || [[ -n "$(git -C "$anchored_repo" ls-files -s -- ":(literal)$anchored_name")" ]] \
+    || [[ "$(git -C "$anchored_repo/$anchored_name" rev-parse --is-inside-work-tree)" != false ]]; then
+    echo "the fixture was meant to be an ignored bare repository named [$anchored_name]" \
+      "that the work tree above records nothing under" >&2
+    exit 1
+  fi
+  anchored_rel_case "a listing inside a bare repository named [$anchored_name]" \
+    "$anchored_repo" "$anchored_name/holder" \
+    'fix-P2/correctness_inside-an-anchored-bare-repository' 1
+done
+
+# THE LEGITIMATE CALLERS. A TRACKED directory whose name begins with the same
+# token is inside the work tree, so discovery answers `true` at the listing and
+# no ascent happens at all -- which is exactly why it holds the repair to
+# supplying a top and nothing else. These answer the same at the previous head;
+# a repair that broke them would be the false red the arm was written against.
+anchored_ledger="$fixture_dir/repo-anchored-ledger"
+new_repo "$anchored_ledger"
+echo seed > "$anchored_ledger/seed.txt"
+mkdir -p "$anchored_ledger/C:" "$anchored_ledger/\\weird"
+printf 'fixture\n' > "$anchored_ledger/C:/P2_correctness_202609130021_an-anchored-ledger.md"
+printf 'one\n' > "$anchored_ledger/\\weird/P2_correctness_202609130022_an-anchored-twin.md"
+printf 'two\n' > "$anchored_ledger/\\weird/P2_correctness_202609130023_an-anchored-twin.md"
+git -C "$anchored_ledger" add -A
+git -C "$anchored_ledger" commit -q -m 'ledgers in directories named for an anchored token'
+if [[ "$(git -C "$anchored_ledger" ls-files -- ':(literal)C:' | wc -l)" != 1 ]] \
+  || [[ "$(git -C "$anchored_ledger" ls-files -- ':(literal)\weird' | wc -l)" != 2 ]]; then
+  echo 'the fixture was meant to record one finding under C: and two under \weird' >&2
+  exit 1
+fi
+anchored_rel_case 'a tracked ledger in a directory named [C:] resolves' \
+  "$anchored_ledger" 'C:' 'fix-P2/correctness_an-anchored-ledger' 0
+anchored_rel_case 'a tracked ledger in a directory named [\weird] is ambiguous' \
+  "$anchored_ledger" '\weird' 'fix-P2/correctness_an-anchored-twin' 1
+spelling_case 'a tracked ledger in a directory named [C:], every spelling' \
+  'fix-P2/correctness_an-anchored-ledger' 0 "$anchored_ledger/C:"
+
 # A SUPERPROJECT WHOSE RECORDS CANNOT BE READ IS REFUSED AND NEVER READ AS A
 # SUPERPROJECT THAT RECORDS NOTHING. `rev-parse --show-superproject-working-tree`
 # answers 0 with empty stdout AND empty stderr while the `ls-files` beneath it
