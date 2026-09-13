@@ -1225,6 +1225,29 @@ gitdir_pointer() {
 # root -- the ascent skipped, on a spelling of a listing whose other spelling
 # ascends. It comes off here while something with a separator in it is left,
 # which is what keeps `/`, `C:\` and `\` spelled as the roots they are.
+#
+# AND TWO WALKS IN THIS FILE DO NOT COME THROUGH HERE, WHICH IS A DIFFERENT
+# DOMAIN AND NOT A MISSED SITE. `records_path` and `recorded_kind_of` each climb
+# their argument with `anc="${anc%/*}"`, and what they climb is A GIT INDEX PATH:
+# every level goes straight to `ls-files -- ":(literal)$anc"`, git records index
+# entries with `/` and no other separator, and both arguments are built that way
+# -- `locate_listing` splits the caller's spelling on `/` alone to make
+# `listing_relpath`, and the other is one `--show-toplevel` answer with another
+# stripped off its front, which git writes with `/` on every platform, Windows
+# included. THIS rule is for NATIVE spellings, the ones a caller or a filesystem
+# wrote, which is exactly what its `'\'*` and `[A-Za-z]:*` arms are testing for.
+#
+# APPLYING IT THERE WOULD SKIP AN ANCESTOR THE INDEX CAN HOLD, and that is the
+# reason rather than the tidiness. Driven directly against this function:
+# `c:/sub` answers `c:/`, where the index walk answers `c:` -- a directory named
+# `c:` is an ordinary tracked path with its own fixtures in this suite, and `c:/`
+# is an entry no index holds, so the ancestor would be asked about under a name
+# that cannot match and the walk would end a level early. `\weird` answers `\`
+# where the index walk correctly stops, there being no ancestor: `\weird` is ONE
+# component of a POSIX path and the backslash in it divides nothing. For every
+# ordinary path the two agree -- `findings/deeper` gives `findings` either way --
+# and they part exactly where the native rule reads a separator the index does
+# not have.
 parent_path=''
 path_parent() {
   local path="$1" seps='/' nots='[!/]' native=0 tail upto stem
@@ -1558,6 +1581,10 @@ enclosing_work_tree() {
 # ENTRIES UNDER is a directory of that ledger's and says nothing about a
 # repository somebody nested inside it, while an ancestor recorded AT ITS OWN
 # NAME is a blob, and no entry of that ledger is named by a path through it.
+#
+# THE ANCESTOR WALK IS OVER AN INDEX PATH, which is why it shortens with
+# `${anc%/*}` and not through `path_parent` -- the two domains, and what the
+# native rule would do to `c:/sub` here, are in that function's header.
 records_path() {
   local where="$1" rel="$2" record name anc
   git_probe '0,128' -- -C "$where" ls-files -sz -- ":(literal)$rel"
@@ -2219,6 +2246,11 @@ locate_listing() {
 # ancestor's exact name is a blob, and the path is unnameable; anything else
 # means the ancestor is a directory in the ledger and the path below it is
 # simply untracked.
+#
+# AND THAT WALK IS OVER AN INDEX PATH TOO, shortened with `${anc%/*}` rather than
+# through `path_parent` for the reason stated in that function's header: this
+# climbs `listing_relpath`, which is built by splitting on `/` alone, and the
+# native rule would answer `c:/` where the index records `c:`.
 recorded_kind=''
 recorded_mode=''
 recorded_children=''
