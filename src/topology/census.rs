@@ -2909,90 +2909,115 @@ pub(crate) mod tests {
 
     #[test]
     fn the_census_transition_table_is_reproducible_from_the_folds_alone() {
-        let census = census();
-        let mut rows = 0usize;
-        for state in census.states() {
-            let recorded: Vec<&CensusTransition> = census.outgoing(state.id).collect();
-            if state.trace.len() >= census.bounds().max_trace {
-                assert!(
-                    recorded.is_empty(),
-                    "state {} sits at the trace ceiling and was extended anyway",
-                    state.id
-                );
-                assert!(
-                    !census.has_legal_transition(state.id),
-                    "state {} was never extended and reports a transition",
-                    state.id
-                );
-                continue;
-            }
-            let offers = classes(&state.fold);
-            assert_eq!(
-                recorded.len(),
-                offers.len(),
-                "state {} recorded {} answers for {} offers",
-                state.id,
-                recorded.len(),
-                offers.len()
-            );
-            let mut any_accepted = false;
-            for (offer, row) in offers.iter().zip(&recorded) {
-                assert_eq!(row.from, state.id);
-                assert_eq!(&*row.label, offer.label, "state {}", state.id);
-                match (state.fold.plan_transition(&offer.event), &row.outcome) {
-                    (Err(error), TransitionOutcome::Refused { reason }) => {
-                        assert_eq!(&**reason, error.to_string(), "state {}", state.id);
-                    }
-                    (Ok(_), TransitionOutcome::Truncated) => {
-                        any_accepted = true;
-                        assert!(
-                            census.truncated(),
-                            "state {}: a truncated offer in a census that does not say so",
-                            state.id
-                        );
-                    }
-                    (Ok(delta), TransitionOutcome::Accepted { to }) => {
-                        any_accepted = true;
-                        let mut next = state.fold.clone();
-                        next.apply_delta(delta);
-                        let landed = &census.states()[*to];
-                        assert_eq!(
-                            fingerprint(&next),
-                            fingerprint(&landed.fold),
-                            "state {} --{}--> {to} is not the state applying it reaches",
-                            state.id,
-                            offer.label
-                        );
-                        assert_eq!(
-                            landed.outcome,
-                            next.derived_outcome(),
-                            "state {to} was recorded with an outcome its own fold does not give"
-                        );
-                    }
-                    (Ok(_), answer) => panic!(
-                        "state {}: the fold accepts `{}` and the census recorded {answer:?}",
-                        state.id, offer.label
-                    ),
-                    (Err(error), answer) => panic!(
-                        "state {}: the fold refuses `{}` with `{error}` and the census recorded \
-                         {answer:?}",
-                        state.id, offer.label
-                    ),
+        for member in family() {
+            let census = member.census;
+            let mut rows = 0usize;
+            for state in census.states() {
+                let recorded: Vec<&CensusTransition> = census.outgoing(state.id).collect();
+                if state.trace.len() >= census.bounds().max_trace {
+                    assert!(
+                        recorded.is_empty(),
+                        "{}: state {} sits at the trace ceiling and was extended anyway",
+                        member.name,
+                        state.id
+                    );
+                    assert!(
+                        !census.has_legal_transition(state.id),
+                        "{}: state {} was never extended and reports a transition",
+                        member.name,
+                        state.id
+                    );
+                    continue;
                 }
-                rows += 1;
+                let offers = (member.classes)(&state.fold);
+                assert_eq!(
+                    recorded.len(),
+                    offers.len(),
+                    "{}: state {} recorded {} answers for {} offers",
+                    member.name,
+                    state.id,
+                    recorded.len(),
+                    offers.len()
+                );
+                let mut any_accepted = false;
+                for (offer, row) in offers.iter().zip(&recorded) {
+                    assert_eq!(
+                        row.from, state.id,
+                        "{}: a row recorded at state {} names another source",
+                        member.name, state.id
+                    );
+                    assert_eq!(
+                        &*row.label, offer.label,
+                        "{}: state {}",
+                        member.name, state.id
+                    );
+                    match (state.fold.plan_transition(&offer.event), &row.outcome) {
+                        (Err(error), TransitionOutcome::Refused { reason }) => {
+                            assert_eq!(
+                                &**reason,
+                                error.to_string(),
+                                "{}: state {}",
+                                member.name,
+                                state.id
+                            );
+                        }
+                        (Ok(_), TransitionOutcome::Truncated) => {
+                            any_accepted = true;
+                            assert!(
+                                census.truncated(),
+                                "{}: state {}: a truncated offer in a census that does not say so",
+                                member.name,
+                                state.id
+                            );
+                        }
+                        (Ok(delta), TransitionOutcome::Accepted { to }) => {
+                            any_accepted = true;
+                            let mut next = state.fold.clone();
+                            next.apply_delta(delta);
+                            let landed = &census.states()[*to];
+                            assert_eq!(
+                                fingerprint(&next),
+                                fingerprint(&landed.fold),
+                                "{}: state {} --{}--> {to} is not the state applying it reaches",
+                                member.name,
+                                state.id,
+                                offer.label
+                            );
+                            assert_eq!(
+                                landed.outcome,
+                                next.derived_outcome(),
+                                "{}: state {to} was recorded with an outcome its own fold does \
+                                 not give",
+                                member.name
+                            );
+                        }
+                        (Ok(_), answer) => panic!(
+                            "{}: state {}: the fold accepts `{}` and the census recorded {answer:?}",
+                            member.name, state.id, offer.label
+                        ),
+                        (Err(error), answer) => panic!(
+                            "{}: state {}: the fold refuses `{}` with `{error}` and the census \
+                             recorded {answer:?}",
+                            member.name, state.id, offer.label
+                        ),
+                    }
+                    rows += 1;
+                }
+                assert_eq!(
+                    census.has_legal_transition(state.id),
+                    any_accepted,
+                    "{}: state {}",
+                    member.name,
+                    state.id
+                );
             }
             assert_eq!(
-                census.has_legal_transition(state.id),
-                any_accepted,
-                "state {}",
-                state.id
+                rows,
+                census.transitions().len(),
+                "{}: the census holds a row no offer produced",
+                member.name
             );
         }
-        assert_eq!(
-            rows,
-            census.transitions().len(),
-            "the census holds a row no offer produced"
-        );
     }
 
     #[test]

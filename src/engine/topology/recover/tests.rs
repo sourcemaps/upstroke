@@ -1823,6 +1823,9 @@ struct FinishedPlanting {
     staging: Option<PathBuf>,
     proposal_pin: Option<GitRef>,
     answer_files: PlantedAnswerFiles,
+    orphan: String,
+    released: Vec<String>,
+    store: Vec<String>,
 }
 
 struct PlantedAnswerFiles {
@@ -1975,6 +1978,9 @@ fn plant_finished_run_with(
         pin
     });
     let answer_files = PlantedAnswerFiles::plant(&fixture);
+    let orphan = plant_unreachable_object(&fixture, tag);
+    let released = referenced_objects(&fixture);
+    let store = store_objects(&fixture.repo_root);
     FinishedPlanting {
         fixture,
         candidate,
@@ -1985,6 +1991,9 @@ fn plant_finished_run_with(
         staging,
         proposal_pin,
         answer_files,
+        orphan,
+        released,
+        store,
     }
 }
 
@@ -15298,6 +15307,7 @@ fn assert_finalized(planted: &FinishedPlanting, outcome: &RunOutcome, tag: &str)
         1,
         "{tag}: finalization appends nothing"
     );
+    assert_objects_kept(planted, tag);
 }
 
 struct FinalizationEffect {
@@ -15473,6 +15483,45 @@ fn assert_finalization_order(
     );
 }
 
+#[track_caller]
+fn assert_objects_kept(planted: &FinishedPlanting, tag: &str) {
+    let fixture = &planted.fixture;
+    let (fold, _) = replayed_with_events(fixture);
+    let inventory = ledger_inventory(fixture, &fold, &planted.released, &planted.store);
+    let store = store_objects(&fixture.repo_root);
+    let missing: Vec<&String> = planted
+        .store
+        .iter()
+        .filter(|object| store.binary_search(object).is_err())
+        .collect();
+    assert_eq!(
+        (
+            inventory.released_objects_missing,
+            inventory.store_objects_missing
+        ),
+        (0, 0),
+        "{tag}: R27 — finalization deleted an object the run's refs and worktrees referenced \
+         ({} checked) or one the store held before it ({} listed; missing {missing:?}, the \
+         planted orphan being {})",
+        inventory.released_objects_checked,
+        inventory.store_objects,
+        planted.orphan
+    );
+    assert!(
+        fixture
+            .manager()
+            .object_exists(&planted.orphan)
+            .expect("cat-file"),
+        "{tag}: R27 — the already-unreachable object the run never made is still in the store"
+    );
+    assert!(
+        crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+            .expect("fsck")
+            .contains(&planted.orphan),
+        "{tag}: and still unreachable: finalization neither pruned nor referenced it"
+    );
+}
+
 #[test]
 fn kill_after_report_before_each_cleanup_step() {
     use crate::topology::effects::LockSite;
@@ -15610,6 +15659,7 @@ fn kill_after_report_before_each_cleanup_step() {
             planted
                 .answer_files
                 .assert_untouched(&format!("{tag}: after the repeated finalization"));
+            assert_objects_kept(&planted, &format!("{tag}: after the repeated finalization"));
         }
         assert_eq!(
             cells,
@@ -16656,6 +16706,7 @@ fn a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_t
         !rundir::is_running(&fixture.public()),
         "the run lock went with the dead process"
     );
+    assert_objects_kept(&planted, "after the kill, before the restart");
 
     let runtime = runtime_holding_the_record();
     let certifies = AlwaysCertifies;
