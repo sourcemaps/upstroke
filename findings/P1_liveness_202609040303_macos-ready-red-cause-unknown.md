@@ -206,13 +206,17 @@ test that caused it.
 reaper's own pre-READY `_exit(1)` sites cannot produce it. Both recorded genuine failures end
 `status 1`, one after 2.001 s and one after 24 µs.
 
-**Swept under that rule: 296 distinct macOS job logs, 197 occurrences, every one injected.** 80
+**Swept under that rule: 296 distinct macOS job logs, 194 occurrences, every one injected.** 80
 `master` logs, the 34 failed pull-request and merge-queue logs, and — newly — the 185 retrievable
 logs of the **314 cancelled** `test (macos-latest)` jobs in the window: 299 rows, 296 distinct,
-the three `master` reds appearing in two sets each. 197 occurrences of
-`reaper did not initialize`: **195** the forced fixture, every one `status 7` with its injecting
-caller `a_parked_sigchld_target_exits_after_parent_setup_failure` reported `ok` in the same log,
-and **2** the lease fixture, already filed as
+the three `master` reds appearing in two sets each. **Occurrences are counted once per distinct
+job.** Jobs `101614908628`, `102390406978` and `102482993424` each appear in two of the three sets,
+byte-identical in both (one SHA-256 each across the pair), and each carries one forced occurrence;
+classifying all 299 rows counted those three twice and returned 197. Run once per distinct log the
+classifier exits 0 and returns **194** occurrences of `reaper did not initialize` — 73 in the
+`master` set, 32 in the failed set, 89 in the cancelled set: **192** the forced fixture, every one
+`status 7` with its injecting caller `a_parked_sigchld_target_exits_after_parent_setup_failure`
+reported `ok` in the same log, and **2** the lease fixture, already filed as
 `PR274-REAPER-EXIT-ASSERTION-RACES-THE-PARENTS-SIGKILL`. **Not one non-injected occurrence.**
 
 **Why that is not yet the answer.** A READY failure is only visible as this string when the failing
