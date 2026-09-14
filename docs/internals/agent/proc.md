@@ -889,8 +889,9 @@ launch barrier, and under that barrier the signal monitor refuses to
 kill or stop any registered group, so every running agent outlives a
 `SIGTERM` for as long as the kernel holds the helper.
 
-The acknowledged-exit wait after CLEANUP or CANCEL is deliberately not
-bounded by this; `ReaperEnding` is where that is written down.
+The wait after a CLEANUP or CANCEL the reaper **acknowledged** is
+deliberately not bounded by this, and the wait after a CLEANUP it did not
+acknowledge is; `ReaperEnding` is where both are written down.
 
 ## `mod termination` › `const HELPER_END_POLL_SLICE: Duration = Duration::from_millis(1);`
 
@@ -1123,18 +1124,38 @@ left in the last case, and the status it filled in the first. The
 descriptors it closes and the order are unchanged.
 
 **Which wait it makes is the caller's, and the two are not
-interchangeable.** `ReaperEnding` is the argument and its two variants
-carry the reason. `AcknowledgedExit`, which `close_and_wait` passes for
-`cleanup` and `cancel`, is master's loop unchanged: a blocking
-`waitpid(pid, &mut status, 0)` made again for as long as it is
-interrupted, and with the identity path on the blocking
+interchangeable.** `ReaperEnding` is the argument and its variants carry
+the reason. `AcknowledgedExit`, which `close_and_wait` passes for a
+`cleanup` or `cancel` the reaper acknowledged, is master's loop
+unchanged: a blocking `waitpid(pid, &mut status, 0)` made again for as
+long as it is interrupted, and with the identity path on the blocking
 `wait_through_identity`. **It is unbounded and must stay so** — the
 reaper's exit is what releases the cleanup lease the caller is about to
 act on, so a budget here would release that caller while the lease was
 still held, which is a worse defect than the one the other arm fixes.
 Row `PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` carves it out in
-those words. `AbandonedHelper`, which only `abandon` passes, is
-`wait_for_an_ended_helper`.
+those words. The other two variants take the bounded arm,
+`wait_for_an_ended_helper` and with the identity path on
+`wait_for_an_ended_helper_through_identity`: `UnacknowledgedCleanup`,
+which `cleanup` passes when its transaction answered anything but
+`REAPER_OK`, and `AbandonedHelper`, which only `abandon` passes.
+
+**The carve-out is the acknowledgement, not the operation.** Until the
+second round of review `cleanup` called `close_and_wait` whatever its
+transaction answered, so a CLEANUP the reaper did not acknowledge took
+the unbounded wait too, and `Supervisor::finish` could not reach its
+answer to that failure — arming fail-closed termination — for as long as
+the reaper stayed alive and uncollectable. Measured on `caf6bed0` and on
+`1e806e20` against a stand-in reaper whose acknowledgement pipe ended with
+no answer: `cleanup` and `finish` had not returned after 10s, and each
+returned within a millisecond of the stand-in being released. The wait is
+the same for all three unacknowledged answers, and
+`a_cleanup_the_reaper_did_not_acknowledge_returns_within_its_budget`
+drives each — the pipe ending with no answer, `REAPER_FAIL`, a frame that
+cannot be written — plus the first through the reaper's descriptor and
+`finish` over the first, asserting each returns inside a fixed ceiling
+with the stand-in still alive and uncollected, and that `finish` armed
+termination and returned its error.
 
 `the_acknowledged_exit_wait_after_cleanup_or_cancel_is_still_unbounded`
 holds the carve-out with two kinds of witness, because either alone can
@@ -1148,17 +1169,31 @@ witness dies of `SIGSYS`.
 
 ## `mod termination` › `enum ReaperEnding {`
 
-Which of `close_and_wait_reporting`'s two waits is being made, chosen by
-the calling site as `EndingWait` and `EndingRetry` are chosen, and for a
-sharper reason: these two differ in whether anything downstream depends
-on the reaper having gone.
+Why `close_and_wait_reporting` is ending a reaper, which decides which
+of its two waits it makes, chosen by the calling site as `EndingWait` and
+`EndingRetry` are chosen, and for a sharper reason: the waits differ in
+whether anything downstream depends on the reaper having gone.
 
-`AcknowledgedExit` is `cleanup` and `cancel`, through `close_and_wait`.
-The reaper holds the run's cleanup lease and its exit is what releases
-it, and those two callers go on to act as though it were free — so this
-wait stays unbounded, and bounding it would release them against a lease
-still held. Row `PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES`
-carves it out in exactly those terms.
+`AcknowledgedExit` is a `cleanup` or `cancel` the reaper acknowledged,
+through `close_and_wait`. The reaper holds the run's cleanup lease and
+its exit is what releases it, and those two callers go on to act as
+though it were free — so this wait stays unbounded, and bounding it would
+release them against a lease still held. Row
+`PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` carves it out in
+exactly those terms.
+
+`UnacknowledgedCleanup` is a `cleanup` whose transaction answered
+anything but `REAPER_OK`: the frame could not be written, the pipe ended
+with no answer, or the reaper refused. It takes the bounded wait,
+because nothing acts on this reaper having gone: `cleanup` answers
+`false`, `Supervisor::finish` answers that by arming fail-closed
+termination and returning an error, and a reaper still running settles
+the group it registered once its command pipe closes, as it does when
+its coordinator dies, and holds the lease until it exits whether or not
+this process is there to collect it. `cancel` has no such variant
+because it has no such wait: a CANCEL not acknowledged within its two
+seconds arms fail-closed termination and closes the descriptors without
+waiting at all.
 
 `AbandonedHelper` is `abandon` and nothing else. It is **not** true
 that such a reaper holds no lease: the child takes the shared hold in
@@ -1402,7 +1437,8 @@ report through `HelperEnd`, and `spawn_reaper`'s parent-side
 settled too, on the four sites that still exist: `Reaper::abandon` and
 the three that reach `end_unready_guard` all take
 `wait_for_an_ended_helper`, and `close_and_wait`'s acknowledged exit is
-the carve-out the row wrote for it. The module's remaining
+the carve-out the row wrote for it — the wait after a CLEANUP the reaper
+acknowledged, and not every wait after a CLEANUP. The module's remaining
 discarded signals are group signals and test children, deliberately so:
 `cleanup_reaper_group` re-sends `SIGKILL` until
 `group_has_non_zombie_members` observes the group empty, `stop_groups`
@@ -1619,7 +1655,13 @@ answers: the pid collected, or `-1` and the errno. This is the
 `PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` its one caller is
 `close_and_wait_reporting`'s acknowledged-exit arm;
 `wait_for_an_ended_helper_through_identity` is the bounded twin every
-abandoning site takes. The status word is
+abandoning site takes, and so does the end of a reaper that did not
+acknowledge CLEANUP. `WEXITED` alone here and `WEXITED | WNOHANG` there
+are the two sets of options DESIGN §15 says turning the identity path on
+asks a host's policy to permit, and
+`each_helper_wait_passes_the_options_documented_for_it` holds each wait,
+through the descriptor and by number, to its own options under a policy
+fatal on any others. The status word is
 rebuilt from `si_code` and `si_status` by `wait_status_of` so that
 `describe_helper_end` reads it as it reads `waitpid`'s;
 `identity_wait_status_helper` holds the two equal for a child that
@@ -1817,8 +1859,9 @@ unreaped.
 `WhileInterrupted` is bounded by `INTERRUPTED_WAIT_ATTEMPTS`, which
 `abort_setup`'s inline loop was not. A wait is interrupted by a signal
 that arrived while it blocked, so the retry exists for a handful of
-deliveries; a wait answered `EINTR` that many times running is being
-refused rather than interrupted, and §7 asks that a retry be bounded.
+deliveries; a wait answered `EINTR` that many times in one ending is
+being refused rather than interrupted, and §7 asks that a retry be
+bounded.
 Unbounded, the loop is a hang where a hang is worse than the leak it
 replaces: the caller receives no answer at all rather than a wait it
 can read. `an_aborted_guard_whose_waits_are_all_interrupted_reports_that_and_returns`
@@ -1834,7 +1877,9 @@ reaches it, and a helper in uninterruptible I/O with `SIGKILL` pending
 is exactly that case — a blocking `waitpid` on it yields no `EINTR` to
 count and simply never returns, so `INTERRUPTED_WAIT_ATTEMPTS` is never
 approached. `HELPER_END_BUDGET` is the bound on that axis and
-`wait_for_an_ended_helper` holds both. Measured on the head carrying
+`poll_for_an_ended_helper` holds both, counting every `EINTR` in the
+ending rather than only those in a row; its section says which test
+holds each rule. Measured on the head carrying
 this bound and not that one: the `abort-setup` shape of
 `ending_a_helper_that_will_not_die_helper` — which is the site with
 `WhileInterrupted` and its 1024 attempts — ran to `timeout 30s` and
@@ -1881,10 +1926,12 @@ the whole of what row
 `PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` changed: the same
 `waitpid` at the same place with the same status pointer, asked with
 `WNOHANG` and polled every `HELPER_END_POLL_SLICE` until the helper is
-collectable or `HELPER_END_BUDGET` runs out. Four sites take it —
-`Reaper::abandon` and the three that reach `end_unready_guard` — so
+collectable or `HELPER_END_BUDGET` runs out. Four abandoning sites take
+it — `Reaper::abandon` and the three that reach `end_unready_guard` — and
+so does the end of a reaper that did not acknowledge CLEANUP, so
 `EndingWait` and `EndingRetry` still come from the calling site and are
-passed straight through.
+passed straight through. The loop itself is `poll_for_an_ended_helper`;
+this function is the call it polls.
 
 **Two bounds on two axes, and the second is why the first was not
 enough.** `EndingRetry`'s `INTERRUPTED_WAIT_ATTEMPTS` bounds a wait
@@ -1901,6 +1948,27 @@ back as `STILL_THERE_AT_THE_BUDGET` and is never resolved into `pid`;
 the status is `None` beside it, because a wait that collected nothing
 filled none.
 
+## `mod termination` › `fn poll_for_an_ended_helper(`
+
+`wait_for_an_ended_helper`'s loop, over whatever each `ask` answered,
+with the budget passed in. It exists so the two bounds can be driven
+with answers no host policy here can give in order: `EINTR` between
+answers of *not yet*. The seccomp policies this module's tests install
+are stateless, so each answers every `wait4` it matches the same way,
+and a fixture could make every wait interrupted or none of them.
+
+The rules it keeps, and the three sequences
+`the_retry_bound_counts_interruptions_in_an_ending_and_not_calls` holds
+them with. *Not yet* is asked again after `HELPER_END_POLL_SLICE` and is
+never counted: 1023 answers of *not yet*, one `EINTR` and then the
+helper collect it under `WhileInterrupted`, where counting calls would
+have ended the wait at the `EINTR`. Every `EINTR` in the ending counts,
+not only those in a row: 1024 of them, each after an answer of *not
+yet*, end the wait before the helper answers, where a count reset by
+*not yet* would go on to collect the helper. And `Once` reports the first interruption
+however late it comes: five answers of *not yet* and then `EINTR` return
+the `EINTR` on the sixth ask. The budget passed is far beyond what those
+sequences take, so only the count can end one early.
 ## `mod termination` › `fn wait_for_an_ended_helper_through_identity(`
 
 The same budget and the same poll, asked of `waitid(P_PIDFD, ..., WEXITED
