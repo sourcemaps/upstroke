@@ -4239,7 +4239,8 @@ end and the next process finalizes it then refuses. Both reach one
 
 ## `struct ArmedFinalization {`
 
-Hooks that inject an error return at one `(site, phase)` of one
+Hooks that inject an error return — or, in `finalization_kill_child`, a
+kill — at one `(site, phase)` of one
 finalization, the nth time it is reached, so the T-FINALIZE matrix is
 driven at every cleanup site in turn and the next resume is shown to
 converge from each. `answering` arms the first execution;
@@ -4256,6 +4257,18 @@ first.
 
 Armed to answer `injection` — an error return, or the kill the
 finalization kill child dies by — the first time `at` is consulted.
+
+## `impl ArmedFinalization` › `fn reporting_to(mut self, path: &Path) -> Self {`
+
+Also writes every consultation the bundle's effect and run-directory hooks
+answer to `path`, one JSON `(site, phase)` line each, appended before the
+answer is given (`report`, the two-crash proof's writer). A child the armed
+kill takes therefore leaves its parent the cells it consulted, the armed one
+last: the harness's observations carried across the process boundary, since
+the harness dies with the child. The parent needs them for one effect.
+`assert_finalization_order` reads the run lock's release from the harness,
+and after a death the lock file cannot tell a release through the funnel
+from the death, which frees it too.
 
 ## `fn the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_rewritten()` › `let records = hooks.ledger_records();`
 
@@ -4602,10 +4615,33 @@ staged or renamed nothing.
 
 ## `fn finalization_kill_child() {`
 
-The child of `a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_the_next_resume`:
-resumes the run its parent planted at its end and dies by abort at
-`Worktree.RemoveExecutionRoot`'s after phase — inside finalization, after
-the last cleanup step's effect and before the guards drop.
+The child of the finalization kill tests (`kill_inside_finalization`):
+resumes the run its parent planted at its end, armed with `Injection::Kill`
+at the one `(site, phase)` the parent names in `UPSTROKE_TEST_KILL_SITE`
+(the cell as JSON), reporting every consultation to the file
+`UPSTROKE_TEST_KILL_REPORT` names (`reporting_to`), and dies by abort at
+that cell's first consultation. The hooks only answer. The abort is the
+production funnels' own: `rundir`'s and `workspace_manager::hooks`'s
+`apply` turn `Injection::Kill` into `std::process::abort()`, so the death
+lands exactly where the same funnel returns the error-return matrix's
+injected error. A recovery that returns past the armed kill writes what it
+returned to the report and panics. Until 2026-09-14 the child was armed at
+`Worktree.RemoveExecutionRoot`'s after phase alone — inside finalization,
+after the last cleanup step's effect and before the guards drop.
+
+## `fn kill_inside_finalization(`
+
+Spawns `finalization_kill_child` against `planted`, armed at `cell`
+(`run_kill_child`: this test binary again, `--exact --ignored`). The death
+must be the abort's (`died_by_abort`), not merely an unsuccessful exit,
+which a child that returned past the kill and panicked also has; that
+refusal quotes the child's report. The last consultation the child
+reported must be `cell`. Returns the reported consultations recorded into
+a fresh harness, the shape `assert_finalization_order` takes. The control
+`control-kill-child-answers-an-error-instead-of-dying`, the child armed
+with `Injection::Error`, fails both halves of the matrix at their first
+cell on the child's exit 101
+(`~/pr10-evidence/fix-g5-c/mutations/at-71229117/`).
 
 ## `fn a_kill_inside_finalization_after_the_execution_root_is_r…`
 
@@ -4618,7 +4654,80 @@ resume finds the report current, nothing left to prune, releases the lock
 through the funnel and refuses. Since round 7 the object store is read
 after the death and again after the restart (`assert_objects_kept`): the
 restart takes the fresh branch, and the same recipe as the matrix's,
-`st18-fresh-branch-prunes-objects-real-kill`, fails it there.
+`st18-fresh-branch-prunes-objects-real-kill`, fails it there. Since
+2026-09-14 the child is spawned through `kill_inside_finalization`; the cell
+is also one of the Complete kill matrix's, and this test keeps what the
+matrix does not read there: every effect's own predicate after the death,
+the release's included, and R27 before the restart.
+
+## `fn kill_at_every_finalization_cell(outcome: &RunOutcome) {`
+
+The ST-18 matrix executed as kills. The child is killed at every cell of
+`finalization_sites(outcome)`: both hook phases of every effect's site, in
+effect order, 26 at Complete and 24 at Halted asserted as exact counts, the
+cells `kill_after_report_before_each_cleanup_step` drives with error
+returns. Each cell plants a finished run with every kind of residue, kills
+the child there (`kill_inside_finalization`) and requires, in order:
+
+- the log untouched by the death, and the answer files byte-identical;
+- `assert_finalization_order` over what the death left: every effect before
+  the cell done, the cell's own effect done only at its after phase, nothing
+  later, the release read from the child's reported consultations;
+- the next resume, in this process, finalizing what is left and refusing,
+  with the report "regenerated" when the death came before its publication
+  and "already current" when it came after;
+- `assert_finalized`, and the log still untouched;
+- the report naming the runner `run_started` recorded, and the run lock
+  released through its funnel by that resume;
+- replay from disk twice equal, ending at the outcome.
+
+Why kills as well as error returns. The PR10 record's R11 reads an error
+return at a hook phase as leaving the durable state a kill there leaves.
+Gate 5's first run graded "kills between every terminal-finalization
+effect" asserted on that reading, executed as a real kill at one cell only
+(`reviews/2026-09-14-gate-G5.md` on `gate/g5-run1`, §8 groups 1 and 5).
+Here every cell's death is held to the order the error-return matrix
+asserts at the same cell. The error-return matrix also has a blind spot the
+reading does not name: its faulted resume and its next resume share a
+process, so a convergence that depends on what the interrupted attempt held
+in memory passes it. The recipe `finalize-remembers-the-report-attempt-in-memory`
+lets the fresh branch trust a current report only when this process
+attempted the write, and otherwise return without pruning. It passes
+`kill_after_report_before_each_cleanup_step` and the single real kill, and
+fails this matrix at `Halted/RunDir.WriteReport/after` and
+`Complete/RunDir.WriteReport/after`.
+
+The matrix fails at the cell named under four more recipes, all under
+`~/pr10-evidence/fix-g5-c/mutations/at-71229117/`:
+
+- `finalize-fresh-branch-skips-cleanup`, a resume that reads a current
+  report as a finished finalization: `…/RunDir.WriteReport/after`;
+- `finalize-reads-a-missing-report-as-current`:
+  `…/RunDir.WriteReport/before`;
+- `finalize-skips-candidate-pins-once-prepared-pins-are-gone`:
+  `…/Ref.DeletePreparedPin/after`;
+- `remove-execution-root-refuses-an-absent-root`, a removal that refuses a
+  root the dead child already removed: `…/Worktree.RemoveExecutionRoot/after`.
+
+On the build box each outcome took about 30 s alone
+(`~/pr10-evidence/fix-g5-c/matrix/timing-complete-alone-71229117.log`,
+`timing-halted-alone-71229117.log`), against 5.67 s for the error-return
+matrix's 50 cells (`timing-error-matrix-alone-71229117.log`). About 1.07 s
+of each cell is the child's spawn to its death
+(`profile-halted-instrumented.log`, an uncommitted timer). On that host a
+`python3` `os.abort()` takes 1.06 s too, where `os._exit` and a `SIGKILL` of
+itself take 0.00 s, and `core_pattern` names a pipe helper
+(`abort-cost-on-this-box.log`).
+
+## `fn a_kill_at_every_cell_of_a_complete_finalization_converge…`
+
+The Complete half of the kill matrix: 26 cells, the candidates ref's
+deletion among them.
+
+## `fn a_kill_at_every_cell_of_a_halted_finalization_converges_…`
+
+The Halted half: 24 cells. One test per outcome, so the two halves run in
+parallel.
 
 ## `fn kill_after_run_finished_before_report() {`
 
