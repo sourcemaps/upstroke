@@ -3489,7 +3489,22 @@ env_case 'a repository the superproject records at 160000' \
   "$env_super/inner" . 'fix-P2/correctness_under-a-pinned-gitlink' 1 \
   "GIT_WORK_TREE=$env_super/inner" \
   "GIT_DIR=$env_super/inner/.git" \
-  "GIT_INDEX_FILE=$env_super/inner/.git/index"
+  "GIT_INDEX_FILE=$env_super/inner/.git/index" \
+  "GIT_TRACE=3" \
+  "GIT_LITERAL_PATHSPECS=1"
+# THE SAME ROW AGAINST TWO VARIABLES THAT ARE NOT LEDGER PINS BUT MOVED IT ALL THE
+# SAME, and they are here because the round before this left them able to. A
+# `GIT_TRACE=3` writes git's trace into descriptor 3 -- which `capture` had open as
+# the copy of git's stdout, so `--is-inside-work-tree` read `true` as `false`, the
+# ascent to the superproject was skipped, and the submodule's own index answered:
+# exit 0 `conforms` on this exact gitlink. `GIT_LITERAL_PATHSPECS=1` turns the
+# `:(literal)<path>` every `ls-files` here sends into the literal name
+# `:(literal)<path>`, which matches nothing, so the ascent's `records_path` saw no
+# `160000` and did not refuse. Both are the initialised-submodule ledger switch this
+# pull request repairs, reached by an environment variable rather than by a spelling;
+# `capture` now runs the producer with 3 and 4 closed and the pathspec-magic variables
+# are unset at the top of the validator, so each gives the clean verdict here -- and
+# `env_case` asserts that with the SAME exit AND the same bytes the clean run gives.
 
 # AND A PIN THAT NAMES NOTHING IS THE SAME RULE AND NOT A REFUSAL OF ITS OWN. A
 # `GIT_DIR` that is not a git directory made every probe exit 128 and the run
@@ -3506,6 +3521,117 @@ env_case 'a standalone repository under a pin that names nothing' \
 env_case 'a standalone repository under another repository index' \
   "$env_standalone" . 'fix-P2/correctness_an-exported-work-tree' 0 \
   "GIT_INDEX_FILE=$env_super/.git/index"
+
+# ---- A RELATIVE PIN IS THE CALLER'S, AND `-C` MUST NOT RE-ANCHOR IT INSIDE THE LISTING ----------
+#
+# `environment_children` roots the listing to `-C` into it and re-exports the pins,
+# and a pin the caller spelled RELATIVE is resolved from wherever `-C` leaves git. A
+# POSIX-relative spelling that only LOOKS anchored -- `C:/repo.git`, or a
+# backslash-led `\meta/repo.git` -- was left unrooted, so with the intended metadata
+# at `<caller>/C:/repo.git` and a SECOND repository's metadata planted at
+# `<listing>/C:/repo.git`, git resolved the pin inside the listing and read the rogue
+# ledger: a finding it never filed conformed at exit 0. The pins are now rooted against
+# the caller's own directory by the same anchor test the rest of the file uses, so the
+# rogue is unreachable. The absolute spelling is the control that never had the defect.
+relpin_wt="$fixture_dir/relpin/wt"
+mkdir -p "$fixture_dir/relpin/C:"
+new_repo "$relpin_wt"
+printf 'findings/\n' > "$relpin_wt/.gitignore"
+echo seed > "$relpin_wt/seed"
+git -C "$relpin_wt" add -A && git -C "$relpin_wt" commit -q -m 'the intended ledger records no finding'
+mv "$relpin_wt/.git" "$fixture_dir/relpin/C:/repo.git"
+mkdir -p "$relpin_wt/findings"
+echo untracked > "$relpin_wt/findings/P2_correctness_202609100001_relative-pin.md"
+new_repo "$fixture_dir/relpin/donor"
+mkdir -p "$fixture_dir/relpin/donor/findings"
+echo rogue > "$fixture_dir/relpin/donor/findings/P2_correctness_202609100001_relative-pin.md"
+git -C "$fixture_dir/relpin/donor" add -A && git -C "$fixture_dir/relpin/donor" commit -q -m 'a rogue ledger'
+mkdir -p "$relpin_wt/findings/C:"
+mv "$fixture_dir/relpin/donor/.git" "$relpin_wt/findings/C:/repo.git"
+relpin_rc=0
+( cd "$fixture_dir/relpin" \
+  && env GIT_DIR="C:/repo.git" GIT_WORK_TREE="$relpin_wt" \
+    "$BASH" "$branch_validator" 'fix-P2/correctness_relative-pin' "$relpin_wt/findings" ) >/dev/null 2>&1 \
+  || relpin_rc=$?
+if [[ "$relpin_rc" != 1 ]]; then
+  echo "a relative GIT_DIR 'C:/repo.git' must be rooted against the caller and not re-anchored" \
+    "inside the listing; got $relpin_rc" >&2
+  exit 1
+fi
+relpin_abs_rc=0
+( cd "$fixture_dir/relpin" \
+  && env GIT_DIR="$fixture_dir/relpin/C:/repo.git" GIT_WORK_TREE="$relpin_wt" \
+    "$BASH" "$branch_validator" 'fix-P2/correctness_relative-pin' "$relpin_wt/findings" ) >/dev/null 2>&1 \
+  || relpin_abs_rc=$?
+if [[ "$relpin_abs_rc" != 1 ]]; then
+  echo "the absolute spelling of the same pin is the control and must also refuse; got $relpin_abs_rc" >&2
+  exit 1
+fi
+
+# ---- THE LEDGER'S RECORDED TYPE DECIDES, NOT THE CHECKOUT'S SHAPE, in the pinned world too ------
+#
+# The environment fallback used to look at the CHECKOUT shape before the recorded
+# type, which the records world never does, and two shapes turned on it.
+#
+# A `skip-worktree` finding whose directory the deployment REMOVED is recorded all the
+# same: the index still holds `findings/<finding>` at 100644 and `git status` is clean.
+# Requiring the directory to exist made the verdict depend on the checkout -- the same
+# committed ledger conformed with an empty `findings/` present and refused without it.
+# It conforms now whether or not the checkout materialised the directory.
+sparse_wt="$fixture_dir/sparse-deployment/wt"
+mkdir -p "$fixture_dir/sparse-deployment"
+new_repo "$sparse_wt"
+mkdir -p "$sparse_wt/findings"
+echo fixture > "$sparse_wt/findings/P2_correctness_202609100004_a-sparse-finding.md"
+git -C "$sparse_wt" add -A && git -C "$sparse_wt" commit -q -m 'one committed finding'
+mv "$sparse_wt/.git" "$fixture_dir/sparse-deployment/repo.git"
+sparse_pins=( "GIT_DIR=$fixture_dir/sparse-deployment/repo.git" "GIT_WORK_TREE=$sparse_wt" )
+( cd "$sparse_wt" && env "${sparse_pins[@]}" \
+  git update-index --skip-worktree findings/P2_correctness_202609100004_a-sparse-finding.md )
+rm "$sparse_wt/findings/P2_correctness_202609100004_a-sparse-finding.md"
+rmdir "$sparse_wt/findings"
+if [[ -n "$( cd "$sparse_wt" && env "${sparse_pins[@]}" git status --porcelain )" ]] \
+  || [[ -e "$sparse_wt/findings" ]]; then
+  echo 'the sparse fixture was meant to be a clean index with its findings/ directory removed' >&2
+  exit 1
+fi
+sparse_rc=0
+( cd "$sparse_wt" && env "${sparse_pins[@]}" \
+  "$BASH" "$branch_validator" 'fix-P2/correctness_a-sparse-finding' findings ) >/dev/null 2>&1 \
+  || sparse_rc=$?
+if [[ "$sparse_rc" != 0 ]]; then
+  echo "a committed finding whose checkout directory was removed must still conform; got $sparse_rc" >&2
+  exit 1
+fi
+
+# A committed symlink materialised by `core.symlinks=false` is a REGULAR FILE on disk
+# holding its target text. Reading those bytes as a listing MANUFACTURED a finding: the
+# ledger records `findings` at 120000, and the records world refuses that, but the
+# pinned fallback read the checkout file and resolved the name its target spelled. It is
+# refused now for the recorded mode, exactly as the records world refuses it.
+mat_wt="$fixture_dir/materialised-deployment/wt"
+mkdir -p "$fixture_dir/materialised-deployment"
+new_repo "$mat_wt"
+ln -s P2_correctness_202609100005_a-materialised-link.md "$mat_wt/findings"
+git -C "$mat_wt" add -A && git -C "$mat_wt" commit -q -m 'findings is a symlink naming a finding'
+git -C "$mat_wt" config core.symlinks false
+rm "$mat_wt/findings"
+git -C "$mat_wt" checkout -- findings
+if [[ -L "$mat_wt/findings" || ! -f "$mat_wt/findings" ]]; then
+  echo 'note: skipping the materialised-symlink deployment case (this git left the link a link)' >&2
+else
+  mv "$mat_wt/.git" "$fixture_dir/materialised-deployment/repo.git"
+  mat_pins=( "GIT_DIR=$fixture_dir/materialised-deployment/repo.git" "GIT_WORK_TREE=$mat_wt" )
+  mat_rc=0
+  mat_out="$( cd "$mat_wt" && env "${mat_pins[@]}" \
+    "$BASH" "$branch_validator" 'fix-P2/correctness_a-materialised-link' findings 2>&1 )" || mat_rc=$?
+  if [[ "$mat_rc" != 1 ]] || [[ "$mat_out" != *'as mode 120000'* ]]; then
+    echo "a materialised 120000 link under pins must refuse for the recorded mode, not read its" \
+      "target text; got $mat_rc" >&2
+    printf '%s\n' "$mat_out" >&2
+    exit 1
+  fi
+fi
 
 # ---- what git RECORDS, not what the checkout happens to hold -----------------------------------
 #
