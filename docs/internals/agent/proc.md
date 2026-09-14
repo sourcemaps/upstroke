@@ -308,6 +308,18 @@ limit, timeout and wait-error arms elsewhere. A before answer of `Error`
 refuses the termination without attempting it; an after answer of `Error`
 reports a kill that happened.
 
+The fate is stored here, `Gone`, as soon as the primitive answers `Ok` —
+that answer is the tree-level evidence — and before the after phase is
+consulted. Every caller stored `Gone` itself on an `Ok` from this function,
+so an after answer of `Error` left a completed termination `Unresolved`:
+on Windows, where the timeout and limit arms terminate through here, the
+fate the invocation ledger was handed contradicted the residue authority,
+whose `Process.Terminate` after phase leaves R22 holding nothing, while
+the Unix arms (`terminate_supervised`) already stored `Gone` before their
+after phase. `a_fault_after_the_terminate_primitive_reports_the_child_gone`
+failed on the Windows guest at `722ac99d` on exactly that and passes with
+the fate stored here.
+
 ## `fn terminate_supervised`
 
 The Unix termination of a supervised child at the output limit or the
