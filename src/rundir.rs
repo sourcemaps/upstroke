@@ -901,6 +901,53 @@ fn sync_dir(dir: &Path, ledger: &DurabilityLedger) -> Result<(), UpstrokeError> 
     Ok(())
 }
 
+/// [`sync_dir`] taken to make one entry's removal durable, with that entry
+/// observed: whether `entry` is present is read by `symlink_metadata` in the
+/// statement immediately before the barrier and carried on the ledger's
+/// [`DurableStep::SyncedDirectory`] record as the entry observed
+/// ([`util::EntryObserved`]), as `workspace_manager::sync_checkout_removed`
+/// carries the checkout's. A record carrying the entry observed absent is the
+/// proof that the barrier followed the removal; a record of the directory
+/// alone is written just the same by a barrier taken before it (Gate 5's
+/// review round 3, on the power-loss witness of
+/// `PR10-RECLAIM-RECORD-DROPPED-BEFORE-DURABLE-DELETION`). As with
+/// [`sync_dir`], the record is written once the barrier has returned, so a
+/// record is a barrier that held.
+///
+/// # Errors
+///
+/// An I/O error reading `entry` other than its absence, or the barrier's I/O
+/// error naming the directory.
+fn sync_dir_observing(
+    dir: &Path,
+    entry: &Path,
+    ledger: &DurabilityLedger,
+) -> Result<(), UpstrokeError> {
+    let present = match fs::symlink_metadata(entry) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: entry.to_path_buf(),
+                source,
+            });
+        }
+    };
+    util::fsync_dir(dir).map_err(|source| UpstrokeError::Io {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    ledger.record_entry(
+        DurableStep::SyncedDirectory,
+        dir,
+        util::EntryObserved {
+            path: entry.to_path_buf(),
+            present,
+        },
+    );
+    Ok(())
+}
+
 /// Create a directory and everything above it.
 fn create_dir(dir: &Path) -> Result<(), UpstrokeError> {
     fs::create_dir_all(dir).map_err(|source| UpstrokeError::Io {
@@ -1515,14 +1562,17 @@ pub fn unrecorded_report_staging(
 /// gone is removed on its own, after the same barrier, since an absent name is
 /// not proof its deletion reached one; something that is not a directory
 /// standing at the recorded name is not what this writer made and is left as
-/// found, the record removed. Then the staging-shaped entries no record names
-/// are listed, for the caller to name: passed over, never removed, never
-/// adopted. The barrier goes between the two removals because the two halves
-/// need not share a filesystem: a record removed ahead of it is lost to a
-/// power loss that restores the directory it named — and the write that
-/// follows publishes its own record over the name — leaving a directory of the
-/// run's own making that no record names and every later write passes over
-/// (`PR10-RECLAIM-RECORD-DROPPED-BEFORE-DURABLE-DELETION`).
+/// found, the record removed after the same barrier. Then the staging-shaped
+/// entries no record names are listed, for the caller to name: passed over,
+/// never removed, never adopted. The barrier goes between the two removals
+/// because the two halves need not share a filesystem: a record removed ahead
+/// of it is lost to a power loss that restores the directory it named — and the
+/// write that follows publishes its own record over the name — leaving a
+/// directory of the run's own making that no record names and every later
+/// write passes over (`PR10-RECLAIM-RECORD-DROPPED-BEFORE-DURABLE-DELETION`).
+/// The barrier carries the recorded name as it found it
+/// ([`sync_dir_observing`]), so its ledger record shows whether it followed
+/// the removal.
 ///
 /// # Errors
 ///
@@ -1550,7 +1600,7 @@ fn reclaim_report_staging(
                 });
             }
         }
-        sync_dir(public, ledger)?;
+        sync_dir_observing(public, &recorded, ledger)?;
         remove_file_if_present(&report_staging_record(private))?;
     }
     unrecorded_report_staging(public, private)
