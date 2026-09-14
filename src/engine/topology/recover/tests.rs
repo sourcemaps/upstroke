@@ -15141,6 +15141,7 @@ struct ArmedSite {
     injection: Injection,
     nth: usize,
     seen: usize,
+    report: Option<PathBuf>,
 }
 
 impl ArmedSite {
@@ -15149,6 +15150,12 @@ impl ArmedSite {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .hook(site, phase);
+        if let Some(path) = &self.report {
+            report(
+                path,
+                &serde_json::to_string(&(site, phase)).expect("a consulted cell serializes"),
+            );
+        }
         if (site, phase) != self.at {
             return Injection::Proceed;
         }
@@ -15186,12 +15193,19 @@ impl ArmedFinalization {
             injection,
             nth,
             seen: 0,
+            report: None,
         };
         Self {
             inner: HarnessTopologyHooks::new(Arc::clone(harness)),
             effects: armed(),
             rundir: armed(),
         }
+    }
+
+    fn reporting_to(mut self, path: &Path) -> Self {
+        self.effects.report = Some(path.to_path_buf());
+        self.rundir.report = Some(path.to_path_buf());
+        self
     }
 }
 
@@ -15887,6 +15901,7 @@ impl BarrierHooks {
             injection,
             nth: 1,
             seen: 0,
+            report: None,
         };
         Self {
             inner: HarnessTopologyHooks::new(Arc::clone(harness)),
@@ -17075,7 +17090,7 @@ fn fresh_report_hook_errors_stop_cleanup_and_retry() {
 const FINALIZATION_KILL_CHILD: &str = "engine::topology::recover::tests::finalization_kill_child";
 
 #[test]
-#[ignore = "spawned as a subprocess by the finalization kill test"]
+#[ignore = "spawned as a subprocess by the finalization kill tests"]
 fn finalization_kill_child() {
     let repo_root = PathBuf::from(
         std::env::var("UPSTROKE_TEST_KILL_REPO").expect("the parent names the repository"),
@@ -17083,16 +17098,17 @@ fn finalization_kill_child() {
     let git_dir = PathBuf::from(
         std::env::var("UPSTROKE_TEST_KILL_GITDIR").expect("the parent names the git dir"),
     );
+    let cell: (EffectSiteId, HookPhase) = serde_json::from_str(
+        &std::env::var("UPSTROKE_TEST_KILL_SITE").expect("the parent names the cell"),
+    )
+    .expect("the cell the parent names parses");
+    let report_path = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_REPORT").expect("the parent names the report"),
+    );
     let repo_key = RepoKey::v1(&std::fs::canonicalize(&git_dir).expect("the git dir exists"));
     let harness = harness();
-    let mut hooks = ArmedFinalization::answering(
-        &harness,
-        (
-            EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot),
-            HookPhase::After,
-        ),
-        Injection::Kill,
-    );
+    let mut hooks =
+        ArmedFinalization::answering(&harness, cell, Injection::Kill).reporting_to(&report_path);
     let runtime = runtime_holding_the_record();
     let liveness = FakeOwnerLiveness::new();
     let view = DisposableDirView::new(ContainerTrace::default());
@@ -17137,16 +17153,62 @@ fn finalization_kill_child() {
         &mut hooks,
         &mut warnings,
     );
-    panic!(
+    let returned = format!(
         "the kill inside finalization did not take this process: {:?}",
         outcome.map(|(recovered, _)| recovered)
     );
+    report(&report_path, &returned);
+    panic!("{returned}");
+}
+
+#[track_caller]
+fn kill_inside_finalization(
+    planted: &FinishedPlanting,
+    cell: (EffectSiteId, HookPhase),
+    tag: &str,
+) -> Arc<Mutex<HookHarness>> {
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child};
+
+    let fixture = &planted.fixture;
+    let report_path = fixture.root.join("finalization-kill-report");
+    let armed = serde_json::to_string(&cell).expect("a cell serializes");
+    let status = run_kill_child(
+        FINALIZATION_KILL_CHILD,
+        &[
+            ("UPSTROKE_TEST_KILL_REPO", fixture.repo_root.as_os_str()),
+            ("UPSTROKE_TEST_KILL_GITDIR", fixture.git_dir.as_os_str()),
+            ("UPSTROKE_TEST_KILL_SITE", std::ffi::OsStr::new(&armed)),
+            ("UPSTROKE_TEST_KILL_REPORT", report_path.as_os_str()),
+        ],
+    );
+    assert!(
+        died_by_abort(&status),
+        "{tag}: the child did not die by the kill inside finalization: {status:?}; it reported:\n{}",
+        std::fs::read_to_string(&report_path).unwrap_or_default()
+    );
+    let consulted: Vec<(EffectSiteId, HookPhase)> = std::fs::read_to_string(&report_path)
+        .expect("the child reported what it consulted")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each line the child reported is a cell"))
+        .collect();
+    assert_eq!(
+        consulted.last(),
+        Some(&cell),
+        "{tag}: the kill took the child at the armed cell, the last one it consulted"
+    );
+    let observed = harness();
+    for (site, phase) in consulted {
+        observed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .hook(site, phase);
+    }
+    observed
 }
 
 #[test]
 fn a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_the_next_resume() {
     use crate::topology::effects::LockSite;
-    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child};
 
     let planted = plant_finished_run_with(
         "finalize-kill-inside",
@@ -17160,16 +17222,13 @@ fn a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_t
     );
     let fixture = &planted.fixture;
     let before = fixture.log_bytes();
-    let status = run_kill_child(
-        FINALIZATION_KILL_CHILD,
-        &[
-            ("UPSTROKE_TEST_KILL_REPO", fixture.repo_root.as_os_str()),
-            ("UPSTROKE_TEST_KILL_GITDIR", fixture.git_dir.as_os_str()),
-        ],
-    );
-    assert!(
-        died_by_abort(&status),
-        "the child did not die by the kill inside finalization: {status:?}"
+    kill_inside_finalization(
+        &planted,
+        (
+            EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot),
+            HookPhase::After,
+        ),
+        "the kill after the execution root is removed",
     );
     assert_eq!(fixture.log_bytes(), before, "the death appended nothing");
     let effects = finalization_effects(&RunOutcome::Complete);
@@ -17211,6 +17270,109 @@ fn a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_t
         !fixture.manager().execution_root().exists(),
         "the root the child removed stays removed"
     );
+}
+
+fn kill_at_every_finalization_cell(outcome: &RunOutcome) {
+    let mut cells = 0;
+    for (site, phase) in finalization_sites(outcome) {
+        let tag = format!("{outcome:?}/{site}/{phase}");
+        let planted = plant_finished_run_with(
+            &format!("finalize-killed-{cells}-{}", outcome_short(outcome)),
+            outcome.clone(),
+            if *outcome == RunOutcome::Complete {
+                AlphaEnd::Published
+            } else {
+                AlphaEnd::Queued
+            },
+            FinishedResidue {
+                snapshot: true,
+                staging: true,
+                prepared_pin: true,
+            },
+        );
+        cells += 1;
+        let fixture = &planted.fixture;
+        let before = fixture.log_bytes();
+
+        let observed = kill_inside_finalization(&planted, (site, phase), &tag);
+        assert_eq!(
+            fixture.log_bytes(),
+            before,
+            "{tag}: the death appended nothing"
+        );
+        planted
+            .answer_files
+            .assert_untouched(&format!("{tag}: after the kill"));
+        assert!(
+            wait_for_cleanup_hold_release(&fixture.public()),
+            "{tag}: the dead child's cleanup lease is still held"
+        );
+        assert_finalization_order(&planted, &observed, outcome, (site, phase), &tag);
+        let report_current = fixture.public().join("report.json").is_file();
+
+        let runtime = runtime_holding_the_record();
+        let certifies = AlwaysCertifies;
+        let given = Given::healthy(fixture, &runtime, &certifies);
+        let next = harness();
+        let (result, _) = resume(fixture, &next, &given);
+        let text =
+            message(&result.expect_err("the next resume finalizes what is left and refuses"));
+        assert!(
+            text.contains(&format!("already finished as `{}`", outcome_short(outcome)))
+                && text.contains("finalized")
+                && text.contains(if report_current {
+                    "already current"
+                } else {
+                    "regenerated"
+                }),
+            "{tag}: the next resume finalizes then refuses, and writes the report only when the \
+             kill came before it: {text}"
+        );
+        assert_finalized(&planted, outcome, &format!("{tag}: after the kill"));
+        assert_eq!(fixture.log_bytes(), before, "{tag}: still nothing appended");
+        assert_eq!(
+            report_of(fixture).runner,
+            fixture.started.runner,
+            "{tag}: the report names the recorded runner"
+        );
+        assert!(
+            next.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(EffectSiteId::Lock(LockSite::Release), HookPhase::After),
+            "{tag}: the converging resume released the run lock through the funnel"
+        );
+        let once = replayed(fixture);
+        let twice = replayed(fixture);
+        assert_eq!(
+            once.state(),
+            twice.state(),
+            "{tag}: replay from disk twice equal"
+        );
+        assert_eq!(
+            once.finished(),
+            Some(outcome),
+            "{tag}: the replayed log ends as the run finished"
+        );
+    }
+    assert_eq!(
+        cells,
+        if *outcome == RunOutcome::Complete {
+            26
+        } else {
+            24
+        },
+        "{outcome:?}: both phases of every effect's site, the report's two sites among them"
+    );
+}
+
+#[test]
+fn a_kill_at_every_cell_of_a_complete_finalization_converges_on_the_next_resume() {
+    kill_at_every_finalization_cell(&RunOutcome::Complete);
+}
+
+#[test]
+fn a_kill_at_every_cell_of_a_halted_finalization_converges_on_the_next_resume() {
+    kill_at_every_finalization_cell(&RunOutcome::Halted);
 }
 
 fn outcome_short(outcome: &RunOutcome) -> &'static str {
