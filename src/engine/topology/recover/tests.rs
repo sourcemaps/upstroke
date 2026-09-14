@@ -13282,6 +13282,146 @@ fn a_fault_after_the_execution_root_is_recreated_leaves_the_root_and_the_next_re
     assert_the_resume_integrates_the_queued_candidate(&fixture, &beta, &resumed, tag);
 }
 
+#[track_caller]
+fn assert_the_candidate_integrates_under_the_next_sequence_on_the_moved_head(
+    fixture: &Fixture,
+    driven: &Driven,
+    head: &CommitSha,
+    tag: &str,
+) {
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Integrated {
+                key: ALPHA,
+                sequence: crate::topology::events::SequenceId(1),
+                ..
+            }))
+        ),
+        "{tag}: the stale candidate integrates under sequence 1: {:?}",
+        driven.progress
+    );
+    let published =
+        ref_target(fixture, fixture.started.integration_ref.as_str()).expect("the ref moved");
+    assert_eq!(
+        crate::workspace_manager::fixture::git(
+            &fixture.repo_root,
+            &["rev-parse", &format!("{published}^")]
+        ),
+        head.0,
+        "{tag}: the proposal sits on the moved head"
+    );
+    assert!(
+        fixture.manager().intents().expect("intents").is_empty(),
+        "{tag}: nothing of the staging path is left after the publication"
+    );
+    assert_eq!(merged_sequences(fixture), vec![0, 1], "{tag}");
+    let (once, events) = replayed_with_events(fixture);
+    let twice = TopologyFold::replay(fixture.inputs(), &events).expect("replays again");
+    assert_eq!(once.state(), twice.state(), "{tag}: replay twice equal");
+}
+
+#[test]
+fn a_resume_over_a_stale_queued_candidate_with_nothing_staged_takes_the_staging_path_and_publishes_the_proposal()
+ {
+    let tag = "stale-nothing-staged";
+    let fixture = Fixture::build(
+        tag,
+        Damage {
+            two_tasks: true,
+            ..Damage::default()
+        },
+    );
+    let (_planted, head) = plant_stale_queued_candidate(&fixture);
+    assert!(
+        fixture.manager().intents().expect("intents").is_empty(),
+        "{tag}: the durable prefix stages nothing: no staging intent, no staging worktree"
+    );
+    assert_eq!(
+        ref_target(
+            &fixture,
+            crate::engine::topology::integrate::prepared_pin_ref(
+                RUN_ID,
+                crate::topology::events::SequenceId(1)
+            )
+            .as_str()
+        ),
+        None,
+        "{tag}: and no prepared pin for the next sequence"
+    );
+    assert_eq!(merged_sequences(&fixture), vec![0], "{tag}");
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let driven = drive_hooked(&fixture, &DriveSeams::default(), 1, &mut hooks);
+    drop(hooks);
+    for (site, phase) in [
+        (
+            EffectSiteId::Worktree(WorktreeSite::WriteStagingIntent),
+            HookPhase::Before,
+        ),
+        (
+            EffectSiteId::Worktree(WorktreeSite::WriteStagingIntent),
+            HookPhase::After,
+        ),
+        (
+            EffectSiteId::Worktree(WorktreeSite::AddStaging),
+            HookPhase::After,
+        ),
+        (
+            EffectSiteId::Object(ObjectSite::ProposalCherryPick),
+            HookPhase::After,
+        ),
+        (EffectSiteId::Ref(RefSite::PinPrepared), HookPhase::After),
+    ] {
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(site, phase),
+            "{tag}: the resumed step takes the staging path through `{site}` ({phase})"
+        );
+    }
+    assert_the_candidate_integrates_under_the_next_sequence_on_the_moved_head(
+        &fixture, &driven, &head, tag,
+    );
+}
+
+#[test]
+fn a_clean_staging_worktree_left_at_the_integration_head_is_reclaimed_and_the_candidate_integrates()
+{
+    let tag = "clean-staging-left";
+    let fixture = Fixture::build(
+        tag,
+        Damage {
+            two_tasks: true,
+            ..Damage::default()
+        },
+    );
+    let (_planted, head) = plant_stale_queued_candidate(&fixture);
+    let staging = plant_staging_worktree(&fixture, 1, head.as_str());
+    let site = EffectSiteId::Object(ObjectSite::ProposalCherryPick);
+    let target = crate::workspace_manager::ResidueTarget::new(&fixture.repo_root)
+        .at(&staging)
+        .from_base(head.as_str());
+    assert_eq!(
+        crate::workspace_manager::classify_object_residue(site, &target).expect("classified"),
+        crate::topology::effects::ObjectResidue::None,
+        "{tag}: the staging worktree stands at the integration head with nothing cherry-picked \
+         into it: `Worktree.AddStaging`'s after phase, `{site}`'s before phase"
+    );
+
+    let (_, handle) = resume_with_real_refs(&fixture, &harness())
+        .expect("the resume reclaims the clean staging worktree rather than refusing");
+    assert_staging_residue_reclaimed(&fixture, &staging, &handle);
+    drop(handle);
+
+    let driven = drive(&fixture, &DriveSeams::default(), 1);
+    assert_the_candidate_integrates_under_the_next_sequence_on_the_moved_head(
+        &fixture, &driven, &head, tag,
+    );
+}
+
 /// Beta's candidate queued at the base, unmerged, so that a second lineage
 /// can be rooted at beta.
 fn plant_queued_beta(fixture: &Fixture) -> crate::topology::events::CandidateRef {
