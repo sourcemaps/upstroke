@@ -3457,13 +3457,23 @@ if [[ "$env_pinned_out" != *"is not inside '"*"the environment names one: GIT_DI
 fi
 
 # A REPOSITORY UNDER A 160000 GITLINK, WITH ITS OWN METADATA EXPORTED -- ARM 3, AND
-# THE TWO LEDGERS AGREE. The superproject is discoverable and records `inner` at
+# THE TWO LEDGERS DISAGREE. The superproject is discoverable and records `inner` at
 # 160000, so the clean run refuses for the gitlink. Each name below selects the
-# inner repository itself, git's work tree for it is `inner`, and the ascent above
-# that root reads the superproject's `160000` exactly as the clean run's does -- the
-# records agree, so the run is the clean run, byte for byte. When the walks still
-# ran with the names exported, `GIT_DIR` and `GIT_INDEX_FILE` made every probe
-# answer out of the inner repository and this row conformed.
+# inner repository itself, and the repository the environment selects is the one
+# that is READ: its index records a matching finding at its own root while the
+# superproject records a gitlink over the same directory, and one directory with two
+# ledgers is refused rather than settled by either. When the walks still ran with
+# the names exported, `GIT_DIR` and `GIT_INDEX_FILE` made every probe answer out of
+# the inner repository and this row conformed.
+#
+# UNTIL ROUND 14 THIS ROW ASSERTED THE CLEAN RUN'S BYTES, AND THOSE BYTES WERE THE
+# SUBSTITUTION. The ascent above `inner` was taken for the selected repository too and
+# replaced its ledger with the superproject's, so both readings were the
+# superproject's `160000` and `inner/.git/index` was never opened -- the same move that
+# let a selected index recording a twin conform (the section after the four routes).
+# It is the hidden superproject below turned round: there the names select the
+# superproject and the path reaches the submodule, here the names select the submodule
+# and the path reaches the superproject, and both refuse for one reason.
 #
 # AND AGAINST TWO VARIABLES THAT ARE NOT NAMES OF A REPOSITORY BUT MOVED IT ALL THE
 # SAME. `GIT_TRACE=3` wrote git's trace into descriptor 3 -- which `capture` had
@@ -3489,11 +3499,19 @@ if ! git -C "$env_super" ls-tree HEAD | grep -q $'^160000 commit [0-9a-f]*\tinne
   echo 'the fixture was meant to record inner as a clean 160000 gitlink' >&2
   exit 1
 fi
-env_case 'a repository the superproject records at 160000' \
+for env_super_pin in "GIT_WORK_TREE=$env_super/inner" "GIT_DIR=$env_super/inner/.git" \
+  "GIT_INDEX_FILE=$env_super/inner/.git/index"; do
+  env_pinned "a repository the superproject records at 160000, selected by ${env_super_pin%%=*}" \
+    "$env_super/inner" . 'fix-P2/correctness_under-a-pinned-gitlink' 1 1 "$env_super_pin"
+  if [[ "$env_pinned_out" != *"the environment names one: ${env_super_pin%%=*}."*'Two ledgers answering differently'* ]]; then
+    echo "a submodule selected by ${env_super_pin%%=*} under its superproject's 160000 must refuse as two" \
+      "ledgers disagreeing, and not answer the superproject's record for it" >&2
+    printf '%s\n' "$env_pinned_out" >&2
+    exit 1
+  fi
+done
+env_case 'a repository the superproject records at 160000, under two variables that name none' \
   "$env_super/inner" . 'fix-P2/correctness_under-a-pinned-gitlink' 1 \
-  "GIT_WORK_TREE=$env_super/inner" \
-  "GIT_DIR=$env_super/inner/.git" \
-  "GIT_INDEX_FILE=$env_super/inner/.git/index" \
   "GIT_TRACE=3" \
   "GIT_LITERAL_PATHSPECS=1"
 
@@ -3752,6 +3770,100 @@ else
     exit 1
   fi
 fi
+
+# ---- THE REPOSITORY THE ENVIRONMENT SELECTS IS THE ONE THAT IS READ ----------------------------
+#
+# The arms above settle which repository JUDGES a listing, and until round 14 nothing settled
+# which one is READ to judge it. The ascent that carries a listing named at a work tree's own
+# root out to a repository above was taken for the selected repository as well as for the
+# path's, and for the selected one it cleared the ledger it was reading on the way: `outer`
+# commits a finding under `findings/`, the names select `outer/findings` through a git directory
+# of their own, and `.` asked from `outer/findings` compared `outer`'s records with themselves.
+# Measured at `e3a91ff3`, each exit 0 `conforms` where `231c1aad` refuses: a selected index
+# recording that finding and a twin of it -- `strace` counted three opens of `outer/.git/index`
+# and none of the selected one -- a selected index recording no finding, and one recording
+# nothing at all. Each of those rows refuses only if the selected index is READ. The fourth, an
+# index recording exactly what `outer` records, is what reading it costs a caller whose two
+# ledgers agree: nothing.
+sel_dir="$fixture_dir/selected-index"
+sel_a='P2_correctness_202609141401_the-selected-index-is-read.md'
+sel_b='P2_correctness_202609141402_the-selected-index-is-read.md'
+new_repo "$sel_dir/outer"
+mkdir -p "$sel_dir/outer/findings"
+echo fixture > "$sel_dir/outer/findings/$sel_a"
+git -C "$sel_dir/outer" add -A && git -C "$sel_dir/outer" commit -q -m 'outer commits one finding'
+# sel_meta <name> [<file>...]: a git directory at `<name>.git` for the work tree
+# `outer/findings`, whose index records those files and nothing else -- `skip-worktree`
+# where the checkout does not hold one -- and whose exclude ignores the finding the checkout
+# does hold, so its status is clean whatever it records.
+sel_meta() {
+  local name="$1" file blob
+  shift
+  new_repo "$sel_dir/src-$name"
+  mv "$sel_dir/src-$name/.git" "$sel_dir/$name.git"
+  rmdir "$sel_dir/src-$name"
+  mkdir -p "$sel_dir/$name.git/info"
+  printf '%s\n' "$sel_a" > "$sel_dir/$name.git/info/exclude"
+  for file in "$@"; do
+    blob="$( printf 'fixture\n' | git --git-dir="$sel_dir/$name.git" hash-object -w --stdin )"
+    ( cd "$sel_dir/outer/findings" \
+      && GIT_DIR="$sel_dir/$name.git" GIT_WORK_TREE="$sel_dir/outer/findings" \
+        git update-index --add --cacheinfo "100644,$blob,$file" )
+    if [[ ! -e "$sel_dir/outer/findings/$file" ]]; then
+      ( cd "$sel_dir/outer/findings" \
+        && GIT_DIR="$sel_dir/$name.git" GIT_WORK_TREE="$sel_dir/outer/findings" \
+          git update-index --skip-worktree -- "$file" )
+    fi
+  done
+  if (( $# > 0 )); then
+    ( cd "$sel_dir/outer/findings" \
+      && GIT_DIR="$sel_dir/$name.git" GIT_WORK_TREE="$sel_dir/outer/findings" \
+        git commit -q -m "the $name ledger" )
+  fi
+}
+sel_meta twin "$sel_a" "$sel_b"
+sel_meta none seed.txt
+sel_meta empty
+sel_meta agree "$sel_a"
+# THE SHAPE IS ASSERTED BEFORE ANYTHING IS JUDGED: both repositories clean, `outer` recording
+# its one finding, and each selected index recording what its name says and nothing else.
+if [[ -n "$(git -C "$sel_dir/outer" status --porcelain)" ]] \
+  || [[ "$(git -C "$sel_dir/outer" ls-files)" != "findings/$sel_a" ]]; then
+  echo 'the selected-index fixture was meant to have a clean outer repository recording one finding' >&2
+  exit 1
+fi
+for sel in twin:"$sel_a $sel_b " none:'seed.txt ' empty:'' agree:"$sel_a "; do
+  if [[ -n "$( cd "$sel_dir/outer/findings" && GIT_DIR="$sel_dir/${sel%%:*}.git" \
+      GIT_WORK_TREE="$sel_dir/outer/findings" git status --porcelain )" ]] \
+    || [[ "$( cd "$sel_dir/outer/findings" && GIT_DIR="$sel_dir/${sel%%:*}.git" \
+      GIT_WORK_TREE="$sel_dir/outer/findings" git ls-files | tr '\n' ' ' )" != "${sel#*:}" ]]; then
+    echo "the selected index '${sel%%:*}' was meant to be clean and to record exactly '${sel#*:}'" >&2
+    exit 1
+  fi
+done
+for sel in twin none empty; do
+  case "$sel" in
+    twin) sel_says='that finding and a twin of it' ;;
+    none) sel_says='no finding' ;;
+    empty) sel_says='nothing at all' ;;
+  esac
+  for sel_listing in . "$sel_dir/outer/findings"; do
+    env_pinned "a selected index recording $sel_says, under a repository recording one ($sel_listing)" \
+      "$sel_dir/outer/findings" "$sel_listing" 'fix-P2/correctness_the-selected-index-is-read' 0 1 \
+      "GIT_DIR=$sel_dir/$sel.git" "GIT_WORK_TREE=$sel_dir/outer/findings"
+    if [[ "$env_pinned_out" != *'the environment names one: GIT_DIR GIT_WORK_TREE.'*'Two ledgers answering differently'* ]]; then
+      echo "a selected index recording $sel_says must refuse as two ledgers disagreeing, and not be" \
+        "replaced by the records of the repository above it ($sel_listing)" >&2
+      printf '%s\n' "$env_pinned_out" >&2
+      exit 1
+    fi
+  done
+done
+for sel_listing in . "$sel_dir/outer/findings"; do
+  env_pinned "a selected index recording what the repository above it records ($sel_listing)" \
+    "$sel_dir/outer/findings" "$sel_listing" 'fix-P2/correctness_the-selected-index-is-read' 0 0 \
+    "GIT_DIR=$sel_dir/agree.git" "GIT_WORK_TREE=$sel_dir/outer/findings"
+done
 
 # ---- what git RECORDS, not what the checkout happens to hold -----------------------------------
 #
