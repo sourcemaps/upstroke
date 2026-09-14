@@ -444,7 +444,7 @@ fn a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(
         } else {
             ProcessFate::Gone
         },
-        "{tag}: the fate the funnel hands the invocation ledger is the authority's rows ({:?}): \
+        "{tag}: the fate the failure reports is the one the authority's rows imply ({:?}): \
          {message}",
         semantics.rows
     );

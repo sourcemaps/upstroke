@@ -206,7 +206,9 @@ faulted by no committed test. This drives each: a supervised child outlives its 
 termination funnel returns the injected error at the phase, and what the fault leaves is read
 against the residue authority rather than restated. The process does not outlive the faulted
 termination on either phase (the funnel settles it on the error path as it does on the ordinary
-one). The fate the failure carries — what the invocation ledger is handed — is the authority's
+one). The fate the failure carries — which the runner hands its caller, and on which the caller
+decides whether the invocation's process may still run (`engine::topology::run`'s verification
+settles an outage only on `Gone` or `NeverStarted`) — is the authority's
 rows: before the primitive, R22 still accounts for the handle, so the fate is `Unresolved`; after
 it, the row holds nothing, so the fate is `Gone`. The tabled action is then the next command
 through the same adapter, which runs to its own exit.

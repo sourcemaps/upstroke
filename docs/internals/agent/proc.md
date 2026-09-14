@@ -313,7 +313,8 @@ that answer is the tree-level evidence — and before the after phase is
 consulted. Every caller stored `Gone` itself on an `Ok` from this function,
 so an after answer of `Error` left a completed termination `Unresolved`:
 on Windows, where the timeout and limit arms terminate through here, the
-fate the invocation ledger was handed contradicted the residue authority,
+fate the runner handed its caller (which settles an outage only on a fate
+that says no process survives) contradicted the residue authority,
 whose `Process.Terminate` after phase leaves R22 holding nothing, while
 the Unix arms (`terminate_supervised`) already stored `Gone` before their
 after phase. `a_fault_after_the_terminate_primitive_reports_the_child_gone`
