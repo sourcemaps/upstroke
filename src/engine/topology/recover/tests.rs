@@ -13094,13 +13094,13 @@ fn a_kill_after_an_answer_is_read_appends_nothing_and_the_next_incarnation_inges
     );
 }
 
-#[test]
-fn a_resume_after_finalization_pruned_the_execution_root_and_the_pins_recreates_the_root_and_integrates_the_queued_candidate()
- {
+fn plant_a_budget_stopped_run_whose_finalization_pruned_the_root(
+    tag: &str,
+) -> (Fixture, crate::topology::events::CandidateRef) {
     use crate::workspace_manager::fixture::git;
 
     let fixture = Fixture::build(
-        "pruned-root-and-pins",
+        tag,
         Damage {
             two_tasks: true,
             extra: vec![
@@ -13129,7 +13129,7 @@ fn a_resume_after_finalization_pruned_the_execution_root_and_the_pins_recreates_
     let names = crate::engine::topology::candidate::CandidateNames::of(RUN_ID, BETA, GEN);
     assert!(
         ref_target(&fixture, names.prepared_ref.as_str()).is_some(),
-        "beta's candidate-prepared pin stands before the budget stop"
+        "{tag}: beta's candidate-prepared pin stands before the budget stop"
     );
     let stopped = drive(
         &fixture,
@@ -13149,21 +13149,113 @@ fn a_resume_after_finalization_pruned_the_execution_root_and_the_pins_recreates_
                 ..
             }))
         ),
-        "the run ends BudgetExceeded and finalization removes the execution root: {shapes:?}"
+        "{tag}: the run ends BudgetExceeded and finalization removes the execution root: {shapes:?}"
     );
     assert!(
         !fixture.manager().execution_root().exists(),
-        "the durable state the next resume starts from has no execution root"
+        "{tag}: the durable state the next resume starts from has no execution root"
     );
     assert_eq!(
         ref_target(&fixture, names.prepared_ref.as_str()),
         None,
-        "finalization pruned beta's candidate-prepared pin (R23)"
+        "{tag}: finalization pruned beta's candidate-prepared pin (R23)"
     );
     assert_eq!(
         ref_target(&fixture, beta.candidate_ref.as_str()).as_deref(),
         Some(beta.commit_sha.as_str()),
-        "the authoritative candidates ref stands (R11)"
+        "{tag}: the authoritative candidates ref stands (R11)"
+    );
+    (fixture, beta)
+}
+
+#[track_caller]
+fn assert_the_resume_integrates_the_queued_candidate(
+    fixture: &Fixture,
+    beta: &crate::topology::events::CandidateRef,
+    resumed: &Driven,
+    tag: &str,
+) {
+    let shapes: Vec<String> = resumed.progress.iter().map(progress_shape).collect();
+    assert!(
+        resumed
+            .progress
+            .iter()
+            .any(|step| matches!(step, Ok(Progress::Integrated { key, .. }) if *key == BETA)),
+        "{tag}: the resume publishes the queued candidate without its pruned pin: {shapes:?}"
+    );
+    assert_eq!(
+        ref_target(fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(beta.commit_sha.as_str()),
+        "{tag}: the integration ref is at beta's candidate commit"
+    );
+    let (once, events) = replayed_with_events(fixture);
+    let twice = TopologyFold::replay(fixture.inputs(), &events).expect("replays again");
+    assert_eq!(once.state(), twice.state(), "{tag}: replay twice equal");
+}
+
+#[test]
+fn a_resume_after_finalization_pruned_the_execution_root_and_the_pins_recreates_the_root_and_integrates_the_queued_candidate()
+ {
+    let tag = "pruned-root-and-pins";
+    let (fixture, beta) = plant_a_budget_stopped_run_whose_finalization_pruned_the_root(tag);
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let resumed = drive_hooked(
+        &fixture,
+        &DriveSeams {
+            run_ceiling_usd: Some(10.0),
+            ..DriveSeams::default()
+        },
+        6,
+        &mut hooks,
+    );
+    drop(hooks);
+    let create_root = EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot);
+    for phase in [HookPhase::Before, HookPhase::After] {
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(create_root, phase),
+            "{tag}: the resume recreates the pruned root through `{create_root}` ({phase})"
+        );
+    }
+    assert_the_resume_integrates_the_queued_candidate(&fixture, &beta, &resumed, tag);
+}
+
+#[test]
+fn a_fault_after_the_execution_root_is_recreated_leaves_the_root_and_the_next_resume_adopts_it() {
+    let tag = "root-recreated-then-faulted";
+    let (fixture, beta) = plant_a_budget_stopped_run_whose_finalization_pruned_the_root(tag);
+    let create_root = EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot);
+    let before = fixture.log_bytes();
+
+    let faulted = harness();
+    let mut armed = ArmedFinalization::new(&faulted, (create_root, HookPhase::After));
+    let error = message(
+        &resume_with_real_refs_hooked(&fixture, &mut armed)
+            .expect_err("the fault after the root's creation ends the resume"),
+    );
+    drop(armed);
+    assert!(
+        error.contains(&format!("{create_root}")) && error.contains("after"),
+        "{tag}: the injected error is the one returned: {error}"
+    );
+    assert!(
+        faulted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .observed(create_root, HookPhase::After),
+        "{tag}: the armed coordinate was reached"
+    );
+    assert!(
+        fixture.manager().execution_root().is_dir(),
+        "{tag}: the root the funnel created stands (R18)"
+    );
+    assert_eq!(
+        fixture.log_bytes(),
+        before,
+        "{tag}: nothing was appended before the fault"
     );
 
     let observed = harness();
@@ -13178,32 +13270,16 @@ fn a_resume_after_finalization_pruned_the_execution_root_and_the_pins_recreates_
         &mut hooks,
     );
     drop(hooks);
-    let shapes: Vec<String> = resumed.progress.iter().map(progress_shape).collect();
-    let create_root = EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot);
-    for phase in [HookPhase::Before, HookPhase::After] {
-        assert!(
-            observed
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .observed(create_root, phase),
-            "the resume recreates the pruned root through `{create_root}` ({phase})"
-        );
-    }
-    assert!(
-        resumed
-            .progress
-            .iter()
-            .any(|step| matches!(step, Ok(Progress::Integrated { key, .. }) if *key == BETA)),
-        "the resume publishes the queued candidate without its pruned pin: {shapes:?}"
-    );
     assert_eq!(
-        ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
-        Some(beta.commit_sha.as_str()),
-        "the integration ref is at beta's candidate commit"
+        observed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .count(create_root, HookPhase::Before),
+        0,
+        "{tag}: the next resume adopts the root the faulted one created and does not create it \
+         again"
     );
-    let (once, events) = replayed_with_events(&fixture);
-    let twice = TopologyFold::replay(fixture.inputs(), &events).expect("replays again");
-    assert_eq!(once.state(), twice.state(), "replay twice equal");
+    assert_the_resume_integrates_the_queued_candidate(&fixture, &beta, &resumed, tag);
 }
 
 /// Beta's candidate queued at the base, unmerged, so that a second lineage
