@@ -178,13 +178,7 @@ crate_path = "upstroke::rundir::names"
 funnel = []
 effectful = []
 effectful_unnameable = []
-effect_free = [
-    # The report's staging name and its recogniser (PR10's round 8): a name
-    # chosen for one write, `report.json.<ulid>.tmp`, and the predicate the
-    # leftover reclaim lists by. String work; neither touches a path.
-    "is_report_staging_name",
-    "report_staging_name",
-]
+effect_free = []
 # The eight production children the `m4-workspace` split gave
 # `src/workspace_manager.rs`, added in the same commit as the split. Twenty-six
 # names left the parent's file, and a name that leaves the domain is a name
@@ -525,11 +519,15 @@ effect_free = [
     "questions",
     "recording_durability",
     "report_json",
-    # Lists the regular files under the public directory wearing the report's
-    # staging shape (`report_staging_name`): `read_dir` and `symlink_metadata`,
-    # nothing created, renamed or removed. The tests' witness that nothing of
-    # the report's protocol is left staged (PR10's round 8).
-    "report_staging_files",
+    # The report's staging directory under a public directory (`REPORT_STAGING_DIR`):
+    # a path join, nothing touched (PR10's round 9).
+    "report_staging_dir",
+    # Lists what the report's protocol has left staged under the public
+    # directory — the staging directory and its entries: `symlink_metadata`
+    # and `read_dir`, nothing created, renamed or removed. The tests' witness
+    # that nothing of the report's protocol is left staged (PR10's rounds 8
+    # and 9).
+    "report_staging_leftovers",
     "reviews",
     "runs_root",
     "settings",
@@ -612,6 +610,12 @@ effect_free = [
     "probe_extensions",
     "read_file_bounded",
     "record",
+    # The ledger's two observed records (PR10's round 9): a group transition's
+    # mode before and after, read by the funnel off its descriptor; a directory
+    # barrier's entry, read by the funnel in the statement before it. Each
+    # appends to the ledger's own log and touches no path.
+    "record_entry",
+    "record_transition",
     "recording",
     "records",
     "records_for",

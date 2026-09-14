@@ -1982,10 +1982,7 @@ fn plant_finished_run_with(
     let orphan = plant_unreachable_object(&fixture, tag);
     let released = referenced_objects(&fixture);
     let store = store_objects(&fixture.repo_root);
-    let report_leftover = fixture
-        .public()
-        .join(rundir::report_staging_name(&crate::ulid::ulid()));
-    crate::workspace_manager::fixture::write_file(&report_leftover, b"{\"half\":");
+    let report_leftover = plant_report_leftover(&fixture.public());
     FinishedPlanting {
         fixture,
         candidate,
@@ -2001,6 +1998,14 @@ fn plant_finished_run_with(
         store,
         report_leftover,
     }
+}
+
+fn plant_report_leftover(public: &Path) -> PathBuf {
+    let staging = rundir::report_staging_dir(public);
+    mkdir(&staging);
+    let leftover = staging.join(rundir::REPORT);
+    crate::workspace_manager::fixture::write_file(&leftover, b"{\"half\":");
+    leftover
 }
 
 fn report_of(fixture: &Fixture) -> crate::engine::topology::report::TopologyReport {
@@ -15315,7 +15320,7 @@ fn assert_finalized(planted: &FinishedPlanting, outcome: &RunOutcome, tag: &str)
     );
     assert!(
         !planted.report_leftover.exists()
-            && rundir::report_staging_files(&fixture.public())
+            && rundir::report_staging_leftovers(&fixture.public())
                 .expect("listed")
                 .is_empty(),
         "{tag}: the staged report a dead writer left is reclaimed inside the report site, on \
@@ -15629,7 +15634,7 @@ fn kill_after_report_before_each_cleanup_step() {
             );
             let report_bytes = std::fs::read(fixture.public().join("report.json"))
                 .expect("the report the second resume left current");
-            crate::workspace_manager::fixture::write_file(&planted.report_leftover, b"{\"half\":");
+            plant_report_leftover(&fixture.public());
             let third = harness();
             let (result, _) = resume(fixture, &third, &given);
             let text = message(&result.expect_err("a finalized run refuses again"));
@@ -15655,7 +15660,7 @@ fn kill_after_report_before_each_cleanup_step() {
             );
             assert!(
                 !planted.report_leftover.exists()
-                    && rundir::report_staging_files(&fixture.public())
+                    && rundir::report_staging_leftovers(&fixture.public())
                         .expect("listed")
                         .is_empty(),
                 "{tag}: nothing was staged, and the staged report a dead writer left before this \
@@ -16020,7 +16025,7 @@ fn the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_re
         "the report was durable before any ref was touched: {timeline:?}"
     );
     assert!(
-        rundir::report_staging_files(&fixture.public())
+        rundir::report_staging_leftovers(&fixture.public())
             .expect("listed")
             .is_empty(),
         "the staged report was renamed onto its name"
@@ -16092,30 +16097,32 @@ fn a_checkouts_deletion_is_made_durable_before_its_intent_is_removed() {
             let shown = path.to_string_lossy();
             PathBuf::from(shown.strip_prefix(r"\\?\").unwrap_or(&shown))
         };
-        let parent_of = |checkout: &Path| {
-            plain(
-                &std::fs::canonicalize(checkout.parent().expect("a slot has a parent directory"))
-                    .expect("the slot kind's directory exists before the resume"),
-            )
+        let canonical = |path: &Path| {
+            plain(&std::fs::canonicalize(path).expect("the checkout exists before the resume"))
         };
+        let parent_of =
+            |checkout: &Path| canonical(checkout.parent().expect("a slot has a parent directory"));
         let slots = [
             (
                 "beta's task worktree",
                 EffectSiteId::Worktree(WorktreeSite::Remove),
                 EffectSiteId::Worktree(WorktreeSite::RemoveIntent),
                 parent_of(&planted.beta_worktree),
+                canonical(&planted.beta_worktree),
             ),
             (
                 "the snapshot",
                 EffectSiteId::Snapshot(SnapshotSite::Remove),
                 EffectSiteId::Snapshot(SnapshotSite::RemoveIntent),
                 parent_of(planted.snapshot.as_deref().expect("planted")),
+                canonical(planted.snapshot.as_deref().expect("planted")),
             ),
             (
                 "the staging worktree",
                 EffectSiteId::Worktree(WorktreeSite::RemoveStaging),
                 EffectSiteId::Worktree(WorktreeSite::RemoveStagingIntent),
                 parent_of(planted.staging.as_deref().expect("planted")),
+                canonical(planted.staging.as_deref().expect("planted")),
             ),
         ];
         let runtime = runtime_holding_the_record();
@@ -16131,6 +16138,7 @@ fn a_checkouts_deletion_is_made_durable_before_its_intent_is_removed() {
         let text = message(&result.expect_err("the resume finalizes then refuses"));
         assert!(text.contains("already finished as"), "{outcome:?}: {text}");
         let timeline = hooks.timeline();
+        let records = hooks.ledger_records();
         let position = |site: EffectSiteId, phase: HookPhase| {
             timeline
                 .iter()
@@ -16139,7 +16147,7 @@ fn a_checkouts_deletion_is_made_durable_before_its_intent_is_removed() {
                     panic!("{outcome:?}: `{site}`/{phase} was not reached: {timeline:?}")
                 })
         };
-        for (label, remove, remove_intent, parent) in &slots {
+        for (label, remove, remove_intent, parent, checkout) in &slots {
             let before = position(*remove, HookPhase::Before);
             let after = position(*remove, HookPhase::After);
             let intent = position(*remove_intent, HookPhase::Before);
@@ -16173,9 +16181,147 @@ fn a_checkouts_deletion_is_made_durable_before_its_intent_is_removed() {
                 "{outcome:?}/{label}: and therefore before the intent that names the checkout \
                  was removed"
             );
+            let barrier = records
+                .iter()
+                .find(|record| {
+                    record.step == crate::util::DurableStep::SyncedDirectory
+                        && plain(&record.path) == *parent
+                        && record
+                            .entry
+                            .as_ref()
+                            .is_some_and(|entry| plain(&entry.path) == *checkout)
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{outcome:?}/{label}: the checkout's directory was synced with the \
+                         checkout itself observed in the statement before the barrier: {records:?}"
+                    )
+                });
+            assert_eq!(
+                barrier.entry.as_ref().map(|entry| entry.present),
+                Some(false),
+                "{outcome:?}/{label}: at the instant of the barrier the checkout was already \
+                 gone — the sync followed the deletion, not the other way round"
+            );
         }
         assert_finalized(&planted, &outcome, "after the resume");
     }
+}
+
+#[test]
+fn a_failed_checkout_barrier_is_retried_before_its_intent_is_removed() {
+    for outcome in [RunOutcome::Complete, RunOutcome::Halted] {
+        let planted = plant_finished_run(
+            &format!("checkout-barrier-retry-{}", outcome_short(&outcome)),
+            outcome.clone(),
+        );
+        let fixture = &planted.fixture;
+        let runtime = runtime_holding_the_record();
+        let certifies = AlwaysCertifies;
+        let given = Given::healthy(fixture, &runtime, &certifies);
+        let parent = planted
+            .beta_worktree
+            .parent()
+            .expect("a checkout has a parent directory")
+            .to_path_buf();
+        let fault = crate::util::fail_barriers_at(&parent);
+        for attempt in 1..=2 {
+            let (result, _) = resume(fixture, &harness(), &given);
+            let error =
+                message(&result.expect_err(
+                    "the checkout's directory barrier refuses, and the resume ends there",
+                ));
+            assert!(
+                error.contains("injected barrier fault"),
+                "{outcome:?}, attempt {attempt}: the resume ends at the barrier's own diagnostic, \
+                 the checkout's deletion unproven — absence is not proof: {error}"
+            );
+            assert!(
+                !planted.beta_worktree.exists(),
+                "{outcome:?}, attempt {attempt}: the checkout is gone, its deletion unproven"
+            );
+            assert!(
+                fixture
+                    .manager()
+                    .intents()
+                    .expect("intents")
+                    .contains(&planted.beta_slot),
+                "{outcome:?}, attempt {attempt}: the intent that names the checkout stands until \
+                 the barrier holds"
+            );
+            assert!(
+                wait_for_cleanup_hold_release(&fixture.public()),
+                "{outcome:?}, attempt {attempt}: the run's cleanup lease is still held"
+            );
+        }
+        drop(fault);
+        let (result, _) = resume(fixture, &harness(), &given);
+        let text = message(&result.expect_err("with the barrier holding, finalize then refuse"));
+        assert!(
+            text.contains("already finished as") && text.contains("finalized"),
+            "{outcome:?}: {text}"
+        );
+        assert_finalized(
+            &planted,
+            &outcome,
+            &format!("{outcome:?}: after the barrier holds"),
+        );
+    }
+}
+
+#[test]
+fn an_absent_checkout_retries_its_parent_barrier() {
+    let planted = plant_finished_run("absent-checkout-barrier", RunOutcome::Complete);
+    let manager = planted.fixture.manager();
+    let parent = planted
+        .beta_worktree
+        .parent()
+        .expect("a checkout has a parent directory")
+        .to_path_buf();
+    let fault = crate::util::fail_barriers_at(&parent);
+    let mut hooks = crate::workspace_manager::NoHooks;
+    let first = message(
+        &manager
+            .remove_worktree_proving(
+                &mut hooks,
+                &planted.beta_slot,
+                crate::workspace_manager::WriterProof::NoWriterAlive,
+            )
+            .expect_err("the first removal deletes the checkout and its barrier refuses"),
+    );
+    assert!(first.contains("injected barrier fault"), "{first}");
+    assert!(
+        !planted.beta_worktree.exists(),
+        "the checkout is gone, its deletion unproven"
+    );
+    let second = message(
+        &manager
+            .remove_worktree_proving(
+                &mut hooks,
+                &planted.beta_slot,
+                crate::workspace_manager::WriterProof::NoWriterAlive,
+            )
+            .expect_err(
+                "the retry meets an absent checkout and takes the barrier again: absence is not \
+                 proof that the first attempt finished",
+            ),
+    );
+    assert!(second.contains("injected barrier fault"), "{second}");
+    assert!(
+        manager
+            .intents()
+            .expect("intents")
+            .contains(&planted.beta_slot),
+        "the intent stands: nothing has removed it"
+    );
+    drop(fault);
+    manager
+        .remove_worktree_proving(
+            &mut hooks,
+            &planted.beta_slot,
+            crate::workspace_manager::WriterProof::NoWriterAlive,
+        )
+        .expect("with the barrier holding, the absent checkout's removal converges");
 }
 
 #[track_caller]
@@ -16257,7 +16403,7 @@ fn assert_fresh_branch_took_the_report_sites(
          nothing: {under_public:?}"
     );
     assert!(
-        rundir::report_staging_files(public)
+        rundir::report_staging_leftovers(public)
             .expect("listed")
             .is_empty(),
         "{tag}: no staged report"
@@ -16313,7 +16459,7 @@ fn a_report_directory_barrier_that_fails_refuses_pruning_on_every_resume_until_i
             "{tag}: and current by digest — the shape the next resume takes the fresh branch on"
         );
         assert!(
-            rundir::report_staging_files(&fixture.public())
+            rundir::report_staging_leftovers(&fixture.public())
                 .expect("listed")
                 .is_empty()
         );
@@ -16676,7 +16822,7 @@ fn fresh_report_hook_errors_stop_cleanup_and_retry() {
                 "{cell}: the report is byte-identical"
             );
             assert!(
-                rundir::report_staging_files(&fixture.public())
+                rundir::report_staging_leftovers(&fixture.public())
                     .expect("listed")
                     .is_empty(),
                 "{cell}: nothing was staged"

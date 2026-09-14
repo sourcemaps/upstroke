@@ -78,7 +78,7 @@ use crate::topology::effects::{
     WorktreeSite,
 };
 use crate::topology::paths::PathSet;
-use crate::util::{DurabilityLedger, DurableStep};
+use crate::util::{DurabilityLedger, DurableStep, EntryObserved};
 
 // ---------------------------------------------------------------------------
 // The Git environment every upstroke process runs under
@@ -2605,17 +2605,25 @@ impl WorkspaceManager {
     ///
     /// The checkout's deletion is made durable inside the site, before the
     /// funnel returns: its parent directory — the slot kind's directory under
-    /// the execution root — is synced through [`sync_directory`] and recorded
-    /// as the ledger's `SyncedDirectory`, the barrier every other directory
-    /// change of this module takes. Every caller removes the slot's intent
-    /// next ([`Self::remove_intent`], which syncs the intents directory), and
-    /// a power loss between the two could otherwise roll the checkout's
-    /// deletion back while the intent's persisted, leaving a checkout no
-    /// terminal resume enumerates — resumes read the intents — so the
-    /// execution root would never empty and R9/R18 residue would outlive every
-    /// later resume (the round-8 crash lens, P2). One barrier here covers the
-    /// three slot kinds and both callers' orders, the terminal finalization's
-    /// scrub and the live loop's.
+    /// the execution root — is synced through [`sync_checkout_removed`] and
+    /// recorded as the ledger's `SyncedDirectory`, the barrier every other
+    /// directory change of this module takes, with the checkout's absence
+    /// observed in the statement before the barrier and carried on the record.
+    /// Every caller removes the slot's intent next ([`Self::remove_intent`],
+    /// which syncs the intents directory), and a power loss between the two
+    /// could otherwise roll the checkout's deletion back while the intent's
+    /// persisted, leaving a checkout no terminal resume enumerates — resumes
+    /// read the intents — so the execution root would never empty and R9/R18
+    /// residue would outlive every later resume (the round-8 crash lens, P2).
+    /// The barrier is taken whether or not the checkout was there to remove:
+    /// a checkout already absent is not proof that the attempt which removed
+    /// it finished its barrier — that attempt may have died before it, or had
+    /// its sync refused — and a retry that read absence as proof would remove
+    /// the intent behind an unproven deletion (the round-9 crash lens, P2).
+    /// Syncing a directory whose entry is already gone is the proof the first
+    /// attempt did not give. One barrier here covers the three slot kinds and
+    /// both callers' orders, the terminal finalization's scrub and the live
+    /// loop's; its error is the funnel's, never absorbed.
     ///
     /// # Errors
     ///
@@ -2648,7 +2656,7 @@ impl WorkspaceManager {
                     });
                 }
             };
-            if present {
+            let checkout = if present {
                 let contained = self.contained(&path)?;
                 remove_tree_once_handles_close(&contained).map_err(|source| {
                     UpstrokeError::Filesystem {
@@ -2657,11 +2665,14 @@ impl WorkspaceManager {
                         source,
                     }
                 })?;
-                let parent = contained.parent().ok_or_else(|| UpstrokeError::Git {
-                    message: format!("{} has no parent directory", contained.display()),
-                })?;
-                sync_directory(parent, &ledger)?;
-            }
+                contained
+            } else {
+                path.clone()
+            };
+            let parent = checkout.parent().ok_or_else(|| UpstrokeError::Git {
+                message: format!("{} has no parent directory", checkout.display()),
+            })?;
+            sync_checkout_removed(&checkout, parent, &ledger)?;
             if let Some(admin) = registration.as_ref() {
                 if !self.registration_still_names(admin, &path)? {
                     // Its identity metadata is already absent: forced cleanup
@@ -5653,6 +5664,51 @@ fn sync_directory(path: &Path, ledger: &DurabilityLedger) -> Result<(), Upstroke
     })?;
     ledger.record(DurableStep::SyncedDirectory, path, 0);
     Ok(())
+}
+
+/// Make a checkout's removal durable: the directory barrier of `parent`,
+/// with the checkout's presence read by `symlink_metadata` in the statement
+/// immediately before the barrier and carried on the ledger's
+/// `SyncedDirectory` record as the entry observed ([`EntryObserved`]), so a
+/// test can hold the barrier to having followed the deletion rather than
+/// merely to having happened between two hook phases (the round-9 fix-check
+/// lens, P1: with the sync moved ahead of the removal the round-8 guard still
+/// passed, since it read the synced directories at the phases and never what
+/// the barrier had seen). The record is written whether or not the barrier
+/// held, one entry per attempt, and the barrier's error is returned to the
+/// funnel — a refused barrier ends the removal, and the intent that names
+/// the checkout is left for the retry to take the barrier again.
+///
+/// `checkout` is the path the removal bound: canonical when the checkout was
+/// there to remove, the slot's own path when it was already gone.
+fn sync_checkout_removed(
+    checkout: &Path,
+    parent: &Path,
+    ledger: &DurabilityLedger,
+) -> Result<(), UpstrokeError> {
+    let present = match fs::symlink_metadata(checkout) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: checkout.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let outcome = crate::util::fsync_dir(parent);
+    ledger.record_entry(
+        DurableStep::SyncedDirectory,
+        parent,
+        EntryObserved {
+            path: checkout.to_path_buf(),
+            present,
+        },
+    );
+    outcome.map_err(|source| UpstrokeError::Io {
+        path: parent.to_path_buf(),
+        source,
+    })
 }
 
 fn directory_is_empty(path: &Path) -> Result<bool, UpstrokeError> {

@@ -142,11 +142,19 @@ pub enum DurableStep {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryObserved {
+    pub path: PathBuf,
+    pub present: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurableRecord {
     pub step: DurableStep,
     pub path: PathBuf,
     pub len: u64,
     pub mode: Option<u32>,
+    pub mode_after: Option<u32>,
+    pub entry: Option<EntryObserved>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -169,15 +177,49 @@ impl DurabilityLedger {
     }
 
     pub fn record(&self, step: DurableStep, path: &Path, len: u64) {
+        self.push(DurableRecord {
+            step,
+            path: path.to_path_buf(),
+            len,
+            mode: permission_bits(path),
+            mode_after: None,
+            entry: None,
+        });
+    }
+
+    pub fn record_transition(
+        &self,
+        step: DurableStep,
+        path: &Path,
+        mode: Option<u32>,
+        mode_after: Option<u32>,
+    ) {
+        self.push(DurableRecord {
+            step,
+            path: path.to_path_buf(),
+            len: 0,
+            mode,
+            mode_after,
+            entry: None,
+        });
+    }
+
+    pub fn record_entry(&self, step: DurableStep, path: &Path, entry: EntryObserved) {
+        self.push(DurableRecord {
+            step,
+            path: path.to_path_buf(),
+            len: 0,
+            mode: permission_bits(path),
+            mode_after: None,
+            entry: Some(entry),
+        });
+    }
+
+    fn push(&self, record: DurableRecord) {
         if let Some(log) = &self.0 {
             log.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(DurableRecord {
-                    step,
-                    path: path.to_path_buf(),
-                    len,
-                    mode: permission_bits(path),
-                });
+                .push(record);
         }
     }
 

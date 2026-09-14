@@ -105,35 +105,21 @@ pub const COMMIT_RECORD_STAGED: &str = "committed.json.tmp";
 pub const EVENT_LOG: &str = "events.jsonl";
 pub const REPORT: &str = "report.json";
 
-/// The staging name of one report write: `report.json.<ulid>.tmp`, unique
-/// per writer per attempt, so that nothing at a shared name is ever this
-/// writer's to reuse or remove (`standards/08`: a multi-step output is
-/// published through a unique staging path, never a fixed temporary name).
-/// Until PR10's round 8 the name was the fixed `report.json.tmp`, and a
+/// `<public>/.report-staging/` — the directory one report write makes for
+/// itself, exclusively (`create_dir`, never `create_dir_all`), stages
+/// `report.json` inside, renames it up onto the published name — the same
+/// filesystem, the rename atomic — and removes, empty, before it returns.
+/// What a writer that died between the two leaves is this directory with the
+/// staged file in it, and the next writer removes it as the run's own tree
+/// before making its own: proof of ownership by construction, not by the
+/// shape of a name (`standards/08`). Until PR10's round 8 the report was
+/// staged at the fixed `report.json.tmp` beside its published name and a
 /// single-link file an operator had left there was removed as the writer's
-/// own (the round-8 regression lens, P2).
-#[must_use]
-pub fn report_staging_name(nonce: &str) -> String {
-    format!("{REPORT}.{nonce}.tmp")
-}
-
-/// Whether `name` is a staging name of the report's protocol — the published
-/// name, one Crockford-base32 ULID of twenty-six characters, `.tmp`: the
-/// names [`report_staging_name`] produces from [`crate::ulid::ulid`] and no
-/// other. What a writer that died between its stage and its rename leaves is
-/// recognised by this, and only under the run lock every report writer holds
-/// is it removed (`rundir::write_report`).
-#[must_use]
-pub fn is_report_staging_name(name: &str) -> bool {
-    name.strip_prefix(REPORT)
-        .and_then(|rest| rest.strip_prefix('.'))
-        .and_then(|rest| rest.strip_suffix(".tmp"))
-        .is_some_and(|nonce| {
-            nonce.len() == 26
-                && nonce
-                    .bytes()
-                    .all(|byte| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&byte))
-        })
-}
+/// own; in round 8 under `report.json.<ulid>.tmp`, and a recogniser over that
+/// shape removed whatever wore it, a name the ULID producer cannot emit
+/// included (the round-8 and round-9 regression lenses, P2). Anything that is
+/// not a directory standing at this name is not the protocol's: it is left as
+/// found and the write refuses, naming it.
+pub const REPORT_STAGING_DIR: &str = ".report-staging";
 /// `<public>/plan.normalized.json`.
 pub const PLAN: &str = "plan.normalized.json";
