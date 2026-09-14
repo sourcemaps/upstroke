@@ -319,7 +319,8 @@ impl EffectHooks for ArmedEffects {
         let shared = self.inner.phase(site, phase);
         for (armed_site, armed_phase, injection) in &self.armed {
             if *armed_site == site && *armed_phase == phase {
-                return *injection;
+                return crate::observations::Exported::new(Arc::clone(self.inner.harness()))
+                    .carried(*injection);
             }
         }
         shared

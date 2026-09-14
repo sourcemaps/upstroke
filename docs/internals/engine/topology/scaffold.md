@@ -170,6 +170,13 @@ So the arming is local and the **recording is not**: every call reaches
 `HarnessEffects` first, so the observation lands in the one harness
 `check_bijection` reads, and only the answer is this type's.
 
+An armed answer is handed back through `Exported::carried`, so a `Kill` writes
+the observation export before the funnel aborts. `HarnessEffects` exports
+before a kill only when the harness itself answers one, which it never does
+at a phase, so until Gate 5's strict re-audit a kill child dying at an armed
+phase lost the record of the coordinate it died at, and no registry claim
+could name the child for that coordinate.
+
 ## `impl ArmedEffects` › `pub(super) fn arm(&mut self, site: EffectSiteId, phase: HookPhase, injection: Injection) {`
 
 Answer `injection` the next time `site` reaches `phase`.

@@ -1115,6 +1115,11 @@ fn attempt_kill_child() {
         let _ = context!(run, process).capture(dispatched.site());
         unreachable!("the kill must have taken this process");
     }
+    if which == "after_stage" {
+        run.arm(STAGE, HookPhase::After, Injection::Kill);
+        let _ = context!(run, process).capture(dispatched.site());
+        unreachable!("the kill must have taken this process");
+    }
 
     let capture = context!(run, process)
         .capture(dispatched.site())
@@ -1126,6 +1131,7 @@ fn attempt_kill_child() {
             SubEffectPoint::IdUnread,
             InjectionMode::Kill,
         ),
+        "after_snapshot_intent" => run.arm(SNAPSHOT_INTENT, HookPhase::After, Injection::Kill),
         "after_snapshot_add" => run.arm(SNAPSHOT_ADD, HookPhase::After, Injection::Kill),
         other => panic!("unknown site `{other}`"),
     }
@@ -1286,6 +1292,128 @@ fn kill_after_capture_leaves_index_referenced_objects_then_scrub_releases_them()
         run.observed(SCRUB, HookPhase::After),
         "the release is the forced scrub's, not something else's"
     );
+}
+
+#[test]
+fn kill_after_the_stage_before_the_tree_leaves_index_referenced_objects_then_scrub_releases_them() {
+    let dir = kill_dir("killstage");
+    let mut run = kill_child_and_adopt(CHILD, &dir, "after_stage");
+    let dispatched = adopted_generation(&run);
+    let mut process = Process::new();
+
+    assert_eq!(
+        run.emitter.durable_kinds(),
+        vec!["run_started", "task_dispatched", "attempt_started"],
+        "the child died inside the capture, before any capture event"
+    );
+    let staged = index_blobs(&dispatched.worktree);
+    let worked = git(&dispatched.worktree, &["hash-object", WORKED_PATH]);
+    assert!(
+        staged.contains(&worked),
+        "the stage completed: the agent's file is in the index: {staged:?} does not hold {worked}"
+    );
+    assert!(
+        !unreachable_objects(&run.fixture.base)
+            .expect("fsck")
+            .contains(&worked),
+        "R9: the object the task index holds is reachable"
+    );
+
+    context!(run, process)
+        .settle_interrupted(
+            &dispatched,
+            crate::topology::events::AttemptNumber(1),
+            AttemptOutcome::Interrupted,
+        )
+        .expect("settle");
+
+    assert_eq!(
+        run.emitter.durable_kinds().last().copied(),
+        Some("attempt_interrupted"),
+        "the settlement appends the interruption"
+    );
+    assert_eq!(run.task_state(ALPHA), TaskState::Pending);
+    assert!(
+        !dispatched.worktree.exists(),
+        "the task worktree is scrubbed with force"
+    );
+    assert!(
+        unreachable_objects(&run.fixture.base)
+            .expect("fsck")
+            .contains(&worked),
+        "R27: the scrub released the staged object to Git"
+    );
+    assert!(
+        run.observed(SCRUB, HookPhase::After),
+        "the release is the forced scrub's"
+    );
+    run.replay_twice_equal();
+}
+
+#[test]
+fn kill_after_the_snapshot_intent_before_its_worktree_is_reclaimed_by_the_settlement() {
+    let dir = kill_dir("killsnapshotintent");
+    let mut run = kill_child_and_adopt(CHILD, &dir, "after_snapshot_intent");
+    let dispatched = adopted_generation(&run);
+    let mut process = Process::new();
+
+    let snapshots: Vec<crate::workspace_manager::Slot> = run
+        .fixture
+        .manager
+        .intents()
+        .expect("intents")
+        .into_iter()
+        .filter(|slot| matches!(slot, crate::workspace_manager::Slot::Snapshot { .. }))
+        .collect();
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "the synced snapshot intent survives: {snapshots:?}"
+    );
+    let path = run.fixture.manager.slot_path(&snapshots[0]);
+    assert!(!path.exists(), "and no snapshot worktree was added for it");
+    assert!(
+        !run.fixture
+            .manager
+            .worktree_records()
+            .expect("worktree records")
+            .iter()
+            .any(|record| record
+                .path()
+                .starts_with(run.fixture.manager.execution_root().join("snapshots"))),
+        "nor registered"
+    );
+    let orphans = unreachable_ephemeral_commits(&run.fixture.base);
+    assert_eq!(
+        orphans.len(),
+        1,
+        "the ephemeral commit written before the intent is unreferenced: {orphans:?}"
+    );
+
+    context!(run, process)
+        .settle_interrupted(
+            &dispatched,
+            crate::topology::events::AttemptNumber(1),
+            AttemptOutcome::Interrupted,
+        )
+        .expect("settle");
+
+    assert!(
+        run.fixture.manager.intents().expect("intents").is_empty(),
+        "the snapshot intent naming no worktree was reclaimed, with the task's"
+    );
+    assert_eq!(
+        unreachable_ephemeral_commits(&run.fixture.base),
+        orphans,
+        "the ephemeral commit is left to Git"
+    );
+    assert_eq!(
+        run.emitter.durable_kinds().last().copied(),
+        Some("attempt_interrupted"),
+        "the settlement appends the interruption"
+    );
+    assert_eq!(run.task_state(ALPHA), TaskState::Pending);
+    run.replay_twice_equal();
 }
 
 #[test]
