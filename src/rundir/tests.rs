@@ -526,6 +526,245 @@ fn two_run_ids_cannot_drive_one_worktree_concurrently() {
     drop(producer);
 }
 
+/// The probe of the worktree-lease fault witnesses: from a process of its
+/// own, answers `absent` when the persistent lock file is not there (and
+/// creates nothing), `free` when it takes the lease (and gives it back as it
+/// exits), and `refused` when another process holds it.
+#[test]
+#[ignore = "spawned as a subprocess by the worktree-lease fault witnesses"]
+fn worktree_lease_probe_child() {
+    let repo = PathBuf::from(std::env::var("UPSTROKE_TEST_WORKTREE_DIR").expect("repo"));
+    let git_dir = PathBuf::from(std::env::var("UPSTROKE_TEST_WORKTREE_GIT_DIR").expect("git dir"));
+    let answer = if !worktree_lock_file(&git_dir).exists() {
+        "absent"
+    } else {
+        match WorktreeLock::acquire_in(&repo, &git_dir) {
+            Ok(_lease) => "free",
+            Err(error) if error.to_string().contains("already driving worktree") => "refused",
+            Err(error) => panic!("the probe's acquisition failed for another reason: {error}"),
+        }
+    };
+    println!("{answer}");
+    std::io::Write::flush(&mut std::io::stdout()).expect("flush");
+}
+
+/// Ask [`worktree_lease_probe_child`] about the lease and require `expected`.
+fn probe_worktree_lease(repo: &Path, git_dir: &Path, expected: &str, context: &str) {
+    let mut producer = readiness::Producer::adopt(
+        std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "rundir::tests::worktree_lease_probe_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("UPSTROKE_TEST_WORKTREE_DIR", repo)
+            .env("UPSTROKE_TEST_WORKTREE_GIT_DIR", git_dir)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn the lease probe"),
+    );
+    producer
+        .await_line(expected, Duration::from_secs(30))
+        .or_fail(&format!("{context}: the probe did not answer `{expected}`"));
+}
+
+/// The production adapter with an error return armed at one `(site, phase)`:
+/// the harness records the phase first, as the funnel's own hook call does,
+/// and the armed coordinate answers [`Injection::Error`].
+struct FailingAt {
+    inner: HarnessHooks,
+    at: (EffectSiteId, HookPhase),
+}
+
+impl RunDirHooks for FailingAt {
+    fn hook(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        let answered = self.inner.hook(site, phase);
+        if (site, phase) == self.at {
+            Injection::Error
+        } else {
+            answered
+        }
+    }
+
+    fn durability_ledger(&self) -> DurabilityLedger {
+        self.inner.durability_ledger()
+    }
+}
+
+/// A fault at one phase of the worktree lease's two sites, on a repository
+/// whose persistent lock file (R25, "never removed by a run") an earlier
+/// write command left and something has since removed — the planted
+/// absence — and then the tabled action, which for a lease is the next write
+/// command's acquisition.
+///
+/// The residue is read against the authority, not restated:
+/// `semantics(phase).rows` names R25 exactly when the lock file is left, and
+/// R17 never — no hold survives an acquisition that returned an error, which
+/// a second process taking the lease at once proves (an in-process probe
+/// cannot: `fcntl` locks do not conflict with their own process). The action
+/// is the authority's too: before a phase nothing was performed, so the next
+/// acquisition performs the create; after `CreateWorktreeLockFile` the file
+/// is adopted, so a byte written into it survives the next acquisition.
+fn a_fault_at_the_worktree_lease_converges_on_the_next_acquisition(
+    site: LockSite,
+    phase: HookPhase,
+    tag: &str,
+) {
+    use crate::topology::effects::{EntryPhase, ResourceRow, ResumeAction};
+
+    let root = scratch(tag);
+    let repo = root.join("repo");
+    let git_dir = root.join("git-dir");
+    fs::create_dir_all(&repo).expect("repository");
+    fs::create_dir_all(&git_dir).expect("worktree git dir");
+    let lock_file = worktree_lock_file(&git_dir);
+    fs::write(&lock_file, b"").expect("the lock file an earlier write command left");
+    fs::remove_file(&lock_file).expect("the planted absence");
+
+    let site = EffectSiteId::Lock(site);
+    let entry = match phase {
+        HookPhase::Before => EntryPhase::Before,
+        HookPhase::After => EntryPhase::After,
+        HookPhase::Point { .. } => panic!("a lease site's coordinates are its two hook phases"),
+    };
+    let semantics = site.semantics(entry);
+
+    let harness = Arc::new(Mutex::new(HookHarness::new()));
+    let mut faulted = FailingAt {
+        inner: HarnessHooks::new(Arc::clone(&harness)),
+        at: (site, phase),
+    };
+    let error = WorktreeLock::acquire_in_hooked(&repo, &git_dir, &mut faulted)
+        .expect_err("the armed fault ends the acquisition");
+    drop(faulted);
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("was made to fail at `{site}` ({phase})")),
+        "{tag}: the injected error is the one returned: {error}"
+    );
+    assert!(
+        harness
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observed(site, phase),
+        "{tag}: the armed coordinate was reached through the production adapter"
+    );
+
+    let create = EffectSiteId::Lock(LockSite::CreateWorktreeLockFile);
+    let create_performed = (site, phase) != (create, HookPhase::Before);
+    assert_eq!(
+        lock_file.exists(),
+        create_performed,
+        "{tag}: the lock file is left exactly when the create was performed"
+    );
+    if site == create {
+        assert_eq!(
+            semantics.rows,
+            if create_performed {
+                vec![ResourceRow::R25]
+            } else {
+                Vec::new()
+            },
+            "{tag}: and the authority's rows say the same"
+        );
+    } else {
+        assert!(
+            semantics.rows.is_empty(),
+            "{tag}: before the hold is taken R17 holds nothing ({:?})",
+            semantics.rows
+        );
+    }
+    if create_performed {
+        probe_worktree_lease(&repo, &git_dir, "free", &format!("{tag}: after the fault"));
+        fs::write(&lock_file, b"adopted").expect("mark the file the fault left");
+    } else {
+        probe_worktree_lease(
+            &repo,
+            &git_dir,
+            "absent",
+            &format!("{tag}: after the fault"),
+        );
+    }
+
+    let recovery = Arc::new(Mutex::new(HookHarness::new()));
+    let mut hooks = HarnessHooks::new(Arc::clone(&recovery));
+    let lease = WorktreeLock::acquire_in_hooked(&repo, &git_dir, &mut hooks)
+        .unwrap_or_else(|error| panic!("{tag}: the next acquisition takes the lease: {error}"));
+    drop(hooks);
+    for (converged, phase) in [
+        (LockSite::CreateWorktreeLockFile, HookPhase::Before),
+        (LockSite::CreateWorktreeLockFile, HookPhase::After),
+        (LockSite::AcquireWorktree, HookPhase::Before),
+        (LockSite::AcquireWorktree, HookPhase::After),
+    ] {
+        assert!(
+            recovery
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .observed(EffectSiteId::Lock(converged), phase),
+            "{tag}: the next acquisition runs `Lock.{}` ({phase})",
+            converged.name()
+        );
+    }
+    assert!(lock_file.is_file(), "{tag}: R25's file stands");
+    assert_eq!(
+        semantics.action,
+        match phase {
+            HookPhase::Before => ResumeAction::ResumeUnperformed,
+            _ => ResumeAction::AdoptPerformed,
+        },
+        "{tag}: the action the authority tables for `{site}` ({phase})"
+    );
+    probe_worktree_lease(&repo, &git_dir, "refused", &format!("{tag}: while held"));
+    drop(lease);
+    probe_worktree_lease(
+        &repo,
+        &git_dir,
+        "free",
+        &format!("{tag}: after the release"),
+    );
+    // Read only now: closing any descriptor of the file drops this process's
+    // `fcntl` lock on it, so a read while the lease was held would release it.
+    if create_performed {
+        assert_eq!(
+            fs::read(&lock_file).expect("the lock file reads"),
+            b"adopted",
+            "{tag}: the file the create performed was adopted, not replaced"
+        );
+    }
+}
+
+#[test]
+fn a_fault_before_the_worktree_lock_file_is_created_leaves_nothing_and_the_next_acquisition_creates_it()
+ {
+    a_fault_at_the_worktree_lease_converges_on_the_next_acquisition(
+        LockSite::CreateWorktreeLockFile,
+        HookPhase::Before,
+        "lease-fault-create-before",
+    );
+}
+
+#[test]
+fn a_fault_after_the_worktree_lock_file_is_created_leaves_it_unheld_and_the_next_acquisition_adopts_it()
+ {
+    a_fault_at_the_worktree_lease_converges_on_the_next_acquisition(
+        LockSite::CreateWorktreeLockFile,
+        HookPhase::After,
+        "lease-fault-create-after",
+    );
+}
+
+#[test]
+fn a_fault_before_the_worktree_lease_is_taken_leaves_no_hold_and_the_next_acquisition_takes_it() {
+    a_fault_at_the_worktree_lease_converges_on_the_next_acquisition(
+        LockSite::AcquireWorktree,
+        HookPhase::Before,
+        "lease-fault-acquire-before",
+    );
+}
+
 #[test]
 fn a_second_process_is_refused_the_run_lock() {
     // The property `claims` cannot provide and the file lock exists for.
