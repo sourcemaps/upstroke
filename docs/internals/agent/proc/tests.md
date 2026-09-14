@@ -185,6 +185,32 @@ timing-out fixture in this suite is `sleep 30`, which writes nothing
 before it is killed — so discarding the whole transcript on timeout was
 a no-op on every fixture that reaches the branch.
 
+## `fn terminate_fault_helper() {`
+
+The child of the `Process.Terminate` fault witnesses: publishes its pid (and, on Windows, its
+creation time, which `ambient::process_alive` needs to tell a reused pid from this process) and
+then outlives the three-second timeout the witness supervises it under, so the funnel's
+termination is what ends it.
+
+## `struct TerminateFaultAt {`
+
+The production adapter (`runner::HarnessHooks`) with an error return armed at one phase of
+`Process.Terminate`: the harness records the phase first, as the funnel's own call does, so the
+observation export names this test as an execution of the coordinate, and the armed phase then
+answers `Injection::Error`.
+
+## `fn a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(`
+
+G5's clause 2 found both phases of `Process.Terminate` observed under the production adapter and
+faulted by no committed test. This drives each: a supervised child outlives its timeout, the
+termination funnel returns the injected error at the phase, and what the fault leaves is read
+against the residue authority rather than restated. The process does not outlive the faulted
+termination on either phase (the funnel settles it on the error path as it does on the ordinary
+one). The fate the failure carries — what the invocation ledger is handed — is the authority's
+rows: before the primitive, R22 still accounts for the handle, so the fate is `Unresolved`; after
+it, the row holds nothing, so the fate is `Gone`. The tabled action is then the next command
+through the same adapter, which runs to its own exit.
+
 ## `fn a_child_registered_pre_exec_is_settled_when_the_parent_never_registers_it() {`
 
 The reaper knows the group **before** the parent registers it, because

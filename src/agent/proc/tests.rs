@@ -294,6 +294,212 @@ fn a_timed_out_child_keeps_the_transcript_it_had_already_written() {
     );
 }
 
+#[test]
+#[ignore = "subprocess helper"]
+fn terminate_fault_helper() {
+    let Some(signal) = std::env::var_os("UPSTROKE_TERMINATE_FAULT_READY") else {
+        return;
+    };
+    let pid = std::process::id();
+    #[cfg(windows)]
+    let created =
+        super::ambient::process_creation_time(pid).expect("the helper reads its own creation time");
+    #[cfg(not(windows))]
+    let created = 0_u64;
+    readiness::publish(
+        Path::new(&signal),
+        &[&pid.to_string(), &created.to_string()],
+    )
+    .expect("publish the helper's identity");
+    thread::sleep(Duration::from_secs(60));
+}
+
+struct TerminateFaultAt {
+    inner: crate::runner::HarnessHooks,
+    at: HookPhase,
+}
+
+impl SpawnHooks for TerminateFaultAt {
+    fn point(&mut self, point: SubEffectPoint) -> Injection {
+        self.inner.point(point)
+    }
+
+    fn point_mode(
+        &mut self,
+        point: SubEffectPoint,
+        mode: crate::topology::effects::InjectionMode,
+    ) -> Injection {
+        self.inner.point_mode(point, mode)
+    }
+
+    fn phase(&mut self, site: ProcessSite, phase: HookPhase) -> Injection {
+        let answered = self.inner.phase(site, phase);
+        if site == ProcessSite::Terminate && phase == self.at {
+            Injection::Error
+        } else {
+            answered
+        }
+    }
+
+    fn child_created(&mut self, pid: u32) {
+        self.inner.child_created(pid);
+    }
+}
+
+fn terminate_fault_helper_gone(pid: u32, created: u64) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = created;
+        let pid = i32::try_from(pid).expect("a pid fits");
+        // SAFETY: signal 0 performs no delivery; it only asks whether the
+        // pid can be signalled.
+        unsafe { libc::kill(pid, 0) != 0 }
+    }
+    #[cfg(windows)]
+    {
+        !super::ambient::process_alive(pid, created)
+    }
+}
+
+fn a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(
+    phase: HookPhase,
+    tag: &str,
+) {
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use crate::topology::effects::{
+        EffectSiteId, EntryPhase, HookHarness, ResourceRow, ResumeAction,
+    };
+
+    let site = EffectSiteId::Process(ProcessSite::Terminate);
+    let semantics = site.semantics(match phase {
+        HookPhase::Before => EntryPhase::Before,
+        HookPhase::After => EntryPhase::After,
+        HookPhase::Point { .. } => panic!("the terminate site's coordinates are its two phases"),
+    });
+    let scratch = std::env::temp_dir().join(format!(
+        "upstroke-{tag}-{}-{}",
+        std::process::id(),
+        crate::ulid::ulid()
+    ));
+    std::fs::create_dir_all(&scratch).expect("scratch directory");
+    let ready = scratch.join("ready");
+
+    let harness = Arc::new(Mutex::new(HookHarness::new()));
+    let mut hooks = TerminateFaultAt {
+        inner: crate::runner::HarnessHooks::new(Arc::clone(&harness)),
+        at: phase,
+    };
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args(["terminate_fault_helper", "--ignored", "--nocapture"])
+        .env("UPSTROKE_TERMINATE_FAULT_READY", &ready);
+    let failure = run_with_timeout_classified(
+        ProcessSite::Spawn,
+        ProcessSite::Terminate,
+        command,
+        b"",
+        Duration::from_secs(3),
+        &mut hooks,
+    )
+    .expect_err("the armed fault ends the supervision");
+    let message = failure.error.to_string();
+    assert!(
+        message.contains(&format!(
+            "the process funnel was made to fail at `Terminate` ({phase})"
+        )),
+        "{tag}: the injected error is the one returned: {message}"
+    );
+    assert!(
+        harness
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .observed(site, phase),
+        "{tag}: the armed coordinate was reached through the production adapter"
+    );
+
+    let identity = readiness::read_published(&ready)
+        .expect("the helper published its identity before the timeout");
+    let pid: u32 = identity
+        .first()
+        .and_then(|field| field.parse().ok())
+        .expect("the helper's pid");
+    let created: u64 = identity
+        .get(1)
+        .and_then(|field| field.parse().ok())
+        .expect("the helper's creation time");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !terminate_fault_helper_gone(pid, created) {
+        assert!(
+            Instant::now() < deadline,
+            "{tag}: the supervised child {pid} outlived the faulted termination"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        failure.fate,
+        if semantics.rows.contains(&ResourceRow::R22) {
+            ProcessFate::Unresolved
+        } else {
+            ProcessFate::Gone
+        },
+        "{tag}: the fate the funnel hands the invocation ledger is the authority's rows ({:?}): \
+         {message}",
+        semantics.rows
+    );
+    assert_eq!(
+        semantics.action,
+        match phase {
+            HookPhase::Before => ResumeAction::ResumeUnperformed,
+            _ => ResumeAction::AdoptPerformed,
+        },
+        "{tag}: the action the authority tables for `{site}` ({phase})"
+    );
+
+    let next = run_with_timeout_classified(
+        ProcessSite::Spawn,
+        ProcessSite::Terminate,
+        shell("echo next"),
+        b"",
+        Duration::from_secs(30),
+        &mut hooks,
+    )
+    .unwrap_or_else(|failure| panic!("{tag}: the next command runs: {}", failure.error));
+    assert_eq!(next.code, Some(0), "{tag}: {next:?}");
+    assert!(next.stdout.contains("next"), "{tag}: {next:?}");
+    let spawn = EffectSiteId::Process(ProcessSite::Spawn);
+    let seen = harness.lock().unwrap_or_else(PoisonError::into_inner);
+    assert_eq!(
+        (
+            seen.count(spawn, HookPhase::Before),
+            seen.count(spawn, HookPhase::After),
+            seen.count(site, phase),
+        ),
+        (2, 2, 1),
+        "{tag}: both commands went through the production adapter, and only the first was \
+         terminated"
+    );
+    drop(seen);
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
+#[test]
+fn a_fault_before_the_terminate_primitive_settles_the_child_and_leaves_its_fate_unresolved() {
+    a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(
+        HookPhase::Before,
+        "terminate-fault-before",
+    );
+}
+
+#[test]
+fn a_fault_after_the_terminate_primitive_reports_the_child_gone() {
+    a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(
+        HookPhase::After,
+        "terminate-fault-after",
+    );
+}
+
 #[cfg(unix)]
 #[test]
 #[allow(clippy::zombie_processes)]
