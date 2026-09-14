@@ -1471,16 +1471,60 @@ if [[ "$gitlink_inside_rc" != 1 ]]; then
   echo "a listing spelled '.' inside an initialised submodule was meant to refuse; got $gitlink_inside_rc" >&2
   exit 1
 fi
-# A PATH BELOW THE GITLINK IS UNNAMEABLE AND NOT RESOLVED, which is the ancestor
+# A PATH BELOW A GITLINK IS UNNAMEABLE AND NOT RESOLVED, which is the ancestor
 # half of the same rule: no index entry and no tree entry of this repository is
 # named by a path through a gitlink.
-mkdir -p "$repo_gitlink/findings/deeper"
-echo fixture > "$repo_gitlink/findings/deeper/P2_correctness_202609100002_under-a-submodule.md"
-gitlink_under_rc=0
-"$BASH" "$branch_validator" 'fix-P2/correctness_under-a-submodule' \
-  "$repo_gitlink/findings/deeper" >/dev/null 2>&1 || gitlink_under_rc=$?
-if [[ "$gitlink_under_rc" != 1 ]]; then
-  echo "a listing under an initialised submodule was meant to refuse; got $gitlink_under_rc" >&2
+#
+# THE ROW THAT STOOD HERE ASSERTED THAT AND WITNESSED NOTHING, AND BOTH HALVES
+# OF THAT WERE MEASURED. It created an UNSTAGED file in a directory under the
+# INITIALISED submodule above and asserted exit 1: `git ls-files -s -- deeper`
+# exits 0 with empty output whichever repository is asked, so the diagnostic was
+# `git records nothing at …` and the row held with the ancestor walk taken out.
+# STAGING IT DOES NOT REPAIR THE ROW, IT INVERTS IT -- committed in the submodule
+# with the outer gitlink updated, the same listing conforms at exit 0 on both
+# trees, because a listing INSIDE an initialised submodule is named by THAT
+# submodule's index. That is the project-in-a-submodule rule the next block
+# states and measures; it is not this one, and the two cannot both hold of one
+# path.
+#
+# SO THE WITNESS IS A GITLINK WITH NO WORK TREE AT IT, where this repository is
+# the one that names the path: discovery from `findings/` lands in the
+# SUPERPROJECT, which records `findings` at 160000 and records nothing under it.
+# The input that separates the two answers is a REGULAR FILE, because a file
+# listing is READ wherever the records hold nothing at all -- it is the shape the
+# workflow hands in from RUNNER_TEMP -- and is NOT read where a recorded blob
+# stands above it. With the ancestor walk in `recorded_kind_of` taken out, this
+# file conforms at exit 0 naming a finding this repository never filed; with it,
+# the refusal quotes the recorded mode, which is what the assertion below reads.
+repo_below="$fixture_dir/repo-gitlink-with-no-work-tree"
+new_repo "$repo_below"
+echo seed > "$repo_below/seed.txt"
+git -C "$repo_below" add -A && git -C "$repo_below" commit -q -m base
+below_base="$(git -C "$repo_below" rev-parse HEAD)"
+git -C "$repo_below" update-index --add --cacheinfo \
+  "160000,$(git -C "$repo_gitlink/findings" rev-parse HEAD),findings"
+git -C "$repo_below" commit -q -m 'a gitlink at findings with no work tree at it'
+below_head="$(git -C "$repo_below" rev-parse HEAD)"
+mkdir -p "$repo_below/findings"
+printf 'P2_correctness_202609100002_under-a-submodule.md\n' > "$repo_below/findings/listing.txt"
+if ! git -C "$repo_below" ls-tree "$below_head" | grep -q $'^160000 commit [0-9a-f]*\tfindings$' \
+  || [[ -e "$repo_below/findings/.git" ]] \
+  || [[ "$(git -C "$repo_below" ls-files -- findings)" != findings ]]; then
+  echo 'the fixture was meant to record findings as a gitlink with no work tree at it' >&2
+  exit 1
+fi
+both_apis 'a file below a gitlink is named by no ledger of this repository' \
+  "$repo_below" "$below_base" "$below_head" 'fix-P2/correctness_under-a-submodule' 1 \
+  "$repo_below/findings/listing.txt"
+# AND IT REFUSES FOR THE GITLINK. Every refusal here is exit 1 and `names no
+# finding` is one of them, so the row that reads the code alone cannot tell the
+# repaired fixture from the one it replaced.
+below_rc=0
+below_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_under-a-submodule' \
+  "$repo_below/findings/listing.txt" 2>&1)" || below_rc=$?
+if [[ "$below_rc" != 1 ]] || [[ "$below_out" != *"records 'findings' as mode 160000"* ]]; then
+  echo "a file below a gitlink was meant to refuse for the recorded mode; got $below_rc" >&2
+  printf '%s\n' "$below_out" >&2
   exit 1
 fi
 # AND AN ORDINARY findings DIRECTORY STILL RESOLVES THE SAME NAME, so the rule
