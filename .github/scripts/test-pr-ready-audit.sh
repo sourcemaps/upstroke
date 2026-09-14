@@ -1601,250 +1601,428 @@ contains MUT-JSON-REPEATED-NAME-CHOSEN "$got" "open-P1:CRITICAL"
 # THE SHAPE, NOT THE INSTANCE -- AND ASKED OF THE DECODE, NEVER OF HOW IT IS WRITTEN. One
 # `json.loads` reads review content today and the hook is on it; a second one added without the
 # hook is this finding again, in a place no fixture here is pointed at. So what is asserted is the
-# class, and this is the THIRD guard written for it. Both of the others read the source:
+# class, and this is the FOURTH guard written for it. Each one before it was wrong in both
+# directions, and each in its own way:
 #
-#   * round 0 matched the literal `json.loads(`. Python allows whitespace before the parenthesis,
-#     so `json.loads (text)` is a working unhooked decoder the scan counted in NEITHER direction --
-#     zero unguarded calls, one hooked call, green;
+#   * round 0 matched the literal `json.loads(`. `json.loads (text)` is a working, unhooked decoder
+#     the scan did not count, and a second decoder carrying the hook turned its count of one red;
 #   * round 1 parsed the module and matched the callee path `json.loads` carrying the keyword
-#     `object_pairs_hook=one_reading`. Three more spellings walked through it, each executed:
-#     `def extra(text, one_reading=None)` binds that identifier to a PARAMETER, so the keyword is
-#     spelled and the hook is `None`; `json.loads(text, object_pairs_hook=one_reading, **opts)`
-#     with `opts = {"cls": Ignoring}` spells it too and hands the decode to a class that drops it;
-#     and because `dotted()` discarded a non-name root, the same guard REFUSED
-#     `factory().json.loads(text)` -- a correct, hooked parser, which this file's own duplicate-key
-#     cases confirm refuses -- while accepting `ns.json.loads(text)`, which is not.
+#     `object_pairs_hook=one_reading`. The identifier bound to a parameter, and a `cls` override
+#     beside the keyword, walked through it; and because `dotted()` discarded a non-name root it
+#     REFUSED `factory().json.loads(text)`, a correct parser;
+#   * round 2 stopped reading the source and ran the decode -- the right direction, and it closed
+#     nine spellings round 1 let through -- but it concluded from whatever happened. It read ANY
+#     EXCEPTION as a refusal, so a hook demanding a finding id "refused" the repeated name; it
+#     wrapped `decode` in a copy of the module, so `raw_decode` and the copy's retained
+#     `json.decoder` decoded unwatched; it called a reader without its keyword-only parameter and
+#     swallowed the `TypeError`, so the reader never ran; and it read its answer off a stdout the
+#     module shares, so a helper printing JSON turned a correct parser red.
 #
-# THE INVARIANT IS BEHAVIOURAL AND IT HAS TWO HALVES. Closed against: A DECODE WHOSE OBJECT
-# CONSTRUCTOR DOES NOT REFUSE A REPEATED NAME, however it is spelled or reached. Let through: A
-# DECODE WHOSE CONSTRUCTOR DOES REFUSE ONE, however it is spelled or reached -- through a factory,
-# an alias, a subscript, an attribute chain, a `**` unpacking or a plain call. Fixing one half
-# alone regenerates the other: requiring the callee's root to be `json` closes the false red and
-# does nothing about a shadowed binding, which IS `json.loads` by that test; accepting anything
-# that looks hooked reopens both evasions. A guard that fails open two ways and closed a third
-# does not have three defects, it has no stated boundary -- so the boundary is stated here and the
-# source is not read for the answer at all.
+# Round 2 did not have four defects. It executed arbitrary functions and inferred intent from their
+# side effects, which is unsound in both directions -- so this guard states WHAT MAY BE CONCLUDED,
+# AND FROM WHAT, and implements exactly that:
 #
-# `json` is replaced before the parser is imported. Every decode the parser makes arrives at the
-# replacement, and each one is answered BY MAKING THAT IDENTICAL CALL ON A DOCUMENT THAT NAMES
-# SOMETHING TWICE: same keywords, same `cls`, same unpacking, same decoder object. Returning an
-# object built from that document is the defect; raising is the fix. No spelling evades it, because
-# nothing here reads the spelling -- and the answer is about the decoder and not about the review,
-# since the probe document is the probe's own and not the one the caller passed.
+#   * WHAT MAKES A DECODER ACCEPTABLE: it REFUSES A REPEATED NAME.
+#   * WHAT THAT IS CONCLUDED FROM: A PAIRED RESULT, never one outcome. The probe runs the decoder
+#     itself on a document naming `findings` twice AND ON BOTH OF THAT DOCUMENT'S SINGLE-NAME
+#     READINGS. Raising on the duplicate and returning on both readings is concluded to be a refusal
+#     of the repetition: whatever either value holds on its own, one of the readings holds too.
+#     Returning on the duplicate is the defect. Raising on the duplicate and on a reading too is
+#     UNPROVEN -- a decoder failing for some other reason -- and unproven is not acceptable either.
+#   * THE PROBE OBSERVES ONLY WHAT IT OWNS. Its three documents are its own and their results are
+#     held as values; its report goes to a file it names, never to the module's stdout; a function
+#     is called by its real signature and run by its real protocol, or reported as skipped; and a
+#     failure of the probe's own is never caught -- it ends the probe, and no report is red below.
+#
+# BOTH HALVES OF THE BOUNDARY, over every decode the probe watches: each one the parser's own code
+# makes that arrives at `JSONDecoder.raw_decode`. That is not every decode -- the routes that do not
+# arrive, or are not reached, are measured at the end of this section. Closed against: a decoder
+# that returns on the duplicate, or that is not shown to refuse it. Let through: a decoder shown to
+# refuse it, whatever name it is reached by -- a factory, an alias, an attribute chain, a `**`
+# unpacking, a subclass, or a SECOND decoder that genuinely refuses, which is safe and green here.
 cat > "$tmp/decode-probe.py" <<'DECODEPROBE'
-"""Ask every decode this module can make whether it REFUSES A REPEATED NAME -- by running it.
+"""Ask every JSON decode this module makes whether it REFUSES A REPEATED NAME -- and conclude it
+only from a PAIRED RESULT the probe makes itself.
 
-    decode-probe.py MODULE DRIVE-FILE
+    decode-probe.py MODULE DRIVE-FILE REPORT-FILE
 
-Prints `decoded=<yes|no> unrefusing=<n>`, and names the functions the unrefusing decodes came from.
+The report is two lines, written to REPORT-FILE and never to stdout, which belongs to MODULE:
+
+    decoded=<yes|no> unrefusing=<sites> unproven=<sites> skipped=<functions>
+    refusing=<sites> drive=<how the drive ended> swept=<function:how each call ended,...>
+
+A swept function is called with the probe's document as text and then, if that answered no
+decode, as a path; its outcomes are joined by `/`. An empty list is written `-`. Exit 0 means the
+report was written, and any other exit means it was not: a failure of the probe's own is never
+caught and never becomes a report.
 """
-import ast, importlib.util, inspect, json as _real, os, sys, tempfile, types
-
-# A document with two readings, and the shape is the finding: one object naming `findings` twice,
-# the second time empty, so a blocking array is discarded and a clean PASS is what a reader gets.
-PROBE = '{"verdict":"PASS","findings":[{"severity":"P1"}],"findings":[]}'
+import ast, importlib.util, inspect, json.decoder, os, sys, tempfile, types
 
 # Importing MODULE must not leave a `__pycache__` beside it: this runs against a checkout, and a
 # gate that writes into the tree it is judging is a gate that dirties `git status`.
 sys.dont_write_bytecode = True
 
+# WHAT MAKES A DECODER ACCEPTABLE: IT REFUSES A REPEATED NAME. WHAT THAT IS CONCLUDED FROM: A PAIRED
+# RESULT, AND NEVER ONE OUTCOME. Raising on a document that names something twice is what a decoder
+# refusing the repetition does -- and what a decoder refusing ANYTHING ELSE in that document does,
+# which is how round 2 read a hook demanding a finding id as a refusal of the repetition. So every
+# decoder is asked three things, by the probe, on the probe's own documents: the DUPLICATE, and ITS
+# TWO SINGLE-NAME READINGS -- the same document with the first occurrence removed, and with the
+# last. Whatever a hook could object to in either value on its own, one of the readings carries
+# too. What the pair cannot separate from the repetition is what only both values together make,
+# such as the object's count of names -- measured, and listed where this probe is used. And then:
+#
+#   * raises on the duplicate, returns on both readings -> REFUSING, the one acceptable answer
+#   * returns on the duplicate                          -> UNREFUSING: it built an object out of a
+#                                                          document with two readings
+#   * raises on the duplicate and on a reading too      -> UNPROVEN: it fails for a reason the pair
+#                                                          does not isolate, so nothing is known
+DUPLICATE = '{"verdict":"PASS","findings":[{"id":"CRITICAL","severity":"P1"}],"findings":[]}'
+READINGS = ('{"verdict":"PASS","findings":[{"id":"CRITICAL","severity":"P1"}]}',
+            '{"verdict":"PASS","findings":[]}')
+
 target = os.path.abspath(sys.argv[1])
-refusing, unrefusing = set(), set()
+drive_file, report_file = sys.argv[2], sys.argv[3]
+json_home = os.path.dirname(os.path.abspath(json.decoder.__file__))
+answers = {}      # the function a decode was made from -> the answers its decoders gave
+observed = [0]    # decodes answered, so the sweep can tell whether a call reached one
+faults = []       # the probe's own failures inside a decode, raised again once the module is done
+asking = False
+
+
+def ended(call):
+    """How CALL ended -- `returned`, or `raised:<type>` -- as the probe's own record of it."""
+    try:
+        call()
+    except Exception as exc:
+        return "raised:" + type(exc).__name__
+    return "returned"
+
+
+def ask(decoder):
+    """DECODER's paired result: its own `decode`, run on the duplicate and on both readings."""
+    global asking
+    asking = True
+    try:
+        duplicate = ended(lambda: decoder.decode(DUPLICATE))
+        readings = [ended(lambda one=one: decoder.decode(one)) for one in READINGS]
+    finally:
+        asking = False
+    if duplicate == "returned":
+        return "unrefusing"
+    return "refusing" if readings == ["returned", "returned"] else "unproven"
 
 
 def site():
-    """The MODULE function a decode was made from -- read off the frame, not off the text."""
-    frame = sys._getframe(1)
-    while frame is not None:
-        if os.path.abspath(frame.f_code.co_filename) == target:
-            return frame.f_code.co_name
+    """The function of MODULE that asked for this decode, or None when MODULE's code did not.
+
+    The frames inside the `json` package are the decode's own machinery and are stepped over. The
+    first frame past them asked for the decode, and it counts only if it is MODULE's -- so a
+    library that decodes for its own reasons is not answered for as the parser.
+    """
+    frame = sys._getframe(2)
+    while frame is not None and os.path.dirname(os.path.abspath(frame.f_code.co_filename)) == json_home:
         frame = frame.f_back
-    return "<outside>"
+    if frame is None or os.path.abspath(frame.f_code.co_filename) != target:
+        return None
+    return getattr(frame.f_code, "co_qualname", frame.f_code.co_name)
 
 
-def answer(where, same_call):
-    """SAME_CALL is this decode made again on PROBE. Returning is the defect; raising is the fix."""
-    try:
-        same_call()
-    except BaseException:
-        refusing.add(where)
-    else:
-        unrefusing.add(where)
+# WHERE THE STANDARD LIBRARY'S DECODES ARRIVE. `json.load` calls `json.loads`; `json.loads` builds
+# a decoder -- or takes the module's default one -- and calls its `decode`; `decode` calls
+# `raw_decode`; and `raw_decode` is where the document is scanned. So the one method replaced is
+# `JSONDecoder.raw_decode`, IN PLACE, on the class the standard library defines -- not a copy of
+# the module, whose retained `json.decoder` and inherited `raw_decode` were two ways round 2's copy
+# was walked around. `json.JSONDecoder` and `json.decoder.JSONDecoder` are that one class, so every
+# name for it and every instance of it arrives here, and so does every subclass that does not
+# replace `raw_decode` without calling it. A decode that drives the scanner itself does not.
+scan = json.decoder.JSONDecoder.raw_decode
 
 
-shim = types.ModuleType("json")
-shim.__dict__.update(_real.__dict__)
+def arrived(self, s, *args, **kwargs):
+    if not asking:
+        try:
+            where = site()
+            if where is not None:
+                answers.setdefault(where, set()).add(ask(self))
+                observed[0] += 1
+        except BaseException as exc:
+            faults.append(exc)
+            raise
+    return scan(self, s, *args, **kwargs)
 
 
-def loads(s, **kw):
-    answer(site(), lambda: _real.loads(PROBE, **kw))
-    return _real.loads(s, **kw)
-
-
-def load(fp, **kw):
-    answer(site(), lambda: _real.loads(PROBE, **kw))
-    return _real.load(fp, **kw)
-
-
-class JSONDecoder(_real.JSONDecoder):
-    def decode(self, s, *rest, **kw):
-        answer(site(), lambda: _real.JSONDecoder.decode(self, PROBE))
-        return _real.JSONDecoder.decode(self, s, *rest, **kw)
-
-
-shim.loads, shim.load, shim.JSONDecoder = loads, load, JSONDecoder
-sys.modules["json"] = shim
-
-scratch = tempfile.mkdtemp()
-probe_file = os.path.join(scratch, "probe.json")
-open(probe_file, "w").write(PROBE)
+json.decoder.JSONDecoder.raw_decode = arrived
 
 spec = importlib.util.spec_from_file_location("under_probe", target)
 module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
 spec.loader.exec_module(module)
+scratch = tempfile.mkdtemp()
 
 # THE PATHS THE PROGRAM TAKES, driven through its own entry point, with every function it enters
-# recorded so that the sweep below never calls one the program has already run itself.
+# recorded so that the sweep below never calls one the program has already run itself. How the
+# drive ended is the module's behaviour on the fixture, so it is recorded, not concluded from.
 entered = set()
 
 
 def watch(frame, event, arg):
     if event == "call" and os.path.abspath(frame.f_code.co_filename) == target:
-        entered.add(frame.f_code.co_name)
-    return None
+        entered.add(frame.f_code)
 
 
+drive = "absent"
 if callable(getattr(module, "main", None)):
     sys.settrace(watch)
     try:
-        module.main(["review", "--out", os.path.join(scratch, "driven"), sys.argv[2]])
-    except BaseException:
-        pass
+        drive = "returned:%r" % (module.main(["review", "--out", os.path.join(scratch, "driven"), drive_file]),)
+    except (Exception, SystemExit) as exc:
+        drive = "raised:" + type(exc).__name__
     finally:
         sys.settrace(None)
 
-# AND THE ONES IT DOES NOT, because a decode nothing runs is a decode nothing has answered for. A
-# decode needs a name this module bound from `json`, so those names are followed from the imports
-# through module-level assignment, and every function mentioning one that the drive never entered
-# is called with the probe -- as text, and as a path. THE TREE IS READ FOR ONE THING ONLY, WHICH
-# FUNCTIONS TO CALL. It never decides whether a call is safe: what decodes is answered by running
-# it, the same way everything else here is. Mentioning the binding is the whole of the test, so a
-# function that only ENCODES is a candidate as well; it contributes nothing, because only decodes
-# are watched. A function this reaches is one the program itself never ran on the fixture, and it
-# is called with a JSON document for every argument it does not default -- so a new helper here
-# that names `json` and has a side effect will be called with one.
-tree = ast.parse(open(target).read())
+# AND THE ONES IT DOES NOT, because a decode nothing runs is a decode nothing has answered for. THE
+# TREE IS READ FOR ONE THING ONLY, WHICH FUNCTIONS TO CALL, and never to decide whether a decode is
+# safe. A name counts as taken from `json` when an import binds it from there, or when a
+# module-level statement binding it -- an assignment, a `class`, a `def` -- mentions a name that
+# counts; that is followed to a fixed point.
+with open(target, encoding="utf-8") as source:
+    tree = ast.parse(source.read())
 names = set()
 for node in ast.walk(tree):
     if isinstance(node, ast.Import):
-        for alias in node.names:
-            if alias.name == "json" or alias.name.startswith("json."):
-                names.add(alias.asname or alias.name.split(".")[0])
-    elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "json":
+        names.update(alias.asname or "json" for alias in node.names if alias.name.split(".")[0] == "json")
+    elif isinstance(node, ast.ImportFrom) and not node.level and (node.module or "").split(".")[0] == "json":
         names.update(alias.asname or alias.name for alias in node.names)
 
 
-def loaded(node):
-    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+def module_level(statements):
+    for statement in statements:
+        yield statement
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for child in ast.iter_child_nodes(statement):
+            if isinstance(child, ast.excepthandler):
+                yield from module_level(child.body)
+            elif isinstance(child, ast.stmt):
+                yield from module_level([child])
+
+
+def binding(statement):
+    """The names STATEMENT binds, and the part of it that decides what they are bound to."""
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [statement.name], statement
+    if isinstance(statement, ast.Assign):
+        targets = statement.targets
+    elif isinstance(statement, (ast.AnnAssign, ast.AugAssign)) and statement.value is not None:
+        targets = [statement.target]
+    else:
+        return [], None
+    return [one.id for each in targets for one in ast.walk(each) if isinstance(one, ast.Name)], statement.value
 
 
 growing = True
 while growing:
     growing = False
-    for stmt in tree.body:
-        bound = getattr(stmt, "targets", None) or ([stmt.target] if isinstance(stmt, ast.AnnAssign) else [])
-        if not bound or stmt.value is None or not loaded(stmt.value) & names:
+    for statement in module_level(tree.body):
+        bound, decides = binding(statement)
+        if decides is None or not names & {one.id for one in ast.walk(decides)
+                                           if isinstance(one, ast.Name) and isinstance(one.ctx, ast.Load)}:
             continue
-        for one in bound:
-            for named in ast.walk(one):
-                if isinstance(named, ast.Name) and named.id not in names:
-                    names.add(named.id)
-                    growing = True
+        for name in bound:
+            if name not in names:
+                names.add(name)
+                growing = True
 
-defined = [s for s in tree.body if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef))]
-# `from json import *` binds names this cannot enumerate, so every function becomes a candidate.
-candidates = defined if "*" in names else [s for s in defined if loaded(s) & names]
 
-for function in candidates:
-    call = getattr(module, function.name, None)
-    if not callable(call) or function.name in entered | refusing | unrefusing:
-        continue
-    for supplied in (PROBE, probe_file):
-        try:
-            needed = [
-                p for p in inspect.signature(call).parameters.values()
-                if p.default is p.empty
-                and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
-            ]
-            call(*([supplied] * len(needed)))
-        except BaseException:
+def code_names(code):
+    found = set(code.co_names)
+    for constant in code.co_consts:
+        if isinstance(constant, types.CodeType):
+            found |= code_names(constant)
+    return found
+
+
+def held(namespace, functions, classes):
+    """Every function of MODULE's own that it holds: by a module-level name, or in a class body."""
+    for value in list(namespace.values()):
+        if isinstance(value, (staticmethod, classmethod)):
+            value = value.__func__
+        if isinstance(value, types.FunctionType):
+            if os.path.abspath(value.__code__.co_filename) == target and value not in functions:
+                functions.append(value)
+        elif isinstance(value, type) and value.__module__ == module.__name__ and value not in classes:
+            classes.append(value)
+            held(vars(value), functions, classes)
+    return functions
+
+
+# Each candidate is called BY ITS REAL SIGNATURE: the probe's document for every parameter the
+# function does not default, positionally or by keyword exactly as it is declared, with the bind
+# checked before the call -- so a call the probe got wrong fails in the probe, uncaught, and can
+# never be mistaken for the function's own behaviour. What the call returns is then RUN THE WAY IT
+# IS RUN: a coroutine awaited, a generator exhausted, because calling either runs none of its body.
+# A function whose signature cannot be read is not called with a guess; it is reported as skipped.
+# AND IT IS REALLY CALLED: a function this reaches is one the program never ran on the fixture, so a
+# new helper here that names a `json`-taken name and has a side effect WILL be called with the
+# probe's document, and one that never returns will hang the gate.
+def arguments(signature, document):
+    positional, keywords = [], {}
+    for parameter in signature.parameters.values():
+        if parameter.default is not parameter.empty:
+            continue
+        if parameter.kind is parameter.KEYWORD_ONLY:
+            keywords[parameter.name] = document
+        elif parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD):
+            positional.append(document)
+    signature.bind(*positional, **keywords)
+    return positional, keywords
+
+
+def run(function, positional, keywords):
+    result = function(*positional, **keywords)
+    if inspect.iscoroutine(result):
+        import asyncio
+        asyncio.run(result)
+    elif inspect.isasyncgen(result):
+        import asyncio
+
+        async def drained(generator):
+            async for _ in generator:
+                pass
+        asyncio.run(drained(result))
+    elif inspect.isgenerator(result):
+        for _ in result:
             pass
-        if function.name in refusing | unrefusing:
-            break
 
-answered = "decoded=%s unrefusing=%d" % ("yes" if refusing | unrefusing else "no", len(unrefusing))
-if unrefusing:
-    answered += " sites=" + ",".join(sorted(unrefusing))
-print(answered)
+
+def as_path():
+    handle, path = tempfile.mkstemp(dir=scratch, suffix=".json")
+    with os.fdopen(handle, "w", encoding="utf-8") as written:
+        written.write(DUPLICATE)
+    return path
+
+
+swept, skipped = [], []
+for function in held(vars(module), [], []):
+    if function.__code__ in entered or not ("*" in names or code_names(function.__code__) & names):
+        continue
+    try:
+        signature = inspect.signature(function)
+    except (TypeError, ValueError):
+        skipped.append(function.__qualname__)
+        continue
+    before = observed[0]
+    attempts = []
+    for document in (lambda: DUPLICATE, as_path):
+        positional, keywords = arguments(signature, document())
+        try:
+            run(function, positional, keywords)
+            attempts.append("returned")
+        except (Exception, SystemExit) as exc:
+            attempts.append("raised:" + type(exc).__name__)
+        if observed[0] > before:
+            break
+    swept.append("%s:%s" % (function.__qualname__, "/".join(attempts)))
+
+if faults:
+    raise faults[0]
+
+
+def listed(items):
+    return ",".join(sorted(items)) or "-"
+
+
+sites = {"refusing": set(), "unrefusing": set(), "unproven": set()}
+for where, given in answers.items():
+    for answer in given:
+        sites[answer].add(where)
+with open(report_file, "w", encoding="utf-8") as report:
+    report.write("decoded=%s unrefusing=%s unproven=%s skipped=%s\n" % (
+        "yes" if answers else "no", listed(sites["unrefusing"]), listed(sites["unproven"]),
+        listed(skipped)))
+    report.write("refusing=%s drive=%s swept=%s\n" % (listed(sites["refusing"]), drive, listed(swept)))
 DECODEPROBE
-# `PYTHONDONTWRITEBYTECODE=1` as well as the `sys.dont_write_bytecode` above, because the probe is
+# `PYTHONDONTWRITEBYTECODE=1` as well as the `sys.dont_write_bytecode` inside, because the probe is
 # also a script somebody runs by hand: importing the parser must not leave a `__pycache__` under
 # `scripts/`, and a required gate that writes into the tree it judges is the shape this whole
-# section exists to keep out. `TMPDIR` keeps the probe's own scratch inside the trap above.
-decode_probe() {
-  TMPDIR="$tmp" PYTHONDONTWRITEBYTECODE=1 "$parser_python" "$tmp/decode-probe.py" "$1" "$2"
+# section exists to keep out. `TMPDIR` keeps the probe's own scratch inside the trap above. The
+# probe's stdout and stderr go to a log and its report to a file of its own, so nothing the module
+# prints can reach an assertion; no report means the probe itself failed, which no assertion below
+# accepts.
+decode_probe() {  # decode_probe MODULE DRIVE: the report's two lines as one, or why there is none
+  local status=0
+  rm -f "$tmp/decode-report"
+  TMPDIR="$tmp" PYTHONDONTWRITEBYTECODE=1 "$parser_python" "$tmp/decode-probe.py" "$1" "$2" \
+    "$tmp/decode-report" > "$tmp/decode-probe.log" 2>&1 || status=$?
+  if ((status != 0)) || [[ ! -s "$tmp/decode-report" ]]; then
+    printf 'no report: the probe exited %s: %s' "$status" "$(tail -n 1 "$tmp/decode-probe.log")"
+    return 0
+  fi
+  printf '%s | %s' "$(sed -n 1p "$tmp/decode-report")" "$(sed -n 2p "$tmp/decode-report")"
 }
 printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 # THE PROBE IS ITSELF UNDER TEST, because a probe that has stopped watching agrees with a clean
-# parser and says so in the same words -- which is how either scan it replaces could have been
-# gutted with nothing here noticing. So it runs first over stand-ins whose answers are known, and
-# SEVEN MUTATIONS OF IT WERE WATCHED AGAINST THOSE STAND-INS, each one moving an asserted string:
+# parser and says so in the same words. So it runs first over stand-ins whose answers are known,
+# and MUTATIONS OF THE PROBE WERE WATCHED AGAINST THEM, each one moving an asserted report:
 #
-#   * a refusal test that always says "refused"        `bare` 1 -> 0, `disguised` 2 -> 0
-#   * the replacement `json` never installed           every stand-in reads `decoded=no`
-#   * the drive removed                                `hooked` and `bare` read `decoded=no`
-#   * a sweep that finds no candidates                 `disguised` 2 -> 0, `routes` 7 -> 0
-#   * a sweep that calls none of them                  `disguised` 2 -> 0, `routes` 7 -> 0
-#   * a hardcoded `decoded=yes unrefusing=0`           `bare`, `disguised` and `routes` disagree
-#                                                      with the sites they still name
-#   * the probe re-running the CALLER'S text rather
-#     than a repeated-name document                    `hooked` 0 -> 1
+#   mutation of the probe                             what moved
+#   any exception read as a refusal (round 2's rule)  `unrelated`: both unproven decoders refusing
+#   the first reading alone asked                     `unrelated`: `by_empty_refusal` refusing
+#   the last reading alone asked                      `unrelated`: `by_severity_refusal` refusing
+#   the unproven left out of the verdict line         `unrelated`
+#   the caller's own text deciding, not the pair      ten stand-ins, and the parser itself
+#   `decode` replaced rather than `raw_decode`        `escapes`: `by_raw_decode` unwatched
+#   keyword-only parameters left out of the call      `contracts`: `by_keyword_only` never ran
+#   a coroutine or a generator called and not run     `contracts`: neither ran
+#   module-level `def`s the only functions swept      `contracts`: the methods and the lambda
+#   the report written to stdout (round 2's channel)  `encoder-only`: the counterfeit line read
+#   the skipped left out of the verdict line          `unreadable`
+#   the drive removed                                 every stand-in, and the parser itself
+#   a sweep that calls nothing                        eight stand-ins
+#   a hardcoded clean verdict line                    eight stand-ins
 #
-# Each stand-in below is the smallest module that decides one question, and each decodes THE WAY
-# THE PARSER DOES -- out of a block object its caller built, not out of a string handed to `read`.
-# That is what makes the drive load-bearing here rather than decoration: the sweep cannot construct
-# a block, so remove the drive and `hooked` and `bare` both go silent.
-probe_stand_in() {  # probe_stand_in <name> <decode-expression>
+# and none of the fourteen moved an assertion anywhere else in this file.
+#
+# Each stand-in decodes THE WAY THE PARSER DOES -- out of a block object its caller built, not out
+# of a string handed to `read` -- so the drive is load-bearing: the sweep cannot construct a block,
+# and without the drive `hooked` and `bare` go silent.
+probe_stand_in() {  # probe_stand_in <name> <decode-expression>, and the rest of the module on stdin
   { printf 'import json\n\n\nclass Block:\n    def __init__(self, content):\n'
     printf '        self.content = content\n\n\ndef one_reading(pairs):\n    seen = set()\n'
     printf '    for name, _ in pairs:\n        if name in seen:\n'
     printf '            raise ValueError("names %%r twice" %% name)\n        seen.add(name)\n'
     printf '    return dict(pairs)\n\n\ndef read(text, block):\n    return %s\n' "$2"
-    printf '\n\ndef main(argv):\n    return read("", Block(open(argv[-1]).read()))\n'
+    printf '\n\ndef main(argv):\n    read("", Block(open(argv[-1]).read()))\n    return 0\n'
     cat
   } > "$tmp/probe-$1.py"
 }
-# The decode the program takes, hooked -- the control, and the only stand-in that must be silent.
+probe_expect() {  # probe_expect <stand-in> <report>
+  expect "MUT-JSON-REPEATED-NAME-CHOSEN [$1]" \
+    "$(decode_probe "$tmp/probe-$1.py" "$tmp/probe-drive.json")" "$2"
+}
+# The control: the decode the program takes, hooked, which the pair must clear.
 probe_stand_in hooked 'json.loads(block.content, object_pairs_hook=one_reading)' < /dev/null
-expect MUT-JSON-REPEATED-NAME-CHOSEN "$(decode_probe "$tmp/probe-hooked.py" "$tmp/probe-drive.json")" \
-  'decoded=yes unrefusing=0'
+probe_expect hooked \
+  'decoded=yes unrefusing=- unproven=- skipped=- | refusing=read drive=returned:0 swept=-'
 # The same program with the hook off: THE DEFECT ITSELF, on the path the program takes.
 probe_stand_in bare 'json.loads(block.content)' < /dev/null
-expect MUT-JSON-REPEATED-NAME-CHOSEN "$(decode_probe "$tmp/probe-bare.py" "$tmp/probe-drive.json")" \
-  'decoded=yes unrefusing=1 sites=read'
-# A SECOND DECODE THAT DOES REFUSE IS NOT THIS DEFECT, and round 0's `grep -c ... == 1` turned red
-# on it. The second half of the invariant is this row: a decode that refuses is let through.
+probe_expect bare \
+  'decoded=yes unrefusing=read unproven=- skipped=- | refusing=- drive=returned:0 swept=-'
+# A SECOND DECODER THAT GENUINELY REFUSES IS NOT THIS DEFECT. It is safe -- run on the pair it
+# raises on the duplicate and reads both readings, the answer the decode the parser takes gives --
+# and round 0's count of one turned red on it. Green, and named among the refusing.
 probe_stand_in second-hooked 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
 
 
 def second_reader(text):
     return json.loads(text, object_pairs_hook=one_reading)
 PYSHAPE
-expect MUT-JSON-REPEATED-NAME-CHOSEN "$(decode_probe "$tmp/probe-second-hooked.py" "$tmp/probe-drive.json")" \
-  'decoded=yes unrefusing=0'
+probe_expect second-hooked \
+  'decoded=yes unrefusing=- unproven=- skipped=- | refusing=read,second_reader drive=returned:0 swept=second_reader:raised:ValueError'
 # THE TWO SPELLINGS THAT WALKED THROUGH ROUND 1, which both spell `object_pairs_hook=one_reading`
 # and neither of which hooks anything: the identifier bound to a parameter, and the keyword handed
-# to a decoder class that ignores it. Run rather than read, they are the same answer as no hook.
+# to a decoder class that drops it. Run rather than read, both return on the duplicate.
 probe_stand_in disguised 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
 
 
@@ -1860,12 +2038,11 @@ def by_shadowed_hook(text, one_reading=None):
 def by_decoder_override(text):
     return json.loads(text, object_pairs_hook=one_reading, **{"cls": IgnoringHook})
 PYSHAPE
-expect MUT-JSON-REPEATED-NAME-CHOSEN "$(decode_probe "$tmp/probe-disguised.py" "$tmp/probe-drive.json")" \
-  'decoded=yes unrefusing=2 sites=by_decoder_override,by_shadowed_hook'
-# EVERY ROUTE ROUND 1 HAD TO DISCLOSE AS OUT OF REACH, in one module: the two it named as imports,
-# the rebinding, the `getattr`, `json.load` on a handle, `JSONDecoder().decode`, and the
-# `ns.json.loads` its own fix-check found escaping. None of them is a spelling of `json.loads` and
-# all seven are answered, because what is watched is the decode and not the call.
+probe_expect disguised \
+  'decoded=yes unrefusing=by_decoder_override,by_shadowed_hook unproven=- skipped=- | refusing=read drive=returned:0 swept=by_decoder_override:returned,by_shadowed_hook:returned'
+# EVERY ROUTE ROUND 1 HAD TO DISCLOSE AS OUT OF ITS REACH, in one module: the two it named as
+# imports, the rebinding, the `getattr`, `json.load` on a handle, `JSONDecoder().decode`, and the
+# `ns.json.loads` its own review found escaping.
 probe_stand_in routes 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
 
 
@@ -1905,11 +2082,161 @@ def by_import(text):
 def by_namespace(text):
     return namespace.json.loads(text)
 PYSHAPE
-expect MUT-JSON-REPEATED-NAME-CHOSEN "$(decode_probe "$tmp/probe-routes.py" "$tmp/probe-drive.json")" \
-  'decoded=yes unrefusing=7 sites=by_alias,by_binding,by_decoder,by_getattr,by_handle,by_import,by_namespace'
+probe_expect routes \
+  'decoded=yes unrefusing=by_alias,by_binding,by_decoder,by_getattr,by_handle,by_import,by_namespace unproven=- skipped=- | refusing=read drive=returned:0 swept=by_alias:returned,by_binding:returned,by_decoder:returned,by_getattr:returned,by_handle:raised:FileNotFoundError/returned,by_import:returned,by_namespace:returned'
+# AN EXCEPTION IS NOT A REFUSAL -- round 2's false green, which both of its reviews found. A hook
+# demanding a finding id, and an `object_hook` indexing one, raised on round 2's probe document
+# only because its finding had no id; given one, both return on the duplicate. And the two
+# decoders here that DO raise on the duplicate raise on a reading as well -- one refuses any
+# severity, one any empty findings array -- so neither is shown to refuse the repetition: UNPROVEN,
+# and not acceptable. They are why both readings are asked: each is cleared by one reading alone.
+probe_stand_in unrelated 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+def schema_hook(pairs):
+    obj = dict(pairs)
+    if "severity" in obj and "id" not in obj:
+        raise ValueError("a finding needs an id")
+    return obj
+
+
+def finding_objects(obj):
+    if "severity" in obj:
+        return {"id": obj["id"], "severity": obj["severity"]}
+    return obj
+
+
+def refuses_severities(pairs):
+    if any(name == "severity" for name, _ in pairs):
+        raise ValueError("no severity may be written here")
+    return dict(pairs)
+
+
+def refuses_empty_findings(pairs):
+    obj = dict(pairs)
+    if obj.get("findings") == []:
+        raise ValueError("a findings array may not be empty")
+    return obj
+
+
+def by_schema_hook(text):
+    return json.loads(text, object_pairs_hook=schema_hook)
+
+
+def by_finding_hook(text):
+    return json.loads(text, object_hook=finding_objects)
+
+
+def by_severity_refusal(text):
+    return json.loads(text, object_pairs_hook=refuses_severities)
+
+
+def by_empty_refusal(text):
+    return json.loads(text, object_pairs_hook=refuses_empty_findings)
+PYSHAPE
+probe_expect unrelated \
+  'decoded=yes unrefusing=by_finding_hook,by_schema_hook unproven=by_empty_refusal,by_severity_refusal skipped=- | refusing=read drive=returned:0 swept=by_empty_refusal:raised:ValueError,by_finding_hook:returned,by_schema_hook:returned,by_severity_refusal:raised:ValueError'
+# THE DECODES THAT ESCAPED ROUND 2'S REPLACEMENT: `raw_decode`, which its copied decoder class
+# inherited unwatched, and `json.decoder.JSONDecoder`, which its copy of the module never replaced
+# -- with that class imported by name, and a subclass of it.
+probe_stand_in escapes 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+import json.decoder
+from json.decoder import JSONDecoder as Imported
+
+
+class Subclassed(json.JSONDecoder):
+    pass
+
+
+def by_raw_decode(text):
+    return json.JSONDecoder().raw_decode(text)[0]
+
+
+def by_decoder_module(text):
+    return json.decoder.JSONDecoder().decode(text)
+
+
+def by_imported_class(text):
+    return Imported().decode(text)
+
+
+def by_subclass(text):
+    return Subclassed().decode(text)
+PYSHAPE
+probe_expect escapes \
+  'decoded=yes unrefusing=by_decoder_module,by_imported_class,by_raw_decode,by_subclass unproven=- skipped=- | refusing=read drive=returned:0 swept=by_decoder_module:returned,by_imported_class:returned,by_raw_decode:returned,by_subclass:returned'
+# EVERY FUNCTION CALLED BY ITS REAL CONTRACT: the keyword-only parameter round 2 left out of the
+# call, a positional-only one, a method and a static method in a class body, a lambda bound at
+# module level, and a coroutine and a generator, neither of which runs any of its body when called.
+probe_stand_in contracts 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+class Reader:
+    def by_method(self, text):
+        return json.loads(text)
+
+    @staticmethod
+    def by_staticmethod(text):
+        return json.loads(text)
+
+
+by_lambda = lambda text: json.loads(text)
+
+
+def by_keyword_only(*, text):
+    return json.loads(text)
+
+
+def by_positional_only(text, /):
+    return json.loads(text)
+
+
+async def by_coroutine(text):
+    return json.loads(text)
+
+
+def by_generator(text):
+    yield json.loads(text)
+PYSHAPE
+probe_expect contracts \
+  'decoded=yes unrefusing=<lambda>,Reader.by_method,Reader.by_staticmethod,by_coroutine,by_generator,by_keyword_only,by_positional_only unproven=- skipped=- | refusing=read drive=returned:0 swept=<lambda>:returned,Reader.by_method:returned,Reader.by_staticmethod:returned,by_coroutine:returned,by_generator:returned,by_keyword_only:returned,by_positional_only:returned'
+# AND ONE THE PROBE CANNOT CALL BY ITS SIGNATURE, because the signature cannot be read: it is not
+# called with a guess, it is reported -- and a skipped function is red, like an unproven decoder.
+probe_stand_in unreadable 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+def by_unreadable_signature(text):
+    return json.loads(text)
+
+
+by_unreadable_signature.__signature__ = "not a signature"
+PYSHAPE
+probe_expect unreadable \
+  'decoded=yes unrefusing=- unproven=- skipped=by_unreadable_signature | refusing=read drive=returned:0 swept=-'
+# NOTHING THE MODULE PRINTS REACHES THE ANSWER. Round 2 read its report off stdout, and a helper
+# printing JSON turned a correct parser red. Both helpers here are called and both print -- one of
+# them a counterfeit report line -- and the report is still the one the probe wrote.
+probe_stand_in encoder-only 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+import os
+import sys
+
+
+def print_review(value):
+    print(json.dumps(value))
+
+
+def announce(value):
+    sys.stdout.write(json.dumps({"verdict": "PASS"}) + "\n")
+    os.write(1, b"decoded=yes unrefusing=- unproven=- skipped=-\n")
+PYSHAPE
+probe_expect encoder-only \
+  'decoded=yes unrefusing=- unproven=- skipped=- | refusing=read drive=returned:0 swept=announce:returned/returned,print_review:returned/returned'
 # AND THE SHAPE ROUND 1 REFUSED: the decode reached through a factory and an attribute chain, still
-# hooked, still refusing. `dotted()` read `factory().json.loads` as `json.loads` and called it
-# unhooked; run instead of read, it is the parser it is.
+# hooked, still refusing -- green, and named by the method that made it.
 cat > "$tmp/probe-chained.py" <<'PYSHAPE'
 import json
 
@@ -1946,24 +2273,33 @@ def read(text, block):
 
 
 def main(argv):
-    return read("", Block(open(argv[-1]).read()))
+    read("", Block(open(argv[-1]).read()))
+    return 0
 PYSHAPE
-expect MUT-JSON-REPEATED-NAME-CHOSEN "$(decode_probe "$tmp/probe-chained.py" "$tmp/probe-drive.json")" \
-  'decoded=yes unrefusing=0'
-# WHAT THIS DOES NOT REACH, measured rather than asserted -- each shape below was built, run, and
-# reported CLEAN, so none of them is closed by anything here:
-#   * a decode that never touches the `json` module. `ast.literal_eval`, a hand-written reader, a
-#     third-party library: nothing arrives at the replacement, and `decoded=no` is the whole of
-#     what stands between that and a silent pass, which is what the stand-in below is for;
+probe_expect chained \
+  'decoded=yes unrefusing=- unproven=- skipped=- | refusing=Strict.loads drive=returned:0 swept=-'
+# WHAT THIS DOES NOT REACH. Each shape below was run through this probe and reported with nothing
+# unrefusing, nothing unproven and nothing skipped -- so none of them is closed by anything here:
+#   * a decode that does not go through the standard library's `json` (the one run is
+#     `ast.literal_eval`): nothing arrives at `raw_decode`, and `decoded=no` is the whole of what
+#     stands between that and a silent pass, which is what the stand-in below is for;
+#   * a decode that drives the scanner itself, and so never calls `raw_decode`:
+#     `json.JSONDecoder().scan_once(text, 0)`, `json.scanner.make_scanner(decoder)(text, 0)`, and a
+#     subclass whose own `raw_decode` calls `self.scan_once` instead of the one it replaces;
+#   * a decode made by code in another file, a module the parser imports included: only a decode
+#     the parser's own code asks for is answered for;
 #   * a decode behind a branch the probe does not take -- `def r(text, mode="strict")` decoding
-#     only when `mode == "loose"` reads clean;
-#   * a decode on a method of a class nothing here instantiates;
-#   * a decode reached through a binding made INSIDE a function: `make()` returning `json.loads`,
-#     called `make()(text)`, reads clean. A binding made at MODULE level is followed, a container
-#     included -- `HOLDER = {"loads": json.loads}` then `HOLDER["loads"](text)` is caught;
-#   * any file but the one named below.
-# What is not on that list is a spelling, and that is the whole of the change: every route above is
-# a place the probe never runs, not a way of writing a decode it runs and misreads.
+#     only when `mode == "loose"`;
+#   * a decode in a function that fails on the probe's arguments before it decodes: a method whose
+#     hook is `self.hook`, which a document has no attribute for, and a reader that decodes bytes;
+#   * a decode in the `if __name__ == "__main__":` block, which importing the module does not run;
+#   * and a decoder that raises on the duplicate for something only both values together make. A
+#     hook refusing any object of more than two names raises on it and reads both readings, and is
+#     counted as refusing.
+# SO THIS LIST IS NOT ONLY PLACES THE PROBE NEVER RUNS. The first three are decodes it runs and
+# does not answer for, and the scanner routes are spellings: ways of writing a standard-library
+# decode that this probe executes and does not see. Round 2 wrote that its list held no spelling,
+# and `raw_decode` proved that wrong; this list was measured, and says which of its routes are.
 cat > "$tmp/probe-elsewhere.py" <<'PYSHAPE'
 import ast
 
@@ -1978,15 +2314,19 @@ def read(text, block):
 
 
 def main(argv):
-    return read("", Block(open(argv[-1]).read()))
+    read("", Block(open(argv[-1]).read()))
+    return 0
 PYSHAPE
-expect MUT-JSON-REPEATED-NAME-CHOSEN "$(decode_probe "$tmp/probe-elsewhere.py" "$tmp/probe-drive.json")" \
-  'decoded=no unrefusing=0'
-# AND THEN THE PARSER THE AUDIT ACTUALLY RUNS, driven by the review fixture above. `decoded=yes` is
-# the limb that makes `unrefusing=0` mean something: a parser with no decode left in it to be
-# unrefusing satisfies the count and fails here.
-expect MUT-JSON-REPEATED-NAME-CHOSEN \
-  "$(decode_probe scripts/pr-review-parse.py "$tmp/one-findings.md")" 'decoded=yes unrefusing=0'
+probe_expect elsewhere \
+  'decoded=no unrefusing=- unproven=- skipped=- | refusing=- drive=returned:0 swept=-'
+# AND THEN THE PARSER THE AUDIT ACTUALLY RUNS, driven by the review fixture above. Only the verdict
+# line is asserted, and deliberately: which functions refuse and what the sweep called are the
+# parser's own business -- a second decoder that genuinely refuses adds its name to them and must
+# stay green. `decoded=yes` is the limb that makes the rest mean something: a parser with no decode
+# left for the probe to watch satisfies every count and fails here.
+got="$(decode_probe scripts/pr-review-parse.py "$tmp/one-findings.md")"
+[[ "${got%% | *}" == 'decoded=yes unrefusing=- unproven=- skipped=-' ]] \
+  || error "MUT-JSON-REPEATED-NAME-CHOSEN: got [$got], want the verdict [decoded=yes unrefusing=- unproven=- skipped=-]"
 
 # --- the frontier form: prose ------------------------------------------------------------------
 cat > "$tmp/prose.md" <<'EOF'
