@@ -4018,6 +4018,91 @@ step, through the production reader: it ingests the answer exactly once, `via` `
 activated repair runs, the file is left as it was published, and the log replays twice to equal
 states.
 
+## `const CANDIDATE_SEQUENCE_KILL_CHILD: &str =`
+
+The kill child of the two candidate-sequence witnesses below.
+
+## `struct EffectKilledAt {`
+
+The production adapter bundle with a kill armed at one phase of one Git-effect site. Only the
+effects family is wrapped; the run directory, the event log, the container and the process
+funnels answer through the bundle unchanged, and the fold projections are handed on.
+
+## `struct KillingEffects {`
+
+The effect family's production adapter, with the kill answered at `at`. The harness records the
+phase first, and the observation is exported (`Exported::carried`) before the kill is handed back:
+the funnel aborts right after, and a process that dies at a hook never reaches the drop that would
+otherwise write the record. The existing `ArmedFinalization` answers its injection without that
+export, so it is not reused here.
+
+## `fn adopted_by_a_kill_child(root: PathBuf, plan: Plan) -> std::mem::ManuallyDrop<Self> {`
+
+The parent's fixture, as its kill child sees it. Every path is the parent's, and the recorded
+start is read back from the planted log's first line rather than built again. The value is never
+dropped, because `Fixture`'s drop removes the tree the parent still has to read.
+
+## `fn candidate_sequence_kill_child() {`
+
+Resumes the parent's healthy run as `RESUMER` and takes one step of the driver with an editing
+worker. With nothing planted, that step is a whole attempt: the dispatch, the attempt, the judge
+and then the candidate sequence. The child dies at the coordinate `UPSTROKE_TEST_KILL_COORDINATE`
+names, either before `Object.CandidateCommitTree` writes the candidate commit or after
+`Ref.CreateCandidates` has created the candidates ref. Reaching the panic means the kill did not
+land.
+
+## `fn kill_the_candidate_sequence(fixture: &Fixture, coordinate: &str, tag: &str) -> usize {`
+
+Runs the child at one coordinate and returns how many events the planted log held, so a witness
+reads exactly the prefix the dead process appended.
+
+## `fn assert_no_unreachable_commit_but_snapshot_inputs(fixture: &Fixture, tag: &str) {`
+
+The judge snapshots the attempt's tree for its gates and reviewers, and every snapshot's ephemeral
+commit is unreferenced once its snapshot is removed (R27). Those commits are expected. A candidate
+commit is the other unreferenced commit a kill here could leave, and it carries the attempt's own
+message, so this refuses any unreachable commit whose subject is not the snapshot input's.
+
+## `fn a_kill_before_the_candidate_commit_is_written_is_settled_interrupted_and_the_next_generation_writes_it()`
+
+Gate 5's strict re-audit, row 54: `Object.CandidateCommitTree`/before had no committed witness. The
+audit's shape was a `candidate_kill_child` arm classified by `recovery_for`, but review round 3
+refused exactly that for the adjacent row 39: `recovery_for` describes the interrupted settlement
+and nothing performs it. Only a resume performs it, so the kill is taken inside the driver's own
+candidate sequence and the recovery is the next incarnation's.
+
+The kill leaves the exact prefix the authority tables for this phase: `run_resumed`,
+`task_dispatched` and `attempt_started`, no `candidate_prepared`, no candidate commit, no pin and
+no candidates ref, with the attempt's worktree and intent still standing (R9). The rows are empty
+and the action is the before phase's. `recovery_for` agrees: settle interrupted, no object, no
+promotion. The next incarnation's recovery performs that settlement, step (d): one
+`attempt_interrupted` before its `run_resumed`, and the closed generation's worktree and intent
+reclaimed, without writing a candidate commit itself. Its first step then performs the site's
+action from the prefix in which nothing was performed. The next generation's attempt is accepted
+and writes the candidate commit through `Object.CandidateCommitTree` (both phases observed under
+the production adapter). It is pinned, prepared and created, the candidates ref names it, the pin
+is pruned, nothing is owed, and the log replays twice to equal states.
+
+## `fn a_kill_after_the_candidates_ref_is_created_is_adopted_by_the_next_resume_which_appends_the_queue_position_once()`
+
+Gate 5's strict re-audit, row 36: `Ref.CreateCandidates`/after had no committed witness. It is
+driven the same way as row 54, and for the same reason: the recovery the authority tables is the
+resume's step (f), `finish_promotions`, which composes `create_candidates_ref`,
+`append_candidate_created` and `reclaim_after_creation`. That step is not called by hand.
+
+The kill leaves the candidate prepared and its candidates ref created (R11, at the recorded
+commit), with the pin not yet pruned, the worktree not reclaimed, the generation `Promoting` and
+no `task_candidate_created`. The rows are R11 and the action is adoption. The next incarnation's
+recovery finishes the promotion. It enters no create funnel for the ref the dead process created
+(`Ref.CreateCandidates` before is never reached), and it appends `task_candidate_created` before
+its own `run_resumed`. It leaves the ref where it was, prunes the pin and reclaims the worktree and
+intent. The next step integrates the adopted candidate: the integration ref is at the commit the
+dead incarnation prepared, the log holds one queue position across the kill and the recovery, and
+it replays twice to equal states.
+
+Because the recovery adopts, this parent's own observation record never holds the coordinate. The
+registry cites the kill child for it, whose record does.
+
 ## `fn two_lineages_publish_in_lineage_order_and_the_younger_candidate_waits_behind_the_older() {`
 
 Two lineages overlapping on one path, the younger's repair already queued
