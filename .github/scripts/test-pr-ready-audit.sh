@@ -231,26 +231,29 @@
 #                                it and was no opener to the guard: the candidate count reached
 #                                zero, and zero is the road to the prose parser and its
 #                                `VERDICT: PASS`. Each guard now asks its question of what its own
-#                                consumer reads -- references for the info string, which is ALL
-#                                CommonMark does to one (it is not parsed as Markdown, so
-#                                `js*on*` is `js*on*` there), and JSON's escapes for the key
-#   MUT-NAME-FOUND-IN-NO-RENDERING  the rule above, over-corrected: it resolved the info string's
-#                                character references the way CommonMark does and then split the
-#                                RESULT the way `str.split()` does, which ends a word at U+0085 and
-#                                at U+001C-U+001F. No rendering of the comment contains that word
-#                                break -- `markdown-it-py` 3.0.0 leaves those references written,
-#                                and CommonMark's two whitespace definitions name none of the five.
-#                                Each reading is split by its own boundary now, and the five written
-#                                LITERALLY still end a word, because that renderer splits the string
-#                                it was handed -- so ```` ```json&#133;x ````, an ordinary
-#                                example block beside a
-#                                review's one real verdict, became a second candidate and a valid
+#                                consumer reads -- the LANGUAGE a renderer gives the info string,
+#                                by `markdown-it-py` 3.0.0's own function (escapes and references
+#                                resolved and nothing else: it is not parsed as Markdown, so
+#                                `js*on*` is `js*on*` there), and JSON's escapes for the key. A
+#                                rule of its own for the info string was the same defect again:
+#                                `jso&#110;` then a literal U+0085, and `jso&#00000110;`, whose
+#                                eight digits both renderers resolve, each reached READY and a
+#                                merge call past a parser that read the tag its own way
+#   MUT-NAME-FOUND-IN-NO-RENDERING  the rule above, over-corrected: a tag no renderer names `json`
+#                                read as `json`. `json&#133;x` and `json&#11;x` were resolved to
+#                                U+0085 and U+000B and split there, and `markdown-it-py` 3.0.0
+#                                resolves neither -- it leaves a reference to a control character
+#                                written -- while cmark-gfm 0.29.0.gfm.6 resolves both and keeps the
+#                                character inside the name. So an ordinary example block beside a
+#                                review's one real verdict became a second candidate and a valid
 #                                PASS was refused with "2 places a verdict could be read from":
 #                                READY to NOT-READY, one merge call to none, out of a review that
 #                                says nothing wrong and cannot be rewritten to clear it. A guard
 #                                reads what its consumer reads in BOTH directions, and the
 #                                spelling `json&amp;#133;x`, which renders byte-identically, is
-#                                read the same way
+#                                read the same way. The same code points written LITERALLY do end
+#                                the word, because that renderer splits what it resolved with
+#                                `str.split()`
 #   MUT-STRAY-TOKEN-ENCODED      the stray severity scan ran over RAW TEXT while the severity only
 #                                exists after JSON decoding, so `"severity":"P\u0031"` -- the
 #                                spelling every witness in this family uses -- carried no `P1` for
@@ -1733,8 +1736,8 @@ swallow_pass() {  # swallow_pass: the candidate a swallow leaves standing as the
 { printf 'Reviewed head: %s\n\n<!--\n```\n-->\n\n```json\n' "$revived_head"
   swallow_blocking; printf '\n```\n\n<!--\n\n```json\n'; swallow_pass; printf '\n```\n'
 } > "$tmp/swallow-plain.md"
-# The swallowed fence's info string is read the way every other one here is read: CommonMark's
-# first word, folded -- so `JSON` is the same shape and an indent of up to three spaces is a fence.
+# The swallowed fence's info string is read the way every other one here is read: its rendered
+# language, folded -- so `JSON` is the same shape and an indent of up to three spaces is a fence.
 { printf 'Reviewed head: %s\n\n<!--\n```text\n-->\n\n```JSON\n' "$revived_head"
   swallow_blocking; printf '\n```\n\n<!--\n\n```json\n'; swallow_pass; printf '\n```\n'
 } > "$tmp/swallow-uppercase.md"
@@ -1854,11 +1857,11 @@ expect MUT-BLOCK-CONTENT-NOT-MATERIAL "$(review_rows "$tmp/quoted-text-fence.md"
 #
 # TWO DECODERS, ONE PER RULE, and each is the whole of what its own consumer does.
 #
-#   * an INFO STRING is read by CommonMark, which resolves character references in it and nothing
-#     else -- the info string is not parsed as Markdown, so `js*on*` is `js*on*` and
-#     `js<span></span>on` is itself (measured against `markdown-it-py` 3.0.0), and a backslash
-#     escape yields an ASCII punctuation character, which cannot spell `json` and cannot move the
-#     whitespace that decides which word is first. So ```` ```jso&#110; ```` opens the one
+#   * an INFO STRING is read by a renderer, which resolves backslash escapes and character
+#     references in it and nothing else -- the info string is not parsed as Markdown, so `js*on*`
+#     is `js*on*` and `js<span></span>on` is itself (measured against `markdown-it-py` 3.0.0) --
+#     and gives the block the first word of what is left as its language. So
+#     ```` ```jso&#110; ```` opens the one
 #     `language-json` block the comment renders to, carrying the blocking verdict inside a
 #     swallowing block, while the rule that exists to find exactly that saw no `json` fence at all.
 #     Measured on this file's own stub: exit 0, verdict=PASS, READY, one merge call;
@@ -2070,12 +2073,12 @@ expect MUT-STRAY-TOKEN-ENCODED "$(parse_nul review "$tmp/stray-unresolvable.md")
 # same question on every head afterwards and cannot refuse.
 #
 # MUT-NAME-FOUND-IN-NO-RENDERING is the same guard over-corrected, and the direction that costs a
-# reviewer the review instead of letting one past. `json&#133;x` resolves to U+0085, which
-# `str.split()` calls whitespace and CommonMark does not, so the first word read as `json` and an
-# ordinary example block became a second candidate: READY to NOT-READY and the merge call to none,
-# for a comment that says nothing wrong and that no rewriting clears. Measured, `markdown-it-py`
-# 3.0.0 renders that fence `language-json&#133;x`; so does `json&amp;#133;x`, byte for byte, and
-# the two are read the same way here.
+# reviewer the review instead of letting one past. `json&#133;x` was resolved to U+0085 and split
+# there, so the first word read as `json` and an ordinary example block became a second candidate:
+# READY to NOT-READY and the merge call to none, for a comment that says nothing wrong and that no
+# rewriting clears. Measured, `markdown-it-py` 3.0.0 renders that fence `language-json&#133;x`; so
+# does `json&amp;#133;x`, byte for byte, and the two are read the same way here. `json&#11;x` is the
+# same defect at U+000B; a case here once required it to refuse, and it is asserted green below.
 enqueue_repo="$tmp/enqueue-repo"
 git init -q "$enqueue_repo"
 git -C "$enqueue_repo" -c user.email=t@example -c user.name=t \
@@ -2186,6 +2189,32 @@ for shape in key key-literal; do
   contains "MUT-GUARD-READS-THE-WRITTEN-SPELLING [round1-$shape]" \
     "$(parse_why "$tmp/round1-$shape.md")" 'a verdict object inside the block'
 done
+# ROUND THREE'S RETURN, and why a tag's language is one function of it rather than two readings.
+# That round split what the comment WROTE at one class and what a reference RESOLVED TO at a
+# narrower one, so a tag holding a reference AND a character only the first class held was `json`
+# to neither: ```` ```jso&#110; ```` then a literal U+0085 and `x` is `language-json` to
+# `markdown-it-py` 3.0.0, which resolves the reference and splits the whole result with
+# `str.split()`, and that round's parser read the swallowed blocking verdict past it -- exit 0,
+# READY, one merge call. Literal U+001C did the same.
+entity_witness "jso&#110;$(printf '\302\205')x" > "$tmp/round3-nel.md"
+entity_witness "jso&#110;$(printf '\034')x"     > "$tmp/round3-fs.md"
+# AND THE DIGIT BOUND IS A RENDERER'S, NOT THE SPECIFICATION'S. CommonMark's grammar stops a numeric
+# reference at seven decimal digits and six hex; `markdown-it-py` 3.0.0 and cmark-gfm 0.29.0.gfm.6
+# both resolve eight, so each tag below is the swallowed `language-json` block to both of them, and
+# the parser of each of the three rounds before this one read past it -- exit 0, READY, one merge
+# call.
+entity_witness 'jso&#00000110;'  > "$tmp/round3-decimal8.md"
+entity_witness '&#x0000006A;son' > "$tmp/round3-hex8.md"
+for shape in nel fs decimal8 hex8; do
+  expect "MUT-GUARD-READS-THE-WRITTEN-SPELLING [round3-$shape] parser" \
+    "$(review_rows "$tmp/round3-$shape.md")" '1|'
+  contains "MUT-GUARD-READS-THE-WRITTEN-SPELLING [round3-$shape]" \
+    "$(parse_why "$tmp/round3-$shape.md")" "inside the block"
+  got="$(merge_run "$tmp/round3-$shape.md")"
+  contains "MUT-GUARD-READS-THE-WRITTEN-SPELLING [round3-$shape]" "$got" "NOT-READY"
+  contains "MUT-GUARD-READS-THE-WRITTEN-SPELLING [round3-$shape]" "$got" "review-parse-failed"
+  expect "MUT-GUARD-READS-THE-WRITTEN-SPELLING [round3-$shape] merge calls" "${got##*|}" 0
+done
 # MUT-NAME-FOUND-IN-NO-RENDERING. The same pull request, the same clean verdict, and an ordinary
 # example block in front of it -- the shape a reviewer writes when they show what a review looks
 # like. Each tag below names `json` to NO renderer, so each of these comments must be read, and
@@ -2198,7 +2227,12 @@ example_tagged 'json&#133;x'     > "$tmp/no-rendering-nel.md"
 example_tagged 'json&amp;#133;x' > "$tmp/no-rendering-ampersand.md"
 example_tagged 'json&#x1c;x'     > "$tmp/no-rendering-hex.md"
 example_tagged 'text'            > "$tmp/no-rendering-plain.md"
-for shape in nel ampersand hex plain; do
+# `json&#11;x` is round three's return: `markdown-it-py` 3.0.0 renders it `language-json&#11;x`,
+# cmark-gfm 0.29.0.gfm.6 keeps the U+000B it resolves inside the name, and that round refused it.
+# And nine digits is past the bound both renderers resolve, so that reference stays written too.
+example_tagged 'json&#11;x'      > "$tmp/no-rendering-vt.md"
+example_tagged 'jso&#000000110;' > "$tmp/no-rendering-nine.md"
+for shape in nel ampersand hex plain vt nine; do
   expect "MUT-NAME-FOUND-IN-NO-RENDERING [$shape] parser" \
     "$(review_rows "$tmp/no-rendering-$shape.md")" \
     "0|json/$enqueue_head/PASS/$enqueue_base/-"
@@ -2224,30 +2258,34 @@ for shape in named space; do
   expect "MUT-NAME-FOUND-IN-NO-RENDERING [$shape] merge calls" "${got##*|}" 0
 done
 # THE BOUNDARY ITSELF, code point by code point, so what this rule turns on is asserted rather than
-# inferred from two examples of it. The five below are exactly what `str.split()` adds to
-# CommonMark's whitespace, and spelled as a REFERENCE they are the whole of the defect: measured,
-# `markdown-it-py` 3.0.0 declines to resolve a reference to a C0 or C1 control and leaves it
-# written, so no word ever breaks there and the tag names no language.
-for point in 001c 001d 001e 001f 0085; do
+# inferred from two examples of it. The six below are every code point `str.split()` ends a word at
+# that `markdown-it-py` 3.0.0 will not resolve a reference to -- it leaves a reference to a control
+# character written -- so spelled as a REFERENCE each is the whole of the defect: no word breaks
+# there, and the tag names no language. cmark-gfm 0.29.0.gfm.6 resolves all six and keeps the
+# character inside the name, so neither renderer names one of these tags `json`.
+for point in 000b 001c 001d 001e 001f 0085; do
   example_tagged "json&#x$point;x" > "$tmp/no-rendering-point.md"
   expect "MUT-NAME-FOUND-IN-NO-RENDERING boundary [U+$point]" \
     "$(review_rows "$tmp/no-rendering-point.md")" \
     "0|json/$enqueue_head/PASS/$enqueue_base/-"
 done
 # And every one a renderer really does end a word at still ends one, so the class was narrowed and
-# not emptied: CommonMark's own tab, line tabulation and form feed, and three Unicode spaces.
-for point in 0009 000b 000c 00a0 2002 3000; do
+# not emptied: tab, which both renderers end the word at, and form feed and three Unicode spaces,
+# which `markdown-it-py` 3.0.0 ends it at and cmark-gfm 0.29.0.gfm.6 does not. A refusal is owed
+# wherever either renderer names the tag `json`.
+for point in 0009 000c 00a0 2002 3000; do
   example_tagged "json&#x$point;x" > "$tmp/no-rendering-point.md"
   expect "MUT-NAME-FOUND-IN-NO-RENDERING boundary [U+$point]" \
     "$(review_rows "$tmp/no-rendering-point.md")" '1|'
 done
-# AND THE SAME FIVE CODE POINTS WRITTEN LITERALLY ARE MATERIAL, which is why there are two
-# boundaries and not one. `markdown-it-py` 3.0.0 splits the info string it was handed with
-# `str.split`, so a literal U+0085 after `json` DOES end the word there and that block is the
-# `language-json` one a reader sees -- while `&#133;`, the same code point, is a reference it never
-# resolves. Same code point, two answers, because the two readings are two different documents; a
-# single boundary over both is wrong whichever one it is.
-for bytes in '\302\205' '\034' '\035' '\036' '\037'; do
+# AND THE SAME CODE POINTS WRITTEN LITERALLY ARE MATERIAL. `markdown-it-py` 3.0.0 splits what it
+# resolved with `str.split()`, and a character the comment wrote is in that string whether or not a
+# reference beside it was resolved, so a literal U+0085 after `json` DOES end the word there and
+# that block is the `language-json` one a reader sees -- while `&#133;`, the same code point, is a
+# reference it never resolves. Same code point, two answers, and one function gives both. All SIX
+# of the loop above, so the two halves of that sentence run the same set: U+000B is the one round
+# three read the other way round, refusing the reference and reading the literal as a name.
+for bytes in '\013' '\302\205' '\034' '\035' '\036' '\037'; do
   example_tagged "json$(printf "$bytes")x" > "$tmp/no-rendering-point.md"
   expect "MUT-NAME-FOUND-IN-NO-RENDERING literal boundary [$bytes]" \
     "$(review_rows "$tmp/no-rendering-point.md")" '1|'
