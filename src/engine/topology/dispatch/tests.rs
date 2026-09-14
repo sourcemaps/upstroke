@@ -335,6 +335,7 @@ fn dispatch_kill_child() {
     run.hand_off(&dir);
     match which.as_str() {
         "before_intent" => run.arm(INTENT, HookPhase::Before, Injection::Kill),
+        "after_intent" => run.arm(INTENT, HookPhase::After, Injection::Kill),
         "after_add" => run.arm(ADD, HookPhase::After, Injection::Kill),
         other => panic!("unknown site `{other}`"),
     }
@@ -344,7 +345,7 @@ fn dispatch_kill_child() {
 
 #[test]
 fn kill_after_dispatch_recreates_worktree_without_spend() {
-    for site in ["before_intent", "after_add"] {
+    for site in ["before_intent", "after_intent", "after_add"] {
         let dir = kill_dir("killdispatch");
         let mut run = kill_child_and_adopt(
             "engine::topology::dispatch::tests::dispatch_kill_child",
@@ -385,6 +386,15 @@ fn kill_after_dispatch_recreates_worktree_without_spend() {
             existed,
             site == "after_add",
             "`{site}`: the child left the wrong prefix on disk"
+        );
+        assert_eq!(
+            run.fixture
+                .manager
+                .intents()
+                .expect("the intents list")
+                .contains(&dispatched.slot),
+            site != "before_intent",
+            "`{site}`: the durable intent is there exactly when the child died after writing it"
         );
 
         let reuse = resume_open_no_attempt(
