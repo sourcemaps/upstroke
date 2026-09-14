@@ -290,6 +290,10 @@ impl Fixture {
         rundir::public_dir(&self.repo_root, RUN_ID)
     }
 
+    fn private(&self) -> PathBuf {
+        self.private_root.join("runs").join(RUN_ID)
+    }
+
     fn log(&self) -> PathBuf {
         self.public().join(rundir::EVENT_LOG)
     }
@@ -1982,7 +1986,7 @@ fn plant_finished_run_with(
     let orphan = plant_unreachable_object(&fixture, tag);
     let released = referenced_objects(&fixture);
     let store = store_objects(&fixture.repo_root);
-    let report_leftover = plant_report_leftover(&fixture.public());
+    let report_leftover = plant_report_leftover(&fixture);
     FinishedPlanting {
         fixture,
         candidate,
@@ -2000,12 +2004,8 @@ fn plant_finished_run_with(
     }
 }
 
-fn plant_report_leftover(public: &Path) -> PathBuf {
-    let staging = rundir::report_staging_dir(public);
-    mkdir(&staging);
-    let leftover = staging.join(rundir::REPORT);
-    crate::workspace_manager::fixture::write_file(&leftover, b"{\"half\":");
-    leftover
+fn plant_report_leftover(fixture: &Fixture) -> PathBuf {
+    rundir::plant_report_staging_of_a_dead_writer(&fixture.public(), &fixture.private())
 }
 
 fn report_of(fixture: &Fixture) -> crate::engine::topology::report::TopologyReport {
@@ -15320,7 +15320,7 @@ fn assert_finalized(planted: &FinishedPlanting, outcome: &RunOutcome, tag: &str)
     );
     assert!(
         !planted.report_leftover.exists()
-            && rundir::report_staging_leftovers(&fixture.public())
+            && rundir::report_staging_leftovers(&fixture.public(), &fixture.private())
                 .expect("listed")
                 .is_empty(),
         "{tag}: the staged report a dead writer left is reclaimed inside the report site, on \
@@ -15634,7 +15634,7 @@ fn kill_after_report_before_each_cleanup_step() {
             );
             let report_bytes = std::fs::read(fixture.public().join("report.json"))
                 .expect("the report the second resume left current");
-            plant_report_leftover(&fixture.public());
+            plant_report_leftover(fixture);
             let third = harness();
             let (result, _) = resume(fixture, &third, &given);
             let text = message(&result.expect_err("a finalized run refuses again"));
@@ -15660,7 +15660,7 @@ fn kill_after_report_before_each_cleanup_step() {
             );
             assert!(
                 !planted.report_leftover.exists()
-                    && rundir::report_staging_leftovers(&fixture.public())
+                    && rundir::report_staging_leftovers(&fixture.public(), &fixture.private())
                         .expect("listed")
                         .is_empty(),
                 "{tag}: nothing was staged, and the staged report a dead writer left before this \
@@ -16025,7 +16025,7 @@ fn the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_re
         "the report was durable before any ref was touched: {timeline:?}"
     );
     assert!(
-        rundir::report_staging_leftovers(&fixture.public())
+        rundir::report_staging_leftovers(&fixture.public(), &fixture.private())
             .expect("listed")
             .is_empty(),
         "the staged report was renamed onto its name"
@@ -16061,6 +16061,7 @@ fn the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_re
         &hooks.timeline(),
         &hooks.ledger_records(),
         &fixture.public(),
+        &fixture.private(),
         "the restart",
     );
     assert_eq!(
@@ -16409,6 +16410,91 @@ fn an_absent_checkout_retries_its_parent_barrier() {
         .expect("with the barrier holding, the absent checkout's removal converges");
 }
 
+#[test]
+fn a_failed_execution_root_barrier_is_retried_before_the_intent_is_removed() {
+    for outcome in [RunOutcome::Complete, RunOutcome::Halted] {
+        let planted = plant_finished_run(
+            &format!("root-barrier-retry-{}", outcome_short(&outcome)),
+            outcome.clone(),
+        );
+        let fixture = &planted.fixture;
+        let runtime = runtime_holding_the_record();
+        let certifies = AlwaysCertifies;
+        let given = Given::healthy(fixture, &runtime, &certifies);
+        let tasks = planted
+            .beta_worktree
+            .parent()
+            .expect("a checkout has a parent directory")
+            .to_path_buf();
+        let root = fixture.manager().execution_root().to_path_buf();
+        {
+            let fault = crate::util::fail_barriers_at(&tasks);
+            let (result, _) = resume(fixture, &harness(), &given);
+            let error = message(
+                &result.expect_err("the first resume removes the checkout and its barrier refuses"),
+            );
+            assert!(
+                error.contains("injected barrier fault"),
+                "{outcome:?}: {error}"
+            );
+            assert!(
+                wait_for_cleanup_hold_release(&fixture.public()),
+                "{outcome:?}: the run's cleanup lease is still held"
+            );
+            drop(fault);
+        }
+        assert!(
+            !planted.beta_worktree.exists(),
+            "{outcome:?}: the checkout is gone, its deletion unproven"
+        );
+        crate::workspace_manager::fixture::remove_dir(&tasks);
+        let fault = crate::util::fail_barriers_at(&root);
+        for attempt in 1..=2 {
+            let (result, _) = resume(fixture, &harness(), &given);
+            let error = message(
+                &result
+                    .expect_err("the execution root's barrier refuses, and the resume ends there"),
+            );
+            assert!(
+                fixture
+                    .manager()
+                    .intents()
+                    .expect("intents")
+                    .contains(&planted.beta_slot),
+                "{outcome:?}, attempt {attempt}: the intent that names the checkout stands until \
+                 the root's barrier holds — a barrier whose error was discarded would have let the \
+                 intent go: {error}"
+            );
+            assert!(
+                error.contains("injected barrier fault"),
+                "{outcome:?}, attempt {attempt}: the resume ends at the barrier's own diagnostic: \
+                 {error}"
+            );
+            assert!(
+                !tasks.exists() && !planted.beta_worktree.exists(),
+                "{outcome:?}, attempt {attempt}: the slot directory and the checkout are absent \
+                 throughout"
+            );
+            assert!(
+                wait_for_cleanup_hold_release(&fixture.public()),
+                "{outcome:?}, attempt {attempt}: the run's cleanup lease is still held"
+            );
+        }
+        drop(fault);
+        let (result, _) = resume(fixture, &harness(), &given);
+        let text = message(&result.expect_err("with the barrier holding, finalize then refuse"));
+        assert!(
+            text.contains("already finished as") && text.contains("finalized"),
+            "{outcome:?}: {text}"
+        );
+        assert_finalized(
+            &planted,
+            &outcome,
+            &format!("{outcome:?}: after the root's barrier holds"),
+        );
+    }
+}
+
 #[track_caller]
 fn assert_no_ref_site(timeline: &[BarrierSeen], tag: &str) {
     assert!(
@@ -16440,6 +16526,7 @@ fn assert_fresh_branch_took_the_report_sites(
     timeline: &[BarrierSeen],
     records: &[crate::util::DurableRecord],
     public: &Path,
+    private: &Path,
     tag: &str,
 ) {
     use crate::topology::effects::ReportSite;
@@ -16488,7 +16575,7 @@ fn assert_fresh_branch_took_the_report_sites(
          nothing: {under_public:?}"
     );
     assert!(
-        rundir::report_staging_leftovers(public)
+        rundir::report_staging_leftovers(public, private)
             .expect("listed")
             .is_empty(),
         "{tag}: no staged report"
@@ -16544,7 +16631,7 @@ fn a_report_directory_barrier_that_fails_refuses_pruning_on_every_resume_until_i
             "{tag}: and current by digest — the shape the next resume takes the fresh branch on"
         );
         assert!(
-            rundir::report_staging_leftovers(&fixture.public())
+            rundir::report_staging_leftovers(&fixture.public(), &fixture.private())
                 .expect("listed")
                 .is_empty()
         );
@@ -16612,6 +16699,7 @@ fn a_report_directory_barrier_that_fails_refuses_pruning_on_every_resume_until_i
             &timeline,
             &hooks.ledger_records(),
             &fixture.public(),
+            &fixture.private(),
             &format!("{tag}: the barrier held"),
         );
         let first_deletion = timeline
@@ -16783,6 +16871,7 @@ fn a_report_rename_without_directory_sync_is_proven_before_pruning() {
             &timeline,
             &hooks.ledger_records(),
             &fixture.public(),
+            &fixture.private(),
             &format!("{tag}: the restart"),
         );
         let first_deletion = timeline
@@ -16907,7 +16996,7 @@ fn fresh_report_hook_errors_stop_cleanup_and_retry() {
                 "{cell}: the report is byte-identical"
             );
             assert!(
-                rundir::report_staging_leftovers(&fixture.public())
+                rundir::report_staging_leftovers(&fixture.public(), &fixture.private())
                     .expect("listed")
                     .is_empty(),
                 "{cell}: nothing was staged"
@@ -16944,6 +17033,7 @@ fn fresh_report_hook_errors_stop_cleanup_and_retry() {
             &hooks.timeline(),
             &hooks.ledger_records(),
             &fixture.public(),
+            &fixture.private(),
             &format!("{tag}: the unarmed restart"),
         );
         assert_eq!(
@@ -17445,27 +17535,44 @@ fn private_records_untouched_by_finalization() {
             outcome.clone(),
         );
         let fixture = &planted.fixture;
-        let private = fixture.private_root.join("runs").join(RUN_ID);
+        let private = fixture.private();
         let owner = private.join(rundir::OWNER_RECORD);
         let commit = private.join(rundir::COMMIT_RECORD);
+        let staging_record = PathBuf::from(rundir::REPORT_STAGING_RECORD);
+        let but_the_record = |tree: std::collections::BTreeMap<PathBuf, Vec<u8>>| {
+            tree.into_iter()
+                .filter(|(path, _)| *path != staging_record)
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let planted_tree = tree_bytes(&private);
+        assert!(
+            planted_tree.contains_key(&staging_record),
+            "{outcome:?}: the planting left the dead writer's staging record in the private half"
+        );
         let before = (
             std::fs::read(&owner).expect("owner record"),
             std::fs::read(&commit).expect("commit record"),
-            tree_bytes(&private),
+            but_the_record(planted_tree),
         );
         let runtime = runtime_holding_the_record();
         let certifies = AlwaysCertifies;
         let given = Given::healthy(fixture, &runtime, &certifies);
         let (result, _) = resume(fixture, &harness(), &given);
         result.expect_err("finalize then refuse");
+        let finalized_tree = tree_bytes(&private);
+        assert!(
+            !finalized_tree.contains_key(&staging_record),
+            "{outcome:?}: finalization reclaimed the dead writer's staging record, the one file \
+             of the private half the report write owns"
+        );
         assert_eq!(
             (
                 std::fs::read(&owner).expect("owner record"),
                 std::fs::read(&commit).expect("commit record"),
-                tree_bytes(&private),
+                but_the_record(finalized_tree),
             ),
             before,
-            "{outcome:?}: the private half is byte-identical after finalization"
+            "{outcome:?}: the private half is byte-identical after finalization but for that record"
         );
         assert_finalized(&planted, &outcome, &format!("{outcome:?}"));
     }

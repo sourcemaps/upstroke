@@ -105,21 +105,40 @@ pub const COMMIT_RECORD_STAGED: &str = "committed.json.tmp";
 pub const EVENT_LOG: &str = "events.jsonl";
 pub const REPORT: &str = "report.json";
 
-/// `<public>/.report-staging/` — the directory one report write makes for
-/// itself, exclusively (`create_dir`, never `create_dir_all`), stages
-/// `report.json` inside, renames it up onto the published name — the same
-/// filesystem, the rename atomic — and removes, empty, before it returns.
-/// What a writer that died between the two leaves is this directory with the
-/// staged file in it, and the next writer removes it as the run's own tree
-/// before making its own: proof of ownership by construction, not by the
-/// shape of a name (`standards/08`). Until PR10's round 8 the report was
-/// staged at the fixed `report.json.tmp` beside its published name and a
-/// single-link file an operator had left there was removed as the writer's
-/// own; in round 8 under `report.json.<ulid>.tmp`, and a recogniser over that
-/// shape removed whatever wore it, a name the ULID producer cannot emit
-/// included (the round-8 and round-9 regression lenses, P2). Anything that is
-/// not a directory standing at this name is not the protocol's: it is left as
-/// found and the write refuses, naming it.
-pub const REPORT_STAGING_DIR: &str = ".report-staging";
+/// `<public>/.report-staging-<ulid>/` — the directory one report write makes
+/// for itself, under a name unique to the write, exclusively (`create_dir`,
+/// never `create_dir_all`), stages `report.json` inside, renames it up onto
+/// the published name — the same filesystem, the rename atomic — and
+/// removes, empty, before it returns. Which directory is this run's is not
+/// read off the name: before the directory is made, the write records its
+/// name durably in the run's private half ([`REPORT_STAGING_RECORD`]), and
+/// only a directory that record names is ever removed — as the run's own
+/// tree, by the record — before the next write makes its own. A directory of
+/// this shape that no record names is not the protocol's: it is left as
+/// found and named in the write's diagnostic, never removed and never
+/// adopted, and the write proceeds under its own fresh name. Until PR10's
+/// round 8 the report was staged at the fixed `report.json.tmp` beside its
+/// published name and a single-link file an operator had left there was
+/// removed as the writer's own; in round 8 under `report.json.<ulid>.tmp`,
+/// and a recogniser over that shape removed whatever wore it, a name the
+/// ULID producer cannot emit included; in round 9 under the fixed
+/// `.report-staging/`, and whatever directory stood at that name was removed
+/// by its name and type before the write's own exclusive creation, which
+/// proved ownership of the replacement and nothing of what was deleted (the
+/// round-8, round-9 and round-10 regression lenses, P2; `standards/08`).
+pub const REPORT_STAGING_PREFIX: &str = ".report-staging-";
+/// `<private>/report-staging.json` — the record of the staging directory the
+/// report write is about to make under `public`, written durably (staged at
+/// [`REPORT_STAGING_RECORD_STAGED`], synced, renamed, the private directory
+/// synced) before `create_dir` runs, and removed after the rename that empties
+/// the directory. It lives in the private half because that is the run's own
+/// tree by the token-carried rule, where a record under the public directory
+/// would itself stand at a fixed name the rule forbids removing by; what a
+/// writer that died between its stage and its rename leaves is this record
+/// and the directory it names, with the staged file inside, and the next
+/// write removes the directory the record names and then the record.
+pub const REPORT_STAGING_RECORD: &str = "report-staging.json";
+/// `<private>/report-staging.json.tmp`.
+pub const REPORT_STAGING_RECORD_STAGED: &str = "report-staging.json.tmp";
 /// `<public>/plan.normalized.json`.
 pub const PLAN: &str = "plan.normalized.json";

@@ -17,6 +17,7 @@ use super::seams::TopologyHooks;
 pub struct Finalize<'a> {
     pub manager: &'a WorkspaceManager,
     pub public: &'a Path,
+    pub private: &'a Path,
     pub run_id: &'a str,
     pub fold: &'a TopologyFold,
     pub events: &'a [TopologyEvent],
@@ -72,6 +73,7 @@ pub struct Finalized {
     pub execution_root_removed: bool,
     pub retained_candidates: usize,
     pub passed_over_registrations: Vec<std::path::PathBuf>,
+    pub passed_over_staging: Vec<std::path::PathBuf>,
 }
 
 pub fn finalize(
@@ -102,11 +104,11 @@ pub fn finalize(
             });
         }
     };
-    if fresh {
-        rundir::sync_report_dir(inputs.public, hooks.rundir())?;
+    let passed_over_staging = if fresh {
+        rundir::sync_report_dir(inputs.public, inputs.private, hooks.rundir())?
     } else {
-        rundir::write_report(inputs.public, &report, hooks.rundir())?;
-    }
+        rundir::write_report(inputs.public, inputs.private, &report, hooks.rundir())?
+    };
 
     let namespace = run_namespace(inputs.run_id);
     let mut removed = Vec::with_capacity(CleanupStep::ORDER.len());
@@ -174,6 +176,7 @@ pub fn finalize(
         execution_root_removed,
         retained_candidates: report.retained_candidates.len(),
         passed_over_registrations,
+        passed_over_staging,
     })
 }
 
@@ -193,11 +196,31 @@ pub fn refuse_continuation(run_id: &str, finalized: &Finalized) -> UpstrokeError
                 .join(", ")
         )
     };
+    let passed_over_staging = if finalized.passed_over_staging.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; {} entr{} of a report staging directory's shape under the run directory that no \
+             record of this run's names, passed over and left as found: {}",
+            finalized.passed_over_staging.len(),
+            if finalized.passed_over_staging.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            finalized
+                .passed_over_staging
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     UpstrokeError::Refused {
         message: format!(
             "run `{run_id}` already finished as `{}`, and a finished run does not continue. \
-             Recovery step (b) finalized it first: the report was {}, {}{passed_over} and \
-             continuation is refused",
+             Recovery step (b) finalized it first: the report was {}, {}{passed_over}\
+             {passed_over_staging} and continuation is refused",
             outcome_label(&finalized.outcome),
             if finalized.report_written {
                 "regenerated"

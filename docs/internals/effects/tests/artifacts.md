@@ -136,11 +136,12 @@ holds the write primitive, and until PR10 the report write this tree ships
 was `RunDir.WriteReport` alone; ST-07 over the full inventory demands both
 names executed, so `rundir::write_report` now consults `Report.Write`
 inside `RunDir.WriteReport` around the report's staged publication
-(`stage_json` of `report.json` inside a staging directory the write makes for itself,
-`.report-staging/`, since PR10's round 9 — under a name unique to the write beside the report,
-`report.json.<ulid>.tmp`, in round 8 — synced, then `publish_report`: the rename onto
-`report.json`, the emptied staging directory removed, and the directory's barrier; one
-`util::write_json` until
+(`stage_json` of `report.json` inside a staging directory the write makes for itself under a
+name unique to the write and first recorded durably in the run's private half,
+`.report-staging-<ulid>/`, since PR10's round 10 — the fixed `.report-staging/` in round 9, a
+name unique to the write beside the report, `report.json.<ulid>.tmp`, in round 8 — synced, then
+`publish_report`: the rename onto `report.json`, the emptied staging directory and its record
+removed, and the directory's barrier; one `util::write_json` until
 PR10's round 3) — `PR3-REPORT-DOUBLE-NAME`'s "two hook executions for one
 write", made and
 recorded in `effects/funnel-modules.json` the way the answer funnels'

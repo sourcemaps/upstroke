@@ -393,7 +393,8 @@ fn funnel<T>(
 mod names;
 pub use names::{
     COMMIT_RECORD, COMMIT_RECORD_STAGED, EVENT_LOG, MARKER, MARKER_STAGED, OWNER_RECORD,
-    OWNER_RECORD_STAGED, PLAN, REPORT, REPORT_STAGING_DIR,
+    OWNER_RECORD_STAGED, PLAN, REPORT, REPORT_STAGING_PREFIX, REPORT_STAGING_RECORD,
+    REPORT_STAGING_RECORD_STAGED,
 };
 
 // ---------------------------------------------------------------------------
@@ -727,7 +728,8 @@ fn keep_group(
 ///
 /// `create_new`, and nothing at the name is ever cleared first: the report is
 /// staged inside a directory this write has just made for itself, exclusively
-/// ([`REPORT_STAGING_DIR`], [`write_report`]), and the three run-creation
+/// ([`REPORT_STAGING_PREFIX`], [`write_report`]), the staging record is
+/// staged into the run's own private half ([`begin_report_staging`]), and the three run-creation
 /// records are staged into a directory the same process created moments
 /// before, under the creation's lock, so a file already at any of these names
 /// is not this writer's and `create_new`'s `AlreadyExists` is the right
@@ -737,10 +739,11 @@ fn keep_group(
 /// `create(true).truncate(true)`, which truncated an alias and filled the
 /// operator's file with report bytes, on the schema-3 path too (the round-6
 /// regression lens, P2-1); until round 8 a single-link regular file at the
-/// fixed name `report.json.tmp` was removed as the writer's own, and in round
-/// 8 a file wearing the shape `report.json.<ulid>.tmp` was, which
-/// `standards/08` forbids either way (the round-8 and round-9 regression
-/// lenses, P2). On Unix the preserved mode —
+/// fixed name `report.json.tmp` was removed as the writer's own, in round 8
+/// a file wearing the shape `report.json.<ulid>.tmp` was, and in round 9 a
+/// directory standing at the fixed `.report-staging` was, which
+/// `standards/08` forbids each way (the round-8, round-9 and round-10
+/// regression lenses, P2). On Unix the preserved mode —
 /// less its group bits, until [`keep_group`] has given the file its group
 /// ([`Preserved::creation_permissions`]) — is the `open`'s own creation
 /// mode (`OpenOptions::mode`), so no instant exists at which the file is
@@ -840,17 +843,20 @@ fn publish(
 
 /// [`publish`] for the report, whose staged file lives in a directory of the
 /// write's own: the rename up onto the published name, then the staging
-/// directory — empty now — removed, then the one directory barrier that makes
-/// both entries durable. The removal goes before the barrier so that a
-/// barrier refused after the rename (the fresh-branch tests' shape: the
-/// report visible under its name and not yet durable) leaves nothing of the
-/// protocol staged — an empty directory the next writer would reclaim, but
-/// one the tests would otherwise read as a leftover of a write that never
-/// finished.
+/// directory — empty now — removed, then the record that named it, then the
+/// one directory barrier that makes both public entries durable. The
+/// removals go before the barrier so that a barrier refused after the rename
+/// (the fresh-branch tests' shape: the report visible under its name and not
+/// yet durable) leaves nothing of the protocol staged — an empty directory
+/// and its record the next writer would reclaim, but ones the tests would
+/// otherwise read as a leftover of a write that never finished. The record's
+/// removal is not synced on its own: a record the disk restores names a
+/// directory that is gone, which the next write removes on its own.
 fn publish_report(
     staged: &Path,
     published: &Path,
     staging: &Path,
+    record: &Path,
     ledger: &DurabilityLedger,
 ) -> Result<(), UpstrokeError> {
     fs::rename(staged, published).map_err(|source| UpstrokeError::Io {
@@ -864,6 +870,10 @@ fn publish_report(
     );
     fs::remove_dir(staging).map_err(|source| UpstrokeError::Io {
         path: staging.to_path_buf(),
+        source,
+    })?;
+    fs::remove_file(record).map_err(|source| UpstrokeError::Io {
+        path: record.to_path_buf(),
         source,
     })?;
     match published.parent() {
@@ -1149,20 +1159,21 @@ pub fn write_plan(
 /// `RunDir.WriteReport` — the derived projection, never read back as state.
 ///
 /// Published the way every other record of the run directory is: staged as
-/// `report.json` inside a directory this write makes for itself
-/// (`<public>/.report-staging/`, [`REPORT_STAGING_DIR`], created exclusively),
-/// synced, renamed up onto `report.json`, the emptied staging directory
-/// removed, the run directory synced ([`publish_report`]). DESIGN.md §26 lets the refs a finalization prunes go only "after
-/// the report is durable", and a resume that finds the report current prunes
-/// without writing it again — so a report present under its name has to hold
-/// durable bytes by construction, which the rename after the sync gives it: a
-/// rename that survives a power loss was made after its file's bytes were,
-/// and one that does not survive leaves no report, which the next finalization
-/// regenerates. The *name* is durable only once the directory's barrier has
-/// completed, which is why a finalization that finds the report current
-/// still takes [`sync_report_dir`] before it prunes. Written with a plain
-/// `std::fs::write` until PR10's round 3, which synced nothing (the crash
-/// lens, P2).
+/// `report.json` inside a directory this write makes for itself under a name
+/// unique to the write (`<public>/.report-staging-<ulid>/`,
+/// [`REPORT_STAGING_PREFIX`], created exclusively), synced, renamed up onto
+/// `report.json`, the emptied staging directory removed, the run directory
+/// synced ([`publish_report`]). DESIGN.md §26 lets the refs a finalization
+/// prunes go only "after the report is durable", and a resume that finds the
+/// report current prunes without writing it again — so a report present under
+/// its name has to hold durable bytes by construction, which the rename after
+/// the sync gives it: a rename that survives a power loss was made after its
+/// file's bytes were, and one that does not survive leaves no report, which
+/// the next finalization regenerates. The *name* is durable only once the
+/// directory's barrier has completed, which is why a finalization that finds
+/// the report current still takes [`sync_report_dir`] before it prunes.
+/// Written with a plain `std::fs::write` until PR10's round 3, which synced
+/// nothing (the crash lens, P2).
 ///
 /// The v0.1 coordinator publishes through here too (`drain_and_report`,
 /// schema 3): the bytes are the ones `fs::write` wrote; the mode is the
@@ -1180,29 +1191,51 @@ pub fn write_plan(
 /// creation without group bits). What the inode carried beyond mode and
 /// group — a POSIX ACL — is not carried (`PR10-LEGACY-REPORT-REWRITE-DROPS-ITS-POSIX-ACL`).
 ///
-/// What a writer that died between its stage and its rename left — its
-/// staging directory, with the staged file in it — is removed here, before
-/// this write makes its own, inside the report site, as the run's own tree
-/// ([`reclaim_report_staging`]): the run lock every caller of this function
-/// holds is the proof that no other writer of the report is alive, and the
-/// directory is one only this protocol makes, inside a directory the run
-/// created for itself — ownership by construction, the rule the execution
-/// root's staging leftovers are removed under, and not a recogniser over a
-/// name's shape (`standards/08`; the round-9 regression and fix-check
-/// lenses, P2). Nothing at any other name under the run directory is opened,
-/// removed or reasoned about: an operator's draft at `report.json.tmp`, at
-/// `report.json.ZZZZZZZZZZZZZZZZZZZZZZZZZZ.tmp` or at a name the ULID
-/// producer could have emitted survives the write byte for byte. A file or a
-/// link standing at the staging directory's own name is not the protocol's
-/// either: it is left as found and the write refuses, naming it. The fresh
-/// branch of a terminal finalization removes the leftover too
-/// ([`sync_report_dir`]), so terminal finalization reaches it on either
-/// branch.
+/// **Which staging directory is this run's is proven by a record, never read
+/// off a name** (`standards/08`; the round-10 lenses, P2, after rounds 8 and 9
+/// had removed by the shape of a name and then by a fixed name's type). Before
+/// the directory is made, the write records its name durably in the run's
+/// private half — `<private>/report-staging.json`
+/// ([`REPORT_STAGING_RECORD`]; staged, synced, renamed, the private directory
+/// synced, [`begin_report_staging`]) — and the ledger's entry for the
+/// directory's creation carries, read in the statement immediately before
+/// `create_dir`, whether that record stood. What a writer that died between
+/// its stage and its rename leaves is the record and the directory it names,
+/// with the staged file inside, and the next write — here, and on the fresh
+/// branch of a terminal finalization ([`sync_report_dir`]) — removes the
+/// directory the record names as the run's own tree, by the record, and then
+/// the record ([`reclaim_report_staging`]); a record naming a directory that
+/// is gone is itself removed. `remove_dir_all` on that directory is a
+/// deletion the record authorises, the way the private half's token
+/// authorises the private half's: the record is the run's own writing in the
+/// run's own tree, made before the name existed. A directory of the staging
+/// shape that no record names — an operator's, or a writer's from before the
+/// record existed — is not the protocol's: it is left as found, named in
+/// what this function returns so the caller can say so, never removed and
+/// never adopted, and the write proceeds under its own fresh name. Nothing at
+/// any other name under the run directory is opened, removed or reasoned
+/// about: an operator's draft at `report.json.tmp`, at
+/// `report.json.ZZZZZZZZZZZZZZZZZZZZZZZZZZ.tmp`, at a name the ULID producer
+/// could have emitted, or a whole `.report-staging/` of the operator's,
+/// survives the write byte for byte.
+///
+/// # Errors
+///
+/// An injected error at either phase of either site; the record's or the
+/// staged file's I/O errors; a record in the private half that does not parse
+/// or names something that is not a staging directory's name (the run's own
+/// record, corrupted: the write refuses rather than guess).
+///
+/// # Returns
+///
+/// The staging-shaped entries under `public` that no record of this run's
+/// names, passed over and left as found — empty in the ordinary case.
 pub fn write_report<T: Serialize>(
     public: &Path,
+    private: &Path,
     report: &T,
     hooks: &mut dyn RunDirHooks,
-) -> Result<(), UpstrokeError> {
+) -> Result<Vec<PathBuf>, UpstrokeError> {
     let run_dir = EffectSiteId::RunDir(RunDirSite::WriteReport);
     let report_site = EffectSiteId::Report(ReportSite::Write);
     let ledger = hooks.durability_ledger();
@@ -1227,15 +1260,17 @@ pub fn write_report<T: Serialize>(
             });
         }
     };
-    reclaim_report_staging(public)?;
-    let staging = report_staging_dir(public);
-    fs::create_dir(&staging).map_err(|source| UpstrokeError::Io {
-        path: staging.clone(),
-        source,
-    })?;
+    let passed_over = reclaim_report_staging(public, private)?;
+    let staging = begin_report_staging(public, private, &ledger)?;
     let staged = staging.join(REPORT);
     stage_json(&staged, report, &ledger, preserved)?;
-    publish_report(&staged, &published, &staging, &ledger)?;
+    publish_report(
+        &staged,
+        &published,
+        &staging,
+        &report_staging_record(private),
+        &ledger,
+    )?;
     apply(
         hooks.hook(report_site, HookPhase::After),
         report_site,
@@ -1245,7 +1280,8 @@ pub fn write_report<T: Serialize>(
         hooks.hook(run_dir, HookPhase::After),
         run_dir,
         HookPhase::After,
-    )
+    )?;
+    Ok(passed_over)
 }
 
 /// The directory barrier of `Report.Write`, on its own.
@@ -1266,15 +1302,26 @@ pub fn write_report<T: Serialize>(
 /// site (the round-5 contract lens, F1). The hooks' [`DurabilityLedger`]
 /// records the directory synced, as before.
 ///
-/// The staging directory a dead report writer left is removed here as in
-/// [`write_report`] ([`reclaim_report_staging`]), before the barrier, so the
-/// barrier makes its removal durable with the name it proves.
+/// What a dead report writer left is reclaimed here as in [`write_report`]
+/// ([`reclaim_report_staging`]): the directory the record in `private` names,
+/// and then the record — before the barrier, so the barrier makes the
+/// removal durable with the name it proves. A staging-shaped directory no
+/// record names is left as found and returned, as there.
 ///
 /// # Errors
 ///
-/// An injected error at either phase of either site, the leftover removal's
-/// error, or the barrier's I/O error naming the directory.
-pub fn sync_report_dir(public: &Path, hooks: &mut dyn RunDirHooks) -> Result<(), UpstrokeError> {
+/// An injected error at either phase of either site, the reclaim's error, or
+/// the barrier's I/O error naming the directory.
+///
+/// # Returns
+///
+/// The staging-shaped entries under `public` that no record of this run's
+/// names, passed over and left as found.
+pub fn sync_report_dir(
+    public: &Path,
+    private: &Path,
+    hooks: &mut dyn RunDirHooks,
+) -> Result<Vec<PathBuf>, UpstrokeError> {
     let run_dir = EffectSiteId::RunDir(RunDirSite::WriteReport);
     let report_site = EffectSiteId::Report(ReportSite::Write);
     let ledger = hooks.durability_ledger();
@@ -1288,7 +1335,7 @@ pub fn sync_report_dir(public: &Path, hooks: &mut dyn RunDirHooks) -> Result<(),
         report_site,
         HookPhase::Before,
     )?;
-    reclaim_report_staging(public)?;
+    let passed_over = reclaim_report_staging(public, private)?;
     sync_dir(public, &ledger)?;
     apply(
         hooks.hook(report_site, HookPhase::After),
@@ -1299,100 +1346,259 @@ pub fn sync_report_dir(public: &Path, hooks: &mut dyn RunDirHooks) -> Result<(),
         hooks.hook(run_dir, HookPhase::After),
         run_dir,
         HookPhase::After,
-    )
+    )?;
+    Ok(passed_over)
 }
 
-/// The report's staging directory under `public`: `<public>/.report-staging`
-/// ([`REPORT_STAGING_DIR`]).
+/// The record of the staging directory a report write makes for itself:
+/// `<private>/report-staging.json` ([`REPORT_STAGING_RECORD`]).
 #[must_use]
-pub fn report_staging_dir(public: &Path) -> PathBuf {
-    public.join(REPORT_STAGING_DIR)
+pub fn report_staging_record(private: &Path) -> PathBuf {
+    private.join(REPORT_STAGING_RECORD)
 }
 
-/// What the report's protocol has left staged under `public`: the staging
-/// directory, when a directory stands at its name, followed by its entries in
-/// name order — what a writer that died between its stage and its rename
-/// leaves, and what the next report writer removes before it stages
-/// ([`reclaim_report_staging`]). Empty when nothing stands at the name; a
-/// file or a symbolic link standing there is not the protocol's and is not
-/// listed.
+/// What the record in the private half says: the name, under `public`, of
+/// the staging directory the write that wrote it made or was about to make.
+#[derive(Debug, Serialize, Deserialize)]
+struct ReportStagingRecord {
+    directory: String,
+}
+
+/// The staging directory the record in `private` names, when a record stands:
+/// `<public>/<name>`, the name checked to be one this protocol produces
+/// ([`REPORT_STAGING_PREFIX`] and a ULID, one path component) — the run's own
+/// record, and a record that says anything else is refused rather than
+/// followed. `None` when no record stands.
 ///
 /// # Errors
 ///
-/// An I/O error reading the name or the directory; only an actual not-found
-/// is an empty answer (§7).
-pub fn report_staging_leftovers(public: &Path) -> Result<Vec<PathBuf>, UpstrokeError> {
-    let staging = report_staging_dir(public);
-    let metadata = match fs::symlink_metadata(&staging) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+/// An I/O error reading the record, a record that does not parse, or a
+/// record whose name is not a staging directory's.
+pub fn recorded_report_staging(
+    public: &Path,
+    private: &Path,
+) -> Result<Option<PathBuf>, UpstrokeError> {
+    let record = report_staging_record(private);
+    let bytes = match fs::read(&record) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(source) => {
             return Err(UpstrokeError::Io {
-                path: staging,
+                path: record,
+                source,
+            });
+        }
+    };
+    let parsed: ReportStagingRecord =
+        serde_json::from_slice(&bytes).map_err(|error| UpstrokeError::Parse {
+            message: format!(
+                "{} is the run's record of its report staging directory and does not parse: \
+                 {error}",
+                record.display()
+            ),
+        })?;
+    let name = parsed.directory;
+    let ulid = name.strip_prefix(REPORT_STAGING_PREFIX).unwrap_or("");
+    if ulid.len() != 26 || !ulid.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Err(UpstrokeError::Refused {
+            message: format!(
+                "{} is the run's record of its report staging directory and names `{name}`, \
+                 which is not a name this protocol produces; nothing is removed",
+                record.display()
+            ),
+        });
+    }
+    Ok(Some(public.join(name)))
+}
+
+/// What the report's protocol has left staged: the record's own staging file
+/// if a dead writer left one, the record, the directory the record names when
+/// a directory stands there, and its entries in name order — what a writer
+/// that died between its stage and its rename leaves, and what the next write
+/// removes before it stages ([`reclaim_report_staging`]). Empty when no
+/// record stands. A staging-shaped directory no record names is not the
+/// protocol's and is not listed here ([`unrecorded_report_staging`]).
+///
+/// # Errors
+///
+/// An I/O error reading the record or the directory; only an actual not-found
+/// is an empty answer (§7).
+pub fn report_staging_leftovers(
+    public: &Path,
+    private: &Path,
+) -> Result<Vec<PathBuf>, UpstrokeError> {
+    let mut found = Vec::new();
+    let staged_record = private.join(REPORT_STAGING_RECORD_STAGED);
+    if fs::symlink_metadata(&staged_record).is_ok() {
+        found.push(staged_record);
+    }
+    let Some(recorded) = recorded_report_staging(public, private)? else {
+        return Ok(found);
+    };
+    found.push(report_staging_record(private));
+    let metadata = match fs::symlink_metadata(&recorded) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(found),
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: recorded,
                 source,
             });
         }
     };
     if !metadata.file_type().is_dir() {
-        return Ok(Vec::new());
+        return Ok(found);
     }
-    let entries = fs::read_dir(&staging).map_err(|source| UpstrokeError::Io {
-        path: staging.clone(),
+    let entries = fs::read_dir(&recorded).map_err(|source| UpstrokeError::Io {
+        path: recorded.clone(),
         source,
     })?;
     let mut inside = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| UpstrokeError::Io {
-            path: staging.clone(),
+            path: recorded.clone(),
             source,
         })?;
         inside.push(entry.path());
     }
     inside.sort();
-    let mut found = vec![staging];
+    found.push(recorded);
     found.extend(inside);
     Ok(found)
 }
 
-/// Remove the staging directory a dead report writer left under `public`, as
-/// the run's own tree, under the run lock the caller holds, and say whether
-/// there was one. Only a directory standing at the name is the protocol's:
-/// the protocol makes nothing else there, and nothing else makes a directory
-/// there inside a directory the run created for itself. A file or a link at
-/// the name is not this writer's to remove and is left as found; the caller's
-/// write refuses on it.
+/// The staging-shaped entries under `public` that no record of this run's
+/// names — every entry whose name begins with [`REPORT_STAGING_PREFIX`],
+/// whatever its type, other than the one the record in `private` names — in
+/// name order. Not the protocol's: the write passes them over, left as found,
+/// and names them.
 ///
 /// # Errors
 ///
-/// The refusal naming what stands at the name, or an I/O error reading it or
-/// removing the tree.
-fn reclaim_report_staging(public: &Path) -> Result<Option<PathBuf>, UpstrokeError> {
-    let staging = report_staging_dir(public);
-    let metadata = match fs::symlink_metadata(&staging) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+/// An I/O error listing `public` or reading the record.
+pub fn unrecorded_report_staging(
+    public: &Path,
+    private: &Path,
+) -> Result<Vec<PathBuf>, UpstrokeError> {
+    let recorded = recorded_report_staging(public, private)?;
+    let entries = fs::read_dir(public).map_err(|source| UpstrokeError::Io {
+        path: public.to_path_buf(),
+        source,
+    })?;
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| UpstrokeError::Io {
+            path: public.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let shaped = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(REPORT_STAGING_PREFIX));
+        if shaped && recorded.as_deref() != Some(path.as_path()) {
+            found.push(path);
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// Remove what a dead report writer left, by its record and by nothing else:
+/// the directory the record in `private` names, when a directory stands
+/// there, as the run's own tree — the record is the run's own writing, made
+/// before the name existed — and then the record; a record whose directory is
+/// gone is removed on its own; something that is not a directory standing at
+/// the recorded name is not what this writer made and is left as found, the
+/// record removed. Then the staging-shaped entries no record names are
+/// listed, for the caller to name: passed over, never removed, never adopted.
+///
+/// # Errors
+///
+/// An I/O error reading the record, removing the tree or the record, or
+/// listing `public`.
+fn reclaim_report_staging(public: &Path, private: &Path) -> Result<Vec<PathBuf>, UpstrokeError> {
+    if let Some(recorded) = recorded_report_staging(public, private)? {
+        match fs::symlink_metadata(&recorded) {
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                fs::remove_dir_all(&recorded).map_err(|source| UpstrokeError::Io {
+                    path: recorded.clone(),
+                    source,
+                })?;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(UpstrokeError::Io {
+                    path: recorded,
+                    source,
+                });
+            }
+        }
+        remove_file_if_present(&report_staging_record(private))?;
+    }
+    unrecorded_report_staging(public, private)
+}
+
+/// Record the name of the staging directory this write is about to make,
+/// durably, in the run's private half, and then make the directory —
+/// exclusively — under `public`; the answer is the directory's path.
+///
+/// The record goes first: staged at [`REPORT_STAGING_RECORD_STAGED`] (a
+/// staged record a dead writer left is removed first — the private half's
+/// own), synced, renamed onto [`REPORT_STAGING_RECORD`], the private
+/// directory synced; then, in the statement immediately before `create_dir`,
+/// whether the record stands is read, and the ledger's
+/// [`DurableStep::DirectoryCreated`] entry for the directory carries it as
+/// the entry observed ([`util::EntryObserved`]), so a creation ahead of its
+/// record shows on the record as `present: false`
+/// (`a_report_staging_directory_is_recorded_before_it_is_made`; the recipe
+/// `staging-created-before-its-record`).
+///
+/// # Errors
+///
+/// The record's I/O errors, or `create_dir`'s.
+fn begin_report_staging(
+    public: &Path,
+    private: &Path,
+    ledger: &DurabilityLedger,
+) -> Result<PathBuf, UpstrokeError> {
+    let name = format!("{REPORT_STAGING_PREFIX}{}", crate::ulid::ulid());
+    let staging = public.join(&name);
+    let record = report_staging_record(private);
+    let staged_record = private.join(REPORT_STAGING_RECORD_STAGED);
+    remove_file_if_present(&staged_record)?;
+    stage_json(
+        &staged_record,
+        &ReportStagingRecord { directory: name },
+        ledger,
+        None,
+    )?;
+    publish(&staged_record, &record, ledger)?;
+    let recorded = match fs::symlink_metadata(&record) {
+        Ok(metadata) => metadata.file_type().is_file(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(source) => {
             return Err(UpstrokeError::Io {
-                path: staging,
+                path: record,
                 source,
             });
         }
     };
-    if !metadata.file_type().is_dir() {
-        return Err(UpstrokeError::Refused {
-            message: format!(
-                "{} is not the staging directory this writer makes for itself: a file or a link \
-                 stands at its name, which is not the report protocol's to remove; it is left as \
-                 found and the report is not written",
-                staging.display()
-            ),
-        });
-    }
-    fs::remove_dir_all(&staging).map_err(|source| UpstrokeError::Io {
+    let made = fs::create_dir(&staging);
+    ledger.record_entry(
+        DurableStep::DirectoryCreated,
+        &staging,
+        util::EntryObserved {
+            path: record,
+            present: recorded,
+        },
+    );
+    made.map_err(|source| UpstrokeError::Io {
         path: staging.clone(),
         source,
     })?;
-    Ok(Some(staging))
+    Ok(staging)
 }
 
 /// `RunDir.WriteQuestionPayload` — written before the question is announced.
@@ -2476,6 +2682,21 @@ mod imp {
 
 #[cfg(test)]
 pub(crate) mod scratch_tree;
+
+/// What a report writer that died between its stage and its rename leaves,
+/// planted through the writer's own record-then-create helper — never by
+/// hand, since a directory planted by hand carries no record and is not the
+/// protocol's: the record in `private` naming the directory, the directory
+/// under `public`, and inside it `report.json` half-written; the answer is
+/// that file. Test builds only, after the census boundary above.
+#[cfg(test)]
+pub(crate) fn plant_report_staging_of_a_dead_writer(public: &Path, private: &Path) -> PathBuf {
+    let staging = begin_report_staging(public, private, &DurabilityLedger::off())
+        .expect("the writer's own record-then-create helper plants the dead writer's directory");
+    let leftover = staging.join(REPORT);
+    fs::write(&leftover, b"{\"half\":").expect("a dead writer's staged report");
+    leftover
+}
 
 #[cfg(test)]
 mod tests;

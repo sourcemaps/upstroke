@@ -879,20 +879,29 @@ already-unreachable object in the store (`plant_unreachable_object`) and
 records the objects the run's refs and worktrees reference and the whole
 store as it stands, so that every finalization driven from it is held to
 R27 by `assert_finalized` (`assert_objects_kept`); since round 8 it also
-leaves a staged report a dead writer would have — since round 9 the
-staging directory the writer makes for itself, `.report-staging/`, with the
-half-written `report.json` inside (`plant_report_leftover`); in round 8 a
-regular file under a name `rundir::report_staging_name` produced — so that
-both branches of the report site are held to reclaiming it.
+leaves a staged report a dead writer would have — since round 10 the
+record of the staging directory's name in the run's private half and the
+directory it names under the public run directory, `.report-staging-<ulid>/`,
+with the half-written `report.json` inside, planted through the writer's own
+record-then-create helper (`plant_report_leftover`); in round 9 a directory
+made by hand at the fixed `.report-staging/`; in round 8 a regular file
+under a name `rundir::report_staging_name` produced — so that both branches
+of the report site are held to reclaiming it.
 
-## `fn plant_report_leftover(public: &Path) -> PathBuf {`
+## `fn plant_report_leftover(fixture: &Fixture) -> PathBuf {`
 
 What a report writer that died between its stage and its rename leaves
-(PR10's round 9): the staging directory it made for itself under the
-public run directory, `rundir::report_staging_dir`, with `report.json`
-half-written inside. Planted by every finished-run fixture and again by the
-matrix before its third resume, and read reclaimed — the directory and the
-file — by `assert_finalized`.
+(PR10's round 10): the record of its staging directory's name in the
+private half, the directory under the public run directory, and
+`report.json` half-written inside — planted through the writer's own
+record-then-create helper, `rundir::plant_report_staging_of_a_dead_writer`,
+never by hand: a directory made by hand carries no record and is not the
+protocol's, and the writer removes only what a record names (the round-10
+lenses, P2; until round 10 the fixture made a directory by hand at a fixed
+name and the writer removed whatever directory stood there). Planted by
+every finished-run fixture and again by the matrix before its third resume,
+and read reclaimed — the record, the directory and the file — by
+`assert_finalized`.
 
 ## `fn resume_finalizes_halted_then_refuses() {`
 
@@ -4260,8 +4269,9 @@ pruned Git's unreachable objects converged); and, since round 8, the
 staged report the planting left for a dead writer, reclaimed inside the
 report site on the write branch and on the fresh branch alike, with
 nothing of the report's protocol left staged
-(`rundir::report_staging_leftovers`: since round 9 the staging directory
-and whatever it holds, neither standing).
+(`rundir::report_staging_leftovers`: since round 10 the record in the
+private half, the directory it names and whatever it holds, none standing;
+in round 9 the fixed staging directory and its entries).
 
 ## `fn assert_objects_kept(planted: &FinishedPlanting, tag: &str) {`
 
@@ -4331,8 +4341,10 @@ effect's "done" reads the report present *and* the dead writer's staged
 report gone, so the cells around the report's two sites hold the write
 branch's reclaim to the site's phases; and the third resume — the one
 that always finds the report current — meets a staged report planted
-anew after the second (`plant_report_leftover`: since round 9 the dead
-writer's staging directory with the half-written file inside), so the
+anew after the second (`plant_report_leftover`: since round 10 the dead
+writer's record and the directory it names with the half-written file
+inside, planted through the writer's own helper; in round 9 a directory
+made by hand at the fixed name), so the
 fresh branch's reclaim is held as well
 (round 8; the recipes `report-leftover-not-reclaimed-on-write` and
 `-on-fresh`, the second of which survived the matrix until the
@@ -4419,6 +4431,31 @@ faith, no barrier in the root) fails it at the missing record; at
 `c82767f4`'s `workspace_manager.rs`, which took no barrier on the absent
 branch at all, it fails the same way
 (`~/pr10-evidence/r9/before-c82767f4/prefix-b2-absent-slot-directory.log`).
+
+## `fn a_failed_execution_root_barrier_is_retried_before_the_intent_is_removed() {`
+
+Rule 2 for the barrier round 9 added — the round-10 lenses' P1, named by
+every lens that looked: the round-9 guard above faults `tasks/`, drops that
+fault, removes `tasks/` and resumes with the execution root's barrier
+unarmed, asserting only the ledger entry, which `sync_slot_directory_absent`
+writes whether or not its barrier held; the saved recipe
+`sync-absent-slot-directory-skipped` removes the helper and its record
+together, so its `101` proves the record is required and not that the error
+propagates, and the swallow `outcome.unwrap_or(()); Ok(())` at the helper's
+end passed that guard
+(`~/pr10-evidence/r10/before-bbd3f2ee/prefix-b1-root-barrier-error-swallowed-existing-test.log`).
+Here the same state is reached — the checkout removed by a first resume
+whose parent barrier was refused, the intent standing, the emptied slot
+directory then removed by hand — and then `fail_barriers_at` is armed on the
+execution root itself, at both outcomes: two resumes each end at the
+barrier's diagnostic with the intent still present, the intent read before
+the diagnostic so that a swallowed barrier fails at the intent first; with
+the fault dropped the third finalizes and `assert_finalized` holds. The
+recipe `root-barrier-error-swallowed` fails it at the first attempt's
+intent assertion; unmutated, the test passes at `bbd3f2ee` too, where the
+production code already propagated the error — the gap was the guard's, not
+the code's (`prefix-b1-root-barrier-retry-unmutated.log`,
+`prefix-b1-root-barrier-error-swallowed-new-test.log`).
 
 ## `fn an_absent_checkout_retries_its_parent_barrier() {`
 
@@ -4611,7 +4648,11 @@ never ingested — the halt outranks ingestion — and finalization leaves it.
 ## `fn private_records_untouched_by_finalization() {`
 
 `private_records_untouched_by_finalization` (T-FINALIZE, R21): the
-private owner and commit records are byte-identical after finalization.
+private owner and commit records are byte-identical after finalization,
+and so is every other file of the private half but for the one the report
+write owns there since PR10's round 10 — the dead writer's staging record
+the planting left, `report-staging.json`, which the write reclaims with the
+directory it names; the test requires it present before and gone after.
 
 ## `fn finalized_report_names_runner_identity() {`
 

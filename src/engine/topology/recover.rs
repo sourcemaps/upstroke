@@ -1062,6 +1062,7 @@ pub fn finalize_if_finished(
                     &super::finalize::Finalize {
                         manager,
                         public: root.public_dir(),
+                        private: root.private_dir(),
                         run_id: root.run_id(),
                         fold: barrier.fold(),
                         events: barrier.events(),

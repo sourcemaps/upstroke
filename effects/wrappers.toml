@@ -517,21 +517,21 @@ effect_free = [
     "plan_json",
     "public_dir",
     "questions",
+    "recorded_report_staging",
     "recording_durability",
     "report_json",
-    # The report's staging directory under a public directory (`REPORT_STAGING_DIR`):
-    # a path join, nothing touched (PR10's round 9).
-    "report_staging_dir",
     # Lists what the report's protocol has left staged under the public
     # directory — the staging directory and its entries: `symlink_metadata`
     # and `read_dir`, nothing created, renamed or removed. The tests' witness
     # that nothing of the report's protocol is left staged (PR10's rounds 8
     # and 9).
     "report_staging_leftovers",
+    "report_staging_record",
     "reviews",
     "runs_root",
     "settings",
     "transcripts",
+    "unrecorded_report_staging",
     "v1",
     "with_private_root",
 ]
@@ -598,7 +598,7 @@ effect_free = [
     "fail_barriers_at",
     # The same fault, scoped to the file barriers directly under a directory,
     # for a staged file whose name the write chooses (PR10's round 8).
-    "fail_file_barriers_under",
+    "fail_file_barriers_within",
     "deserialize",
     "executable_extensions",
     "fence_for",

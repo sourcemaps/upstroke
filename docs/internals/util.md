@@ -114,6 +114,18 @@ A staged file was created, empty, at the mode it will carry its bytes at
 test can read the record's `mode` from before the first byte rather than
 from the source order of a create and a `chmod`.
 
+## `DirectoryCreated,`
+
+A directory was created, exclusively, for a staged file to be written in
+(`rundir::begin_report_staging`; PR10's round 10): the report's staging
+directory under the public run directory, `.report-staging-<ulid>`. The
+entry carries, as the entry observed ([`EntryObserved`]), the record of
+that directory's name in the run's private half — whether it stood at the
+instant before `create_dir`, read by `symlink_metadata` in the statement
+immediately before it — so a creation ahead of its record shows on the
+record as `present: false` (the recipe `staging-created-before-its-record`).
+No barrier.
+
 ## `GroupGiven,`
 
 A staged file was given the group of the file it replaces
@@ -207,8 +219,10 @@ lens, P1).
 ## `pub struct EntryObserved {`
 
 What a directory barrier saw of one entry of the directory it made
-durable: the entry's path, as the funnel bound it, and whether it was
-present at the instant before the barrier.
+durable — or, since PR10's round 10, what the report staging directory's
+creation saw of the record that names it: the entry's path, as the funnel
+bound it, and whether it was present at the instant before the barrier or
+the creation.
 
 ## `#[derive(Debug, Clone, Default)]`
 
@@ -217,7 +231,11 @@ An ordered record of the durability primitives a funnel performed.
 Cloning shares the log, so a caller can hand a clone into a funnel body and
 still read what the body recorded. Production never constructs a recording
 one: [`Self::off`] holds no allocation and every `record` call on it is a
-discriminant test.
+discriminant test — the enabled check comes before any record is built, so
+an off ledger reads no path and allocates nothing (round 9 had built the
+record first, with a `metadata` of the path on Unix, so every schema-3
+append through the off ledger did a pathname lookup; the round-10
+regression lens, P3, restored the order).
 
 ## `#[must_use]`
 
@@ -426,7 +444,7 @@ one a barrier consults before returning to its syscall.
 
 ## `#[cfg_attr(not(test), allow(dead_code))]`
 
-The guard [`fail_barriers_at`] and [`fail_file_barriers_under`] hand back:
+The guard [`fail_barriers_at`] and [`fail_file_barriers_within`] hand back:
 the fault is armed while it is held and disarmed by its `drop`, so a test
 that panics disarms it too. It remembers its scope beside its path, so a
 guard for a directory's file barriers disarms only that.
@@ -439,13 +457,16 @@ instead of performing the barrier, until the guard is dropped. The path
 compares as given and canonicalised, so a funnel handed the same directory
 by another spelling still meets it.
 
-A second scope, [`fail_file_barriers_under`] (PR10's round 8): every
-[`fsync_file_at`] of a file *directly under* `dir` is refused, and no
-directory barrier is — the staged report's own barrier is armed by the
-directory it lands in, since round 9 the staging directory the write makes
-for itself (`rundir::report_staging_dir`), and until then the public
-directory, under a name the write chose (`report.json.<ulid>.tmp`) and no
-test could know in advance; the directory barrier tests keep the
+A second scope, [`fail_file_barriers_within`] (PR10's round 10; from
+round 8 to round 9 a `fail_file_barriers_under`, every file *directly
+under* a directory, which went with the fixed staging directory it was
+written for): every [`fsync_file_at`] of a file anywhere *within* `dir` is
+refused, and no directory barrier is — the staged report's own barrier is
+armed by the run directory it lands under, since the staging directory's
+name is unique to the write and recorded before it exists, so no test can
+know it in advance; the staged report is the only file synced within the
+public run directory during a report write, the staging record's own
+barrier being in the private half; the directory barrier tests keep the
 exact-path scope, since a fault on the public directory must not reach the
 staged file's sync.
 

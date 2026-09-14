@@ -51,7 +51,10 @@ report.json)", "BudgetExceeded: resumably_open (never pruned)".
 
 What finalization reports back: the outcome it finalized, whether the report was written or
 found current, what each step removed, whether the root went, how many candidates refs the
-report lists as retained, and the linked-worktree registrations the removals passed over —
+report lists as retained, the linked-worktree registrations the removals passed over, and the
+staging-shaped entries under the run directory that no record of this run's names, which the
+report write passed over and left as found (since PR10's round 10; both are named in step (b)'s
+refusal) —
 entries of the repository's store that name no checkout (`WorkspaceManager::WriterProof`),
 sorted, without duplicates, left as found.
 
@@ -61,7 +64,10 @@ Refuses without a durable `run_finished` — nothing is written and nothing dele
 that has not ended. Otherwise the report is derived from the fold and written when the file on
 disk is missing or stale — a file whose stored digest is not the digest of its own bytes, or
 whose outcome or runner is not the derived report's (`TopologyReport::is_fresh_against`) — then
-the steps run. The write is `rundir::write_report`'s staged, synced, renamed publication, so a
+the steps run. The write is `rundir::write_report`'s staged, synced, renamed publication — the
+report staged inside a directory the write makes for itself under a name it first records
+durably in the run's private half, which is why finalization carries the private directory too
+(`Finalize::private`, from the locked root and the run's paths) — so a
 report present under its name holds durable bytes and the refs the steps prune go only after it
 (DESIGN.md §26); a report found current is not written again, and its directory's barrier is
 taken again (`rundir::sync_report_dir`, through the report's two sites exactly as the write is —
@@ -118,7 +124,7 @@ it is what is made durable, `sync_slot_directory_absent`) — its error is the f
 lens, P1: with `.unwrap_or(())` on the barrier both round-8 guards still passed, since neither
 armed the checkout's parent), and the barrier's own record carries the checkout observed absent
 in the statement before it (`util::EntryObserved`; the round-9 fix-check lens, P1: with the sync
-moved ahead of the removal the round-8 guard still passed). The three guards in the recover tests:
+moved ahead of the removal the round-8 guard still passed). The five guards in the recover tests:
 `a_checkouts_deletion_is_made_durable_before_its_intent_is_removed` (the parent synced between the
 removal's two phases and before the intent site's first, and the barrier's record showing the
 checkout absent at the instant of the sync),
@@ -129,7 +135,13 @@ funnel called twice under the fault: the retry meets an absent checkout and refu
 `an_absent_slot_directory_is_made_durably_absent_in_the_root_before_the_intent_is_removed` (the
 checkout removed by a first resume whose barrier was refused, the emptied slot kind's directory
 then removed by hand: the next resume syncs the execution root with that directory observed
-absent, removes the intent and finalizes). Guards
+absent, removes the intent and finalizes) and, since round 10,
+`a_failed_execution_root_barrier_is_retried_before_the_intent_is_removed` (the same state, the
+execution root's barrier then armed to fail across two resumes at both outcomes, each ending at
+the barrier's diagnostic with the intent still present, the third converging — rule 2 for the
+barrier round 9 added, whose guard dropped its fault before the root barrier ran and read only the
+record, which the helper writes whether or not the barrier held, so the swallow
+`outcome.unwrap_or(()); Ok(())` at the helper's end passed it; the round-10 lenses, P1). Guards
 rather than cells in the matrix, since the barrier is inside the removal's site and the matrix
 already faults both its phases; the round-8 lens's alternative — a recovery that rediscovers an
 intent-less checkout — was not taken, because it would add a second reader of the root's contents

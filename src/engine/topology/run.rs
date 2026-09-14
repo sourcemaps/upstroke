@@ -1279,6 +1279,7 @@ impl TopologyRun {
             &finalize::Finalize {
                 manager: seams.manager,
                 public: &seams.paths.public,
+                private: &seams.paths.private,
                 run_id: &self.identity.run_id,
                 fold: &self.handle.fold,
                 events: &self.handle.events,

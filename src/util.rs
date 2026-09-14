@@ -135,6 +135,7 @@ pub enum DurableStep {
     SyncedData,
     Truncated,
     Staged,
+    DirectoryCreated,
     GroupGiven,
     SyncedFile,
     Renamed,
@@ -177,6 +178,9 @@ impl DurabilityLedger {
     }
 
     pub fn record(&self, step: DurableStep, path: &Path, len: u64) {
+        if !self.is_recording() {
+            return;
+        }
         self.push(DurableRecord {
             step,
             path: path.to_path_buf(),
@@ -194,6 +198,9 @@ impl DurabilityLedger {
         mode: Option<u32>,
         mode_after: Option<u32>,
     ) {
+        if !self.is_recording() {
+            return;
+        }
         self.push(DurableRecord {
             step,
             path: path.to_path_buf(),
@@ -205,6 +212,9 @@ impl DurabilityLedger {
     }
 
     pub fn record_entry(&self, step: DurableStep, path: &Path, entry: EntryObserved) {
+        if !self.is_recording() {
+            return;
+        }
         self.push(DurableRecord {
             step,
             path: path.to_path_buf(),
@@ -346,7 +356,7 @@ static ARMED_BARRIER_FAULTS: std::sync::Mutex<Vec<(PathBuf, FaultScope)>> =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FaultScope {
     Exactly,
-    FilesBeneath,
+    FilesWithin,
 }
 
 static ARMED_BARRIER_FAULT_COUNT: std::sync::atomic::AtomicUsize =
@@ -365,8 +375,8 @@ pub(crate) fn fail_barriers_at(path: &Path) -> BarrierFault {
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn fail_file_barriers_under(dir: &Path) -> BarrierFault {
-    arm_barrier_fault(dir, FaultScope::FilesBeneath)
+pub(crate) fn fail_file_barriers_within(dir: &Path) -> BarrierFault {
+    arm_barrier_fault(dir, FaultScope::FilesWithin)
 }
 
 fn arm_barrier_fault(path: &Path, scope: FaultScope) -> BarrierFault {
@@ -404,8 +414,6 @@ fn injected_barrier_fault(path: &Path, half: BarrierHalf) -> Option<std::io::Err
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let resolved = std::fs::canonicalize(path).ok();
-    let parent = path.parent();
-    let parent_resolved = parent.and_then(|parent| std::fs::canonicalize(parent).ok());
     armed
         .iter()
         .any(|(armed, scope)| match scope {
@@ -413,11 +421,15 @@ fn injected_barrier_fault(path: &Path, half: BarrierHalf) -> Option<std::io::Err
                 armed == path
                     || (resolved.is_some() && std::fs::canonicalize(armed).ok() == resolved)
             }
-            FaultScope::FilesBeneath => {
+            FaultScope::FilesWithin => {
                 half == BarrierHalf::File
-                    && (parent == Some(armed.as_path())
-                        || (parent_resolved.is_some()
-                            && std::fs::canonicalize(armed).ok() == parent_resolved))
+                    && (path.starts_with(armed)
+                        || (resolved.is_some()
+                            && std::fs::canonicalize(armed).ok().is_some_and(|armed| {
+                                resolved
+                                    .as_ref()
+                                    .is_some_and(|resolved| resolved.starts_with(armed))
+                            })))
             }
         })
         .then(|| {
