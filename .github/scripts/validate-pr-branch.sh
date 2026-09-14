@@ -578,96 +578,85 @@ unset GLOBIGNORE
 # a clean superproject recording `findings` at a gitlink conformed at exit 0 where
 # the clean run refuses; `GIT_GLOB_PATHSPECS`, `GIT_NOGLOB_PATHSPECS` and
 # `GIT_ICASE_PATHSPECS` are compatible with an explicit `:(literal)` and moved no
-# verdict, but they narrow or widen a match all the same and are unset with it. This
-# is the same rule as the three names above -- the environment does not decide what
-# this gate reads -- and it is why `GIT_CONFIG_*` and the trace variables, which do
-# NOT change which paths a pathspec names, are still left alone (a trace descriptor
-# that collided with a capture copy is handled where the copy is opened, not here).
+# verdict, but they narrow or widen a match all the same and are unset with it. None
+# of them names a repository, so none is put back for any probe -- not even for the
+# asks below that put back the three names that do -- and it is why `GIT_CONFIG_*` and
+# the trace variables, which do NOT change which paths a pathspec names, are still left
+# alone (a trace descriptor that collided with a capture copy is handled where the copy
+# is opened, not here).
 unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
 
-# AND WHICH REPOSITORY ANSWERS IS DECIDED BY THE PATH, NEVER BY `GIT_DIR`,
-# `GIT_WORK_TREE` OR `GIT_INDEX_FILE` -- WHICH ARE THE THREE NAMES THIS ENFORCES
-# AND THE WHOLE OF WHAT IT CLAIMS. Each of them puts a different ledger behind
-# the same directory, and a verdict an exported variable can flip is not a
-# verdict -- it is the "one directory, two answers" shape every P1 in this file
-# has had, reached through the environment instead of through a spelling. All
-# three were measured here, one at a time, against the clean-environment control
-# on the same tree:
+# AND WHICH REPOSITORY A CALLER'S ENVIRONMENT NAMES IS GIT'S TO SAY. THIS FILE ASKS
+# GIT AND NEVER WORKS IT OUT. `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` are how
+# a caller tells git which git directory, work tree and index a directory belongs to,
+# and git is the only thing that defines what a spelling of them means: relative to
+# which directory, what `.` and a trailing `/.` name, what a git directory with no work
+# tree takes as its root, what an index path is relative to. Rounds 10 to 12 read those
+# values here, and each round's review met a spelling the reading got wrong -- a
+# `GIT_WORK_TREE=.` whose prefix was stripped by spelling, so a materialised 120000
+# conformed and a sparse finding refused; a relative `GIT_DIR` that named nothing at
+# the caller's directory, re-anchored by `-C` onto metadata planted inside the listing;
+# a fallback that never asked the recorded ancestors, so a file listing below a
+# `160000` was read; and a superproject reachable ONLY through the names, hidden with
+# them, and its `160000` with it. Each was exit 1 at `231c1aad` and exit 0 `conforms`
+# at `9980591a`, and each was a site where this file answered git's question for it.
 #
-#   GIT_WORK_TREE   a clean standalone repository holding one committed finding
-#                   at its root, spelled `.`, went from exit 0 `conforms` to exit
-#                   1, and a plain directory in no repository at all refused the
-#                   same way. A FALSE RED.
-#   GIT_DIR         a listing under a 160000 gitlink -- which the superproject
-#                   records, and which every other spelling and all three tree
-#                   listings refuse at exit 1 -- conformed at exit 0. A FALSE
-#                   GREEN.
-#   GIT_INDEX_FILE  the same false green by the same mechanism one level in: the
-#                   repository is discovered from the path and a foreign index
-#                   answers for it.
+# SO A LISTING CAN BE IN TWO REPOSITORIES, AND GIT IS ASKED ABOUT EACH.
 #
-# THEY ARE UNSET HERE, ONCE, ABOVE EVERY PROBE, RATHER THAN READ AT THE SITES
-# THAT TRIP OVER THEM. A reading is what the first of these was filed as wanting,
-# and a reading is the wrong shape: the ascent asks git whether the PARENT of a
-# work tree is inside a work tree, and a pinned work tree makes git answer about
-# the pin at every level of that walk, so there is no reading of "the caller
-# selected this work tree" that makes the question answerable -- the pin is what
-# stops it being answered. NO PROBE THAT DECIDES WHICH REPOSITORY ANSWERS READS
-# ANY OF THE THREE. Every walk below runs with them cleared, and the environment
-# fixtures assert that from the outside, row by row -- the pinned run and the
-# clean run compared on exit code AND bytes wherever the records answer. That is
-# also what keeps the equivalence property covering these callers at all: the
-# three tree listings are FILES and no variable moves them, so a directory whose
-# answer the environment can change disagrees with them by construction.
+#   THE ONE ITS PATH REACHES is git's discovery from the listing, and every walk below
+#   asks it with the three names CLEARED -- here, once, above every probe -- because a
+#   name left exported makes every step of a walk answer about the name rather than
+#   about the path. Measured while the walks still ran with the names exported, one at
+#   a time against the clean control: `GIT_WORK_TREE` made the ascent's question about a
+#   PARENT directory answer about the pin, and a clean standalone repository spelled
+#   `.` refused; `GIT_DIR` or `GIT_INDEX_FILE` pointed at a gitlinked repository's own
+#   metadata made every probe answer out of that repository, and the gitlink conformed.
 #
-# CLEARING THEM IS NOT FREE, AND THE COST IS THE ONE WORLD WHERE THE FILESYSTEM
-# ANSWERS. A `git --git-dir=… --work-tree=…` deployment with no `.git` at or
-# above the work tree is reachable through these names and, measured, through
-# nothing else: discovery from that work tree with them cleared is `fatal: not a
-# git repository`. So cleared, the listing is in no repository at all, a
-# directory in no repository is answered by the names the FILESYSTEM holds, and
-# an ignored, untracked file -- `git status` in the deployment says `!! findings/`
-# and `git ls-files -- findings` prints nothing -- was counted as a filed
-# finding: exit 0 `conforms`, where the same fixture under the pins and under
-# `231c1aad` is exit 1 `names no finding`. That was executed. It is the false
-# green this whole file exists to close, introduced by the round that unset them.
+#   THE ONE THE ENVIRONMENT NAMES is asked of git ONCE, from the caller's own directory,
+#   with the names put back exactly as exported, empty ones included: `rev-parse
+#   --absolute-git-dir`, `--show-toplevel` and `--path-format=absolute --git-path
+#   index`. What comes back is three absolute paths GIT printed, and every later read of
+#   that repository's records exports those three and nothing the caller spelled, so no
+#   `-C` can re-anchor anything. `resolve_deployment` asks; `ledger_probe` reads.
 #
-# SO IN THAT ONE WORLD THE LEDGER THOSE NAMES POINT AT IS ASKED ABOUT THE
-# LISTING, AND ONLY ABOUT THE LISTING. REFUSING THERE INSTEAD WAS THE ROUND
-# BEFORE THIS ONE, AND IT WAS THE OPPOSITE ERROR. The same deployment holding a
-# COMMITTED finding -- clean index, no submodule, the real
-# `findings/P1_correctness_202609112028_the-legacy-workspace-reads-replacement-objects.md`
-# and the `fix-P1/` branch that repairs it -- refused at exit 1 where master,
-# `231c1aad` and the deployment's own repository all answer exit 0 `conforms`.
-# Both directions were executed, on one fixture, changing only whether the file
-# is TRACKED. THAT IS THE WHOLE OF THE DIFFERENCE BETWEEN THEM, and no probe of a
-# directory can see it: the filesystem cannot see a recorded mode, which is the
-# sentence this file repeats everywhere else. So `read_listing` puts the names
-# back for ONE `ls-files` against the listing's own absolute path and takes them
-# off again. What that ledger records there is the candidate set, read exactly as
-# the records world reads a tree; where it records nothing, the refusal stands.
+# AND A LISTING IS JUDGED IN THE REPOSITORY THE ENVIRONMENT NAMES, OR NOT AT ALL.
+# `judge_in_deployment` is the whole of the rule and it has four arms:
 #
-# THE ENVIRONMENT STILL NEVER SELECTS BETWEEN LEDGERS, WHICH IS THE RULE ABOVE
-# AND IS UNCHANGED. The ask is guarded on `listing_world`, so wherever the path
-# reaches a repository nothing is put back and the pinned run and the clean run
-# stay the same run -- which is what every `env_case` row asserts -- and where it
-# reaches none there is no repository to displace. TWO THINGS BOUND IT FURTHER,
-# both measured at git 2.43.0:
+#   1. Git could not resolve that repository -- a git directory that is not one, a name
+#      exported empty, a work tree it will not take. REFUSED: a repository nothing can
+#      be asked about is not one a listing conforms in.
+#   2. The listing is not inside its work tree. REFUSED, save one input: a regular file
+#      in no repository at all is a list of names somebody wrote -- the workflow builds
+#      three -- and not a ledger, so it is read exactly as it is read with nothing
+#      exported. Not where `GIT_DIR` is exported without `GIT_WORK_TREE`: that work
+#      tree is rooted wherever git is asked from, so "outside" says where the CALLER
+#      stands, and a materialised 120000 outside the caller's directory is a regular
+#      file whose target text would be read as names. A listing is inside the work
+#      tree where a component the caller WROTE is that root, matched by inode, and the
+#      rest of what they wrote does not climb back out of it through a `..` -- the
+#      test `name_listing` makes, and the one git makes of a pathspec: measured at git
+#      2.43.0, a path written through a link TO the work tree's root is inside it, and
+#      one written through a link to a directory BELOW the root is `outside repository`.
+#   3. The path reaches a repository of its own as well. Both are asked what they record
+#      at the listing, and anything but the same answer is REFUSED. One directory with
+#      two ledgers is settled by neither: this is where a hidden superproject's `160000`
+#      refuses over the submodule's own index, and a foreign `GIT_INDEX_FILE` over a
+#      repository refuses rather than answers.
+#   4. The path reaches no repository. The named repository's records DECIDE, read by
+#      `recorded_kind_of` exactly as any records are -- recorded type before checkout
+#      shape, ancestors included -- where the environment names BOTH its git directory
+#      and its work tree, which is how `git --git-dir=… --work-tree=…` is spelled. A git
+#      directory alone makes whatever directory git is asked from the work tree's root,
+#      which says where the ASKER stands and places no listing; a work tree or an index
+#      alone takes its repository from discovery at the caller's directory, which is not
+#      the listing's. Either is refused.
 #
-#   A GIT DIRECTORY SAYS WHERE GIT IS, NOT WHERE THE LISTING IS, which is this
-#   file's own rule one section up. With no `GIT_WORK_TREE` among the names git
-#   takes the directory it is asked FROM as the work tree's root, so the pinned
-#   index's ROOT entries come back as this listing's own children: a standalone
-#   repository's committed finding was offered as a child of an unrelated
-#   directory in no repository at all. The ledger is asked only where a work tree
-#   was named too, and every other pinning keeps the refusal.
-#
-#   AND THE PATHSPEC IS THE LISTING'S OWN ABSOLUTE PATH UNDER `:(literal)`, which
-#   git refuses at 128 -- `is outside repository` -- for a listing outside that
-#   work tree, where the same call with the path merely implied answers about the
-#   work tree's ROOT instead and offers its entries. A 128 is read here as this
-#   ledger not placing this listing, and the only thing that reading does is
-#   leave the refusal below standing, so it fails closed.
+# SO WHAT EXPORTING THE NAMES CAN CHANGE IS STATED HERE RATHER THAN LEFT TO BE FOUND.
+# Where the path reaches a repository, the run with them exported gives exactly the
+# answer the run without them gives, or it refuses. Where the path reaches none, the
+# named repository's records answer in place of the names the filesystem holds, or it
+# refuses -- save a regular file or a link outside the named work tree, which is read
+# as it always is wherever that work tree is not simply the caller's own directory.
 #
 # WHAT THIS DOES NOT ENFORCE, MEASURED RATHER THAN ASSUMED, because "cannot move
 # a verdict" stood here as an assertion and two reviews then argued it both ways.
@@ -684,10 +673,15 @@ unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PA
 # records`, `GIT_CEILING_DIRECTORIES` naming a path that is not there conforms as
 # the control, and `231c1aad` refuses identically -- a REFUSAL WITH A NAMED
 # REASON, which is the direction this file wants, and not this pull request's
-# regression. The sentence above is narrowed to the three names rather than the
-# gate widened to a fourth. `GIT_DISCOVERY_ACROSS_FILESYSTEM=0` did not move the
-# verdict in the fixture that was run, and that fixture crosses no filesystem
-# boundary: UNTESTED, not cleared.
+# regression. The rule above is about the three names, and is not widened to a
+# fourth. `GIT_DISCOVERY_ACROSS_FILESYSTEM=0` did not move the verdict in the
+# fixture that was run, and that fixture crosses no filesystem boundary: UNTESTED,
+# not cleared. Nor did `GIT_COMMON_DIR` naming a BARE repository's directory, which
+# is where a discovered repository's config would be read from: over an ordinary
+# repository whose index records two findings of one description and whose checkout
+# holds one, `--is-inside-work-tree` stayed `true` and the run refused `names 2
+# findings` at `231c1aad`, at `9980591a` and here alike -- one shape at git 2.43.0,
+# and not a property of the variable.
 #
 # THE NAMES ARE RECORDED BEFORE THEY ARE CLEARED, because the refusal has to say
 # which of them was there, and SET BUT EMPTY IS ONE OF THEM: at git 2.43.0 an
@@ -697,10 +691,10 @@ unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PA
 # substitution this gate is about. This is one process's environment and nothing
 # the caller's own git commands see.
 #
-# THE VALUES ARE RECORDED WITH THEM, for the one ask `environment_children`
-# makes and for nothing else. They are held in variables this file writes and
-# never in the environment, so between here and that one call there is no
-# exported name for any probe to find.
+# THE VALUES ARE RECORDED WITH THEM, for the one ask `resolve_deployment` makes
+# and for nothing else: nothing in this file reads them, it hands them back to git.
+# They are held in variables this file writes and never in the environment, so
+# outside that ask and `ledger_probe` there is no exported name for a probe to find.
 environment_ledger=''
 environment_git_dir=''
 environment_work_tree=''
@@ -1491,7 +1485,8 @@ path_parent() {
 # asks whether a work tree CONTAINS this one: a work tree the caller selected is
 # not a container of itself, and a clean standalone repository spelled `.` was
 # refused for it. Both readings are gone with the pins, which are unset at the
-# top of the file where nothing has to remember which question is being asked.
+# top of the file where nothing has to remember which question is being asked --
+# and the repository they name is asked about by git, and never by this walk.
 #
 # RULE 4: THE PATH MUST ARRIVE ROOTED AND THIS NO LONGER ROOTS IT, because the
 # join it used to make was `${PWD%/}/$dir` for anything not beginning with `/` -- true of
@@ -1607,6 +1602,76 @@ repository_above() {
 listing_world=''
 listing_toplevel=''
 listing_relpath=''
+# The shell's own directory, rooted -- `locate_listing` sets it, and every chain a
+# listing is named along starts from it.
+here=''
+
+# resolve_deployment: the repository `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE`
+# name, AS GIT RESOLVES IT from the caller's own directory with the names put back
+# exactly as they were exported -- `deployment_git_dir`, `deployment_top` and
+# `deployment_index`, three absolute paths git printed -- and `deployment_resolved`
+# set only where git printed all three. Where it could not, `deployment_said` is what
+# it said. Asked once, and only when one of the names was exported; the environment
+# section at the top of this file is why, and what is done with the answer.
+#
+# NOTHING HERE READS A VALUE. Git takes a relative `GIT_DIR` from the directory it is
+# run in -- this one, since nothing below the top ever changes it -- takes `.` and a
+# trailing `/.` as the directory they name, takes a git directory with no work tree
+# as rooted wherever it is asked from, and takes a relative `GIT_INDEX_FILE` from the
+# work tree's top when it is run inside the work tree and from where it is run when it
+# is not. Each of those was measured at git 2.43.0, and each is git's to decide; the
+# three answers are what it decided.
+deployment_resolved=0
+deployment_git_dir=''
+deployment_top=''
+deployment_index=''
+deployment_said=''
+resolve_deployment() {
+  if (( environment_git_dir_named )); then export GIT_DIR="$environment_git_dir"; fi
+  if (( environment_work_tree_named )); then export GIT_WORK_TREE="$environment_work_tree"; fi
+  if (( environment_index_file_named )); then export GIT_INDEX_FILE="$environment_index_file"; fi
+  git_probe '0,128' -- rev-parse --absolute-git-dir
+  deployment_git_dir="$probe_text"
+  if (( probe_status == 0 )); then
+    git_probe '0,128' -- rev-parse --show-toplevel
+    deployment_top="$probe_text"
+  fi
+  if (( probe_status == 0 )); then
+    git_probe '0,128' -- rev-parse --path-format=absolute --git-path index
+    deployment_index="$probe_text"
+  fi
+  deployment_said="$probe_stderr"
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+  # EACH ANSWER IS ONE LINE OR IT IS NOT AN ANSWER. Inside a repository `rev-parse`
+  # ECHOES an option it does not know and exits 0 -- measured at git 2.43.0 with an
+  # invented `--path-formatx=absolute`, printed back ahead of the path -- so a git
+  # too old for `--path-format` would answer the index as two lines, the first of
+  # them the option, and a path exported from that would read an index that is not
+  # there: an empty ledger, which is the substitution this gate is about.
+  case "$deployment_git_dir$deployment_top$deployment_index" in
+    *$'\n'*) return 0 ;;
+  esac
+  if (( probe_status == 0 )) && [[ -n "$deployment_git_dir" && -n "$deployment_top" && -n "$deployment_index" ]]; then
+    deployment_resolved=1
+  fi
+}
+
+# ledger_probe <expected-statuses> -- <git arguments>: `git_probe`, reading the
+# records of the repository the environment names while `ledger_is_deployment` is
+# set -- with the three names set to what `resolve_deployment` heard git answer, never
+# to what the caller spelled -- and with them cleared otherwise. `recorded_tree` and
+# `recorded_kind_of`, which read the ledger a listing is named in, go through here.
+# Every probe that asks WHICH repository answers -- discovery, and the ascent's
+# `records_path` over a repository found above a work tree -- runs cleared, and
+# never through here.
+ledger_is_deployment=0
+ledger_probe() {
+  if (( ledger_is_deployment )); then
+    export GIT_DIR="$deployment_git_dir" GIT_WORK_TREE="$deployment_top" GIT_INDEX_FILE="$deployment_index"
+  fi
+  git_probe "$@"
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+}
 
 # recorded_tree <work-tree root> <path within it>: does the index record ENTRIES
 # UNDER that path -- is it a DIRECTORY in the ledger? A path the index records AT
@@ -1614,7 +1679,7 @@ listing_relpath=''
 # there; a path it records nowhere is not a directory of the ledger's either.
 recorded_tree() {
   local where="$1" rel="$2" record name
-  git_probe '0' -- -C "$where" ls-files -sz -- ":(literal)$rel"
+  ledger_probe '0' -- -C "$where" ls-files -sz -- ":(literal)$rel"
   (( ${#probe_records[@]} > 0 )) || return 1
   for record in "${probe_records[@]}"; do
     name="${record#*$'\t'}"
@@ -1778,12 +1843,11 @@ records_path() {
 }
 
 locate_listing() {
-  local path="$1" anchor entered=0 said top spelled prefix rest component index above=0
-  local prefixes rests shallow deep named_root segment nameable answering walker named
-  local subject subrel here hopped=0 moved=0 answering_rel='' moved_rel='' physical_name=''
+  local path="$1" anchor entered=0 said top above=0 hopped=0
   listing_world=''
   listing_toplevel=''
   listing_relpath=''
+  ledger_is_deployment=0
   # An ANCHOR to ask git from: the deepest ancestor of the listing this can
   # enter. Entering is a test and nothing else -- git chdirs for itself and
   # resolves its own physical path -- so no resolved path is carried between
@@ -2042,11 +2106,11 @@ locate_listing() {
     # `PR280-ENV-EXPORTED-WORK-TREE-REFUSES-A-VALID-CALLER`, filed as wanting a
     # reading of an explicitly selected work tree and repaired by giving the walk
     # no pin to read; the measurements are with the `unset`. WHAT WAS EXPORTED IS
-    # STILL RECORDED, and `read_listing` reads that record at ONE site, in the one
-    # world where no repository the path reaches answers at all: it asks the
-    # ledger those names point at about the listing, and refuses where that ledger
-    # records nothing. NO WALK READS IT. Nothing here chooses between repositories
-    # from the environment, which is what this walk would have done.
+    # STILL RECORDED, and it is handed back to GIT, once, by `resolve_deployment`:
+    # the repository those names select is git's answer, and `judge_in_deployment`
+    # judges the listing in it as the environment section at the top states. THIS
+    # WALK NEVER READS IT, so discovery from the path is still discovery from the
+    # path, which is what that judgement compares the named repository against.
     #
     # `/proc/self` does not reach here either: git exits 128 for it rather than
     # answering `false`, so the refusal above is what it gets, and the fixtures
@@ -2089,6 +2153,25 @@ locate_listing() {
     echo "  was not judged." >&2
     return 1
   fi
+  name_listing "$path" "$top" path
+}
+
+# name_listing <listing> <work-tree root> <path|deployment>: the listing's name in
+# that work tree's index, and the repository whose records answer for it, left in
+# `listing_world`, `listing_toplevel` and `listing_relpath`. `locate_listing` hands it
+# the root git DISCOVERED from the path; `judge_in_deployment` hands it the root git
+# RESOLVED from the environment, with `ledger_is_deployment` set so every record read
+# here is that repository's -- until an ascent below moves the answer to a repository
+# ABOVE the root, which is found by discovery and read cleared. 1 is a refusal, stated;
+# 3, for the second caller only, is "no component the caller wrote is this root, or
+# what they wrote climbs back out of it", which for that caller is a listing the named
+# work tree does not hold and is not this function's to refuse.
+name_listing() {
+  local path="$1" top="$2" ledger="$3" spelled prefix rest component index
+  local prefixes rests shallow deep named_root segment nameable answering walker named
+  local subject subrel moved=0 answering_rel='' moved_rel='' physical_name=''
+  ledger_is_deployment=0
+  [[ "$ledger" != deployment ]] || ledger_is_deployment=1
   # The caller's own components, DEEPEST FIRST, until one of them IS the work
   # tree's root. What is left is the listing's name in the index, and no part of
   # it has been resolved on the filesystem.
@@ -2276,6 +2359,7 @@ locate_listing() {
         physical_name="$moved_rel"
         break
       fi
+      [[ "$ledger" != deployment ]] || return 3
       echo "branch-name-policy: '$path' is inside the work tree at '$top' and no part" >&2
       echo "  of the path as it was written names that root, so what the index records" >&2
       echo "  for it cannot be worked out. Give the listing as a path that goes through" >&2
@@ -2306,6 +2390,17 @@ locate_listing() {
       fi
       index=$(( index + 1 ))
     done
+    # A NAME THAT CLIMBS OUT OF THE ROOT IT WAS MATCHED AT NAMES NOTHING IN IT, and
+    # only the second caller is ever handed such a root. Git finds the environment's
+    # work tree from the CALLER'S directory, so `../findings` written from inside it
+    # matches that root and then leaves it -- the pathspec `git ls-files` refuses as
+    # `outside repository`. A root DISCOVERY finds holds the directory it was
+    # discovered from, and a component the caller wrote cannot leave it.
+    if [[ "$ledger" == deployment ]] && (( ! moved )); then
+      case "/${rests[named_root]}/" in
+        */../*) return 3 ;;
+      esac
+    fi
     # A name the work tree's own index can hold. Only an EMPTY one asks another
     # repository, and only then is anything above this one looked at.
     [[ -z "${rests[named_root]}" ]] || break
@@ -2364,6 +2459,7 @@ locate_listing() {
     top="$answering"
     moved_rel="$answering_rel"
     moved=1
+    ledger_is_deployment=0
   done
   listing_world=records
   listing_toplevel="$top"
@@ -2375,7 +2471,10 @@ locate_listing() {
   return 0
 }
 
-# WHAT GIT RECORDS FOR THE LISTING, and nothing about what the checkout holds.
+# WHAT GIT RECORDS FOR THE LISTING, and nothing about what the checkout holds:
+# `recorded_kind_of <work-tree root> <path within it>`, read through `ledger_probe`
+# so the one function answers for the repository the path reaches and for the one
+# the environment names alike.
 #
 #   tree        it records entries UNDER the path. `recorded_children` holds the
 #               immediate ones, `<mode><TAB><name>` per line.
@@ -2421,21 +2520,17 @@ locate_listing() {
 recorded_kind=''
 recorded_mode=''
 recorded_children=''
-# The mode the environment-named ledger records the LISTING itself at, when it
-# records it as a blob rather than a directory of children. `environment_children`
-# sets it; `read_listing` refuses a non-regular one exactly as the records world does.
-env_listing_mode=''
 unnameable_component=''
 recorded_kind_of() {
-  local rel="$1" record name rest anc
+  local top="$1" rel="$2" record name rest anc
   recorded_kind=''
   recorded_mode=''
   recorded_children=''
   unnameable_component=''
   if [[ -z "$rel" ]]; then
-    git_probe '0' -- -C "$listing_toplevel" ls-files -sz
+    ledger_probe '0' -- -C "$top" ls-files -sz
   else
-    git_probe '0' -- -C "$listing_toplevel" ls-files -sz -- ":(literal)$rel"
+    ledger_probe '0' -- -C "$top" ls-files -sz -- ":(literal)$rel"
   fi
   if (( ${#probe_records[@]} > 0 )); then
     for record in "${probe_records[@]}"; do
@@ -2471,7 +2566,7 @@ recorded_kind_of() {
   anc="$rel"
   while [[ "$anc" == */* ]]; do
     anc="${anc%/*}"
-    git_probe '0' -- -C "$listing_toplevel" ls-files -sz -- ":(literal)$anc"
+    ledger_probe '0' -- -C "$top" ls-files -sz -- ":(literal)$anc"
     if (( ${#probe_records[@]} > 0 )); then
       for record in "${probe_records[@]}"; do
         name="${record#*$'\t'}"
@@ -2538,138 +2633,89 @@ add_recorded_candidates() {
   done <<< "$recorded_children"
 }
 
-# environment_children <listing>: what the ledger `GIT_DIR`, `GIT_WORK_TREE` and
-# `GIT_INDEX_FILE` pointed at records AT <listing>, in `recorded_children`'s
-# `<mode><TAB><name>` form, or NOTHING AT ALL -- which every caller reads as a
-# refusal and never as an empty ledger. It is called from one place, in the one
-# world where no repository the path reaches answers; the file header states why
-# that world is different and what bounds this.
+# judge_in_deployment <listing>: the four arms the environment section at the top of
+# this file states, for a listing whose own repository -- or the absence of one --
+# `locate_listing` has already found. 1 is a refusal, and says which arm refused. 0
+# hands the listing back to `read_listing` either as it was found, or ANSWERED: with
+# `listing_classified` set, the records that decide it are already read, and they
+# are the repository the environment names wherever the path reaches none.
 #
-# THE NAMES GO BACK FOR THIS ONE CALL AND COME OFF AGAIN. They are what the
-# caller exported, put back as they were -- an empty one included, because git
-# honours all three empty and this is not the place to decide what a caller meant
-# -- so the question asked is the one the deployment's own `git` answers.
-#
-# A GIT DIRECTORY SAYS WHERE GIT IS, NOT WHERE THE LISTING IS, so with no work
-# tree named there is nothing to ask: git would take the directory it is asked
-# FROM as the work tree's root and hand back that index's root entries as this
-# listing's children. Measured -- a standalone repository's committed finding
-# offered as a child of an unrelated directory in no repository at all.
-#
-# AND THE PATHSPEC IS THE LISTING'S OWN ABSOLUTE PATH. `:(literal)` because a
-# pathname is the caller's to choose, as everywhere else here; ABSOLUTE because
-# git answers about the work tree's root for a listing it cannot place, and
-# refuses at 128 -- `is outside repository` -- for the same listing named in
-# full. `-C` puts git inside the listing so the names come back relative to it,
-# which is what makes them this directory's entries and not the work tree's.
-# root_against_pwd <spelling>: the spelling made ABSOLUTE against the caller's own
-# directory, in `rooted_pin`, so that the `git -C "$listing"` below cannot re-resolve
-# a relative pin INSIDE the listing. `-C` moves git's directory, and a relative
-# `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` is resolved from there -- so with the
-# intended metadata at `<caller>/C:/repo.git` and a SECOND repository's metadata at
-# `<listing>/C:/repo.git`, an unrooted pin read the second and a finding it never
-# filed conformed at exit 0. Measured at git 2.43.0: `C:/repo.git` and `\meta/repo.git`
-# each moved the verdict `1 -> 0`, where `./C:/repo.git` and an absolute spelling did
-# not. This is the same rule the environment section at the top of the file states --
-# the environment does not decide which ledger answers -- reached here because `-C`
-# re-anchors a relative pin, so the remedy is to make the pin's interpretation
-# independent of the directory the helper enters rather than to widen what is accepted.
-#
-# WHICH SPELLINGS ARE RELATIVE IS CLOSED PER PLATFORM, NOT PER GRAMMAR, and that is
-# why this is `locate_listing`'s anchor test and not `list_dir`'s. `/x` is absolute
-# everywhere and is left alone; `C:/x` and `\x` are anchored on Windows and ORDINARY
-# RELATIVE NAMES on POSIX, so they are rooted exactly where `$PWD/$p` names the same
-# thing the bare spelling does -- the `-ef` test, which is true for a POSIX relative
-# name and false for a real Windows root or a spelling that names nothing. An empty
-# pin stays empty: git honours all three empty and this is not the place to decide
-# what a caller meant by it.
-rooted_pin=''
-root_against_pwd() {
-  local p="$1"
-  case "$p" in
-    '' | /*) rooted_pin="$p" ;;
-    '\'* | [A-Za-z]:*)
-      if [[ "$p" -ef "$PWD/$p" ]]; then rooted_pin="$PWD/$p"; else rooted_pin="$p"; fi ;;
-    *) rooted_pin="$PWD/$p" ;;
-  esac
-}
-environment_children() {
-  local listing="$1" record rest name work_tree strip bare
-  recorded_children=''
-  env_listing_mode=''
-  (( environment_work_tree_named )) || return 0
-  # THE LISTING AND EACH PIN ARE ROOTED THE SAME WAY, against the caller's directory
-  # and by the one anchor test, so nothing here is resolved on the filesystem and no
-  # relative pin is re-anchored by the `-C` below. The three pins are put back exactly
-  # as the caller exported them once rooted, an empty one included.
-  root_against_pwd "$listing"; listing="$rooted_pin"
-  root_against_pwd "$environment_work_tree"; work_tree="$rooted_pin"; export GIT_WORK_TREE="$rooted_pin"
-  if (( environment_git_dir_named )); then
-    root_against_pwd "$environment_git_dir"; export GIT_DIR="$rooted_pin"
+# ARM 3 COMPARES WHAT IS RECORDED, NOT WHICH REPOSITORY RECORDS IT, because the two
+# can be one repository reached two ways -- `GIT_DIR` naming the very `.git`
+# discovery finds -- or two with one answer, and either way the listing has one
+# ledger. Kind, mode and children are the whole of what `read_listing` decides from,
+# so equal ones decide identically; what is refused is two DIFFERENT answers for one
+# directory, and neither is chosen. When they are equal the path's own reading is
+# what is kept, so the run's words are the words the run with nothing exported says.
+listing_classified=0
+judge_in_deployment() {
+  local listing="$1" world="$listing_world" top="$listing_toplevel" rel="$listing_relpath"
+  local placed=0 kind mode children said_kind
+  if (( ! deployment_resolved )); then
+    echo "branch-name-policy: git could not resolve a repository from '$PWD' with the names" >&2
+    echo "  this environment exported, so '$listing' has no repository to be judged in, and" >&2
+    echo "  the environment names one: $environment_ledger." >&2
+    echo "  A listing is judged in the repository those names select or not at all. Correct" >&2
+    echo "  them, or clear them to judge by the path alone. '$branch' was not judged." >&2
+    if [[ -n "$deployment_said" ]]; then
+      indent "$deployment_said"
+    fi
+    return 1
   fi
-  if (( environment_index_file_named )); then
-    root_against_pwd "$environment_index_file"; export GIT_INDEX_FILE="$rooted_pin"
+  name_listing "$listing" "$deployment_top" deployment || placed=$?
+  if (( placed == 1 )); then
+    ledger_is_deployment=0
+    return 1
   fi
-  # WHERE THE CHECKOUT STILL HOLDS THE DIRECTORY, `-C` INTO IT, exactly as before:
-  # its entries come back relative to it, no prefix to strip, and every environment
-  # fixture measures this path. WHERE IT DOES NOT -- a `skip-worktree` finding whose
-  # directory the deployment removed, its clean index still recording it at 100644 --
-  # `-C` into the WORK TREE the pins name, which does exist, and read `--full-name`
-  # so the entries are work-tree-root relative. The LEDGER records the listing whether
-  # or not the checkout materialised it, and requiring the directory to be there made
-  # the verdict depend on the checkout while the committed ledger was unchanged, which
-  # is the sentence this whole file repeats. Either way the pathspec is the listing's
-  # OWN ABSOLUTE path under `:(literal)`, so a listing OUTSIDE the selected work tree
-  # is refused at 128 -- `is outside repository` -- and the names are this directory's.
-  strip=''
-  bare=''
-  if [[ -d "$listing" ]]; then
-    git_probe '0,128' -- -C "$listing" ls-files -sz -- ":(literal)$listing"
-  else
-    git_probe '0,128' -- -C "$work_tree" ls-files -sz --full-name -- ":(literal)$listing"
-    # The listing's path within the work tree, ending in a separator, to cut a
-    # work-tree-relative entry back to a name relative to the LISTING. A listing that
-    # is the work-tree root is a directory and took the branch above; a listing
-    # outside the work tree 128'd and never reaches here, so this strip is the
-    # ordinary proper-descendant case and a name that does not begin with it is under
-    # some other path and not this listing's. `bare` is the same path WITHOUT the
-    # separator: the ledger records an entry at exactly that name when the listing is
-    # itself a BLOB and not a directory, which `env_listing_mode` carries out.
-    strip="${listing#"$work_tree"/}/"
-    bare="${strip%/}"
+  if (( placed == 3 )); then
+    ledger_is_deployment=0
+    listing_world="$world" listing_toplevel="$top" listing_relpath="$rel"
+    # A git directory exported WITHOUT a work tree is rooted wherever git is asked
+    # from, so "outside it" says where the caller stands and not where the listing
+    # is: a regular file git records at 120000 from its own directory is outside the
+    # caller's, and its target text would be read as names. The exception is not made.
+    if [[ "$world" == filesystem ]] && [[ -L "$listing" || -f "$listing" ]]; then
+      (( environment_git_dir_named && ! environment_work_tree_named )) || return 0
+    fi
+    echo "branch-name-policy: '$listing' is not inside '$deployment_top', the work tree git" >&2
+    echo "  resolves from '$PWD' with the names this environment exported, and" >&2
+    echo "  the environment names one: $environment_ledger." >&2
+    echo "  A listing is judged in the repository those names select or not at all, so this" >&2
+    echo "  is refused rather than answered by another. Clear them to judge by the path alone," >&2
+    echo "  or export GIT_WORK_TREE with GIT_DIR so the work tree is not wherever git is run." >&2
+    return 1
   fi
-  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-  (( probe_status == 0 )) || return 0
-  if (( ${#probe_records[@]} > 0 )); then
-    for record in "${probe_records[@]}"; do
-      name="${record#*$'\t'}"
-      # THE LISTING RECORDED AT ITS OWN NAME IS A BLOB, NOT A DIRECTORY, and its mode
-      # is what a materialised symlink or a gitlink presents: git records `findings`
-      # at 120000, the checkout holds the target text as a regular file, and reading
-      # those bytes as a listing MANUFACTURES a finding. The mode is carried out so the
-      # caller refuses it exactly as the records world refuses a 120000 -- the checkout
-      # shape does not decide what the ledger recorded.
-      if [[ -n "$bare" && "$name" == "$bare" ]]; then
-        env_listing_mode="${record%% *}"
-        continue
-      fi
-      if [[ -n "$strip" ]]; then
-        case "$name" in
-          "$strip"*) rest="${name#"$strip"}" ;;
-          *) continue ;;
-        esac
-      else
-        rest="$name"
-      fi
-      # An entry below a subdirectory is `sub/name` and is in no listing here,
-      # and a name holding a newline is no finding's name -- both exactly as the
-      # records world reads a tree, and stated there.
-      case "$rest" in
-        */* | *$'\n'*) continue ;;
-      esac
-      recorded_children="$recorded_children${record%% *}"$'\t'"$rest"$'\n'
-    done
+  recorded_kind_of "$listing_toplevel" "$listing_relpath"
+  ledger_is_deployment=0
+  if [[ "$world" == records ]]; then
+    kind="$recorded_kind" mode="$recorded_mode" children="$recorded_children"
+    listing_world="$world" listing_toplevel="$top" listing_relpath="$rel"
+    recorded_kind_of "$top" "$rel"
+    if [[ "$kind" != "$recorded_kind" || "$mode" != "$recorded_mode" || "$children" != "$recorded_children" ]]; then
+      said_kind="$kind${mode:+ at mode $mode}"
+      [[ "$kind" != "$recorded_kind" || "$mode" != "$recorded_mode" ]] || said_kind="$said_kind with other entries"
+      echo "branch-name-policy: the repository whose work tree is '$top' records '$listing' as" >&2
+      echo "  $recorded_kind${recorded_mode:+ at mode $recorded_mode}, and the one git resolves from '$PWD' with the" >&2
+      echo "  names this environment exported records it as $said_kind, and" >&2
+      echo "  the environment names one: $environment_ledger." >&2
+      echo "  Two ledgers answering differently for one directory is refused rather than" >&2
+      echo "  settled by either of them." >&2
+      return 1
+    fi
+    listing_classified=1
+    return 0
   fi
+  if (( ! environment_git_dir_named || ! environment_work_tree_named )); then
+    echo "branch-name-policy: no repository the path reaches records '$listing', and" >&2
+    echo "  the environment names one: $environment_ledger." >&2
+    echo "  Its records answer for such a listing only where GIT_DIR and GIT_WORK_TREE are" >&2
+    echo "  both exported: a git directory alone takes whatever directory git is asked from" >&2
+    echo "  as its work tree's root, and a work tree alone takes its repository from wherever" >&2
+    echo "  git is run. Export both, or clear them to judge by the path alone." >&2
+    return 1
+  fi
+  listing_world=records
+  listing_classified=1
   return 0
 }
 
@@ -2687,9 +2733,16 @@ environment_children() {
 # whatever the checkout put in its place.
 read_listing() {
   local listing="$1" out='' entry record mode name read_status=0 is_file=0
+  listing_classified=0
   locate_listing "$listing" || return 1
+  # WHERE THE ENVIRONMENT NAMES A REPOSITORY, THE LISTING IS JUDGED IN IT OR NOT AT
+  # ALL, by the four arms the environment section at the top of this file states.
+  # Nothing below knows which repository's records it is reading, and needs not to.
+  if [[ -n "$environment_ledger" ]]; then
+    judge_in_deployment "$listing" || return 1
+  fi
   if [[ "$listing_world" == records ]]; then
-    recorded_kind_of "$listing_relpath"
+    (( listing_classified )) || recorded_kind_of "$listing_toplevel" "$listing_relpath"
     case "$recorded_kind" in
       tree)
         add_recorded_candidates
@@ -2770,94 +2823,6 @@ read_listing() {
     echo "branch-name-policy: findings listing '$listing' is a symlink, so it is" >&2
     echo "  not a findings directory and holds no finding of its own." >&2
     return 0
-  fi
-  # AND A DIRECTORY THE ENVIRONMENT NAMED A LEDGER FOR IS ANSWERED BY THAT
-  # LEDGER, OR BY NOTHING. `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` are
-  # cleared at the top of this file so that no probe can answer about a pin, and
-  # in this one world -- the world where there is no repository and the names the
-  # filesystem holds are the whole of the evidence -- clearing them also hides a
-  # ledger that is real. A `git --git-dir=… --work-tree=…` deployment whose work
-  # tree has no `.git` at or above it is reachable through those names and,
-  # measured, through nothing else, so with them cleared its IGNORED, UNTRACKED
-  # files were counted as filed findings and the run conformed at exit 0 where
-  # the deployment's own repository, and `231c1aad`, say `names no finding`.
-  #
-  # REFUSING EVERY SUCH DIRECTORY WAS THE ROUND BEFORE THIS ONE AND IT WAS THE
-  # OPPOSITE ERROR. The same deployment with the finding COMMITTED -- clean
-  # index, no submodule, a real `findings/P1_correctness_…md` that is on master
-  # now, and the `fix-P1/` branch that repairs it -- refused at exit 1 where
-  # master, `231c1aad` and the deployment's own repository answer exit 0
-  # `conforms`. THE PREVIOUS ACCEPTANCE THERE WAS CORRECT: this is the validator
-  # refusing work it is supposed to admit, which is the error the other direction
-  # and not a silent wrong `conforms` being replaced.
-  #
-  # TRACKED OR UNTRACKED IS THE WHOLE OF THE DIFFERENCE between the two, and the
-  # filesystem cannot see a recorded mode -- which is why the ledger is asked
-  # rather than the directory listed. `environment_children` is that ask and
-  # states what bounds it; what it records here is read exactly as the records
-  # world reads a tree, and where it records nothing the refusal below is
-  # unchanged, message and all.
-  #
-  # The environment does not get to say WHICH ledger answers -- that is the rule
-  # at the top of this file and it is unchanged. The test is on `listing_world`,
-  # so a listing the records answer for never reaches this at all, and where none
-  # does there is no repository for a name to displace.
-  if [[ "$listing_world" != records ]] && [[ -n "$environment_ledger" ]] && [[ ! -L "$listing" ]]; then
-    # THE LEDGER'S RECORDED TYPE DECIDES, NOT THE CHECKOUT'S SHAPE, exactly as it does
-    # in the records world -- because the index is the ledger and the checkout is not.
-    # Two shapes made the verdict depend on the checkout instead:
-    #   A `skip-worktree` finding whose directory the deployment removed is recorded
-    #   all the same, and requiring the directory to exist gave `0` with an empty
-    #   directory present and `1` without it, on one unchanged committed ledger.
-    #   A committed symlink materialised by `core.symlinks=false` is a REGULAR FILE on
-    #   disk holding its target text, so reading those bytes as a listing MANUFACTURED
-    #   a finding -- exit 0 `conforms` where the ledger records `findings` at 120000 and
-    #   the records world refuses it.
-    # So the ledger is asked whatever the checkout holds, and its recorded type is read
-    # with the SAME rules recorded_kind_of gives the records world: a tree is its
-    # children; a non-regular blob holds no finding; a regular blob is a file listing
-    # read from the checkout; nothing recorded is decided by the checkout shape below.
-    environment_children "$listing"
-    if [[ -n "$recorded_children" ]]; then
-      add_recorded_candidates
-      return 0
-    fi
-    case "$env_listing_mode" in
-      '') ;;
-      100644|100755)
-        # A tracked regular file is a file listing, read from the checkout as the
-        # records world reads one -- and never from a link standing in for it.
-        if [[ ! -f "$listing" ]]; then
-          echo "branch-name-policy: git records '$listing' as a regular file and the" >&2
-          echo "  checkout does not hold one there, so the names in it are not known." >&2
-          echo "  That is refused rather than read from whatever the checkout put in its" >&2
-          echo "  place." >&2
-          return 1
-        fi
-        is_file=1
-        ;;
-      *)
-        echo "branch-name-policy: git records '$listing' as mode $env_listing_mode, which is" >&2
-        echo "  neither a regular file nor a directory: it is not a findings listing, and it" >&2
-        echo "  holds no finding. A tree listing of the same commit holds none for it either." >&2
-        return 0
-        ;;
-    esac
-    if (( ! is_file )); then
-      # Nothing recorded at or under the listing. A regular file the checkout holds is
-      # an untracked file listing -- the workflow builds those in RUNNER_TEMP and a
-      # maintainer may build one anywhere -- and is read below. A directory, or a path
-      # the checkout does not hold at all, is not a filed finding and is refused.
-      if [[ ! -f "$listing" ]]; then
-        echo "branch-name-policy: no repository the path reaches records '$listing', and" >&2
-        echo "  the environment names one: $environment_ledger. A directory in no repository is" >&2
-        echo "  answered by the names the filesystem holds, and those are not a ledger: an" >&2
-        echo "  untracked file is not a filed finding wherever its repository is. That is" >&2
-        echo "  refused rather than counted. Ask from inside the work tree its repository is" >&2
-        echo "  found from, or clear those names to ask about the filesystem alone." >&2
-        return 1
-      fi
-    fi
   fi
   if (( ! is_file )) && [[ -d "$listing" ]]; then
     list_dir "$listing" || {
@@ -3155,6 +3120,11 @@ collect_candidates() {
 }
 
 if [[ -n "$merge_base_findings$head_findings$range_findings" ]]; then
+  # Git is asked once which repository the environment names, before any listing is
+  # judged in it; the two diff listings below are no ledger and never ask.
+  if [[ -n "$environment_ledger" ]]; then
+    resolve_deployment
+  fi
   collect_candidates \
     || fail "'$branch' could not be checked: a findings listing could not be read.
   The error is above. A gate that cannot see its input refuses rather than
