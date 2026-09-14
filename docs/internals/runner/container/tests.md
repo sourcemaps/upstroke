@@ -519,6 +519,25 @@ Before: nothing is written.
 
 After: the record is on disk and the call still fails.
 
+## `struct ContainerFaultAt {`
+
+The production adapter (`HarnessHooks`, recording the fixture's trace) with an error return armed
+at one `(site, phase)`. The harness records the phase first, as the funnel's own call does, so the
+observation export names the test as an execution of the coordinate; `RecordingHooks` arms the
+same error and records into no harness, which is why the fault witnesses below do not use it.
+
+## `fn a_fault_at_the_git_view_mount_is_reclaimed_by_the_next_census(`
+
+G5's clause 2 found both phases of `Container.MountGitView` observed under the production adapter
+and faulted by no committed test, and no stranded view planted (R19, "the disposable Git view
+lives and dies with its invocation"). This faults each phase inside a real `launch` against the
+fake runtime: the launch returns the injected error with R26's intent written and synced and
+nothing created, and the view is left exactly where the residue authority's rows put R19 — absent
+before the mount, mounted after it. The tabled recovery is the next write command's startup
+census (`T-CONTAINER`: "remove Git view -> remove intent"), here a fresh run whose census finds the
+intent of a run whose owner is not running and reclaims it through the funnels; the view's absence
+and the intent's are read after it, and a second census over the converged state reclaims nothing.
+
 ## `fn the_intent_record_carries_the_six_fields_and_each_is_read_back() {`
 
 ---------------------------------------------------------------------------
