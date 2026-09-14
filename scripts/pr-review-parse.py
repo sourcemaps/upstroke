@@ -188,62 +188,46 @@ JSON_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})|\\(.)", re.S)
 SIMPLE_ESCAPE = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f",
                  "n": "\n", "r": "\r", "t": "\t"}
 
-# AND THE SPELLING A RENDERER READS, WHICH IS THE SAME SENTENCE ASKED OF THE OTHER CONSUMER. The
-# scan above resolves what `json.loads` resolves, because that is what reads a verdict object;
-# CommonMark resolves CHARACTER REFERENCES, because that is what reads an info string, and GitHub
-# renders these comments by CommonMark's rules. `&#110;` is `n` there, so a fence opened
-# ```` ```jso&#110; ```` is `language-json` to the renderer and to the person reading the comment,
-# and was not a `json` fence at all to a rule that compared the characters the comment spells it
-# with: the block carrying the blocking verdict, hidden inside a swallowing block and invisible to
-# the content rule, while a clean `PASS` stood as the only candidate.
+# AND THE LANGUAGE A RENDERER GIVES A FENCE, WHICH IS A FUNCTION OF ITS INFO STRING AND NOT A
+# SPELLING OF IT. The scan above resolves what `json.loads` resolves, because that is what reads a
+# verdict object; what reads an info string is a renderer, and what it reads out of one is the
+# block's LANGUAGE. `&#110;` is `n` there, so ```` ```jso&#110; ```` is a `language-json` block to
+# the person reading the comment, and it was no `json` fence at all to a rule that compared the
+# characters the comment spells it with: the blocking verdict hidden inside a swallowing block while
+# a clean `PASS` stood as the only candidate.
 #
-# CommonMark's own grammar and no wider: `&` then a name from the HTML5 table, or `#` and up to
-# seven decimal digits, or `#x` and up to six hex, and THE SEMICOLON IS REQUIRED
-# (https://spec.commonmark.org/0.31.2/#entity-and-numeric-character-references). A reference this
-# does not recognise is left exactly as it was written, for the reason an unresolvable `\q` is:
-# a name must not be able to hide in the gap between what this understands and what it discards.
-# One left-to-right pass, as CommonMark makes one, so a reference spelled out of the output of
-# another -- `&am&#112;;` -- is not resolved twice here and is not resolved twice there.
+# CommonMark does not define that language -- "this spec does not mandate any particular treatment
+# of the info string" (https://spec.commonmark.org/0.31.2/#fenced-code-blocks) -- so it is whatever
+# a renderer computes, and each reading this file derived from the specification instead was wrong
+# somewhere a renderer is not. Resolving every reference the grammar admits and then splitting with
+# `str.split()` read `json&#133;x` and `json&#11;x` as `json`, which neither renderer measured below
+# gives either tag. Splitting what a reference resolved to at a narrower class than `str.split()`'s
+# read ```` ```jso&#110; ```` followed by a literal U+0085 as no `json` fence, and `markdown-it-py`
+# 3.0.0 renders it `language-json`. And both took the grammar's digit bounds, seven decimal and six
+# hex, where both renderers resolve eight: ```` ```jso&#00000110; ```` is `language-json` to each of
+# them and was no `json` fence to either reading.
 #
-# A backslash escape is the other thing CommonMark resolves in an info string, and it is NOT
-# resolved here because it cannot change this question's answer: `\` before an ASCII punctuation
-# character yields that character, and `json` holds no punctuation, so no escape can spell the
-# name, and none can remove the whitespace that decides which word is first. Measured against
-# `markdown-it-py` 3.0.0: `foo\+bar` is `foo+bar` and `\json` is `\json`.
-CHAR_REFERENCE = re.compile(r"&(#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{0,30});")
-
-# AND THE WORD ENDS WHERE A RENDERER ENDS IT, WHICH IS NOT WHERE ONE `str.split()` DOES. Resolving
-# the reference is half the question; the other half is which character then ends the first word,
-# and the answer is not the same for a character the comment WRITES and one a reference RESOLVES TO.
-# Measured against `markdown-it-py` 3.0.0 over every code point `str.isspace` calls whitespace, a
-# fence tagged ```` ```json<c>x ```` renders `language-json` for every one of them -- that is
-# Python's own set, because that renderer splits the info string with `str.split` -- while
-# ```` ```json&#N;x ```` renders `language-json` for that set LESS U+001C-U+001F, U+0085 and U+000B:
-# it declines to resolve a reference to a C0 or C1 control and leaves the reference written, so no
-# word break ever appears there. U+000B is the one place it goes the other way, and CommonMark's
-# whitespace-character definition names it, so it is a break here.
-#
-# Running ONE set over both readings was the defect, in the direction this rule must never be wrong
-# in. `json&#133;x` resolved to U+0085 and Python's set ended the word: an ordinary example block
-# read as a `json` fence, stood beside the review's one real verdict as a second candidate, and a
-# valid `PASS` was refused with "2 places a verdict could be read from" -- a refusal no rewriting of
-# the comment clears, because the comment says nothing wrong. Measured: `markdown-it-py` 3.0.0
-# renders that fence `language-json&#133;x` and never `language-json`, and U+0085 is neither a
-# whitespace character (https://spec.commonmark.org/0.31.2/#whitespace-character) nor a Unicode
-# whitespace character (https://spec.commonmark.org/0.31.2/#unicode-whitespace-character).
-#
-# So there are two boundaries, one per reading, and each is the union of what the renderers do to
-# ITS reading -- every break either of them makes, which is the refusing direction, and no break
-# neither of them makes, which is what the P2 cost. The resolved one is CommonMark's whitespace
-# -- space, tab, line feed, LINE TABULATION, form feed, carriage return -- widened by the Unicode
-# space and line separators; the written one adds the five Python calls whitespace and CommonMark
-# does not. GitHub renders by cmark-gfm, which is not measured here; where these classes are wider
-# than what was measured they are wider by REFUSING.
-RESOLVED_SPACE = "\t\n\x0b\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000"
-WRITTEN_SPACE = RESOLVED_SPACE + "\x1c-\x1f\x85"
-FIRST_WORD = "[%s]*([^%s]*)"
-RESOLVED_FIRST_WORD = re.compile(FIRST_WORD % (RESOLVED_SPACE, RESOLVED_SPACE))
-WRITTEN_FIRST_WORD = re.compile(FIRST_WORD % (WRITTEN_SPACE, WRITTEN_SPACE))
+# So what is below is not a reading of the specification. It is `markdown-it-py` 3.0.0's own
+# function, transcribed: its fence renderer takes the first `str.split()` word of
+# `unescapeAll(info)`, and `unescapeAll` is `INFO_ESCAPE` below -- a backslash escape or a
+# reference, in ONE left-to-right pass, so an escaped `\&` starts no reference and nothing a
+# reference resolves to is read again -- with a name looked up in the table the standard library
+# carries (the one that renderer builds its own from), a number of up to eight digits, and a
+# reference to any code point `referable` refuses left exactly as it was written. Measured
+# 2026-09-14 over every code point, written literally and as a decimal and a hex reference in and
+# around the name; every named reference, with and without its semicolon; each letter of the name
+# spelled as a number with up to ten leading zeros; a backslash before every printable ASCII
+# character; and two million random tags: `rendered_language` equals `markdown-it-py` 3.0.0's
+# language on every one, and cmark-gfm 0.29.0.gfm.6 renders `json` on none of them that
+# `markdown-it-py` does not. The second fact is why one renderer's function is enough: its `json`
+# is the union of both renderers', which is the refusing direction and no wider than a renderer.
+INFO_ESCAPE = re.compile(
+    r'\\([!"#$%&\'()*+,\-.\/:;<=>?@[\\\]^_`{|}~])' + "|" + r"&([a-z#][a-z0-9]{1,31});",
+    re.IGNORECASE,
+)
+DECIMAL_REFERENCE = re.compile(r"#([0-9]{1,8})")
+HEX_REFERENCE = re.compile(r"#x([a-f0-9]{1,8})", re.IGNORECASE)
+NAMED_REFERENCE = {name.rstrip(";"): chars for name, chars in html.entities.html5.items()}
 
 # A finding carrying any of these blocks in every lane (MAINTAINING step 5): the deferring
 # implementor's ledger row asserts there is no witness, and a witness the review recorded
@@ -445,41 +429,58 @@ def decoded_spelling(text):
     return JSON_ESCAPE.sub(resolved, text)
 
 
-def resolved_references(text):
-    """TEXT with CommonMark's character references resolved, as the renderer of it resolves them.
+def referable(point):
+    """Whether a numeric reference to POINT is resolved, rather than left exactly as it was written.
+
+    `markdown-it-py` 3.0.0's `isValidEntityCode`, range for range: a surrogate, a noncharacter, a
+    control character other than tab, line feed, form feed and carriage return, and anything past
+    the last code point are not resolved. THIS IS WHERE BOTH EARLIER READINGS WERE WRONG IN THE
+    REFUSING DIRECTION. U+000B, U+001C-U+001F and U+0085 are whitespace to `str.split()`, and a
+    reference to one of them is none of them: `&#11;` stays `&#11;`, so no word ends there, and
+    `json&#11;x` is `language-json&#11;x`. cmark-gfm 0.29.0.gfm.6 does resolve those six references
+    and keeps the character inside the language it renders, so it names none of those tags `json`
+    either.
+    """
+    return not (0xd800 <= point <= 0xdfff or 0xfdd0 <= point <= 0xfdef
+                or (point & 0xffff) in (0xfffe, 0xffff)
+                or point <= 0x08 or point == 0x0b or 0x0e <= point <= 0x1f
+                or 0x7f <= point <= 0x9f or point > 0x10ffff)
+
+
+def rendered_language(info):
+    """The language a renderer gives a fenced block whose info string is INFO, or "" for none.
 
     THE SIBLING OF `decoded_spelling`, AND THE SAME SENTENCE. That one reads what `json.loads`
-    reads, because a verdict object's only reader is `json.loads`; this one reads what CommonMark
-    reads, because an info string's only readers are the renderer and the person looking at what it
+    reads, because a verdict object's only reader is `json.loads`; this one reads what a renderer
+    reads, because an info string's readers are the renderer and the person looking at what it
     rendered. A rule that asks its question of the characters a comment is stored as, when its
     consumer asks the same question of what they resolve to, is comparing two different documents.
 
-    A code point of zero, a surrogate and anything past the last one are U+FFFD, which is
-    CommonMark's answer and not a name either way. A reference this does not recognise is left
-    exactly as it was written.
+    ONE READING, SPLIT ONCE: every escape and reference resolved, then the first word, by
+    `str.split()`'s whitespace, of what that leaves -- whichever of its characters were written and
+    whichever were resolved. Two readings with a boundary each missed the tag that holds one of
+    each: `jso&#110;` then a literal U+0085 was no `json` to the written reading, which split at
+    the U+0085, nor to the resolved one, which split nowhere, and it is `language-json` to
+    `markdown-it-py` 3.0.0. That renderer reads a NUL as U+FFFD before it parses a line, so this
+    does too; neither is whitespace and neither is a letter, so it decides nothing.
     """
     def resolved(match):
-        body = match.group(1)
-        if body[0] == "#":
-            point = int(body[2:], 16) if body[1] in "xX" else int(body[1:])
-            if point == 0 or 0xd800 <= point <= 0xdfff or point > 0x10ffff:
-                return "\ufffd"
+        if match.group(1):
+            return match.group(1)
+        name = match.group(2)
+        if name in NAMED_REFERENCE:
+            return NAMED_REFERENCE[name]
+        number = DECIMAL_REFERENCE.fullmatch(name)
+        if number is not None:
+            point = int(number.group(1))
+        else:
+            number = HEX_REFERENCE.fullmatch(name)
+            point = None if number is None else int(number.group(1), 16)
+        if point is not None and referable(point):
             return chr(point)
-        named = html.entities.html5.get(body + ";")
-        return match.group(0) if named is None else named
-    return CHAR_REFERENCE.sub(resolved, text)
-
-
-def first_word(info, boundary):
-    """The first word of an info string, by the BOUNDARY its own reading is split at, or "".
-
-    THE ONE PLACE THAT QUESTION IS ANSWERED, so the rule and the diagnostic that quotes it cannot
-    drift apart, and so that `names_json` does not reach into a list that may be empty. Leading
-    separators are skipped, as `str.split()` skips them and as a renderer skips the whitespace
-    CommonMark trims off an info string; an info string that is all separators has no first word
-    and is not a name.
-    """
-    return boundary.match(info).group(1)
+        return match.group(0)
+    words = INFO_ESCAPE.sub(resolved, info.replace("\0", "\ufffd")).split(None, 1)
+    return words[0] if words else ""
 
 
 def stray_summary(outside):
@@ -629,39 +630,24 @@ def outside_block(text, block):
 
 
 def names_json(info):
-    """Whether an info string names the verdict's language: CommonMark's first word, folded.
+    """Whether an info string names the verdict's language: the language rendered for it, folded.
 
-    BOTH SPELLINGS, what the comment writes and what a renderer of it reads, for the reason
-    `stray_summary` reads both: this decides what is MATERIAL, so a name found in one spelling and
-    not the other is a block this program cannot be sure it is reading past, and a name found in
-    neither is the defect. Reading only the written one is how ```` ```jso&#110; ```` -- a
-    `language-json` block to CommonMark, to GitHub and to the reader, carrying the blocking verdict
-    inside a swallowing block -- was nothing at all to the rule that exists to find exactly that.
+    WHAT A RENDERER READS, NOT WHAT THE COMMENT SPELLS. Reading the written spelling is how
+    ```` ```jso&#110; ```` -- a `language-json` block to the renderer and to the reader, carrying
+    the blocking verdict inside a swallowing block -- was nothing at all to the rule that exists to
+    find exactly that.
 
     Every extra name this finds is a refusal, never a reading: one more candidate makes the count
     two, and a block whose content names `json` is material. The only block it can newly read a
     verdict FROM is one that is the comment's single candidate, whose content `json.loads` must
     then take whole.
 
-    BUT ONLY A NAME SOME READER OF THE COMMENT ACTUALLY SEES. A refusal costs a reviewer the
-    review, and one raised over a tag no renderer reads as `json` is a refusal nobody can clear:
-    `json&#133;x` resolved to U+0085 and was then split by `str.split()`'s set, which ends a word
-    there where no renderer does, so a valid `PASS` beside an ordinary example block became "2
-    places a verdict could be read from".
-
-    EACH READING IS SPLIT BY ITS OWN BOUNDARY, and neither is redundant. The written one ends a
-    word at a literal U+0085, because `markdown-it-py` 3.0.0 does and a reader of that comment sees
-    a `language-json` block; the resolved one does not, because that renderer never resolves
-    `&#133;` to anything at all and CommonMark calls U+0085 neither kind of whitespace, so no
-    reader of THAT comment sees one. Same code point, two answers, because the two readings are two
-    different documents. And the resolved reading is the one that catches what a reference spells
-    -- `jso&#110;`, the witness this guard exists for.
+    AND ONLY A NAME A RENDERER GIVES. A refusal costs a reviewer the review, and one raised over a
+    tag no renderer reads as `json` is a refusal nobody can clear: `json&#133;x` and `json&#11;x`,
+    each an ordinary example block beside a valid `PASS`, became "2 places a verdict could be read
+    from" under readings that resolved a reference `markdown-it-py` 3.0.0 leaves written.
     """
-    for reading, boundary in ((info, WRITTEN_FIRST_WORD),
-                              (resolved_references(info), RESOLVED_FIRST_WORD)):
-        if first_word(reading, boundary).lower() == "json":
-            return True
-    return False
+    return rendered_language(info).lower() == "json"
 
 
 def spans_outside(text, blocks):
@@ -765,9 +751,9 @@ def unresolved_material(text, blocks):
         at = text.count("\n", 0, one.outer) + 1
         for run in CONTENT_FENCE_RUN.finditer(one.content):
             if names_json(run.group(2)):
-                named = first_word(run.group(2), WRITTEN_FIRST_WORD)
+                written = run.group(2).split(None, 1)
                 stale.append("%s%s inside the block at line %d"
-                             % (run.group(1)[:8], named[:8], at))
+                             % (run.group(1)[:8], (written[0] if written else "")[:8], at))
         if bare_object_openers(one.content):
             stale.append("a verdict object inside the block at line %d" % at)
         if one.fence != "`" and names_json(one.info):
