@@ -3865,6 +3865,117 @@ for sel_listing in . "$sel_dir/outer/findings"; do
     "GIT_DIR=$sel_dir/agree.git" "GIT_WORK_TREE=$sel_dir/outer/findings"
 done
 
+# ---- AND WHAT GIT ANSWERS IS A PATH, WHATEVER BYTES FOLLOW ITS ROOT -------------------------------
+#
+# `resolve_deployment` refused any answer holding a newline, to catch a git too old for
+# `--path-format` echoing that option ahead of the index path -- and a newline is a legal byte
+# in a path. A clean deployment whose git directory is `meta<LF>repo.git`, or whose index is
+# `index<LF>copy`, resolves at exit 0 for all three asks and records its finding, and
+# `e3a91ff3` refused both as repositories git could not resolve where `231c1aad` conforms. What
+# separates a path from an echoed option is where it BEGINS: every ask answers an absolute path,
+# and an option begins with `-`. The finding is `skip-worktree` with its directory removed, so
+# the clean control refuses and nothing but the named records can make the pinned run conform.
+# RUNS NATIVELY ON WINDOWS: NO -- no Windows path component holds a newline; a platform that
+# will not make one says so and skips.
+nl_dir="$fixture_dir/newline-metadata"
+nl_git="$nl_dir/meta"$'\n'"repo.git"
+nl_finding='P2_correctness_202609141403_a-newline-in-a-metadata-path.md'
+mkdir -p "$nl_dir"
+if mkdir "$nl_git" 2>/dev/null && rmdir "$nl_git"; then
+  new_repo "$nl_dir/wt"
+  mkdir -p "$nl_dir/wt/findings"
+  echo fixture > "$nl_dir/wt/findings/$nl_finding"
+  git -C "$nl_dir/wt" add -A && git -C "$nl_dir/wt" commit -q -m 'one committed finding'
+  mv "$nl_dir/wt/.git" "$nl_git"
+  ( cd "$nl_dir/wt" && GIT_DIR="$nl_git" GIT_WORK_TREE="$nl_dir/wt" \
+    git update-index --skip-worktree -- "findings/$nl_finding" )
+  rm -r "$nl_dir/wt/findings"
+  cp "$nl_git/index" "$nl_git/index"$'\n'"copy"
+  for nl_index in "$nl_git/index" "$nl_git/index"$'\n'"copy"; do
+    if [[ -n "$( cd "$nl_dir/wt" && GIT_DIR="$nl_git" GIT_WORK_TREE="$nl_dir/wt" GIT_INDEX_FILE="$nl_index" \
+        git status --porcelain )" ]] \
+      || [[ "$( cd "$nl_dir/wt" && GIT_DIR="$nl_git" GIT_WORK_TREE="$nl_dir/wt" GIT_INDEX_FILE="$nl_index" \
+        git ls-files )" != "findings/$nl_finding" ]] \
+      || [[ "$( cd "$nl_dir/wt" && GIT_DIR="$nl_git" GIT_WORK_TREE="$nl_dir/wt" GIT_INDEX_FILE="$nl_index" \
+        git rev-parse --path-format=absolute --git-path index )" != "$nl_index" ]]; then
+      echo 'the newline fixture was meant to be a clean deployment git resolves, recording one finding' >&2
+      exit 1
+    fi
+  done
+  env_pinned 'a git directory whose path holds a newline' \
+    "$nl_dir/wt" findings 'fix-P2/correctness_a-newline-in-a-metadata-path' 1 0 \
+    "GIT_DIR=$nl_git" "GIT_WORK_TREE=$nl_dir/wt"
+  env_pinned 'an index whose path holds a newline' \
+    "$nl_dir/wt" findings 'fix-P2/correctness_a-newline-in-a-metadata-path' 1 0 \
+    "GIT_DIR=$nl_git" "GIT_WORK_TREE=$nl_dir/wt" "GIT_INDEX_FILE=$nl_git/index"$'\n'"copy"
+else
+  echo "note: skipping the newline-in-a-metadata-path cases (this platform will not name a directory with one)" >&2
+fi
+
+# AND THE ANSWER THAT DOES NOT RESOLVE COMES FROM A GIT THIS SUITE DOES NOT RUN, so
+# `resolve_deployment` is driven directly with `git_probe` stubbed, as the walks above are, and
+# what the stub hands back is the shape an old git gives: an option it does not know, echoed
+# ahead of the path. The rows hold the rule from both sides -- a rooted answer resolves whatever
+# bytes follow its root, and an echoed option does not, on either ask it can reach.
+resolve_harness="$fixture_dir/resolve-deployment.sh"
+cat > "$resolve_harness" <<'RESOLVE'
+set -uo pipefail
+validator="$1"; git_dir_answer="$2"; index_answer="$3"
+src="$(awk '/^resolve_deployment\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$src" ]] || { echo 'harness: resolve_deployment was not extracted'; exit 3; }
+bash -n <<< "$src" || { echo 'harness: the extract does not parse'; exit 3; }
+eval "$src"
+environment_git_dir_named=1; environment_git_dir=/meta/repo.git
+environment_work_tree_named=1; environment_work_tree=/wt
+environment_index_file_named=0; environment_index_file=''
+deployment_resolved=0; deployment_git_dir=''; deployment_top=''; deployment_index=''; deployment_said=''
+probe_status=0; probe_text=''; probe_stderr=''
+git_probe() {
+  [[ "$1" == 0,128 ]] && [[ "$2" == -- ]] && [[ "$3" == rev-parse ]] \
+    || { echo "harness: unexpected call: git_probe $*"; exit 3; }
+  probe_status=0
+  case "${*:4}" in
+    --absolute-git-dir) probe_text="$git_dir_answer" ;;
+    --show-toplevel) probe_text=/wt ;;
+    '--path-format=absolute --git-path index') probe_text="$index_answer" ;;
+    *) echo "harness: unexpected probe '${*:4}'"; exit 3 ;;
+  esac
+}
+resolve_deployment
+echo "resolved=$deployment_resolved"
+RESOLVE
+resolve_case() {  # resolve_case <label> <git-dir answer> <index answer> <want resolved>
+  local got rc=0
+  got="$( "$BASH" "$resolve_harness" "$branch_validator" "$2" "$3" 2>&1 )" || rc=$?
+  if [[ "$rc" != 0 ]] || [[ "$got" != "resolved=$4" ]]; then
+    echo "$1: expected 'resolved=$4' at exit 0; got '$got' at exit $rc" >&2
+    exit 1
+  fi
+}
+resolve_case 'three rooted answers resolve' '/meta/repo.git' '/meta/repo.git/index' 1
+resolve_case 'a rooted answer holding a newline resolves' $'/meta\nrepo.git' $'/meta\nrepo.git/index' 1
+resolve_case 'a drive-rooted answer resolves' 'C:/meta/repo.git' 'C:/meta/repo.git/index' 1
+resolve_case 'an index path an old git answered after echoing --path-format does not resolve' \
+  '/meta/repo.git' $'--path-format=absolute\n/meta/repo.git/index' 0
+resolve_case 'a git directory an old git answered by echoing the option does not resolve' \
+  '--absolute-git-dir' '/meta/repo.git/index' 0
+# AND THE STUB'S SHAPE IS GIT'S, checked against the git this suite runs: inside a repository an
+# option `rev-parse` does not know is echoed AHEAD of the path, at exit 0 -- an invented option
+# standing in for one an old git lacks. A git that refuses unknown options instead no longer
+# makes the shape at all, which retires none of the rows above: the gits that do are still the
+# ones the rule is for.
+echo_rc=0
+echo_out="$( git -C "$sel_dir/outer" rev-parse --path-formatx=absolute --git-path index 2>/dev/null )" || echo_rc=$?
+if (( echo_rc == 0 )) && [[ "$echo_out" != $'--path-formatx=absolute\n'?* ]]; then
+  echo "git echoed an unknown rev-parse option somewhere other than ahead of the path, so the stub" \
+    "above hands back a shape git does not give; got '$echo_out'" >&2
+  exit 1
+fi
+if (( echo_rc != 0 )); then
+  echo "note: this git refuses an unknown rev-parse option (exit $echo_rc), so the echoed shape the" \
+    "resolve rows stub is not made here" >&2
+fi
+
 # ---- what git RECORDS, not what the checkout happens to hold -----------------------------------
 #
 # A TRACKED finding need not be in the working tree, and the candidate names
