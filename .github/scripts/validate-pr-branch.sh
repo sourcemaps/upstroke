@@ -594,14 +594,13 @@ unset GLOBIGNORE
 # work tree is inside a work tree, and a pinned work tree makes git answer about
 # the pin at every level of that walk, so there is no reading of "the caller
 # selected this work tree" that makes the question answerable -- the pin is what
-# stops it being answered. No probe below this line reads any of the three: the
-# lines under it that name them are comments, which `grep -n` says and the
-# environment fixtures then assert from the outside, row by row -- the pinned run
-# and the clean run compared on exit code AND bytes wherever the records answer,
-# and the pinned run required to refuse with a named reason where they do not.
-# That is also what keeps the equivalence property covering these callers at all:
-# the three tree listings are FILES and no variable moves them, so a directory
-# whose answer the environment can change disagrees with them by construction.
+# stops it being answered. NO PROBE THAT DECIDES WHICH REPOSITORY ANSWERS READS
+# ANY OF THE THREE. Every walk below runs with them cleared, and the environment
+# fixtures assert that from the outside, row by row -- the pinned run and the
+# clean run compared on exit code AND bytes wherever the records answer. That is
+# also what keeps the equivalence property covering these callers at all: the
+# three tree listings are FILES and no variable moves them, so a directory whose
+# answer the environment can change disagrees with them by construction.
 #
 # CLEARING THEM IS NOT FREE, AND THE COST IS THE ONE WORLD WHERE THE FILESYSTEM
 # ANSWERS. A `git --git-dir=… --work-tree=…` deployment with no `.git` at or
@@ -615,13 +614,42 @@ unset GLOBIGNORE
 # `231c1aad` is exit 1 `names no finding`. That was executed. It is the false
 # green this whole file exists to close, introduced by the round that unset them.
 #
-# SO WHERE THE FILESYSTEM WOULD ANSWER AND ONE OF THESE NAMES WAS IN THE
-# ENVIRONMENT, `read_listing` REFUSES. The environment still never selects a
-# ledger: it is evidence that there is one the path cannot reach, and refusing is
-# the only thing that evidence is allowed to do here. The guard is written on
-# `listing_world`, so where the RECORDS answer it cannot fire and the pinned run
-# and the clean run stay the same run, which is what every `env_case` row in that
-# group asserts.
+# SO IN THAT ONE WORLD THE LEDGER THOSE NAMES POINT AT IS ASKED ABOUT THE
+# LISTING, AND ONLY ABOUT THE LISTING. REFUSING THERE INSTEAD WAS THE ROUND
+# BEFORE THIS ONE, AND IT WAS THE OPPOSITE ERROR. The same deployment holding a
+# COMMITTED finding -- clean index, no submodule, the real
+# `findings/P1_correctness_202609112028_the-legacy-workspace-reads-replacement-objects.md`
+# and the `fix-P1/` branch that repairs it -- refused at exit 1 where master,
+# `231c1aad` and the deployment's own repository all answer exit 0 `conforms`.
+# Both directions were executed, on one fixture, changing only whether the file
+# is TRACKED. THAT IS THE WHOLE OF THE DIFFERENCE BETWEEN THEM, and no probe of a
+# directory can see it: the filesystem cannot see a recorded mode, which is the
+# sentence this file repeats everywhere else. So `read_listing` puts the names
+# back for ONE `ls-files` against the listing's own absolute path and takes them
+# off again. What that ledger records there is the candidate set, read exactly as
+# the records world reads a tree; where it records nothing, the refusal stands.
+#
+# THE ENVIRONMENT STILL NEVER SELECTS BETWEEN LEDGERS, WHICH IS THE RULE ABOVE
+# AND IS UNCHANGED. The ask is guarded on `listing_world`, so wherever the path
+# reaches a repository nothing is put back and the pinned run and the clean run
+# stay the same run -- which is what every `env_case` row asserts -- and where it
+# reaches none there is no repository to displace. TWO THINGS BOUND IT FURTHER,
+# both measured at git 2.43.0:
+#
+#   A GIT DIRECTORY SAYS WHERE GIT IS, NOT WHERE THE LISTING IS, which is this
+#   file's own rule one section up. With no `GIT_WORK_TREE` among the names git
+#   takes the directory it is asked FROM as the work tree's root, so the pinned
+#   index's ROOT entries come back as this listing's own children: a standalone
+#   repository's committed finding was offered as a child of an unrelated
+#   directory in no repository at all. The ledger is asked only where a work tree
+#   was named too, and every other pinning keeps the refusal.
+#
+#   AND THE PATHSPEC IS THE LISTING'S OWN ABSOLUTE PATH UNDER `:(literal)`, which
+#   git refuses at 128 -- `is outside repository` -- for a listing outside that
+#   work tree, where the same call with the path merely implied answers about the
+#   work tree's ROOT instead and offers its entries. A 128 is read here as this
+#   ledger not placing this listing, and the only thing that reading does is
+#   leave the refusal below standing, so it fails closed.
 #
 # WHAT THIS DOES NOT ENFORCE, MEASURED RATHER THAN ASSUMED, because "cannot move
 # a verdict" stood here as an assertion and two reviews then argued it both ways.
@@ -650,10 +678,33 @@ unset GLOBIGNORE
 # makes `git ls-files` print nothing and exit 0 -- an empty ledger, which is the
 # substitution this gate is about. This is one process's environment and nothing
 # the caller's own git commands see.
+#
+# THE VALUES ARE RECORDED WITH THEM, for the one ask `environment_children`
+# makes and for nothing else. They are held in variables this file writes and
+# never in the environment, so between here and that one call there is no
+# exported name for any probe to find.
 environment_ledger=''
-if [[ -n "${GIT_DIR+set}" ]]; then environment_ledger="$environment_ledger GIT_DIR"; fi
-if [[ -n "${GIT_WORK_TREE+set}" ]]; then environment_ledger="$environment_ledger GIT_WORK_TREE"; fi
-if [[ -n "${GIT_INDEX_FILE+set}" ]]; then environment_ledger="$environment_ledger GIT_INDEX_FILE"; fi
+environment_git_dir=''
+environment_work_tree=''
+environment_index_file=''
+environment_git_dir_named=0
+environment_work_tree_named=0
+environment_index_file_named=0
+if [[ -n "${GIT_DIR+set}" ]]; then
+  environment_ledger="$environment_ledger GIT_DIR"
+  environment_git_dir="$GIT_DIR"
+  environment_git_dir_named=1
+fi
+if [[ -n "${GIT_WORK_TREE+set}" ]]; then
+  environment_ledger="$environment_ledger GIT_WORK_TREE"
+  environment_work_tree="$GIT_WORK_TREE"
+  environment_work_tree_named=1
+fi
+if [[ -n "${GIT_INDEX_FILE+set}" ]]; then
+  environment_ledger="$environment_ledger GIT_INDEX_FILE"
+  environment_index_file="$GIT_INDEX_FILE"
+  environment_index_file_named=1
+fi
 environment_ledger="${environment_ledger# }"
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
@@ -1973,9 +2024,11 @@ locate_listing() {
     # `PR280-ENV-EXPORTED-WORK-TREE-REFUSES-A-VALID-CALLER`, filed as wanting a
     # reading of an explicitly selected work tree and repaired by giving the walk
     # no pin to read; the measurements are with the `unset`. WHAT WAS EXPORTED IS
-    # STILL RECORDED, and `read_listing` reads that record at one site and for one
-    # purpose: to refuse where the answer would otherwise come from the
-    # filesystem. No walk reads it, and nothing reads it to choose a repository.
+    # STILL RECORDED, and `read_listing` reads that record at ONE site, in the one
+    # world where no repository the path reaches answers at all: it asks the
+    # ledger those names point at about the listing, and refuses where that ledger
+    # records nothing. NO WALK READS IT. Nothing here chooses between repositories
+    # from the environment, which is what this walk would have done.
     #
     # `/proc/self` does not reach here either: git exits 128 for it rather than
     # answering `false`, so the refusal above is what it gets, and the fixtures
@@ -2428,6 +2481,113 @@ add_candidate() {
   candidate_lines="$candidate_lines$1"$'\n'
 }
 
+# The findings in `recorded_children`, which is `<mode><TAB><name>` per line.
+#
+# Two sets rather than a lookup per name: bash 3.2 has no associative array and
+# this file runs wherever the suite is run by hand. A name is wrapped in newlines
+# on both sides, so a membership test is exact and not a prefix -- WHICH HOLDS
+# ONLY BECAUSE NO NAME IN EITHER SET CARRIES A NEWLINE. A CONFLICTED entry is
+# recorded at SEVERAL stages: an ordinary content conflict is a regular blob at
+# every stage and stays a finding, while a regular file conflicting with a
+# symlink is recorded at both kinds, lands in both sets, and is not a finding --
+# the non-regular set is tested first.
+add_recorded_candidates() {
+  local record mode name regular other
+  regular=$'\n'
+  other=$'\n'
+  while IFS= read -r record; do
+    [[ -n "$record" ]] || continue
+    mode="${record%%$'\t'*}"
+    name="${record#*$'\t'}"
+    case "$mode" in
+      100644|100755) regular="$regular$name"$'\n' ;;
+      *) other="$other$name"$'\n' ;;
+    esac
+  done <<< "$recorded_children"
+  while IFS= read -r record; do
+    [[ -n "$record" ]] || continue
+    name="${record#*$'\t'}"
+    case "$other" in
+      *$'\n'"$name"$'\n'*) continue ;;
+    esac
+    case "$regular" in
+      *$'\n'"$name"$'\n'*) add_candidate "$name" ;;
+    esac
+  done <<< "$recorded_children"
+}
+
+# environment_children <listing>: what the ledger `GIT_DIR`, `GIT_WORK_TREE` and
+# `GIT_INDEX_FILE` pointed at records AT <listing>, in `recorded_children`'s
+# `<mode><TAB><name>` form, or NOTHING AT ALL -- which every caller reads as a
+# refusal and never as an empty ledger. It is called from one place, in the one
+# world where no repository the path reaches answers; the file header states why
+# that world is different and what bounds this.
+#
+# THE NAMES GO BACK FOR THIS ONE CALL AND COME OFF AGAIN. They are what the
+# caller exported, put back as they were -- an empty one included, because git
+# honours all three empty and this is not the place to decide what a caller meant
+# -- so the question asked is the one the deployment's own `git` answers.
+#
+# A GIT DIRECTORY SAYS WHERE GIT IS, NOT WHERE THE LISTING IS, so with no work
+# tree named there is nothing to ask: git would take the directory it is asked
+# FROM as the work tree's root and hand back that index's root entries as this
+# listing's children. Measured -- a standalone repository's committed finding
+# offered as a child of an unrelated directory in no repository at all.
+#
+# AND THE PATHSPEC IS THE LISTING'S OWN ABSOLUTE PATH. `:(literal)` because a
+# pathname is the caller's to choose, as everywhere else here; ABSOLUTE because
+# git answers about the work tree's root for a listing it cannot place, and
+# refuses at 128 -- `is outside repository` -- for the same listing named in
+# full. `-C` puts git inside the listing so the names come back relative to it,
+# which is what makes them this directory's entries and not the work tree's.
+environment_children() {
+  local listing="$1" record rest
+  recorded_children=''
+  (( environment_work_tree_named )) || return 0
+  # A RELATIVE PIN IS THE CALLER'S, RELATIVE TO THE CALLER'S DIRECTORY, and `-C`
+  # is about to move git's. The listing is rooted the same way and by the same
+  # class test the rest of this file uses, so nothing here is resolved on the
+  # filesystem either.
+  case "$listing" in
+    /* | '\'* | [A-Za-z]:*) ;;
+    *) listing="$PWD/$listing" ;;
+  esac
+  if (( environment_git_dir_named )); then
+    case "$environment_git_dir" in
+      /* | '\'* | [A-Za-z]:* | '') export GIT_DIR="$environment_git_dir" ;;
+      *) export GIT_DIR="$PWD/$environment_git_dir" ;;
+    esac
+  fi
+  if (( environment_work_tree_named )); then
+    case "$environment_work_tree" in
+      /* | '\'* | [A-Za-z]:* | '') export GIT_WORK_TREE="$environment_work_tree" ;;
+      *) export GIT_WORK_TREE="$PWD/$environment_work_tree" ;;
+    esac
+  fi
+  if (( environment_index_file_named )); then
+    case "$environment_index_file" in
+      /* | '\'* | [A-Za-z]:* | '') export GIT_INDEX_FILE="$environment_index_file" ;;
+      *) export GIT_INDEX_FILE="$PWD/$environment_index_file" ;;
+    esac
+  fi
+  git_probe '0,128' -- -C "$listing" ls-files -sz -- ":(literal)$listing"
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+  (( probe_status == 0 )) || return 0
+  if (( ${#probe_records[@]} > 0 )); then
+    for record in "${probe_records[@]}"; do
+      rest="${record#*$'\t'}"
+      # An entry below a subdirectory is `sub/name` and is in no listing here,
+      # and a name holding a newline is no finding's name -- both exactly as the
+      # records world reads a tree, and stated there.
+      case "$rest" in
+        */* | *$'\n'*) continue ;;
+      esac
+      recorded_children="$recorded_children${record%% *}"$'\t'"$rest"$'\n'
+    done
+  fi
+  return 0
+}
+
 # read_listing <listing>: add every finding filename in one listing to the
 # candidate set. A read that FAILS returns non-zero and never an empty set.
 #
@@ -2442,42 +2602,12 @@ add_candidate() {
 # whatever the checkout put in its place.
 read_listing() {
   local listing="$1" out='' entry record mode name read_status=0 is_file=0
-  local regular other
   locate_listing "$listing" || return 1
   if [[ "$listing_world" == records ]]; then
     recorded_kind_of "$listing_relpath"
     case "$recorded_kind" in
       tree)
-        # Two sets rather than a lookup per name: bash 3.2 has no associative
-        # array and this file runs wherever the suite is run by hand. A name is
-        # wrapped in newlines on both sides, so a membership test is exact and
-        # not a prefix -- WHICH HOLDS ONLY BECAUSE NO NAME IN EITHER SET CARRIES
-        # A NEWLINE. A CONFLICTED entry is recorded at SEVERAL stages: an
-        # ordinary content conflict is a regular blob at every stage and stays a
-        # finding, while a regular file conflicting with a symlink is recorded at
-        # both kinds, lands in both sets, and is not a finding -- the non-regular
-        # set is tested first.
-        regular=$'\n'
-        other=$'\n'
-        while IFS= read -r record; do
-          [[ -n "$record" ]] || continue
-          mode="${record%%$'\t'*}"
-          name="${record#*$'\t'}"
-          case "$mode" in
-            100644|100755) regular="$regular$name"$'\n' ;;
-            *) other="$other$name"$'\n' ;;
-          esac
-        done <<< "$recorded_children"
-        while IFS= read -r record; do
-          [[ -n "$record" ]] || continue
-          name="${record#*$'\t'}"
-          case "$other" in
-            *$'\n'"$name"$'\n'*) continue ;;
-          esac
-          case "$regular" in
-            *$'\n'"$name"$'\n'*) add_candidate "$name" ;;
-          esac
-        done <<< "$recorded_children"
+        add_recorded_candidates
         return 0
         ;;
       blob)
@@ -2556,8 +2686,8 @@ read_listing() {
     echo "  not a findings directory and holds no finding of its own." >&2
     return 0
   fi
-  # AND A DIRECTORY THE ENVIRONMENT NAMED A LEDGER FOR IS NOT ANSWERED BY THE
-  # FILESYSTEM AT ALL. `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` are
+  # AND A DIRECTORY THE ENVIRONMENT NAMED A LEDGER FOR IS ANSWERED BY THAT
+  # LEDGER, OR BY NOTHING. `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` are
   # cleared at the top of this file so that no probe can answer about a pin, and
   # in this one world -- the world where there is no repository and the names the
   # filesystem holds are the whole of the evidence -- clearing them also hides a
@@ -2567,13 +2697,33 @@ read_listing() {
   # files were counted as filed findings and the run conformed at exit 0 where
   # the deployment's own repository, and `231c1aad`, say `names no finding`.
   #
+  # REFUSING EVERY SUCH DIRECTORY WAS THE ROUND BEFORE THIS ONE AND IT WAS THE
+  # OPPOSITE ERROR. The same deployment with the finding COMMITTED -- clean
+  # index, no submodule, a real `findings/P1_correctness_…md` that is on master
+  # now, and the `fix-P1/` branch that repairs it -- refused at exit 1 where
+  # master, `231c1aad` and the deployment's own repository answer exit 0
+  # `conforms`. THE PREVIOUS ACCEPTANCE THERE WAS CORRECT: this is the validator
+  # refusing work it is supposed to admit, which is the error the other direction
+  # and not a silent wrong `conforms` being replaced.
+  #
+  # TRACKED OR UNTRACKED IS THE WHOLE OF THE DIFFERENCE between the two, and the
+  # filesystem cannot see a recorded mode -- which is why the ledger is asked
+  # rather than the directory listed. `environment_children` is that ask and
+  # states what bounds it; what it records here is read exactly as the records
+  # world reads a tree, and where it records nothing the refusal below is
+  # unchanged, message and all.
+  #
   # The environment does not get to say WHICH ledger answers -- that is the rule
-  # at the top of this file and it is unchanged. It says that one EXISTS, and
-  # against the filesystem, which cannot see a recorded mode and here cannot see
-  # the repository either, that is enough to refuse. The test is on
-  # `listing_world`, so a listing the records answer for never reaches it.
+  # at the top of this file and it is unchanged. The test is on `listing_world`,
+  # so a listing the records answer for never reaches this at all, and where none
+  # does there is no repository for a name to displace.
   if (( ! is_file )) && [[ "$listing_world" != records ]] && [[ -d "$listing" ]] \
     && [[ -n "$environment_ledger" ]]; then
+    environment_children "$listing"
+    if [[ -n "$recorded_children" ]]; then
+      add_recorded_candidates
+      return 0
+    fi
     echo "branch-name-policy: no repository the path reaches records '$listing', and" >&2
     echo "  the environment names one: $environment_ledger. A directory in no repository is" >&2
     echo "  answered by the names the filesystem holds, and those are not a ledger: an" >&2

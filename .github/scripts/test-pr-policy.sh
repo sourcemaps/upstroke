@@ -3310,6 +3310,113 @@ env_refuses 'a name exported empty is still a ledger the path cannot reach' \
   "GIT_DIR=" \
   "GIT_INDEX_FILE="
 
+# AND THE SAME DEPLOYMENT WITH ITS FINDING COMMITTED, WHICH IS THE LEGITIMATE
+# SHAPE OF THE ROW ABOVE AND WHICH THE ROUND THAT WROTE THAT ROW REFUSED. Every
+# row so far exports ONE name, and one name alone never reaches a deployment's
+# ledger: `GIT_WORK_TREE` and `GIT_INDEX_FILE` leave discovery where it was, so
+# with no `.git` above the work tree they are `fatal: not a git repository`, and
+# `GIT_DIR` alone says where git is and not where the listing is. The deployment
+# is reached by BOTH, which is how `git --git-dir=… --work-tree=…` is spelled,
+# and that is the shape this pair asserts.
+#
+# The two differ in ONE thing, whether the finding is TRACKED, and the
+# filesystem cannot see it: `env_deployment` above holds an IGNORED, UNTRACKED
+# file and must refuse, and this one holds a COMMITTED finding and must conform,
+# exactly as `231c1aad` and the deployment's own repository answer for each.
+# Measured at the head that refused both: exit 1 for a real
+# `findings/P1_correctness_202609112028_…md` and the `fix-P1/` branch that
+# repairs it, where master answers exit 0. A refusal there replaces an
+# acceptance that was RIGHT, which is the one thing the row above must not cost.
+env_pinned_out=''
+env_pinned() {  # env_pinned <label> <cwd> <listing> <branch> <clean-exit> <pinned-exit> <VAR=VALUE>...
+  local label="$1" cwd="$2" listing="$3" branch="$4" clean_want="$5" pinned_want="$6"
+  shift 6
+  local clean_out clean_rc=0 pinned_rc=0
+  clean_out="$( cd "$cwd" && "$BASH" "$branch_validator" "$branch" "$listing" 2>&1 )" || clean_rc=$?
+  if [[ "$clean_rc" != "$clean_want" ]]; then
+    echo "$label: the clean-environment control answered $clean_rc, and $clean_want was expected" >&2
+    echo "  ${clean_out%%$'\n'*}" >&2
+    exit 1
+  fi
+  env_pinned_out="$( cd "$cwd" && env "$@" "$BASH" "$branch_validator" "$branch" "$listing" 2>&1 )" \
+    || pinned_rc=$?
+  if [[ "$pinned_rc" != "$pinned_want" ]]; then
+    echo "$label: with $* exported the run answered $pinned_rc, and $pinned_want was expected" >&2
+    echo "  exported: ${env_pinned_out%%$'\n'*}" >&2
+    exit 1
+  fi
+}
+
+env_tracked="$fixture_dir/env-deployment-tracked"
+mkdir -p "$env_tracked/meta"
+new_repo "$env_tracked/wt"
+mkdir -p "$env_tracked/wt/findings"
+echo fixture > "$env_tracked/wt/findings/P2_correctness_202609140901_a-pin-that-reaches-a-ledger.md"
+echo fixture > "$env_tracked/wt/P2_correctness_202609140902_a-pin-outside-its-work-tree.md"
+git -C "$env_tracked/wt" add -A
+git -C "$env_tracked/wt" commit -q -m 'a committed finding, and one at the root'
+mv "$env_tracked/wt/.git" "$env_tracked/meta/repo.git"
+env_tracked_pins=( "GIT_DIR=$env_tracked/meta/repo.git" "GIT_WORK_TREE=$env_tracked/wt" )
+# THE SHAPE IS ASSERTED BEFORE ANYTHING IS JUDGED: the work tree has no `.git`
+# at or above it and discovery from it with the names cleared says so, the index
+# is clean, and it records the two findings and nothing else. A fixture that
+# stopped being a deployment would otherwise pass this by being an ordinary
+# repository.
+if [[ -e "$env_tracked/wt/.git" ]] \
+  || ( cd "$env_tracked/wt" && git rev-parse --show-toplevel ) >/dev/null 2>&1 \
+  || [[ -n "$( cd "$env_tracked/wt" && env "${env_tracked_pins[@]}" git status --porcelain )" ]] \
+  || [[ "$( cd "$env_tracked/wt" && env "${env_tracked_pins[@]}" git ls-files | tr '\n' ' ' )" \
+    != 'P2_correctness_202609140902_a-pin-outside-its-work-tree.md findings/P2_correctness_202609140901_a-pin-that-reaches-a-ledger.md ' ]]; then
+  echo 'the fixture was meant to be a clean deployment reachable only through the environment' >&2
+  exit 1
+fi
+
+# THE ROW THE PREVIOUS ROUND GOT WRONG. The clean control conforms because the
+# filesystem holds the same one name; the pinned run must conform because the
+# LEDGER holds it, and those are two different reasons for one exit code.
+env_pinned 'a deployment whose finding is committed is not refused' \
+  "$env_tracked/wt" findings 'fix-P2/correctness_a-pin-that-reaches-a-ledger' 0 0 \
+  "${env_tracked_pins[@]}"
+
+# AND ITS HOSTILE TWIN UNDER THE SAME TWO NAMES, because every row above exports
+# one at a time and neither of those reaches the deployment at all. This is the
+# false green the guard exists for, reached the way a deployment is actually
+# spelled: the checkout holds a finding-shaped name, the ledger holds nothing
+# there, and the run must refuse AND say which names were in the environment.
+env_pinned 'a deployment whose finding is untracked still refuses' \
+  "$env_deployment/wt" findings 'fix-P2/correctness_a-cleared-pin' 0 1 \
+  "GIT_DIR=$env_deployment/meta/.git" "GIT_WORK_TREE=$env_deployment/wt"
+if [[ "$env_pinned_out" != *'the environment names one: GIT_DIR GIT_WORK_TREE'* ]]; then
+  echo 'a deployment whose finding is untracked refused for a different reason' >&2
+  echo "  ${env_pinned_out%%$'\n'*}" >&2
+  exit 1
+fi
+
+# A GIT DIRECTORY SAYS WHERE GIT IS, NOT WHERE THE LISTING IS, and this row is
+# what holds that. With no work tree named git takes the directory it is asked
+# FROM as the work tree's root, so the pinned index's ROOT entries come back as
+# this listing's own children -- and `env_standalone` keeps its one committed
+# finding at its root. Without that bound, a directory in NO repository, holding
+# nothing of the kind, conforms for a finding filed somewhere else entirely.
+env_refuses 'a git directory alone does not place a listing' \
+  "$env_loose" . 'fix-P2/correctness_an-exported-work-tree' 1 \
+  "GIT_DIR=$env_standalone/.git"
+
+# AND A LISTING OUTSIDE THE WORK TREE THOSE NAMES SELECT IS NOT ITS LISTING.
+# Asked with the path merely implied, git answers about the work tree's ROOT and
+# offers the entries there -- `$env_tracked/wt` keeps a committed finding at its
+# root for exactly this -- so the listing is named to git in FULL, which it
+# refuses at 128 `is outside repository`. The clean control is `names no
+# finding`, which is also what the deployment's own repository says.
+env_pinned 'a listing outside the selected work tree is not its listing' \
+  "$env_loose" . 'fix-P2/correctness_a-pin-outside-its-work-tree' 1 1 \
+  "${env_tracked_pins[@]}"
+if [[ "$env_pinned_out" != *'the environment names one: GIT_DIR GIT_WORK_TREE'* ]]; then
+  echo 'a listing outside the selected work tree refused for a different reason' >&2
+  echo "  ${env_pinned_out%%$'\n'*}" >&2
+  exit 1
+fi
+
 # THE HOSTILE HALF, AND IT IS THE HALF THAT DECIDES WHICH REPAIR IS THE RIGHT
 # ONE. A repository under a 160000 gitlink is refused because the SUPERPROJECT
 # records it, and that refusal is what an exported variable took away: pinning
