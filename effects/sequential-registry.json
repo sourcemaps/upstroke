@@ -2629,7 +2629,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+          "test": "engine::topology::recover::tests::a_kill_before_an_answer_is_read_leaves_the_question_open_and_the_next_incarnation_ingests_it",
           "passed": true
         }
       }
@@ -2647,7 +2647,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+          "test": "engine::topology::recover::tests::a_kill_after_an_answer_is_read_appends_nothing_and_the_next_incarnation_ingests_it",
           "passed": true
         }
       }
@@ -2703,7 +2703,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "test": "rundir::tests::a_fault_before_the_worktree_lease_is_taken_leaves_no_hold_and_the_next_acquisition_takes_it",
           "passed": true
         }
       }
@@ -2815,7 +2815,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "test": "rundir::tests::a_fault_before_the_worktree_lock_file_is_created_leaves_nothing_and_the_next_acquisition_creates_it",
           "passed": true
         }
       }
@@ -2835,7 +2835,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "test": "rundir::tests::a_fault_after_the_worktree_lock_file_is_created_leaves_it_unheld_and_the_next_acquisition_adopts_it",
           "passed": true
         }
       }
@@ -2929,7 +2929,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+          "test": "agent::proc::tests::a_fault_before_the_terminate_primitive_settles_the_child_and_leaves_its_fate_unresolved",
           "passed": true
         }
       }
@@ -2947,7 +2947,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+          "test": "agent::proc::tests::a_fault_after_the_terminate_primitive_reports_the_child_gone",
           "passed": true
         }
       }
@@ -3298,7 +3298,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::the_container_launch_funnels_execute_both_phases_under_the_production_adapter",
+          "test": "runner::container::tests::a_fault_before_the_git_view_is_mounted_leaves_the_intent_and_the_next_census_reclaims_it",
           "passed": true
         }
       }
@@ -3318,7 +3318,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::the_container_launch_funnels_execute_both_phases_under_the_production_adapter",
+          "test": "runner::container::tests::a_fault_after_the_git_view_is_mounted_leaves_the_view_and_the_next_census_removes_it",
           "passed": true
         }
       }
@@ -3509,8 +3509,8 @@
             "n": 8,
             "histogram": {
               "none": 1,
-              "internal": 3,
-              "after": 4
+              "internal": 6,
+              "after": 1
             },
             "unclassified": 0,
             "recovered": true
@@ -3550,8 +3550,8 @@
             "n": 8,
             "histogram": {
               "none": 2,
-              "internal": 5,
-              "after": 1
+              "internal": 6,
+              "after": 0
             },
             "unclassified": 0,
             "recovered": true
@@ -3696,8 +3696,8 @@
           "sampling": {
             "n": 8,
             "histogram": {
-              "none": 5,
-              "internal": 3,
+              "none": 3,
+              "internal": 5,
               "after": 0
             },
             "unclassified": 0,
@@ -3866,8 +3866,8 @@
             "n": 8,
             "histogram": {
               "none": 0,
-              "internal": 0,
-              "after": 8
+              "internal": 5,
+              "after": 3
             },
             "unclassified": 0,
             "recovered": true
@@ -3925,8 +3925,8 @@
             "n": 8,
             "histogram": {
               "none": 0,
-              "internal": 7,
-              "after": 1
+              "internal": 6,
+              "after": 2
             },
             "unclassified": 0,
             "recovered": true

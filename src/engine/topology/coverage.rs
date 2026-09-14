@@ -1062,12 +1062,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Answer(AnswerSite::Ingest),
         phase: EntryPhase::Before,
-        test: "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+        test: "engine::topology::recover::tests::a_kill_before_an_answer_is_read_leaves_the_question_open_and_the_next_incarnation_ingests_it",
     },
     Claim {
         site: EffectSiteId::Answer(AnswerSite::Ingest),
         phase: EntryPhase::After,
-        test: "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+        test: "engine::topology::recover::tests::a_kill_after_an_answer_is_read_appends_nothing_and_the_next_incarnation_ingests_it",
     },
     Claim {
         site: EffectSiteId::Lock(LockSite::AcquireRun),
@@ -1082,7 +1082,7 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Lock(LockSite::AcquireWorktree),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+        test: "rundir::tests::a_fault_before_the_worktree_lease_is_taken_leaves_no_hold_and_the_next_acquisition_takes_it",
     },
     Claim {
         site: EffectSiteId::Lock(LockSite::AcquireWorktree),
@@ -1112,12 +1112,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Lock(LockSite::CreateWorktreeLockFile),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+        test: "rundir::tests::a_fault_before_the_worktree_lock_file_is_created_leaves_nothing_and_the_next_acquisition_creates_it",
     },
     Claim {
         site: EffectSiteId::Lock(LockSite::CreateWorktreeLockFile),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+        test: "rundir::tests::a_fault_after_the_worktree_lock_file_is_created_leaves_it_unheld_and_the_next_acquisition_adopts_it",
     },
     Claim {
         site: EffectSiteId::Lock(LockSite::ObserveCleanupHold),
@@ -1142,12 +1142,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Process(ProcessSite::Terminate),
         phase: EntryPhase::Before,
-        test: "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+        test: "agent::proc::tests::a_fault_before_the_terminate_primitive_settles_the_child_and_leaves_its_fate_unresolved",
     },
     Claim {
         site: EffectSiteId::Process(ProcessSite::Terminate),
         phase: EntryPhase::After,
-        test: "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+        test: "agent::proc::tests::a_fault_after_the_terminate_primitive_reports_the_child_gone",
     },
     Claim {
         site: EffectSiteId::Process(ProcessSite::Spawn),
@@ -1254,12 +1254,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Container(ContainerSite::MountGitView),
         phase: EntryPhase::Before,
-        test: "engine::topology::coverage::tests::the_container_launch_funnels_execute_both_phases_under_the_production_adapter",
+        test: "runner::container::tests::a_fault_before_the_git_view_is_mounted_leaves_the_intent_and_the_next_census_reclaims_it",
     },
     Claim {
         site: EffectSiteId::Container(ContainerSite::MountGitView),
         phase: EntryPhase::After,
-        test: "engine::topology::coverage::tests::the_container_launch_funnels_execute_both_phases_under_the_production_adapter",
+        test: "runner::container::tests::a_fault_after_the_git_view_is_mounted_leaves_the_view_and_the_next_census_removes_it",
     },
     Claim {
         site: EffectSiteId::Container(ContainerSite::Stop),
