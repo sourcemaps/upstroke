@@ -13094,6 +13094,118 @@ fn a_kill_after_an_answer_is_read_appends_nothing_and_the_next_incarnation_inges
     );
 }
 
+#[test]
+fn a_resume_after_finalization_pruned_the_execution_root_and_the_pins_recreates_the_root_and_integrates_the_queued_candidate()
+ {
+    use crate::workspace_manager::fixture::git;
+
+    let fixture = Fixture::build(
+        "pruned-root-and-pins",
+        Damage {
+            two_tasks: true,
+            extra: vec![
+                dispatched(),
+                attempt_started(1),
+                attempt_finished(
+                    1,
+                    AttemptSettlement::Closed {
+                        transition: SettlementTransition::Retry,
+                        lease: LeaseDisposition::PredictedReleased,
+                    },
+                ),
+            ],
+            ..Damage::default()
+        },
+    );
+    let beta = plant_queued_beta(&fixture);
+    git(
+        &fixture.repo_root,
+        &[
+            "update-ref",
+            fixture.started.integration_ref.as_str(),
+            fixture.base_sha.as_str(),
+        ],
+    );
+    let names = crate::engine::topology::candidate::CandidateNames::of(RUN_ID, BETA, GEN);
+    assert!(
+        ref_target(&fixture, names.prepared_ref.as_str()).is_some(),
+        "beta's candidate-prepared pin stands before the budget stop"
+    );
+    let stopped = drive(
+        &fixture,
+        &DriveSeams {
+            run_ceiling_usd: Some(0.000_001),
+            ..DriveSeams::default()
+        },
+        2,
+    );
+    let shapes: Vec<String> = stopped.progress.iter().map(progress_shape).collect();
+    assert!(
+        matches!(
+            stopped.progress.get(1),
+            Some(Ok(Progress::Finished {
+                outcome: RunOutcome::BudgetExceeded,
+                execution_root_removed: true,
+                ..
+            }))
+        ),
+        "the run ends BudgetExceeded and finalization removes the execution root: {shapes:?}"
+    );
+    assert!(
+        !fixture.manager().execution_root().exists(),
+        "the durable state the next resume starts from has no execution root"
+    );
+    assert_eq!(
+        ref_target(&fixture, names.prepared_ref.as_str()),
+        None,
+        "finalization pruned beta's candidate-prepared pin (R23)"
+    );
+    assert_eq!(
+        ref_target(&fixture, beta.candidate_ref.as_str()).as_deref(),
+        Some(beta.commit_sha.as_str()),
+        "the authoritative candidates ref stands (R11)"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let resumed = drive_hooked(
+        &fixture,
+        &DriveSeams {
+            run_ceiling_usd: Some(10.0),
+            ..DriveSeams::default()
+        },
+        6,
+        &mut hooks,
+    );
+    drop(hooks);
+    let shapes: Vec<String> = resumed.progress.iter().map(progress_shape).collect();
+    let create_root = EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot);
+    for phase in [HookPhase::Before, HookPhase::After] {
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(create_root, phase),
+            "the resume recreates the pruned root through `{create_root}` ({phase})"
+        );
+    }
+    assert!(
+        resumed
+            .progress
+            .iter()
+            .any(|step| matches!(step, Ok(Progress::Integrated { key, .. }) if *key == BETA)),
+        "the resume publishes the queued candidate without its pruned pin: {shapes:?}"
+    );
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(beta.commit_sha.as_str()),
+        "the integration ref is at beta's candidate commit"
+    );
+    let (once, events) = replayed_with_events(&fixture);
+    let twice = TopologyFold::replay(fixture.inputs(), &events).expect("replays again");
+    assert_eq!(once.state(), twice.state(), "replay twice equal");
+}
+
 /// Beta's candidate queued at the base, unmerged, so that a second lineage
 /// can be rooted at beta.
 fn plant_queued_beta(fixture: &Fixture) -> crate::topology::events::CandidateRef {
