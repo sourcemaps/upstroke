@@ -12743,6 +12743,357 @@ fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnatio
     assert_eq!(answers[0].question, question.id);
 }
 
+const ANSWER_INGEST_KILL_CHILD: &str = "engine::topology::recover::tests::answer_ingest_kill_child";
+
+struct IngestKilledAt {
+    inner: rundir::HarnessHooks,
+    at: HookPhase,
+}
+
+impl rundir::RunDirHooks for IngestKilledAt {
+    fn hook(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        let answered = self.inner.hook(site, phase);
+        if site == EffectSiteId::Answer(crate::topology::effects::AnswerSite::Ingest)
+            && phase == self.at
+        {
+            crate::observations::Exported::new(Arc::clone(self.inner.harness()))
+                .carried(Injection::Kill)
+        } else {
+            answered
+        }
+    }
+}
+
+struct FunnelAnswers {
+    dir: PathBuf,
+    hooks: Mutex<IngestKilledAt>,
+}
+
+impl crate::interaction::AnswerSource for FunnelAnswers {
+    fn id(&self) -> &'static str {
+        "event-log"
+    }
+
+    fn resolve(&self, question: &crate::ir::Question) -> Result<crate::ir::Answer, UpstrokeError> {
+        self.poll(question)
+    }
+
+    fn poll(&self, question: &crate::ir::Question) -> Result<crate::ir::Answer, UpstrokeError> {
+        let component = crate::util::filename_component(question.id.as_str());
+        let mut hooks = self.hooks.lock().unwrap_or_else(PoisonError::into_inner);
+        match rundir::ingest_answer(&self.dir, &component, &mut *hooks)? {
+            Some(text) => serde_json::from_str(&text).map_err(|error| UpstrokeError::Parse {
+                message: format!("{component}: {error}"),
+            }),
+            None => Ok(crate::ir::Answer::Unanswered),
+        }
+    }
+}
+
+#[test]
+#[ignore = "spawned as a subprocess by the answer-ingestion kill witnesses"]
+fn answer_ingest_kill_child() {
+    use crate::engine::topology::run::{RunSeams, TopologyRun};
+    use crate::engine::topology::select::Ceiling;
+
+    let repo_root = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_REPO").expect("the parent names the repository"),
+    );
+    let git_dir = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_GITDIR").expect("the parent names the git dir"),
+    );
+    let at = match std::env::var("UPSTROKE_TEST_KILL_PHASE")
+        .expect("the parent names the phase")
+        .as_str()
+    {
+        "before" => HookPhase::Before,
+        "after" => HookPhase::After,
+        other => panic!("`{other}` is not a phase of `Answer.Ingest`"),
+    };
+    let repo_key = RepoKey::v1(&std::fs::canonicalize(&git_dir).expect("the git dir exists"));
+    let harness = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
+    let runtime = runtime_holding_the_record();
+    let liveness = FakeOwnerLiveness::new();
+    let view = DisposableDirView::new(ContainerTrace::default());
+    let incarnation = IncarnationId(RESUMER.to_owned());
+    let today = container_selection();
+    let root = RootDerived::derive_with(&repo_root, RUN_ID, None, TOPOLOGY_SCHEMA)
+        .expect("(a0) derives in the child");
+    let private_root = root.private_root().to_path_buf();
+    let manager = crate::workspace_manager::WorkspaceManager::derive(
+        &repo_root,
+        &private_root,
+        RUN_ID,
+        RESUMER,
+    )
+    .expect("the child's repository and private root are real directories");
+    let inputs = FrozenInputs {
+        plan: plan_with(true),
+        normalized_plan_digest: "sha256:aaaa".to_owned(),
+    };
+    let mut warnings = Vec::new();
+    let (_recovered, handle) = run_recovery_order(
+        root,
+        &ResumeSeams {
+            repo_root: &repo_root,
+            worktree_git_dir: &git_dir,
+            repo_key: &repo_key,
+            incarnation: &incarnation,
+            inputs: inputs.clone(),
+            today: &today,
+            runtime: &runtime,
+            liveness: &liveness,
+            view: &view,
+            preflight: &AlwaysCertifies,
+            refs: &manager,
+            manager: &manager,
+            clock: &Frozen,
+        },
+        &mut hooks,
+        &mut warnings,
+    )
+    .expect("the child resumes the planted run");
+    let mut run = TopologyRun::resumed(handle, inputs, Ceiling::unlimited());
+    let sleeper = RecordingSleeper::default();
+    let runner = RecordingRunner::default();
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
+    let paths = crate::rundir::RunPaths::with_private_root(&repo_root, RUN_ID, &private_root);
+    let plans = crate::engine::assembly::FrozenPlans {
+        adapters: &adapters,
+        paths: &paths,
+        gates: &[],
+        pools: &[],
+        caps: &[],
+        worker_timeout: Duration::from_secs(300),
+        decisions: &[],
+    };
+    let answers = FunnelAnswers {
+        dir: paths.answers(),
+        hooks: Mutex::new(IngestKilledAt {
+            inner: rundir::HarnessHooks::new(Arc::clone(&harness)),
+            at,
+        }),
+    };
+    let seams = RunSeams {
+        manager: &manager,
+        clock: &Frozen,
+        sleeper: &sleeper,
+        runner: &runner,
+        adapters: &adapters,
+        paths: &paths,
+        plans: &plans,
+        reviews: &crate::engine::attempt::LegacyReviewPasses,
+        input_policy: &crate::engine::attempt::LegacyReviewInputPolicy,
+        answers: &answers,
+        ids: &FixedIds,
+        halts_run: false,
+    };
+    let stepped = run.step(&seams, &mut hooks);
+    panic!(
+        "the kill at `Answer.Ingest` ({at}) did not take this process: {:?}",
+        stepped.map(|_| ())
+    );
+}
+
+fn a_kill_at_the_answer_ingestion_converges_on_the_next_incarnation(phase: HookPhase, tag: &str) {
+    use crate::topology::effects::{AnswerSite, EntryPhase, ResumeAction};
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child};
+
+    let fixture = Fixture::build(
+        tag,
+        Damage {
+            two_tasks: true,
+            no_automatic_repairs: true,
+            ..Damage::default()
+        },
+    );
+    let (rejection, repair) = plant_over_limit_repair(&fixture);
+    let question = rejection
+        .repair
+        .admission
+        .question()
+        .expect("a human admission carries its question")
+        .clone();
+    let paths = crate::rundir::RunPaths::with_private_root(
+        &fixture.repo_root,
+        &fixture.started.run_id,
+        &fixture.private_root,
+    );
+    paths.create().expect("the run directories are creatable");
+    let component = crate::util::filename_component(question.id.as_str());
+    crate::rundir::stage_answer(
+        &paths.answers(),
+        &component,
+        &crate::ir::Answer::Answered {
+            text: question.options.first().expect("an option").clone(),
+        },
+        &mut crate::rundir::NoHooks,
+    )
+    .expect("the answer is staged");
+    crate::rundir::publish_answer(&paths.answers(), &component, &mut crate::rundir::NoHooks)
+        .expect("and published");
+    let published = paths.answers().join(format!("{component}.json"));
+    let answer_bytes = std::fs::read(&published).expect("the published answer");
+    let before = fixture.log_bytes();
+    let events_before = TopologyFold::parse_log(&before)
+        .expect("the planted log parses")
+        .len();
+
+    let status = run_kill_child(
+        ANSWER_INGEST_KILL_CHILD,
+        &[
+            ("UPSTROKE_TEST_KILL_REPO", fixture.repo_root.as_os_str()),
+            ("UPSTROKE_TEST_KILL_GITDIR", fixture.git_dir.as_os_str()),
+            (
+                "UPSTROKE_TEST_KILL_PHASE",
+                std::ffi::OsStr::new(&phase.to_string()),
+            ),
+        ],
+    );
+    assert!(
+        died_by_abort(&status),
+        "{tag}: the child did not die by the kill at `Answer.Ingest` ({phase}): {status:?}"
+    );
+    assert!(
+        !rundir::is_running(&fixture.public()),
+        "{tag}: the run lock went with the dead process"
+    );
+    let after_kill = fixture.log_bytes();
+    assert!(
+        after_kill.starts_with(&before),
+        "{tag}: the kill rewrote nothing of the planted log"
+    );
+    let events = TopologyFold::parse_log(&after_kill).expect("the log the kill left parses");
+    assert_eq!(
+        events
+            .iter()
+            .skip(events_before)
+            .map(|event| event.body.kind())
+            .collect::<Vec<_>>(),
+        vec!["run_resumed"],
+        "{tag}: the durable prefix is the child's resume and nothing after it"
+    );
+    assert!(
+        answers_of(&events, repair).is_empty(),
+        "{tag}: no `question_answered` precedes the recovery"
+    );
+    let site = EffectSiteId::Answer(AnswerSite::Ingest);
+    let semantics = site.semantics(match phase {
+        HookPhase::Before => EntryPhase::Before,
+        HookPhase::After => EntryPhase::After,
+        HookPhase::Point { .. } => panic!("the ingestion's coordinates are its two phases"),
+    });
+    assert!(
+        semantics.rows.is_empty(),
+        "{tag}: a read-only observation leaves no row holding anything ({:?})",
+        semantics.rows
+    );
+    assert_eq!(
+        semantics.action,
+        match phase {
+            HookPhase::Before => ResumeAction::ResumeUnperformed,
+            _ => ResumeAction::RepeatObservation,
+        },
+        "{tag}: the action the authority tables for `{site}` ({phase})"
+    );
+
+    let observed = harness();
+    let mut read_hooks = rundir::HarnessHooks::new(Arc::clone(&observed));
+    let read = rundir::ingest_answer(&paths.answers(), &component, &mut read_hooks)
+        .expect("the answer file reads")
+        .expect("R21: the published answer survives the kill");
+    drop(read_hooks);
+    assert_eq!(
+        read.as_bytes(),
+        answer_bytes.as_slice(),
+        "{tag}: byte for byte"
+    );
+    for seen in [HookPhase::Before, HookPhase::After] {
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(site, seen),
+            "{tag}: the surviving file is read through `{site}` ({seen}) under the production \
+             adapter"
+        );
+    }
+
+    let seams = DriveSeams {
+        answers_from_run_dir: true,
+        ..DriveSeams::default()
+    };
+    let runner = driven_runner(&seams);
+    let mut hooks = HarnessTopologyHooks::new(harness());
+    let driven = drive_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &seams,
+        2,
+        &runner,
+        &mut hooks,
+    );
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Answered {
+                key,
+                declined: false,
+                ..
+            })) if *key == repair
+        ),
+        "{tag}: the next incarnation's first step ingests the answer the dead one did not: {:?}",
+        driven.progress
+    );
+    assert!(
+        matches!(
+            driven.progress.get(1),
+            Some(Ok(Progress::Settled {
+                key,
+                accepted: true,
+                ..
+            })) if *key == repair
+        ),
+        "{tag}: and the activated repair runs: {:?}",
+        driven.progress
+    );
+    let answers = answers_of(&driven.log, repair);
+    assert_eq!(
+        answers.len(),
+        1,
+        "{tag}: exactly one `question_answered` across the kill and the recovery"
+    );
+    assert_eq!(answers[0].question, question.id);
+    assert_eq!(answers[0].via, "event-log");
+    assert_eq!(
+        std::fs::read(&published).expect("R21: the answer file is never pruned"),
+        answer_bytes,
+        "{tag}: the ingested file is left as it was published"
+    );
+    let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("parses");
+    let once = TopologyFold::replay(fixture.inputs(), &events).expect("replays");
+    let twice = TopologyFold::replay(fixture.inputs(), &events).expect("replays again");
+    assert_eq!(once.state(), twice.state(), "{tag}: replay twice equal");
+}
+
+#[test]
+fn a_kill_before_an_answer_is_read_leaves_the_question_open_and_the_next_incarnation_ingests_it() {
+    a_kill_at_the_answer_ingestion_converges_on_the_next_incarnation(
+        HookPhase::Before,
+        "answer-ingest-kill-before",
+    );
+}
+
+#[test]
+fn a_kill_after_an_answer_is_read_appends_nothing_and_the_next_incarnation_ingests_it() {
+    a_kill_at_the_answer_ingestion_converges_on_the_next_incarnation(
+        HookPhase::After,
+        "answer-ingest-kill-after",
+    );
+}
+
 /// Beta's candidate queued at the base, unmerged, so that a second lineage
 /// can be rooted at beta.
 fn plant_queued_beta(fixture: &Fixture) -> crate::topology::events::CandidateRef {

@@ -3975,6 +3975,49 @@ hard-blocks; an answer staged and published into `answers/` while the
 engine is away is ingested by the next incarnation's first step, `via`
 `event-log`, before anything else is selected.
 
+## `const ANSWER_INGEST_KILL_CHILD: &str =`
+
+The kill child of the two `Answer.Ingest` witnesses below.
+
+## `struct IngestKilledAt {`
+
+The run directory's production adapter with a kill armed at one phase of `Answer.Ingest`. The
+harness records the phase first; the kill is exported (`Exported::carried`) before it is handed
+back, because the funnel aborts right after and a process that dies at a hook never reaches the
+drop that would otherwise write the record.
+
+## `struct FunnelAnswers {`
+
+The answer reader the kill child ingests through. The production reader, `EventLogAnswers`,
+reaches `rundir::ingest_answer` with `NoHooks` (`interaction::read_answer`), so no hook of
+`Answer.Ingest` is ever consulted on the schema-4 ingestion path and no adapter can be armed
+there. This reads the same file through the same funnel with an armed adapter, answering `id`
+`event-log` as the production reader does; it is the seam, not a second reader — the recovery in
+the witnesses ingests through the production `EventLogAnswers`.
+
+## `fn answer_ingest_kill_child() {`
+
+Resumes the planted run as `RESUMER` and takes one step with `FunnelAnswers`, whose adapter kills
+the process at the phase `UPSTROKE_TEST_KILL_PHASE` names. The first step's first branch is the
+ingestion, so the process dies inside the read of the published answer, before (or just after)
+the file is read and before any `question_answered` exists. Reaching the panic means the kill did
+not land.
+
+## `fn a_kill_at_the_answer_ingestion_converges_on_the_next_incarnation(`
+
+G5's clause 2 found both phases of `Answer.Ingest` observed under the production adapter and
+faulted by no committed test; G4 had killed the ingestion's append (`T-ANSWER`, `G4B-O9`) with
+temporary tests it did not commit. This kills a real process at each phase of the read itself: an
+over-limit repair's human admission is planted, the answer is staged and published into
+`answers/`, and the child dies at the phase. What it leaves is the exact durable prefix — the
+planted log plus the child's `run_resumed` and nothing after it, no `question_answered` — and the
+answer file byte for byte (R21), read here through `Answer.Ingest` under the production adapter.
+The authority's rows for both phases are empty (a read-only observation) and its actions are the
+before phase's and the repeated observation. The tabled recovery is the next incarnation's first
+step, through the production reader: it ingests the answer exactly once, `via` `event-log`, the
+activated repair runs, the file is left as it was published, and the log replays twice to equal
+states.
+
 ## `fn two_lineages_publish_in_lineage_order_and_the_younger_candidate_waits_behind_the_older() {`
 
 Two lineages overlapping on one path, the younger's repair already queued
