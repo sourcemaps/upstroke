@@ -879,9 +879,20 @@ already-unreachable object in the store (`plant_unreachable_object`) and
 records the objects the run's refs and worktrees reference and the whole
 store as it stands, so that every finalization driven from it is held to
 R27 by `assert_finalized` (`assert_objects_kept`); since round 8 it also
-leaves a staged report a dead writer would have — a regular file under a
-name `rundir::report_staging_name` produces — so that both branches of the
-report site are held to reclaiming it.
+leaves a staged report a dead writer would have — since round 9 the
+staging directory the writer makes for itself, `.report-staging/`, with the
+half-written `report.json` inside (`plant_report_leftover`); in round 8 a
+regular file under a name `rundir::report_staging_name` produced — so that
+both branches of the report site are held to reclaiming it.
+
+## `fn plant_report_leftover(public: &Path) -> PathBuf {`
+
+What a report writer that died between its stage and its rename leaves
+(PR10's round 9): the staging directory it made for itself under the
+public run directory, `rundir::report_staging_dir`, with `report.json`
+half-written inside. Planted by every finished-run fixture and again by the
+matrix before its third resume, and read reclaimed — the directory and the
+file — by `assert_finalized`.
 
 ## `fn resume_finalizes_halted_then_refuses() {`
 
@@ -4248,7 +4259,9 @@ crash lens, P1: a terminal resume that found the report current and
 pruned Git's unreachable objects converged); and, since round 8, the
 staged report the planting left for a dead writer, reclaimed inside the
 report site on the write branch and on the fresh branch alike, with
-nothing of the report's protocol left staged (`rundir::report_staging_files`).
+nothing of the report's protocol left staged
+(`rundir::report_staging_leftovers`: since round 9 the staging directory
+and whatever it holds, neither standing).
 
 ## `fn assert_objects_kept(planted: &FinishedPlanting, tag: &str) {`
 
@@ -4318,7 +4331,9 @@ effect's "done" reads the report present *and* the dead writer's staged
 report gone, so the cells around the report's two sites hold the write
 branch's reclaim to the site's phases; and the third resume — the one
 that always finds the report current — meets a staged report planted
-anew after the second, so the fresh branch's reclaim is held as well
+anew after the second (`plant_report_leftover`: since round 9 the dead
+writer's staging directory with the half-written file inside), so the
+fresh branch's reclaim is held as well
 (round 8; the recipes `report-leftover-not-reclaimed-on-write` and
 `-on-fresh`, the second of which survived the matrix until the
 re-planting: every finalization the cells drove had met the write branch
@@ -4342,16 +4357,79 @@ staging worktree, at Complete and at Halted, the checkout's directory —
 its slot kind's directory under the execution root — is not among the
 synced directories when the removal's before phase fires, is among them
 at the removal's after phase, and so before the intent site's before
-phase. The directory is compared in its plain canonical form — the test
-canonicalizes the slot kind's directory before the resume and strips the
-verbatim prefix Windows' `canonicalize` adds, since the removal syncs the
-path `canonical_prefix` hands it, prefix stripped — and nothing is
-canonicalized after the resume, when the root is already pruned (the
-guest's full suite at `0eccb5dd` failed the first form of this test on
-exactly that: `\\?\C:\…\tasks` against `C:\…\tasks`, a string fallback
-after a failed `canonicalize`; `fc131b2c`). The recipe
+phase; and, since round 9, the barrier's own ledger record — the
+`SyncedDirectory` of that directory whose `entry` is the checkout — shows
+the checkout absent at the instant of the sync (`util::EntryObserved`,
+read by `symlink_metadata` in the statement before the barrier inside
+`sync_checkout_removed`), which is what makes this an ordering guard
+rather than a guard of the barrier's existence: the round-9 fix-check lens
+moved the sync ahead of the removal and the round-8 form passed, since a
+sync between two hook phases is between them whichever side of the
+deletion it falls on. The directory and the checkout are compared in their
+plain canonical form — the test canonicalizes both before the resume and
+strips the verbatim prefix Windows' `canonicalize` adds, since the removal
+syncs and records the path `canonical_prefix` hands it, prefix stripped —
+and nothing is canonicalized after the resume, when the root is already
+pruned (the guest's full suite at `0eccb5dd` failed the first form of this
+test on exactly that: `\\?\C:\…\tasks` against `C:\…\tasks`, a string
+fallback after a failed `canonicalize`; `fc131b2c`). The recipes
 `scrub-checkout-unsynced-before-intent` (the barrier removed from the
-removal) fails it at the after phase.
+removal) and `checkout-synced-before-its-deletion` (the barrier moved
+ahead of the removal) fail it — the first at the after phase, the second
+at the record's `present`.
+
+## `fn a_failed_checkout_barrier_is_retried_before_its_intent_i…`
+
+The round-9 crash lens's recipe, its P1 and its P2 in one: the checkout's
+parent directory has its barrier armed to fail (`util::fail_barriers_at`)
+and a finished run of either outcome is resumed twice under the fault. The
+first resume removes beta's checkout and ends at the barrier's own
+diagnostic, the intent that names the checkout still present; the second
+meets the checkout already absent and, since round 9, takes the barrier
+again and ends the same way — at `c82767f4` it read the absence as proof,
+removed the intent and finished cleanup (the recipe placed in that tree
+fails at the second attempt's diagnostic,
+`~/pr10-evidence/r9/before-c82767f4/prefix-b2-failed-barrier-retried.log`).
+With the fault dropped the third resume finalizes and refuses, and
+`assert_finalized` reads everything pruned. The recipe
+`checkout-barrier-error-swallowed` (the barrier's result discarded with
+`.unwrap_or(())`) fails it at the first attempt's diagnostic: the round-8
+guards both passed under it, since neither armed a checkout's parent.
+
+## `fn an_absent_slot_directory_is_made_durably_absent_in_the_root_…`
+
+The one state in which the checkout barrier has no directory to sync: a
+finished run whose beta checkout is gone *and* whose slot kind's directory
+(`tasks/`) was never made — thirty-eight resume fixtures of this module
+plant an intent without the scaffolding `create_execution_root` lays down,
+and the first shape of the round-9 barrier errored at every one of them
+with `NotFound` on that directory (`~/pr10-evidence/1c5bb58c…/full-suite-export.log`,
+the superseded round-9 head). Here the shape is reached the way a run
+reaches it: a first resume under the parent's barrier fault removes the
+checkout and ends at the barrier, the intent standing; then the emptied
+directory is removed (`fixture::remove_dir`, the fixture's non-recursive
+removal — a checkout tree is not the tests' to delete by hand) and the
+fault dropped; the second resume is held to syncing the execution root
+instead, with the absent directory observed in the statement before the
+barrier (`sync_slot_directory_absent`; the `SyncedDirectory` record of the
+root whose `entry` is the slot kind's directory, `present: false`),
+removing the intent and finalizing. The recipe
+`sync-absent-slot-directory-skipped` (the directory's absence taken on
+faith, no barrier in the root) fails it at the missing record; at
+`c82767f4`'s `workspace_manager.rs`, which took no barrier on the absent
+branch at all, it fails the same way
+(`~/pr10-evidence/r9/before-c82767f4/prefix-b2-absent-slot-directory.log`).
+
+## `fn an_absent_checkout_retries_its_parent_barrier() {`
+
+The round-9 fix-check lens's unit form of the same retry: the funnel
+`remove_worktree_proving` called twice under the parent's barrier fault
+with `WriterProof::NoWriterAlive`, no resume between. The first call
+deletes the checkout and errors at the barrier; the second, meeting an
+absent checkout, errors at the barrier again, the intent untouched
+throughout; with the fault dropped a third call converges. At `c82767f4`
+the second call returned `Ok`
+(`~/pr10-evidence/r9/before-c82767f4/prefix-b2-absent-checkout-retries-barrier.log`).
 
 ## `fn a_fault_at_a_staging_leftovers_own_removal_stops_finaliz…`
 

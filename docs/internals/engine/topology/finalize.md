@@ -103,14 +103,34 @@ funnel returns: `WorkspaceManager::remove_worktree_proving` syncs the checkout's
 tree is gone, so the intent that names the checkout — removed next, and synced in its own
 directory — can never outlive a deletion the disk rolled back; a resume enumerates the intents,
 and a checkout with no intent would have kept the root non-empty on every later resume (the
-round-8 crash lens, P2). The order is a guard in the recover tests
-(`a_checkouts_deletion_is_made_durable_before_its_intent_is_removed`: the parent synced between
-the removal's two phases and before the intent site's first) rather than a cell in the matrix,
-since the barrier is inside the removal's site and the matrix already faults both its phases; the
-lens's alternative — a recovery that rediscovers an intent-less checkout — was not taken, because
-it would add a second reader of the root's contents beside the intents where one barrier in the
-funnel every caller already uses (the live loop's scrubs and reclaims included) removes the
-shape.
+round-8 crash lens, P2). Since round 9 the barrier is taken on the absent branch as well — a
+checkout already gone is not proof that the attempt which removed it reached its barrier, or that
+the barrier held, and a retry that read absence as proof removed the intent behind an unproven
+deletion (the round-9 crash lens, P2; syncing a directory whose entry is already gone is the proof
+the first attempt did not give — and where the slot kind's directory is itself absent, a root an
+older engine or a fixture made without the scaffolding `create_execution_root` lays down, the
+execution root above it is synced instead, so the directory's own absence and the checkout's with
+it is what is made durable, `sync_slot_directory_absent`) — its error is the funnel's and never absorbed (the round-9 crash
+lens, P1: with `.unwrap_or(())` on the barrier both round-8 guards still passed, since neither
+armed the checkout's parent), and the barrier's own record carries the checkout observed absent
+in the statement before it (`util::EntryObserved`; the round-9 fix-check lens, P1: with the sync
+moved ahead of the removal the round-8 guard still passed). The three guards in the recover tests:
+`a_checkouts_deletion_is_made_durable_before_its_intent_is_removed` (the parent synced between the
+removal's two phases and before the intent site's first, and the barrier's record showing the
+checkout absent at the instant of the sync),
+`a_failed_checkout_barrier_is_retried_before_its_intent_is_removed` (the parent's barrier armed to
+fail across two resumes at both outcomes, each ending at the barrier's diagnostic with the intent
+still present, the third converging) and `an_absent_checkout_retries_its_parent_barrier` (the
+funnel called twice under the fault: the retry meets an absent checkout and refuses again), and
+`an_absent_slot_directory_is_made_durably_absent_in_the_root_before_the_intent_is_removed` (the
+checkout removed by a first resume whose barrier was refused, the emptied slot kind's directory
+then removed by hand: the next resume syncs the execution root with that directory observed
+absent, removes the intent and finalizes). Guards
+rather than cells in the matrix, since the barrier is inside the removal's site and the matrix
+already faults both its phases; the round-8 lens's alternative — a recovery that rediscovers an
+intent-less checkout — was not taken, because it would add a second reader of the root's contents
+beside the intents where one barrier in the funnel every caller already uses (the live loop's
+scrubs and reclaims included) removes the shape.
 
 ## `fn delete_refs_under(`
 

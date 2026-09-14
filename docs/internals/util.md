@@ -116,13 +116,18 @@ from the source order of a create and a `chmod`.
 
 ## `GroupGiven,`
 
-A staged file is about to be given the group of the file it replaces
-(`rundir::give_group`; PR10's round 8): the entry is recorded at the
-instant before the `fchown`, inside the transition's own call, so its
-`mode` is the mode the file carried until then — without its group bits,
-which the publication withholds until the group is the operator's — and a
-widening slipped before the transition is a widening before the record.
-No barrier.
+A staged file was given the group of the file it replaces
+(`rundir::give_group`; PR10's rounds 8 and 9): one entry per `fchown`,
+whether or not it succeeded, carrying the mode the file had at the instant
+before the call — read by `fstat` on the descriptor in the statement
+immediately before it — as `mode`, and the mode at the instant after it,
+read the same way in the statement immediately after, as `mode_after`.
+Both are without the group bits the publication withholds until the group
+is the operator's, and the two reads bracket the syscall: a widening before
+the first is in `mode`, a widening between them is in `mode_after` (round
+8 recorded a `stat` of the path in the statement before the `fchown`, and a
+`chmod` inserted after that record and before the syscall showed in
+neither; the round-9 fix-check lens, P1). No barrier.
 
 ## `SyncedFile,`
 
@@ -170,12 +175,40 @@ about. Zero when the path has no length to report.
 ## `pub mode: Option<u32>,`
 
 The permission bits (`st_mode & 0o7777`) the path had when the entry was
-taken, read from the filesystem by `record` itself; `None` off Unix or when
-the path could not be read. What [`DurableStep::Staged`] is for: a staged
+taken, read from the filesystem by `record` itself — or, for an entry taken
+by `record_transition`, the mode the funnel read off the descriptor in the
+statement before its syscall; `None` off Unix or when the path could not be
+read. What [`DurableStep::Staged`] is for: a staged
 report that took the existing report's mode by a `chmod` after its bytes
 were written was readable at the umask's mode in between, and every
 observation taken after the publication read the mode as preserved (the
 round-5 regression lens, P2).
+
+## `pub mode_after: Option<u32>,`
+
+For an entry taken by `record_transition` — [`DurableStep::GroupGiven`]
+today — the mode the funnel read off the descriptor in the statement
+immediately after its syscall; `None` for every other entry. With `mode`
+it brackets the syscall, so a test of the ledger can hold the transition
+to what it saw on both sides rather than to the source order of a record
+and a call (PR10's round 9).
+
+## `pub entry: Option<EntryObserved>,`
+
+For a directory barrier taken by `record_entry` — the checkout barrier of
+`workspace_manager::remove_worktree_proving` today — the entry the barrier
+was taken for and whether it was present, read by `symlink_metadata` in the
+statement immediately before the barrier; `None` for every other entry. A
+`SyncedDirectory` record that carries the checkout observed absent is the
+proof that the barrier followed the deletion, which a record of the
+directory alone, read at a hook phase, never gave (the round-9 fix-check
+lens, P1).
+
+## `pub struct EntryObserved {`
+
+What a directory barrier saw of one entry of the directory it made
+durable: the entry's path, as the funnel bound it, and whether it was
+present at the instant before the barrier.
 
 ## `#[derive(Debug, Clone, Default)]`
 
@@ -201,6 +234,19 @@ Whether this ledger records at all.
 ## `pub fn record(&self, step: DurableStep, path: &Path, len: u64) {`
 
 Append one entry, with the mode the path has at that moment.
+
+## `pub fn record_transition(`
+
+Append one entry for a transition the funnel bracketed with two reads of
+its own: the mode before and the mode after, as the funnel read them off
+the descriptor (`rundir::give_group`); the length is not the transition's
+to report.
+
+## `pub fn record_entry(&self, step: DurableStep, path: &Path, entry: EntryObserved) {`
+
+Append one entry for a directory barrier, with the mode the directory has
+at that moment and the [`EntryObserved`] the funnel read in the statement
+before the barrier (`workspace_manager::sync_checkout_removed`).
 
 ## `#[must_use]`
 
@@ -395,11 +441,13 @@ by another spelling still meets it.
 
 A second scope, [`fail_file_barriers_under`] (PR10's round 8): every
 [`fsync_file_at`] of a file *directly under* `dir` is refused, and no
-directory barrier is — the staged report's own barrier, whose name the
-write chooses for itself (`rundir::report_staging_name`) and no test can
-know in advance, is armed by the directory it lands in; the directory
-barrier tests keep the exact-path scope, since a fault on the public
-directory must not reach the staged file's sync.
+directory barrier is — the staged report's own barrier is armed by the
+directory it lands in, since round 9 the staging directory the write makes
+for itself (`rundir::report_staging_dir`), and until then the public
+directory, under a name the write chose (`report.json.<ulid>.tmp`) and no
+test could know in advance; the directory barrier tests keep the
+exact-path scope, since a fault on the public directory must not reach the
+staged file's sync.
 
 ## `impl Drop for BarrierFault {`
 
