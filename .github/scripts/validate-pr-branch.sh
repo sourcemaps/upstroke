@@ -640,8 +640,9 @@ unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PA
 #   3. The path reaches a repository of its own as well. Both are asked what they record
 #      at the listing, and anything but the same answer is REFUSED. One directory with
 #      two ledgers is settled by neither: this is where a hidden superproject's `160000`
-#      refuses over the submodule's own index, and a foreign `GIT_INDEX_FILE` over a
-#      repository refuses rather than answers.
+#      refuses over the submodule's own index -- and, nested the other way round, where a
+#      submodule's own index the names select refuses under its superproject's `160000`
+#      -- and a foreign `GIT_INDEX_FILE` over a repository refuses rather than answers.
 #   4. The path reaches no repository. The named repository's records DECIDE, read by
 #      `recorded_kind_of` exactly as any records are -- recorded type before checkout
 #      shape, ancestors included -- where the environment names BOTH its git directory
@@ -650,6 +651,24 @@ unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PA
 #      which says where the ASKER stands and places no listing; a work tree or an index
 #      alone takes its repository from discovery at the caller's directory, which is not
 #      the listing's. Either is refused.
+#
+# AND THE REPOSITORY THE ENVIRONMENT NAMES IS THE ONE THAT IS READ, WHICH IS THE HALF THE
+# FOUR ARMS DID NOT SAY. They settle which repository JUDGES a listing; which one is READ
+# to judge it was left to `name_listing`, whose ascent -- discovery's way from a work
+# tree's own root out to the repository above that records it -- was taken for the named
+# repository too, and cleared `ledger_is_deployment` as it went. So arm 3 compared the
+# repository above with ITSELF. `outer` committing finding A under `findings/`, the names
+# selecting `outer/findings` through a second index recording A and a twin B, and `.`
+# asked from `outer/findings`: exit 0 `conforms` at `e3a91ff3`, an untruncated `strace`
+# counting three opens of `outer/.git/index` and none of the selected one, where
+# `231c1aad` refuses `names 2 findings`; a selected index recording no finding, or nothing
+# at all, conformed alike. It entered with `62bc799b`, which cleared the names for every
+# probe -- `4bcf49f3` exit 1, `62bc799b` exit 0, on all three -- and each round since
+# closed another face of that one move. So the named repository's root is never ascended
+# from, and no ascent ever stands in for the selected ledger. A repository above it is
+# the PATH's, which `locate_listing` reaches by that same ascent, and where it records the
+# listing otherwise than the selected one does, that is arm 3's refusal -- whichever of the
+# two is nested in the other.
 #
 # SO WHAT EXPORTING THE NAMES CAN CHANGE IS STATED HERE RATHER THAN LEFT TO BE FOUND.
 # Where the path reaches a repository, the run with them exported gives exactly the
@@ -1663,7 +1682,9 @@ resolve_deployment() {
 # `recorded_kind_of`, which read the ledger a listing is named in, go through here.
 # Every probe that asks WHICH repository answers -- discovery, and the ascent's
 # `records_path` over a repository found above a work tree -- runs cleared, and
-# never through here.
+# never through here; and none of them is asked on the named repository's behalf, so
+# nothing between `name_listing` setting this flag and `judge_in_deployment` reading the
+# named records clears it.
 ledger_is_deployment=0
 ledger_probe() {
   if (( ledger_is_deployment )); then
@@ -2161,8 +2182,10 @@ locate_listing() {
 # `listing_world`, `listing_toplevel` and `listing_relpath`. `locate_listing` hands it
 # the root git DISCOVERED from the path; `judge_in_deployment` hands it the root git
 # RESOLVED from the environment, with `ledger_is_deployment` set so every record read
-# here is that repository's -- until an ascent below moves the answer to a repository
-# ABOVE the root, which is found by discovery and read cleared. 1 is a refusal, stated;
+# here is that repository's -- and for that caller the root is never ascended from, so
+# the name in it is the whole answer and no repository above replaces the one the
+# environment selected. The first caller's ascent is what reaches a repository above,
+# and arm 3 is where the two are compared. 1 is a refusal, stated;
 # 3, for the second caller only, is "no component the caller wrote is this root, or
 # what they wrote climbs back out of it", which for that caller is a listing the named
 # work tree does not hold and is not this function's to refuse.
@@ -2396,10 +2419,25 @@ name_listing() {
     # matches that root and then leaves it -- the pathspec `git ls-files` refuses as
     # `outside repository`. A root DISCOVERY finds holds the directory it was
     # discovered from, and a component the caller wrote cannot leave it.
-    if [[ "$ledger" == deployment ]] && (( ! moved )); then
+    #
+    # AND FOR THAT CALLER THE NAME IS THE WHOLE OF THE ANSWER, EMPTY OR NOT: THE
+    # REPOSITORY THE ENVIRONMENT SELECTS IS THE ONE THAT IS READ, SO NOTHING BELOW MOVES
+    # IT. The ascent below is DISCOVERY's -- discovery lands in the deepest work tree a
+    # path enters and must go and find which repository records it -- and a root the
+    # environment selected was not found that way. Taken for both callers, it moved an
+    # empty name out to whatever repository above recorded the root and cleared
+    # `ledger_is_deployment` on the way, so the records `judge_in_deployment` compared
+    # were that repository's and the selected index was never opened: exit 0 `conforms`
+    # at `e3a91ff3` over a selected index recording a twin, where `231c1aad` refuses --
+    # the environment section at the top of this file has the run and its `strace`. The
+    # repository above is not lost: it is the PATH's, reached by this same ascent from
+    # `locate_listing`, and arm 3 compares what it records with what the selected one
+    # records.
+    if [[ "$ledger" == deployment ]]; then
       case "/${rests[named_root]}/" in
         */../*) return 3 ;;
       esac
+      break
     fi
     # A name the work tree's own index can hold. Only an EMPTY one asks another
     # repository, and only then is anything above this one looked at.
@@ -2459,7 +2497,6 @@ name_listing() {
     top="$answering"
     moved_rel="$answering_rel"
     moved=1
-    ledger_is_deployment=0
   done
   listing_world=records
   listing_toplevel="$top"
