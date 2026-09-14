@@ -16088,9 +16088,15 @@ fn a_checkouts_deletion_is_made_durable_before_its_intent_is_removed() {
             },
         );
         let fixture = &planted.fixture;
+        let plain = |path: &Path| -> PathBuf {
+            let shown = path.to_string_lossy();
+            PathBuf::from(shown.strip_prefix(r"\\?\").unwrap_or(&shown))
+        };
         let parent_of = |checkout: &Path| {
-            std::fs::canonicalize(checkout.parent().expect("a slot has a parent directory"))
-                .expect("the slot kind's directory exists before the resume")
+            plain(
+                &std::fs::canonicalize(checkout.parent().expect("a slot has a parent directory"))
+                    .expect("the slot kind's directory exists before the resume"),
+            )
         };
         let slots = [
             (
@@ -16143,9 +16149,10 @@ fn a_checkouts_deletion_is_made_durable_before_its_intent_is_removed() {
                  {timeline:?}"
             );
             let synced_at = |index: usize| {
-                timeline[index].synced_dirs.iter().any(|dir| {
-                    std::fs::canonicalize(dir).ok().as_ref() == Some(parent) || dir == parent
-                })
+                timeline[index]
+                    .synced_dirs
+                    .iter()
+                    .any(|dir| plain(dir) == *parent)
             };
             assert!(
                 !synced_at(before),
