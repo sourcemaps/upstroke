@@ -212,7 +212,9 @@
 #                                ZERO and zero was a road to the prose parser and its
 #                                `VERDICT: PASS`. `<div>`, `<pre>` and any complete tag on a line
 #                                of its own start HTML blocks too, so the class is the divergence
-#                                and not the tag: a `json` fence line or a bare verdict opener
+#                                and not the tag: a `json` fence -- at the start of its line or
+#                                behind a blockquote's `>` or a list marker, which a rule anchored
+#                                at the start of the line let through -- or a bare verdict opener
 #                                inside a block the verdict was not read from is material
 #   MUT-STRAY-TOKEN-ENCODED      the stray severity scan ran over RAW TEXT while the severity only
 #                                exists after JSON decoding, so `"severity":"P\u0031"` -- the
@@ -1653,8 +1655,9 @@ expect MUT-JSON-REPEATED-NAME-CHOSEN \
 # `role_understanding` object is not a candidate either, so the count reaches ZERO -- and zero was a
 # road to the prose parser, which read the `VERDICT: PASS` line written underneath it. One repair
 # closes both, because a block the verdict was not read FROM is now accounted for on the same terms
-# as the material outside one: a line of its content shaped like the opening fence of a `json`
-# block, and the bare form's object opener, are material and there is no result.
+# as the material outside one: a fence run naming `json` anywhere in its content -- at the start of
+# a line or behind a blockquote's `>` or a list marker -- and the bare form's object opener, are
+# material and there is no result.
 #
 # AND THE UNCLOSED `<!--` IS A SPELLING, NOT THE CLASS. `<div>` (HTML block type 6, ended by a blank
 # line), `<pre>` (type 1, ended by its closing tag) and any complete tag on a line of its own start
@@ -1714,8 +1717,29 @@ sed 's/$/\r/' "$tmp/swallow-html-comment.md" > "$tmp/swallow-crlf.md"
     "$revived_head"
   swallow_blocking; printf '\n```\n\nVERDICT: PASS\n'
 } > "$tmp/swallow-prose-swallowed.md"
+# AND THE `json` FENCE A SWALLOW HIDES NEED NOT START ITS LINE. Inside a blockquote or a list item
+# it is still the verdict to CommonMark, and inside the hidden block it was nothing to a content
+# rule anchored at the start of the line: the review of that rule's head put `> ` in front of the
+# blocking object's fence and the audit read PASS out of the same swallow. The object lists no
+# findings, because CHANGES_REQUIRED listing none blocks on its own -- so there is no stray severity
+# to rescue the case, and what is asserted is the swallow alone. `markdown-it-py` 3.0.0 reads each
+# of these three comments as exactly one fenced `json` block, and it is the CHANGES_REQUIRED one.
+swallow_quiet() {  # swallow_quiet: a blocking object with nothing in it for the stray scan to find
+  printf '{"reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[]}' \
+    "$revived_head" "$revived_base"
+}
+{ printf 'Reviewed head: %s\n\n<!--\n```text\n-->\n\n> ```json\n> ' "$revived_head"
+  swallow_quiet; printf '\n> ```\n\n<!--\n```\n-->\n\n<!--\n```json\n'; swallow_pass; printf '\n```\n'
+} > "$tmp/swallow-blockquote.md"
+# A list item's closing fence would close a three-backtick block here, so the hidden one is longer.
+{ printf 'Reviewed head: %s\n\n<!--\n````text\n-->\n\n- ```json\n  ' "$revived_head"
+  swallow_quiet; printf '\n  ```\n\n<!--\n````\n-->\n\n<!--\n```json\n'; swallow_pass; printf '\n```\n'
+} > "$tmp/swallow-list-item.md"
+{ printf 'Reviewed head: %s\n\n<!--\n```text\n-->\n\n> - ```json\n>   ' "$revived_head"
+  swallow_quiet; printf '\n>   ```\n\n<!--\n```\n-->\n\n<!--\n```json\n'; swallow_pass; printf '\n```\n'
+} > "$tmp/swallow-quoted-list.md"
 for shape in html-comment div pre tilde plain uppercase indented crlf bare-object prose-object \
-             prose-swallowed; do
+             prose-swallowed blockquote list-item quoted-list; do
   got="$(review_rows "$tmp/swallow-$shape.md")"
   [[ "$got" == 0\|* ]] \
     && error "MUT-BLOCK-CONTENT-NOT-MATERIAL [$shape]: a comment whose verdict was swallowed parsed, got [$got]"
@@ -1737,9 +1761,12 @@ for shape in html-comment div pre tilde plain uppercase indented crlf bare-objec
     && error "MUT-BLOCK-CONTENT-NOT-MATERIAL [$shape]: the audit read PASS out of it"
 done
 # The diagnostic names WHICH of the two shapes it found, so each finding's own witness is pinned to
-# its own rule rather than to whichever of them fires first.
-contains MUT-BLOCK-CONTENT-NOT-MATERIAL "$(parse_why "$tmp/swallow-html-comment.md")" \
-  '```json inside the block'
+# its own rule rather than to whichever of them fires first -- and the three whose fence does not
+# start its line are pinned to the content rule, not to a fence run left outside every block.
+for shape in html-comment blockquote list-item quoted-list; do
+  contains "MUT-BLOCK-CONTENT-NOT-MATERIAL [$shape]" "$(parse_why "$tmp/swallow-$shape.md")" \
+    '```json inside the block'
+done
 contains MUT-BLOCK-CONTENT-NOT-MATERIAL "$(parse_why "$tmp/swallow-prose-object.md")" \
   'a verdict object inside the block'
 # THE CONTROLS, so no case above can pass on a fixture this parser refuses anyway. The same
@@ -1758,14 +1785,21 @@ printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\n1. **P1 - a thing th
 expect MUT-BLOCK-CONTENT-NOT-MATERIAL "$(review_rows "$tmp/swallow-control-prose.md")" \
   "0|prose/$revived_head/PASS/-/-;P1:-:0"
 # AND THE RULE IS NOT "A FENCE INSIDE A BLOCK", which would refuse a review for quoting one. A
-# longer fence around a shorter one is how a `text` block shows a fenced block, and only a line
-# shaped like the opening fence of a `json` block is material -- `json` being the one shape a
-# verdict is ever read from. This comment carries a nested fence and parses as the prose review it
-# is, so the cases above are about what the swallowed block HELD and not about nesting.
+# longer fence around a shorter one is how a `text` block shows a fenced block, and only a fence
+# run naming `json` is material -- `json` being the one shape a verdict is ever read from. This
+# comment carries a nested fence and parses as the prose review it is, so the cases above are about
+# what the swallowed block HELD and not about nesting.
 { printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\n' "$revived_head"
   printf '````text\nan example of a block:\n```text\nnot a verdict\n```\n````\n\nVERDICT: PASS\n'
 } > "$tmp/nested-text-fence.md"
 expect MUT-BLOCK-CONTENT-NOT-MATERIAL "$(review_rows "$tmp/nested-text-fence.md")" \
+  "0|prose/$revived_head/PASS/-/-"
+# NOR IS IT "A BLOCKQUOTE INSIDE A BLOCK". Quoted behind `> `, the same nested fence names `text`
+# and the comment parses: what the blockquote and list cases above turn on is the `json`, not `>`.
+{ printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\n' "$revived_head"
+  printf '````text\n> ```text\n> a quoted block, not a verdict\n> ```\n````\n\nVERDICT: PASS\n'
+} > "$tmp/quoted-text-fence.md"
+expect MUT-BLOCK-CONTENT-NOT-MATERIAL "$(review_rows "$tmp/quoted-text-fence.md")" \
   "0|prose/$revived_head/PASS/-/-"
 
 # --- the severity the stray scan could not read -------------------------------------------------

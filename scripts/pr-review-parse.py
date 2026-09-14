@@ -84,13 +84,13 @@ refusal:
   * every run of three or more backticks or tildes in the comment was consumed by the structure
     scan as a fence of a block that scan found. One that was not means the comment's block
     structure is NOT what this program thinks it is, and there is no result;
-  * and no block the verdict was not read from holds a `json` fence line or a bare verdict
-    opener. Accounting for every run says each one was consumed as a fence; it says nothing about
-    WHICH block it was consumed into, and CommonMark suppresses a fence inside a raw-HTML block
-    where this scan does not -- so a hidden `` ```text `` line swallowed a real blocking verdict
-    as its content, left every run accounted for, and let a `PASS` appended after it stand as the
-    only candidate. What such a block holds is material, on the same terms as what lies outside
-    one;
+  * and no block the verdict was not read from holds a `json` fence -- at the start of a line or
+    behind a blockquote's `>` or a list marker -- or a bare verdict opener. Accounting for every
+    run says each one was consumed as a fence; it says nothing about WHICH block it was consumed
+    into, and CommonMark suppresses a fence inside a raw-HTML block where this scan does not -- so
+    a hidden `` ```text `` line swallowed a real blocking verdict as its content, left every run
+    accounted for, and let a `PASS` appended after it stand as the only candidate. What such a
+    block holds is material, on the same terms as what lies outside one;
   * nothing but whitespace follows the block the verdict is read from, and no `VERDICT:` line
     stands outside it. Not "nothing this program recognises as a block" -- nothing;
   * no object the verdict is read from names anything twice, AT ANY DEPTH. `json.loads` keeps
@@ -249,20 +249,29 @@ FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,})[ \t\r]*\Z")
 # `\{\"role_understanding` missed `{ "role_understanding` and let an earlier PASS stand as the
 # verdict.
 FENCE_RUN = re.compile(r"`{3,}|~{3,}")
-# AND A LINE OF A BLOCK'S CONTENT THAT WOULD OPEN ONE, asked the same way. A fence run this scan
-# consumed AS A FENCE is accounted for by `FENCE_RUN` above whether or not it opened the block the
-# reader sees -- which is the hole `unresolved_material` was blind to, because accounting for every
-# run says nothing about which block each one belongs to. CommonMark suppresses a fence inside a
-# raw-HTML block -- an unclosed `<!--`, a `<div>`, a `<pre>`, any complete tag on a line of its own
-# (https://spec.commonmark.org/0.31.2/#html-blocks) -- and this scan does not, so a fence opened
-# inside one swallows the real verdict as its content and leaves every run accounted for. What such
-# a block's content holds is therefore material too, and a line of it SHAPED LIKE THE OPENING FENCE
-# of a `json` block is the material that matters: that is the one shape the verdict is ever read
-# from, so a block whose content carries one is a block this program cannot be sure it is reading
-# past. The info string is read the way `names_json` reads every other one; a line this matches and
-# CommonMark would not -- a backtick fence whose info string holds a backtick -- is a refusal rather
-# than a reading, which is the direction every rule in this file is wrong in when it is wrong.
-CONTENT_FENCE_OPEN = re.compile(r"^ {0,3}(?:`{3,}|~{3,})([^\n]*)$", re.M)
+# AND A FENCE RUN INSIDE A BLOCK'S CONTENT THAT WOULD OPEN A `json` BLOCK, asked the same way. A
+# fence run this scan consumed AS A FENCE is accounted for by `FENCE_RUN` above whether or not it
+# opened the block the reader sees -- which is the hole `unresolved_material` was blind to, because
+# accounting for every run says nothing about which block each one belongs to. CommonMark
+# suppresses a fence inside a raw-HTML block -- an unclosed `<!--`, a `<div>`, a `<pre>`, any
+# complete tag on a line of its own (https://spec.commonmark.org/0.31.2/#html-blocks) -- and this
+# scan does not, so a fence opened inside one swallows the real verdict as its content and leaves
+# every run accounted for. What such a block's content holds is therefore material too, and a fence
+# run whose info string names `json` is the material that matters: that is the one shape the
+# verdict is ever read from, so a block whose content carries one is a block this program cannot be
+# sure it is reading past.
+#
+# EVERY RUN, WHEREVER IT STANDS ON ITS LINE -- asked in characters for the reason `FENCE_RUN` is.
+# This was a pattern anchored at the start of a line, and `> ```json` walked past it: a `json` fence
+# inside a blockquote, which CommonMark renders as the verdict, swallowed by a hidden `text` block
+# whose content this rule then read as clean -- the blockquote getting past a content rule the way
+# it once got past the recogniser. A list marker opens a fence the same way, and so does a list
+# inside a blockquote, so the prefix is not enumerated: the run is found wherever it is and the
+# rest of its line is read the way `names_json` reads every other info string. A run this
+# matches and CommonMark would not read as a fence -- after prose, indented into code, a backtick
+# run whose info string holds a backtick -- is a refusal rather than a reading, which is the
+# direction every rule in this file is wrong in when it is wrong.
+CONTENT_FENCE_RUN = re.compile(r"(`{3,}|~{3,})(?=([^\n]*))")
 
 # The prose form, read exactly as the shell read it. `[^ \t\n\r\f\v]` is POSIX `[^[:space:]]` in
 # the `C` locale, which is what the greps were given.
@@ -561,11 +570,14 @@ def unresolved_material(text, blocks):
 
     So a block this program did not read the verdict FROM is not inert. Two things inside one are
     material, and they are the two shapes a verdict is ever read from anywhere else in this file:
-    a line SHAPED LIKE THE OPENING FENCE of a `json` block, and the older bare form's OBJECT OPENER
-    -- which is the whole of the second finding, whose `text`-fenced `role_understanding` object
-    left the candidate count at zero and sent a self-contradictory comment to the prose parser. A
-    comment whose `text` block holds either has no result -- which is the same sentence as the one
-    above it, asked of the inside of a block rather than of the outside of one.
+    a FENCE RUN NAMING `json`, wherever it stands on its line, and the older bare form's OBJECT
+    OPENER -- which is the whole of the second finding, whose `text`-fenced `role_understanding`
+    object left the candidate count at zero and sent a self-contradictory comment to the prose
+    parser. A comment whose `text` block holds either has no result -- which is the same sentence as
+    the one above it, asked of the inside of a block rather than of the outside of one. Wherever it
+    stands, because a pattern anchored at the start of the line let `> ```json` through: a `json`
+    fence inside a blockquote is a verdict to CommonMark, and inside a swallowing block it was
+    nothing to this rule.
     """
     stale = []
     for start, end in spans_outside(text, blocks):
@@ -575,12 +587,14 @@ def unresolved_material(text, blocks):
         if one.fence == "`" and names_json(one.info):
             # The verdict's own shape. What is inside THIS is read by `json.loads`, which is a
             # whole-document check no fence run can pass: a line-initial run inside a valid JSON
-            # object would have to be inside a string, and a JSON string holds no newline.
+            # object would have to be inside a string, and a JSON string holds no newline -- and a
+            # run behind a blockquote's `>` or a list marker is no more JSON than one without.
             continue
         at = text.count("\n", 0, one.outer) + 1
-        for run in CONTENT_FENCE_OPEN.finditer(one.content):
-            if names_json(run.group(1)):
-                stale.append("%s inside the block at line %d" % (run.group(0).strip()[:16], at))
+        for run in CONTENT_FENCE_RUN.finditer(one.content):
+            if names_json(run.group(2)):
+                stale.append("%s%s inside the block at line %d"
+                             % (run.group(1)[:8], run.group(2).split()[0][:8], at))
         if BARE_OBJECT_OPEN.search(one.content) is not None:
             stale.append("a verdict object inside the block at line %d" % at)
         if one.fence != "`" and names_json(one.info):
@@ -785,9 +799,9 @@ def review_result(args):
 
       * material this program could not account for as a block -> no result. A fence run outside
         every block it found, and -- because accounting for every run says nothing about which
-        block each one went into -- a `json` fence line or a bare verdict opener INSIDE a block it
-        did not read the verdict from. The structure is not what it thinks it is, so nothing built
-        on that structure can be trusted;
+        block each one went into -- a fence run naming `json`, wherever it stands on its line, or a
+        bare verdict opener INSIDE a block it did not read the verdict from. The structure is not
+        what it thinks it is, so nothing built on that structure can be trusted;
       * the prose form's marker AND a verdict block -> no result. The comment claims to be both
         forms, and they do not agree about the same review;
       * the prose form's marker and nothing else -> the prose parser, which is the form the comment
