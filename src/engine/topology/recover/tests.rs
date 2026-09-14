@@ -1826,6 +1826,7 @@ struct FinishedPlanting {
     orphan: String,
     released: Vec<String>,
     store: Vec<String>,
+    report_leftover: PathBuf,
 }
 
 struct PlantedAnswerFiles {
@@ -1981,6 +1982,10 @@ fn plant_finished_run_with(
     let orphan = plant_unreachable_object(&fixture, tag);
     let released = referenced_objects(&fixture);
     let store = store_objects(&fixture.repo_root);
+    let report_leftover = fixture
+        .public()
+        .join(rundir::report_staging_name(&crate::ulid::ulid()));
+    crate::workspace_manager::fixture::write_file(&report_leftover, b"{\"half\":");
     FinishedPlanting {
         fixture,
         candidate,
@@ -1994,6 +1999,7 @@ fn plant_finished_run_with(
         orphan,
         released,
         store,
+        report_leftover,
     }
 }
 
@@ -15307,6 +15313,14 @@ fn assert_finalized(planted: &FinishedPlanting, outcome: &RunOutcome, tag: &str)
         1,
         "{tag}: finalization appends nothing"
     );
+    assert!(
+        !planted.report_leftover.exists()
+            && rundir::report_staging_files(&fixture.public())
+                .expect("listed")
+                .is_empty(),
+        "{tag}: the staged report a dead writer left is reclaimed inside the report site, on \
+         either branch, and nothing of the report's protocol is left staged"
+    );
     assert_objects_kept(planted, tag);
 }
 
@@ -15340,7 +15354,10 @@ fn finalization_effects(outcome: &RunOutcome) -> Vec<FinalizationEffect> {
                 EffectSiteId::Report(crate::topology::effects::ReportSite::Write),
             ],
             label: "report written",
-            done: |planted| planted.fixture.public().join("report.json").is_file(),
+            done: |planted| {
+                planted.fixture.public().join("report.json").is_file()
+                    && !planted.report_leftover.exists()
+            },
         },
         FinalizationEffect {
             sites: vec![EffectSiteId::Worktree(WorktreeSite::Remove)],
@@ -15612,6 +15629,7 @@ fn kill_after_report_before_each_cleanup_step() {
             );
             let report_bytes = std::fs::read(fixture.public().join("report.json"))
                 .expect("the report the second resume left current");
+            crate::workspace_manager::fixture::write_file(&planted.report_leftover, b"{\"half\":");
             let third = harness();
             let (result, _) = resume(fixture, &third, &given);
             let text = message(&result.expect_err("a finalized run refuses again"));
@@ -15636,8 +15654,12 @@ fn kill_after_report_before_each_cleanup_step() {
                 "{tag}: and writes nothing: the report is byte-identical"
             );
             assert!(
-                !fixture.public().join(rundir::REPORT_STAGED).exists(),
-                "{tag}: nothing was staged"
+                !planted.report_leftover.exists()
+                    && rundir::report_staging_files(&fixture.public())
+                        .expect("listed")
+                        .is_empty(),
+                "{tag}: nothing was staged, and the staged report a dead writer left before this \
+                 resume is reclaimed on the fresh branch too"
             );
             for site in [
                 EffectSiteId::Worktree(WorktreeSite::Remove),
@@ -15998,7 +16020,9 @@ fn the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_re
         "the report was durable before any ref was touched: {timeline:?}"
     );
     assert!(
-        !fixture.public().join(rundir::REPORT_STAGED).exists(),
+        rundir::report_staging_files(&fixture.public())
+            .expect("listed")
+            .is_empty(),
         "the staged report was renamed onto its name"
     );
     let bytes = std::fs::read(&report_path).expect("the report is present under its name");
@@ -16044,6 +16068,107 @@ fn the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_re
         "and the refs are pruned behind the report the rename proved durable"
     );
     assert_finalized(&planted, &RunOutcome::Complete, "after the restart");
+}
+
+#[test]
+fn a_checkouts_deletion_is_made_durable_before_its_intent_is_removed() {
+    use crate::topology::effects::{LockSite, SnapshotSite};
+    for (outcome, alpha) in [
+        (RunOutcome::Complete, AlphaEnd::Published),
+        (RunOutcome::Halted, AlphaEnd::Queued),
+    ] {
+        let planted = plant_finished_run_with(
+            &format!("scrub-durable-{}", outcome_short(&outcome)),
+            outcome.clone(),
+            alpha,
+            FinishedResidue {
+                snapshot: true,
+                staging: true,
+                prepared_pin: true,
+            },
+        );
+        let fixture = &planted.fixture;
+        let parent_of = |checkout: &Path| {
+            std::fs::canonicalize(checkout.parent().expect("a slot has a parent directory"))
+                .expect("the slot kind's directory exists before the resume")
+        };
+        let slots = [
+            (
+                "beta's task worktree",
+                EffectSiteId::Worktree(WorktreeSite::Remove),
+                EffectSiteId::Worktree(WorktreeSite::RemoveIntent),
+                parent_of(&planted.beta_worktree),
+            ),
+            (
+                "the snapshot",
+                EffectSiteId::Snapshot(SnapshotSite::Remove),
+                EffectSiteId::Snapshot(SnapshotSite::RemoveIntent),
+                parent_of(planted.snapshot.as_deref().expect("planted")),
+            ),
+            (
+                "the staging worktree",
+                EffectSiteId::Worktree(WorktreeSite::RemoveStaging),
+                EffectSiteId::Worktree(WorktreeSite::RemoveStagingIntent),
+                parent_of(planted.staging.as_deref().expect("planted")),
+            ),
+        ];
+        let runtime = runtime_holding_the_record();
+        let certifies = AlwaysCertifies;
+        let given = Given::healthy(fixture, &runtime, &certifies);
+        let harness = harness();
+        let mut hooks = BarrierHooks::armed(
+            &harness,
+            (EffectSiteId::Lock(LockSite::Release), HookPhase::After),
+            Injection::Proceed,
+        );
+        let (result, _) = resume_with(fixture, &mut hooks, &given);
+        let text = message(&result.expect_err("the resume finalizes then refuses"));
+        assert!(text.contains("already finished as"), "{outcome:?}: {text}");
+        let timeline = hooks.timeline();
+        let position = |site: EffectSiteId, phase: HookPhase| {
+            timeline
+                .iter()
+                .position(|seen| seen.site == site && seen.phase == phase)
+                .unwrap_or_else(|| {
+                    panic!("{outcome:?}: `{site}`/{phase} was not reached: {timeline:?}")
+                })
+        };
+        for (label, remove, remove_intent, parent) in &slots {
+            let before = position(*remove, HookPhase::Before);
+            let after = position(*remove, HookPhase::After);
+            let intent = position(*remove_intent, HookPhase::Before);
+            assert!(
+                before < after && after < intent,
+                "{outcome:?}/{label}: the removal's two phases precede the intent's removal: \
+                 {timeline:?}"
+            );
+            let synced_at = |index: usize| {
+                timeline[index].synced_dirs.iter().any(|dir| {
+                    std::fs::canonicalize(dir).ok().as_ref() == Some(parent) || dir == parent
+                })
+            };
+            assert!(
+                !synced_at(before),
+                "{outcome:?}/{label}: the checkout's directory was not yet synced when its \
+                 removal began: {:?}",
+                timeline[before].synced_dirs
+            );
+            assert!(
+                synced_at(after),
+                "{outcome:?}/{label}: the checkout's directory ({}) was synced inside the \
+                 removal's site, before its after phase — the deletion durable before the funnel \
+                 returned: {:?}",
+                parent.display(),
+                timeline[after].synced_dirs
+            );
+            assert!(
+                synced_at(intent),
+                "{outcome:?}/{label}: and therefore before the intent that names the checkout \
+                 was removed"
+            );
+        }
+        assert_finalized(&planted, &outcome, "after the resume");
+    }
 }
 
 #[track_caller]
@@ -16125,7 +16250,9 @@ fn assert_fresh_branch_took_the_report_sites(
          nothing: {under_public:?}"
     );
     assert!(
-        !public.join(rundir::REPORT_STAGED).exists(),
+        rundir::report_staging_files(public)
+            .expect("listed")
+            .is_empty(),
         "{tag}: no staged report"
     );
 }
@@ -16178,7 +16305,11 @@ fn a_report_directory_barrier_that_fails_refuses_pruning_on_every_resume_until_i
             report_of(fixture).is_fresh_against(&bytes),
             "{tag}: and current by digest — the shape the next resume takes the fresh branch on"
         );
-        assert!(!fixture.public().join(rundir::REPORT_STAGED).exists());
+        assert!(
+            rundir::report_staging_files(&fixture.public())
+                .expect("listed")
+                .is_empty()
+        );
         assert_eq!(
             candidates_refs_of(fixture).len(),
             1,
@@ -16538,7 +16669,9 @@ fn fresh_report_hook_errors_stop_cleanup_and_retry() {
                 "{cell}: the report is byte-identical"
             );
             assert!(
-                !fixture.public().join(rundir::REPORT_STAGED).exists(),
+                rundir::report_staging_files(&fixture.public())
+                    .expect("listed")
+                    .is_empty(),
                 "{cell}: nothing was staged"
             );
             assert_eq!(

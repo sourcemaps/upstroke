@@ -176,6 +176,15 @@ effect_free = [
 path = "src/rundir/names.rs"
 crate_path = "upstroke::rundir::names"
 funnel = []
+effectful = []
+effectful_unnameable = []
+effect_free = [
+    # The report's staging name and its recogniser (PR10's round 8): a name
+    # chosen for one write, `report.json.<ulid>.tmp`, and the predicate the
+    # leftover reclaim lists by. String work; neither touches a path.
+    "is_report_staging_name",
+    "report_staging_name",
+]
 # The eight production children the `m4-workspace` split gave
 # `src/workspace_manager.rs`, added in the same commit as the split. Twenty-six
 # names left the parent's file, and a name that leaves the domain is a name
@@ -516,6 +525,11 @@ effect_free = [
     "questions",
     "recording_durability",
     "report_json",
+    # Lists the regular files under the public directory wearing the report's
+    # staging shape (`report_staging_name`): `read_dir` and `symlink_metadata`,
+    # nothing created, renamed or removed. The tests' witness that nothing of
+    # the report's protocol is left staged (PR10's round 8).
+    "report_staging_files",
     "reviews",
     "runs_root",
     "settings",
@@ -584,6 +598,9 @@ effect_free = [
     # guard's `drop` disarms it); reaches no filesystem effect of its own.
     "drop",
     "fail_barriers_at",
+    # The same fault, scoped to the file barriers directly under a directory,
+    # for a staged file whose name the write chooses (PR10's round 8).
+    "fail_file_barriers_under",
     "deserialize",
     "executable_extensions",
     "fence_for",

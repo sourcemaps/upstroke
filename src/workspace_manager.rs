@@ -2603,6 +2603,20 @@ impl WorkspaceManager {
     /// which is empty under [`WriterProof::Unknown`], since that proof
     /// refuses the first such entry instead.
     ///
+    /// The checkout's deletion is made durable inside the site, before the
+    /// funnel returns: its parent directory — the slot kind's directory under
+    /// the execution root — is synced through [`sync_directory`] and recorded
+    /// as the ledger's `SyncedDirectory`, the barrier every other directory
+    /// change of this module takes. Every caller removes the slot's intent
+    /// next ([`Self::remove_intent`], which syncs the intents directory), and
+    /// a power loss between the two could otherwise roll the checkout's
+    /// deletion back while the intent's persisted, leaving a checkout no
+    /// terminal resume enumerates — resumes read the intents — so the
+    /// execution root would never empty and R9/R18 residue would outlive every
+    /// later resume (the round-8 crash lens, P2). One barrier here covers the
+    /// three slot kinds and both callers' orders, the terminal finalization's
+    /// scrub and the live loop's.
+    ///
     /// # Errors
     ///
     /// The containment refusals, or a Git or I/O error.
@@ -2617,6 +2631,7 @@ impl WorkspaceManager {
             admin: registration,
             passed_over,
         } = self.revalidate_removal_proving(&path, proof)?;
+        let ledger = hooks.durability_ledger();
         funnel(hooks, slot.remove_site(), || {
             self.revalidate_acted_through(
                 Primitive::RemoveWorktree,
@@ -2638,10 +2653,14 @@ impl WorkspaceManager {
                 remove_tree_once_handles_close(&contained).map_err(|source| {
                     UpstrokeError::Filesystem {
                         operation: "remove",
-                        path: contained,
+                        path: contained.clone(),
                         source,
                     }
                 })?;
+                let parent = contained.parent().ok_or_else(|| UpstrokeError::Git {
+                    message: format!("{} has no parent directory", contained.display()),
+                })?;
+                sync_directory(parent, &ledger)?;
             }
             if let Some(admin) = registration.as_ref() {
                 if !self.registration_still_names(admin, &path)? {

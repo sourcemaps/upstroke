@@ -135,6 +135,7 @@ pub enum DurableStep {
     SyncedData,
     Truncated,
     Staged,
+    GroupGiven,
     SyncedFile,
     Renamed,
     SyncedDirectory,
@@ -290,14 +291,21 @@ pub(crate) fn fsync_file(file: &std::fs::File) -> std::io::Result<()> {
 }
 
 pub(crate) fn fsync_file_at(file: &std::fs::File, path: &Path) -> std::io::Result<()> {
-    if let Some(fault) = injected_barrier_fault(path) {
+    if let Some(fault) = injected_barrier_fault(path, BarrierHalf::File) {
         count_barrier(BarrierHalf::File);
         return Err(fault);
     }
     fsync_file(file)
 }
 
-static ARMED_BARRIER_FAULTS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+static ARMED_BARRIER_FAULTS: std::sync::Mutex<Vec<(PathBuf, FaultScope)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FaultScope {
+    Exactly,
+    FilesBeneath,
+}
 
 static ARMED_BARRIER_FAULT_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -306,17 +314,28 @@ static ARMED_BARRIER_FAULT_COUNT: std::sync::atomic::AtomicUsize =
 #[must_use = "the fault is armed only while the guard is held"]
 pub(crate) struct BarrierFault {
     path: PathBuf,
+    scope: FaultScope,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn fail_barriers_at(path: &Path) -> BarrierFault {
+    arm_barrier_fault(path, FaultScope::Exactly)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn fail_file_barriers_under(dir: &Path) -> BarrierFault {
+    arm_barrier_fault(dir, FaultScope::FilesBeneath)
+}
+
+fn arm_barrier_fault(path: &Path, scope: FaultScope) -> BarrierFault {
     ARMED_BARRIER_FAULTS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .push(path.to_path_buf());
+        .push((path.to_path_buf(), scope));
     ARMED_BARRIER_FAULT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     BarrierFault {
         path: path.to_path_buf(),
+        scope,
     }
 }
 
@@ -325,14 +344,17 @@ impl Drop for BarrierFault {
         let mut armed = ARMED_BARRIER_FAULTS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(index) = armed.iter().position(|armed| *armed == self.path) {
+        if let Some(index) = armed
+            .iter()
+            .position(|(armed, scope)| *armed == self.path && *scope == self.scope)
+        {
             armed.remove(index);
             ARMED_BARRIER_FAULT_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
 
-fn injected_barrier_fault(path: &Path) -> Option<std::io::Error> {
+fn injected_barrier_fault(path: &Path, half: BarrierHalf) -> Option<std::io::Error> {
     if ARMED_BARRIER_FAULT_COUNT.load(std::sync::atomic::Ordering::Relaxed) == 0 {
         return None;
     }
@@ -340,10 +362,21 @@ fn injected_barrier_fault(path: &Path) -> Option<std::io::Error> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let resolved = std::fs::canonicalize(path).ok();
+    let parent = path.parent();
+    let parent_resolved = parent.and_then(|parent| std::fs::canonicalize(parent).ok());
     armed
         .iter()
-        .any(|armed| {
-            armed == path || (resolved.is_some() && std::fs::canonicalize(armed).ok() == resolved)
+        .any(|(armed, scope)| match scope {
+            FaultScope::Exactly => {
+                armed == path
+                    || (resolved.is_some() && std::fs::canonicalize(armed).ok() == resolved)
+            }
+            FaultScope::FilesBeneath => {
+                half == BarrierHalf::File
+                    && (parent == Some(armed.as_path())
+                        || (parent_resolved.is_some()
+                            && std::fs::canonicalize(armed).ok() == parent_resolved))
+            }
         })
         .then(|| {
             std::io::Error::other(format!(
@@ -355,7 +388,7 @@ fn injected_barrier_fault(path: &Path) -> Option<std::io::Error> {
 
 pub(crate) fn fsync_dir(dir: &Path) -> std::io::Result<()> {
     count_barrier(BarrierHalf::Directory);
-    if let Some(fault) = injected_barrier_fault(dir) {
+    if let Some(fault) = injected_barrier_fault(dir, BarrierHalf::Directory) {
         return Err(fault);
     }
     #[cfg(unix)]
