@@ -234,6 +234,23 @@
 #                                consumer reads -- references for the info string, which is ALL
 #                                CommonMark does to one (it is not parsed as Markdown, so
 #                                `js*on*` is `js*on*` there), and JSON's escapes for the key
+#   MUT-NAME-FOUND-IN-NO-RENDERING  the rule above, over-corrected: it resolved the info string's
+#                                character references the way CommonMark does and then split the
+#                                RESULT the way `str.split()` does, which ends a word at U+0085 and
+#                                at U+001C-U+001F. No rendering of the comment contains that word
+#                                break -- `markdown-it-py` 3.0.0 leaves those references written,
+#                                and CommonMark's two whitespace definitions name none of the five.
+#                                Each reading is split by its own boundary now, and the five written
+#                                LITERALLY still end a word, because that renderer splits the string
+#                                it was handed -- so ```` ```json&#133;x ````, an ordinary
+#                                example block beside a
+#                                review's one real verdict, became a second candidate and a valid
+#                                PASS was refused with "2 places a verdict could be read from":
+#                                READY to NOT-READY, one merge call to none, out of a review that
+#                                says nothing wrong and cannot be rewritten to clear it. A guard
+#                                reads what its consumer reads in BOTH directions, and the
+#                                spelling `json&amp;#133;x`, which renders byte-identically, is
+#                                read the same way
 #   MUT-STRAY-TOKEN-ENCODED      the stray severity scan ran over RAW TEXT while the severity only
 #                                exists after JSON decoding, so `"severity":"P\u0031"` -- the
 #                                spelling every witness in this family uses -- carried no `P1` for
@@ -2032,6 +2049,211 @@ expect MUT-STRAY-TOKEN-ENCODED "$(review_rows "$tmp/stray-unresolvable.md")" \
   "0|json/$revived_head/PASS/$revived_base/-"
 expect MUT-STRAY-TOKEN-ENCODED "$(parse_nul review "$tmp/stray-unresolvable.md")" \
   "0|review|json|$revived_head|PASS|$revived_base|-|0|"
+
+# --- a name no rendering of the comment contains, and the merge call two witnesses bought --------
+# TWO THINGS ARE ASSERTED HERE AND THE HARNESS IS WHY THEY SHARE A SECTION. Everything above reads
+# the parser's exit and the audit's state; a bypass does not stop at a state, it ends in
+# `gh pr merge`, and none of the fixtures above can count that call because none of them reaches
+# READY: the audit resolves the reviewed and base commits with git, and their shas are invented.
+# So the harness below is a REPOSITORY OF ITS OWN -- two empty commits, `origin/master` at the
+# second, the stub's pull request head the same commit -- and its clean control reaches READY and
+# MAKES the call. That is what makes a zero mean something: a count that is zero for every input,
+# including the ones that must not be zero, asserts nothing at all.
+#
+# MUT-GUARD-READS-THE-WRITTEN-SPELLING, at the cost. The first two comments are the review's own
+# witnesses against the head that first claimed this finding closed, kept as they were written: a
+# blocking verdict behind a ```` ```jso&#110; ```` fence inside a swallowing block, and a
+# `text`-fenced object opening `{"role_understandin\u0067"`. At that head each one
+# parsed, reported PASS, reached READY and made one merge call, out of a review that blocks. They
+# are fixtures rather than something a reviewer re-checks because the review that answers "is this
+# actually fixed" refused eight consecutive times on the head this repairs; a fixture answers the
+# same question on every head afterwards and cannot refuse.
+#
+# MUT-NAME-FOUND-IN-NO-RENDERING is the same guard over-corrected, and the direction that costs a
+# reviewer the review instead of letting one past. `json&#133;x` resolves to U+0085, which
+# `str.split()` calls whitespace and CommonMark does not, so the first word read as `json` and an
+# ordinary example block became a second candidate: READY to NOT-READY and the merge call to none,
+# for a comment that says nothing wrong and that no rewriting clears. Measured, `markdown-it-py`
+# 3.0.0 renders that fence `language-json&#133;x`; so does `json&amp;#133;x`, byte for byte, and
+# the two are read the same way here.
+enqueue_repo="$tmp/enqueue-repo"
+git init -q "$enqueue_repo"
+git -C "$enqueue_repo" -c user.email=t@example -c user.name=t \
+  commit -q --allow-empty -m "the base the review was made against"
+enqueue_base="$(git -C "$enqueue_repo" rev-parse HEAD)"
+git -C "$enqueue_repo" -c user.email=t@example -c user.name=t \
+  commit -q --allow-empty -m "the head the review read"
+enqueue_head="$(git -C "$enqueue_repo" rev-parse HEAD)"
+git -C "$enqueue_repo" remote add origin "$enqueue_repo"
+git -C "$enqueue_repo" update-ref refs/remotes/origin/master "$enqueue_head"
+# The stub the audit is run against: the `lookup` one above, plus the two reads that stand between
+# READY and the enqueue, plus `pr merge` ITSELF, which is recorded rather than answered. Nothing
+# here reaches the network -- `origin` is the harness repository itself -- and an unmodelled call
+# is still `GH-UNSTUBBED`, so a case cannot pass by taking a path this does not describe.
+enqueue_gh="$tmp/enqueue-gh"
+mkdir -p "$enqueue_gh"
+printf '#!/usr/bin/env bash\nhead=%s\n' "$enqueue_head" > "$enqueue_gh/gh"
+cat >> "$enqueue_gh/gh" <<'GH'
+case "$*" in
+  "repo view"*)               echo eventloops/upstroke ;;
+  *"--jq .owner.login")       echo eventloops ;;
+  *"--jq .owner.type")        echo User ;;
+  *"/labels?per_page=100"*)   ;;
+  "label create"*)            ;;
+  "pr edit"*)                 ;;
+  "pr merge"*)                printf '[%s]' "$@" >> "$STUB_MERGE_LOG"
+                              printf '\n' >> "$STUB_MERGE_LOG" ;;
+  *rulesets*)                 ;;
+  *check-runs*)               printf 'upstroke-ci\t10\tsuccess\nupstroke-pr-policy\t11\tsuccess\n' ;;
+  *"/pulls?state=open"*)      exit 0 ;;
+  *timeline*)                 ;;
+  *"/comments?per_page=100"*) echo "2026-09-01T00:00:00Z 5001" ;;
+  *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
+  *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
+  *"--json body"*)            echo "no ledger" ;;
+  *"--json headRefOid"*)      echo "$head" ;;
+  *"--json baseRefName"*)     echo master ;;
+  "pr view"*)                 printf '%s\n%s\nfalse\nCLEAN\nmaster\n%s\n0\n' \
+                                feature/x "$head" "$head" ;;
+  *) echo "GH-UNSTUBBED $*" >&2; exit 97 ;;
+esac
+GH
+chmod +x "$enqueue_gh/gh"
+merge_run() {  # merge_run FILE: "<status>|<output, on one line>|<gh pr merge calls>"
+  local out status=0
+  : > "$tmp/merge-calls.log"
+  out="$(cd "$enqueue_repo" && STUB_MERGE_LOG="$tmp/merge-calls.log" STUB_REVIEW_BODY="$1" \
+    PATH="$enqueue_gh:$PATH" bash "$root/scripts/pr-ready-audit.sh" --enqueue 999 2>&1)" \
+    || status=$?
+  printf '%s|%s|%s' "$status" "$(tr '\n' ' ' <<< "$out")" \
+    "$(grep -c . "$tmp/merge-calls.log" || true)"
+}
+enqueue_pass() {  # enqueue_pass: the clean verdict this harness's pull request has earned
+  printf '{"reviewed_sha":"%s","base_sha":"%s","verdict":"PASS","findings":[]}' \
+    "$enqueue_head" "$enqueue_base"
+}
+enqueue_blocking() {  # enqueue_blocking: the blocking verdict the two witnesses below hide
+  printf '{"reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[]}' \
+    "$enqueue_head" "$enqueue_base"
+}
+# THE CONTROL FIRST, and it is the only reason a zero below is evidence: the same pull request with
+# the same clean verdict and nothing hidden anywhere is READY, is enqueued, and the recorder holds
+# exactly one call.
+{ printf 'Reviewed head: %s\n\n```json\n' "$enqueue_head"; enqueue_pass; printf '\n```\n'; } \
+  > "$tmp/enqueue-clean.md"
+got="$(merge_run "$tmp/enqueue-clean.md")"
+contains "MUT-GUARD-READS-THE-WRITTEN-SPELLING merge control" "$got" "enqueued #999"
+expect "MUT-GUARD-READS-THE-WRITTEN-SPELLING merge control calls" "${got##*|}" 1
+expect "MUT-GUARD-READS-THE-WRITTEN-SPELLING merge control status" "${got%%|*}" 0
+# Round one's first witness, and the same comment with the hidden fence's language written plainly:
+# the encoded spelling buys nothing the literal one does not already get.
+entity_witness() {  # entity_witness INFO: round one's blockquote witness, hidden fence tagged INFO
+  printf 'Reviewed head: %s\n\n<!--\n```text\n-->\n\n> ```%s\n> ' "$enqueue_head" "$1"
+  enqueue_blocking; printf '\n> ```\n\n<!--\n```\n-->\n\n<!--\n```json\n'
+  enqueue_pass; printf '\n```\n'
+}
+entity_witness 'jso&#110;' > "$tmp/round1-entity.md"
+entity_witness 'json'      > "$tmp/round1-entity-literal.md"
+# Round one's second witness, and its literal twin: the object's first key is `role_understanding`
+# to `json.loads` either way, and the candidate count it emptied was the road to the prose parser.
+key_witness() {  # key_witness KEY: round one's prose witness, the object's first key spelled KEY
+  printf '<!-- upstroke-frontier-review pr=286 head=%s -->\n\n```text\n' "$enqueue_head"
+  printf '{"%s":"x","reviewed_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[]}' \
+    "$1" "$enqueue_head"
+  printf '\n```\n\nVERDICT: PASS\n'
+}
+key_witness 'role_understandin\u0067' > "$tmp/round1-key.md"
+key_witness 'role_understanding'      > "$tmp/round1-key-literal.md"
+for shape in entity entity-literal key key-literal; do
+  expect "MUT-GUARD-READS-THE-WRITTEN-SPELLING [round1-$shape] parser" \
+    "$(review_rows "$tmp/round1-$shape.md")" '1|'
+  got="$(merge_run "$tmp/round1-$shape.md")"
+  contains "MUT-GUARD-READS-THE-WRITTEN-SPELLING [round1-$shape]" "$got" "NOT-READY"
+  contains "MUT-GUARD-READS-THE-WRITTEN-SPELLING [round1-$shape]" "$got" "review-parse-failed"
+  expect "MUT-GUARD-READS-THE-WRITTEN-SPELLING [round1-$shape] merge calls" "${got##*|}" 0
+  [[ "$got" == *"verdict=PASS"* ]] \
+    && error "MUT-GUARD-READS-THE-WRITTEN-SPELLING [round1-$shape]: the audit read PASS out of it"
+  [[ "$got" == *"enqueued #999"* ]] \
+    && error "MUT-GUARD-READS-THE-WRITTEN-SPELLING [round1-$shape]: the audit enqueued it"
+done
+# AND EACH REFUSED FOR ITS OWN CASE'S REASON, so a parse that fails because some other rule moved
+# is not mistaken for this one holding.
+for shape in entity entity-literal; do
+  contains "MUT-GUARD-READS-THE-WRITTEN-SPELLING [round1-$shape]" \
+    "$(parse_why "$tmp/round1-$shape.md")" "inside the block"
+done
+for shape in key key-literal; do
+  contains "MUT-GUARD-READS-THE-WRITTEN-SPELLING [round1-$shape]" \
+    "$(parse_why "$tmp/round1-$shape.md")" 'a verdict object inside the block'
+done
+# MUT-NAME-FOUND-IN-NO-RENDERING. The same pull request, the same clean verdict, and an ordinary
+# example block in front of it -- the shape a reviewer writes when they show what a review looks
+# like. Each tag below names `json` to NO renderer, so each of these comments must be read, and
+# reach READY, and be enqueued, exactly as the control was.
+example_tagged() {  # example_tagged INFO: an example block tagged INFO, then the real verdict
+  printf 'Reviewed head: %s\n\n```%s\nnot a review object\n```\n\n```json\n' "$enqueue_head" "$1"
+  enqueue_pass; printf '\n```\n'
+}
+example_tagged 'json&#133;x'     > "$tmp/no-rendering-nel.md"
+example_tagged 'json&amp;#133;x' > "$tmp/no-rendering-ampersand.md"
+example_tagged 'json&#x1c;x'     > "$tmp/no-rendering-hex.md"
+example_tagged 'text'            > "$tmp/no-rendering-plain.md"
+for shape in nel ampersand hex plain; do
+  expect "MUT-NAME-FOUND-IN-NO-RENDERING [$shape] parser" \
+    "$(review_rows "$tmp/no-rendering-$shape.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/-"
+  got="$(merge_run "$tmp/no-rendering-$shape.md")"
+  contains "MUT-NAME-FOUND-IN-NO-RENDERING [$shape]" "$got" "enqueued #999"
+  expect "MUT-NAME-FOUND-IN-NO-RENDERING [$shape] merge calls" "${got##*|}" 1
+  [[ "$got" == *NOT-READY* ]] \
+    && error "MUT-NAME-FOUND-IN-NO-RENDERING [$shape]: a valid review was refused: [$got]"
+done
+# AND THE RULE IS NOT "STOP RESOLVING REFERENCES", which is what a repair that deleted the
+# resolution would look like from here. A reference that DOES spell the name, and one that merely
+# ends the word where a renderer ends it, are both a second candidate and both refuse -- measured
+# against `markdown-it-py` 3.0.0, which renders each of these two tags `language-json`.
+example_tagged 'jso&#110;'      > "$tmp/no-rendering-named.md"
+example_tagged 'json&#32;extra' > "$tmp/no-rendering-space.md"
+for shape in named space; do
+  expect "MUT-NAME-FOUND-IN-NO-RENDERING [$shape] parser" \
+    "$(review_rows "$tmp/no-rendering-$shape.md")" '1|'
+  contains "MUT-NAME-FOUND-IN-NO-RENDERING [$shape]" \
+    "$(parse_why "$tmp/no-rendering-$shape.md")" "2 places a verdict could be read from"
+  got="$(merge_run "$tmp/no-rendering-$shape.md")"
+  contains "MUT-NAME-FOUND-IN-NO-RENDERING [$shape]" "$got" "NOT-READY"
+  expect "MUT-NAME-FOUND-IN-NO-RENDERING [$shape] merge calls" "${got##*|}" 0
+done
+# THE BOUNDARY ITSELF, code point by code point, so what this rule turns on is asserted rather than
+# inferred from two examples of it. The five below are exactly what `str.split()` adds to
+# CommonMark's whitespace, and spelled as a REFERENCE they are the whole of the defect: measured,
+# `markdown-it-py` 3.0.0 declines to resolve a reference to a C0 or C1 control and leaves it
+# written, so no word ever breaks there and the tag names no language.
+for point in 001c 001d 001e 001f 0085; do
+  example_tagged "json&#x$point;x" > "$tmp/no-rendering-point.md"
+  expect "MUT-NAME-FOUND-IN-NO-RENDERING boundary [U+$point]" \
+    "$(review_rows "$tmp/no-rendering-point.md")" \
+    "0|json/$enqueue_head/PASS/$enqueue_base/-"
+done
+# And every one a renderer really does end a word at still ends one, so the class was narrowed and
+# not emptied: CommonMark's own tab, line tabulation and form feed, and three Unicode spaces.
+for point in 0009 000b 000c 00a0 2002 3000; do
+  example_tagged "json&#x$point;x" > "$tmp/no-rendering-point.md"
+  expect "MUT-NAME-FOUND-IN-NO-RENDERING boundary [U+$point]" \
+    "$(review_rows "$tmp/no-rendering-point.md")" '1|'
+done
+# AND THE SAME FIVE CODE POINTS WRITTEN LITERALLY ARE MATERIAL, which is why there are two
+# boundaries and not one. `markdown-it-py` 3.0.0 splits the info string it was handed with
+# `str.split`, so a literal U+0085 after `json` DOES end the word there and that block is the
+# `language-json` one a reader sees -- while `&#133;`, the same code point, is a reference it never
+# resolves. Same code point, two answers, because the two readings are two different documents; a
+# single boundary over both is wrong whichever one it is.
+for bytes in '\302\205' '\034' '\035' '\036' '\037'; do
+  example_tagged "json$(printf "$bytes")x" > "$tmp/no-rendering-point.md"
+  expect "MUT-NAME-FOUND-IN-NO-RENDERING literal boundary [$bytes]" \
+    "$(review_rows "$tmp/no-rendering-point.md")" '1|'
+  contains "MUT-NAME-FOUND-IN-NO-RENDERING literal boundary [$bytes]" \
+    "$(parse_why "$tmp/no-rendering-point.md")" "2 places a verdict could be read from"
+done
 
 # --- the frontier form: prose ------------------------------------------------------------------
 cat > "$tmp/prose.md" <<'EOF'
