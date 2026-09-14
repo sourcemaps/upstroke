@@ -3069,6 +3069,20 @@ fn the_names_on_disk_are_the_names_the_packet_writes() {
             .expect("name"),
         "upstroke-worktree.lock"
     );
+    assert_eq!(
+        (
+            REPORT_STAGING_PREFIX,
+            REPORT_STAGING_RECORD,
+            REPORT_STAGING_RECORD_STAGED
+        ),
+        (
+            ".report-staging-",
+            "report-staging.json",
+            "report-staging.json.tmp"
+        ),
+        "the report's staging directory's prefix under the public half, and its record and \
+         the record's staging name in the private half"
+    );
 }
 
 /// `RunPaths::events` and `RunPaths::plan_json` return the paths [`EVENT_LOG`]
@@ -3502,6 +3516,11 @@ fn sites_this_module_owns() -> Vec<String> {
                 .iter()
                 .map(|site| EffectSiteId::Lock(*site).to_string()),
         )
+        .chain(
+            crate::topology::effects::ReportSite::ALL
+                .iter()
+                .map(|site| EffectSiteId::Report(*site).to_string()),
+        )
         .collect();
     names.sort_unstable();
     names
@@ -3593,6 +3612,14 @@ fn every_atomic_publication_syncs_the_staged_file_then_renames_then_syncs_its_di
             COMMIT_RECORD_STAGED,
             COMMIT_RECORD,
         ),
+        // The report joined the atomic publications in PR10's round 3 and
+        // this sequence in round 4 (the crash lens, P1): the two witnesses
+        // that read the barriers across `write_report` count them and check
+        // the staged name is gone, which a writer that never stages —
+        // `report.json` created, synced and its directory synced, no rename —
+        // satisfies. The staged-path and step-sequence assertions below do
+        // not.
+        ("report", public.clone(), "", REPORT),
     ];
     for (which, dir, staged_name, published_name) in publications {
         ledger.clear();
@@ -3605,30 +3632,108 @@ fn every_atomic_publication_syncs_the_staged_file_then_renames_then_syncs_its_di
                 stage_owner_record(&private, &owner, &mut hooks).expect("P3a");
                 publish_owner_record(&private, &mut hooks).expect("P3b");
             }
-            _ => {
+            "commit record" => {
                 stage_commit_record(&private, &commit, &mut hooks).expect("P5a");
                 publish_commit_record(&private, &mut hooks).expect("P5b");
+            }
+            _ => {
+                let report = serde_json::json!({"run_id": "01LEDGER", "outcome": "complete"});
+                write_report(&public, &private, &report, &mut hooks).expect("the report");
             }
         }
 
         let records = ledger.records();
+        // The report is staged inside a directory the write makes for itself
+        // under a name unique to the write, recorded in the private half
+        // before the directory exists (PR10's round 10; a fixed directory in
+        // round 9, a name unique to the write in round 8): the staged path
+        // is read from the ledger's own record of the directory's creation,
+        // which carries the record observed standing in the statement before
+        // `create_dir`; the three run-creation records keep their fixed
+        // names.
+        let staged_path = if which == "report" {
+            let made = records
+                .iter()
+                .find(|record| record.step == DurableStep::DirectoryCreated)
+                .expect("the staging directory's creation is recorded");
+            assert!(
+                made.path.parent() == Some(dir.as_path())
+                    && made
+                        .path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(REPORT_STAGING_PREFIX)),
+                "{which}: the staging directory is made under the report's own directory, under \
+                 the write's own name: {}",
+                made.path.display()
+            );
+            assert_eq!(
+                made.entry
+                    .as_ref()
+                    .map(|entry| (entry.path.clone(), entry.present)),
+                Some((report_staging_record(&private), true)),
+                "{which}: and its record in the private half stood at the instant before \
+                 `create_dir`"
+            );
+            made.path.join(REPORT)
+        } else {
+            dir.join(staged_name)
+        };
         // One expectation for every platform (`PR5-CONF-013`). This used to
         // fork on `cfg!(unix)` because `sync_dir` was a documented no-op on
         // Windows; `run_creation`'s "fsync the directory" carries no
-        // platform exception, and now neither does this.
-        let expected: Vec<DurableStep> = vec![
+        // platform exception, and now neither does this. The `Staged` entry
+        // is the staged file's creation, taken before its first byte (PR10's
+        // round 5): the mode it carries is what the mode test below reads.
+        let publication: Vec<DurableStep> = vec![
+            DurableStep::Staged,
             DurableStep::SyncedFile,
             DurableStep::Renamed,
             DurableStep::SyncedDirectory,
         ];
+        // The report's sequence is the record's publication — the same four
+        // steps, in the private half — then the directory's creation, then
+        // its own publication; the record's steps are held to the private
+        // half here and the report's own are read below as the other three
+        // records' are.
+        let (expected, records): (Vec<DurableStep>, Vec<util::DurableRecord>) = if which == "report"
+        {
+            let mut expected = publication.clone();
+            expected.push(DurableStep::DirectoryCreated);
+            expected.extend(publication.iter().copied());
+            let record = report_staging_record(&private);
+            assert_eq!(
+                (
+                    records[0].path.as_path(),
+                    records[1].path.as_path(),
+                    records[2].path.as_path(),
+                    records[3].path.as_path()
+                ),
+                (
+                    private.join(REPORT_STAGING_RECORD_STAGED).as_path(),
+                    private.join(REPORT_STAGING_RECORD_STAGED).as_path(),
+                    record.as_path(),
+                    private.as_path()
+                ),
+                "{which}: the record is staged, synced, renamed and its directory synced — in \
+                 the private half, before the staging directory exists"
+            );
+            (expected, records[5..].to_vec())
+        } else {
+            (publication, records)
+        };
         assert_eq!(
             ledger.steps(),
             expected,
             "{which}: the durability sequence run_creation names, in order"
         );
         assert_eq!(
-            records[0].path,
-            dir.join(staged_name),
+            (records[0].path.as_path(), records[0].len),
+            (staged_path.as_path(), 0),
+            "{which}: the staged file is recorded at its creation, empty"
+        );
+        assert_eq!(
+            records[1].path, staged_path,
             "{which}: the sync is of the STAGED file, before it has its published name"
         );
         let published_len = fs::metadata(dir.join(published_name))
@@ -3636,23 +3741,25 @@ fn every_atomic_publication_syncs_the_staged_file_then_renames_then_syncs_its_di
             .len();
         assert!(published_len > 0, "{which}: the record has bytes at all");
         assert_eq!(
-            records[0].len, published_len,
+            records[1].len, published_len,
             "{which}: the whole staged file was synced, not a prefix of it"
         );
         assert_eq!(
-            records[1].path,
+            records[2].path,
             dir.join(published_name),
             "{which}: the rename lands on the published name"
         );
         assert_eq!(
-            records[2].path, dir,
+            records[3].path, dir,
             "{which}: the directory sync is of the directory the rename changed"
         );
     }
 
-    // Three publications, each recording one file sync and one directory
-    // sync: six ledger entries that each claim a barrier was performed.
-    let claimed = 6;
+    // Four publications, each recording one file sync and one directory
+    // sync (and one creation, which is no barrier), and the report's staging
+    // record published the same way before it: ten ledger entries that each
+    // claim a barrier was performed.
+    let claimed = 10;
     let performed = util::barriers_performed().saturating_sub(barriers_before);
     assert!(
         performed >= claimed,
@@ -3660,6 +3767,131 @@ fn every_atomic_publication_syncs_the_staged_file_then_renames_then_syncs_its_di
              were entered; a ledger that certifies the function it is written by \
              cannot tell the two apart (PR5-CONF-012)"
     );
+}
+
+/// `let _ = stage_json(...)` in `write_report` — the staged file's sync
+/// failing and the failure discarded — survived every test until PR10's
+/// round 4 (the fix-check lens): nothing made a sync fail. This does: the
+/// file half of the barrier is refused for every file within the public run
+/// directory (`util::fail_file_barriers_within`) — the staged report's alone,
+/// inside the directory this write makes for itself under a name the test
+/// cannot know in advance; the staging record's own barrier is in the
+/// private half and holds — the publication stops there, no rename, no
+/// report under its name, and says so; what it leaves is exactly a dead
+/// writer's shape, the record, the directory it names and the staged file
+/// inside, and with the barrier holding again the same call reclaims them
+/// by the record and publishes.
+#[test]
+fn a_report_whose_staged_file_will_not_sync_is_not_published() {
+    let root = scratch("report-stage-sync-fault");
+    let public = root.join("public");
+    create_dir(&public).expect("public");
+    let private = root.join("private");
+    create_dir(&private).expect("private");
+    let payload = serde_json::json!({"run_id": "01FAULT", "outcome": "complete"});
+    {
+        let _fault = util::fail_file_barriers_within(&public);
+        let error = write_report(&public, &private, &payload, &mut NoHooks)
+            .expect_err("a staged report whose barrier fails is not published");
+        assert!(
+            error.to_string().contains("injected barrier fault"),
+            "the failure is the barrier's, by name: {error}"
+        );
+        assert!(
+            !public.join(REPORT).exists(),
+            "no report under its name: the rename never ran"
+        );
+        let left = report_staging_leftovers(&public, &private).expect("listed");
+        let recorded = recorded_report_staging(&public, &private)
+            .expect("the record reads")
+            .expect("the record stands: it was published before the directory was made");
+        assert_eq!(
+            left,
+            vec![
+                report_staging_record(&private),
+                recorded.clone(),
+                recorded.join(REPORT)
+            ],
+            "what the failed write leaves is a dead writer's shape: the record, the directory it \
+             names, the staged file inside"
+        );
+    }
+    write_report(&public, &private, &payload, &mut NoHooks)
+        .expect("with the barrier holding, published");
+    assert!(
+        public.join(REPORT).is_file()
+            && report_staging_leftovers(&public, &private)
+                .expect("listed")
+                .is_empty()
+            && unrecorded_report_staging(&public, &private)
+                .expect("listed")
+                .is_empty(),
+        "the leftover reclaimed by its record and this write's own directory and record gone \
+         with the rename"
+    );
+}
+
+/// The staged report carries the existing report's mode **from its
+/// creation**, not from a `chmod` after its bytes are written (the round-5
+/// regression lens, P2): a staged report created at the umask's mode and
+/// narrowed afterwards is readable by whoever opens it in between, and a
+/// death in between leaves it so. The ledger's `Staged` entry is taken
+/// before the first byte and carries the mode the file had then, so the
+/// window is an observable rather than a reading of the source order. Two
+/// modes: the lens's `0600`, which this box's umask of `077` gives every
+/// fresh file anyway, so on its own it is a witness under `umask 022` only;
+/// and `0400`, narrower than any umask's default, which is one under either.
+#[cfg(unix)]
+#[test]
+fn a_private_report_is_staged_at_its_mode_before_any_byte_is_written() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = scratch("report-staged-mode");
+    let public = root.join("public");
+    create_dir(&public).expect("public");
+    let private = root.join("private");
+    create_dir(&private).expect("private");
+    let payload = serde_json::json!({"run_id": "01MODE", "outcome": "parked"});
+    let path = public.join(REPORT);
+    write_report(&public, &private, &payload, &mut NoHooks).expect("the first report");
+    for mode in [0o600, 0o400] {
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("make it private");
+        let mut hooks = HarnessHooks::default().recording_durability();
+        let ledger = hooks.ledger();
+        write_report(&public, &private, &payload, &mut hooks).expect("the report, written again");
+        let staged: Vec<_> = ledger
+            .records()
+            .into_iter()
+            .filter(|record| {
+                record.step == DurableStep::Staged && is_staged_report(&record.path, &public)
+            })
+            .collect();
+        assert_eq!(
+            staged.len(),
+            1,
+            "{mode:o}: the staged file was recorded once, at its creation"
+        );
+        assert_eq!(
+            (staged[0].mode, staged[0].len),
+            (Some(mode), 0),
+            "{mode:o}: at the existing report's mode before any byte reached it — a file \
+             created at the umask's mode and narrowed after the write is readable in between"
+        );
+        assert_eq!(
+            fs::metadata(&path)
+                .expect("the published report")
+                .permissions()
+                .mode()
+                & 0o777,
+            mode,
+            "{mode:o}: and published at that mode"
+        );
+        assert!(
+            report_staging_leftovers(&public, &private)
+                .expect("listed")
+                .is_empty(),
+            "{mode:o}: the staged file was renamed onto its name"
+        );
+    }
 }
 
 #[test]
@@ -3679,12 +3911,37 @@ fn every_site_this_module_owns_is_reached_through_a_funnel_in_both_phases() {
     stage_owner_record(&husk.private, &husk.owner, &mut hooks).expect("P3a");
     publish_owner_record(&husk.private, &mut hooks).expect("P3b");
     write_plan(&public, b"{\"tasks\":[]}", &mut hooks).expect("P5");
+    let barriers_before = util::barriers_on_this_thread();
     write_report(
         &public,
+        &husk.private,
         &serde_json::json!({"outcome": "parked"}),
         &mut hooks,
     )
     .expect("report");
+    let barriers_after = util::barriers_on_this_thread();
+    // Two publications, not one: the staging record's (its file synced, the
+    // private directory synced) and then the report's own (the staged file
+    // synced, the run directory synced). A report written in place with no
+    // barrier of its own leaves the record's one of each, which is why the
+    // count is held to two — under a single barrier the record's publication
+    // alone satisfied this assertion and `report-write-unsynced` survived
+    // (PR10's round 10).
+    assert!(
+        barriers_after.file >= barriers_before.file + 2
+            && barriers_after.directory >= barriers_before.directory + 2,
+        "the report write is a durable publication twice over — the staging record's file synced \
+         and its private directory synced, then the report's staged file synced and the run \
+         directory synced — and the barriers this thread entered say so, two of each at least: \
+         {barriers_before:?} -> {barriers_after:?}"
+    );
+    assert!(
+        report_staging_leftovers(&public, &husk.private)
+            .expect("listed")
+            .is_empty()
+            && public.join(REPORT).is_file(),
+        "the staged report was renamed onto its name"
+    );
     let questions = public.join("questions");
     fs::create_dir_all(&questions).expect("questions");
     write_question_payload(&questions, "q-1", &serde_json::json!({}), &mut hooks)
@@ -4953,6 +5210,450 @@ fn a_staged_partial_is_never_ingested_and_a_published_answer_survives_ingestion(
     );
 }
 
+/// Whatever an operator left at the old fixed staging name `report.json.tmp`
+/// — a hard link to a note outside the run directory, a symbolic link, a
+/// directory — is left exactly as found, and the report is published beside
+/// it: since PR10's round 9 the report is staged inside a directory the
+/// write makes for itself (under a name unique to the write and recorded in
+/// the private half since round 10, `REPORT_STAGING_PREFIX`; a fixed
+/// directory in round 9; a name unique to the write in round 8), so no name
+/// that is somebody else's is ever opened, truncated, written through or
+/// removed (the round-6 regression lens, P2-1, whose alias round 6 refused
+/// by link count; the round-8 one, P2, whose single-link draft round 6
+/// removed as the writer's own).
+#[test]
+fn report_staging_leaves_whatever_is_at_the_old_fixed_name_as_found() {
+    let root = scratch("report-stage-old-name");
+    let public = root.join("public");
+    create_dir(&public).expect("public directory");
+    let private = root.join("private");
+    create_dir(&private).expect("private directory");
+    let note = root.join("operator-note.txt");
+    fs::write(&note, b"keep me\n").expect("operator note");
+    let old_name = public.join("report.json.tmp");
+    let payload = serde_json::json!({"outcome": "parked"});
+
+    fs::hard_link(&note, &old_name).expect("an alias at the old fixed name");
+    write_report(&public, &private, &payload, &mut NoHooks)
+        .expect("the report is published beside it");
+    assert_eq!(
+        fs::read(&note).expect("operator note"),
+        b"keep me\n".to_vec(),
+        "the operator's file is byte-identical: nothing staged through the alias"
+    );
+    assert!(
+        old_name.is_file() && public.join(REPORT).is_file(),
+        "the alias stands and the report was published"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        assert_eq!(
+            fs::metadata(&old_name).expect("the alias").nlink(),
+            2,
+            "still one of the operator's two names"
+        );
+    }
+    fs::remove_file(&old_name).expect("the operator's alias removed for the next case");
+
+    create_dir(&old_name).expect("a directory at the old fixed name");
+    write_report(&public, &private, &payload, &mut NoHooks)
+        .expect("the report is published beside it");
+    assert!(old_name.is_dir(), "the directory stands");
+    fs::remove_dir(&old_name).expect("removed for the next case");
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&note, &old_name).expect("a symlink at the old fixed name");
+        write_report(&public, &private, &payload, &mut NoHooks)
+            .expect("the report is published beside it");
+        assert!(
+            fs::symlink_metadata(&old_name)
+                .expect("the link")
+                .file_type()
+                .is_symlink(),
+            "the link stands, unfollowed"
+        );
+        assert_eq!(
+            fs::read(&note).expect("operator note"),
+            b"keep me\n".to_vec()
+        );
+    }
+    assert!(
+        report_staging_leftovers(&public, &private)
+            .expect("listed")
+            .is_empty(),
+        "and nothing of the report's own protocol is left staged"
+    );
+}
+
+/// The round-8 and round-9 regression lenses' recipe: a single-link draft an
+/// operator left under a schema-3 run survives the next report write byte for
+/// byte, whatever its name — at the old fixed name `report.json.tmp`, which
+/// round 6's `clear_stale_staging` read as the writer's own and unlinked; at
+/// `report.json.ZZZZZZZZZZZZZZZZZZZZZZZZZZ.tmp`, a name the ULID producer
+/// cannot emit and round 8's recogniser accepted and removed; and at a name
+/// the producer could have emitted, which no recogniser can tell from the
+/// writer's own. Nothing at any name beside the report is this writer's to
+/// reason about (`standards/08`: cleanup removes only what the operation can
+/// prove it owns, never inferred from a shared filename): the write stages
+/// inside a directory it makes for itself and touches nothing else.
+#[test]
+fn legacy_report_preserves_unowned_staging_name() {
+    let root = scratch("report-unowned-staging-name");
+    let public = root.join("public");
+    create_dir(&public).expect("public");
+    let private = root.join("private");
+    create_dir(&private).expect("private");
+    let payload = serde_json::json!({"outcome": "parked"});
+    for name in [
+        "report.json.tmp",
+        "report.json.ZZZZZZZZZZZZZZZZZZZZZZZZZZ.tmp",
+        "report.json.01M191Y2PSP8400DBF5QSFFJT3.tmp",
+    ] {
+        let draft = public.join(name);
+        fs::write(&draft, b"operator draft\n").expect("an operator draft at the name");
+        write_report(&public, &private, &payload, &mut NoHooks)
+            .expect("the report is published beside the draft");
+        assert_eq!(
+            fs::read(&draft).expect("the operator's draft is still there"),
+            b"operator draft\n".to_vec(),
+            "an operator's file at `{name}` is not this writer's to remove"
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &fs::read(public.join(REPORT)).expect("report")
+            )
+            .expect("json"),
+            payload,
+            "{name}: and the report was published"
+        );
+    }
+}
+
+/// The round-10 regression and record lenses' recipe: what an operator left
+/// under a schema-3 run directory in the report's staging shape survives the
+/// next report write byte for byte, whether it is a whole `.report-staging/`
+/// (round 9's fixed name, which round 9 removed by its name and type before
+/// the write's own exclusive creation — proof of ownership of the
+/// replacement, and of nothing that was deleted) or a directory wearing this
+/// round's shape, `.report-staging-<ulid>`, that no record of this run's
+/// names. Neither is opened, removed or adopted: the write records its own
+/// fresh name in the private half, makes its own directory, publishes
+/// beside them, and hands the passed-over shapes back by name
+/// (`standards/08`: cleanup removes only what the operation can prove it
+/// owns, and the proof here is the record, never the name).
+#[test]
+fn legacy_report_preserves_unowned_staging_directory() {
+    let root = scratch("report-unowned-staging-directory");
+    let public = root.join("public");
+    create_dir(&public).expect("public");
+    let private = root.join("private");
+    create_dir(&private).expect("private");
+    let payload = serde_json::json!({"outcome": "parked"});
+
+    let fixed = public.join(".report-staging");
+    create_dir(&fixed).expect("an operator's directory at round 9's fixed name");
+    let fixed_note = fixed.join("operator-note.txt");
+    fs::write(&fixed_note, b"operator draft\n").expect("the operator's note inside it");
+    let shaped = public.join("report-staging-shaped");
+    let shaped = shaped.with_file_name(".report-staging-01M191Y2PSP8400DBF5QSFFJT3");
+    create_dir(&shaped).expect("a directory of this round's shape, with no record naming it");
+    let shaped_note = shaped.join(REPORT);
+    fs::write(&shaped_note, b"{\"operator\":").expect("whatever it holds");
+    assert_eq!(
+        unrecorded_report_staging(&public, &private).expect("listed"),
+        vec![shaped.clone()],
+        "the shaped directory is listed as unrecorded; the fixed-name directory is not of this \
+         round's shape at all"
+    );
+
+    let passed_over = write_report(&public, &private, &payload, &mut NoHooks)
+        .expect("the report is published beside both");
+    assert_eq!(
+        passed_over,
+        vec![shaped.clone()],
+        "the write names the shaped directory it passed over, and removes nothing it did not \
+         record"
+    );
+    assert_eq!(
+        fs::read(&fixed_note).expect("the operator's note is still there"),
+        b"operator draft\n".to_vec(),
+        "a directory at round 9's fixed name is not this writer's to remove"
+    );
+    assert_eq!(
+        fs::read(&shaped_note).expect("the shaped directory's file is still there"),
+        b"{\"operator\":".to_vec(),
+        "a directory of this round's shape that no record names is not this writer's to remove"
+    );
+    assert!(
+        fixed.is_dir() && shaped.is_dir(),
+        "both directories stand, as found"
+    );
+    assert!(
+        report_staging_leftovers(&public, &private)
+            .expect("listed")
+            .is_empty(),
+        "nothing of the protocol's own is left: the write's record and directory went with the \
+         rename"
+    );
+    assert_eq!(
+        unrecorded_report_staging(&public, &private).expect("listed"),
+        vec![shaped.clone()],
+        "and the shaped directory is still there to be passed over next time"
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &fs::read(public.join(REPORT)).expect("report")
+        )
+        .expect("json"),
+        payload,
+        "and the report was published"
+    );
+
+    #[cfg(unix)]
+    {
+        let note = root.join("operator-note.txt");
+        fs::write(&note, b"keep me\n").expect("operator note");
+        let link = public.join(".report-staging-01M191Y2PSP8400DBF5QSFFJT4");
+        std::os::unix::fs::symlink(&note, &link).expect("a link wearing the shape");
+        let passed_over = write_report(&public, &private, &payload, &mut NoHooks)
+            .expect("the report is published beside it");
+        assert_eq!(
+            passed_over,
+            vec![shaped.clone(), link.clone()],
+            "a link wearing the shape is passed over by name too, never followed"
+        );
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("the link")
+                .file_type()
+                .is_symlink()
+                && fs::read(&note).expect("operator note") == b"keep me\n".to_vec(),
+            "the link and what it names are as found"
+        );
+    }
+}
+
+/// What a report writer that died between its stage and its rename leaves —
+/// the record of its staging directory's name in the private half, the
+/// directory under the public run directory, and the half-written report
+/// inside — is reclaimed by the next write **by the record**: the directory
+/// the record names is removed as the run's own tree, then the record, before
+/// that write makes its own, under the run lock every writer holds. The
+/// leftover is planted through the writer's own record-then-create helper
+/// (`plant_report_staging_of_a_dead_writer`), never by hand — a directory
+/// planted by hand carries no record and is not the protocol's, which is the
+/// contrast the second half of this test draws: a hand-planted directory of
+/// the same shape survives the same write byte for byte. A record whose
+/// directory is already gone is removed on its own; something that is not a
+/// directory standing at a recorded name is left as found and the record
+/// removed. Until PR10's round 10 the fixture made the directory by hand at a
+/// fixed name and the writer removed whatever directory stood there (the
+/// round-10 fix-check and crash lenses, P2).
+#[test]
+fn a_dead_writers_staged_report_is_reclaimed_by_the_next_write() {
+    let root = scratch("report-dead-writer");
+    let public = root.join("public");
+    create_dir(&public).expect("public");
+    let private = root.join("private");
+    create_dir(&private).expect("private");
+    let payload = serde_json::json!({"outcome": "parked"});
+
+    let leftover = plant_report_staging_of_a_dead_writer(&public, &private);
+    let staging = leftover
+        .parent()
+        .expect("the staged file is inside the staging directory")
+        .to_path_buf();
+    let record = report_staging_record(&private);
+    assert_eq!(
+        report_staging_leftovers(&public, &private).expect("listed"),
+        vec![record.clone(), staging.clone(), leftover.clone()],
+        "the dead writer's record, the directory it names, and what the directory holds"
+    );
+    assert_eq!(
+        recorded_report_staging(&public, &private).expect("read"),
+        Some(staging.clone()),
+        "the record names the directory the helper made"
+    );
+    let by_hand = public.join(".report-staging-01M191Y2PSP8400DBF5QSFFJT3");
+    create_dir(&by_hand).expect("a directory of the same shape, planted by hand: no record");
+    let by_hand_file = by_hand.join(REPORT);
+    fs::write(&by_hand_file, b"{\"operator\":").expect("whatever it holds");
+    assert_eq!(
+        unrecorded_report_staging(&public, &private).expect("listed"),
+        vec![by_hand.clone()],
+        "the hand-planted directory is the unrecorded one; the recorded one is not listed here"
+    );
+
+    let passed_over =
+        write_report(&public, &private, &payload, &mut NoHooks).expect("the report is published");
+    assert!(
+        !leftover.exists() && !staging.exists() && !record.exists(),
+        "the dead writer's directory is reclaimed as the run's own tree, by its record, and the \
+         record with it; this write's own record and directory are gone with the rename"
+    );
+    assert_eq!(
+        passed_over,
+        vec![by_hand.clone()],
+        "the hand-planted directory is passed over by name"
+    );
+    assert_eq!(
+        fs::read(&by_hand_file).expect("the hand-planted directory's file is still there"),
+        b"{\"operator\":".to_vec(),
+        "a directory no record names survives the write byte for byte"
+    );
+    assert!(
+        report_staging_leftovers(&public, &private)
+            .expect("listed")
+            .is_empty(),
+        "nothing of the protocol is left staged"
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(
+            &fs::read(public.join(REPORT)).expect("report")
+        )
+        .expect("json"),
+        payload,
+        "and the published report is the payload, not the stale bytes"
+    );
+    fs::remove_dir_all(&by_hand).expect("the hand-planted directory removed for the next case");
+
+    // A record whose directory is already gone: removed on its own.
+    let leftover = plant_report_staging_of_a_dead_writer(&public, &private);
+    let staging = leftover
+        .parent()
+        .expect("the staged file is inside the staging directory")
+        .to_path_buf();
+    fs::remove_dir_all(&staging).expect("the recorded directory gone before the next write");
+    assert_eq!(
+        report_staging_leftovers(&public, &private).expect("listed"),
+        vec![record.clone()],
+        "the record alone is what the protocol left"
+    );
+    let passed_over =
+        write_report(&public, &private, &payload, &mut NoHooks).expect("the report is published");
+    assert!(
+        passed_over.is_empty() && !record.exists(),
+        "a record naming a directory that is gone is removed on its own, and nothing is passed over"
+    );
+
+    // Something that is not a directory standing at a recorded name: not
+    // what this writer made, left as found, the record removed, and named.
+    let leftover = plant_report_staging_of_a_dead_writer(&public, &private);
+    let staging = leftover
+        .parent()
+        .expect("the staged file is inside the staging directory")
+        .to_path_buf();
+    fs::remove_dir_all(&staging).expect("the recorded directory gone");
+    fs::write(&staging, b"an operator's file at the recorded name\n").expect("a file at the name");
+    let passed_over = write_report(&public, &private, &payload, &mut NoHooks)
+        .expect("the report is published beside it");
+    assert_eq!(
+        (
+            passed_over,
+            fs::read(&staging).expect("the file stands"),
+            record.exists()
+        ),
+        (
+            vec![staging.clone()],
+            b"an operator's file at the recorded name\n".to_vec(),
+            false
+        ),
+        "the file is left as found and named, and the record that named the directory is gone"
+    );
+    fs::remove_file(&staging).expect("removed for the next case");
+
+    write_report(&public, &private, &payload, &mut NoHooks)
+        .expect("with nothing left, the write publishes");
+    assert!(
+        report_staging_leftovers(&public, &private)
+            .expect("listed")
+            .is_empty()
+            && unrecorded_report_staging(&public, &private)
+                .expect("listed")
+                .is_empty()
+            && public.join(REPORT).is_file()
+    );
+}
+
+/// Rule 1 for the record: the staging directory's name is recorded durably
+/// in the private half **before** the directory is made, and the ledger's
+/// entry for the creation carries the record observed standing in the
+/// statement immediately before `create_dir` — so the recipe
+/// `staging-created-before-its-record` (the creation moved ahead of the
+/// record's publication) shows on the record as `present: false` and in the
+/// sequence as the creation before the record's rename. The record's own
+/// publication is the four steps every atomic publication takes, in the
+/// private half, and its directory barrier precedes the creation.
+#[test]
+fn a_report_staging_directory_is_recorded_before_it_is_made() {
+    let root = scratch("report-staging-recorded-first");
+    let public = root.join("public");
+    create_dir(&public).expect("public");
+    let private = root.join("private");
+    create_dir(&private).expect("private");
+    let payload = serde_json::json!({"run_id": "01RECORD", "outcome": "parked"});
+    let mut hooks = HarnessHooks::default().recording_durability();
+    let ledger = hooks.ledger();
+    write_report(&public, &private, &payload, &mut hooks).expect("the report");
+    let records = ledger.records();
+    let record = report_staging_record(&private);
+    let made = records
+        .iter()
+        .position(|entry| entry.step == DurableStep::DirectoryCreated)
+        .expect("the staging directory's creation is recorded");
+    assert_eq!(
+        records[made]
+            .entry
+            .as_ref()
+            .map(|entry| (entry.path.clone(), entry.present)),
+        Some((record.clone(), true)),
+        "at the instant before `create_dir`, read by `symlink_metadata` in the statement \
+         immediately before it, the record of the directory's name stood in the private half"
+    );
+    let record_published = records
+        .iter()
+        .position(|entry| entry.step == DurableStep::Renamed && entry.path == record)
+        .expect("the record was renamed onto its name");
+    let private_synced = records
+        .iter()
+        .position(|entry| entry.step == DurableStep::SyncedDirectory && entry.path == private)
+        .expect("the private directory was synced");
+    assert!(
+        record_published < private_synced && private_synced < made,
+        "the record is renamed onto its name and its directory synced before the staging \
+         directory is made: {:?}",
+        ledger.steps()
+    );
+    assert!(
+        is_staged_report(&records[made].path.join(REPORT), &public),
+        "and the directory made is this write's own, under the public run directory: {}",
+        records[made].path.display()
+    );
+    assert!(
+        report_staging_leftovers(&public, &private)
+            .expect("listed")
+            .is_empty()
+            && !record.exists()
+            && public.join(REPORT).is_file(),
+        "after the rename the record and the directory are gone and the report stands"
+    );
+}
+
+/// Whether `path` is a staged report of this protocol's: `report.json`
+/// inside a staging directory of this round's shape directly under `public`.
+fn is_staged_report(path: &Path, public: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some(REPORT)
+        && path.parent().is_some_and(|staging| {
+            staging.parent() == Some(public)
+                && staging
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(REPORT_STAGING_PREFIX))
+        })
+}
+
 /// The moved payload writers keep the **legacy byte shape**
 /// (`PR5-RUNDIR-058`).
 ///
@@ -4970,15 +5671,45 @@ fn the_payload_writers_keep_their_exact_legacy_bytes() {
     let public = root.join("public");
     let questions = public.join("questions");
     create_dir(&questions).expect("questions");
+    let private = root.join("private");
+    create_dir(&private).expect("private");
     let payload = serde_json::json!({"kind": "choice", "options": ["a", "b"]});
     let expected = "{\n  \"kind\": \"choice\",\n  \"options\": [\n    \"a\",\n    \"b\"\n  ]\n}\n";
 
-    write_report(&public, &payload, &mut NoHooks).expect("report");
+    write_report(&public, &private, &payload, &mut NoHooks).expect("report");
     assert_eq!(
         fs::read_to_string(public.join("report.json")).expect("report.json"),
         expected,
         "report.json is pretty-printed with two-space indentation and ends in a newline"
     );
+    // The v0.1 coordinator publishes through this writer (`drain_and_report`,
+    // schema 3), and until PR10's round 3 it was a plain `fs::write`, which
+    // keeps the mode of the file it truncates. The staged publication creates
+    // a fresh file at the umask default, so a report an operator had made
+    // private was reopened as `0644` on the next write (the round-4
+    // regression lens, P2-1): the existing report's permissions are copied
+    // onto the staged file before it is synced and renamed.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = public.join("report.json");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("make it private");
+        write_report(&public, &private, &payload, &mut NoHooks).expect("report again");
+        assert_eq!(
+            fs::metadata(&path)
+                .expect("report metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "a rewritten report keeps the mode the existing one had, as `fs::write` did"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("report.json"),
+            expected,
+            "with the same bytes"
+        );
+    }
 
     write_question_payload(&questions, "q-1", &payload, &mut NoHooks).expect("question");
     assert_eq!(
@@ -4996,6 +5727,150 @@ fn the_payload_writers_keep_their_exact_legacy_bytes() {
         fs::read(public.join(PLAN)).expect("plan.json"),
         normalized,
         "the plan's exact bytes reach disk unaltered"
+    );
+}
+
+/// The report's group survives its rewrite, as it did under `fs::write`.
+///
+/// A schema-3 run parks; the operator gives `report.json` a group and the
+/// mode `0640` so that group can read it; the run resumes and the report is
+/// written again. Until PR10's round 7 the staged publication replaced it
+/// with a file in the writer's primary group (the round-7 regression lens,
+/// P2): the group the operator chose lost the report and the writer's group
+/// gained it. The group is read back with `MetadataExt::gid` before and
+/// after, and the mode with it. The group is a supplementary group of this
+/// process — a user in two groups is what the case needs, so where the
+/// process has no second group the test says so and stops; on CI's runners
+/// and on the build box the user has several. The `EPERM` arm — a group the
+/// process is not in — cannot be set up without privilege and is reasoned in
+/// `keep_group`'s doc, not driven here. What this observes, and no more:
+/// the `Staged` ledger entry's mode at the file's creation (`0600`, the
+/// group bits withheld); the `GroupGiven` entry's two modes, read by `fstat`
+/// on the descriptor in the statement immediately before the `fchown` and in
+/// the statement immediately after it, both without group bits — so a
+/// widening anywhere before the first read is in the first, a widening
+/// between the two is in the second, and the recipe "a `chmod` to the full
+/// mode immediately before the `fchown`" has no line to land on that the
+/// record does not show (the round-8 fix-check lens, P1: until round 8 the
+/// test read the creation and the publication and nothing between; the
+/// round-9 one, P1: round 8's record was a `stat` of the path in the
+/// statement before the `fchown`, and a `chmod` inserted after the record
+/// and before the syscall passed it) — and the published file's group and
+/// mode. What the two reads bracket is the syscall itself; nothing a program
+/// observes reaches inside it, and no other instant is claimed.
+#[cfg(unix)]
+#[test]
+fn rewriting_report_preserves_its_group() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let root = scratch("report-group");
+    let public = root.join("public");
+    create_dir(&public).expect("public");
+    let private = root.join("private");
+    create_dir(&private).expect("private");
+    let payload = serde_json::json!({"run_id": "01GROUP", "outcome": "parked"});
+    let path = public.join(REPORT);
+    write_report(&public, &private, &payload, &mut NoHooks).expect("the first report");
+    let primary = fs::metadata(&path).expect("report metadata").gid();
+
+    // SAFETY: `getgroups` with a null list and a count of zero answers how
+    // many supplementary groups the process has and writes nothing; the
+    // second call is handed a buffer of exactly that many entries, which it
+    // fills up to the count it returns.
+    let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+    assert!(count >= 0, "getgroups answers the group count");
+    let mut groups = vec![0 as libc::gid_t; usize::try_from(count).expect("a small count")];
+    let filled = unsafe { libc::getgroups(count, groups.as_mut_ptr()) };
+    assert!(filled >= 0, "getgroups fills the list");
+    groups.truncate(usize::try_from(filled).expect("a small count"));
+    let Some(other) = groups.iter().copied().find(|gid| *gid != primary) else {
+        println!(
+            "skipped: this process belongs to no group but {primary}, and the case needs a \
+             second one ({groups:?})"
+        );
+        return;
+    };
+
+    std::os::unix::fs::chown(&path, None, Some(other)).expect("give the report the other group");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).expect("group-readable");
+    let before = fs::metadata(&path).expect("report metadata");
+    assert_eq!(
+        before.gid(),
+        other,
+        "premise: the report belongs to the other group"
+    );
+
+    let mut hooks = HarnessHooks::default().recording_durability();
+    let ledger = hooks.ledger();
+    write_report(&public, &private, &payload, &mut hooks).expect("the report, written again");
+    let after = fs::metadata(&path).expect("report metadata");
+    assert_eq!(
+        after.gid(),
+        before.gid(),
+        "a rewritten report keeps the group the existing one had, as `fs::write` did"
+    );
+    assert_eq!(
+        after.permissions().mode() & 0o777,
+        0o640,
+        "and the mode that lets that group read it"
+    );
+    let staged: Vec<_> = ledger
+        .records()
+        .into_iter()
+        .filter(|record| {
+            record.step == DurableStep::Staged && is_staged_report(&record.path, &public)
+        })
+        .collect();
+    assert_eq!(
+        staged.iter().map(|record| record.mode).collect::<Vec<_>>(),
+        vec![Some(0o600)],
+        "the staged file was created without the group bits"
+    );
+    let given: Vec<_> = ledger
+        .records()
+        .into_iter()
+        .filter(|record| record.step == DurableStep::GroupGiven)
+        .collect();
+    assert_eq!(
+        given
+            .iter()
+            .map(|record| record.path.as_path())
+            .collect::<Vec<_>>(),
+        vec![staged[0].path.as_path()],
+        "the group was given once, at the staged file"
+    );
+    assert_eq!(
+        given[0].mode.map(|mode| mode & 0o070),
+        Some(0),
+        "at the instant before the `fchown`, read by `fstat` on the descriptor in the statement \
+         before it, the file carried no group bits: {:o}",
+        given[0].mode.unwrap_or(0)
+    );
+    assert_eq!(
+        given[0].mode_after.map(|mode| mode & 0o070),
+        Some(0),
+        "and at the instant after it, read the same way in the statement after it, still none — \
+         a widening between the two reads is a widening the record shows: {:o}",
+        given[0].mode_after.unwrap_or(0)
+    );
+    assert_eq!(
+        ledger
+            .records_for(&staged[0].path)
+            .into_iter()
+            .map(|record| record.step)
+            .collect::<Vec<_>>(),
+        vec![
+            DurableStep::Staged,
+            DurableStep::GroupGiven,
+            DurableStep::SyncedFile
+        ],
+        "created without the group bits, given its group, then synced — the group bits arrive \
+         with `settle_mode`, between the second and the third"
+    );
+    assert!(
+        report_staging_leftovers(&public, &private)
+            .expect("listed")
+            .is_empty(),
+        "the staged file was renamed onto its name"
     );
 }
 

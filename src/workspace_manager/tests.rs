@@ -1176,6 +1176,242 @@ fn a_worktree_whose_killed_child_is_still_closing_is_removed_not_refused() {
     }
 }
 
+/// The classifier's read of a registration marker across a delete-pending
+/// name: the deterministic form of what CI's Windows leg met at random in
+/// PR10's round 6 (`Worktree.Add`, one sample of eight, `locked: Access is
+/// denied (os error 5)`), where a `git worktree add` the sampler had just
+/// terminated still held the marker it was unlinking. The sampler proves the
+/// condition exists and cannot be re-run to prove a fix; here the name is
+/// held delete-pending on purpose, the way the removal control above holds
+/// its file, and released against an attempt the seam reports rather than
+/// against a clock (`PR109-ORACLE-OBSERVES-TIMING-NOT-ATTEMPTS`).
+///
+/// Two cases. **Closing**: the holder closes once the read's first attempt
+/// has provably returned against the delete-pending name, so a later attempt
+/// finds the name gone — the marker its deleter meant to remove — and the
+/// populated worktree classifies `After`. **Held**: the name is held through
+/// the classifier's whole budget, and the classifier answers `Internal` —
+/// the lock the add holds, the class the inventory names for a `locked`
+/// marker that stands — rather than the inspection error CI recorded, since
+/// ST-07 requires every sampled residue classified. The attempt count is
+/// asserted in both, so a read that never retried (one attempt, answering
+/// the held class at once) fails the closing case by its answer and by its
+/// count, and a read that propagated the error after the budget fails the
+/// held case by its answer.
+#[cfg(windows)]
+#[test]
+fn a_locked_marker_a_terminated_add_still_holds_is_read_across_its_closing_and_as_held_past_it() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    use windows_sys::Win32::Storage::FileSystem::{
+        DELETE, FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+        FILE_DISPOSITION_INFO_EX, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FileDispositionInfoEx, SetFileInformationByHandle,
+    };
+
+    /// One deadline per case, the wedge detector the removal control explains.
+    const FAIL_SAFE: std::time::Duration = std::time::Duration::from_secs(600);
+
+    let site = EffectSiteId::Worktree(WorktreeSite::Add);
+    for (releases_after_the_first_attempt, expected) in [
+        (true, ObjectResidue::After),
+        (false, ObjectResidue::Internal),
+    ] {
+        let fixture = Fixture::created("held-locked-marker");
+        let slot = fixture.task("alpha", 1);
+        fixture
+            .manager
+            .write_intent(&mut NoHooks, &slot)
+            .expect("the intent must be durable");
+        let path = fixture
+            .manager
+            .add_worktree(&mut NoHooks, &slot, &fixture.head)
+            .expect("a populated worktree, its add complete");
+        let admin = git_dir_of(&path)
+            .expect("the pointer reads")
+            .expect("a populated worktree has a git dir behind its pointer");
+        let locked = admin.join("locked");
+        fs::write(&locked, b"initializing\n").expect("plant the add's own marker");
+        let base = fixture.base.clone();
+        let target = ResidueTarget::new(&base).at(&path).from_base(&fixture.head);
+        assert_eq!(
+            classify_object_residue(site, &target).expect("the classifier answers"),
+            ObjectResidue::Internal,
+            "premise: a readable `initializing` marker is the unpopulated class"
+        );
+
+        let deadline = Instant::now() + FAIL_SAFE;
+        let (opened, ready) = mpsc::channel::<()>();
+        let (close_now, may_close) = mpsc::channel::<()>();
+        let (closed, has_closed) = mpsc::channel::<()>();
+        let held = locked.clone();
+        let holder = std::thread::spawn(move || {
+            // The marking handle itself is what holds the name: a delete
+            // disposition set through a handle that stays open leaves the
+            // name in the directory, delete-pending, until that handle closes
+            // -- the shape a terminated add's last unlink leaves behind. Not
+            // `fs::remove_file`, which sets the disposition through a handle
+            // of its own and closes it at once, so that the name is gone
+            // before anything can meet it delete-pending (measured on the
+            // guest: the premise below then read `NotFound`). The technique
+            // is `runner::container::tests::windows_posix_delete_pending`'s.
+            let file = fs::OpenOptions::new()
+                .access_mode(DELETE)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .open(&held)
+                .expect("hold the marker open for deletion");
+            let disposition = FILE_DISPOSITION_INFO_EX {
+                Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+            };
+            let size = u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO_EX>())
+                .expect("a small struct");
+            // SAFETY: `file` is open for the duration of the call, `disposition`
+            // is a fully initialised `FILE_DISPOSITION_INFO_EX` and `size` is
+            // its size, which is the contract `FileDispositionInfoEx` documents.
+            let set = unsafe {
+                SetFileInformationByHandle(
+                    file.as_raw_handle(),
+                    FileDispositionInfoEx,
+                    (&raw const disposition).cast(),
+                    size,
+                )
+            };
+            assert_ne!(
+                set,
+                0,
+                "mark the held name delete-pending: {}",
+                std::io::Error::last_os_error()
+            );
+            opened.send(()).expect("announce the delete-pending name");
+            // `Ok` is the closing case, told from inside the read that its
+            // first attempt has returned; `Disconnected` is the held case,
+            // released after the classifier has answered; `Timeout` is the
+            // fail-safe, and the join below re-raises whatever it left.
+            let _ = may_close.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+            drop(file);
+            let _ = closed.send(());
+        });
+        ready
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("the marker is delete-pending before the classifier runs");
+        let premise = fs::read(&locked).expect_err("premise: a delete-pending name refuses a read");
+        assert_eq!(
+            premise.raw_os_error(),
+            Some(ERROR_ACCESS_DENIED as i32),
+            "premise: the kernel answers a read of a delete-pending name with error 5: {premise}"
+        );
+
+        let mut release = Some(close_now);
+        let observing = if releases_after_the_first_attempt {
+            let tell = release.take().expect("the closing case's release");
+            super::fixture::observe_marker_read_attempts(Box::new(move |attempt| {
+                if attempt != 1 {
+                    return;
+                }
+                // Ordered against the attempt rather than a clock: attempt 1
+                // has already returned against the delete-pending name, and
+                // waiting for the close here means attempt 2 runs after it.
+                let _ = tell.send(());
+                let _ = has_closed.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+            }))
+        } else {
+            drop(has_closed);
+            super::fixture::observe_marker_read_attempts(Box::new(|_| {}))
+        };
+        let answer = classify_object_residue(site, &target);
+        let attempts = observing.count();
+        drop(observing);
+        // The held case's release, after the answer: the only thing that
+        // closes its handle. Then the holder is joined on every path, so a
+        // failing assertion never leaves the tree locked against the
+        // fixture's own removal.
+        drop(release);
+        let joined = holder.join();
+        if let Err(payload) = joined {
+            std::panic::resume_unwind(payload);
+        }
+
+        let answer = answer.unwrap_or_else(|error| {
+            panic!(
+                "releases after the first attempt: {releases_after_the_first_attempt}: the \
+                 classifier refused a marker a terminated add still holds, after {attempts} \
+                 attempt(s): {error}"
+            )
+        });
+        assert_eq!(
+            answer, expected,
+            "releases after the first attempt: {releases_after_the_first_attempt}: after \
+             {attempts} attempt(s)"
+        );
+        if releases_after_the_first_attempt {
+            assert!(
+                attempts > 1 && attempts < ATTEMPTS,
+                "the closing case is crossed by a retry, and before the budget is spent: \
+                 {attempts} attempt(s) of {ATTEMPTS}"
+            );
+            assert!(
+                !locked.exists(),
+                "the delete-pending marker is gone once its holder closed"
+            );
+        } else {
+            assert_eq!(
+                attempts, ATTEMPTS,
+                "the held case spends the whole budget before the marker is read as held"
+            );
+        }
+    }
+}
+
+/// The Unix arm of the marker read makes exactly one attempt, and the seam
+/// reports that one — the removal seam's Unix pin, for the classifier's
+/// read: the retry and the held answer exist for the Windows control above,
+/// so on every other leg this pins the seam where CI runs it every time, and
+/// reads the two answers the Unix arm does give through the classifier.
+#[cfg(not(windows))]
+#[test]
+fn a_marker_read_records_the_one_attempt_the_unix_arm_makes() {
+    let site = EffectSiteId::Worktree(WorktreeSite::Add);
+    let fixture = Fixture::created("marker-read-once");
+    let slot = fixture.task("alpha", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &slot)
+        .expect("the intent must be durable");
+    let path = fixture
+        .manager
+        .add_worktree(&mut NoHooks, &slot, &fixture.head)
+        .expect("a populated worktree, its add complete");
+    let admin = git_dir_of(&path)
+        .expect("the pointer reads")
+        .expect("a populated worktree has a git dir behind its pointer");
+    let locked = admin.join("locked");
+    let base = fixture.base.clone();
+    let target = ResidueTarget::new(&base).at(&path).from_base(&fixture.head);
+
+    fs::write(&locked, b"initializing\n").expect("plant the add's own marker");
+    let observing = super::fixture::observe_marker_read_attempts(Box::new(|_| {}));
+    let answer = classify_object_residue(site, &target).expect("the classifier answers");
+    assert_eq!(
+        (answer, observing.count()),
+        (ObjectResidue::Internal, 1),
+        "a readable `initializing` marker is the unpopulated class, read in one attempt"
+    );
+    drop(observing);
+
+    fs::remove_file(&locked).expect("release the marker");
+    let observing = super::fixture::observe_marker_read_attempts(Box::new(|_| {}));
+    let answer = classify_object_residue(site, &target).expect("the classifier answers");
+    assert_eq!(
+        (answer, observing.count()),
+        (ObjectResidue::After, 1),
+        "an absent marker is the populated class, read in one attempt"
+    );
+}
+
 /// The Unix arm makes exactly one attempt, and the seam reports that one.
 ///
 /// The seam exists for the Windows control above, which is the only place a
@@ -3459,6 +3695,14 @@ fn every_slot_taking_primitive_refuses_a_hostile_slot_name() {
             Box::new(|slot| manager.remove_worktree(&mut NoHooks, slot)),
         ),
         (
+            "remove_worktree_proving",
+            Box::new(|slot| {
+                manager
+                    .remove_worktree_proving(&mut NoHooks, slot, WriterProof::NoWriterAlive)
+                    .map(drop)
+            }),
+        ),
+        (
             "candidate_stage",
             Box::new(|slot| manager.candidate_stage(&mut NoHooks, slot, &[])),
         ),
@@ -4853,31 +5097,144 @@ fn a_relative_registration_still_binds_its_checkout() {
     );
 }
 
-/// Git failing to enumerate is an error, never "not registered": a zero-length
-/// `commondir`, the interrupted-add residue `revalidate_removal` documents,
-/// makes `git worktree list` fail, and the classifier propagates that rather
-/// than reading the registered-but-unpopulated worktree as absent.
+/// The registration `git worktree add` leaves when it is killed after it has
+/// written `gitdir` but before `commondir` or `HEAD` holds its bytes — the
+/// files it writes one at a time, each opened and truncated before it is
+/// written, so a kill inside either leaves it empty (measured by PR10's ST-07
+/// sampler, `~/pr10-evidence/r3/sampler-prefix-instrumented.log`, runs 20 and
+/// 22 of thirty). Git's own enumeration cannot report it: an empty
+/// `commondir` makes `git worktree list` die before any record, and an empty
+/// `HEAD` prints a record with neither a branch nor a detached mark, which the
+/// parser refuses (`PR172-SAMPLER-REFUSED-A-TORN-WORKTREE-LIST-RECORD`). So a
+/// classifier that asked Git answered an error where the frozen enums
+/// register a class (`SWEEP-WORKTREE-012`). It reads the registration itself,
+/// byte-safe, as the removal binds it, and answers the class the state is:
+/// registered, locked by the add that never finished, unpopulated. Forced
+/// removal converges on both, and Git enumerates again afterwards.
 #[test]
-fn a_failed_worktree_list_is_an_error_not_an_absent_registration() {
-    let fixture = Fixture::created("failed-list");
-    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
-    let path = fixture.manager.slot_path(&slot);
-    let admin = fixture
-        .manager
-        .revalidate_removal(&path)
-        .expect("admin dir")
-        .expect("registered");
-    fs::write(admin.join("commondir"), []).expect("truncate commondir");
-    let error = record_for(&fixture.base, &path).expect_err("Git could not enumerate");
+fn a_registration_git_cannot_enumerate_classifies_as_unpopulated_and_converges() {
+    for torn in ["commondir", "HEAD"] {
+        let fixture = Fixture::created(&format!("torn-{}", torn.to_lowercase()));
+        let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+        let path = fixture.manager.slot_path(&slot);
+        let admin = fixture
+            .manager
+            .revalidate_removal(&path)
+            .expect("admin dir")
+            .expect("registered");
+        fs::write(admin.join("locked"), "initializing\n")
+            .expect("the lock the add holds until it finishes");
+        fs::write(admin.join(torn), []).expect("the file the add opened and never wrote");
+        fixture.manager.worktree_records().expect_err(&format!(
+            "{torn}: Git's enumeration cannot report this registration"
+        ));
+
+        let site = EffectSiteId::Worktree(WorktreeSite::Add);
+        let target = ResidueTarget::new(&fixture.base).at(&path);
+        assert_eq!(
+            classify(site, &target),
+            ObjectResidue::Internal,
+            "{torn}: registered, locked by the add that never finished, unpopulated"
+        );
+        assert_eq!(
+            observed_residue_elements(site, &target).expect("observe"),
+            vec![ResidueElement::RegisteredUnpopulatedWorktree],
+            "{torn}"
+        );
+
+        fixture
+            .manager
+            .remove_worktree(&mut NoHooks, &slot)
+            .expect("forced removal converges on a registration that names its checkout");
+        assert!(
+            !path.exists() && !admin.exists(),
+            "{torn}: the checkout and the registration are gone"
+        );
+        assert!(
+            fixture
+                .manager
+                .worktree_records()
+                .expect("Git enumerates again")
+                .iter()
+                .all(|record| !record.path().ends_with("kalpha-g1")),
+            "{torn}"
+        );
+    }
+}
+
+/// The registration reader the classifier gained in PR10's round 3
+/// (`registration_for`) enters `common_git_dir`, which read Git's answer as
+/// UTF-8: in a repository whose path holds a byte no UTF-8 spells, an absent
+/// add target — no registration, no checkout, the shape every first `add`
+/// starts from — errored where the merge base's reader, which decoded Git's
+/// NUL-delimited enumeration byte for byte, answered `ObjectResidue::None`
+/// (the round-4 regression lens, P2-2; the decoder defect for a populated
+/// worktree is `PR128-REVIEW2-PATHS-READ-AS-UTF8`'s and stays filed). A raw
+/// repository, not `Fixture::created`: the fixture's own manager derivation
+/// reaches the same reader. Unix, where such a path exists at all — and not
+/// on every Unix filesystem: APFS refuses the name with `EILSEQ` ("Illegal
+/// byte sequence", errno 92 on macOS; CI's `test (macos-latest)` job at
+/// `96bf1944`), so the directory is probed first and the test is skipped,
+/// saying why and with the errno it saw, where the name cannot be made — on
+/// such a filesystem the shape the test guards against cannot arise either.
+/// Linux makes the name and measures the decoder.
+#[cfg(unix)]
+#[test]
+fn an_absent_add_target_in_a_byte_named_repository_still_classifies() {
+    use std::os::unix::ffi::OsStringExt as _;
+    let root = scratch("byte-named-repository");
+    let repo = root.join(std::ffi::OsString::from_vec(b"repo-\xff".to_vec()));
+    match fs::create_dir_all(&repo) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
+            eprintln!(
+                "skipped: this filesystem refuses a directory name that is not UTF-8 — {error} \
+                 (errno {:?}, EILSEQ) — so the byte-named repository the decoder is measured on \
+                 cannot exist here, and neither can the shape this test guards against",
+                error.raw_os_error()
+            );
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
+        Err(error) => panic!("a repository directory Git can name and UTF-8 cannot: {error}"),
+    }
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["config", "user.email", "tests@upstroke.local"],
+        &["config", "user.name", "upstroke tests"],
+    ] {
+        let output = git_out(&repo, args);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    fs::write(repo.join("a.txt"), "one\n").expect("seed file");
+    for args in [&["add", "-A"][..], &["commit", "-q", "-m", "seed"]] {
+        let output = git_out(&repo, args);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let target = root.join("not-added");
     assert!(
-        error.to_string().contains("worktree list"),
-        "the error names the command: {error}"
+        !target.exists(),
+        "the add target is absent: nothing was ever added there"
     );
-    classify_object_residue(
-        EffectSiteId::Worktree(WorktreeSite::Add),
-        &ResidueTarget::new(&fixture.base).at(&path),
-    )
-    .expect_err("the classifier propagates the failure and does not answer for Git");
+
+    assert_eq!(
+        classify_object_residue(
+            EffectSiteId::Worktree(WorktreeSite::Add),
+            &ResidueTarget::new(&repo).at(&target),
+        )
+        .expect("valid Unix repository path"),
+        ObjectResidue::None,
+        "an absent target in a byte-named repository is unregistered, as at the merge base"
+    );
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -4920,6 +5277,15 @@ enum TreeEntry {
 /// regular file with its bytes, every symbolic link or junction with its target. Nothing
 /// is followed, so replacing a file with a link to equal bytes is a
 /// difference, and so is a deleted empty directory.
+impl WorkspaceManager {
+    /// The binding the plain funnel makes: `revalidate_removal_proving` under
+    /// `WriterProof::Unknown`, its admin directory alone.
+    fn revalidate_removal(&self, target: &Path) -> Result<Option<PathBuf>, UpstrokeError> {
+        self.revalidate_removal_proving(target, WriterProof::Unknown)
+            .map(|binding| binding.admin)
+    }
+}
+
 fn tree_bytes(root: &Path) -> std::collections::BTreeMap<PathBuf, TreeEntry> {
     fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<PathBuf, TreeEntry>) {
         for entry in fs::read_dir(dir).expect("list a directory the test created") {
@@ -5054,7 +5420,10 @@ fn tree_bytes_detects_a_directory_replaced_by_a_link_to_equal_contents() {
 /// indistinguishable from an add in flight in the same window -- `locked` is
 /// present in both -- and a skip here was measured to delete the checkout
 /// beneath a live writer's registration (PR #151 pass 1), so the refusal is
-/// not to be relaxed on disk state alone.
+/// not to be relaxed on disk state alone. What relaxes it is a proof about
+/// writers, `WriterProof::NoWriterAlive`, and the sibling
+/// `a_torn_registration_is_passed_over_and_the_slot_converges_when_no_writer_is_alive`
+/// holds that form to what it may and may not touch.
 ///
 /// What each refusal is checked against is a snapshot -- relative path to
 /// directory, bytes or link target -- of four trees, taken before and compared
@@ -5115,9 +5484,12 @@ fn an_add_killed_before_it_wrote_gitdir_is_unlisted_and_refuses_forced_cleanup()
     let site = EffectSiteId::Worktree(WorktreeSite::Add);
     let target = ResidueTarget::new(&fixture.base).at(&path);
     assert!(
-        record_for(&fixture.base, &path)
+        !fixture
+            .manager
+            .worktree_records()
             .expect("Git enumerates")
-            .is_none(),
+            .iter()
+            .any(|record| canonical_prefix(record.path()).ok() == canonical_prefix(&path).ok()),
         "`git worktree list` skips a zero-length gitdir"
     );
     assert_eq!(classify(site, &target), ObjectResidue::None);
@@ -5176,6 +5548,148 @@ fn an_add_killed_before_it_wrote_gitdir_is_unlisted_and_refuses_forced_cleanup()
             .iter()
             .any(|record| record.path().ends_with("kbeta-g1")),
         "the unrelated slot is still registered"
+    );
+}
+
+/// The same two torn registrations under the proof the plain funnel lacks —
+/// no writer of the execution root is alive, which terminal finalization
+/// holds (a durable `run_finished` proves every add of the run passed) and
+/// the kill samplers hold once their child is reaped
+/// (`WriterProof::NoWriterAlive`), and nothing that resumes: each entry that names no checkout
+/// is passed over and reported, never bound by its Git-generated name and
+/// never touched, and the slot's contained checkout and intent converge.
+/// The two states are the ones an add leaves when killed inside its first
+/// two writes: `locked` alone (opened, never written), and `locked` beside
+/// an empty `gitdir` — PR10's ST-07 sampler measured both
+/// (`~/pr10-evidence/r3/sampler-prefix-instrumented.log`, runs 17 and 22).
+/// What is checked is the whole `.git/worktrees/` store byte for byte, an
+/// unrelated populated slot's checkout, and Git's enumeration; and that the
+/// plain funnel still refuses over the same store.
+#[test]
+fn a_torn_registration_is_passed_over_and_the_slot_converges_when_no_writer_is_alive() {
+    let fixture = Fixture::created("torn-passed-over");
+    let slot = fixture.task("alpha", 1);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &slot)
+        .expect("intent");
+    let path = fixture.manager.slot_path(&slot);
+    let name = path
+        .file_name()
+        .expect("a slot path has a final component")
+        .to_os_string();
+    let worktrees = fixture.manager.common_git_dir.join("worktrees");
+    let stale = worktrees.join(&name);
+    fs::create_dir_all(&stale).expect("the admin directory the add makes first");
+    fs::write(stale.join("locked"), "initializing\n").expect("the lock the add writes next");
+    fs::write(stale.join("gitdir"), []).expect("the gitdir the add opened and never wrote");
+    fs::create_dir_all(&path).expect("the checkout directory the add made, still empty");
+    let earlier = worktrees.join("kalpha-g0");
+    fs::create_dir_all(&earlier).expect("the admin directory of an earlier torn add");
+    fs::write(earlier.join("locked"), []).expect("its lock, opened and never written");
+
+    let other = fixture.add_task(&mut NoHooks, "beta", 1);
+    let other_path = fixture.manager.slot_path(&other);
+    fs::write(other_path.join("witness.txt"), "unrelated slot\n").expect("plant a file");
+    let store_before = tree_bytes(&worktrees);
+    let other_before = tree_bytes(&other_path);
+    assert!(
+        store_before.len() > 6,
+        "the store holds the two torn entries and the unrelated slot's registration: {:?}",
+        store_before.keys().collect::<Vec<_>>()
+    );
+
+    let passed_over = fixture
+        .manager
+        .remove_worktree_proving(&mut NoHooks, &slot, WriterProof::NoWriterAlive)
+        .expect("a registration that names nothing is passed over, not refused");
+    assert_eq!(
+        passed_over,
+        vec![earlier.clone(), stale.clone()],
+        "both torn entries are reported, sorted, whichever slot left them"
+    );
+    assert!(!path.exists(), "the contained checkout is reclaimed");
+    assert_eq!(
+        tree_bytes(&worktrees),
+        store_before,
+        "neither torn entry nor the unrelated slot's registration was touched"
+    );
+    assert_eq!(tree_bytes(&other_path), other_before);
+    fixture
+        .manager
+        .remove_intent(&mut NoHooks, &slot)
+        .expect("intent removal converges");
+    assert_eq!(
+        fixture.manager.intents().expect("intents"),
+        vec![other.clone()],
+        "the torn slot's intent is gone and the unrelated slot's stands"
+    );
+    assert!(
+        fixture
+            .manager
+            .worktree_records()
+            .expect("Git enumerates: it lists neither torn entry")
+            .iter()
+            .all(|record| !record.path().ends_with("kalpha-g1")),
+        "Git registers nothing for the slot"
+    );
+
+    let again = fixture
+        .manager
+        .remove_worktree_proving(&mut NoHooks, &slot, WriterProof::NoWriterAlive)
+        .expect("idempotent");
+    assert_eq!(again, passed_over, "and still reported");
+    assert_eq!(tree_bytes(&worktrees), store_before);
+
+    let error = fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &other)
+        .expect_err("without the proof the plain funnel still refuses over this store");
+    let text = error.to_string();
+    assert!(
+        text.contains("has an empty gitdir") || text.contains("is locked and has no gitdir"),
+        "the refusal names whichever torn entry the scan met first: {text}"
+    );
+    assert_eq!(tree_bytes(&other_path), other_before, "and changed nothing");
+    let unrelated = fixture
+        .manager
+        .remove_worktree_proving(&mut NoHooks, &other, WriterProof::NoWriterAlive)
+        .expect("the unrelated slot converges under the proof");
+    assert_eq!(
+        unrelated, passed_over,
+        "reporting the same two torn entries"
+    );
+    assert!(!other_path.exists());
+    assert!(
+        stale.join("gitdir").exists() && earlier.join("locked").exists(),
+        "the torn entries outlive every removal: Git's, or an operator's, to remove"
+    );
+
+    // The same store with both torn entries in the first shape — `locked`,
+    // no `gitdir` — which the plain funnel skipped instead of refusing until
+    // PR10's round 4, while the rustdoc promised one boundary for both (the
+    // round-4 record lens, P2-2): the refusal names the missing file, the
+    // proof passes both over, and neither is touched.
+    fs::remove_file(stale.join("gitdir")).expect("the second torn entry now lacks gitdir too");
+    let store_before = tree_bytes(&worktrees);
+    let error = fixture
+        .manager
+        .remove_worktree(&mut NoHooks, &other)
+        .expect_err("without the proof the plain funnel refuses a locked entry without gitdir");
+    assert!(
+        error.to_string().contains("is locked and has no gitdir"),
+        "the refusal names the missing gitdir: {error}"
+    );
+    assert_eq!(tree_bytes(&worktrees), store_before, "and changed nothing");
+    let both = fixture
+        .manager
+        .remove_worktree_proving(&mut NoHooks, &other, WriterProof::NoWriterAlive)
+        .expect("under the proof both entries are passed over");
+    assert_eq!(both, passed_over, "the same two, reported");
+    assert_eq!(
+        tree_bytes(&worktrees),
+        store_before,
+        "and neither is touched"
     );
 }
 
@@ -9750,6 +10264,63 @@ fn every_registered_residue_element_is_constructed_and_recovers() {
         );
         assert!(!evidence.claims_execution());
     }
+
+    // The synthetic half of the residue-class evidence, the tracked file the
+    // sequential registry (`engine::topology::coverage`) embeds: one record
+    // per (site, element), exactly what this test asserted above.
+    // Deterministic by construction -- every field is what the assertions
+    // required -- so unlike the histogram it is pinned rather than
+    // machine-varying, and this test holds the tracked bytes to what it
+    // constructed instead of rewriting them: an ordinary test that rewrote
+    // a tracked input in place left a truncation window for the ordinary
+    // coverage tests that read it (PR10's round-3 regression lens, P2), and
+    // rewrote it on every machine. `UPSTROKE_REGENERATE_EFFECT_ARTIFACTS=1`
+    // regenerates it, as it does the residue-class declarations.
+    let sites: Vec<serde_json::Value> = residue_classified_sites()
+        .iter()
+        .map(|site| {
+            serde_json::json!({
+                "site": site.name(),
+                "synthetic": records
+                    .iter()
+                    .filter(|(seen, _)| seen == site)
+                    .map(|(_, record)| *record)
+                    .collect::<Vec<SyntheticRecord>>(),
+            })
+        })
+        .collect();
+    let emitted = serde_json::to_string_pretty(&serde_json::json!({
+        "note": "decisions.effect_site_inventory.outputs, the synthetic-construction half of \
+                 the residue-class evidence: one record per (site, element) the frozen enums \
+                 register, written by \
+                 workspace_manager::tests::every_registered_residue_element_is_constructed_and_recovers \
+                 from what it constructed, classified and recovered, and held to on every run. \
+                 Deterministic, so it is pinned (regenerate with \
+                 UPSTROKE_REGENERATE_EFFECT_ARTIFACTS=1); effects/sequential-registry.json \
+                 embeds it.",
+        "sites": sites,
+    }))
+    .expect("the synthetic evidence serializes");
+    let tracked =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(crate::effects::RESIDUE_SYNTHETIC_JSON);
+    let generated = format!("{emitted}\n");
+    if std::env::var_os(crate::effects::REGENERATE).is_some() {
+        write_file(&tracked, generated.as_bytes());
+    }
+    let on_disk = fs::read_to_string(&tracked).unwrap_or_else(|error| {
+        panic!(
+            "{} is tracked; regenerate it with {}=1: {error}",
+            crate::effects::RESIDUE_SYNTHETIC_JSON,
+            crate::effects::REGENERATE
+        )
+    });
+    assert_eq!(
+        on_disk.replace("\r\n", "\n"),
+        generated,
+        "{} is stale against what this test constructed; regenerate it with {}=1",
+        crate::effects::RESIDUE_SYNTHETIC_JSON,
+        crate::effects::REGENERATE
+    );
 }
 
 /// Construct one element at one site, classify it, check quiescence, and
@@ -10113,6 +10684,16 @@ fn sampled_git_child_kills_every_residue_classified_and_recovered() {
             4 * SAMPLING_N as usize,
             "every sampled site must launch exactly its frozen N children, \
                  and an observation is pushed whether or not one was"
+        );
+        let group_end = log
+            .iter()
+            .map(|launch| launch.group_ended)
+            .max()
+            .unwrap_or_default();
+        println!(
+            "residue sampling: every killed group was gone within {group_end:?} of its leader's \
+             reap (the bound is {:?})",
+            super::fixture::GROUP_END_BOUND
         );
         for (label, fixed) in [
             ("git add", WorkspaceManager::CANDIDATE_STAGE_ARGV[0]),
@@ -11147,6 +11728,10 @@ struct SampledLaunch {
     /// asserted on — see the note at that printing.
     kill_error: Option<String>,
     end: LaunchEnd,
+    /// How long after the leader's reap its whole process group was gone
+    /// (`fixture::await_group_end`): zero off Unix, where the child is no
+    /// group.
+    group_ended: std::time::Duration,
 }
 
 /// Every Git child the sampler actually launched, in order.
@@ -11210,24 +11795,40 @@ struct SampledChild {
     /// What the clock said when a kill fired at this child, or `None` if
     /// none ever did. Written only by [`Self::kill`].
     fired: Option<std::time::Duration>,
+    /// How long after the leader's reap its whole process group was gone
+    /// (`fixture::await_group_end`), or `None` until [`Self::wait`] has run.
+    group_ended: Option<std::time::Duration>,
 }
 
 impl SampledChild {
+    /// Spawn the child in a process group of its own on Unix, so that
+    /// [`Self::kill`] reaches the children git starts — `git worktree add`'s
+    /// `reset --hard` — and not the leader alone. Until PR10's round 5 this
+    /// sampler killed the leader alone (round 2's group kill reached
+    /// `fixture::KillableGitChild`, the other samplers' child), and CI's
+    /// macOS leg at `869e336a` met that child still populating the checkout
+    /// — `PR136`'s first fingerprint — at the forced removal.
     fn spawn(cwd: &Path, args: &[String]) -> Self {
-        let child = Command::new("git")
+        let mut command = Command::new("git");
+        command
             .arg("-C")
             .arg(cwd)
             .args(["-c", "core.fsmonitor=false"])
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn the sampled git child");
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
+        let child = command.spawn().expect("spawn the sampled git child");
         Self {
             child,
             spawned: std::time::Instant::now(),
             fired: None,
+            group_ended: None,
         }
     }
 
@@ -11247,13 +11848,24 @@ impl SampledChild {
     /// but a real kill produces.
     fn kill(&mut self) -> std::io::Result<()> {
         let fired = self.spawned.elapsed();
-        let outcome = self.child.kill();
+        let outcome = super::fixture::kill_process_group(&mut self.child);
         self.fired = Some(fired);
         outcome
     }
 
+    /// Reap the leader, then wait until its whole process group is gone
+    /// (`fixture::await_group_end`, bounded): the proof `recover_sample`
+    /// runs under is that no writer the child started is alive, and the
+    /// leader's reap alone is not that proof.
     fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.child.wait()
+        let status = self.child.wait()?;
+        let pgid = i32::try_from(self.child.id()).expect("a pid fits in i32");
+        self.group_ended = Some(
+            super::fixture::await_group_end(pgid).unwrap_or_else(|outlived| {
+                panic!("the sampled git child's group outlived its leader: {outlived}")
+            }),
+        );
+        Ok(status)
     }
 }
 
@@ -11277,6 +11889,7 @@ fn kill_git_child(cwd: &Path, args: &[String], after: std::time::Duration) {
             fired: child.fired,
             kill_error,
             end: launch_end(&status),
+            group_ended: child.group_ended.unwrap_or_default(),
         });
 }
 
@@ -11284,9 +11897,17 @@ fn kill_git_child(cwd: &Path, args: &[String], after: std::time::Duration) {
 /// worktree and its intent, which is the before-phase action every
 /// `Internal` residue routes to and is idempotent for the other two.
 fn recover_sample(fixture: &Fixture, slot: &Slot) -> bool {
+    // The sampled child's whole process group is gone before this runs —
+    // the leader reaped and every member it started, `git worktree add`'s
+    // own `reset --hard` among them, dead and reaped
+    // (`fixture::await_group_end`; until PR10's round 5 the leader alone was
+    // killed and reaped here, and CI's macOS leg at `869e336a` met the
+    // member still writing: `PR136`'s first fingerprint) — so no writer of
+    // the execution root is alive: the proof under which a registration the
+    // kill left naming nothing is passed over rather than refused.
     fixture
         .manager
-        .remove_worktree(&mut NoHooks, slot)
+        .remove_worktree_proving(&mut NoHooks, slot, WriterProof::NoWriterAlive)
         .expect("forced removal converges");
     fixture
         .manager

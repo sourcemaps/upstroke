@@ -40,7 +40,12 @@ pub(super) fn funnel_module_record() -> String {
                      taste is that a gate-attached artifact stated something untrue of \
                      this tree with nothing checked in saying otherwise. The generator \
                      is src/topology/effects.rs, frozen, so the column is corrected \
-                     here rather than in place, and the funnel bodies are NOT moved.",
+                     here rather than in place, and the funnel bodies are NOT moved. \
+                     PR10 (PR3-REPORT-DOUBLE-NAME): `Report.Write` names the same \
+                     report.json as `RunDir.WriteReport`, and ST-07's full-inventory \
+                     bijection executes both names around the one write in \
+                     src/rundir.rs (rundir::write_report); its inventory module, \
+                     src/util.rs, still holds the write primitive and no funnel.",
             "sites_checked": EffectSiteId::all().len(),
             "disagreements": disagreements,
         }))
@@ -50,12 +55,12 @@ pub(super) fn funnel_module_record() -> String {
 
 pub(super) fn funnel_module(site: EffectSiteId) -> &'static str {
     match site.group().name() {
-        "Answer" => "src/rundir.rs",
+        "Answer" | "Report" => "src/rundir.rs",
         _ => site.module(),
     }
 }
 
-pub(super) const SITES_WITHOUT_A_FUNNEL: &[&str] = &["Report.Write"];
+pub(super) const SITES_WITHOUT_A_FUNNEL: &[&str] = &[];
 
 pub(super) const SAMPLING_N: u32 = 8;
 

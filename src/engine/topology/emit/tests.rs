@@ -812,8 +812,13 @@ impl Fixture {
     /// `RunDir.WriteReport` on purpose — the report from memory is the exact
     /// thing `Run::drain_and_report` does and the protocol forbids.
     fn drive_a_report(&mut self) {
-        crate::rundir::write_report(&self.paths.public, &"a report", self.hooks.rundir())
-            .expect("the control report is written");
+        crate::rundir::write_report(
+            &self.paths.public,
+            &self.paths.private,
+            &"a report",
+            self.hooks.rundir(),
+        )
+        .expect("the control report is written");
     }
 }
 
@@ -949,7 +954,7 @@ fn open_syncs_surviving_prefix_before_any_recovery_effect() {
 
     // The control. The same scan, after one real fold-derived effect, must find
     // it — otherwise the assertion above was measuring nothing.
-    crate::rundir::write_report(&paths.public, &"a report", hooks.rundir())
+    crate::rundir::write_report(&paths.public, &paths.private, &"a report", hooks.rundir())
         .expect("the control report is written");
     let after: Vec<EffectSiteId> = {
         let seen = harness

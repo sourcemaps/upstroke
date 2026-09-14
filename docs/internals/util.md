@@ -107,6 +107,40 @@ distinct from [`Self::SyncedFile`]'s `sync_all`.
 
 A file was truncated to `len` bytes.
 
+## `Staged,`
+
+A staged file was created, empty, at the mode it will carry its bytes at
+(`rundir::stage_json`; PR10's round 5). No barrier: the entry exists so a
+test can read the record's `mode` from before the first byte rather than
+from the source order of a create and a `chmod`.
+
+## `DirectoryCreated,`
+
+A directory was created, exclusively, for a staged file to be written in
+(`rundir::begin_report_staging`; PR10's round 10): the report's staging
+directory under the public run directory, `.report-staging-<ulid>`. The
+entry carries, as the entry observed ([`EntryObserved`]), the record of
+that directory's name in the run's private half — whether it stood at the
+instant before `create_dir`, read by `symlink_metadata` in the statement
+immediately before it — so a creation ahead of its record shows on the
+record as `present: false` (the recipe `staging-created-before-its-record`).
+No barrier.
+
+## `GroupGiven,`
+
+A staged file was given the group of the file it replaces
+(`rundir::give_group`; PR10's rounds 8 and 9): one entry per `fchown`,
+whether or not it succeeded, carrying the mode the file had at the instant
+before the call — read by `fstat` on the descriptor in the statement
+immediately before it — as `mode`, and the mode at the instant after it,
+read the same way in the statement immediately after, as `mode_after`.
+Both are without the group bits the publication withholds until the group
+is the operator's, and the two reads bracket the syscall: a widening before
+the first is in `mode`, a widening between them is in `mode_after` (round
+8 recorded a `stat` of the path in the statement before the `fchown`, and a
+`chmod` inserted after that record and before the syscall showed in
+neither; the round-9 fix-check lens, P1). No barrier.
+
 ## `SyncedFile,`
 
 A staged file's own bytes were made durable (`fsync` / `FlushFileBuffers`).
@@ -150,6 +184,46 @@ number of bytes handed to `write_all`, which is the quantity the claim
 "one `write_all` containing both the JSON and its LF commit marker" is
 about. Zero when the path has no length to report.
 
+## `pub mode: Option<u32>,`
+
+The permission bits (`st_mode & 0o7777`) the path had when the entry was
+taken, read from the filesystem by `record` itself — or, for an entry taken
+by `record_transition`, the mode the funnel read off the descriptor in the
+statement before its syscall; `None` off Unix or when the path could not be
+read. What [`DurableStep::Staged`] is for: a staged
+report that took the existing report's mode by a `chmod` after its bytes
+were written was readable at the umask's mode in between, and every
+observation taken after the publication read the mode as preserved (the
+round-5 regression lens, P2).
+
+## `pub mode_after: Option<u32>,`
+
+For an entry taken by `record_transition` — [`DurableStep::GroupGiven`]
+today — the mode the funnel read off the descriptor in the statement
+immediately after its syscall; `None` for every other entry. With `mode`
+it brackets the syscall, so a test of the ledger can hold the transition
+to what it saw on both sides rather than to the source order of a record
+and a call (PR10's round 9).
+
+## `pub entry: Option<EntryObserved>,`
+
+For a directory barrier taken by `record_entry` — the checkout barrier of
+`workspace_manager::remove_worktree_proving` today — the entry the barrier
+was taken for and whether it was present, read by `symlink_metadata` in the
+statement immediately before the barrier; `None` for every other entry. A
+`SyncedDirectory` record that carries the checkout observed absent is the
+proof that the barrier followed the deletion, which a record of the
+directory alone, read at a hook phase, never gave (the round-9 fix-check
+lens, P1).
+
+## `pub struct EntryObserved {`
+
+What a directory barrier saw of one entry of the directory it made
+durable — or, since PR10's round 10, what the report staging directory's
+creation saw of the record that names it: the entry's path, as the funnel
+bound it, and whether it was present at the instant before the barrier or
+the creation.
+
 ## `#[derive(Debug, Clone, Default)]`
 
 An ordered record of the durability primitives a funnel performed.
@@ -157,7 +231,11 @@ An ordered record of the durability primitives a funnel performed.
 Cloning shares the log, so a caller can hand a clone into a funnel body and
 still read what the body recorded. Production never constructs a recording
 one: [`Self::off`] holds no allocation and every `record` call on it is a
-discriminant test.
+discriminant test — the enabled check comes before any record is built, so
+an off ledger reads no path and allocates nothing (round 9 had built the
+record first, with a `metadata` of the path on Unix, so every schema-3
+append through the off ledger did a pathname lookup; the round-10
+regression lens, P3, restored the order).
 
 ## `#[must_use]`
 
@@ -173,7 +251,20 @@ Whether this ledger records at all.
 
 ## `pub fn record(&self, step: DurableStep, path: &Path, len: u64) {`
 
-Append one entry.
+Append one entry, with the mode the path has at that moment.
+
+## `pub fn record_transition(`
+
+Append one entry for a transition the funnel bracketed with two reads of
+its own: the mode before and the mode after, as the funnel read them off
+the descriptor (`rundir::give_group`); the length is not the transition's
+to report.
+
+## `pub fn record_entry(&self, step: DurableStep, path: &Path, entry: EntryObserved) {`
+
+Append one entry for a directory barrier, with the mode the directory has
+at that moment and the [`EntryObserved`] the funnel read in the statement
+before the barrier (`workspace_manager::sync_checkout_removed`).
 
 ## `#[must_use]`
 
@@ -319,10 +410,80 @@ check rather than a line each caller is trusted to keep.
 
 [`std::io::Error`] from `fsync`, verbatim.
 
+## `pub(crate) fn fsync_file_at(file: &std::fs::File, path: &Path) -> std::io::Result<()> {`
+
+[`fsync_file`] named by the path it makes durable, so that the barrier fault
+below can refuse exactly one file's barrier. The run-directory publications
+go through this form (`rundir::sync_file_recorded`); the entry counts as
+the file half either way.
+
+# Errors
+
+The injected fault, or [`fsync_file`]'s.
+
+## `static ARMED_BARRIER_FAULTS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());`
+
+The paths whose barrier a test has made fail (`PR10`'s round 4, the crash
+and fix-check lenses: `let _ = stage_json(...)` and a fresh-report branch
+without a directory barrier survived every test, because nothing made a
+barrier fail). Process-wide and keyed by path rather than thread-local,
+because the funnel that meets the fault runs wherever the engine runs it
+and a fixture's directory is its own, so two tests' faults cannot meet;
+guarded by a mutex (§6) because arming and disarming are a test's rare
+writes against the barrier's reads, and the reads pay nothing until a
+fault is armed — the count beside it is the fast path.
+
+Unconditional rather than `#[cfg(test)]`, for the reason [`BARRIERS`] gives:
+a `#[cfg(test)]` item here would move the cut every source census's
+production region stops at.
+
+## `static ARMED_BARRIER_FAULT_COUNT: std::sync::atomic::AtomicUsize =`
+
+How many faults are armed; zero is the production reading and the only
+one a barrier consults before returning to its syscall.
+
+## `#[cfg_attr(not(test), allow(dead_code))]`
+
+The guard [`fail_barriers_at`] and [`fail_file_barriers_within`] hand back:
+the fault is armed while it is held and disarmed by its `drop`, so a test
+that panics disarms it too. It remembers its scope beside its path, so a
+guard for a directory's file barriers disarms only that.
+
+## `#[cfg_attr(not(test), allow(dead_code))]`
+
+Arm a barrier fault at `path`: every [`fsync_dir`] of that directory and
+every [`fsync_file_at`] of that file returns an `io::Error` naming the path
+instead of performing the barrier, until the guard is dropped. The path
+compares as given and canonicalised, so a funnel handed the same directory
+by another spelling still meets it.
+
+A second scope, [`fail_file_barriers_within`] (PR10's round 10; from
+round 8 to round 9 a `fail_file_barriers_under`, every file *directly
+under* a directory, which went with the fixed staging directory it was
+written for): every [`fsync_file_at`] of a file anywhere *within* `dir` is
+refused, and no directory barrier is — the staged report's own barrier is
+armed by the run directory it lands under, since the staging directory's
+name is unique to the write and recorded before it exists, so no test can
+know it in advance; the staged report is the only file synced within the
+public run directory during a report write, the staging record's own
+barrier being in the private half; the directory barrier tests keep the
+exact-path scope, since a fault on the public directory must not reach the
+staged file's sync.
+
+## `impl Drop for BarrierFault {`
+
+Disarms the one entry this guard armed.
+
+## `fn injected_barrier_fault(path: &Path) -> Option<std::io::Error> {`
+
+The fault for `path`, if one is armed; `None` at the cost of one relaxed
+load when none is.
+
 ## `pub(crate) fn fsync_dir(dir: &Path) -> std::io::Result<()> {`
 
 The **directory** half of the durability barrier, on every platform this
-ships on (`PR5-CONF-013`).
+ships on (`PR5-CONF-013`). Consults the armed faults after counting its
+entry, so a refused barrier is still an entered one.
 
 A rename is not durable because the renamed file was synced: the durable
 thing is the *directory entry*, and it needs its own barrier.

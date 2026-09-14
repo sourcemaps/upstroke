@@ -200,6 +200,17 @@ inspection.
 
 Drain, settle, and report.
 
+The report goes through `rundir::write_report` with both halves of the
+run's paths (PR10's round 10): the writer records the name of the staging
+directory it is about to make in the run's private half before making it,
+and removes on the next write only the directory that record names. What
+the writer hands back — staging-shaped entries under the run directory that
+no record of this run's names, passed over and left as found — is dropped
+on this path: the coordinator has no diagnostic channel that is not a
+governed effect (`eprintln!` is denied here), the entries are left as found
+either way, and the schema-4 finalization names them in its refusal
+(`finalize::refuse_continuation`).
+
 ## `pub(super) fn drain_and_report(&mut self) -> Result<RunReport, UpstrokeError> {` › `let partial = self.finish();`
 
 The log already holds everything that happened, including the

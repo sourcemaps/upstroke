@@ -298,6 +298,14 @@ One mode, at the coordinate that mode belongs at. A funnel that fires a
 point's two modes at two coordinates calls this twice, once each; the
 harness is keyed by `(site, point, mode)`, so each lands on its own key.
 
+## `impl SpawnHooks for HarnessHooks` › `fn phase(&mut self, site: ProcessSite, phase: HookPhase) -> Injection {`
+
+A hook phase of either process site, recorded under that site: the
+funnel's `Spawn` phases land on `Process.Spawn` and its termination phases
+on `Process.Terminate`, so the observation export carries both sites at
+both phases and the ST-07 bijection over the whole inventory reads them
+without a declaration.
+
 ## `mod tests` › `fn slotting_follows_r3_not_the_predicate() {`
 
 The slotting split is R3's sentence, transcribed here rather than
