@@ -1646,6 +1646,7 @@ deployment_top=''
 deployment_index=''
 deployment_said=''
 resolve_deployment() {
+  local answer
   if (( environment_git_dir_named )); then export GIT_DIR="$environment_git_dir"; fi
   if (( environment_work_tree_named )); then export GIT_WORK_TREE="$environment_work_tree"; fi
   if (( environment_index_file_named )); then export GIT_INDEX_FILE="$environment_index_file"; fi
@@ -1661,18 +1662,31 @@ resolve_deployment() {
   fi
   deployment_said="$probe_stderr"
   unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-  # EACH ANSWER IS ONE LINE OR IT IS NOT AN ANSWER. Inside a repository `rev-parse`
+  # EACH ANSWER IS A ROOTED PATH OR IT IS NOT AN ANSWER. Inside a repository `rev-parse`
   # ECHOES an option it does not know and exits 0 -- measured at git 2.43.0 with an
   # invented `--path-formatx=absolute`, printed back ahead of the path -- so a git
   # too old for `--path-format` would answer the index as two lines, the first of
   # them the option, and a path exported from that would read an index that is not
   # there: an empty ledger, which is the substitution this gate is about.
-  case "$deployment_git_dir$deployment_top$deployment_index" in
-    *$'\n'*) return 0 ;;
-  esac
-  if (( probe_status == 0 )) && [[ -n "$deployment_git_dir" && -n "$deployment_top" && -n "$deployment_index" ]]; then
-    deployment_resolved=1
-  fi
+  #
+  # WHAT TELLS THAT FROM A PATH IS WHERE THE ANSWER BEGINS, NOT WHETHER IT HOLDS A
+  # NEWLINE. The guard that stood here refused any answer holding one, and a newline is
+  # a legal byte in a path: a clean deployment whose git directory is `meta<LF>repo.git`,
+  # or whose `GIT_INDEX_FILE` is `index<LF>copy`, resolves at exit 0 for all three asks
+  # and `ls-files` records its committed finding, and it was refused as a repository
+  # git could not resolve -- `231c1aad` exit 0, `e3a91ff3` exit 1. All three asks answer
+  # an ABSOLUTE path, and an option echoed ahead of one begins with `-`, which roots
+  # nothing. So each answer must begin with a root -- `/`, a backslash or a drive
+  # designator, the spellings git roots a path with here and on Windows -- and whatever
+  # follows is the path's own bytes.
+  (( probe_status == 0 )) || return 0
+  for answer in "$deployment_git_dir" "$deployment_top" "$deployment_index"; do
+    case "$answer" in
+      /* | '\'* | [A-Za-z]:*) ;;
+      *) return 0 ;;
+    esac
+  done
+  deployment_resolved=1
 }
 
 # ledger_probe <expected-statuses> -- <git arguments>: `git_probe`, reading the
