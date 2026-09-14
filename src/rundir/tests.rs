@@ -598,14 +598,15 @@ impl RunDirHooks for FailingAt {
 /// absence — and then the tabled action, which for a lease is the next write
 /// command's acquisition.
 ///
-/// The residue is read against the authority, not restated:
-/// `semantics(phase).rows` names R25 exactly when the lock file is left, and
-/// R17 never — no hold survives an acquisition that returned an error, which
-/// a second process taking the lease at once proves (an in-process probe
-/// cannot: `fcntl` locks do not conflict with their own process). The action
-/// is the authority's too: before a phase nothing was performed, so the next
-/// acquisition performs the create; after `CreateWorktreeLockFile` the file
-/// is adopted, so a byte written into it survives the next acquisition.
+/// The residue is read against the authority, not restated: the create's
+/// rows name R25 exactly when the lock file is left, and the acquisition's
+/// before phase names no row, since no hold is taken before it. No hold
+/// survives an acquisition that returned an error, which a second process
+/// taking the lease at once proves (an in-process probe cannot: `fcntl` locks
+/// do not conflict with their own process). The action is the authority's
+/// too: before a phase nothing was performed, so the next acquisition
+/// performs it; after `CreateWorktreeLockFile` the file is adopted, so a byte
+/// written into it survives the next acquisition.
 fn a_fault_at_the_worktree_lease_converges_on_the_next_acquisition(
     site: LockSite,
     phase: HookPhase,
