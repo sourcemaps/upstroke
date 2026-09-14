@@ -423,6 +423,7 @@ fn kill_after_dispatch_recreates_worktree_without_spend() {
             vec!["run_started", "task_dispatched"],
             "`{site}`: recovery of an OpenNoAttempt generation appends nothing and spends nothing"
         );
+        run.replay_twice_equal();
     }
 }
 

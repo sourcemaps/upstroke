@@ -187,7 +187,8 @@ durable prefix, faulted by no committed test) and the recovery rebuilds from
 it, and at `after_add` the worktree exists and quiesces and is reused. A test
 that drove only the first would pass against a recovery that force-removed
 every worktree it found. The intent's presence is asserted per prefix, beside
-the worktree's.
+the worktree's, and each prefix's log replays twice to equal states after its
+recovery.
 
 "Without spend" is asserted three ways: no `attempt_started` in the durable
 log, the generation still `OpenNoAttempt`, and the task still `Pending`.
