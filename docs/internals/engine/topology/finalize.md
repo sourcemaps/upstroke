@@ -96,7 +96,21 @@ delete.
 One namespace of the execution root at a time, by slot kind, through the Worktree and Snapshot
 funnels' remove-then-remove-intent pairs. The removal runs under
 `WriterProof::NoWriterAlive` — the finalizer holds the run lock and the run's cleanup lease, so
-no writer of the root is alive — and what it passes over is collected for `Finalized`.
+no writer of the root is alive — and what it passes over is collected for `Finalized`. Since
+PR10's round 8 the removal makes the checkout's deletion durable inside its own site, before the
+funnel returns: `WorkspaceManager::remove_worktree_proving` syncs the checkout's parent directory
+(the slot kind's directory under the root, recorded as the ledger's `SyncedDirectory`) after the
+tree is gone, so the intent that names the checkout — removed next, and synced in its own
+directory — can never outlive a deletion the disk rolled back; a resume enumerates the intents,
+and a checkout with no intent would have kept the root non-empty on every later resume (the
+round-8 crash lens, P2). The order is a guard in the recover tests
+(`a_checkouts_deletion_is_made_durable_before_its_intent_is_removed`: the parent synced between
+the removal's two phases and before the intent site's first) rather than a cell in the matrix,
+since the barrier is inside the removal's site and the matrix already faults both its phases; the
+lens's alternative — a recovery that rediscovers an intent-less checkout — was not taken, because
+it would add a second reader of the root's contents beside the intents where one barrier in the
+funnel every caller already uses (the live loop's scrubs and reclaims included) removes the
+shape.
 
 ## `fn delete_refs_under(`
 

@@ -878,7 +878,10 @@ nothing yet done to it. Since PR10's round 7 the planting also leaves an
 already-unreachable object in the store (`plant_unreachable_object`) and
 records the objects the run's refs and worktrees reference and the whole
 store as it stands, so that every finalization driven from it is held to
-R27 by `assert_finalized` (`assert_objects_kept`).
+R27 by `assert_finalized` (`assert_objects_kept`); since round 8 it also
+leaves a staged report a dead writer would have — a regular file under a
+name `rundir::report_staging_name` produces — so that both branches of the
+report site are held to reclaiming it.
 
 ## `fn resume_finalizes_halted_then_refuses() {`
 
@@ -4242,7 +4245,10 @@ root, the answer files, the report, the events — and, since PR10's round
 7, the object store (`assert_objects_kept`), which until then no
 finalization the matrix or the real kill drove was held to (the round-7
 crash lens, P1: a terminal resume that found the report current and
-pruned Git's unreachable objects converged).
+pruned Git's unreachable objects converged); and, since round 8, the
+staged report the planting left for a dead writer, reclaimed inside the
+report site on the write branch and on the fresh branch alike, with
+nothing of the report's protocol left staged (`rundir::report_staging_files`).
 
 ## `fn assert_objects_kept(planted: &FinishedPlanting, tag: &str) {`
 
@@ -4307,7 +4313,45 @@ round 7 the third resume is held to R27 too (`assert_objects_kept`), as the
 second is through `assert_finalized`: it is the resume that takes the fresh
 branch, and a fresh branch that pruned Git's unreachable objects after its
 barrier converged under this matrix until then — the recipe
-`st18-fresh-branch-prunes-objects` fails at exactly that cell.
+`st18-fresh-branch-prunes-objects` fails at exactly that cell. The report
+effect's "done" reads the report present *and* the dead writer's staged
+report gone, so the cells around the report's two sites hold the write
+branch's reclaim to the site's phases; and the third resume — the one
+that always finds the report current — meets a staged report planted
+anew after the second, so the fresh branch's reclaim is held as well
+(round 8; the recipes `report-leftover-not-reclaimed-on-write` and
+`-on-fresh`, the second of which survived the matrix until the
+re-planting: every finalization the cells drove had met the write branch
+first, which had already reclaimed what the planting left). The round-8
+crash lens's recipe — a file re-created inside beta's worktree after the
+`Worktree.RemoveIntent`/after cell, the shape a power loss between the
+checkout's deletion and its intent's leaves when the deletion rolls back
+— failed this matrix at `bab5a4b7` ("the closed generation's worktree is
+pruned") and is retired with the barrier that makes the deletion durable
+inside the removal's site: a rollback of a synced deletion is not a shape
+the fault model admits, and the order is
+`a_checkouts_deletion_is_made_durable_before_its_intent_is_removed`'s to
+guard.
+
+## `fn a_checkouts_deletion_is_made_durable_before_its_intent_i…`
+
+The order the round-8 crash lens asked for, asserted the way the report's
+barrier is (`BarrierHooks`'s timeline, the directories the ledger had
+synced at each hook): for beta's task worktree, the snapshot and the
+staging worktree, at Complete and at Halted, the checkout's directory —
+its slot kind's directory under the execution root — is not among the
+synced directories when the removal's before phase fires, is among them
+at the removal's after phase, and so before the intent site's before
+phase. The directory is compared in its plain canonical form — the test
+canonicalizes the slot kind's directory before the resume and strips the
+verbatim prefix Windows' `canonicalize` adds, since the removal syncs the
+path `canonical_prefix` hands it, prefix stripped — and nothing is
+canonicalized after the resume, when the root is already pruned (the
+guest's full suite at `0eccb5dd` failed the first form of this test on
+exactly that: `\\?\C:\…\tasks` against `C:\…\tasks`, a string fallback
+after a failed `canonicalize`; `fc131b2c`). The recipe
+`scrub-checkout-unsynced-before-intent` (the barrier removed from the
+removal) fails it at the after phase.
 
 ## `fn a_fault_at_a_staging_leftovers_own_removal_stops_finaliz…`
 

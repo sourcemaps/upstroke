@@ -114,6 +114,16 @@ A staged file was created, empty, at the mode it will carry its bytes at
 test can read the record's `mode` from before the first byte rather than
 from the source order of a create and a `chmod`.
 
+## `GroupGiven,`
+
+A staged file is about to be given the group of the file it replaces
+(`rundir::give_group`; PR10's round 8): the entry is recorded at the
+instant before the `fchown`, inside the transition's own call, so its
+`mode` is the mode the file carried until then — without its group bits,
+which the publication withholds until the group is the operator's — and a
+widening slipped before the transition is a widening before the record.
+No barrier.
+
 ## `SyncedFile,`
 
 A staged file's own bytes were made durable (`fsync` / `FlushFileBuffers`).
@@ -370,8 +380,10 @@ one a barrier consults before returning to its syscall.
 
 ## `#[cfg_attr(not(test), allow(dead_code))]`
 
-The guard [`fail_barriers_at`] hands back: the fault is armed while it is
-held and disarmed by its `drop`, so a test that panics disarms it too.
+The guard [`fail_barriers_at`] and [`fail_file_barriers_under`] hand back:
+the fault is armed while it is held and disarmed by its `drop`, so a test
+that panics disarms it too. It remembers its scope beside its path, so a
+guard for a directory's file barriers disarms only that.
 
 ## `#[cfg_attr(not(test), allow(dead_code))]`
 
@@ -380,6 +392,14 @@ every [`fsync_file_at`] of that file returns an `io::Error` naming the path
 instead of performing the barrier, until the guard is dropped. The path
 compares as given and canonicalised, so a funnel handed the same directory
 by another spelling still meets it.
+
+A second scope, [`fail_file_barriers_under`] (PR10's round 8): every
+[`fsync_file_at`] of a file *directly under* `dir` is refused, and no
+directory barrier is — the staged report's own barrier, whose name the
+write chooses for itself (`rundir::report_staging_name`) and no test can
+know in advance, is armed by the directory it lands in; the directory
+barrier tests keep the exact-path scope, since a fault on the public
+directory must not reach the staged file's sync.
 
 ## `impl Drop for BarrierFault {`
 
