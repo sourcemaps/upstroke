@@ -5,18 +5,26 @@
 - The four Unix helper endings that give up on a helper — the cleanup reaper that never said
   READY, the job-control guard whose descriptors could not be configured, the guard that never
   said READY, and a guard aborted after it said READY — no longer wait for that helper without a
-  bound. Each asks `waitpid(pid, …, WNOHANG)` and polls it for two seconds, after which a helper
-  still there is left for the process's exit to collect and the failure message says so, naming
-  what it saw rather than claiming the helper. A helper in uninterruptible I/O with the `SIGKILL`
+  bound, and neither does the end of a cleanup reaper that did not acknowledge CLEANUP. Each asks
+  `waitpid(pid, …, WNOHANG)` and polls it for two seconds, after which a helper still there is
+  left for the process's exit to collect; the four endings' failure messages say so, naming what
+  they saw rather than claiming the helper. A helper in uninterruptible I/O with the `SIGKILL`
   pending never becomes collectable, and the blocking wait these sites made did not return: the
   reaper's callers hold the launch barrier, under which the signal monitor refuses to kill or stop
   any registered group, so every running agent outlived a `SIGTERM` for as long as the kernel took.
-  This supersedes, for these four sites, the sentence below that neither guard path "makes its wait
+  A CLEANUP the reaper did not acknowledge, from a reaper that stayed alive, likewise kept the
+  supervisor from ever arming the fail-closed termination it answers that failure with. This
+  supersedes, for the four endings, the sentence below that neither guard path "makes its wait
   again where it did not before": each now makes its wait again until the helper is collected or
-  the budget runs out. The status-pointer shape each site passes is unchanged, so a host policy
-  keyed on that sees what it saw. **The acknowledged-exit wait after CLEANUP or CANCEL is
+  the budget runs out. **The wait after a CLEANUP or CANCEL the reaper acknowledged is
   deliberately still unbounded**, because the reaper's exit is what releases the run's cleanup
-  lease its caller is about to act on
+  lease its caller is about to act on. What a host's syscall policy sees changes at the bounded
+  waits only: each is a `WNOHANG` poll made again until it collects the helper or the budget runs
+  out, `waitpid(pid, …, WNOHANG)` by number where it passed `0`, and with
+  `UPSTROKE_HELPER_IDENTITY=1` `waitid(P_PIDFD, fd, WEXITED | WNOHANG)` where it passed `WEXITED`.
+  A policy written for the identity path must therefore permit both sets of `waitid` options, as
+  `DESIGN.md` §15 now states; the acknowledged-exit wait still passes `0` by number and `WEXITED`
+  through the descriptor, and the status-pointer shape every wait passes is unchanged
   (`PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES`).
 - Ending a Unix job-control guard the launch gives up on (its descriptors could not be configured,
   or the signal monitor could not start after it said READY) now reports what `kill` and `waitpid`
