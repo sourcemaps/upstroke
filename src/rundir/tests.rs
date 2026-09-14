@@ -3323,11 +3323,20 @@ fn every_site_this_module_owns_is_reached_through_a_funnel_in_both_phases() {
     )
     .expect("report");
     let barriers_after = util::barriers_on_this_thread();
+    // Two publications, not one: the staging record's (its file synced, the
+    // private directory synced) and then the report's own (the staged file
+    // synced, the run directory synced). A report written in place with no
+    // barrier of its own leaves the record's one of each, which is why the
+    // count is held to two — under a single barrier the record's publication
+    // alone satisfied this assertion and `report-write-unsynced` survived
+    // (PR10's round 10).
     assert!(
-        barriers_after.file > barriers_before.file
-            && barriers_after.directory > barriers_before.directory,
-        "the report write is a durable publication — its file synced, then its directory — \
-         and the barriers this thread entered say so: {barriers_before:?} -> {barriers_after:?}"
+        barriers_after.file >= barriers_before.file + 2
+            && barriers_after.directory >= barriers_before.directory + 2,
+        "the report write is a durable publication twice over — the staging record's file synced \
+         and its private directory synced, then the report's staged file synced and the run \
+         directory synced — and the barriers this thread entered say so, two of each at least: \
+         {barriers_before:?} -> {barriers_after:?}"
     );
     assert!(
         report_staging_leftovers(&public, &husk.private)

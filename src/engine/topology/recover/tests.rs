@@ -16010,9 +16010,32 @@ fn the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_re
     let before = timeline[written].barriers;
     let after = timeline[durable].barriers;
     assert!(
-        after.file > before.file && after.directory > before.directory,
-        "between the report site's two phases its file and its directory were synced: {before:?} \
-         -> {after:?}"
+        after.file >= before.file + 2 && after.directory >= before.directory + 2,
+        "between the report site's two phases the staging record's file and its private directory \
+         and then the report's own staged file and the run directory were synced — two file \
+         barriers and two directory barriers at least: {before:?} -> {after:?}"
+    );
+    let records = hooks.ledger_records();
+    let public = fixture.public();
+    let staged_report_synced = records.iter().any(|record| {
+        record.step == crate::util::DurableStep::SyncedFile
+            && record.path.file_name().and_then(|name| name.to_str()) == Some(rundir::REPORT)
+            && record.path.parent().is_some_and(|staging| {
+                staging.parent() == Some(public.as_path())
+                    && staging
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(rundir::REPORT_STAGING_PREFIX))
+            })
+    });
+    let run_directory_synced = records.iter().any(|record| {
+        record.step == crate::util::DurableStep::SyncedDirectory && record.path == public
+    });
+    assert!(
+        staged_report_synced && run_directory_synced,
+        "the report's own staged file, inside the staging directory made for the write under the \
+         run directory, and the run directory itself are each on the ledger as synced — the \
+         record's barriers in the private half do not stand in for them: {records:?}"
     );
     let first_deletion = timeline
         .iter()

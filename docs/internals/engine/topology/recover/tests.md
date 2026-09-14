@@ -4257,6 +4257,20 @@ first.
 Armed to answer `injection` — an error return, or the kill the
 finalization kill child dies by — the first time `at` is consulted.
 
+## `fn the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_rewritten()` › `let records = hooks.ledger_records();`
+
+The between-phases barrier count is held to two file barriers and two
+directory barriers since PR10's round 10, and beside it the ledger is read
+for the report's own: a `SyncedFile` of `report.json` inside a staging
+directory of the write's shape directly under the run directory, and a
+`SyncedDirectory` of the run directory. The staging record the write
+publishes first (its file synced, the private directory synced) is one
+barrier of each kind, and under the round-10 shape it satisfied the old
+"one of each" count on a mutant that wrote the report in place with no
+barrier of its own — `report-write-unsynced-finalization` survived this
+test at the round's first code head — so the count is doubled and the
+ledger names the report's file and directory outright.
+
 ## `fn assert_finalized(planted: &FinishedPlanting, outcome: &R…`
 
 The outcome equation's terminal half, as the physical state after a
