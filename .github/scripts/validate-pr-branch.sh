@@ -567,6 +567,24 @@ export PATH="/usr/bin:/bin:$PATH"
 shopt -s nullglob
 unset GLOBIGNORE
 
+# AND THE PATHSPEC-MAGIC VARIABLES ARE UNSET, because they change WHICH PATHS git
+# matches for the pathspecs THIS FILE constructs, and that moves a verdict. Every
+# `ls-files` below names its path as `:(literal)<path>`, so that a listing at
+# `:weird` is a name and not pathspec magic; `GIT_LITERAL_PATHSPECS=1` turns that
+# whole prefix INTO the literal name `:(literal)<path>`, which matches nothing, so
+# the ascent that reads a superproject's `160000 findings` saw no record, did not
+# refuse, and answered a submodule's own index -- the initialised-submodule ledger
+# switch reached through the environment. Measured at git 2.43.0: with it exported,
+# a clean superproject recording `findings` at a gitlink conformed at exit 0 where
+# the clean run refuses; `GIT_GLOB_PATHSPECS`, `GIT_NOGLOB_PATHSPECS` and
+# `GIT_ICASE_PATHSPECS` are compatible with an explicit `:(literal)` and moved no
+# verdict, but they narrow or widen a match all the same and are unset with it. This
+# is the same rule as the three names above -- the environment does not decide what
+# this gate reads -- and it is why `GIT_CONFIG_*` and the trace variables, which do
+# NOT change which paths a pathspec names, are still left alone (a trace descriptor
+# that collided with a capture copy is handled where the copy is opened, not here).
+unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
+
 # AND WHICH REPOSITORY ANSWERS IS DECIDED BY THE PATH, NEVER BY `GIT_DIR`,
 # `GIT_WORK_TREE` OR `GIT_INDEX_FILE` -- WHICH ARE THE THREE NAMES THIS ENFORCES
 # AND THE WHOLE OF WHAT IT CLAIMS. Each of them puts a different ledger behind
@@ -866,8 +884,8 @@ read_private() {
 #      the file, sentinel and all. The open here is `exec`, whose status is a
 #      status, and it truncates, so a destination that opens holds nothing from
 #      before.
-#   2. The producer ran, and ITS status is `capture_status`, for the caller to
-#      enumerate rather than for this to interpret.
+#   2. The producer ran WITH FDS 3 AND 4 CLOSED, so `GIT_TRACE=3` could not write git's
+#      trace into a copy and be parsed as its output, and ITS status is `capture_status`.
 #   3. BOTH SENTINELS WERE WRITTEN. The marker is this primitive's OWN write, its
 #      status was the one nobody read, and the cost was a finding nobody filed.
 #   4. Both copies read back as far as their sentinel.
@@ -898,9 +916,9 @@ capture() {
   { exec 4> "$err"; } 2>/dev/null \
     || { exec 3>&-; capture_error="its errors could not be captured: '$err' would not open"; return 1; }
   if [[ "$stdin" == fd9 ]]; then
-    { "$@" || capture_status=$?; printf '\001' || marked_out=$?; printf '\001' >&2 || marked_err=$?; } >&3 2>&4 <&9
+    { "$@" 3>&- 4>&- || capture_status=$?; printf '\001' || marked_out=$?; printf '\001' >&2 || marked_err=$?; } >&3 2>&4 <&9
   else
-    { "$@" || capture_status=$?; printf '\001' || marked_out=$?; printf '\001' >&2 || marked_err=$?; } >&3 2>&4 </dev/null
+    { "$@" 3>&- 4>&- || capture_status=$?; printf '\001' || marked_out=$?; printf '\001' >&2 || marked_err=$?; } >&3 2>&4 </dev/null
   fi
   exec 3>&- 4>&-
   (( marked_out == 0 && marked_err == 0 )) \
@@ -2403,6 +2421,10 @@ locate_listing() {
 recorded_kind=''
 recorded_mode=''
 recorded_children=''
+# The mode the environment-named ledger records the LISTING itself at, when it
+# records it as a blob rather than a directory of children. `environment_children`
+# sets it; `read_listing` refuses a non-regular one exactly as the records world does.
+env_listing_mode=''
 unnameable_component=''
 recorded_kind_of() {
   local rel="$1" record name rest anc
@@ -2540,42 +2562,105 @@ add_recorded_candidates() {
 # refuses at 128 -- `is outside repository` -- for the same listing named in
 # full. `-C` puts git inside the listing so the names come back relative to it,
 # which is what makes them this directory's entries and not the work tree's.
-environment_children() {
-  local listing="$1" record rest
-  recorded_children=''
-  (( environment_work_tree_named )) || return 0
-  # A RELATIVE PIN IS THE CALLER'S, RELATIVE TO THE CALLER'S DIRECTORY, and `-C`
-  # is about to move git's. The listing is rooted the same way and by the same
-  # class test the rest of this file uses, so nothing here is resolved on the
-  # filesystem either.
-  case "$listing" in
-    /* | '\'* | [A-Za-z]:*) ;;
-    *) listing="$PWD/$listing" ;;
+# root_against_pwd <spelling>: the spelling made ABSOLUTE against the caller's own
+# directory, in `rooted_pin`, so that the `git -C "$listing"` below cannot re-resolve
+# a relative pin INSIDE the listing. `-C` moves git's directory, and a relative
+# `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` is resolved from there -- so with the
+# intended metadata at `<caller>/C:/repo.git` and a SECOND repository's metadata at
+# `<listing>/C:/repo.git`, an unrooted pin read the second and a finding it never
+# filed conformed at exit 0. Measured at git 2.43.0: `C:/repo.git` and `\meta/repo.git`
+# each moved the verdict `1 -> 0`, where `./C:/repo.git` and an absolute spelling did
+# not. This is the same rule the environment section at the top of the file states --
+# the environment does not decide which ledger answers -- reached here because `-C`
+# re-anchors a relative pin, so the remedy is to make the pin's interpretation
+# independent of the directory the helper enters rather than to widen what is accepted.
+#
+# WHICH SPELLINGS ARE RELATIVE IS CLOSED PER PLATFORM, NOT PER GRAMMAR, and that is
+# why this is `locate_listing`'s anchor test and not `list_dir`'s. `/x` is absolute
+# everywhere and is left alone; `C:/x` and `\x` are anchored on Windows and ORDINARY
+# RELATIVE NAMES on POSIX, so they are rooted exactly where `$PWD/$p` names the same
+# thing the bare spelling does -- the `-ef` test, which is true for a POSIX relative
+# name and false for a real Windows root or a spelling that names nothing. An empty
+# pin stays empty: git honours all three empty and this is not the place to decide
+# what a caller meant by it.
+rooted_pin=''
+root_against_pwd() {
+  local p="$1"
+  case "$p" in
+    '' | /*) rooted_pin="$p" ;;
+    '\'* | [A-Za-z]:*)
+      if [[ "$p" -ef "$PWD/$p" ]]; then rooted_pin="$PWD/$p"; else rooted_pin="$p"; fi ;;
+    *) rooted_pin="$PWD/$p" ;;
   esac
+}
+environment_children() {
+  local listing="$1" record rest name work_tree strip bare
+  recorded_children=''
+  env_listing_mode=''
+  (( environment_work_tree_named )) || return 0
+  # THE LISTING AND EACH PIN ARE ROOTED THE SAME WAY, against the caller's directory
+  # and by the one anchor test, so nothing here is resolved on the filesystem and no
+  # relative pin is re-anchored by the `-C` below. The three pins are put back exactly
+  # as the caller exported them once rooted, an empty one included.
+  root_against_pwd "$listing"; listing="$rooted_pin"
+  root_against_pwd "$environment_work_tree"; work_tree="$rooted_pin"; export GIT_WORK_TREE="$rooted_pin"
   if (( environment_git_dir_named )); then
-    case "$environment_git_dir" in
-      /* | '\'* | [A-Za-z]:* | '') export GIT_DIR="$environment_git_dir" ;;
-      *) export GIT_DIR="$PWD/$environment_git_dir" ;;
-    esac
-  fi
-  if (( environment_work_tree_named )); then
-    case "$environment_work_tree" in
-      /* | '\'* | [A-Za-z]:* | '') export GIT_WORK_TREE="$environment_work_tree" ;;
-      *) export GIT_WORK_TREE="$PWD/$environment_work_tree" ;;
-    esac
+    root_against_pwd "$environment_git_dir"; export GIT_DIR="$rooted_pin"
   fi
   if (( environment_index_file_named )); then
-    case "$environment_index_file" in
-      /* | '\'* | [A-Za-z]:* | '') export GIT_INDEX_FILE="$environment_index_file" ;;
-      *) export GIT_INDEX_FILE="$PWD/$environment_index_file" ;;
-    esac
+    root_against_pwd "$environment_index_file"; export GIT_INDEX_FILE="$rooted_pin"
   fi
-  git_probe '0,128' -- -C "$listing" ls-files -sz -- ":(literal)$listing"
+  # WHERE THE CHECKOUT STILL HOLDS THE DIRECTORY, `-C` INTO IT, exactly as before:
+  # its entries come back relative to it, no prefix to strip, and every environment
+  # fixture measures this path. WHERE IT DOES NOT -- a `skip-worktree` finding whose
+  # directory the deployment removed, its clean index still recording it at 100644 --
+  # `-C` into the WORK TREE the pins name, which does exist, and read `--full-name`
+  # so the entries are work-tree-root relative. The LEDGER records the listing whether
+  # or not the checkout materialised it, and requiring the directory to be there made
+  # the verdict depend on the checkout while the committed ledger was unchanged, which
+  # is the sentence this whole file repeats. Either way the pathspec is the listing's
+  # OWN ABSOLUTE path under `:(literal)`, so a listing OUTSIDE the selected work tree
+  # is refused at 128 -- `is outside repository` -- and the names are this directory's.
+  strip=''
+  bare=''
+  if [[ -d "$listing" ]]; then
+    git_probe '0,128' -- -C "$listing" ls-files -sz -- ":(literal)$listing"
+  else
+    git_probe '0,128' -- -C "$work_tree" ls-files -sz --full-name -- ":(literal)$listing"
+    # The listing's path within the work tree, ending in a separator, to cut a
+    # work-tree-relative entry back to a name relative to the LISTING. A listing that
+    # is the work-tree root is a directory and took the branch above; a listing
+    # outside the work tree 128'd and never reaches here, so this strip is the
+    # ordinary proper-descendant case and a name that does not begin with it is under
+    # some other path and not this listing's. `bare` is the same path WITHOUT the
+    # separator: the ledger records an entry at exactly that name when the listing is
+    # itself a BLOB and not a directory, which `env_listing_mode` carries out.
+    strip="${listing#"$work_tree"/}/"
+    bare="${strip%/}"
+  fi
   unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
   (( probe_status == 0 )) || return 0
   if (( ${#probe_records[@]} > 0 )); then
     for record in "${probe_records[@]}"; do
-      rest="${record#*$'\t'}"
+      name="${record#*$'\t'}"
+      # THE LISTING RECORDED AT ITS OWN NAME IS A BLOB, NOT A DIRECTORY, and its mode
+      # is what a materialised symlink or a gitlink presents: git records `findings`
+      # at 120000, the checkout holds the target text as a regular file, and reading
+      # those bytes as a listing MANUFACTURES a finding. The mode is carried out so the
+      # caller refuses it exactly as the records world refuses a 120000 -- the checkout
+      # shape does not decide what the ledger recorded.
+      if [[ -n "$bare" && "$name" == "$bare" ]]; then
+        env_listing_mode="${record%% *}"
+        continue
+      fi
+      if [[ -n "$strip" ]]; then
+        case "$name" in
+          "$strip"*) rest="${name#"$strip"}" ;;
+          *) continue ;;
+        esac
+      else
+        rest="$name"
+      fi
       # An entry below a subdirectory is `sub/name` and is in no listing here,
       # and a name holding a newline is no finding's name -- both exactly as the
       # records world reads a tree, and stated there.
@@ -2717,20 +2802,62 @@ read_listing() {
   # at the top of this file and it is unchanged. The test is on `listing_world`,
   # so a listing the records answer for never reaches this at all, and where none
   # does there is no repository for a name to displace.
-  if (( ! is_file )) && [[ "$listing_world" != records ]] && [[ -d "$listing" ]] \
-    && [[ -n "$environment_ledger" ]]; then
+  if [[ "$listing_world" != records ]] && [[ -n "$environment_ledger" ]] && [[ ! -L "$listing" ]]; then
+    # THE LEDGER'S RECORDED TYPE DECIDES, NOT THE CHECKOUT'S SHAPE, exactly as it does
+    # in the records world -- because the index is the ledger and the checkout is not.
+    # Two shapes made the verdict depend on the checkout instead:
+    #   A `skip-worktree` finding whose directory the deployment removed is recorded
+    #   all the same, and requiring the directory to exist gave `0` with an empty
+    #   directory present and `1` without it, on one unchanged committed ledger.
+    #   A committed symlink materialised by `core.symlinks=false` is a REGULAR FILE on
+    #   disk holding its target text, so reading those bytes as a listing MANUFACTURED
+    #   a finding -- exit 0 `conforms` where the ledger records `findings` at 120000 and
+    #   the records world refuses it.
+    # So the ledger is asked whatever the checkout holds, and its recorded type is read
+    # with the SAME rules recorded_kind_of gives the records world: a tree is its
+    # children; a non-regular blob holds no finding; a regular blob is a file listing
+    # read from the checkout; nothing recorded is decided by the checkout shape below.
     environment_children "$listing"
     if [[ -n "$recorded_children" ]]; then
       add_recorded_candidates
       return 0
     fi
-    echo "branch-name-policy: no repository the path reaches records '$listing', and" >&2
-    echo "  the environment names one: $environment_ledger. A directory in no repository is" >&2
-    echo "  answered by the names the filesystem holds, and those are not a ledger: an" >&2
-    echo "  untracked file is not a filed finding wherever its repository is. That is" >&2
-    echo "  refused rather than counted. Ask from inside the work tree its repository is" >&2
-    echo "  found from, or clear those names to ask about the filesystem alone." >&2
-    return 1
+    case "$env_listing_mode" in
+      '') ;;
+      100644|100755)
+        # A tracked regular file is a file listing, read from the checkout as the
+        # records world reads one -- and never from a link standing in for it.
+        if [[ ! -f "$listing" ]]; then
+          echo "branch-name-policy: git records '$listing' as a regular file and the" >&2
+          echo "  checkout does not hold one there, so the names in it are not known." >&2
+          echo "  That is refused rather than read from whatever the checkout put in its" >&2
+          echo "  place." >&2
+          return 1
+        fi
+        is_file=1
+        ;;
+      *)
+        echo "branch-name-policy: git records '$listing' as mode $env_listing_mode, which is" >&2
+        echo "  neither a regular file nor a directory: it is not a findings listing, and it" >&2
+        echo "  holds no finding. A tree listing of the same commit holds none for it either." >&2
+        return 0
+        ;;
+    esac
+    if (( ! is_file )); then
+      # Nothing recorded at or under the listing. A regular file the checkout holds is
+      # an untracked file listing -- the workflow builds those in RUNNER_TEMP and a
+      # maintainer may build one anywhere -- and is read below. A directory, or a path
+      # the checkout does not hold at all, is not a filed finding and is refused.
+      if [[ ! -f "$listing" ]]; then
+        echo "branch-name-policy: no repository the path reaches records '$listing', and" >&2
+        echo "  the environment names one: $environment_ledger. A directory in no repository is" >&2
+        echo "  answered by the names the filesystem holds, and those are not a ledger: an" >&2
+        echo "  untracked file is not a filed finding wherever its repository is. That is" >&2
+        echo "  refused rather than counted. Ask from inside the work tree its repository is" >&2
+        echo "  found from, or clear those names to ask about the filesystem alone." >&2
+        return 1
+      fi
+    fi
   fi
   if (( ! is_file )) && [[ -d "$listing" ]]; then
     list_dir "$listing" || {
