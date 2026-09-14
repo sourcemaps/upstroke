@@ -1533,8 +1533,10 @@ mod termination {
     /// helper is left for this process's own exit to collect. The same two
     /// seconds `HELPER_READY_BUDGET` gives a helper to start.
     ///
-    /// The acknowledged-exit wait after CLEANUP or CANCEL is deliberately
-    /// **not** bounded by this; see `ReaperEnding::AcknowledgedExit`.
+    /// The wait after a CLEANUP or CANCEL the reaper **acknowledged** is
+    /// deliberately not bounded by this; see `ReaperEnding::AcknowledgedExit`.
+    /// The wait after a CLEANUP it did not acknowledge is, and so is every
+    /// ending of a helper that is being abandoned.
     const HELPER_END_BUDGET: Duration = Duration::from_secs(2);
 
     /// The pause between the polls a bounded ending makes inside
@@ -2307,9 +2309,15 @@ mod termination {
         }
 
         fn cleanup(self, pgid: libc::pid_t) -> bool {
-            let cleaned = self.transact_raw(REAPER_CLEANUP, pgid) == Some(REAPER_OK);
-            self.close_and_wait();
-            cleaned
+            if self.transact_raw(REAPER_CLEANUP, pgid) == Some(REAPER_OK) {
+                self.close_and_wait();
+                return true;
+            }
+            // Not acknowledged, so this reaper's exit releases nothing a
+            // caller is about to act on: `Supervisor::finish` answers `false`
+            // by failing closed. Its wait is the bounded one.
+            let _ = self.close_and_wait_reporting(ReaperEnding::UnacknowledgedCleanup);
+            false
         }
 
         fn transact_raw(self, operation: u8, pgid: libc::pid_t) -> Option<u8> {
@@ -2380,7 +2388,7 @@ mod termination {
             if self.identity >= 0 {
                 let answered = match ending {
                     ReaperEnding::AcknowledgedExit => wait_through_identity(self.identity),
-                    ReaperEnding::AbandonedHelper => {
+                    ReaperEnding::UnacknowledgedCleanup | ReaperEnding::AbandonedHelper => {
                         wait_for_an_ended_helper_through_identity(self.identity)
                     }
                 };
@@ -2408,18 +2416,21 @@ mod termination {
                         }
                     }
                 }
-                ReaperEnding::AbandonedHelper => wait_for_an_ended_helper(
-                    self.pid,
-                    EndingWait::CollectingStatus,
-                    EndingRetry::WhileInterrupted,
-                ),
+                ReaperEnding::UnacknowledgedCleanup | ReaperEnding::AbandonedHelper => {
+                    wait_for_an_ended_helper(
+                        self.pid,
+                        EndingWait::CollectingStatus,
+                        EndingRetry::WhileInterrupted,
+                    )
+                }
             }
         }
     }
 
-    /// Which of `Reaper::close_and_wait_reporting`'s two waits is being made.
-    /// They differ in one thing and it is the important one: whether anything
-    /// downstream depends on the reaper having gone.
+    /// Why `Reaper::close_and_wait_reporting` is ending a reaper, which decides
+    /// which of its two waits it makes. The one thing that decides it is
+    /// whether anything downstream depends on the reaper having gone: only
+    /// `AcknowledgedExit` has such a caller, and only it waits without a bound.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum ReaperEnding {
         /// The reaper acknowledged CLEANUP or CANCEL and is exiting. **This
@@ -2427,8 +2438,24 @@ mod termination {
         /// cleanup lease, its exit is what releases it, and `cleanup` and
         /// `cancel` return to callers that then act as though the lease were
         /// free. A budget here would release them while it is still held —
-        /// a worse defect than the one the abandoned arm fixes.
+        /// a worse defect than the one the bounded arm fixes.
         AcknowledgedExit,
+        /// The reaper was sent CLEANUP and did not acknowledge it: the frame
+        /// could not be written, the pipe ended with no answer, or the answer
+        /// was not `REAPER_OK`. This one carries `HELPER_END_BUDGET`, and a
+        /// reaper still there at the end of it is left for this process's exit
+        /// to collect.
+        ///
+        /// No caller acts on this reaper having gone. `cleanup` answers
+        /// `false`, and `Supervisor::finish` answers that by arming fail-closed
+        /// termination and returning an error, so the lease is never treated
+        /// as free on the strength of this wait. A reaper that is still running
+        /// settles the group it registered once its command pipe closes, as it
+        /// does when its coordinator dies, and its exit releases the lease
+        /// whether or not this process is there to collect it. Waiting for it
+        /// without a bound is what kept `finish` from reaching its answer for
+        /// as long as such a reaper stayed alive and uncollectable.
+        UnacknowledgedCleanup,
         /// The reaper never acknowledged READY and is being abandoned, after a
         /// `SIGKILL` it may never act on. This one carries `HELPER_END_BUDGET`,
         /// and a reaper still there at the end of it is left for this process's
@@ -2437,12 +2464,12 @@ mod termination {
         /// Such a reaper **may hold the cleanup lease already**: the child
         /// takes it in `lock_cleanup_paths` before it writes READY, which is
         /// why the failure message reports on those paths. What differs from
-        /// the arm above is not whether the lease is held but whether waiting
-        /// releases it. `spawn_reaper` is returning an error to a launch that
-        /// is failing, so no caller proceeds on the strength of this wait; and
-        /// a helper that will not die does not become collectable however long
-        /// the wait is, so the unbounded form buys a wedged parent beside the
-        /// wedged child rather than a released lease.
+        /// `AcknowledgedExit` is not whether the lease is held but whether
+        /// waiting releases it. `spawn_reaper` is returning an error to a
+        /// launch that is failing, so no caller proceeds on the strength of
+        /// this wait; and a helper that will not die does not become
+        /// collectable however long the wait is, so the unbounded form buys a
+        /// wedged parent beside the wedged child rather than a released lease.
         AbandonedHelper,
     }
 
@@ -3647,14 +3674,18 @@ mod termination {
     /// The bound on `EndingRetry::WhileInterrupted`. A wait is interrupted by a
     /// signal that arrived while it blocked, so the retry exists for a handful
     /// of deliveries, not for a stream of them; a wait that is refused this many
-    /// times running is being refused, not interrupted, and the caller is told
-    /// so rather than waiting for an answer that is not coming.
+    /// times in one ending is being refused, not interrupted, and the caller is
+    /// told so rather than waiting for an answer that is not coming.
     ///
     /// It counts **interruptions and not calls**, which is why `Once` is a `1`
     /// here and not a cap on how many times `wait_for_an_ended_helper` asks:
     /// that function polls with `WNOHANG` and asks again for as long as the
     /// answer is *not yet*, at every site. `HELPER_END_BUDGET` is the bound on
-    /// that axis.
+    /// that axis. The count is of every interruption in the ending, not only of
+    /// those in a row, so an answer of *not yet* between two of them does not
+    /// start it again; `poll_for_an_ended_helper` is where both are kept, and
+    /// `the_retry_bound_counts_interruptions_in_an_ending_and_not_calls` holds
+    /// each.
     const INTERRUPTED_WAIT_ATTEMPTS: u32 = 1024;
 
     impl EndingRetry {
@@ -3719,11 +3750,8 @@ mod termination {
         wait: EndingWait,
         retry: EndingRetry,
     ) -> (libc::pid_t, libc::c_int, libc::c_int) {
-        let deadline = std::time::Instant::now() + HELPER_END_BUDGET;
-        let attempts = retry.attempts();
-        let mut interruptions = 0_u32;
         let mut status = 0;
-        loop {
+        poll_for_an_ended_helper(HELPER_END_BUDGET, retry, || {
             // SAFETY: `pid` is a child this process forked and has not reaped.
             // The `CollectingStatus` arm's `status` is writable for the call;
             // the other arm passes a null status pointer, through which
@@ -3736,6 +3764,32 @@ mod termination {
                     libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG)
                 },
             };
+            let wait_errno = if waited < 0 { last_errno() } else { 0 };
+            (waited, wait_errno, status)
+        })
+    }
+
+    /// `wait_for_an_ended_helper`'s loop, over what each `ask` answered: the
+    /// value `waitpid` returned, the errno it left, and the status it filled.
+    /// Split from the call so the loop's two bounds can be driven with *not
+    /// yet* and `EINTR` interleaved, a sequence the stateless seccomp policies
+    /// this module's tests install cannot produce.
+    ///
+    /// A collected pid returns at once. *Not yet* is asked again after
+    /// `HELPER_END_POLL_SLICE` until `budget` has passed, and is never counted.
+    /// `EINTR` is counted, across the whole ending, and returns once the count
+    /// reaches `retry`'s attempts or `budget` has passed. Any other answer
+    /// returns as it was given.
+    fn poll_for_an_ended_helper(
+        budget: Duration,
+        retry: EndingRetry,
+        mut ask: impl FnMut() -> (libc::pid_t, libc::c_int, libc::c_int),
+    ) -> (libc::pid_t, libc::c_int, libc::c_int) {
+        let deadline = std::time::Instant::now() + budget;
+        let attempts = retry.attempts();
+        let mut interruptions = 0_u32;
+        loop {
+            let (waited, wait_errno, status) = ask();
             if waited > 0 {
                 return (waited, 0, status);
             }
@@ -3748,7 +3802,6 @@ mod termination {
                 thread::sleep(HELPER_END_POLL_SLICE);
                 continue;
             }
-            let wait_errno = last_errno();
             if wait_errno != libc::EINTR {
                 return (waited, wait_errno, 0);
             }
@@ -7901,8 +7954,28 @@ mod termination {
             libc::c_int::try_from(opened).expect("a descriptor for the stand-in fits c_int")
         }
 
-        /// The four endings this finding names, each driven against a helper
-        /// that will not die.
+        /// Each abandoning ending the finding names, driven against a helper
+        /// that will not die. The finding names five sites and four are still
+        /// in the tree; each is a shape here, called with the arguments that
+        /// site passes:
+        ///
+        /// - `ready-failure`: `spawn_guard`'s READY failure,
+        ///   `(CollectingStatus, Once)`;
+        /// - `descriptor-failure`: `spawn_guard`'s descriptor-configuration
+        ///   failure, `(AskingForNoStatus, Once)`;
+        /// - `abort-setup`: `Guard::abort_setup`,
+        ///   `(AskingForNoStatus, WhileInterrupted)`;
+        /// - `reaper-abandon`: `Reaper::abandon`, which `spawn_reaper`'s READY
+        ///   failure calls;
+        /// - `identity`: `Reaper::abandon` through the helper's descriptor,
+        ///   `end_helper_through_identity`, which is also where each of the
+        ///   three guard sites goes with the identity path on.
+        ///
+        /// The fifth, the parent's own `setpgid(pid, pid)` in `spawn_reaper`
+        /// and the kill and wait after its failure, was removed by `a328b6fe`.
+        /// The reaper's own `setpgid(0, 0)` reports a failure on the
+        /// acknowledgement pipe, and the parent ends that reaper through
+        /// `Reaper::abandon`, the `reaper-abandon` shape.
         ///
         /// The stand-in is `spawn_sigchld_target`'s: a forked child blocking
         /// in `read` on a pipe this process holds, which is the shape both
@@ -7959,8 +8032,15 @@ mod termination {
                     EndingWait::CollectingStatus,
                     EndingRetry::Once,
                 ),
-                // `Guard::abort_setup` and `spawn_guard`'s
-                // descriptor-configuration failure share these.
+                // `spawn_guard`'s descriptor-configuration failure: the same
+                // wait as `Guard::abort_setup`, and not its retry.
+                "descriptor-failure" => end_unready_guard(
+                    stand_in,
+                    identity,
+                    EndingWait::AskingForNoStatus,
+                    EndingRetry::Once,
+                ),
+                // `Guard::abort_setup`, with that site's arguments.
                 "abort-setup" => end_unready_guard(
                     stand_in,
                     identity,
@@ -8060,32 +8140,49 @@ mod termination {
         #[cfg(target_os = "linux")]
         #[test]
         fn an_ending_returns_within_its_budget_when_the_helper_will_not_die() {
-            for shape in ["ready-failure", "abort-setup", "reaper-abandon", "identity"] {
-                let record = std::env::temp_dir().join(format!(
-                    "upstroke-stand-in-{}-{shape}.pid",
-                    std::process::id()
-                ));
-                let _ = std::fs::remove_file(&record);
-                let path = record.to_str().expect("a UTF-8 temporary path");
-                run_fixture_within(
+            for shape in [
+                "ready-failure",
+                "descriptor-failure",
+                "abort-setup",
+                "reaper-abandon",
+                "identity",
+            ] {
+                run_a_stand_in_fixture(
                     "ending_a_helper_that_will_not_die_helper",
-                    &[
-                        ("UPSTROKE_ENDING_A_HELPER_THAT_WILL_NOT_DIE_HELPER", shape),
-                        ("UPSTROKE_STAND_IN_PID_PATH", path),
-                    ],
-                    A_BOUNDED_ENDING_DEADLINE,
+                    "UPSTROKE_ENDING_A_HELPER_THAT_WILL_NOT_DIE_HELPER",
+                    shape,
                 );
-                let recorded = std::fs::read_to_string(&record)
-                    .unwrap_or_else(|error| panic!("read the {shape} stand-in's pid: {error}"));
-                let stand_in: libc::pid_t = recorded
-                    .trim()
-                    .parse()
-                    .unwrap_or_else(|error| panic!("the {shape} stand-in's pid: {error}"));
-                // The obligation the bound takes on: a helper left behind is
-                // the exiting process's to shed, not a leak into the run.
-                assert_the_process_is_gone(stand_in, &format!("the {shape} ending's stand-in"));
-                let _ = std::fs::remove_file(&record);
             }
+        }
+
+        /// Run one shape of a fixture that leaves a live stand-in behind on
+        /// purpose, then hold the obligation that takes on: once the fixture
+        /// has exited, the stand-in it recorded is gone too. The record is
+        /// named for the fixture as well as the shape, because drivers run
+        /// side by side in one process and two fixtures share shape names.
+        #[cfg(target_os = "linux")]
+        fn run_a_stand_in_fixture(fixture: &str, variable: &str, shape: &str) {
+            let record = std::env::temp_dir().join(format!(
+                "upstroke-stand-in-{}-{fixture}-{shape}.pid",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&record);
+            let path = record.to_str().expect("a UTF-8 temporary path");
+            run_fixture_within(
+                fixture,
+                &[(variable, shape), ("UPSTROKE_STAND_IN_PID_PATH", path)],
+                A_BOUNDED_ENDING_DEADLINE,
+            );
+            let recorded = std::fs::read_to_string(&record)
+                .unwrap_or_else(|error| panic!("read the {shape} stand-in's pid: {error}"));
+            let stand_in: libc::pid_t = recorded
+                .trim()
+                .parse()
+                .unwrap_or_else(|error| panic!("the {shape} stand-in's pid: {error}"));
+            // The obligation the bound takes on: a helper left behind is the
+            // exiting process's to shed, not a leak into the run.
+            assert_the_process_is_gone(stand_in, &format!("the {fixture} {shape} stand-in"));
+            let _ = std::fs::remove_file(&record);
         }
 
         /// A `Reaper` handle whose pipes are this fixture's own, with the
@@ -8214,6 +8311,436 @@ mod termination {
                     A_BOUNDED_ENDING_DEADLINE,
                 );
             }
+        }
+
+        /// A `Reaper` handle over this fixture's own pipes whose CLEANUP will
+        /// not be acknowledged, for a stand-in that stays alive. `answer` is
+        /// which of the three ways `transact_raw` has of answering something
+        /// other than `REAPER_OK`: `no-answer` closes the acknowledgement
+        /// writer with nothing on it, `refused` queues `REAPER_FAIL` first, and
+        /// `unwritable` hands the frame to the command pipe's read end, which
+        /// no write can reach.
+        #[cfg(target_os = "linux")]
+        fn a_reaper_that_does_not_acknowledge(
+            pid: libc::pid_t,
+            identity: libc::c_int,
+            answer: &str,
+        ) -> Reaper {
+            let [command_read, command_write] =
+                create_cloexec_pipe().expect("a stand-in for the reaper's command pipe");
+            let [ack_read, ack_write] =
+                create_cloexec_pipe().expect("a stand-in for the reaper's acknowledgement pipe");
+            let (command_fd, keepalive) = match answer {
+                "no-answer" => (command_write, command_read),
+                "refused" => {
+                    assert!(write_raw(ack_write, &[REAPER_FAIL]), "queue the refusal");
+                    (command_write, command_read)
+                }
+                "unwritable" => (command_read, command_write),
+                other => panic!("no unacknowledged answer is named {other}"),
+            };
+            // Closed, so the transaction reads what was queued and then
+            // end-of-file, never a writer this fixture still holds.
+            close_fd(ack_write);
+            Reaper {
+                command_fd,
+                ack_fd: ack_read,
+                _command_keepalive_fd: keepalive,
+                pid,
+                identity,
+            }
+        }
+
+        /// A CLEANUP the reaper did not acknowledge, against a reaper that
+        /// stays alive and uncollectable. The wait after it must return within
+        /// its budget and leave the reaper behind, and `Supervisor::finish`
+        /// must reach its own answer to the failure — fail-closed termination
+        /// armed, the error returned — while the reaper is still there.
+        ///
+        /// The shapes are the three unacknowledged answers by number, the
+        /// first of them through the reaper's descriptor, and `finish` over
+        /// the first. Measured before this repair, on `caf6bed0` and on
+        /// `1e806e20`, against the same stand-in: `no-answer`, `refused`,
+        /// `identity` and `finish` had each not returned after 10s, and each
+        /// returned within a millisecond of the stand-in's release.
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn unacknowledged_cleanup_helper() {
+            use std::os::fd::IntoRawFd;
+
+            let Some(shape) = fixture_variable("UPSTROKE_UNACKNOWLEDGED_CLEANUP_HELPER") else {
+                return;
+            };
+            let (stand_in, lifetime) = spawn_sigchld_target();
+            if let Some(path) = std::env::var_os("UPSTROKE_STAND_IN_PID_PATH") {
+                std::fs::write(&path, stand_in.to_string()).expect("record the stand-in's pid");
+            }
+            let (answer, identity) = match shape.as_str() {
+                "identity" => ("no-answer", identity_of(stand_in)),
+                "finish" => ("no-answer", NO_HELPER_IDENTITY),
+                answer => (answer, NO_HELPER_IDENTITY),
+            };
+            let reaper = a_reaper_that_does_not_acknowledge(stand_in, identity, answer);
+            let finishing = shape == "finish";
+            let began = Instant::now();
+            // `Ok` is what `cleanup` answered; `Err` is the message of the
+            // error `finish` returned.
+            let ending = thread::spawn(move || -> Result<bool, String> {
+                if !finishing {
+                    return Ok(reaper.cleanup(stand_in));
+                }
+                let mut supervisor = Supervisor {
+                    state: Arc::new(Mutex::new(State {
+                        spawning: 0,
+                        groups: vec![RegisteredGroup {
+                            pgid: stand_in,
+                            signal_leases: 0,
+                        }],
+                        terminating: false,
+                        suspending: false,
+                        guard: Guard {
+                            command_fd: -1,
+                            ack_fd: -1,
+                            _command_keepalive_fd: -1,
+                            pid: 0,
+                            identity: NO_HELPER_IDENTITY,
+                        },
+                    })),
+                    phase: Phase::Group(stand_in),
+                    reaper,
+                    terminate_site: ProcessSite::Terminate,
+                };
+                match supervisor.finish() {
+                    Ok(()) => Ok(true),
+                    Err(UpstrokeError::Agent { message }) => Err(message),
+                    Err(other) => Err(other.to_string()),
+                }
+            });
+            while !ending.is_finished() && began.elapsed() < A_BOUNDED_ENDING_RETURNS_WITHIN {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if !ending.is_finished() {
+                // Release the stand-in, which is the reaper's own exit, so the
+                // thread can end and what it answered can be named.
+                drop(lifetime);
+                let answered = ending.join();
+                panic!(
+                    "the {shape} CLEANUP was not acknowledged, and the call had not returned \
+                     within {A_BOUNDED_ENDING_RETURNS_WITHIN:?} on a reaper that had not exited; it \
+                     answered {answered:?} once the reaper was released"
+                );
+            }
+            let answered = ending.join().expect("the ending's thread");
+            // Deliberately never closed from here: holding the write end until
+            // this process exits is what leaves the stand-in behind for that
+            // exit to collect, which is what the call just left it for.
+            let _held = lifetime.into_raw_fd();
+            if finishing {
+                assert_eq!(
+                    answered,
+                    Err(format!(
+                        "Unix cleanup reaper failed while settling process group {stand_in}"
+                    )),
+                    "finish did not answer the CLEANUP the reaper did not acknowledge"
+                );
+                assert_eq!(
+                    PENDING_TERMINATION.load(Ordering::SeqCst),
+                    libc::SIGTERM,
+                    "finish returned without arming fail-closed termination"
+                );
+            } else {
+                assert_eq!(
+                    answered,
+                    Ok(false),
+                    "the {shape} CLEANUP was reported acknowledged"
+                );
+            }
+            assert_a_child_is_still_alive(&format!("the {shape} CLEANUP"));
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_cleanup_the_reaper_did_not_acknowledge_returns_within_its_budget() {
+            for shape in ["no-answer", "refused", "unwritable", "identity", "finish"] {
+                run_a_stand_in_fixture(
+                    "unacknowledged_cleanup_helper",
+                    "UPSTROKE_UNACKNOWLEDGED_CLEANUP_HELPER",
+                    shape,
+                );
+            }
+        }
+
+        /// A wait on a descriptor whose options are anything but `options`.
+        /// The descriptor's twin of `answer_a_wait_by_number_with_options_with`:
+        /// a `waitid` on any other id type, and every other call, is answered
+        /// as the kernel does.
+        #[cfg(target_os = "linux")]
+        fn answer_a_wait_on_a_descriptor_with_options_other_than(
+            options: libc::c_int,
+            action: u32,
+        ) {
+            let (target_low, target_high) = seccomp_argument_words(0);
+            let (options_low, _) = seccomp_argument_words(3);
+            let options = u32::try_from(options).expect("wait options fit the kernel's field");
+            let mut program = [
+                seccomp_load(SECCOMP_DATA_NR_OFFSET),
+                seccomp_jump_if_equal(seccomp_syscall_number(libc::SYS_waitid), 0, 6),
+                seccomp_load(target_high),
+                seccomp_jump_if_equal(0, 0, 4),
+                seccomp_load(target_low),
+                seccomp_jump_if_equal(libc::P_PIDFD, 0, 2),
+                seccomp_load(options_low),
+                seccomp_jump_if_equal(options, 0, 1),
+                seccomp_return(libc::SECCOMP_RET_ALLOW),
+                seccomp_return(action),
+            ];
+            install_seccomp_policy(&mut program);
+        }
+
+        /// A process group no reaper can have registered: no pid Linux issues
+        /// is this large.
+        #[cfg(target_os = "linux")]
+        const A_GROUP_NO_REAPER_REGISTERED: libc::pid_t = libc::pid_t::MAX;
+
+        /// A reaper this fixture forked and then killed, left uncollected, so
+        /// a CLEANUP sent to it reads end-of-file and the wait after that
+        /// collects it on its first ask whatever the scheduler does.
+        #[cfg(target_os = "linux")]
+        fn a_reaper_that_has_already_exited() -> Reaper {
+            let reaper = spawn_reaper().expect("spawn private reaper");
+            // SAFETY: `reaper.pid` is this fixture's own unreaped child.
+            let killed = unsafe { libc::kill(reaper.pid, libc::SIGKILL) };
+            assert_eq!(
+                killed,
+                0,
+                "kill the reaper: {}",
+                std::io::Error::last_os_error()
+            );
+            let pid = u32::try_from(reaper.pid).expect("a reaper pid is positive");
+            crate::agent::proc::await_exit_without_reaping(pid, Duration::from_secs(10))
+                .unwrap_or_else(|error| panic!("the killed reaper did not exit: {error}"));
+            reaper
+        }
+
+        /// The options each of the six helper waits passes — three reasons to
+        /// end a helper, by number and through its descriptor — held to what is
+        /// documented for it. Through the descriptor that is DESIGN §15's
+        /// contract for turning the identity path on: the wait after a CLEANUP
+        /// or CANCEL the reaper acknowledged passes `WEXITED`, and every
+        /// bounded wait — a helper abandoned, a CLEANUP not acknowledged —
+        /// passes `WEXITED | WNOHANG`. By number it is the changelog's: `0`
+        /// and `WNOHANG` for the same two kinds of wait. Each shape installs a
+        /// policy fatal on any other options for the wait it drives, so
+        /// reaching the end at all is the assertion.
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn helper_wait_options_helper() {
+            let Some(shape) = fixture_variable("UPSTROKE_HELPER_WAIT_OPTIONS_HELPER") else {
+                return;
+            };
+            let identity_on = shape.ends_with("-through-identity");
+            assert_eq!(
+                helper_identity_path_on(),
+                identity_on,
+                "the {shape} shape runs with the identity path {}",
+                if identity_on { "on" } else { "off" }
+            );
+            match shape.as_str() {
+                "acknowledged-through-identity" => {
+                    // Both reapers and the registration before the policy, as
+                    // in the by-number `syscall` witness: the claim is about
+                    // the waits this process makes.
+                    let (target, target_lifetime) = spawn_sigchld_target();
+                    let reaper = spawn_reaper().expect("spawn private reaper");
+                    assert!(reaper.identity >= 0, "the reaper has no descriptor");
+                    assert!(reaper.register_raw(target), "register the target group");
+                    let cancelled = spawn_reaper().expect("spawn a second private reaper");
+                    answer_a_wait_on_a_descriptor_with_options_other_than(
+                        libc::WEXITED,
+                        libc::SECCOMP_RET_KILL_PROCESS,
+                    );
+                    assert!(reaper.cleanup(target), "CLEANUP is acknowledged");
+                    cancelled.cancel();
+                    drop(target_lifetime);
+                    // SAFETY: `target` is this fixture's own child, killed by
+                    // the CLEANUP above; `waitpid` writes nothing through the
+                    // null status pointer.
+                    let collected = unsafe { libc::waitpid(target, std::ptr::null_mut(), 0) };
+                    assert_eq!(collected, target, "collect the cleaned-up target");
+                }
+                "unacknowledged-cleanup-through-identity" => {
+                    let reaper = a_reaper_that_has_already_exited();
+                    assert!(reaper.identity >= 0, "the reaper has no descriptor");
+                    answer_a_wait_on_a_descriptor_with_options_other_than(
+                        libc::WEXITED | libc::WNOHANG,
+                        libc::SECCOMP_RET_KILL_PROCESS,
+                    );
+                    assert!(
+                        !reaper.cleanup(A_GROUP_NO_REAPER_REGISTERED),
+                        "a CLEANUP sent to an exited reaper was acknowledged"
+                    );
+                }
+                "unacknowledged-cleanup-by-number" => {
+                    let reaper = a_reaper_that_has_already_exited();
+                    answer_a_wait_by_number_polling_for_nothing_with(
+                        libc::SECCOMP_RET_KILL_PROCESS,
+                    );
+                    assert!(
+                        !reaper.cleanup(A_GROUP_NO_REAPER_REGISTERED),
+                        "a CLEANUP sent to an exited reaper was acknowledged"
+                    );
+                }
+                "abandoned-through-identity" => {
+                    answer_a_wait_on_a_descriptor_with_options_other_than(
+                        libc::WEXITED | libc::WNOHANG,
+                        libc::SECCOMP_RET_KILL_PROCESS,
+                    );
+                    for (prefix, message) in launch_failures_before_ready() {
+                        assert!(
+                            message.contains(
+                                "ending it: SIGKILL was delivered through the helper's identity, \
+                                 and the wait through it collected it, having already exited \
+                                 with status 7"
+                            ),
+                            "the {prefix}'s end was not answered through its identity: {message}"
+                        );
+                    }
+                }
+                "acknowledged-by-number" => {
+                    let (target, target_lifetime) = spawn_sigchld_target();
+                    let reaper = spawn_reaper().expect("spawn private reaper");
+                    assert!(reaper.register_raw(target), "register the target group");
+                    let cancelled = spawn_reaper().expect("spawn a second private reaper");
+                    answer_a_wait_by_number_with_options_with(libc::SECCOMP_RET_KILL_PROCESS);
+                    assert!(reaper.cleanup(target), "CLEANUP is acknowledged");
+                    cancelled.cancel();
+                    drop(target_lifetime);
+                    // SAFETY: `target` is this fixture's own child, killed by
+                    // the CLEANUP above; `waitpid` writes nothing through the
+                    // null status pointer, and its options are the `0` the
+                    // policy permits.
+                    let collected = unsafe { libc::waitpid(target, std::ptr::null_mut(), 0) };
+                    assert_eq!(collected, target, "collect the cleaned-up target");
+                }
+                "abandoned-by-number" => {
+                    answer_a_wait_by_number_polling_for_nothing_with(
+                        libc::SECCOMP_RET_KILL_PROCESS,
+                    );
+                    for (prefix, message) in launch_failures_before_ready() {
+                        assert!(
+                            message.contains(DEFAULT_TEARDOWN_WORDS),
+                            "the {prefix}'s end was not the default's: {message}"
+                        );
+                    }
+                }
+                other => panic!("unknown shape {other}"),
+            }
+            // Under the same policy, so it asks `waitid` for every child and
+            // no descriptor: nothing the waits above should have collected is
+            // left.
+            assert_no_child_left_asking_for_no_status(&format!("the {shape} shape"));
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn each_helper_wait_passes_the_options_documented_for_it() {
+            for (shape, extra) in [
+                ("acknowledged-through-identity", None),
+                ("unacknowledged-cleanup-through-identity", None),
+                (
+                    "abandoned-through-identity",
+                    Some(EXIT_BEFORE_READY_WITH_SEVEN),
+                ),
+                ("acknowledged-by-number", None),
+                ("unacknowledged-cleanup-by-number", None),
+                ("abandoned-by-number", Some(EXIT_BEFORE_READY_WITH_SEVEN)),
+            ] {
+                let mut vars = vec![("UPSTROKE_HELPER_WAIT_OPTIONS_HELPER", shape)];
+                if shape.ends_with("-through-identity") {
+                    vars.push(IDENTITY_ON);
+                }
+                vars.extend(extra);
+                run_fixture_within(
+                    "helper_wait_options_helper",
+                    &vars,
+                    A_BOUNDED_ENDING_DEADLINE,
+                );
+            }
+        }
+
+        /// `INTERRUPTED_WAIT_ATTEMPTS` counts interruptions, never calls, and
+        /// every interruption in an ending rather than only those in a row;
+        /// `Once` reports the first interruption however many answers of *not
+        /// yet* came before it. Driven through `poll_for_an_ended_helper` with
+        /// the answers scripted, since no policy this suite installs can
+        /// interleave them, and with a budget no sequence here comes near, so
+        /// that only the count can end one early.
+        ///
+        /// Each sequence fails a different miscount: counting calls ends the
+        /// first at its lone `EINTR`, counting only interruptions in a row
+        /// never ends the second before its collection, and treating `Once`
+        /// as one call ends the third at its first *not yet*.
+        #[test]
+        fn the_retry_bound_counts_interruptions_in_an_ending_and_not_calls() {
+            type Answer = (libc::pid_t, libc::c_int, libc::c_int);
+            const NOT_YET: Answer = (STILL_THERE_AT_THE_BUDGET, 0, 0);
+            const INTERRUPTED: Answer = (-1, libc::EINTR, 0);
+            const COLLECTED: Answer = (4321, 0, 9);
+            // What an ending that asks past the end of its script is told, so
+            // it returns rather than polls, and fails the comparison.
+            const PAST_THE_SCRIPT: Answer = (-1, libc::EIO, 0);
+            const OUT_OF_REACH: Duration = Duration::from_secs(60);
+
+            fn poll_over(script: &[Answer], retry: EndingRetry) -> (Answer, usize) {
+                let mut asked = 0_usize;
+                let answered = poll_for_an_ended_helper(OUT_OF_REACH, retry, || {
+                    let answer = script.get(asked).copied().unwrap_or(PAST_THE_SCRIPT);
+                    asked = asked.saturating_add(1);
+                    answer
+                });
+                (answered, asked)
+            }
+
+            let attempts =
+                usize::try_from(INTERRUPTED_WAIT_ATTEMPTS).expect("the bound fits usize");
+
+            // One answer of *not yet* fewer than there are attempts, then one
+            // interruption: the interruption is the ending's first, and the
+            // wait goes on to collect the helper.
+            let mut calls_are_not_interruptions = vec![NOT_YET; attempts.saturating_sub(1)];
+            calls_are_not_interruptions.extend([INTERRUPTED, COLLECTED]);
+            assert_eq!(
+                poll_over(&calls_are_not_interruptions, EndingRetry::WhileInterrupted),
+                (COLLECTED, attempts.saturating_add(1)),
+                "{} answers of not yet and one EINTR ended the wait before it collected the \
+                 helper; the bound counted calls",
+                attempts.saturating_sub(1)
+            );
+
+            // Every interruption apart: the count reaches the bound at the
+            // last of them, before the helper is collected.
+            let mut apart = Vec::with_capacity(attempts.saturating_mul(2));
+            for _ in 0..attempts {
+                apart.extend([NOT_YET, INTERRUPTED]);
+            }
+            apart.push(COLLECTED);
+            assert_eq!(
+                poll_over(&apart, EndingRetry::WhileInterrupted),
+                (INTERRUPTED, attempts.saturating_mul(2)),
+                "{attempts} EINTRs, each after an answer of not yet, did not exhaust the bound; \
+                 it counted only interruptions in a row"
+            );
+
+            // `Once`: the first interruption is reported, however late.
+            let mut once = vec![NOT_YET; 5];
+            once.extend([INTERRUPTED, COLLECTED]);
+            assert_eq!(
+                poll_over(&once, EndingRetry::Once),
+                (INTERRUPTED, 6),
+                "Once did not report the first interruption after five answers of not yet"
+            );
         }
 
         #[test]
