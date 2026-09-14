@@ -2621,9 +2621,14 @@ impl WorkspaceManager {
     /// its sync refused — and a retry that read absence as proof would remove
     /// the intent behind an unproven deletion (the round-9 crash lens, P2).
     /// Syncing a directory whose entry is already gone is the proof the first
-    /// attempt did not give. One barrier here covers the three slot kinds and
-    /// both callers' orders, the terminal finalization's scrub and the live
-    /// loop's; its error is the funnel's, never absorbed.
+    /// attempt did not give; where the slot kind's directory is itself absent
+    /// — a root an older engine or a fixture made without the scaffolding
+    /// [`Self::create_execution_root`] lays down — the execution root above
+    /// it is synced instead, so the directory's own absence, and the
+    /// checkout's with it, is what is made durable. One barrier here covers
+    /// the three slot kinds and both callers' orders, the terminal
+    /// finalization's scrub and the live loop's; its error is the funnel's,
+    /// never absorbed.
     ///
     /// # Errors
     ///
@@ -2667,7 +2672,7 @@ impl WorkspaceManager {
                 })?;
                 contained
             } else {
-                path.clone()
+                canonical_prefix(&path)?
             };
             let parent = checkout.parent().ok_or_else(|| UpstrokeError::Git {
                 message: format!("{} has no parent directory", checkout.display()),
@@ -5679,8 +5684,22 @@ fn sync_directory(path: &Path, ledger: &DurabilityLedger) -> Result<(), Upstroke
 /// funnel — a refused barrier ends the removal, and the intent that names
 /// the checkout is left for the retry to take the barrier again.
 ///
-/// `checkout` is the path the removal bound: canonical when the checkout was
-/// there to remove, the slot's own path when it was already gone.
+/// `checkout` is the path the removal bound, in its canonical form on both
+/// branches (`canonical_prefix`, which resolves what exists of it).
+///
+/// A `parent` that is not there to sync, with the checkout absent, is the one
+/// state in which this barrier has no entry to make durable: the slot kind's
+/// directory was never made — [`WorkspaceManager::create_execution_root`]
+/// lays the four down, and [`WorkspaceManager::remove_execution_root`]
+/// removes one only when empty and only after every intent is gone, so under
+/// this tree's own protocol the directory outlives every intent beneath it;
+/// a root an older engine or a fixture made by hand lacks it. Nothing can roll
+/// a checkout back into a directory that does not exist, and a rollback of
+/// the directory's own removal restores an empty one; what is made durable
+/// then is the directory's absence, in the execution root above it
+/// ([`sync_slot_directory_absent`]), recorded the same way with the directory
+/// as the entry observed. A `parent` absent while the checkout is present is
+/// impossible and is left to the error.
 fn sync_checkout_removed(
     checkout: &Path,
     parent: &Path,
@@ -5705,8 +5724,53 @@ fn sync_checkout_removed(
             present,
         },
     );
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !present => {
+            sync_slot_directory_absent(parent, ledger)
+        }
+        Err(source) => Err(UpstrokeError::Io {
+            path: parent.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// The barrier [`sync_checkout_removed`] takes when the slot kind's directory
+/// is absent along with the checkout: the execution root above it synced,
+/// with the directory's presence read by `symlink_metadata` in the statement
+/// immediately before the barrier and carried on the record, so the
+/// directory's absence — and the checkout's with it — is durable before the
+/// intent that names the checkout is removed. The record is written whether
+/// or not the barrier held, and the barrier's error is the funnel's.
+fn sync_slot_directory_absent(
+    directory: &Path,
+    ledger: &DurabilityLedger,
+) -> Result<(), UpstrokeError> {
+    let root = directory.parent().ok_or_else(|| UpstrokeError::Git {
+        message: format!("{} has no parent directory", directory.display()),
+    })?;
+    let present = match fs::symlink_metadata(directory) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: directory.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let outcome = crate::util::fsync_dir(root);
+    ledger.record_entry(
+        DurableStep::SyncedDirectory,
+        root,
+        EntryObserved {
+            path: directory.to_path_buf(),
+            present,
+        },
+    );
     outcome.map_err(|source| UpstrokeError::Io {
-        path: parent.to_path_buf(),
+        path: root.to_path_buf(),
         source,
     })
 }

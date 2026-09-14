@@ -16270,6 +16270,91 @@ fn a_failed_checkout_barrier_is_retried_before_its_intent_is_removed() {
 }
 
 #[test]
+fn an_absent_slot_directory_is_made_durably_absent_in_the_root_before_the_intent_is_removed() {
+    use crate::topology::effects::LockSite;
+    let planted = plant_finished_run("absent-slot-directory", RunOutcome::Complete);
+    let fixture = &planted.fixture;
+    let plain = |path: &Path| -> PathBuf {
+        let shown = path.to_string_lossy();
+        PathBuf::from(shown.strip_prefix(r"\\?\").unwrap_or(&shown))
+    };
+    let tasks = planted
+        .beta_worktree
+        .parent()
+        .expect("a checkout has a parent directory")
+        .to_path_buf();
+    let root = plain(
+        &std::fs::canonicalize(fixture.manager().execution_root())
+            .expect("the execution root exists before the resume"),
+    );
+    let tasks_plain = root.join(
+        tasks
+            .file_name()
+            .expect("the slot kind's directory has a name"),
+    );
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(fixture, &runtime, &certifies);
+    let fault = crate::util::fail_barriers_at(&tasks);
+    let (result, _) = resume(fixture, &harness(), &given);
+    let error = message(
+        &result.expect_err("the first resume removes the checkout and its barrier refuses"),
+    );
+    assert!(error.contains("injected barrier fault"), "{error}");
+    assert!(
+        !planted.beta_worktree.exists()
+            && fixture
+                .manager()
+                .intents()
+                .expect("intents")
+                .contains(&planted.beta_slot),
+        "the checkout is gone, its deletion unproven, and the intent stands"
+    );
+    assert!(
+        wait_for_cleanup_hold_release(&fixture.public()),
+        "the run's cleanup lease is still held"
+    );
+    drop(fault);
+    crate::workspace_manager::fixture::remove_dir(&tasks);
+    let harness = harness();
+    let mut hooks = BarrierHooks::armed(
+        &harness,
+        (EffectSiteId::Lock(LockSite::Release), HookPhase::After),
+        Injection::Proceed,
+    );
+    let (result, _) = resume_with(fixture, &mut hooks, &given);
+    let text = message(&result.expect_err("the resume finalizes then refuses"));
+    assert!(
+        text.contains("already finished as") && text.contains("finalized"),
+        "{text}"
+    );
+    let records = hooks.ledger_records();
+    let barrier = records
+        .iter()
+        .find(|record| {
+            record.step == crate::util::DurableStep::SyncedDirectory
+                && plain(&record.path) == root
+                && record
+                    .entry
+                    .as_ref()
+                    .is_some_and(|entry| plain(&entry.path) == tasks_plain)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the execution root was synced with the absent slot directory observed in the \
+                 statement before the barrier: {records:?}"
+            )
+        });
+    assert_eq!(
+        barrier.entry.as_ref().map(|entry| entry.present),
+        Some(false),
+        "the slot kind's directory was absent at the instant of the barrier, its absence made \
+         durable in the root before the intent went"
+    );
+    assert_finalized(&planted, &RunOutcome::Complete, "after the resume");
+}
+
+#[test]
 fn an_absent_checkout_retries_its_parent_barrier() {
     let planted = plant_finished_run("absent-checkout-barrier", RunOutcome::Complete);
     let manager = planted.fixture.manager();
