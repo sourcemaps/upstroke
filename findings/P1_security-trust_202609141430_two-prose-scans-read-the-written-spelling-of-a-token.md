@@ -41,9 +41,12 @@ Both render as the token a reader sees. Measured with `markdown-it-py` 3.0.0 on 
 
 #286's rule is that a guard asks its question of what its own consumer reads, and it is a **closure**
 for the two guards it repairs because each of those consumers performs a complete, small
-transformation: CommonMark resolves character references in a fence info string **and nothing
-else** -- the info string is not parsed as Markdown -- and `json.loads` resolves a JSON string's
-escapes. Both are implementable in full.
+transformation: a renderer gives a fence the first word of its info string once backslash escapes
+and character references are resolved, **and nothing else** -- the info string is not parsed as
+Markdown -- and `json.loads` resolves a JSON string's escapes. Both are implementable in full. The
+first is implemented as `markdown-it-py` 3.0.0's own function rather than as a reading of the
+specification, which does not define a fence's language: three readings of the specification were
+each wrong somewhere that renderer is not (#286 rounds 2 to 4).
 
 The consumer here is the whole inline renderer, and resolving character references would close
 **one spelling of at least four**. All four were measured at 553cfddf, each rendering to the token
@@ -66,7 +69,10 @@ Decide what this program may assume about comment prose at all, rather than addi
 Three directions, none of them free:
 
 - **Render the comment.** Complete, and it puts a Markdown implementation between the review and the
-  merge decision. The parser is stdlib-only today and CI installs nothing for it.
+  merge decision. The parser is stdlib-only today and CI installs nothing for it. It also has to
+  choose a renderer, because "what a reader sees" is not one document: measured for #286 round 4,
+  `markdown-it-py` 3.0.0 gives a fence tagged `json` and then a literal U+0085, U+000B or U+00A0 the
+  language `json`, and cmark-gfm 0.29.0.gfm.6 does not.
 - **Refuse prose the program cannot read plainly.** Fail-closed, and it has to separate the rows
   that must stay green: every real workflow-form comment carries a preamble, and a rule that
   refuses one refuses them all. The json form reads its `reviewed_sha` from the object, not from the
