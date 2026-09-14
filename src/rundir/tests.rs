@@ -5641,6 +5641,77 @@ fn a_report_staging_directory_is_recorded_before_it_is_made() {
     );
 }
 
+/// Rule 2 for the record's two barriers in the private half, which
+/// `a_report_staging_directory_is_recorded_before_it_is_made` reads only when
+/// they hold: the staged record's file barrier
+/// (`util::fail_file_barriers_within`) and the private directory's barrier
+/// after the rename (`util::fail_barriers_at`), each refused on its own across
+/// two attempts, stop the write with the barrier's diagnostic before the
+/// staging directory is made — no `DirectoryCreated` entry in the ledger and
+/// nothing under the public run directory, no staging directory and no report
+/// — and with the barrier holding again the next write publishes and reclaims
+/// what the refused attempts left. A discarded error at either barrier, the
+/// recipes `r11-staging-record-stage-swallowed` and
+/// `r11-staging-record-publish-swallowed`, publishes a report through a
+/// directory whose record was never made durable, and survived the ordering
+/// test (`PR10-PRIVATE-RECORD-BARRIERS-UNWITNESSED`).
+#[test]
+fn a_report_staging_record_failure_stops_before_directory_creation() {
+    let payload = serde_json::json!({"run_id": "01RECORDFAULT", "outcome": "parked"});
+    for (tag, which) in [
+        ("file", "the staged record's file barrier"),
+        ("directory", "the private directory's barrier"),
+    ] {
+        let root = scratch(&format!("report-staging-record-{tag}-fault"));
+        let public = root.join("public");
+        create_dir(&public).expect("public");
+        let private = root.join("private");
+        create_dir(&private).expect("private");
+        let mut hooks = HarnessHooks::default().recording_durability();
+        let ledger = hooks.ledger();
+        {
+            let _fault = if tag == "file" {
+                util::fail_file_barriers_within(&private)
+            } else {
+                util::fail_barriers_at(&private)
+            };
+            for attempt in 1..=2 {
+                let error = write_report(&public, &private, &payload, &mut hooks)
+                    .expect_err("a record whose barrier is refused stops the write");
+                assert!(
+                    error.to_string().contains("injected barrier fault"),
+                    "{which}, attempt {attempt}: the failure is the barrier's, by name: {error}"
+                );
+            }
+        }
+        assert!(
+            ledger
+                .records()
+                .iter()
+                .all(|entry| entry.step != DurableStep::DirectoryCreated),
+            "{which}: no staging directory was made: {:?}",
+            ledger.steps()
+        );
+        assert_eq!(
+            fs::read_dir(&public).expect("listed").count(),
+            0,
+            "{which}: nothing under the public run directory, no staging directory and no report"
+        );
+        write_report(&public, &private, &payload, &mut NoHooks)
+            .expect("with the barrier holding, published");
+        assert!(
+            public.join(REPORT).is_file()
+                && report_staging_leftovers(&public, &private)
+                    .expect("listed")
+                    .is_empty()
+                && unrecorded_report_staging(&public, &private)
+                    .expect("listed")
+                    .is_empty(),
+            "{which}: published, and what the refused attempts left reclaimed"
+        );
+    }
+}
+
 /// Whether `path` is a staged report of this protocol's: `report.json`
 /// inside a staging directory of this round's shape directly under `public`.
 fn is_staged_report(path: &Path, public: &Path) -> bool {
