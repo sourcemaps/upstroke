@@ -15,7 +15,11 @@ the report is written and the cleanup steps run in the packet's fixed order. Two
 loop, once closure has appended the end (`TopologyRun::close_run`), and recovery step (b)
 (`recover::finalize_if_finished`), which finalizes a Complete or Halted run found on disk and
 only then refuses continuation. Both reach the same function with the barrier-proven fold, so a
-finalization is idempotent across incarnations: a step that already ran finds nothing to do.
+finalization is idempotent across incarnations: a step that already ran finds nothing to do —
+or, for a checkout's removal since PR10's round 9, only its parent directory's barrier to take
+again, on the absent branch as on the present one, so a resume after a failed or unfinished
+barrier converges once it holds and refuses at it with the intent standing until then
+(`a_failed_checkout_barrier_is_retried_before_its_intent_is_removed`).
 
 ## `pub struct Finalize<'a> {`
 
