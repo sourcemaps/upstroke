@@ -3186,37 +3186,31 @@ if (( posix_names )); then
     'C:\y' 'rc=1 asked=2 at=[C:\y/.git C:\/.git]'
 fi
 
-# ---- AND THE ENVIRONMENT DOES NOT CHOOSE WHICH REPOSITORY ANSWERS ------------------------------
+# ---- WHICH REPOSITORY THE ENVIRONMENT NAMES IS GIT'S TO SAY, AND A LISTING IS JUDGED IN IT ----------
 #
-# Every rule above is about a SPELLING deciding which ledger answers for a
-# directory. `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` decide it without a
-# spelling at all, and all three moved a verdict here before the validator unset
-# them: a clean standalone repository holding one committed finding at its root,
-# spelled `.`, went from exit 0 `conforms` to exit 1 with `GIT_WORK_TREE`
-# exported -- the ascent asks git whether the PARENT is inside a work tree, a
-# pinned work tree makes git answer about the pin, and the 128 that follows was
-# read as a repository above -- while a listing under a 160000 gitlink, which
-# every other spelling refuses, CONFORMED with `GIT_DIR` or `GIT_INDEX_FILE`
-# exported. A false red and two false greens, one variable each.
+# `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` tell git which repository a
+# directory belongs to, and rounds 10 to 12 read their VALUES in the validator:
+# relative or absolute, `.` or a trailing `/.`, which directory a `-C` left git in.
+# Each round's review met a spelling that reading got wrong, and four were exit 1
+# at `231c1aad` and exit 0 `conforms` at `9980591a` -- the hidden superproject, a
+# `GIT_WORK_TREE=.`, a relative `GIT_DIR` re-anchored onto metadata planted inside
+# the listing, and a file listing below a pinned `160000`. The validator now asks
+# GIT, once, from the caller's own directory with the names as exported, which
+# repository they select, and judges a listing in that repository or not at all.
+# Its environment section states the four arms; these rows hold each of them.
 #
-# WHAT IS ASSERTED, WHEREVER THE RECORDS ANSWER, IS THAT THE PINNED RUN AND THE
-# CLEAN RUN ARE THE SAME RUN -- the same exit code AND the same bytes on stdout
-# and stderr -- and not merely that each answers what this section expects. A
-# refusal has more than one reason: with `GIT_WORK_TREE` exported the gitlink row
-# below refused at the unrepaired head too, for `git could not say whether
-# '<parent>' is inside a work tree` rather than for the gitlink, and a row reading
-# only the exit code would have called that repair green. It is also what makes
-# the group cheap to extend: a fourth variable is one word in a list.
+# WHAT IS ASSERTED FOLLOWS FROM THOSE ARMS, IN THREE SHAPES. `env_case`: where the
+# repository the names select records at the listing what the path's own
+# repository records there, the run with them exported IS the run without them --
+# the same exit code AND the same bytes. `env_refuses`: where the names select a
+# repository git cannot resolve, a work tree the listing is not in, a ledger that
+# disagrees with the path's, or a git directory with no work tree over a listing no
+# repository reaches, the run refuses AND SAYS WHICH NAMES WERE EXPORTED -- because
+# every refusal this validator makes is exit 1 and `names no finding` is one of
+# them. `env_pinned`: where no repository reaches the path, the named repository's
+# records answer, and the row says what they answered.
 #
-# AND WHEREVER THE FILESYSTEM ANSWERS, WHAT IS ASSERTED IS A REFUSAL THAT NAMES
-# THE VARIABLE, by `env_refuses` below. The two shapes are one rule: a directory
-# with no repository over it is answered by the names the filesystem holds, and
-# an exported name is evidence of a ledger the path cannot reach, so the
-# filesystem does not get to answer for it. Round 9 asserted the first shape
-# alone, over every world; the row that measured otherwise is the deployment row
-# below.
-#
-# THE CONTROL IS THE CLEAN ENVIRONMENT AND IT IS ASSERTED FIRST IN BOTH SHAPES,
+# THE CONTROL IS THE CLEAN ENVIRONMENT AND IT IS ASSERTED FIRST IN EVERY SHAPE,
 # so a fixture that stopped being the shape it is named for cannot pass this by
 # refusing everywhere alike.
 env_case() {  # env_case <label> <cwd> <listing> <branch> <want-exit> <VAR=VALUE>...
@@ -3235,8 +3229,8 @@ env_case() {  # env_case <label> <cwd> <listing> <branch> <want-exit> <VAR=VALUE
       || pinned_rc=$?
     if [[ "$pinned_rc" != "$clean_rc" ]] || [[ "$pinned_out" != "$clean_out" ]]; then
       echo "$label: with ${pin%%=*} exported the run answered $pinned_rc where the same run in a" \
-        "clean environment answered $clean_rc, and a verdict an exported variable can flip is not" \
-        "a verdict" >&2
+        "clean environment answered $clean_rc, and the repository it names records what the" \
+        "path's own repository records here" >&2
       echo "  exported: ${pinned_out%%$'\n'*}" >&2
       echo "  clean:    ${clean_out%%$'\n'*}" >&2
       exit 1
@@ -3247,10 +3241,11 @@ env_case() {  # env_case <label> <cwd> <listing> <branch> <want-exit> <VAR=VALUE
 # THE FILED REPRODUCTION, which is a LEGITIMATE CALLER and not a hostile one: a
 # clean standalone repository, one committed finding at its root, asked about its
 # own directory, by somebody who exports the variable git documents for exactly
-# that repository. `GIT_DIR` is here beside it because only `GIT_WORK_TREE`
-# reaches the defect -- with a git directory pinned, discovery succeeds from
-# every directory and the 128 never happens -- so a `GIT_DIR` row alone would
-# have passed against the unrepaired code and proved nothing.
+# that repository. Each name selects the very repository discovery finds, so the
+# two ledgers are one and the run is the clean run. `GIT_DIR` is here beside it
+# because only `GIT_WORK_TREE` reached the original defect -- with a git directory
+# pinned, discovery succeeds from every directory and the 128 never happens -- so a
+# `GIT_DIR` row alone would have passed against that code and proved nothing.
 env_standalone="$fixture_dir/env-standalone"
 new_repo "$env_standalone"
 echo fixture > "$env_standalone/P2_correctness_202609130713_an-exported-work-tree.md"
@@ -3268,14 +3263,9 @@ env_case 'a standalone repository asked about its own root' \
   "GIT_DIR=$env_standalone/.git" \
   "GIT_INDEX_FILE=$env_standalone/.git/index"
 
-# AND WHERE THE ANSWER WOULD COME FROM THE FILESYSTEM, THE PINNED RUN REFUSES
-# RATHER THAN MATCHING THE CLEAN ONE. That is the second half of the rule and the
-# half the round that unset the names did not have: clearing them is what stops a
-# pin answering for a path nobody asked it about, and in the one world where
-# there is no repository it also hides a ledger that is real. `env_refuses` is
-# `env_case`'s other shape -- the clean control is asserted the same way, and
-# each pinned run must then refuse AND SAY WHY, because every refusal this
-# validator makes is exit 1 and `names no finding` is one of them.
+# AND WHERE THE NAMES DO NOT SELECT A REPOSITORY THE LISTING CAN BE JUDGED IN, THE
+# PINNED RUN REFUSES RATHER THAN MATCHING THE CLEAN ONE, and says which names were
+# exported. The clean control is asserted the same way first.
 env_refuses() {  # env_refuses <label> <cwd> <listing> <branch> <clean-exit> <VAR=VALUE>...
   local label="$1" cwd="$2" listing="$3" branch="$4" want="$5"
   shift 5
@@ -3291,8 +3281,8 @@ env_refuses() {  # env_refuses <label> <cwd> <listing> <branch> <clean-exit> <VA
     pinned_out="$( cd "$cwd" && env "$pin" "$BASH" "$branch_validator" "$branch" "$listing" 2>&1 )" \
       || pinned_rc=$?
     if (( pinned_rc != 1 )); then
-      echo "$label: with ${pin%%=*} exported the run answered $pinned_rc, and the names the" \
-        "filesystem holds are not a ledger for a directory the environment names one for" >&2
+      echo "$label: with ${pin%%=*} exported the run answered $pinned_rc, and a listing is judged" \
+        "in the repository the environment names or not at all" >&2
       echo "  exported: ${pinned_out%%$'\n'*}" >&2
       exit 1
     fi
@@ -3305,11 +3295,14 @@ env_refuses() {  # env_refuses <label> <cwd> <listing> <branch> <clean-exit> <VA
   done
 }
 
-# A DIRECTORY IN NO REPOSITORY AT ALL. The filesystem is the whole of the
-# evidence there, and an exported name says there is evidence this cannot see:
-# the clean run counts the names in the directory and conforms, and each pinned
-# run refuses instead. `231c1aad` refuses these three too, for `git could not say
-# what it records` -- so this row is a message changing, not a verdict.
+# A DIRECTORY IN NO REPOSITORY AT ALL. The clean run counts the names in the
+# directory and conforms. Exported one at a time, `GIT_WORK_TREE` and
+# `GIT_INDEX_FILE` leave git to find a repository from the caller's directory,
+# which has none -- arm 1, unresolvable -- and `GIT_DIR` alone roots its work tree
+# wherever git is asked from, which places no listing -- arm 4. Measured against
+# `231c1aad`: `GIT_WORK_TREE` refuses there, `git could not say what it records`;
+# `GIT_DIR` refuses, `names no finding`; and `GIT_INDEX_FILE` CONFORMS at exit 0,
+# counting the filesystem's names under an index the path cannot reach.
 env_loose="$fixture_dir/env-no-repository/listing"
 mkdir -p "$env_loose"
 echo fixture > "$env_loose/P2_correctness_202609130715_no-repository-at-all.md"
@@ -3319,17 +3312,13 @@ env_refuses 'a listing in no repository at all' \
   "GIT_DIR=$env_standalone/.git" \
   "GIT_INDEX_FILE=$env_standalone/.git/index"
 
-# AND THE DEPLOYMENT THE CLEARING HID, WHICH IS THE FALSE GREEN THAT ROUND'S OWN
-# REPAIR INTRODUCED. `git --git-dir=… --work-tree=…` with no `.git` at or above
-# the work tree: the repository is reachable through those names and, measured,
-# through nothing else -- discovery from the work tree with them cleared is
-# `fatal: not a git repository`. It IGNORES `findings/`, so its own answer for
-# this listing is `git ls-files -- findings` printing nothing. Cleared, the
-# listing was a directory in no repository, the filesystem counted an untracked
-# file as a filed finding, and the run CONFORMED at exit 0 where `231c1aad` and
-# the deployment's own repository say `names no finding`. The clean control here
-# is exit 0 for the same reason -- without the names there is nothing to see --
-# which is why the row asserts the pinned runs and not the clean one.
+# AND A DEPLOYMENT REACHABLE ONLY THROUGH THE NAMES. `git --git-dir=… --work-tree=…`
+# with no `.git` at or above the work tree: discovery from the work tree with the
+# names cleared is `fatal: not a git repository`. It IGNORES `findings/`, so its own
+# answer for this listing is `git ls-files -- findings` printing nothing. One name
+# alone never reaches its ledger, for the reasons the row above gives, and each of
+# the three refuses. The clean control is exit 0 because without the names there is
+# nothing to see but the filesystem's names.
 env_deployment="$fixture_dir/env-separate-deployment"
 mkdir -p "$env_deployment/wt/findings"
 new_repo "$env_deployment/meta"
@@ -3345,32 +3334,20 @@ env_refuses 'a work tree reachable only through the environment' \
 # AND A NAME SET TO THE EMPTY STRING IS ONE OF THE THREE. Git honours all three
 # empty: `GIT_DIR=` is `fatal: not a git repository: ''`, `GIT_WORK_TREE=` is
 # `fatal: The empty string is not a valid path`, and `GIT_INDEX_FILE=` makes
-# `git ls-files` print nothing and exit 0, which is an empty LEDGER and exactly
-# the substitution this section is about. So the record of what was exported is
-# taken with `${NAME+set}` and not from the value.
+# `git ls-files` print nothing and exit 0, which is an empty LEDGER. So what was
+# exported is recorded with `${NAME+set}` and not from the value, and each is a
+# repository git cannot resolve from here.
 env_refuses 'a name exported empty is still a ledger the path cannot reach' \
   "$env_deployment/wt" findings 'fix-P2/correctness_a-cleared-pin' 0 \
   "GIT_WORK_TREE=" \
   "GIT_DIR=" \
   "GIT_INDEX_FILE="
 
-# AND THE SAME DEPLOYMENT WITH ITS FINDING COMMITTED, WHICH IS THE LEGITIMATE
-# SHAPE OF THE ROW ABOVE AND WHICH THE ROUND THAT WROTE THAT ROW REFUSED. Every
-# row so far exports ONE name, and one name alone never reaches a deployment's
-# ledger: `GIT_WORK_TREE` and `GIT_INDEX_FILE` leave discovery where it was, so
-# with no `.git` above the work tree they are `fatal: not a git repository`, and
-# `GIT_DIR` alone says where git is and not where the listing is. The deployment
-# is reached by BOTH, which is how `git --git-dir=… --work-tree=…` is spelled,
-# and that is the shape this pair asserts.
-#
-# The two differ in ONE thing, whether the finding is TRACKED, and the
-# filesystem cannot see it: `env_deployment` above holds an IGNORED, UNTRACKED
-# file and must refuse, and this one holds a COMMITTED finding and must conform,
-# exactly as `231c1aad` and the deployment's own repository answer for each.
-# Measured at the head that refused both: exit 1 for a real
-# `findings/P1_correctness_202609112028_…md` and the `fix-P1/` branch that
-# repairs it, where master answers exit 0. A refusal there replaces an
-# acceptance that was RIGHT, which is the one thing the row above must not cost.
+# AND THE SAME DEPLOYMENT NAMED THE WAY IT IS SPELLED -- BOTH NAMES -- WHERE NO
+# REPOSITORY REACHES THE PATH: ARM 4, and the named repository's records answer.
+# The two rows differ in ONE thing, whether the finding is TRACKED, and the
+# filesystem cannot see it: this one holds a COMMITTED finding and must conform,
+# exactly as `231c1aad` and the deployment's own repository answer.
 env_pinned_out=''
 env_pinned() {  # env_pinned <label> <cwd> <listing> <branch> <clean-exit> <pinned-exit> <VAR=VALUE>...
   local label="$1" cwd="$2" listing="$3" branch="$4" clean_want="$5" pinned_want="$6"
@@ -3415,43 +3392,40 @@ if [[ -e "$env_tracked/wt/.git" ]] \
   exit 1
 fi
 
-# THE ROW THE PREVIOUS ROUND GOT WRONG. The clean control conforms because the
-# filesystem holds the same one name; the pinned run must conform because the
-# LEDGER holds it, and those are two different reasons for one exit code.
 env_pinned 'a deployment whose finding is committed is not refused' \
   "$env_tracked/wt" findings 'fix-P2/correctness_a-pin-that-reaches-a-ledger' 0 0 \
   "${env_tracked_pins[@]}"
 
-# AND ITS HOSTILE TWIN UNDER THE SAME TWO NAMES, because every row above exports
-# one at a time and neither of those reaches the deployment at all. This is the
-# false green the guard exists for, reached the way a deployment is actually
-# spelled: the checkout holds a finding-shaped name, the ledger holds nothing
-# there, and the run must refuse AND say which names were in the environment.
+# AND ITS HOSTILE TWIN UNDER THE SAME TWO NAMES: the checkout holds a
+# finding-shaped name and the named ledger records nothing there. Arm 4 reads that
+# ledger exactly as any records are read, so the refusal is the records' own --
+# `git records nothing at` -- and not a second message the environment adds. The
+# clean run conforms on the filesystem's names, which is the false green the names
+# exist to take away.
 env_pinned 'a deployment whose finding is untracked still refuses' \
   "$env_deployment/wt" findings 'fix-P2/correctness_a-cleared-pin' 0 1 \
   "GIT_DIR=$env_deployment/meta/.git" "GIT_WORK_TREE=$env_deployment/wt"
-if [[ "$env_pinned_out" != *'the environment names one: GIT_DIR GIT_WORK_TREE'* ]]; then
+if [[ "$env_pinned_out" != *"git records nothing at 'findings'"* ]]; then
   echo 'a deployment whose finding is untracked refused for a different reason' >&2
   echo "  ${env_pinned_out%%$'\n'*}" >&2
   exit 1
 fi
 
-# A GIT DIRECTORY SAYS WHERE GIT IS, NOT WHERE THE LISTING IS, and this row is
-# what holds that. With no work tree named git takes the directory it is asked
-# FROM as the work tree's root, so the pinned index's ROOT entries come back as
-# this listing's own children -- and `env_standalone` keeps its one committed
-# finding at its root. Without that bound, a directory in NO repository, holding
-# nothing of the kind, conforms for a finding filed somewhere else entirely.
+# A GIT DIRECTORY SAYS WHERE GIT IS, NOT WHERE THE LISTING IS. With no work tree
+# named git takes the directory it is asked FROM as the work tree's root, so the
+# named index's ROOT entries would come back as this listing's own children -- and
+# `env_standalone` keeps its one committed finding at its root. Without arm 4's
+# bound, a directory in NO repository, holding nothing of the kind, conforms for a
+# finding filed somewhere else entirely.
 env_refuses 'a git directory alone does not place a listing' \
   "$env_loose" . 'fix-P2/correctness_an-exported-work-tree' 1 \
   "GIT_DIR=$env_standalone/.git"
 
-# AND A LISTING OUTSIDE THE WORK TREE THOSE NAMES SELECT IS NOT ITS LISTING.
-# Asked with the path merely implied, git answers about the work tree's ROOT and
-# offers the entries there -- `$env_tracked/wt` keeps a committed finding at its
-# root for exactly this -- so the listing is named to git in FULL, which it
-# refuses at 128 `is outside repository`. The clean control is `names no
-# finding`, which is also what the deployment's own repository says.
+# AND A LISTING OUTSIDE THE WORK TREE THOSE NAMES SELECT IS NOT ITS LISTING -- ARM
+# 2. `$env_tracked/wt` keeps a committed finding at its root for exactly this: a
+# reading that took the work tree's root for the listing would offer it. The clean
+# control is `names no finding`, which is also what the deployment's own
+# repository says.
 env_pinned 'a listing outside the selected work tree is not its listing' \
   "$env_loose" . 'fix-P2/correctness_a-pin-outside-its-work-tree' 1 1 \
   "${env_tracked_pins[@]}"
@@ -3461,15 +3435,45 @@ if [[ "$env_pinned_out" != *'the environment names one: GIT_DIR GIT_WORK_TREE'* 
   exit 1
 fi
 
-# THE HOSTILE HALF, AND IT IS THE HALF THAT DECIDES WHICH REPAIR IS THE RIGHT
-# ONE. A repository under a 160000 gitlink is refused because the SUPERPROJECT
-# records it, and that refusal is what an exported variable took away: pinning
-# the inner repository's own git directory or its own index makes every probe
-# answer out of the inner repository, which records a matching finding and knows
-# nothing about the gitlink. A repair that read the pin at the one site the row
-# above reaches -- and left the walk otherwise pinned -- turns THIS row green,
-# because the ascent's `--is-inside-work-tree` then answers about the pinned work
-# tree at every level and climbs past the superproject.
+# AND A LISTING WRITTEN THROUGH A `..` THAT CLIMBS OUT OF THAT WORK TREE IS OUTSIDE
+# IT TOO. A git directory exported alone roots its work tree where git is asked --
+# here `sub` -- so `../findings` written from `sub` is matched at that root and then
+# leaves it, the pathspec `git ls-files` refuses as `outside repository`. It is arm 2
+# and says so, rather than handing git a name that leaves its work tree and reading
+# git's 128 as a status nobody enumerated.
+env_ordinary="$fixture_dir/env-ordinary"
+new_repo "$env_ordinary"
+mkdir -p "$env_ordinary/findings" "$env_ordinary/sub"
+echo fixture > "$env_ordinary/findings/P2_correctness_202609141804_climbs-out-of-the-work-tree.md"
+echo seed > "$env_ordinary/sub/seed"
+git -C "$env_ordinary" add -A && git -C "$env_ordinary" commit -q -m 'a finding, and a subdirectory'
+env_pinned 'a listing that climbs out of the work tree git roots where it is asked' \
+  "$env_ordinary/sub" ../findings 'fix-P2/correctness_climbs-out-of-the-work-tree' 0 1 \
+  "GIT_DIR=$env_ordinary/.git"
+if [[ "$env_pinned_out" != *"is not inside '"*"the environment names one: GIT_DIR"* ]]; then
+  echo 'a listing that climbs out of the work tree refused for a different reason' >&2
+  echo "  ${env_pinned_out%%$'\n'*}" >&2
+  exit 1
+fi
+
+# A REPOSITORY UNDER A 160000 GITLINK, WITH ITS OWN METADATA EXPORTED -- ARM 3, AND
+# THE TWO LEDGERS AGREE. The superproject is discoverable and records `inner` at
+# 160000, so the clean run refuses for the gitlink. Each name below selects the
+# inner repository itself, git's work tree for it is `inner`, and the ascent above
+# that root reads the superproject's `160000` exactly as the clean run's does -- the
+# records agree, so the run is the clean run, byte for byte. When the walks still
+# ran with the names exported, `GIT_DIR` and `GIT_INDEX_FILE` made every probe
+# answer out of the inner repository and this row conformed.
+#
+# AND AGAINST TWO VARIABLES THAT ARE NOT NAMES OF A REPOSITORY BUT MOVED IT ALL THE
+# SAME. `GIT_TRACE=3` wrote git's trace into descriptor 3 -- which `capture` had
+# open as the copy of git's stdout, so `--is-inside-work-tree` read `true` as
+# `false`, the ascent to the superproject was skipped, and the submodule's own index
+# answered. `GIT_LITERAL_PATHSPECS=1` turns the `:(literal)<path>` every `ls-files`
+# here sends into the literal name `:(literal)<path>`, which matches nothing, so the
+# ascent's `records_path` saw no `160000` and did not refuse. `capture` runs the
+# producer with 3 and 4 closed, and the pathspec-magic variables are unset at the
+# top of the validator.
 env_super="$fixture_dir/env-superproject"
 new_repo "$env_super"
 new_repo "$env_super/inner"
@@ -3492,92 +3496,198 @@ env_case 'a repository the superproject records at 160000' \
   "GIT_INDEX_FILE=$env_super/inner/.git/index" \
   "GIT_TRACE=3" \
   "GIT_LITERAL_PATHSPECS=1"
-# THE SAME ROW AGAINST TWO VARIABLES THAT ARE NOT LEDGER PINS BUT MOVED IT ALL THE
-# SAME, and they are here because the round before this left them able to. A
-# `GIT_TRACE=3` writes git's trace into descriptor 3 -- which `capture` had open as
-# the copy of git's stdout, so `--is-inside-work-tree` read `true` as `false`, the
-# ascent to the superproject was skipped, and the submodule's own index answered:
-# exit 0 `conforms` on this exact gitlink. `GIT_LITERAL_PATHSPECS=1` turns the
-# `:(literal)<path>` every `ls-files` here sends into the literal name
-# `:(literal)<path>`, which matches nothing, so the ascent's `records_path` saw no
-# `160000` and did not refuse. Both are the initialised-submodule ledger switch this
-# pull request repairs, reached by an environment variable rather than by a spelling;
-# `capture` now runs the producer with 3 and 4 closed and the pathspec-magic variables
-# are unset at the top of the validator, so each gives the clean verdict here -- and
-# `env_case` asserts that with the SAME exit AND the same bytes the clean run gives.
 
-# AND A PIN THAT NAMES NOTHING IS THE SAME RULE AND NOT A REFUSAL OF ITS OWN. A
-# `GIT_DIR` that is not a git directory made every probe exit 128 and the run
-# refused; the path decides, so it conforms exactly as the clean run does.
-env_case 'a standalone repository under a pin that names nothing' \
+# AND A NAME THAT SELECTS NOTHING THE LISTING IS IN REFUSES -- ARMS 1 AND 2. A
+# `GIT_DIR` that is not a git directory is a repository git cannot resolve, and a
+# `GIT_WORK_TREE` that names no directory is a work tree the listing is not inside.
+# Round 9 asserted the clean verdict here, under the rule that the path alone
+# decides. Measured against `231c1aad`: the `GIT_DIR` refuses, `git could not say
+# what it records`, and the `GIT_WORK_TREE` conforms at exit 0. This head refuses
+# both and says why.
+env_refuses 'a standalone repository under a pin that names nothing' \
   "$env_standalone" . 'fix-P2/correctness_an-exported-work-tree' 0 \
   "GIT_DIR=$env_standalone/there-is-no-git-directory-here" \
   "GIT_WORK_TREE=$env_standalone/there-is-no-work-tree-here"
 
-# AND A FOREIGN LEDGER OVER A REPOSITORY THAT HAS ITS OWN is the third variable's
-# other direction: the superproject's index over the standalone repository
-# answered `names no finding anywhere in this pull request` at exit 1, for a
-# ledger that is not the one the path is in.
-env_case 'a standalone repository under another repository index' \
+# AND A FOREIGN LEDGER OVER A REPOSITORY THAT HAS ITS OWN -- ARM 3, AND THE TWO
+# LEDGERS DISAGREE. The superproject's index over the standalone repository records
+# `inner` and `seed.txt` at the root and no finding; the standalone repository's own
+# records its one finding. One directory, two answers, and neither settles it: the
+# run refuses and says so, where `231c1aad` refuses as `names no finding`.
+env_refuses 'a standalone repository under another repository index' \
   "$env_standalone" . 'fix-P2/correctness_an-exported-work-tree' 0 \
   "GIT_INDEX_FILE=$env_super/.git/index"
-
-# ---- A RELATIVE PIN IS THE CALLER'S, AND `-C` MUST NOT RE-ANCHOR IT INSIDE THE LISTING ----------
-#
-# `environment_children` roots the listing to `-C` into it and re-exports the pins,
-# and a pin the caller spelled RELATIVE is resolved from wherever `-C` leaves git. A
-# POSIX-relative spelling that only LOOKS anchored -- `C:/repo.git`, or a
-# backslash-led `\meta/repo.git` -- was left unrooted, so with the intended metadata
-# at `<caller>/C:/repo.git` and a SECOND repository's metadata planted at
-# `<listing>/C:/repo.git`, git resolved the pin inside the listing and read the rogue
-# ledger: a finding it never filed conformed at exit 0. The pins are now rooted against
-# the caller's own directory by the same anchor test the rest of the file uses, so the
-# rogue is unreachable. The absolute spelling is the control that never had the defect.
-relpin_wt="$fixture_dir/relpin/wt"
-mkdir -p "$fixture_dir/relpin/C:"
-new_repo "$relpin_wt"
-printf 'findings/\n' > "$relpin_wt/.gitignore"
-echo seed > "$relpin_wt/seed"
-git -C "$relpin_wt" add -A && git -C "$relpin_wt" commit -q -m 'the intended ledger records no finding'
-mv "$relpin_wt/.git" "$fixture_dir/relpin/C:/repo.git"
-mkdir -p "$relpin_wt/findings"
-echo untracked > "$relpin_wt/findings/P2_correctness_202609100001_relative-pin.md"
-new_repo "$fixture_dir/relpin/donor"
-mkdir -p "$fixture_dir/relpin/donor/findings"
-echo rogue > "$fixture_dir/relpin/donor/findings/P2_correctness_202609100001_relative-pin.md"
-git -C "$fixture_dir/relpin/donor" add -A && git -C "$fixture_dir/relpin/donor" commit -q -m 'a rogue ledger'
-mkdir -p "$relpin_wt/findings/C:"
-mv "$fixture_dir/relpin/donor/.git" "$relpin_wt/findings/C:/repo.git"
-relpin_rc=0
-( cd "$fixture_dir/relpin" \
-  && env GIT_DIR="C:/repo.git" GIT_WORK_TREE="$relpin_wt" \
-    "$BASH" "$branch_validator" 'fix-P2/correctness_relative-pin' "$relpin_wt/findings" ) >/dev/null 2>&1 \
-  || relpin_rc=$?
-if [[ "$relpin_rc" != 1 ]]; then
-  echo "a relative GIT_DIR 'C:/repo.git' must be rooted against the caller and not re-anchored" \
-    "inside the listing; got $relpin_rc" >&2
-  exit 1
-fi
-relpin_abs_rc=0
-( cd "$fixture_dir/relpin" \
-  && env GIT_DIR="$fixture_dir/relpin/C:/repo.git" GIT_WORK_TREE="$relpin_wt" \
-    "$BASH" "$branch_validator" 'fix-P2/correctness_relative-pin' "$relpin_wt/findings" ) >/dev/null 2>&1 \
-  || relpin_abs_rc=$?
-if [[ "$relpin_abs_rc" != 1 ]]; then
-  echo "the absolute spelling of the same pin is the control and must also refuse; got $relpin_abs_rc" >&2
+env_pinned 'a standalone repository under another repository index, and why' \
+  "$env_standalone" . 'fix-P2/correctness_an-exported-work-tree' 0 1 \
+  "GIT_INDEX_FILE=$env_super/.git/index"
+if [[ "$env_pinned_out" != *'Two ledgers answering differently'* ]]; then
+  echo 'a foreign index over a repository must refuse as two ledgers disagreeing' >&2
+  echo "  ${env_pinned_out%%$'\n'*}" >&2
   exit 1
 fi
 
-# ---- THE LEDGER'S RECORDED TYPE DECIDES, NOT THE CHECKOUT'S SHAPE, in the pinned world too ------
+# ---- THE FOUR ROUTES ROUND 12'S REVIEW EXECUTED, EACH `231c1aad` 1 AND `9980591a` 0 ------------
 #
-# The environment fallback used to look at the CHECKOUT shape before the recorded
-# type, which the records world never does, and two shapes turned on it.
+# Each was a site where the validator read a name's value instead of asking git,
+# and each is now a row. The clean control is asserted wherever there is one.
+
+# ROUTE 1: THE HIDDEN SUPERPROJECT. A superproject records `findings` at 160000 and
+# `findings` is an initialised repository holding a matching finding at its root --
+# and the superproject's `.git` is OUTSIDE its work tree, so the names are the only
+# way to it. Cleared, `findings` is a standalone repository and conforms, exactly
+# as `env_standalone` does; that is the clean control, and it is right. Exported,
+# the names select the superproject, whose records say `findings` is a gitlink:
+# arm 3, two ledgers, refused -- from the superproject's root, from inside the
+# submodule, and with a git directory alone.
+hidden_wt="$fixture_dir/hidden-superproject/wt"
+new_repo "$hidden_wt"
+echo seed > "$hidden_wt/seed"
+git -C "$hidden_wt" add -A && git -C "$hidden_wt" commit -q -m 'the superproject'
+new_repo "$hidden_wt/findings"
+echo fixture > "$hidden_wt/findings/P2_correctness_202609141801_a-hidden-superproject.md"
+git -C "$hidden_wt/findings" add -A && git -C "$hidden_wt/findings" commit -q -m 'the submodule ledger'
+git -C "$hidden_wt" update-index --add --cacheinfo \
+  "160000,$(git -C "$hidden_wt/findings" rev-parse HEAD),findings"
+git -C "$hidden_wt" commit -q -m 'findings is a gitlink'
+mv "$hidden_wt/.git" "$fixture_dir/hidden-superproject/super.git"
+hidden_pins=( "GIT_DIR=$fixture_dir/hidden-superproject/super.git" "GIT_WORK_TREE=$hidden_wt" )
+if [[ -n "$( cd "$hidden_wt" && env "${hidden_pins[@]}" git status --porcelain )" ]] \
+  || ! ( cd "$hidden_wt" && env "${hidden_pins[@]}" git ls-files -s -- findings ) | grep -q '^160000 '; then
+  echo 'the fixture was meant to be a clean superproject, reachable only through the names, recording findings at 160000' >&2
+  exit 1
+fi
+env_pinned 'a superproject reachable only through the names records the submodule' \
+  "$hidden_wt" findings 'fix-P2/correctness_a-hidden-superproject' 0 1 "${hidden_pins[@]}"
+if [[ "$env_pinned_out" != *'Two ledgers answering differently'* ]]; then
+  echo 'the hidden superproject refused for a different reason' >&2
+  echo "  ${env_pinned_out%%$'\n'*}" >&2
+  exit 1
+fi
+env_pinned 'the hidden superproject, asked from inside its submodule' \
+  "$hidden_wt/findings" . 'fix-P2/correctness_a-hidden-superproject' 0 1 "${hidden_pins[@]}"
+env_pinned 'the hidden superproject, named by its git directory alone' \
+  "$hidden_wt" findings 'fix-P2/correctness_a-hidden-superproject' 0 1 \
+  "GIT_DIR=$fixture_dir/hidden-superproject/super.git"
+
+# ROUTE 4: A FILE LISTING BELOW A 160000 THE NAMES RECORD, WITH NO SUBMODULE AT ALL.
+# `findings` is a gitlink in a deployment reachable only through the names, and the
+# checkout holds a plain directory there with a file naming a finding. The
+# fallback that stood here asked what the ledger records AT the file and not above
+# it, found nothing, and read the file: exit 0. The named repository's records are
+# read by `recorded_kind_of`, ancestors and all, so the gitlink above it answers.
+below_wt="$fixture_dir/pinned-below-gitlink/wt"
+new_repo "$below_wt"
+echo seed > "$below_wt/seed"
+git -C "$below_wt" add -A && git -C "$below_wt" commit -q -m seed
+git -C "$below_wt" update-index --add --cacheinfo "160000,$(git -C "$below_wt" rev-parse HEAD),findings"
+git -C "$below_wt" commit -q -m 'findings is a gitlink'
+mkdir -p "$below_wt/findings"
+echo 'P2_correctness_202609141802_below-a-pinned-gitlink.md' > "$below_wt/findings/list.txt"
+mv "$below_wt/.git" "$fixture_dir/pinned-below-gitlink/repo.git"
+env_pinned 'a file listing below a gitlink the names record' \
+  "$below_wt" findings/list.txt 'fix-P2/correctness_below-a-pinned-gitlink' 0 1 \
+  "GIT_DIR=$fixture_dir/pinned-below-gitlink/repo.git" "GIT_WORK_TREE=$below_wt"
+if [[ "$env_pinned_out" != *"records 'findings' as mode 160000, so"* ]]; then
+  echo 'a file listing below a pinned gitlink refused for a different reason' >&2
+  echo "  ${env_pinned_out%%$'\n'*}" >&2
+  exit 1
+fi
+
+# ROUTE 3: A RELATIVE `GIT_DIR` THAT NAMES NOTHING WHERE THE CALLER STANDS, WITH
+# MATCHING METADATA PLANTED AT THE SAME SPELLING INSIDE THE LISTING. The rooting that
+# stood here tested `-ef` against the caller's directory, found nothing there, left
+# the pin relative, and `git -C <listing>` read the planted repository: exit 0. Git
+# is now asked from the caller's own directory with the name exactly as exported,
+# says `not a git repository`, and arm 1 refuses; nothing inside the listing is
+# ever asked. The absolute spelling of the same absent directory is the control.
+# RUNS NATIVELY ON WINDOWS: NO -- a directory named `C:` is a POSIX name.
+if (( posix_names )); then
+  planted_wt="$fixture_dir/planted-relative-pin/wt"
+  new_repo "$planted_wt"
+  printf 'findings/\n' > "$planted_wt/.gitignore"
+  git -C "$planted_wt" add -A && git -C "$planted_wt" commit -q -m 'the intended ledger records no finding'
+  mv "$planted_wt/.git" "$fixture_dir/planted-relative-pin/intended.git"
+  mkdir -p "$planted_wt/findings/C:"
+  echo untracked > "$planted_wt/findings/P2_correctness_202609141803_a-planted-pin.md"
+  new_repo "$fixture_dir/planted-relative-pin/donor"
+  mkdir -p "$fixture_dir/planted-relative-pin/donor/findings"
+  echo planted > "$fixture_dir/planted-relative-pin/donor/findings/P2_correctness_202609141803_a-planted-pin.md"
+  git -C "$fixture_dir/planted-relative-pin/donor" add -A
+  git -C "$fixture_dir/planted-relative-pin/donor" commit -q -m 'a planted ledger'
+  mv "$fixture_dir/planted-relative-pin/donor/.git" "$planted_wt/findings/C:/not-there.git"
+  for planted_dir in 'C:/not-there.git' "$fixture_dir/planted-relative-pin/C:/not-there.git"; do
+    env_pinned "a GIT_DIR naming nothing where the caller stands ($planted_dir)" \
+      "$fixture_dir/planted-relative-pin" "$planted_wt/findings" 'fix-P2/correctness_a-planted-pin' 0 1 \
+      "GIT_DIR=$planted_dir" "GIT_WORK_TREE=$planted_wt"
+    if [[ "$env_pinned_out" != *'git could not resolve a repository from'* ]]; then
+      echo "a GIT_DIR naming nothing where the caller stands refused for a different reason" >&2
+      echo "  ${env_pinned_out%%$'\n'*}" >&2
+      exit 1
+    fi
+  done
+fi
+
+# AND A RELATIVE PIN THAT DOES NAME THE CALLER'S METADATA IS THE CALLER'S. The same
+# spellings round 12 was shown -- `C:/repo.git` and `\meta/repo.git`, POSIX-relative
+# names that look anchored -- with the intended metadata at `<caller>/<spelling>`
+# recording no finding and a second repository's metadata planted at
+# `<listing>/<spelling>` recording one. Git resolves the name from the caller's
+# directory, reads the intended ledger, and that ledger records nothing at the
+# listing: refused, where the planted ledger would have conformed. The absolute
+# spelling is the control.
+if (( posix_names )); then
+  relpin_wt="$fixture_dir/relpin/wt"
+  new_repo "$relpin_wt"
+  printf 'findings/\n' > "$relpin_wt/.gitignore"
+  echo seed > "$relpin_wt/seed"
+  git -C "$relpin_wt" add -A && git -C "$relpin_wt" commit -q -m 'the intended ledger records no finding'
+  mkdir -p "$fixture_dir/relpin/C:" "$fixture_dir/relpin/\\meta"
+  mv "$relpin_wt/.git" "$fixture_dir/relpin/C:/repo.git"
+  cp -R "$fixture_dir/relpin/C:/repo.git" "$fixture_dir/relpin/\\meta/repo.git"
+  mkdir -p "$relpin_wt/findings"
+  echo untracked > "$relpin_wt/findings/P2_correctness_202609100001_relative-pin.md"
+  new_repo "$fixture_dir/relpin/donor"
+  mkdir -p "$fixture_dir/relpin/donor/findings"
+  echo rogue > "$fixture_dir/relpin/donor/findings/P2_correctness_202609100001_relative-pin.md"
+  git -C "$fixture_dir/relpin/donor" add -A && git -C "$fixture_dir/relpin/donor" commit -q -m 'a rogue ledger'
+  mkdir -p "$relpin_wt/findings/C:" "$relpin_wt/findings/\\meta"
+  cp -R "$fixture_dir/relpin/donor/.git" "$relpin_wt/findings/\\meta/repo.git"
+  mv "$fixture_dir/relpin/donor/.git" "$relpin_wt/findings/C:/repo.git"
+  for relpin_dir in 'C:/repo.git' '\meta/repo.git' "$fixture_dir/relpin/C:/repo.git"; do
+    env_pinned "a relative GIT_DIR is resolved where the caller stands ($relpin_dir)" \
+      "$fixture_dir/relpin" "$relpin_wt/findings" 'fix-P2/correctness_relative-pin' 0 1 \
+      "GIT_DIR=$relpin_dir" "GIT_WORK_TREE=$relpin_wt"
+    if [[ "$env_pinned_out" != *"git records nothing at"* ]]; then
+      echo "a relative GIT_DIR naming the caller's metadata refused for a different reason" >&2
+      echo "  ${env_pinned_out%%$'\n'*}" >&2
+      exit 1
+    fi
+  done
+fi
+
+# AND THE LEGITIMATE SHAPE BESIDE BOTH: a deployment named by RELATIVE names, whose
+# ledger records the finding. Git resolves both names from the caller's directory,
+# so the run conforms from the parent and from the work tree with `.`. `231c1aad`
+# refuses these, for `git could not say what it records` -- its `git -C <listing>`
+# resolved the names inside the listing, where they name nothing -- and `9980591a`
+# conforms, which is the answer the deployment's own `git ls-files` gives.
+env_pinned 'a deployment named by relative names, from its parent' \
+  "$env_tracked" wt/findings 'fix-P2/correctness_a-pin-that-reaches-a-ledger' 0 0 \
+  "GIT_DIR=meta/repo.git" "GIT_WORK_TREE=wt"
+env_pinned 'a deployment named by relative names, from its work tree' \
+  "$env_tracked/wt" findings 'fix-P2/correctness_a-pin-that-reaches-a-ledger' 0 0 \
+  "GIT_DIR=../meta/repo.git" "GIT_WORK_TREE=."
+
+# ---- ROUTE 2: THE LEDGER'S RECORDED TYPE DECIDES, NOT THE CHECKOUT'S SHAPE, AND NOT A SPELLING ----
 #
-# A `skip-worktree` finding whose directory the deployment REMOVED is recorded all the
-# same: the index still holds `findings/<finding>` at 100644 and `git status` is clean.
-# Requiring the directory to exist made the verdict depend on the checkout -- the same
-# committed ledger conformed with an empty `findings/` present and refused without it.
-# It conforms now whether or not the checkout materialised the directory.
+# A `skip-worktree` finding whose directory the deployment REMOVED is recorded all
+# the same: the index still holds `findings/<finding>` at 100644 and `git status` is
+# clean. It conforms whether or not the checkout materialised the directory -- and
+# whatever spelling names the work tree. Round 12's review executed the false red
+# with `GIT_WORK_TREE=.`, `<wt>/` and `<wt>/.`: the fallback stripped the work tree's
+# prefix from the listing BY SPELLING, `<caller>/.` was no prefix of
+# `<caller>/findings`, and every recorded entry was discarded. Git resolves each
+# spelling to one work tree now, and the listing is named inside it by inode.
 sparse_wt="$fixture_dir/sparse-deployment/wt"
 mkdir -p "$fixture_dir/sparse-deployment"
 new_repo "$sparse_wt"
@@ -3595,20 +3705,17 @@ if [[ -n "$( cd "$sparse_wt" && env "${sparse_pins[@]}" git status --porcelain )
   echo 'the sparse fixture was meant to be a clean index with its findings/ directory removed' >&2
   exit 1
 fi
-sparse_rc=0
-( cd "$sparse_wt" && env "${sparse_pins[@]}" \
-  "$BASH" "$branch_validator" 'fix-P2/correctness_a-sparse-finding' findings ) >/dev/null 2>&1 \
-  || sparse_rc=$?
-if [[ "$sparse_rc" != 0 ]]; then
-  echo "a committed finding whose checkout directory was removed must still conform; got $sparse_rc" >&2
-  exit 1
-fi
+for sparse_tree in "$sparse_wt" . "$sparse_wt/" "$sparse_wt/."; do
+  env_pinned "a committed finding whose checkout directory was removed (GIT_WORK_TREE=$sparse_tree)" \
+    "$sparse_wt" findings 'fix-P2/correctness_a-sparse-finding' 1 0 \
+    "GIT_DIR=$fixture_dir/sparse-deployment/repo.git" "GIT_WORK_TREE=$sparse_tree"
+done
 
 # A committed symlink materialised by `core.symlinks=false` is a REGULAR FILE on disk
-# holding its target text. Reading those bytes as a listing MANUFACTURED a finding: the
-# ledger records `findings` at 120000, and the records world refuses that, but the
-# pinned fallback read the checkout file and resolved the name its target spelled. It is
-# refused now for the recorded mode, exactly as the records world refuses it.
+# holding its target text. Reading those bytes as a listing MANUFACTURED a finding:
+# the ledger records `findings` at 120000, and the records world refuses that. It is
+# refused for the recorded mode under every spelling of the work tree -- the same
+# `GIT_WORK_TREE=.` that made the sparse row refuse made this one conform.
 mat_wt="$fixture_dir/materialised-deployment/wt"
 mkdir -p "$fixture_dir/materialised-deployment"
 new_repo "$mat_wt"
@@ -3621,14 +3728,27 @@ if [[ -L "$mat_wt/findings" || ! -f "$mat_wt/findings" ]]; then
   echo 'note: skipping the materialised-symlink deployment case (this git left the link a link)' >&2
 else
   mv "$mat_wt/.git" "$fixture_dir/materialised-deployment/repo.git"
-  mat_pins=( "GIT_DIR=$fixture_dir/materialised-deployment/repo.git" "GIT_WORK_TREE=$mat_wt" )
-  mat_rc=0
-  mat_out="$( cd "$mat_wt" && env "${mat_pins[@]}" \
-    "$BASH" "$branch_validator" 'fix-P2/correctness_a-materialised-link' findings 2>&1 )" || mat_rc=$?
-  if [[ "$mat_rc" != 1 ]] || [[ "$mat_out" != *'as mode 120000'* ]]; then
-    echo "a materialised 120000 link under pins must refuse for the recorded mode, not read its" \
-      "target text; got $mat_rc" >&2
-    printf '%s\n' "$mat_out" >&2
+  for mat_tree in "$mat_wt" . "$mat_wt/" "$mat_wt/."; do
+    env_pinned "a materialised 120000 link under the names (GIT_WORK_TREE=$mat_tree)" \
+      "$mat_wt" findings 'fix-P2/correctness_a-materialised-link' 0 1 \
+      "GIT_DIR=$fixture_dir/materialised-deployment/repo.git" "GIT_WORK_TREE=$mat_tree"
+    if [[ "$env_pinned_out" != *'as mode 120000'* ]]; then
+      echo "a materialised 120000 link under the names must refuse for the recorded mode, not read" \
+        "its target text (GIT_WORK_TREE=$mat_tree)" >&2
+      printf '%s\n' "$env_pinned_out" >&2
+      exit 1
+    fi
+  done
+  # AND WITH A GIT DIRECTORY ALONE FROM A SIBLING DIRECTORY, whose work tree is rooted
+  # where git is asked: the file is outside it, and read as a caller's file listing
+  # it would name the finding its target text spells. Arm 2 makes no exception there.
+  mkdir -p "$fixture_dir/materialised-elsewhere"
+  env_pinned 'a materialised 120000 link outside a git directory exported alone' \
+    "$fixture_dir/materialised-elsewhere" "$mat_wt/findings" 'fix-P2/correctness_a-materialised-link' 0 1 \
+    "GIT_DIR=$fixture_dir/materialised-deployment/repo.git"
+  if [[ "$env_pinned_out" != *'is not inside'* ]]; then
+    echo 'a materialised link outside a git directory exported alone refused for a different reason' >&2
+    echo "  ${env_pinned_out%%$'\n'*}" >&2
     exit 1
   fi
 fi
