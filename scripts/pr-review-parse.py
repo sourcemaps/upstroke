@@ -133,6 +133,7 @@ and after to establish that it changed none.
 """
 
 import collections
+import html.entities
 import json
 import os
 import re
@@ -187,6 +188,30 @@ JSON_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})|\\(.)", re.S)
 SIMPLE_ESCAPE = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f",
                  "n": "\n", "r": "\r", "t": "\t"}
 
+# AND THE SPELLING A RENDERER READS, WHICH IS THE SAME SENTENCE ASKED OF THE OTHER CONSUMER. The
+# scan above resolves what `json.loads` resolves, because that is what reads a verdict object;
+# CommonMark resolves CHARACTER REFERENCES, because that is what reads an info string, and GitHub
+# renders these comments by CommonMark's rules. `&#110;` is `n` there, so a fence opened
+# ```` ```jso&#110; ```` is `language-json` to the renderer and to the person reading the comment,
+# and was not a `json` fence at all to a rule that compared the characters the comment spells it
+# with: the block carrying the blocking verdict, hidden inside a swallowing block and invisible to
+# the content rule, while a clean `PASS` stood as the only candidate.
+#
+# CommonMark's own grammar and no wider: `&` then a name from the HTML5 table, or `#` and up to
+# seven decimal digits, or `#x` and up to six hex, and THE SEMICOLON IS REQUIRED
+# (https://spec.commonmark.org/0.31.2/#entity-and-numeric-character-references). A reference this
+# does not recognise is left exactly as it was written, for the reason an unresolvable `\q` is:
+# a name must not be able to hide in the gap between what this understands and what it discards.
+# One left-to-right pass, as CommonMark makes one, so a reference spelled out of the output of
+# another -- `&am&#112;;` -- is not resolved twice here and is not resolved twice there.
+#
+# A backslash escape is the other thing CommonMark resolves in an info string, and it is NOT
+# resolved here because it cannot change this question's answer: `\` before an ASCII punctuation
+# character yields that character, and `json` holds no punctuation, so no escape can spell the
+# name, and none can remove the whitespace that decides which word is first. Measured against
+# `markdown-it-py` 3.0.0: `foo\+bar` is `foo+bar` and `\json` is `\json`.
+CHAR_REFERENCE = re.compile(r"&(#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{0,30});")
+
 # A finding carrying any of these blocks in every lane (MAINTAINING step 5): the deferring
 # implementor's ledger row asserts there is no witness, and a witness the review recorded
 # contradicts it.
@@ -212,7 +237,27 @@ PROSE_VERDICT = re.compile(r"VERDICT:")
 # comment holding a complete fenced `PASS` example and then a real `{ "role_understanding":...}`
 # object saying CHANGES_REQUIRED read as the example, with the object's `"P\u0031"` invisible to
 # the stray scan. The bare form has no fence, so its object runs from the opener to the last `}`.
-BARE_OBJECT_OPEN = re.compile(r"\{\s*\"role_understanding\"")
+#
+# AND THE KEY IS A JSON STRING, SO IT IS READ AS ONE. `\"role_understanding\"` compared the
+# characters the comment spells the name with, and the only reader that object ever has is
+# `json.loads`, which compares what they DECODE TO: `{"role_understandin\u0067":...}` opens an
+# object whose first key is `role_understanding` to that reader, to GitHub's renderer and to the
+# person reading the comment, and was no opener at all to the guard. The candidate count reached
+# zero, and zero is the road to the prose parser, which read the `VERDICT: PASS` written under it.
+#
+# The brace and the quote are STRUCTURE and are matched as characters; what stands between the
+# quotes is decoded before it is compared, by the pass `decoded_spelling` already runs over a
+# severity. `\s` is wider than the four characters JSON calls whitespace, which finds more openers
+# rather than fewer -- the direction every rule in this file is wrong in when it is wrong.
+OBJECT_OPEN = re.compile(r"\{\s*\"")
+# One JSON string's body: every character up to the first quote no backslash introduces. `\\.`
+# consumes an escape whole, so the quote inside `\"` does not end the string, and `re.S` lets it
+# consume a backslash before a newline. That reads a longer string than JSON does -- JSON allows no
+# raw control character in one -- which can only offer an opener JSON has none at, and an opener
+# whose object `json.loads` then refuses is a refusal rather than a reading.
+JSON_STRING_BODY = re.compile(r'(?:[^"\\]|\\.)*', re.S)
+# The name that opener carries, compared after decoding rather than matched before it.
+BARE_OBJECT_KEY = "role_understanding"
 
 # A FENCE IS A LINE, AND THE LINES ARE READ IN ORDER, BY COMMONMARK'S RULES -- which are the rules
 # GitHub renders these comments by, so they are the rules that decide what a reader of the comment
@@ -367,6 +412,31 @@ def decoded_spelling(text):
     return JSON_ESCAPE.sub(resolved, text)
 
 
+def resolved_references(text):
+    """TEXT with CommonMark's character references resolved, as the renderer of it resolves them.
+
+    THE SIBLING OF `decoded_spelling`, AND THE SAME SENTENCE. That one reads what `json.loads`
+    reads, because a verdict object's only reader is `json.loads`; this one reads what CommonMark
+    reads, because an info string's only readers are the renderer and the person looking at what it
+    rendered. A rule that asks its question of the characters a comment is stored as, when its
+    consumer asks the same question of what they resolve to, is comparing two different documents.
+
+    A code point of zero, a surrogate and anything past the last one are U+FFFD, which is
+    CommonMark's answer and not a name either way. A reference this does not recognise is left
+    exactly as it was written.
+    """
+    def resolved(match):
+        body = match.group(1)
+        if body[0] == "#":
+            point = int(body[2:], 16) if body[1] in "xX" else int(body[1:])
+            if point == 0 or 0xd800 <= point <= 0xdfff or point > 0x10ffff:
+                return "\ufffd"
+            return chr(point)
+        named = html.entities.html5.get(body + ";")
+        return match.group(0) if named is None else named
+    return CHAR_REFERENCE.sub(resolved, text)
+
+
 def stray_summary(outside):
     """The severity and MUST tokens found outside the findings, as one field, or None.
 
@@ -514,9 +584,25 @@ def outside_block(text, block):
 
 
 def names_json(info):
-    """Whether an info string names the verdict's language: CommonMark's first word, folded."""
-    words = info.split()
-    return bool(words) and words[0].lower() == "json"
+    """Whether an info string names the verdict's language: CommonMark's first word, folded.
+
+    BOTH SPELLINGS, what the comment writes and what a renderer of it reads, for the reason
+    `stray_summary` reads both: this decides what is MATERIAL, so a name found in one spelling and
+    not the other is a block this program cannot be sure it is reading past, and a name found in
+    neither is the defect. Reading only the written one is how ```` ```jso&#110; ```` -- a
+    `language-json` block to CommonMark, to GitHub and to the reader, carrying the blocking verdict
+    inside a swallowing block -- was nothing at all to the rule that exists to find exactly that.
+
+    Every extra name this finds is a refusal, never a reading: one more candidate makes the count
+    two, and a block whose content names `json` is material. The only block it can newly read a
+    verdict FROM is one that is the comment's single candidate, whose content `json.loads` must
+    then take whole.
+    """
+    for reading in (info, resolved_references(info)):
+        words = reading.split()
+        if words and words[0].lower() == "json":
+            return True
+    return False
 
 
 def spans_outside(text, blocks):
@@ -534,6 +620,33 @@ def spans_outside(text, blocks):
         pos = max(pos, one.after)
     spans.append((pos, len(text)))
     return spans
+
+
+def bare_object_openers(text, start=0, end=None):
+    """Every offset in TEXT[START:END] where the older bare form's verdict object opens.
+
+    THE NAME IS COMPARED AS ITS READER DECODES IT. `{"role_understandin\\u0067"` is an object whose
+    first key is `role_understanding` to `json.loads` and to everyone looking at the comment, and
+    it was not this opener to a pattern that matched the characters instead -- which left the
+    candidate count at zero, and zero was the road to the prose parser and the `VERDICT: PASS` line
+    written underneath. The brace and the quotes are structure and are read as characters; the name
+    between them is a JSON string and is decoded before it is compared.
+
+    The offset returned is the BRACE's, in TEXT as it was given, because the object runs from there
+    to the comment's last `}` and that span is what `json.loads` is handed.
+    """
+    if end is None:
+        end = len(text)
+    openers = []
+    for opener in OBJECT_OPEN.finditer(text, start, end):
+        body = JSON_STRING_BODY.match(text, opener.end(), end)
+        # An unterminated string is not a key: the body ran to the end of the span this was asked
+        # about without a closing quote, so there is no name here to compare.
+        if body is None or body.end() >= end or text[body.end()] != '"':
+            continue
+        if decoded_spelling(body.group(0)) == BARE_OBJECT_KEY:
+            openers.append(opener.start())
+    return openers
 
 
 def unresolved_material(text, blocks):
@@ -595,7 +708,7 @@ def unresolved_material(text, blocks):
             if names_json(run.group(2)):
                 stale.append("%s%s inside the block at line %d"
                              % (run.group(1)[:8], run.group(2).split()[0][:8], at))
-        if BARE_OBJECT_OPEN.search(one.content) is not None:
+        if bare_object_openers(one.content):
             stale.append("a verdict object inside the block at line %d" % at)
         if one.fence != "`" and names_json(one.info):
             stale.append("%s%s at line %d" % (one.fence * 3, one.info[:16], at))
@@ -616,8 +729,7 @@ def verdict_candidates(text, blocks):
     found = [one for one in blocks if one.fence == "`" and names_json(one.info)]
     close = text.rfind("}")
     for start, end in spans_outside(text, blocks):
-        for opener in BARE_OBJECT_OPEN.finditer(text, start, end):
-            at = opener.start()
+        for at in bare_object_openers(text, start, end):
             found.append(Block("`", "json", text[at:close + 1], at, at, close + 1, close + 1,
                                close >= at))
     found.sort(key=lambda one: one.outer)
