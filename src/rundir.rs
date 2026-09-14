@@ -843,15 +843,18 @@ fn publish(
 
 /// [`publish`] for the report, whose staged file lives in a directory of the
 /// write's own: the rename up onto the published name, then the staging
-/// directory — empty now — removed, then the record that named it, then the
-/// one directory barrier that makes both public entries durable. The
-/// removals go before the barrier so that a barrier refused after the rename
-/// (the fresh-branch tests' shape: the report visible under its name and not
-/// yet durable) leaves nothing of the protocol staged — an empty directory
-/// and its record the next writer would reclaim, but ones the tests would
-/// otherwise read as a leftover of a write that never finished. The record's
-/// removal is not synced on its own: a record the disk restores names a
-/// directory that is gone, which the next write removes on its own.
+/// directory — empty now — removed, then the one directory barrier that makes
+/// both public changes durable, and only then the record that named the
+/// directory. The record outlives the deletion it names: a barrier refused
+/// after the rename (the fresh-branch tests' shape: the report visible under
+/// its name and not yet durable) leaves the record naming a directory that is
+/// gone, which a loss may restore and which the next write reclaims by that
+/// record ([`reclaim_report_staging`]); until the fix of
+/// `PR10-RECLAIM-RECORD-DROPPED-BEFORE-DURABLE-DELETION` the record went before
+/// the barrier, and a loss after a refused barrier restored a staging
+/// directory no record named. The record's removal is not synced on its own: a
+/// record the disk restores names a directory whose deletion is durable, which
+/// the next write removes on its own.
 fn publish_report(
     staged: &Path,
     published: &Path,
@@ -872,14 +875,13 @@ fn publish_report(
         path: staging.to_path_buf(),
         source,
     })?;
+    if let Some(dir) = published.parent() {
+        sync_dir(dir, ledger)?;
+    }
     fs::remove_file(record).map_err(|source| UpstrokeError::Io {
         path: record.to_path_buf(),
         source,
-    })?;
-    match published.parent() {
-        Some(dir) => sync_dir(dir, ledger),
-        None => Ok(()),
-    }
+    })
 }
 
 /// fsync a directory, on every platform (`PR5-CONF-013`).
@@ -1203,9 +1205,10 @@ pub fn write_plan(
 /// its stage and its rename leaves is the record and the directory it names,
 /// with the staged file inside, and the next write — here, and on the fresh
 /// branch of a terminal finalization ([`sync_report_dir`]) — removes the
-/// directory the record names as the run's own tree, by the record, and then
-/// the record ([`reclaim_report_staging`]); a record naming a directory that
-/// is gone is itself removed. `remove_dir_all` on that directory is a
+/// directory the record names as the run's own tree, by the record, and, once
+/// the public directory's barrier has made that removal durable, the record
+/// ([`reclaim_report_staging`]); a record naming a directory that is gone is
+/// itself removed, after the same barrier. `remove_dir_all` on that directory is a
 /// deletion the record authorises, the way the private half's token
 /// authorises the private half's: the record is the run's own writing in the
 /// run's own tree, made before the name existed. A directory of the staging
@@ -1260,7 +1263,7 @@ pub fn write_report<T: Serialize>(
             });
         }
     };
-    let passed_over = reclaim_report_staging(public, private)?;
+    let passed_over = reclaim_report_staging(public, private, &ledger)?;
     let staging = begin_report_staging(public, private, &ledger)?;
     let staged = staging.join(REPORT);
     stage_json(&staged, report, &ledger, preserved)?;
@@ -1304,9 +1307,9 @@ pub fn write_report<T: Serialize>(
 ///
 /// What a dead report writer left is reclaimed here as in [`write_report`]
 /// ([`reclaim_report_staging`]): the directory the record in `private` names,
-/// and then the record — before the barrier, so the barrier makes the
-/// removal durable with the name it proves. A staging-shaped directory no
-/// record names is left as found and returned, as there.
+/// the public directory's barrier that makes its removal durable, and only
+/// then the record — all before this branch's own barrier. A staging-shaped
+/// directory no record names is left as found and returned, as there.
 ///
 /// # Errors
 ///
@@ -1335,7 +1338,7 @@ pub fn sync_report_dir(
         report_site,
         HookPhase::Before,
     )?;
-    let passed_over = reclaim_report_staging(public, private)?;
+    let passed_over = reclaim_report_staging(public, private, &ledger)?;
     sync_dir(public, &ledger)?;
     apply(
         hooks.hook(report_site, HookPhase::After),
@@ -1507,17 +1510,29 @@ pub fn unrecorded_report_staging(
 /// Remove what a dead report writer left, by its record and by nothing else:
 /// the directory the record in `private` names, when a directory stands
 /// there, as the run's own tree — the record is the run's own writing, made
-/// before the name existed — and then the record; a record whose directory is
-/// gone is removed on its own; something that is not a directory standing at
-/// the recorded name is not what this writer made and is left as found, the
-/// record removed. Then the staging-shaped entries no record names are
-/// listed, for the caller to name: passed over, never removed, never adopted.
+/// before the name existed — then the public directory's barrier, which makes
+/// that deletion durable, and only then the record; a record whose directory is
+/// gone is removed on its own, after the same barrier, since an absent name is
+/// not proof its deletion reached one; something that is not a directory
+/// standing at the recorded name is not what this writer made and is left as
+/// found, the record removed. Then the staging-shaped entries no record names
+/// are listed, for the caller to name: passed over, never removed, never
+/// adopted. The barrier goes between the two removals because the two halves
+/// need not share a filesystem: a record removed ahead of it is lost to a
+/// power loss that restores the directory it named — and the write that
+/// follows publishes its own record over the name — leaving a directory of the
+/// run's own making that no record names and every later write passes over
+/// (`PR10-RECLAIM-RECORD-DROPPED-BEFORE-DURABLE-DELETION`).
 ///
 /// # Errors
 ///
-/// An I/O error reading the record, removing the tree or the record, or
-/// listing `public`.
-fn reclaim_report_staging(public: &Path, private: &Path) -> Result<Vec<PathBuf>, UpstrokeError> {
+/// An I/O error reading the record, removing the tree or the record, taking
+/// the public directory's barrier, or listing `public`.
+fn reclaim_report_staging(
+    public: &Path,
+    private: &Path,
+    ledger: &DurabilityLedger,
+) -> Result<Vec<PathBuf>, UpstrokeError> {
     if let Some(recorded) = recorded_report_staging(public, private)? {
         match fs::symlink_metadata(&recorded) {
             Ok(metadata) if metadata.file_type().is_dir() => {
@@ -1535,6 +1550,7 @@ fn reclaim_report_staging(public: &Path, private: &Path) -> Result<Vec<PathBuf>,
                 });
             }
         }
+        sync_dir(public, ledger)?;
         remove_file_if_present(&report_staging_record(private))?;
     }
     unrecorded_report_staging(public, private)

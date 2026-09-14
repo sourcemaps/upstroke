@@ -5577,6 +5577,169 @@ fn a_dead_writers_staged_report_is_reclaimed_by_the_next_write() {
     );
 }
 
+/// `PR10-RECLAIM-RECORD-DROPPED-BEFORE-DURABLE-DELETION`, the round-11 crash
+/// lens's recipe, committed from the witness Gate 5 ran at `caf6bed0`, where it
+/// failed: a dead writer left directory A and the record naming it; the next
+/// write reclaims A, publishes the record of its own directory B in the private
+/// half, makes B and dies at the staged file's barrier, before the publication's
+/// barrier on the public directory; then a power loss undoes every change to the
+/// public directory that no barrier made durable, while B's record, synced in
+/// the private half, survives; then the retry. Until the fix the reclaim removed
+/// A's record before any barrier on the public directory, so the loss restored A
+/// with the record naming it already replaced, and the retry passed A over as
+/// unrecorded for good. Whether the loss restores A is read off the faulted
+/// write's own ledger — whether it records a `SyncedDirectory` of the public
+/// directory, every one of which follows the reclaim's removal of A — rather
+/// than assumed: the gate's copy restored A unconditionally, which after the fix
+/// models a loss undoing a synced deletion, and fails there as it failed before.
+#[test]
+fn a_reclaimed_report_stage_remains_reclaimable_after_power_loss() {
+    let root = scratch("report-power-loss-reclaim");
+    let public = root.join("public");
+    create_dir(&public).expect("public");
+    let private = root.join("private");
+    create_dir(&private).expect("private");
+    let payload = serde_json::json!({"outcome": "parked"});
+
+    let leftover_a = plant_report_staging_of_a_dead_writer(&public, &private);
+    let staging_a = leftover_a
+        .parent()
+        .expect("the staged file is inside the staging directory")
+        .to_path_buf();
+    let record = report_staging_record(&private);
+    let a_bytes = fs::read(&leftover_a).expect("A's staged file");
+    assert_eq!(
+        recorded_report_staging(&public, &private).expect("read"),
+        Some(staging_a.clone()),
+        "premise: the record names A"
+    );
+
+    let mut hooks = HarnessHooks::default().recording_durability();
+    let ledger = hooks.ledger();
+    let fault = util::fail_file_barriers_within(&public);
+    write_report(&public, &private, &payload, &mut hooks)
+        .expect_err("the staged report's file barrier is refused");
+    drop(fault);
+    let staging_b = recorded_report_staging(&public, &private)
+        .expect("read")
+        .expect("record(B) was published before the fault");
+    assert_ne!(staging_b, staging_a, "B is a fresh name");
+    assert!(
+        !staging_a.exists(),
+        "A was removed before record(B) was published"
+    );
+
+    let a_deletion_durable = ledger
+        .records()
+        .iter()
+        .any(|entry| entry.step == DurableStep::SyncedDirectory && entry.path == public);
+    if !a_deletion_durable {
+        fs::create_dir(&staging_a).expect("A restored");
+        fs::write(&leftover_a, &a_bytes).expect("A's file restored");
+    }
+    if staging_b.exists() {
+        fs::remove_dir_all(&staging_b).expect("B discarded");
+    }
+    assert!(record.is_file(), "record(B) survives in the private half");
+
+    let passed_over =
+        write_report(&public, &private, &payload, &mut NoHooks).expect("the retry publishes");
+    assert!(
+        !staging_a.exists(),
+        "the old directory A, restored by the loss, is reclaimed by the retry"
+    );
+    assert!(
+        passed_over.is_empty(),
+        "nothing of the run's own making is passed over"
+    );
+}
+
+/// The record outlives the public deletion it names when the public
+/// directory's barrier is refused (`util::fail_barriers_at`), on both of the
+/// writer's removals: a reclaim that removed a dead writer's directory A stops
+/// at its barrier with the record still naming A, and a publication that
+/// renamed its report up and removed its emptied directory B stops at its
+/// barrier with the record still naming B. Either deletion a loss undoes is
+/// therefore still recorded, and with the barrier holding the next write
+/// reclaims by that record and passes nothing over. Until the fix the reclaim
+/// removed the record before any barrier and the publication before its own,
+/// so a refused barrier left no record at all
+/// (`PR10-RECLAIM-RECORD-DROPPED-BEFORE-DURABLE-DELETION`); the order
+/// removal, barrier, record is what this holds — the record removed ahead of
+/// the barrier, the barrier's error discarded, or the barrier taken ahead of
+/// the removal each fails here.
+#[test]
+fn a_refused_public_barrier_leaves_the_record_of_the_staging_directory_it_removed() {
+    let root = scratch("report-refused-public-barrier");
+    let public = root.join("public");
+    create_dir(&public).expect("public");
+    let private = root.join("private");
+    create_dir(&private).expect("private");
+    let payload = serde_json::json!({"outcome": "parked"});
+    let record = report_staging_record(&private);
+
+    let leftover_a = plant_report_staging_of_a_dead_writer(&public, &private);
+    let staging_a = leftover_a
+        .parent()
+        .expect("the staged file is inside the staging directory")
+        .to_path_buf();
+    let a_bytes = fs::read(&leftover_a).expect("A's staged file");
+    {
+        let _fault = util::fail_barriers_at(&public);
+        let error = write_report(&public, &private, &payload, &mut NoHooks)
+            .expect_err("the reclaim's barrier is refused");
+        assert!(
+            error.to_string().contains("injected barrier fault"),
+            "the failure is the barrier's, by name: {error}"
+        );
+    }
+    assert_eq!(
+        (
+            staging_a.exists(),
+            recorded_report_staging(&public, &private).expect("read"),
+            public.join(REPORT).exists()
+        ),
+        (false, Some(staging_a.clone()), false),
+        "the reclaim removed A and stopped at the barrier with the record still naming A, before \
+         any directory of its own or any report"
+    );
+    fs::create_dir(&staging_a).expect("a loss undoes A's unsynced deletion");
+    fs::write(&leftover_a, &a_bytes).expect("and restores its file");
+    let passed_over = write_report(&public, &private, &payload, &mut NoHooks)
+        .expect("with the barrier holding, published");
+    assert!(
+        passed_over.is_empty() && !staging_a.exists() && !record.exists(),
+        "A is reclaimed by the record that outlived its deletion, and nothing is passed over"
+    );
+
+    {
+        let _fault = util::fail_barriers_at(&public);
+        let error = write_report(&public, &private, &payload, &mut NoHooks)
+            .expect_err("the publication's barrier is refused");
+        assert!(
+            error.to_string().contains("injected barrier fault"),
+            "the failure is the barrier's, by name: {error}"
+        );
+    }
+    let staging_b = recorded_report_staging(&public, &private)
+        .expect("read")
+        .expect("the record still names the publication's own staging directory");
+    assert!(
+        !staging_b.exists() && public.join(REPORT).is_file(),
+        "which the publication emptied by the rename and removed before its refused barrier"
+    );
+    let passed_over = write_report(&public, &private, &payload, &mut NoHooks)
+        .expect("with the barrier holding, published");
+    assert!(
+        passed_over.is_empty()
+            && !record.exists()
+            && report_staging_leftovers(&public, &private)
+                .expect("listed")
+                .is_empty(),
+        "the record of the removed directory is reclaimed, and nothing is passed over"
+    );
+}
+
 /// Rule 1 for the record: the staging directory's name is recorded durably
 /// in the private half **before** the directory is made, and the ledger's
 /// entry for the creation carries the record observed standing in the

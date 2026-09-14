@@ -4589,7 +4589,16 @@ directories synced before the first ref deletion, the pins are pruned,
 the candidates ref is pruned at Complete and retained at Halted, and
 finalization converges. A fresh branch without the barrier prunes at the
 second resume instead; one that takes it at Complete only prunes the
-Halted run's pins behind an unproven name.
+Halted run's pins behind an unproven name. The dead writer's staged report
+the planting leaves is reclaimed before the fault is armed
+(`rundir::sync_report_dir`): since the fix of
+`PR10-RECLAIM-RECORD-DROPPED-BEFORE-DURABLE-DELETION` the reclaim takes the
+public directory's barrier between removing the directory and removing its
+record, so with the leftover in place the first finalization would be
+refused there, before any report was renamed. After the first finalization
+the one thing of the report's protocol left is the record of the staging
+directory the publication removed, which outlives the refused barrier as
+the fix requires, and the converging finalization reclaims it.
 
 ## `fn a_report_rename_without_directory_sync_is_proven_before_…`
 
@@ -4608,7 +4617,11 @@ deletion carries the public directory itself among the directories the
 run-directory ledger recorded synced — that path, not the aggregate
 directory count, which the worktree and intent removals raise on other
 directories — and under the public directory the restart synced and
-staged or renamed nothing.
+staged or renamed nothing. The dead writer's staged report the planting
+leaves is reclaimed before the fault is armed, as in
+`a_report_directory_barrier_that_fails_refuses_pruning_on_every_resume_until_it_holds`
+and for its reason: the reclaim's own barrier would otherwise refuse the
+faulted finalization before the rename this test is about.
 
 ## `fn finalization_kill_child() {`
 

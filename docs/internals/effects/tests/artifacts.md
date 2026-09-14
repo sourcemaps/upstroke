@@ -140,8 +140,8 @@ inside `RunDir.WriteReport` around the report's staged publication
 name unique to the write and first recorded durably in the run's private half,
 `.report-staging-<ulid>/`, since PR10's round 10 — the fixed `.report-staging/` in round 9, a
 name unique to the write beside the report, `report.json.<ulid>.tmp`, in round 8 — synced, then
-`publish_report`: the rename onto `report.json`, the emptied staging directory and its record
-removed, and the directory's barrier; one `util::write_json` until
+`publish_report`: the rename onto `report.json`, the emptied staging directory removed, the
+directory's barrier, and then its record removed; one `util::write_json` until
 PR10's round 3) — `PR3-REPORT-DOUBLE-NAME`'s "two hook executions for one
 write", made and
 recorded in `effects/funnel-modules.json` the way the answer funnels'
