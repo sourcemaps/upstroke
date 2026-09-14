@@ -212,6 +212,39 @@ SIMPLE_ESCAPE = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f",
 # `markdown-it-py` 3.0.0: `foo\+bar` is `foo+bar` and `\json` is `\json`.
 CHAR_REFERENCE = re.compile(r"&(#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{0,30});")
 
+# AND THE WORD ENDS WHERE A RENDERER ENDS IT, WHICH IS NOT WHERE ONE `str.split()` DOES. Resolving
+# the reference is half the question; the other half is which character then ends the first word,
+# and the answer is not the same for a character the comment WRITES and one a reference RESOLVES TO.
+# Measured against `markdown-it-py` 3.0.0 over every code point `str.isspace` calls whitespace, a
+# fence tagged ```` ```json<c>x ```` renders `language-json` for every one of them -- that is
+# Python's own set, because that renderer splits the info string with `str.split` -- while
+# ```` ```json&#N;x ```` renders `language-json` for that set LESS U+001C-U+001F, U+0085 and U+000B:
+# it declines to resolve a reference to a C0 or C1 control and leaves the reference written, so no
+# word break ever appears there. U+000B is the one place it goes the other way, and CommonMark's
+# whitespace-character definition names it, so it is a break here.
+#
+# Running ONE set over both readings was the defect, in the direction this rule must never be wrong
+# in. `json&#133;x` resolved to U+0085 and Python's set ended the word: an ordinary example block
+# read as a `json` fence, stood beside the review's one real verdict as a second candidate, and a
+# valid `PASS` was refused with "2 places a verdict could be read from" -- a refusal no rewriting of
+# the comment clears, because the comment says nothing wrong. Measured: `markdown-it-py` 3.0.0
+# renders that fence `language-json&#133;x` and never `language-json`, and U+0085 is neither a
+# whitespace character (https://spec.commonmark.org/0.31.2/#whitespace-character) nor a Unicode
+# whitespace character (https://spec.commonmark.org/0.31.2/#unicode-whitespace-character).
+#
+# So there are two boundaries, one per reading, and each is the union of what the renderers do to
+# ITS reading -- every break either of them makes, which is the refusing direction, and no break
+# neither of them makes, which is what the P2 cost. The resolved one is CommonMark's whitespace
+# -- space, tab, line feed, LINE TABULATION, form feed, carriage return -- widened by the Unicode
+# space and line separators; the written one adds the five Python calls whitespace and CommonMark
+# does not. GitHub renders by cmark-gfm, which is not measured here; where these classes are wider
+# than what was measured they are wider by REFUSING.
+RESOLVED_SPACE = "\t\n\x0b\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000"
+WRITTEN_SPACE = RESOLVED_SPACE + "\x1c-\x1f\x85"
+FIRST_WORD = "[%s]*([^%s]*)"
+RESOLVED_FIRST_WORD = re.compile(FIRST_WORD % (RESOLVED_SPACE, RESOLVED_SPACE))
+WRITTEN_FIRST_WORD = re.compile(FIRST_WORD % (WRITTEN_SPACE, WRITTEN_SPACE))
+
 # A finding carrying any of these blocks in every lane (MAINTAINING step 5): the deferring
 # implementor's ledger row asserts there is no witness, and a witness the review recorded
 # contradicts it.
@@ -437,6 +470,18 @@ def resolved_references(text):
     return CHAR_REFERENCE.sub(resolved, text)
 
 
+def first_word(info, boundary):
+    """The first word of an info string, by the BOUNDARY its own reading is split at, or "".
+
+    THE ONE PLACE THAT QUESTION IS ANSWERED, so the rule and the diagnostic that quotes it cannot
+    drift apart, and so that `names_json` does not reach into a list that may be empty. Leading
+    separators are skipped, as `str.split()` skips them and as a renderer skips the whitespace
+    CommonMark trims off an info string; an info string that is all separators has no first word
+    and is not a name.
+    """
+    return boundary.match(info).group(1)
+
+
 def stray_summary(outside):
     """The severity and MUST tokens found outside the findings, as one field, or None.
 
@@ -597,10 +642,24 @@ def names_json(info):
     two, and a block whose content names `json` is material. The only block it can newly read a
     verdict FROM is one that is the comment's single candidate, whose content `json.loads` must
     then take whole.
+
+    BUT ONLY A NAME SOME READER OF THE COMMENT ACTUALLY SEES. A refusal costs a reviewer the
+    review, and one raised over a tag no renderer reads as `json` is a refusal nobody can clear:
+    `json&#133;x` resolved to U+0085 and was then split by `str.split()`'s set, which ends a word
+    there where no renderer does, so a valid `PASS` beside an ordinary example block became "2
+    places a verdict could be read from".
+
+    EACH READING IS SPLIT BY ITS OWN BOUNDARY, and neither is redundant. The written one ends a
+    word at a literal U+0085, because `markdown-it-py` 3.0.0 does and a reader of that comment sees
+    a `language-json` block; the resolved one does not, because that renderer never resolves
+    `&#133;` to anything at all and CommonMark calls U+0085 neither kind of whitespace, so no
+    reader of THAT comment sees one. Same code point, two answers, because the two readings are two
+    different documents. And the resolved reading is the one that catches what a reference spells
+    -- `jso&#110;`, the witness this guard exists for.
     """
-    for reading in (info, resolved_references(info)):
-        words = reading.split()
-        if words and words[0].lower() == "json":
+    for reading, boundary in ((info, WRITTEN_FIRST_WORD),
+                              (resolved_references(info), RESOLVED_FIRST_WORD)):
+        if first_word(reading, boundary).lower() == "json":
             return True
     return False
 
@@ -706,8 +765,9 @@ def unresolved_material(text, blocks):
         at = text.count("\n", 0, one.outer) + 1
         for run in CONTENT_FENCE_RUN.finditer(one.content):
             if names_json(run.group(2)):
+                named = first_word(run.group(2), WRITTEN_FIRST_WORD)
                 stale.append("%s%s inside the block at line %d"
-                             % (run.group(1)[:8], run.group(2).split()[0][:8], at))
+                             % (run.group(1)[:8], named[:8], at))
         if bare_object_openers(one.content):
             stale.append("a verdict object inside the block at line %d" % at)
         if one.fence != "`" and names_json(one.info):
