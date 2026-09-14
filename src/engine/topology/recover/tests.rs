@@ -15634,7 +15634,11 @@ fn kill_after_report_before_each_cleanup_step() {
             );
             let report_bytes = std::fs::read(fixture.public().join("report.json"))
                 .expect("the report the second resume left current");
-            plant_report_leftover(fixture);
+            let leftover = plant_report_leftover(fixture);
+            let staging = leftover
+                .parent()
+                .expect("the staged file is inside the staging directory")
+                .to_path_buf();
             let third = harness();
             let (result, _) = resume(fixture, &third, &given);
             let text = message(&result.expect_err("a finalized run refuses again"));
@@ -15657,6 +15661,19 @@ fn kill_after_report_before_each_cleanup_step() {
                 std::fs::read(fixture.public().join("report.json")).expect("the report stands"),
                 report_bytes,
                 "{tag}: and writes nothing: the report is byte-identical"
+            );
+            assert!(
+                !leftover.exists(),
+                "{tag}: the staged file a dead writer left before this resume is gone after the \
+                 fresh branch"
+            );
+            assert!(
+                !staging.exists(),
+                "{tag}: the directory its record names is gone after the fresh branch"
+            );
+            assert!(
+                !rundir::report_staging_record(&fixture.private()).exists(),
+                "{tag}: the record naming that directory is gone after the fresh branch"
             );
             assert!(
                 !planted.report_leftover.exists()

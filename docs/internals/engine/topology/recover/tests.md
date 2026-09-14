@@ -901,7 +901,8 @@ lenses, P2; until round 10 the fixture made a directory by hand at a fixed
 name and the writer removed whatever directory stood there). Planted by
 every finished-run fixture and again by the matrix before its third resume,
 and read reclaimed — the record, the directory and the file — by
-`assert_finalized`.
+`assert_finalized`, and the re-planted one by the matrix after its third
+resume.
 
 ## `fn resume_finalizes_halted_then_refuses() {`
 
@@ -4363,7 +4364,16 @@ fresh branch's reclaim is held as well
 (round 8; the recipes `report-leftover-not-reclaimed-on-write` and
 `-on-fresh`, the second of which survived the matrix until the
 re-planting: every finalization the cells drove had met the write branch
-first, which had already reclaimed what the planting left). The round-8
+first, which had already reclaimed what the planting left). Until the fix
+of `PR10-ST18-THIRD-RESUME-LEFTOVER-ASSERTION` the third resume was held
+only to the first leftover, already gone after the second resume, and to
+`rundir::report_staging_leftovers`, which lists the directory through the
+record, so a fresh branch that removed the record alone and left the
+directory and its half-written file passed (the round-11 crash lens's
+recipe, `r11-third-resume-leftover-record-only`, executed by Gate 5 at
+`caf6bed0`); the matrix now keeps the path the re-planting returns and
+reads the staged file, the directory its record names and the record each
+gone after the third resume, and that recipe fails it. The round-8
 crash lens's recipe — a file re-created inside beta's worktree after the
 `Worktree.RemoveIntent`/after cell, the shape a power loss between the
 checkout's deletion and its intent's leaves when the deletion rolls back
