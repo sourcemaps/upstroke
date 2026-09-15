@@ -895,3 +895,12 @@ where the execution is:
   test as it stood at `e03f7eae` (`round1/b4-before/M11-before.log`, exit `0`) and fails the
   empty-string assertion at `92b45c9d` (`round1/mutations/M11-constructor-accepts-empty.{diff,log}`,
   exit `101`, `the constructor refuses what the writer refuses: ""`).
+- **B5 (record 2): the body's "46 of 1,069" was a count by test name, stated as a count by
+  assertion.** The 2026-09-14 scan (`~/pr10-evidence/r10/reaper-lease-flake-scan.log`) selected
+  logs by the line `… a_host_integration_reaper_holds_the_runs_cleanup_lease ... FAILED`, not by
+  the assertion text; of its 46, 45 carry `the hold outlived the reaper that took it` and one,
+  `~/pr10-evidence/1c5bb58c0dd7c860600ad8f27f53de7f64b2a9b7/full-suite-export.log`, fails earlier
+  with `the resume settles the planted state: Io … No such file or directory`. Re-scanned on
+  2026-09-15 by both selections, the command and every matching path in
+  `round1/b5-flake-rescan.txt`: 1,119 logs, 57 with the test reported `FAILED`, 56 with the
+  assertion text, the one difference that same export log. The body's sentence says this.
