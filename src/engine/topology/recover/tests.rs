@@ -14255,14 +14255,34 @@ fn a_kill_after_a_parked_questions_payload_is_written_is_adopted_and_the_answer_
         "{tag}: the resume adopts the payload: it is neither rewritten nor removed"
     );
 
-    let answered = crate::answer::answer(
-        &fixture.repo_root,
-        PARKED_QUESTION,
-        crate::answer::Reply::Option(1),
+    let found = crate::rundir::find_question(&fixture.repo_root, PARKED_QUESTION)
+        .expect("the operator's command finds the question by its adopted payload");
+    assert_eq!(found.question_id, PARKED_QUESTION, "{tag}");
+    let adopted: crate::interaction::QuestionRecord = serde_json::from_slice(
+        &std::fs::read(
+            found
+                .public
+                .join("questions")
+                .join(format!("{}.json", found.question_id)),
+        )
+        .expect("the found payload reads"),
     )
-    .expect("the operator's command answers from the adopted payload");
-    assert_eq!(answered.question_id, PARKED_QUESTION, "{tag}");
-    assert!(!answered.run_is_live, "{tag}: nothing holds the run's lock");
+    .expect("and parses as the command parses it");
+    assert!(
+        adopted.is_open(),
+        "{tag}: the adopted payload is unanswered"
+    );
+    let answer = crate::interaction::answer_for_option(&adopted.question, 1)
+        .expect("the adopted question offers option 1");
+    let component = crate::util::filename_component(&found.question_id);
+    let answers = found.public.join("answers");
+    crate::rundir::stage_answer(&answers, &component, &answer, &mut NoHooks)
+        .expect("the answer is staged");
+    crate::rundir::publish_answer(&answers, &component, &mut NoHooks).expect("and published");
+    assert!(
+        !rundir::is_running(&found.public),
+        "{tag}: nothing holds the run's lock"
+    );
 
     let seams = DriveSeams {
         answers_from_run_dir: true,

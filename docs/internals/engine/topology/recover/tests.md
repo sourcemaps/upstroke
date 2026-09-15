@@ -4155,8 +4155,12 @@ question's payload and dies after the write: the log is byte for byte the park, 
 present (R21) and holds the frozen question, open. The authority's rows are R21 and its action is
 adoption. The next incarnation resumes. Its replay rematerializes the same question under the same
 id (`T-FAILED`'s "never re-decide"), alpha awaits input, and the payload is neither rewritten nor
-removed. The operator's command then answers through the production path, `answer::answer`: it finds
-the question by the adopted file, parses it, and publishes an answer while nothing holds the run.
+removed. The operator's answer is then made the way `upstroke answer` makes it, step by step through
+the production pieces the command composes, because `answer::answer` itself is a wrapper this
+module may not call. `rundir::find_question` finds the question by the adopted file, the file parses
+as the command parses it and is unanswered, `interaction::answer_for_option` chooses the first
+option, and the answer is staged and published through the answer funnels while nothing holds the
+run.
 The incarnation after that ingests the answer on its first step, once, `via` `event-log`. The
 payload is still as it was written, and the log replays twice to equal states.
 
