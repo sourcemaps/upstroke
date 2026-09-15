@@ -14614,6 +14614,383 @@ fn a_fault_after_the_worktree_lease_is_taken_ends_the_resume_with_it_released_an
     );
 }
 
+const PROCESS_SPAWN_KILL_CHILD: &str = "engine::topology::recover::tests::process_spawn_kill_child";
+
+struct SpawnPhaseFault {
+    inner: crate::runner::HarnessHooks,
+    at: HookPhase,
+    injection: Injection,
+}
+
+impl crate::agent::proc::SpawnHooks for SpawnPhaseFault {
+    fn point(&mut self, point: SubEffectPoint) -> Injection {
+        self.inner.point(point)
+    }
+
+    fn point_mode(&mut self, point: SubEffectPoint, mode: InjectionMode) -> Injection {
+        self.inner.point_mode(point, mode)
+    }
+
+    fn phase(
+        &mut self,
+        site: crate::topology::effects::ProcessSite,
+        phase: HookPhase,
+    ) -> Injection {
+        let answered = self.inner.phase(site, phase);
+        if site == crate::topology::effects::ProcessSite::Spawn && phase == self.at {
+            crate::observations::Exported::new(Arc::clone(self.inner.harness()))
+                .carried(self.injection)
+        } else {
+            answered
+        }
+    }
+}
+
+struct SpawningRunner {
+    host: crate::runner::host::HostRunner,
+    editing: RecordingRunner,
+    program: CommandSpec,
+}
+
+impl Runner for SpawningRunner {
+    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+        if request.role == crate::runner::ExecutionRole::Implement {
+            self.host.run(&RunnerRequest {
+                command: self.program.clone(),
+                ..request.clone()
+            })?;
+        }
+        self.editing.run(request)
+    }
+}
+
+fn this_binary_running(test: &str) -> CommandSpec {
+    CommandSpec::new(
+        std::env::current_exe()
+            .expect("the test binary")
+            .to_string_lossy()
+            .into_owned(),
+    )
+    .arg("--exact")
+    .arg(test)
+    .arg("--ignored")
+}
+
+fn spawn_point_named(name: &str) -> SubEffectPoint {
+    crate::runner::SPAWN_SITE
+        .sub_effects()
+        .iter()
+        .copied()
+        .find(|point| point.name() == name)
+        .unwrap_or_else(|| panic!("`{name}` is not a point of `Process.Spawn`"))
+}
+
+#[test]
+#[ignore = "spawned as a subprocess by the process-spawn kill witnesses"]
+fn process_spawn_kill_child() {
+    use crate::engine::topology::select::Ceiling;
+
+    let root = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_ROOT").expect("the parent names the fixture root"),
+    );
+    let coordinate =
+        std::env::var("UPSTROKE_TEST_KILL_COORDINATE").expect("the parent names the coordinate");
+    let fixture = Fixture::adopted_by_a_kill_child(root, plan());
+    let harness = harness();
+    let hooks: Box<dyn crate::agent::proc::SpawnHooks + Send> = if coordinate == "After" {
+        Box::new(SpawnPhaseFault {
+            inner: crate::runner::HarnessHooks::new(Arc::clone(&harness)),
+            at: HookPhase::After,
+            injection: Injection::Kill,
+        })
+    } else {
+        harness
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .arm(
+                crate::runner::SPAWN_SITE,
+                spawn_point_named(&coordinate),
+                InjectionMode::Kill,
+            )
+            .expect("the point supports a kill");
+        Box::new(crate::runner::HarnessHooks::new(Arc::clone(&harness)))
+    };
+    if coordinate == "AmbientJobJoined" {
+        let mut hooks = hooks;
+        let contained = crate::runner::host::contain_write_command(&mut *hooks);
+        panic!("the kill at `{coordinate}` did not take this process: {contained:?}");
+    }
+    let runner = SpawningRunner {
+        host: crate::runner::host::HostRunner::new().with_hooks(hooks),
+        editing: RecordingRunner::editing(),
+        program: this_binary_running("engine::topology::coverage::tests::sleeps_until_terminated"),
+    };
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
+    with_live_run_hooked_runner(
+        &fixture,
+        &harness,
+        Ceiling::unlimited(),
+        &adapters,
+        &runner,
+        |run, seams, hooks| {
+            let stepped = run.step(seams, hooks).map(|_| ());
+            panic!("the kill at `{coordinate}` did not take this process: {stepped:?}");
+        },
+    );
+}
+
+fn a_kill_in_the_workers_spawn_converges_on_the_next_resume(coordinate: &str, tag: &str) {
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child};
+
+    let fixture = Fixture::healthy(tag);
+    let planted = durable_kinds(&fixture).len();
+    let status = run_kill_child(
+        PROCESS_SPAWN_KILL_CHILD,
+        &[
+            ("UPSTROKE_TEST_KILL_ROOT", fixture.root.as_os_str()),
+            (
+                "UPSTROKE_TEST_KILL_COORDINATE",
+                std::ffi::OsStr::new(coordinate),
+            ),
+        ],
+    );
+    assert!(
+        died_by_abort(&status),
+        "{tag}: the child did not die by the kill at `{coordinate}`: {status:?}"
+    );
+    let contained_only = coordinate == "AmbientJobJoined";
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        if contained_only {
+            Vec::new()
+        } else {
+            vec!["run_resumed", "task_dispatched", "attempt_started"]
+        },
+        "{tag}: the durable prefix the kill left"
+    );
+    assert!(
+        wait_for_cleanup_hold_release(&fixture.public()),
+        "{tag}: the run's cleanup hold is still observed: nothing settled what the spawn left"
+    );
+    assert!(
+        !rundir::is_running(&fixture.public()),
+        "{tag}: the run lock went with the dead process"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (recovered, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut hooks,
+    )
+    .expect("the next resume converges");
+    assert_eq!(
+        recovered.interrupted,
+        usize::from(!contained_only),
+        "{tag}: step (d) settles the attempt whose worker's spawn the kill took"
+    );
+    let runner = RecordingRunner::editing();
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Settled {
+                key: ALPHA,
+                accepted: true,
+                ..
+            }))
+        ),
+        "{tag}: the next attempt is spawned and accepted: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+#[test]
+fn a_kill_after_the_workers_process_is_spawned_is_settled_and_the_next_resume_converges() {
+    a_kill_in_the_workers_spawn_converges_on_the_next_resume("After", "spawn-kill-after");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_kill_at_each_unix_point_of_the_workers_spawn_is_settled_by_the_reaper_and_the_next_resume_converges()
+ {
+    for point in [
+        "ReaperStarted",
+        "PreExecPgidAndRegister",
+        "Exec",
+        "Registered",
+    ] {
+        a_kill_in_the_workers_spawn_converges_on_the_next_resume(
+            point,
+            &format!("spawn-kill-{point}"),
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_kill_at_each_windows_point_of_the_workers_spawn_leaves_no_process_and_the_next_resume_converges()
+ {
+    for point in [
+        "AmbientJobJoined",
+        "CreatedSuspended",
+        "PrivateJobAssigned",
+        "Resumed",
+    ] {
+        a_kill_in_the_workers_spawn_converges_on_the_next_resume(
+            point,
+            &format!("spawn-kill-{point}"),
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn an_error_at_the_ambient_job_join_refuses_the_write_command_and_the_next_resume_converges() {
+    let tag = "ambient-job-join-error";
+    let fixture = Fixture::healthy(tag);
+    let planted = durable_kinds(&fixture).len();
+    let site = crate::runner::SPAWN_SITE;
+    let point = SubEffectPoint::AmbientJobJoined;
+    let mode = InjectionMode::ErrorReturn;
+    let faulted = harness();
+    faulted
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .arm(site, point, mode)
+        .expect("the ambient join supports an error return");
+    let mut hooks = crate::runner::HarnessHooks::new(Arc::clone(&faulted));
+    let refused = crate::runner::host::contain_write_command(&mut hooks);
+    drop(hooks);
+    assert!(
+        refused.is_err(),
+        "{tag}: the write command refuses before the ambient join"
+    );
+    assert!(
+        faulted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .observed(site, HookPhase::Point { point, mode }),
+        "{tag}: the armed point fired"
+    );
+    assert!(
+        kinds_after(&fixture, planted).is_empty(),
+        "{tag}: the refused command appended nothing"
+    );
+
+    let (_, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(harness()),
+    )
+    .expect("the next resume converges");
+    drop(handle);
+    assert_eq!(kinds_after(&fixture, planted), vec!["run_resumed"], "{tag}");
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+#[test]
+fn an_error_before_the_workers_process_is_spawned_spawns_nothing_and_the_next_step_spawns_it() {
+    use crate::engine::topology::select::Ceiling;
+
+    let tag = "spawn-error-before";
+    let fixture = Fixture::healthy(tag);
+    let planted = durable_kinds(&fixture).len();
+    let site = crate::runner::SPAWN_SITE;
+    let faulted = harness();
+    let runner = SpawningRunner {
+        host: crate::runner::host::HostRunner::new().with_hooks(Box::new(SpawnPhaseFault {
+            inner: crate::runner::HarnessHooks::new(Arc::clone(&faulted)),
+            at: HookPhase::Before,
+            injection: Injection::Error,
+        })),
+        editing: RecordingRunner::editing(),
+        program: this_binary_running("a_test_this_tree_does_not_contain_and_never_will"),
+    };
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
+    let first = with_live_run_hooked_runner(
+        &fixture,
+        &faulted,
+        Ceiling::unlimited(),
+        &adapters,
+        &runner,
+        |run, seams, hooks| run.step(seams, hooks),
+    );
+    {
+        let seen = faulted.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            seen.observed(site, HookPhase::Before) && !seen.observed(site, HookPhase::After),
+            "{tag}: the error came at the spawn's before phase and nothing was spawned"
+        );
+    }
+    let kinds = kinds_after(&fixture, planted);
+    assert!(
+        kinds.starts_with(&[
+            "run_resumed".to_owned(),
+            "task_dispatched".to_owned(),
+            "attempt_started".to_owned()
+        ]) && !kinds.iter().any(|kind| kind == "candidate_prepared"),
+        "{tag}: the attempt started and produced no candidate: {kinds:?} ({first:?})"
+    );
+    assert!(
+        wait_for_cleanup_hold_release(&fixture.public()),
+        "{tag}: no hold outlives a spawn that never happened"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (_, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut hooks,
+    )
+    .expect("the next resume converges");
+    let runner = RecordingRunner::editing();
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        2,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert!(
+        driven.progress.iter().any(|step| matches!(
+            step,
+            Ok(Progress::Settled {
+                key: ALPHA,
+                accepted: true,
+                ..
+            })
+        )),
+        "{tag}: a later attempt spawns its worker and is accepted: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
 /// Beta's candidate queued at the base, unmerged, so that a second lineage
 /// can be rooted at beta.
 fn plant_queued_beta(fixture: &Fixture) -> crate::topology::events::CandidateRef {

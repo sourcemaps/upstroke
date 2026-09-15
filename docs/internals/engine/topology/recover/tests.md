@@ -4202,6 +4202,62 @@ replacing it (read only after the release, because closing any descriptor of the
 process's `fcntl` lock), appends its `run_resumed` after the planted prefix, and the log replays
 twice to equal states.
 
+## `const PROCESS_SPAWN_KILL_CHILD: &str = "engine::topology::recover::tests::process_spawn_kill_child";`
+
+The kill child of the worker-spawn witnesses below.
+
+## `struct SpawnPhaseFault {`
+
+The process funnel's production adapter with one injection at one phase of `Process.Spawn`. The
+harness records the phase, and the injection is exported before it is handed back, because a
+kill there aborts the process.
+
+## `struct SpawningRunner {`
+
+The runner the spawn witnesses run the driver with. The implementer's invocation runs a real
+process, this test binary, through the host runner and so through `Process.Spawn` under whatever
+adapter the host runner carries. It then edits the worktree as `RecordingRunner::editing` does, so
+an attempt that survives its spawn is accepted. Every other invocation is the recording runner's.
+The driver's own step holds the run's cleanup scope while it runs, so the reaper the funnel starts
+takes the run's cleanup lease, just as it does in production.
+
+## `fn process_spawn_kill_child() {`
+
+Resumes the parent's healthy run as `RESUMER` and takes one driver step. Its worker is
+`sleeps_until_terminated`, a process that outlives the kill unless something settles it. The child
+dies at the coordinate `UPSTROKE_TEST_KILL_COORDINATE` names: `Process.Spawn`'s after phase, or one
+of its points armed in kill mode on the shared harness. `AmbientJobJoined`, which the containment
+step consults rather than the spawn, is driven through `contain_write_command` before anything is
+resumed. Reaching a panic means the kill did not land.
+
+## `fn a_kill_in_the_workers_spawn_converges_on_the_next_resume(coordinate: &str, tag: &str) {`
+
+Gate 5's strict re-audit, rows 141 and 144 to 152: `Process.Spawn`'s after phase and the spawn's
+kill points, each driven to the recovery the authority tables. The kill leaves the worker's
+attempt in flight (`run_resumed`, `task_dispatched`, `attempt_started`); the containment kill
+leaves nothing appended. The run's cleanup hold is then released. On Unix this is the reaper
+settling the worker's process group, which would otherwise hold the lease for the sleeper's two
+minutes. A control run with the reaper's cleanup delayed by thirty seconds fails this assertion
+(`~/pr10-evidence/fix-g5-b/witness/controls/`). On Windows the private job closes with the process
+that held it. The run lock is gone. The next resume converges: step (d) settles the attempt
+interrupted, and the next attempt is spawned and accepted. The log replays twice to equal states.
+The kill child's record holds the coordinates, because the parent never spawns under the armed
+adapter.
+
+## `fn an_error_before_the_workers_process_is_spawned_spawns_nothing_and_the_next_step_spawns_it() {`
+
+Gate 5's strict re-audit, row 140: `Process.Spawn`/before. The driver's step runs the worker with
+an error at the spawn's before phase. The phase is observed and the after phase is not, so nothing
+was spawned. The attempt started and produced no candidate, and no cleanup hold outlives a spawn
+that never happened. The next resume converges, a later attempt spawns its worker and is accepted,
+and the log replays twice to equal states.
+
+## `fn an_error_at_the_ambient_job_join_refuses_the_write_command_and_the_next_resume_converges() {`
+
+Gate 5's strict re-audit, row 145, on Windows: `AmbientJobJoined` in error-return mode. The
+containment step refuses before the join, the armed point fires, and nothing is appended. The next
+resume converges, appends its `run_resumed`, and the log replays twice to equal states.
+
 ## `fn two_lineages_publish_in_lineage_order_and_the_younger_candidate_waits_behind_the_older() {`
 
 Two lineages overlapping on one path, the younger's repair already queued
