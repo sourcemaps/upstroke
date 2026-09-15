@@ -3,7 +3,7 @@ id: O3-DESIGN-DEFECT-UNCLASSIFIED-SINCE-PR9
 severity: P3
 disposition: deferred
 category: docs-contract
-pr:
+pr: 290
 reviewed_sha: 8b28944f9607447448f5d9b9950ee49596073e58
 location: src/topology/events.rs:1261
 provenance: pre_existing
