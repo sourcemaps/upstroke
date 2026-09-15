@@ -17089,28 +17089,21 @@ fn fresh_report_hook_errors_stop_cleanup_and_retry() {
 
 const FINALIZATION_KILL_CHILD: &str = "engine::topology::recover::tests::finalization_kill_child";
 
+const FINALIZATION_RESUME_CHILD: &str =
+    "engine::topology::recover::tests::finalization_resume_child";
+
 const FINALIZATION_CHILD_BOUND: Duration = Duration::from_secs(120);
 
-#[test]
-#[ignore = "spawned as a subprocess by the finalization kill tests"]
-fn finalization_kill_child() {
+fn resume_the_planted_run_in_this_child(
+    hooks: &mut dyn TopologyHooks,
+) -> Result<(Recovered, RunHandle), UpstrokeError> {
     let repo_root = PathBuf::from(
         std::env::var_os("UPSTROKE_TEST_KILL_REPO").expect("the parent names the repository"),
     );
     let git_dir = PathBuf::from(
         std::env::var_os("UPSTROKE_TEST_KILL_GITDIR").expect("the parent names the git dir"),
     );
-    let cell: (EffectSiteId, HookPhase) = serde_json::from_str(
-        &std::env::var("UPSTROKE_TEST_KILL_SITE").expect("the parent names the cell"),
-    )
-    .expect("the cell the parent names parses");
-    let report_path = PathBuf::from(
-        std::env::var_os("UPSTROKE_TEST_KILL_REPORT").expect("the parent names the report"),
-    );
     let repo_key = RepoKey::v1(&std::fs::canonicalize(&git_dir).expect("the git dir exists"));
-    let harness = harness();
-    let mut hooks =
-        ArmedFinalization::answering(&harness, cell, Injection::Kill).reporting_to(&report_path);
     let runtime = runtime_holding_the_record();
     let liveness = FakeOwnerLiveness::new();
     let view = DisposableDirView::new(ContainerTrace::default());
@@ -17132,7 +17125,7 @@ fn finalization_kill_child() {
         RESUMER,
     )
     .expect("the child's repository and private root are real directories");
-    let outcome = run_recovery_order(
+    run_recovery_order(
         root,
         &ResumeSeams {
             repo_root: &repo_root,
@@ -17152,15 +17145,53 @@ fn finalization_kill_child() {
             manager: &manager,
             clock: &Frozen,
         },
-        &mut hooks,
+        hooks,
         &mut warnings,
+    )
+}
+
+#[test]
+#[ignore = "spawned as a subprocess by the finalization kill tests"]
+fn finalization_kill_child() {
+    let cell: (EffectSiteId, HookPhase) = serde_json::from_str(
+        &std::env::var("UPSTROKE_TEST_KILL_SITE").expect("the parent names the cell"),
+    )
+    .expect("the cell the parent names parses");
+    let report_path = PathBuf::from(
+        std::env::var_os("UPSTROKE_TEST_KILL_REPORT").expect("the parent names the report"),
     );
+    let harness = harness();
+    let mut hooks =
+        ArmedFinalization::answering(&harness, cell, Injection::Kill).reporting_to(&report_path);
+    let outcome = resume_the_planted_run_in_this_child(&mut hooks);
     let returned = format!(
         "the kill inside finalization did not take this process: {:?}",
         outcome.map(|(recovered, _)| recovered)
     );
     report(&report_path, &returned);
     panic!("{returned}");
+}
+
+#[test]
+#[ignore = "spawned as a subprocess by the finalization kill tests"]
+fn finalization_resume_child() {
+    let report_path = PathBuf::from(
+        std::env::var_os("UPSTROKE_TEST_KILL_REPORT").expect("the parent names the report"),
+    );
+    let harness = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness)).recording_durability();
+    let outcome = resume_the_planted_run_in_this_child(&mut hooks);
+    let released = {
+        let seen = harness.lock().unwrap_or_else(PoisonError::into_inner);
+        seen.observed(EffectSiteId::Lock(LockSite::Release), HookPhase::Before)
+            && seen.observed(EffectSiteId::Lock(LockSite::Release), HookPhase::After)
+    };
+    let resumed = serde_json::json!({
+        "refusal": outcome.as_ref().err().map(message),
+        "continued": outcome.as_ref().ok().map(|(recovered, _)| format!("{recovered:?}")),
+        "released_through_the_funnel": released,
+    });
+    report(&report_path, &resumed.to_string());
 }
 
 #[track_caller]
@@ -17217,10 +17248,47 @@ fn kill_inside_finalization(
     observed
 }
 
+#[track_caller]
+fn resume_in_a_fresh_process(planted: &FinishedPlanting, tag: &str) -> (String, bool) {
+    use crate::workspace_manager::fixture::run_kill_child_within;
+
+    let fixture = &planted.fixture;
+    let report_path = fixture.root.join("finalization-resume-report");
+    let Some(status) = run_kill_child_within(
+        FINALIZATION_RESUME_CHILD,
+        &[
+            ("UPSTROKE_TEST_KILL_REPO", fixture.repo_root.as_os_str()),
+            ("UPSTROKE_TEST_KILL_GITDIR", fixture.git_dir.as_os_str()),
+            ("UPSTROKE_TEST_KILL_REPORT", report_path.as_os_str()),
+        ],
+        FINALIZATION_CHILD_BOUND,
+    ) else {
+        panic!(
+            "{tag}: the resume child did not end within {FINALIZATION_CHILD_BOUND:?}, and was \
+             killed and reaped; it reported:\n{}",
+            std::fs::read_to_string(&report_path).unwrap_or_default()
+        );
+    };
+    let reported = std::fs::read_to_string(&report_path).unwrap_or_default();
+    assert!(
+        status.success(),
+        "{tag}: the resume child did not finish: {status:?}; it reported:\n{reported}"
+    );
+    let resumed: serde_json::Value = serde_json::from_str(reported.trim_end())
+        .expect("the resume child reported one JSON object");
+    let refusal = resumed
+        .get("refusal")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("{tag}: the next resume did not refuse: {resumed}"));
+    let released = resumed
+        .get("released_through_the_funnel")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or_else(|| panic!("{tag}: the resume child reported no release: {resumed}"));
+    (refusal.to_owned(), released)
+}
+
 #[test]
 fn a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_the_next_resume() {
-    use crate::topology::effects::LockSite;
-
     let planted = plant_finished_run_with(
         "finalize-kill-inside",
         RunOutcome::Complete,
@@ -17262,19 +17330,15 @@ fn a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_t
     );
     assert_objects_kept(&planted, "after the kill, before the restart");
 
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(fixture, &runtime, &certifies);
-    let next = harness();
-    let (result, _) = resume(fixture, &next, &given);
-    let text = message(&result.expect_err("the next resume finalizes what is left and refuses"));
+    let (text, released) = resume_in_a_fresh_process(
+        &planted,
+        "Complete/Worktree.RemoveExecutionRoot/after, the single real kill",
+    );
     assert!(text.contains("already current"), "{text}");
     assert_finalized(&planted, &RunOutcome::Complete, "after the kill");
     assert_eq!(fixture.log_bytes(), before, "still nothing appended");
-    let seen = next.lock().unwrap_or_else(PoisonError::into_inner);
     assert!(
-        seen.observed(EffectSiteId::Lock(LockSite::Release), HookPhase::Before)
-            && seen.observed(EffectSiteId::Lock(LockSite::Release), HookPhase::After),
+        released,
         "the converging resume released the run lock through the funnel"
     );
     assert!(
@@ -17321,13 +17385,7 @@ fn kill_at_every_finalization_cell(outcome: &RunOutcome) {
         assert_finalization_order(&planted, &observed, outcome, (site, phase), &tag);
         let report_current = fixture.public().join("report.json").is_file();
 
-        let runtime = runtime_holding_the_record();
-        let certifies = AlwaysCertifies;
-        let given = Given::healthy(fixture, &runtime, &certifies);
-        let next = harness();
-        let (result, _) = resume(fixture, &next, &given);
-        let text =
-            message(&result.expect_err("the next resume finalizes what is left and refuses"));
+        let (text, released) = resume_in_a_fresh_process(&planted, &tag);
         assert!(
             text.contains(&format!("already finished as `{}`", outcome_short(outcome)))
                 && text.contains("finalized")
@@ -17347,9 +17405,7 @@ fn kill_at_every_finalization_cell(outcome: &RunOutcome) {
             "{tag}: the report names the recorded runner"
         );
         assert!(
-            next.lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .observed(EffectSiteId::Lock(LockSite::Release), HookPhase::After),
+            released,
             "{tag}: the converging resume released the run lock through the funnel"
         );
         let once = replayed(fixture);
