@@ -92,7 +92,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "test": "engine::topology::recover::tests::a_resume_after_finalization_pruned_the_execution_root_and_the_pins_recreates_the_root_and_integrates_the_queued_candidate",
           "passed": true
         }
       }
@@ -112,7 +112,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "test": "engine::topology::recover::tests::a_fault_after_the_execution_root_is_recreated_leaves_the_root_and_the_next_resume_adopts_it",
           "passed": true
         }
       }
@@ -188,7 +188,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "test": "engine::topology::dispatch::tests::kill_after_dispatch_recreates_worktree_without_spend",
           "passed": true
         }
       }
@@ -208,7 +208,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "test": "engine::topology::dispatch::tests::kill_after_dispatch_recreates_worktree_without_spend",
           "passed": true
         }
       }
@@ -360,7 +360,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "test": "engine::topology::recover::tests::a_resume_over_a_stale_queued_candidate_with_nothing_staged_takes_the_staging_path_and_publishes_the_proposal",
           "passed": true
         }
       }
@@ -420,7 +420,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "test": "engine::topology::recover::tests::a_clean_staging_worktree_left_at_the_integration_head_is_reclaimed_and_the_candidate_integrates",
           "passed": true
         }
       }
@@ -536,7 +536,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "test": "engine::topology::attempt::tests::attempt_kill_child",
           "passed": true
         }
       }
@@ -556,7 +556,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "test": "engine::topology::attempt::tests::attempt_kill_child",
           "passed": true
         }
       }
@@ -770,7 +770,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "test": "engine::topology::recover::tests::candidate_sequence_kill_child",
           "passed": true
         }
       }
@@ -1004,7 +1004,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "test": "engine::topology::attempt::tests::attempt_kill_child",
           "passed": true
         }
       }
@@ -1022,7 +1022,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "test": "engine::topology::attempt::tests::attempt_kill_child",
           "passed": true
         }
       }
@@ -1123,7 +1123,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "test": "engine::topology::recover::tests::a_kill_before_the_candidate_commit_is_written_is_settled_interrupted_and_the_next_generation_writes_it",
           "passed": true
         }
       }
@@ -1186,7 +1186,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::recover::tests::a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers",
+          "test": "engine::topology::recover::tests::a_clean_staging_worktree_left_at_the_integration_head_is_reclaimed_and_the_candidate_integrates",
           "passed": true
         }
       }
@@ -1744,7 +1744,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+          "test": "engine::topology::recover::tests::question_payload_kill_child",
           "passed": true
         }
       }
@@ -1908,7 +1908,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::every_error_return_point_of_the_event_funnels_fires_under_the_production_adapter",
+          "test": "engine::topology::create::tests::an_error_after_the_log_is_created_refuses_the_run_resumably_and_the_next_creation_opens_it_again",
           "passed": true
         }
       }
@@ -1958,7 +1958,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::every_error_return_point_of_the_event_funnels_fires_under_the_production_adapter",
+          "test": "engine::topology::recover::tests::an_error_after_the_logs_torn_tail_is_truncated_refuses_the_resume_before_any_effect_and_the_next_resume_converges",
           "passed": true
         }
       }
@@ -2182,7 +2182,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::event_kill_child",
+          "test": "engine::topology::create::tests::create_kill_child",
           "passed": true
         }
       }
@@ -2388,7 +2388,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::event_kill_child",
+          "test": "engine::topology::emit::tests::a_kill_before_the_informational_append_leaves_the_prefix_and_the_next_process_appends_the_line",
           "passed": true
         }
       }
@@ -2408,7 +2408,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::emit::tests::poisoned_fold_refuses_every_later_transition",
+          "test": "engine::topology::emit::tests::informational_append_kill_child",
           "passed": true
         }
       }
@@ -2433,7 +2433,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::event_kill_child",
+          "test": "engine::topology::emit::tests::informational_append_kill_child",
           "passed": true
         }
       }
@@ -2458,7 +2458,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::every_error_return_point_of_the_event_funnels_fires_under_the_production_adapter",
+          "test": "engine::topology::emit::tests::a_written_error_at_the_informational_append_is_absent_and_the_next_process_appends_the_line",
           "passed": true
         }
       }
@@ -2483,7 +2483,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::every_error_return_point_of_the_event_funnels_fires_under_the_production_adapter",
+          "test": "engine::topology::emit::tests::a_written_full_error_at_the_informational_append_is_present_and_the_next_open_proves_it",
           "passed": true
         }
       }
@@ -2508,7 +2508,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::event_kill_child",
+          "test": "engine::topology::emit::tests::informational_append_kill_child",
           "passed": true
         }
       }
@@ -2703,7 +2703,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "rundir::tests::a_fault_before_the_worktree_lease_is_taken_leaves_no_hold_and_the_next_acquisition_takes_it",
+          "test": "engine::topology::recover::tests::a_fault_before_the_worktree_lease_is_taken_ends_the_resume_and_the_next_resume_takes_it",
           "passed": true
         }
       }
@@ -2723,7 +2723,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "test": "engine::topology::recover::tests::a_fault_after_the_worktree_lease_is_taken_ends_the_resume_with_it_released_and_the_next_resume_takes_it_again",
           "passed": true
         }
       }
@@ -2815,7 +2815,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "rundir::tests::a_fault_before_the_worktree_lock_file_is_created_leaves_nothing_and_the_next_acquisition_creates_it",
+          "test": "engine::topology::recover::tests::a_fault_before_the_worktree_lock_file_is_created_ends_the_resume_and_the_next_resume_creates_it",
           "passed": true
         }
       }
@@ -2835,7 +2835,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "rundir::tests::a_fault_after_the_worktree_lock_file_is_created_leaves_it_unheld_and_the_next_acquisition_adopts_it",
+          "test": "engine::topology::recover::tests::a_fault_after_the_worktree_lock_file_is_created_ends_the_resume_and_the_next_resume_adopts_it",
           "passed": true
         }
       }
@@ -2889,7 +2889,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+          "test": "engine::topology::recover::tests::an_error_before_the_workers_process_is_spawned_spawns_nothing_and_the_next_step_spawns_it",
           "passed": true
         }
       }
@@ -2909,7 +2909,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+          "test": "engine::topology::recover::tests::process_spawn_kill_child",
           "passed": true
         }
       }
@@ -2929,7 +2929,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "agent::proc::tests::a_fault_before_the_terminate_primitive_settles_the_child_and_leaves_its_fate_unresolved",
+          "test": "engine::topology::recover::tests::a_fault_before_the_workers_termination_ends_the_step_and_the_next_resume_converges",
           "passed": true
         }
       }
@@ -2947,7 +2947,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "agent::proc::tests::a_fault_after_the_terminate_primitive_reports_the_child_gone",
+          "test": "engine::topology::recover::tests::a_fault_after_the_workers_termination_ends_the_step_and_the_next_resume_converges",
           "passed": true
         }
       }
@@ -2970,7 +2970,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::spawn_kill_child",
+          "test": "engine::topology::recover::tests::process_spawn_kill_child",
           "passed": true
         }
       }
@@ -2993,7 +2993,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::the_ambient_job_join_error_return_point_fires_under_the_process_funnel",
+          "test": "engine::topology::recover::tests::an_error_at_the_ambient_job_join_refuses_the_write_command_and_the_next_resume_converges",
           "passed": true
         }
       }
@@ -3016,7 +3016,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::spawn_kill_child",
+          "test": "engine::topology::recover::tests::process_spawn_kill_child",
           "passed": true
         }
       }
@@ -3039,7 +3039,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::spawn_kill_child",
+          "test": "engine::topology::recover::tests::process_spawn_kill_child",
           "passed": true
         }
       }
@@ -3062,7 +3062,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::spawn_kill_child",
+          "test": "engine::topology::recover::tests::process_spawn_kill_child",
           "passed": true
         }
       }
@@ -3087,7 +3087,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::spawn_kill_child",
+          "test": "engine::topology::recover::tests::process_spawn_kill_child",
           "passed": true
         }
       }
@@ -3112,7 +3112,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::spawn_kill_child",
+          "test": "engine::topology::recover::tests::process_spawn_kill_child",
           "passed": true
         }
       }
@@ -3137,7 +3137,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::spawn_kill_child",
+          "test": "engine::topology::recover::tests::process_spawn_kill_child",
           "passed": true
         }
       }
@@ -3162,7 +3162,7 @@
       "label": "execution_observed",
       "evidence": {
         "executed": {
-          "test": "engine::topology::coverage::tests::spawn_kill_child",
+          "test": "engine::topology::recover::tests::process_spawn_kill_child",
           "passed": true
         }
       }
@@ -3508,9 +3508,9 @@
           "sampling": {
             "n": 8,
             "histogram": {
-              "none": 1,
-              "internal": 6,
-              "after": 1
+              "none": 0,
+              "internal": 3,
+              "after": 5
             },
             "unclassified": 0,
             "recovered": true
@@ -3549,9 +3549,9 @@
           "sampling": {
             "n": 8,
             "histogram": {
-              "none": 2,
-              "internal": 6,
-              "after": 0
+              "none": 1,
+              "internal": 5,
+              "after": 2
             },
             "unclassified": 0,
             "recovered": true
@@ -3696,8 +3696,8 @@
           "sampling": {
             "n": 8,
             "histogram": {
-              "none": 3,
-              "internal": 5,
+              "none": 6,
+              "internal": 2,
               "after": 0
             },
             "unclassified": 0,
@@ -3925,8 +3925,8 @@
             "n": 8,
             "histogram": {
               "none": 0,
-              "internal": 6,
-              "after": 2
+              "internal": 2,
+              "after": 6
             },
             "unclassified": 0,
             "recovered": true
