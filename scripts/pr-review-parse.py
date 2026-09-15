@@ -84,6 +84,13 @@ refusal:
   * every run of three or more backticks or tildes in the comment was consumed by the structure
     scan as a fence of a block that scan found. One that was not means the comment's block
     structure is NOT what this program thinks it is, and there is no result;
+  * and no block the verdict was not read from holds a `json` fence -- at the start of a line or
+    behind a blockquote's `>` or a list marker -- or a bare verdict opener. Accounting for every
+    run says each one was consumed as a fence; it says nothing about WHICH block it was consumed
+    into, and CommonMark suppresses a fence inside a raw-HTML block where this scan does not -- so
+    a hidden `` ```text `` line swallowed a real blocking verdict as its content, left every run
+    accounted for, and let a `PASS` appended after it stand as the only candidate. What such a
+    block holds is material, on the same terms as what lies outside one;
   * nothing but whitespace follows the block the verdict is read from, and no `VERDICT:` line
     stands outside it. Not "nothing this program recognises as a block" -- nothing;
   * no object the verdict is read from names anything twice, AT ANY DEPTH. `json.loads` keeps
@@ -126,6 +133,7 @@ and after to establish that it changed none.
 """
 
 import collections
+import html.entities
 import json
 import os
 import re
@@ -166,6 +174,61 @@ CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 # safe direction for a stray-token scan is to find MORE of them, because each one is a blocker.
 STRAY_TOKEN = re.compile(r"\b(?:P[0-3]|MUST)\b", re.ASCII)
 
+# AND THE SPELLING A DECODER READS, NOT ONLY THE ONE THE COMMENT WRITES. `"severity":"P\u0031"` is
+# `P1` to `json.loads`, to GitHub's renderer and to the person reading the comment, and it is
+# nothing at all to a regex run over the characters the comment spells it with. Every witness in
+# this family carried its blocking severity past this scan that way -- the truncation revival, the
+# indented fence, the repeated name, the HTML comment and the fenced object all spell it `P\u0031`
+# -- because the scan that exists to catch a severity outside the verdict object could not read the
+# only spelling those witnesses use. `\uXXXX` and JSON's two-character escapes are resolved below;
+# a doubled backslash is consumed as the one character it is, so `\\u0031` is not read as an escape
+# it is not. Each `\uXXXX` is resolved on its own, which is enough for every spelling of an ASCII
+# token, and `P0`-`P3` and `MUST` are ASCII.
+JSON_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})|\\(.)", re.S)
+SIMPLE_ESCAPE = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f",
+                 "n": "\n", "r": "\r", "t": "\t"}
+
+# AND THE LANGUAGE A RENDERER GIVES A FENCE, WHICH IS A FUNCTION OF ITS INFO STRING AND NOT A
+# SPELLING OF IT. The scan above resolves what `json.loads` resolves, because that is what reads a
+# verdict object; what reads an info string is a renderer, and what it reads out of one is the
+# block's LANGUAGE. `&#110;` is `n` there, so ```` ```jso&#110; ```` is a `language-json` block to
+# the person reading the comment, and it was no `json` fence at all to a rule that compared the
+# characters the comment spells it with: the blocking verdict hidden inside a swallowing block while
+# a clean `PASS` stood as the only candidate.
+#
+# CommonMark does not define that language -- "this spec does not mandate any particular treatment
+# of the info string" (https://spec.commonmark.org/0.31.2/#fenced-code-blocks) -- so it is whatever
+# a renderer computes, and each reading this file derived from the specification instead was wrong
+# somewhere a renderer is not. Resolving every reference the grammar admits and then splitting with
+# `str.split()` read `json&#133;x` and `json&#11;x` as `json`, which neither renderer measured below
+# gives either tag. Splitting what a reference resolved to at a narrower class than `str.split()`'s
+# read ```` ```jso&#110; ```` followed by a literal U+0085 as no `json` fence, and `markdown-it-py`
+# 3.0.0 renders it `language-json`. And both took the grammar's digit bounds, seven decimal and six
+# hex, where both renderers resolve eight: ```` ```jso&#00000110; ```` is `language-json` to each of
+# them and was no `json` fence to either reading.
+#
+# So what is below is not a reading of the specification. It is `markdown-it-py` 3.0.0's own
+# function, transcribed: its fence renderer takes the first `str.split()` word of
+# `unescapeAll(info)`, and `unescapeAll` is `INFO_ESCAPE` below -- a backslash escape or a
+# reference, in ONE left-to-right pass, so an escaped `\&` starts no reference and nothing a
+# reference resolves to is read again -- with a name looked up in the table the standard library
+# carries (the one that renderer builds its own from), a number of up to eight digits, and a
+# reference to any code point `referable` refuses left exactly as it was written. Measured
+# 2026-09-14 over every code point, written literally and as a decimal and a hex reference in and
+# around the name; every named reference, with and without its semicolon; each letter of the name
+# spelled as a number with up to ten leading zeros; a backslash before every printable ASCII
+# character; and two million random tags: `rendered_language` equals `markdown-it-py` 3.0.0's
+# language on every one, and cmark-gfm 0.29.0.gfm.6 renders `json` on none of them that
+# `markdown-it-py` does not. The second fact is why one renderer's function is enough: its `json`
+# is the union of both renderers', which is the refusing direction and no wider than a renderer.
+INFO_ESCAPE = re.compile(
+    r'\\([!"#$%&\'()*+,\-.\/:;<=>?@[\\\]^_`{|}~])' + "|" + r"&([a-z#][a-z0-9]{1,31});",
+    re.IGNORECASE,
+)
+DECIMAL_REFERENCE = re.compile(r"#([0-9]{1,8})")
+HEX_REFERENCE = re.compile(r"#x([a-f0-9]{1,8})", re.IGNORECASE)
+NAMED_REFERENCE = {name.rstrip(";"): chars for name, chars in html.entities.html5.items()}
+
 # A finding carrying any of these blocks in every lane (MAINTAINING step 5): the deferring
 # implementor's ledger row asserts there is no witness, and a witness the review recorded
 # contradicts it.
@@ -191,7 +254,27 @@ PROSE_VERDICT = re.compile(r"VERDICT:")
 # comment holding a complete fenced `PASS` example and then a real `{ "role_understanding":...}`
 # object saying CHANGES_REQUIRED read as the example, with the object's `"P\u0031"` invisible to
 # the stray scan. The bare form has no fence, so its object runs from the opener to the last `}`.
-BARE_OBJECT_OPEN = re.compile(r"\{\s*\"role_understanding\"")
+#
+# AND THE KEY IS A JSON STRING, SO IT IS READ AS ONE. `\"role_understanding\"` compared the
+# characters the comment spells the name with, and the only reader that object ever has is
+# `json.loads`, which compares what they DECODE TO: `{"role_understandin\u0067":...}` opens an
+# object whose first key is `role_understanding` to that reader, to GitHub's renderer and to the
+# person reading the comment, and was no opener at all to the guard. The candidate count reached
+# zero, and zero is the road to the prose parser, which read the `VERDICT: PASS` written under it.
+#
+# The brace and the quote are STRUCTURE and are matched as characters; what stands between the
+# quotes is decoded before it is compared, by the pass `decoded_spelling` already runs over a
+# severity. `\s` is wider than the four characters JSON calls whitespace, which finds more openers
+# rather than fewer -- the direction every rule in this file is wrong in when it is wrong.
+OBJECT_OPEN = re.compile(r"\{\s*\"")
+# One JSON string's body: every character up to the first quote no backslash introduces. `\\.`
+# consumes an escape whole, so the quote inside `\"` does not end the string, and `re.S` lets it
+# consume a backslash before a newline. That reads a longer string than JSON does -- JSON allows no
+# raw control character in one -- which can only offer an opener JSON has none at, and an opener
+# whose object `json.loads` then refuses is a refusal rather than a reading.
+JSON_STRING_BODY = re.compile(r'(?:[^"\\]|\\.)*', re.S)
+# The name that opener carries, compared after decoding rather than matched before it.
+BARE_OBJECT_KEY = "role_understanding"
 
 # A FENCE IS A LINE, AND THE LINES ARE READ IN ORDER, BY COMMONMARK'S RULES -- which are the rules
 # GitHub renders these comments by, so they are the rules that decide what a reader of the comment
@@ -228,6 +311,29 @@ FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,})[ \t\r]*\Z")
 # `\{\"role_understanding` missed `{ "role_understanding` and let an earlier PASS stand as the
 # verdict.
 FENCE_RUN = re.compile(r"`{3,}|~{3,}")
+# AND A FENCE RUN INSIDE A BLOCK'S CONTENT THAT WOULD OPEN A `json` BLOCK, asked the same way. A
+# fence run this scan consumed AS A FENCE is accounted for by `FENCE_RUN` above whether or not it
+# opened the block the reader sees -- which is the hole `unresolved_material` was blind to, because
+# accounting for every run says nothing about which block each one belongs to. CommonMark
+# suppresses a fence inside a raw-HTML block -- an unclosed `<!--`, a `<div>`, a `<pre>`, any
+# complete tag on a line of its own (https://spec.commonmark.org/0.31.2/#html-blocks) -- and this
+# scan does not, so a fence opened inside one swallows the real verdict as its content and leaves
+# every run accounted for. What such a block's content holds is therefore material too, and a fence
+# run whose info string names `json` is the material that matters: that is the one shape the
+# verdict is ever read from, so a block whose content carries one is a block this program cannot be
+# sure it is reading past.
+#
+# EVERY RUN, WHEREVER IT STANDS ON ITS LINE -- asked in characters for the reason `FENCE_RUN` is.
+# This was a pattern anchored at the start of a line, and `> ```json` walked past it: a `json` fence
+# inside a blockquote, which CommonMark renders as the verdict, swallowed by a hidden `text` block
+# whose content this rule then read as clean -- the blockquote getting past a content rule the way
+# it once got past the recogniser. A list marker opens a fence the same way, and so does a list
+# inside a blockquote, so the prefix is not enumerated: the run is found wherever it is and the
+# rest of its line is read the way `names_json` reads every other info string. A run this
+# matches and CommonMark would not read as a fence -- after prose, indented into code, a backtick
+# run whose info string holds a backtick -- is a refusal rather than a reading, which is the
+# direction every rule in this file is wrong in when it is wrong.
+CONTENT_FENCE_RUN = re.compile(r"(`{3,}|~{3,})(?=([^\n]*))")
 
 # The prose form, read exactly as the shell read it. `[^ \t\n\r\f\v]` is POSIX `[^[:space:]]` in
 # the `C` locale, which is what the greps were given.
@@ -299,13 +405,97 @@ def present(value):
     return value not in (None, False, "", [], {}) and str(value).strip() != ""
 
 
+def decoded_spelling(text):
+    """TEXT with JSON's string escapes resolved, so an encoded token is a token to the scan above.
+
+    THE SCAN READS THE SEVERITY THE PARSER READS. `"severity":"P\\u0031"` decodes to `P1` -- for
+    `json.loads`, for GitHub's renderer and for the person reading the comment -- and carries no
+    `P1` at all for a regex over the characters the comment spells it with. That one gap is what
+    every witness in this family used to get a blocking severity past `stray_summary`: the severity
+    only exists after JSON decoding, and the scan ran over raw text.
+
+    Resolved the way a JSON decoder resolves them, and in one left-to-right pass, so a doubled
+    backslash is consumed as the one character it is: `\\\\u0031` is a backslash followed by
+    `u0031` and is NOT an escape, which a pass that resolved `\\uXXXX` anywhere would read as one.
+    An escape this cannot resolve -- `\\uZZZZ` is not four hex digits, and `\\q` is not an escape
+    JSON has -- is left exactly as it was written rather than dropped: a token must not be able to
+    hide in the gap between what this understands and what it discards.
+    """
+    def resolved(match):
+        point, simple = match.group(1), match.group(2)
+        if point is not None:
+            return chr(int(point, 16))
+        return SIMPLE_ESCAPE.get(simple, match.group(0))
+    return JSON_ESCAPE.sub(resolved, text)
+
+
+def referable(point):
+    """Whether a numeric reference to POINT is resolved, rather than left exactly as it was written.
+
+    `markdown-it-py` 3.0.0's `isValidEntityCode`, range for range: a surrogate, a noncharacter, a
+    control character other than tab, line feed, form feed and carriage return, and anything past
+    the last code point are not resolved. THIS IS WHERE BOTH EARLIER READINGS WERE WRONG IN THE
+    REFUSING DIRECTION. U+000B, U+001C-U+001F and U+0085 are whitespace to `str.split()`, and a
+    reference to one of them is none of them: `&#11;` stays `&#11;`, so no word ends there, and
+    `json&#11;x` is `language-json&#11;x`. cmark-gfm 0.29.0.gfm.6 does resolve those six references
+    and keeps the character inside the language it renders, so it names none of those tags `json`
+    either.
+    """
+    return not (0xd800 <= point <= 0xdfff or 0xfdd0 <= point <= 0xfdef
+                or (point & 0xffff) in (0xfffe, 0xffff)
+                or point <= 0x08 or point == 0x0b or 0x0e <= point <= 0x1f
+                or 0x7f <= point <= 0x9f or point > 0x10ffff)
+
+
+def rendered_language(info):
+    """The language a renderer gives a fenced block whose info string is INFO, or "" for none.
+
+    THE SIBLING OF `decoded_spelling`, AND THE SAME SENTENCE. That one reads what `json.loads`
+    reads, because a verdict object's only reader is `json.loads`; this one reads what a renderer
+    reads, because an info string's readers are the renderer and the person looking at what it
+    rendered. A rule that asks its question of the characters a comment is stored as, when its
+    consumer asks the same question of what they resolve to, is comparing two different documents.
+
+    ONE READING, SPLIT ONCE: every escape and reference resolved, then the first word, by
+    `str.split()`'s whitespace, of what that leaves -- whichever of its characters were written and
+    whichever were resolved. Two readings with a boundary each missed the tag that holds one of
+    each: `jso&#110;` then a literal U+0085 was no `json` to the written reading, which split at
+    the U+0085, nor to the resolved one, which split nowhere, and it is `language-json` to
+    `markdown-it-py` 3.0.0. That renderer reads a NUL as U+FFFD before it parses a line, so this
+    does too; neither is whitespace and neither is a letter, so it decides nothing.
+    """
+    def resolved(match):
+        if match.group(1):
+            return match.group(1)
+        name = match.group(2)
+        if name in NAMED_REFERENCE:
+            return NAMED_REFERENCE[name]
+        number = DECIMAL_REFERENCE.fullmatch(name)
+        if number is not None:
+            point = int(number.group(1))
+        else:
+            number = HEX_REFERENCE.fullmatch(name)
+            point = None if number is None else int(number.group(1), 16)
+        if point is not None and referable(point):
+            return chr(point)
+        return match.group(0)
+    words = INFO_ESCAPE.sub(resolved, info.replace("\0", "\ufffd")).split(None, 1)
+    return words[0] if words else ""
+
+
 def stray_summary(outside):
     """The severity and MUST tokens found outside the findings, as one field, or None.
 
     Sorted and joined exactly as `sort -u | tr '\\n' '/'` joined them: both orders are by code
     point, because `sort` ran under `LC_ALL=C` too.
+
+    BOTH SPELLINGS ARE SCANNED -- what the comment writes and what a decoder reads -- and the two
+    are not the same text. Reading both is the safe direction for this scan, the same direction
+    `re.ASCII` is chosen for above: every token it finds is a blocker that sends the review to a
+    person, so one found in both spellings costs nothing and one found in neither is the defect.
     """
-    tokens = sorted(set(STRAY_TOKEN.findall(outside)))
+    tokens = sorted(set(STRAY_TOKEN.findall(outside))
+                    | set(STRAY_TOKEN.findall(decoded_spelling(outside))))
     return "/".join(tokens) if tokens else None
 
 
@@ -440,9 +630,24 @@ def outside_block(text, block):
 
 
 def names_json(info):
-    """Whether an info string names the verdict's language: CommonMark's first word, folded."""
-    words = info.split()
-    return bool(words) and words[0].lower() == "json"
+    """Whether an info string names the verdict's language: the language rendered for it, folded.
+
+    WHAT A RENDERER READS, NOT WHAT THE COMMENT SPELLS. Reading the written spelling is how
+    ```` ```jso&#110; ```` -- a `language-json` block to the renderer and to the reader, carrying
+    the blocking verdict inside a swallowing block -- was nothing at all to the rule that exists to
+    find exactly that.
+
+    Every extra name this finds is a refusal, never a reading: one more candidate makes the count
+    two, and a block whose content names `json` is material. The only block it can newly read a
+    verdict FROM is one that is the comment's single candidate, whose content `json.loads` must
+    then take whole.
+
+    AND ONLY A NAME A RENDERER GIVES. A refusal costs a reviewer the review, and one raised over a
+    tag no renderer reads as `json` is a refusal nobody can clear: `json&#133;x` and `json&#11;x`,
+    each an ordinary example block beside a valid `PASS`, became "2 places a verdict could be read
+    from" under readings that resolved a reference `markdown-it-py` 3.0.0 leaves written.
+    """
+    return rendered_language(info).lower() == "json"
 
 
 def spans_outside(text, blocks):
@@ -460,6 +665,33 @@ def spans_outside(text, blocks):
         pos = max(pos, one.after)
     spans.append((pos, len(text)))
     return spans
+
+
+def bare_object_openers(text, start=0, end=None):
+    """Every offset in TEXT[START:END] where the older bare form's verdict object opens.
+
+    THE NAME IS COMPARED AS ITS READER DECODES IT. `{"role_understandin\\u0067"` is an object whose
+    first key is `role_understanding` to `json.loads` and to everyone looking at the comment, and
+    it was not this opener to a pattern that matched the characters instead -- which left the
+    candidate count at zero, and zero was the road to the prose parser and the `VERDICT: PASS` line
+    written underneath. The brace and the quotes are structure and are read as characters; the name
+    between them is a JSON string and is decoded before it is compared.
+
+    The offset returned is the BRACE's, in TEXT as it was given, because the object runs from there
+    to the comment's last `}` and that span is what `json.loads` is handed.
+    """
+    if end is None:
+        end = len(text)
+    openers = []
+    for opener in OBJECT_OPEN.finditer(text, start, end):
+        body = JSON_STRING_BODY.match(text, opener.end(), end)
+        # An unterminated string is not a key: the body ran to the end of the span this was asked
+        # about without a closing quote, so there is no name here to compare.
+        if body is None or body.end() >= end or text[body.end()] != '"':
+            continue
+        if decoded_spelling(body.group(0)) == BARE_OBJECT_KEY:
+            openers.append(opener.start())
+    return openers
 
 
 def unresolved_material(text, blocks):
@@ -480,15 +712,52 @@ def unresolved_material(text, blocks):
     because a ``` inside one would otherwise be read as a fence of the comment's own, but it is
     never the verdict -- the workflow writes backticks -- so a comment carrying one is a comment
     whose verdict this program cannot be sure it is reading.
+
+    AND WHAT SUCH A BLOCK HOLDS IS MATERIAL, WHICH IS WHERE ACCOUNTING FOR EVERY RUN WAS NOT
+    ENOUGH -- the hole `HTML-COMMENT-FENCE-SWALLOWS-VERDICT` and
+    `PROSE-CANDIDATE-ZERO-PERMITS-PROSE` both came through. Accounting for every run says each one
+    WAS consumed as a fence; it says nothing about WHICH BLOCK it was consumed into. CommonMark
+    suppresses a fence inside a raw-HTML block and this scan does not, so `<!--`, a `` ```text ``
+    line, `-->`, and then the real verdict, is a `text` block that SWALLOWS that verdict as its
+    content -- every run accounted for, the swallowed object invisible to the candidate count, and a
+    clean `PASS` appended after it the only candidate left. Measured: the audit reports READY, out
+    of a comment a CommonMark parse sees exactly one fenced verdict in, and that one says
+    CHANGES_REQUIRED with a P1. An unclosed `<!--` is not the only way; `<div>`, `<pre>` and any
+    complete tag on a line of its own start HTML blocks too, so the shape is not a list of tags and
+    is not answered by learning one more of them.
+
+    So a block this program did not read the verdict FROM is not inert. Two things inside one are
+    material, and they are the two shapes a verdict is ever read from anywhere else in this file:
+    a FENCE RUN NAMING `json`, wherever it stands on its line, and the older bare form's OBJECT
+    OPENER -- which is the whole of the second finding, whose `text`-fenced `role_understanding`
+    object left the candidate count at zero and sent a self-contradictory comment to the prose
+    parser. A comment whose `text` block holds either has no result -- which is the same sentence as
+    the one above it, asked of the inside of a block rather than of the outside of one. Wherever it
+    stands, because a pattern anchored at the start of the line let `> ```json` through: a `json`
+    fence inside a blockquote is a verdict to CommonMark, and inside a swallowing block it was
+    nothing to this rule.
     """
     stale = []
     for start, end in spans_outside(text, blocks):
         for run in FENCE_RUN.finditer(text, start, end):
             stale.append("%s at line %d" % (run.group(0)[:8], text.count("\n", 0, run.start()) + 1))
     for one in blocks:
+        if one.fence == "`" and names_json(one.info):
+            # The verdict's own shape. What is inside THIS is read by `json.loads`, which is a
+            # whole-document check no fence run can pass: a line-initial run inside a valid JSON
+            # object would have to be inside a string, and a JSON string holds no newline -- and a
+            # run behind a blockquote's `>` or a list marker is no more JSON than one without.
+            continue
+        at = text.count("\n", 0, one.outer) + 1
+        for run in CONTENT_FENCE_RUN.finditer(one.content):
+            if names_json(run.group(2)):
+                written = run.group(2).split(None, 1)
+                stale.append("%s%s inside the block at line %d"
+                             % (run.group(1)[:8], (written[0] if written else "")[:8], at))
+        if bare_object_openers(one.content):
+            stale.append("a verdict object inside the block at line %d" % at)
         if one.fence != "`" and names_json(one.info):
-            stale.append("%s%s at line %d"
-                         % (one.fence * 3, one.info[:16], text.count("\n", 0, one.outer) + 1))
+            stale.append("%s%s at line %d" % (one.fence * 3, one.info[:16], at))
     return stale
 
 
@@ -506,8 +775,7 @@ def verdict_candidates(text, blocks):
     found = [one for one in blocks if one.fence == "`" and names_json(one.info)]
     close = text.rfind("}")
     for start, end in spans_outside(text, blocks):
-        for opener in BARE_OBJECT_OPEN.finditer(text, start, end):
-            at = opener.start()
+        for at in bare_object_openers(text, start, end):
             found.append(Block("`", "json", text[at:close + 1], at, at, close + 1, close + 1,
                                close >= at))
     found.sort(key=lambda one: one.outer)
@@ -687,7 +955,10 @@ def review_result(args):
     comment's marker rather than by which parser gets an answer. Every branch that cannot be
     resolved ends in a refusal, and none of them ends in the other parser:
 
-      * fence material this program could not read as a block -> no result. The structure is not
+      * material this program could not account for as a block -> no result. A fence run outside
+        every block it found, and -- because accounting for every run says nothing about which
+        block each one went into -- a fence run naming `json`, wherever it stands on its line, or a
+        bare verdict opener INSIDE a block it did not read the verdict from. The structure is not
         what it thinks it is, so nothing built on that structure can be trusted;
       * the prose form's marker AND a verdict block -> no result. The comment claims to be both
         forms, and they do not agree about the same review;
@@ -705,7 +976,7 @@ def review_result(args):
     stale = unresolved_material(text, blocks)
     if stale:
         raise Unparsed(
-            "the review carries fence material this parse could not read as a block: [%s]"
+            "the review carries material this parse could not account for as a block: [%s]"
             % stale[0]
         )
     candidates = verdict_candidates(text, blocks)
