@@ -1899,6 +1899,16 @@ impl rundir::RunDirHooks for ExportedErrorAt {
     }
 }
 
+/// A [`Fixture`] named after `name` and this process.
+///
+/// `Fixture::new` removes whatever tree stands at its name before it builds, so
+/// a test process running a witness under a fixed name removes the husk another
+/// process running the same witness has built, and that census finds nothing
+/// (#292's review round 5). The census witnesses below build under this name.
+fn fixture_of_this_process(name: &str) -> Fixture {
+    Fixture::new(&format!("{name}-{}", std::process::id()))
+}
+
 /// The husk a creator leaves when it dies after publishing its owner record: the
 /// marker published, `run.lock` taken at P2 and released by the death, the
 /// private half created and the owner record published. The lock file is part
@@ -1928,7 +1938,7 @@ fn husk_its_creator_left_after_taking_the_run_lock<'a>(
 /// directory with the marker last. No event log is involved.
 #[test]
 fn a_husk_whose_private_half_refused_removal_is_reclaimed_by_the_next_census_private_half_first() {
-    let fixture = Fixture::new("private-refused-then-reclaimed");
+    let fixture = fixture_of_this_process("private-refused-then-reclaimed");
     let husk =
         husk_its_creator_left_after_taking_the_run_lock(&fixture, "01PRIVREFUSED0000000000000");
     let private = tree_bytes(&husk.private());
@@ -1987,7 +1997,7 @@ fn a_husk_whose_private_half_refused_removal_is_reclaimed_by_the_next_census_pri
 /// runs directory a removal emptied. No event log is involved.
 #[test]
 fn a_husk_whose_public_removal_erred_after_completing_is_gone_for_the_next_census() {
-    let fixture = Fixture::new("public-removed-then-erred");
+    let fixture = fixture_of_this_process("public-removed-then-erred");
     let run_id = "01PUBREMOVED00000000000000";
     let husk = husk_its_creator_left_after_taking_the_run_lock(&fixture, run_id);
 
@@ -2049,7 +2059,7 @@ fn a_creation_prefix_with_a_released_run_lock_is_reclaimed_public_only(
     construct: impl FnOnce(&Husk<'_>) -> HookHarness,
     coordinate: (EffectSiteId, HookPhase),
 ) {
-    let fixture = Fixture::new(run_id);
+    let fixture = fixture_of_this_process(run_id);
     let husk = Husk::at_p0(&fixture, run_id)
         .stage_marker()
         .publish_marker();
