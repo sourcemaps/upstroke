@@ -14618,7 +14618,7 @@ const PROCESS_SPAWN_KILL_CHILD: &str = "engine::topology::recover::tests::proces
 
 struct SpawnPhaseFault {
     inner: crate::runner::HarnessHooks,
-    at: HookPhase,
+    at: (crate::topology::effects::ProcessSite, HookPhase),
     injection: Injection,
 }
 
@@ -14637,7 +14637,7 @@ impl crate::agent::proc::SpawnHooks for SpawnPhaseFault {
         phase: HookPhase,
     ) -> Injection {
         let answered = self.inner.phase(site, phase);
-        if site == crate::topology::effects::ProcessSite::Spawn && phase == self.at {
+        if (site, phase) == self.at {
             crate::observations::Exported::new(Arc::clone(self.inner.harness()))
                 .carried(self.injection)
         } else {
@@ -14650,6 +14650,7 @@ struct SpawningRunner {
     host: crate::runner::host::HostRunner,
     editing: RecordingRunner,
     program: CommandSpec,
+    timeout: Option<Duration>,
 }
 
 impl Runner for SpawningRunner {
@@ -14657,6 +14658,7 @@ impl Runner for SpawningRunner {
         if request.role == crate::runner::ExecutionRole::Implement {
             self.host.run(&RunnerRequest {
                 command: self.program.clone(),
+                timeout: self.timeout.unwrap_or(request.timeout),
                 ..request.clone()
             })?;
         }
@@ -14700,7 +14702,10 @@ fn process_spawn_kill_child() {
     let hooks: Box<dyn crate::agent::proc::SpawnHooks + Send> = if coordinate == "After" {
         Box::new(SpawnPhaseFault {
             inner: crate::runner::HarnessHooks::new(Arc::clone(&harness)),
-            at: HookPhase::After,
+            at: (
+                crate::topology::effects::ProcessSite::Spawn,
+                HookPhase::After,
+            ),
             injection: Injection::Kill,
         })
     } else {
@@ -14724,6 +14729,7 @@ fn process_spawn_kill_child() {
         host: crate::runner::host::HostRunner::new().with_hooks(hooks),
         editing: RecordingRunner::editing(),
         program: this_binary_running("engine::topology::coverage::tests::sleeps_until_terminated"),
+        timeout: None,
     };
     let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
     with_live_run_hooked_runner(
@@ -14859,6 +14865,117 @@ fn a_kill_at_each_windows_point_of_the_workers_spawn_leaves_no_process_and_the_n
     }
 }
 
+fn a_fault_at_the_workers_termination_ends_the_step_and_the_next_resume_converges(
+    phase: HookPhase,
+    tag: &str,
+) {
+    use crate::engine::topology::select::Ceiling;
+    use crate::topology::effects::ProcessSite;
+
+    let fixture = Fixture::healthy(tag);
+    let planted = durable_kinds(&fixture).len();
+    let site = EffectSiteId::Process(ProcessSite::Terminate);
+    let faulted = harness();
+    let runner = SpawningRunner {
+        host: crate::runner::host::HostRunner::new().with_hooks(Box::new(SpawnPhaseFault {
+            inner: crate::runner::HarnessHooks::new(Arc::clone(&faulted)),
+            at: (ProcessSite::Terminate, phase),
+            injection: Injection::Error,
+        })),
+        editing: RecordingRunner::editing(),
+        program: this_binary_running("engine::topology::coverage::tests::sleeps_until_terminated"),
+        timeout: Some(Duration::from_secs(1)),
+    };
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
+    let stepped = with_live_run_hooked_runner(
+        &fixture,
+        &faulted,
+        Ceiling::unlimited(),
+        &adapters,
+        &runner,
+        |run, seams, hooks| run.step(seams, hooks),
+    );
+    let error = message(&stepped.expect_err("the fault at the worker's termination ends the step"));
+    assert!(
+        error.contains("Terminate") && error.contains(&format!("({phase})")),
+        "{tag}: the injected error is the one the step returns: {error}"
+    );
+    assert!(
+        faulted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .observed(site, phase),
+        "{tag}: the worker outlived its timeout and the funnel reached `{site}` ({phase})"
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec!["run_resumed", "task_dispatched", "attempt_started"],
+        "{tag}: the attempt is left in flight"
+    );
+    assert!(
+        wait_for_cleanup_hold_release(&fixture.public()),
+        "{tag}: no hold outlives the step: the funnel settled the worker it could not terminate \
+         cleanly"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (recovered, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut hooks,
+    )
+    .expect("the next resume converges");
+    assert_eq!(
+        recovered.interrupted, 1,
+        "{tag}: step (d) settles the attempt"
+    );
+    let runner = RecordingRunner::editing();
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Settled {
+                key: ALPHA,
+                accepted: true,
+                ..
+            }))
+        ),
+        "{tag}: the next attempt is accepted: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+#[test]
+fn a_fault_before_the_workers_termination_ends_the_step_and_the_next_resume_converges() {
+    a_fault_at_the_workers_termination_ends_the_step_and_the_next_resume_converges(
+        HookPhase::Before,
+        "terminate-fault-before-engine",
+    );
+}
+
+#[test]
+fn a_fault_after_the_workers_termination_ends_the_step_and_the_next_resume_converges() {
+    a_fault_at_the_workers_termination_ends_the_step_and_the_next_resume_converges(
+        HookPhase::After,
+        "terminate-fault-after-engine",
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn an_error_at_the_ambient_job_join_refuses_the_write_command_and_the_next_resume_converges() {
@@ -14917,11 +15034,15 @@ fn an_error_before_the_workers_process_is_spawned_spawns_nothing_and_the_next_st
     let runner = SpawningRunner {
         host: crate::runner::host::HostRunner::new().with_hooks(Box::new(SpawnPhaseFault {
             inner: crate::runner::HarnessHooks::new(Arc::clone(&faulted)),
-            at: HookPhase::Before,
+            at: (
+                crate::topology::effects::ProcessSite::Spawn,
+                HookPhase::Before,
+            ),
             injection: Injection::Error,
         })),
         editing: RecordingRunner::editing(),
         program: this_binary_running("a_test_this_tree_does_not_contain_and_never_will"),
+        timeout: None,
     };
     let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
     let first = with_live_run_hooked_runner(

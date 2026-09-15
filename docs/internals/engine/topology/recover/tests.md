@@ -4252,6 +4252,17 @@ was spawned. The attempt started and produced no candidate, and no cleanup hold 
 that never happened. The next resume converges, a later attempt spawns its worker and is accepted,
 and the log replays twice to equal states.
 
+## `fn a_fault_at_the_workers_termination_ends_the_step_and_the_next_resume_converges(`
+
+`Process.Terminate` before and after (rows 142 and 143 of Gate 5's strict re-audit), driven through
+the driver rather than the funnel alone. The funnel witnesses in `agent::proc::tests` replay no log.
+The worker is the sleeper with a one-second timeout, so the funnel terminates it, and an error is
+armed at the phase. The step returns that error with the attempt in flight, and the funnel has
+settled the worker it could not terminate cleanly: no cleanup hold outlives the step. The next
+resume settles the attempt interrupted, the next attempt is accepted, and the log replays twice to
+equal states. This parent's record holds both phases, because its own runner's adapter observed
+them.
+
 ## `fn an_error_at_the_ambient_job_join_refuses_the_write_command_and_the_next_resume_converges() {`
 
 Gate 5's strict re-audit, row 145, on Windows: `AmbientJobJoined` in error-return mode. The
