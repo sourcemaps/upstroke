@@ -1429,11 +1429,17 @@ pub(crate) fn await_group_end(_pgid: i32) -> Result<std::time::Duration, GroupOu
 /// directory the panicking child's `Drop` had already deleted. Measured:
 /// exactly that, on a kill armed at a site the child never reached.
 ///
-/// Unix has a value for it — `SIGABRT`, which no Rust panic raises. Windows
-/// does not expose one portably (`abort()` reaches `__fastfail`, whose code
-/// has moved between CRT versions), so there the oracle is the *negation*
-/// of the panic's own exit code, which `std::process::abort` cannot produce
-/// and `panic!` always does.
+/// **A value per platform, as [`died_by_kill`] is.** On Unix it is `SIGABRT`,
+/// which no Rust panic raises and no exit carries. On Windows it is the exit
+/// status `std::process::abort()` ends a process with there, `0xC0000409`
+/// (`STATUS_STACK_BUFFER_OVERRUN`, the status of a fast fail). Measured on the
+/// Windows guest, through this test binary's own abort, beside exits of 1, 2
+/// and 134 and a panic, each of which ended with its own code (#292's review
+/// round 5). Until then this arm was the negation of the panic's 101, which
+/// read every one of those exits as an abort.
+/// `the_abort_oracle_separates_an_abort_from_an_exit_of_one` applies this
+/// predicate to a real abort on every run, so a Windows whose abort ended with
+/// another status would fail there.
 pub(crate) fn died_by_abort(status: &std::process::ExitStatus) -> bool {
     #[cfg(unix)]
     {
@@ -1441,9 +1447,10 @@ pub(crate) fn died_by_abort(status: &std::process::ExitStatus) -> bool {
     }
     #[cfg(windows)]
     {
-        /// What a Rust process exits with when a panic unwinds out of main.
-        const PANIC: i32 = 101;
-        !status.success() && status.code() != Some(PANIC)
+        /// `STATUS_STACK_BUFFER_OVERRUN`, the status a fast-failed process
+        /// exits with, as `ExitStatus::code` reads it.
+        const FAST_FAIL: i32 = 0xC000_0409_u32 as i32;
+        status.code() == Some(FAST_FAIL)
     }
 }
 

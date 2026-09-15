@@ -1441,8 +1441,9 @@ the live fold.
 Launch `create_kill_child` armed at `site`, and require that it died by the armed abort within
 `KILL_CHILD_BOUND`. The witnesses of rows 103 and 106 launch through it. It reads the child's exit
 status, which `run_kill_child_within` returns, through `died_by_abort`: on Unix, termination by
-`SIGABRT`, which an exit, an ordinary panic and a `Child::kill` do not produce. A child still running
-at the bound is killed and reaped there, and that fails the same assertion.
+`SIGABRT`, and on Windows the exit status `0xC0000409` an abort ends with there, neither of which an
+exit, an ordinary panic or a `Child::kill` produces. A child still running at the bound is killed and
+reaped there, and that fails the same assertion.
 
 `spawn_and_wait` would not do for these two. It launches through the host runner, whose
 `ProcessOutput` carries no signal on Unix, so its callers can only check what the output is not: a
