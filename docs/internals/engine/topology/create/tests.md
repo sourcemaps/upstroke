@@ -239,6 +239,12 @@ caller — here, this fixture.
 
 The first committed line of a run's log, as the event it records.
 
+## `fn assert_replays_twice_to_the_next_open(fixture: &Fixture) {`
+
+Replay twice equal after the append-error protocol: the log's bytes
+replayed twice, the two states equal to each other and to the state of the
+fold the next open's barrier recovers from the same prefix.
+
 ## `fn a_created_run_hands_itself_to_the_loop() {`
 
 =======================================================================
@@ -698,12 +704,14 @@ prefix has no committed line, and nothing is deleted.
 
 A full line then a flush error: the barrier's replay shows the line, the
 run is reported committed, and the append is **never retried** — one
-line, not two.
+line, not two. The log the protocol leaves replays twice to the fold the
+next open recovers (`assert_replays_twice_to_the_next_open`).
 
 ## `fn append_first_sync_error_reports_by_replay_and_never_deletes() {`
 
 A sync error after the data reached the disk: reported by replay, and
-nothing is ever deleted.
+nothing is ever deleted. The log the protocol leaves replays twice to the
+fold the next open recovers (`assert_replays_twice_to_the_next_open`).
 
 ## `fn append_first_error_with_failed_prefix_sync_reports_undetermined_and_never_deletes() {`
 

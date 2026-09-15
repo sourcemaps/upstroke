@@ -188,6 +188,12 @@ The first is the durable claim; the other two are what a scheduler reads,
 and a fold that admitted a spend the log did not record would be caught by
 the disagreement rather than by any one of them.
 
+Each prefix ends with its durable log replayed twice from disk
+(`Run::replay_twice_equal`): the two replays equal each other and the fold
+the parent adopted from the child's log. The recovery holds neither the log
+nor the fold and appends nothing, so what this pins is that the log it
+recovered over still replays to the state the recovery was handed.
+
 ## `fn kill_after_dispatch_recreates_worktree_without_spend()` › `let existed = dispatched.worktree.is_dir();`
 
 What the child actually left, which is the difference between the
@@ -248,6 +254,10 @@ would have produced. That is computed by materializing the same candidate in
 a **second, independent** generation and comparing the two indexes — so the
 assertion is "the same as doing it once, uninterrupted" rather than "some
 file appeared", which a half-applied cherry-pick also satisfies.
+
+Both sides end with the durable log replayed twice from disk and compared
+with the adopted fold (`Run::replay_twice_equal`). The recovery appends
+nothing, so the replay is of the log the child left.
 
 ## `fn repair_materialization_reproduced_after_kill()` › `let control = Dispatched {`
 

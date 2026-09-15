@@ -840,6 +840,22 @@ fn resume(paths: &RunPaths) -> StablePrefix {
     .expect("the surviving prefix replays")
 }
 
+/// Replay twice equal, after a recovery: the log's bytes on disk replayed twice,
+/// the two folds equal to each other and to the one the next process recovered
+/// from the same prefix.
+#[track_caller]
+fn assert_replays_twice_to(paths: &RunPaths, recovered: &TopologyFold) {
+    let events = TopologyFold::parse_log(&read(&paths.events())).expect("the log parses");
+    let once = TopologyFold::replay(inputs(), &events).expect("the log replays");
+    let twice = TopologyFold::replay(inputs(), &events).expect("the log replays again");
+    assert_eq!(once.state(), twice.state(), "two replays disagree");
+    assert_eq!(
+        recovered.state(),
+        once.state(),
+        "the recovered fold and a replay of the log disagree"
+    );
+}
+
 #[track_caller]
 fn append_error(error: &EmitError) -> &UncancelledAppend {
     error
@@ -1087,6 +1103,8 @@ fn open_sync_failure_refuses_resumably_with_no_fold_derived_effect() {
     .expect("the next resume establishes the barrier");
     assert_eq!(prefix.bytes(), &before[..]);
     assert!(prefix.fold().budget_stop().is_some());
+    // And the log replays twice to the fold that open recovered.
+    assert_replays_twice_to(&paths, prefix.fold());
 }
 
 // ---------------------------------------------------------------------------
@@ -2009,6 +2027,11 @@ fn every_append_site_reaches_the_protocol_under_its_own_site() {
             failed.creator_disposition().is_some(),
             site == EventSite::AppendFirst
         );
+
+        // The next process's barrier over what the protocol left, and the log
+        // replayed twice to the fold it recovers.
+        let recovered = resume(&fixture.paths);
+        assert_replays_twice_to(&fixture.paths, recovered.fold());
     }
 }
 
