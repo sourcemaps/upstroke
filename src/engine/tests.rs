@@ -9253,8 +9253,9 @@ fn a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converg
     .expect_err("a resume whose ambient job join errs refuses");
     let refused = refused.to_string();
     assert!(
-        refused.contains("containment step"),
-        "{tag}: the refusal is the injected one: {refused}"
+        refused.contains("INV-18")
+            && refused.contains("(simulated failure). No process was spawned"),
+        "{tag}: the refusal is the containment step's, for the injected failure: {refused}"
     );
     assert!(
         harness
