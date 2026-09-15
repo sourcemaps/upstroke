@@ -1041,6 +1041,8 @@ impl Run<'_> {
                     Answer::Answered { text } => text.clone(),
                     _ => "declined".to_owned(),
                 },
+                attribution: None,
+                citation: None,
             },
         })?;
 

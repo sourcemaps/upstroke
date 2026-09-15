@@ -901,7 +901,8 @@ lenses, P2; until round 10 the fixture made a directory by hand at a fixed
 name and the writer removed whatever directory stood there). Planted by
 every finished-run fixture and again by the matrix before its third resume,
 and read reclaimed — the record, the directory and the file — by
-`assert_finalized`.
+`assert_finalized`, and the re-planted one by the matrix after its third
+resume.
 
 ## `fn resume_finalizes_halted_then_refuses() {`
 
@@ -4239,7 +4240,8 @@ end and the next process finalizes it then refuses. Both reach one
 
 ## `struct ArmedFinalization {`
 
-Hooks that inject an error return at one `(site, phase)` of one
+Hooks that inject an error return — or, in `finalization_kill_child`, a
+kill — at one `(site, phase)` of one
 finalization, the nth time it is reached, so the T-FINALIZE matrix is
 driven at every cleanup site in turn and the next resume is shown to
 converge from each. `answering` arms the first execution;
@@ -4256,6 +4258,18 @@ first.
 
 Armed to answer `injection` — an error return, or the kill the
 finalization kill child dies by — the first time `at` is consulted.
+
+## `impl ArmedFinalization` › `fn reporting_to(mut self, path: &Path) -> Self {`
+
+Also writes every consultation the bundle's effect and run-directory hooks
+answer to `path`, one JSON `(site, phase)` line each, appended before the
+answer is given (`report`, the two-crash proof's writer). A child the armed
+kill takes therefore leaves its parent the cells it consulted, the armed one
+last: the harness's observations carried across the process boundary, since
+the harness dies with the child. The parent needs them for one effect.
+`assert_finalization_order` reads the run lock's release from the harness,
+and after a death the lock file cannot tell a release through the funnel
+from the death, which frees it too.
 
 ## `fn the_report_is_durable_before_any_ref_is_pruned_and_a_current_report_is_not_rewritten()` › `let records = hooks.ledger_records();`
 
@@ -4363,7 +4377,16 @@ fresh branch's reclaim is held as well
 (round 8; the recipes `report-leftover-not-reclaimed-on-write` and
 `-on-fresh`, the second of which survived the matrix until the
 re-planting: every finalization the cells drove had met the write branch
-first, which had already reclaimed what the planting left). The round-8
+first, which had already reclaimed what the planting left). Until the fix
+of `PR10-ST18-THIRD-RESUME-LEFTOVER-ASSERTION` the third resume was held
+only to the first leftover, already gone after the second resume, and to
+`rundir::report_staging_leftovers`, which lists the directory through the
+record, so a fresh branch that removed the record alone and left the
+directory and its half-written file passed (the round-11 crash lens's
+recipe, `r11-third-resume-leftover-record-only`, executed by Gate 5 at
+`caf6bed0`); the matrix now keeps the path the re-planting returns and
+reads the staged file, the directory its record names and the record each
+gone after the third resume, and that recipe fails it. The round-8
 crash lens's recipe — a file re-created inside beta's worktree after the
 `Worktree.RemoveIntent`/after cell, the shape a power loss between the
 checkout's deletion and its intent's leaves when the deletion rolls back
@@ -4579,7 +4602,16 @@ directories synced before the first ref deletion, the pins are pruned,
 the candidates ref is pruned at Complete and retained at Halted, and
 finalization converges. A fresh branch without the barrier prunes at the
 second resume instead; one that takes it at Complete only prunes the
-Halted run's pins behind an unproven name.
+Halted run's pins behind an unproven name. The dead writer's staged report
+the planting leaves is reclaimed before the fault is armed
+(`rundir::sync_report_dir`): since the fix of
+`PR10-RECLAIM-RECORD-DROPPED-BEFORE-DURABLE-DELETION` the reclaim takes the
+public directory's barrier between removing the directory and removing its
+record, so with the leftover in place the first finalization would be
+refused there, before any report was renamed. After the first finalization
+the one thing of the report's protocol left is the record of the staging
+directory the publication removed, which outlives the refused barrier as
+the fix requires, and the converging finalization reclaims it.
 
 ## `fn a_report_rename_without_directory_sync_is_proven_before_…`
 
@@ -4598,14 +4630,110 @@ deletion carries the public directory itself among the directories the
 run-directory ledger recorded synced — that path, not the aggregate
 directory count, which the worktree and intent removals raise on other
 directories — and under the public directory the restart synced and
-staged or renamed nothing.
+staged or renamed nothing. The dead writer's staged report the planting
+leaves is reclaimed before the fault is armed, as in
+`a_report_directory_barrier_that_fails_refuses_pruning_on_every_resume_until_it_holds`
+and for its reason: the reclaim's own barrier would otherwise refuse the
+faulted finalization before the rename this test is about.
+
+## `const FINALIZATION_CHILD_BOUND: Duration = Duration::from_s…`
+
+How long the parent waits for either child of a finalization kill cell,
+the kill child or the resume child, before it kills and reaps the child and
+fails the cell by name (`fixture::run_kill_child_within`). The bound is
+120 s. `kill_inside_closure_recovers` already gives its own kill child that
+bound, through the host runner. It is also about 110 times the 1.07 s a
+kill child took from spawn to death on the build box
+(`~/pr10-evidence/fix-g5-c/matrix/profile-halted-instrumented.log`); on
+the Windows guest a whole cell took about 5 s at `af712163`, counting the
+planting, the kill child's death, the resume and the assertions: 131.94 s
+for the Complete half's 26 cells run alone
+(`~/pr10-evidence/fix-g5-c/guest/guest-timing-af712163.log`).
+Until round 1 of #291 the wait had no bound (F3). A child that wedged
+before reaching its armed cell then held the matrix, with no abort, cell or
+convergence assertion run, until CI's job timeout. The recipe
+`wedge-before-arming` parks the kill child before arming. It now fails the
+Halted half at its first cell after 120.05 s, and the child is killed and
+reaped (`~/pr10-evidence/fix-g5-c/r1/at-5eb16256/wedge-before-arming.log`).
+
+## `fn resume_the_planted_run_in_this_child(`
+
+What both children of the finalization kill tests do with the run their
+parent planted. The repository and its git directory come from
+`UPSTROKE_TEST_KILL_REPO` and `UPSTROKE_TEST_KILL_GITDIR`, read with
+`var_os`, so a path that is not Unicode arrives as it was sent. The resume's
+seams are the ones `resume_with` builds for a `Fixture`: the recorded
+runtime, `AlwaysCertifies`, a fresh `FakeOwnerLiveness`, the `RESUMER`
+incarnation, the planted run's plan. Then `run_recovery_order` runs once
+through `hooks`. A child cannot build a `Fixture` of its own, because a
+`Fixture`'s `Drop` removes its root, and that root is the parent's.
 
 ## `fn finalization_kill_child() {`
 
-The child of `a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_the_next_resume`:
-resumes the run its parent planted at its end and dies by abort at
-`Worktree.RemoveExecutionRoot`'s after phase — inside finalization, after
-the last cleanup step's effect and before the guards drop.
+The child of the finalization kill tests (`kill_inside_finalization`). It
+is armed with `Injection::Kill` at the one `(site, phase)` the parent names
+in `UPSTROKE_TEST_KILL_SITE` (the cell as JSON, read with `std::env::var`),
+and reports every consultation to the file `UPSTROKE_TEST_KILL_REPORT`
+names (`reporting_to`). It then resumes the planted run
+(`resume_the_planted_run_in_this_child`) and dies by abort at that cell's
+first consultation. The hooks only answer. The abort is the
+production funnels' own: `rundir`'s and `workspace_manager::hooks`'s
+`apply` turn `Injection::Kill` into `std::process::abort()`, so the death
+lands exactly where the same funnel returns the error-return matrix's
+injected error. A recovery that returns past the armed kill writes what it
+returned to the report and panics. Until 2026-09-14 the child was armed at
+`Worktree.RemoveExecutionRoot`'s after phase alone — inside finalization,
+after the last cleanup step's effect and before the guards drop.
+
+The report path, like the two paths above, is read with `var_os` since
+round 1 of #291 (F2). Read with `var`, a report path that is not Unicode, a
+valid one on Unix, made the child panic before arming. The Halted half then
+failed its abort assertion at its first cell without exercising
+finalization
+(`~/pr10-evidence/fix-g5-c/r1/before-af712163/non-unicode-kill-report.log`).
+Read with `var_os`, the same path works, for the kill child's report and
+for the resume child's (`r1/at-5eb16256/non-unicode-kill-report.log`,
+`non-unicode-kill-and-resume-reports.log`).
+
+## `fn finalization_resume_child() {`
+
+The next resume of a finalization kill cell, in a process of its own. It
+resumes the planted run once through the harness bundle `resume` uses,
+`HarnessTopologyHooks` with a recording durability ledger. It then writes
+one JSON object to the report file, with three fields:
+
+- `refusal`: the resume's error message, or null when it continued;
+- `continued`: the `Recovered` it returned when it did;
+- `released_through_the_funnel`: whether `Lock.Release` was observed at
+  both hook phases.
+
+It asserts nothing. The parent reads the object
+(`resume_in_a_fresh_process`).
+
+## `fn kill_inside_finalization(`
+
+Spawns `finalization_kill_child` against `planted`, armed at `cell`
+(`fixture::run_kill_child_within`: this test binary again,
+`--exact --ignored`, waited for within `FINALIZATION_CHILD_BOUND`). A child
+still running at the bound is killed and reaped, and the cell fails naming
+`tag`, which carries the outcome, and the armed cell. The death
+must be the abort's (`died_by_abort`), not merely an unsuccessful exit,
+which a child that returned past the kill and panicked also has; that
+refusal quotes the child's report. The last consultation the child
+reported must be `cell`. Returns the reported consultations recorded into
+a fresh harness, the shape `assert_finalization_order` takes. The control
+`control-kill-child-answers-an-error-instead-of-dying`, the child armed
+with `Injection::Error`, fails both halves of the matrix at their first
+cell on the child's exit 101
+(`~/pr10-evidence/fix-g5-c/r1/at-5eb16256/round0-six/`).
+
+## `fn resume_in_a_fresh_process(planted: &FinishedPlanting, ta…`
+
+Spawns `finalization_resume_child` against `planted` through the same
+bounded wait. The child must finish with success, or the call fails quoting
+its report. Returns the refusal it reported and whether the release was
+observed at both phases. A resume that continued past a finished run fails
+here, naming what it returned.
 
 ## `fn a_kill_inside_finalization_after_the_execution_root_is_r…`
 
@@ -4618,7 +4746,102 @@ resume finds the report current, nothing left to prune, releases the lock
 through the funnel and refuses. Since round 7 the object store is read
 after the death and again after the restart (`assert_objects_kept`): the
 restart takes the fresh branch, and the same recipe as the matrix's,
-`st18-fresh-branch-prunes-objects-real-kill`, fails it there.
+`st18-fresh-branch-prunes-objects-real-kill`, fails it there. Since
+2026-09-14 the child is spawned through `kill_inside_finalization`; the cell
+is also one of the Complete kill matrix's, and this test keeps what the
+matrix does not read there: every effect's own predicate after the death,
+the release's included, and R27 before the restart. Since round 1 of #291
+the restart runs in a process of its own as well
+(`resume_in_a_fresh_process`), and the release at both phases is read from
+that child's report.
+
+## `fn kill_at_every_finalization_cell(outcome: &RunOutcome) {`
+
+The ST-18 matrix executed as kills. The child is killed at every cell of
+`finalization_sites(outcome)`: both hook phases of every effect's site, in
+effect order, 26 at Complete and 24 at Halted asserted as exact counts, the
+cells `kill_after_report_before_each_cleanup_step` drives with error
+returns. Each cell plants a finished run with every kind of residue, kills
+the child there (`kill_inside_finalization`) and requires, in order:
+
+- the log untouched by the death, and the answer files byte-identical;
+- `assert_finalization_order` over what the death left: every effect before
+  the cell done, the cell's own effect done only at its after phase, nothing
+  later, the release read from the child's reported consultations;
+- the next resume, in a fresh process of its own
+  (`resume_in_a_fresh_process`), finalizing what is left and refusing, with
+  the report "regenerated" when the death came before its publication and
+  "already current" when it came after;
+- `assert_finalized`, and the log still untouched;
+- the report naming the runner `run_started` recorded, and the run lock
+  released through its funnel, at both phases, by that resume;
+- replay from disk twice equal, ending at the outcome.
+
+The parent plants, spawns and asserts. It resumes nothing itself, so no
+cell's resume runs in a process that has run an earlier cell.
+
+Why kills as well as error returns. The PR10 record's R11 reads an error
+return at a hook phase as leaving the durable state a kill there leaves.
+Gate 5's first run graded "kills between every terminal-finalization
+effect" asserted on that reading, executed as a real kill at one cell only
+(`reviews/2026-09-14-gate-G5.md` on `gate/g5-run1`, §8 groups 1 and 5).
+Here every cell's death is held to the order the error-return matrix
+asserts at the same cell. The error-return matrix also has a blind spot the
+reading does not name: its faulted resume and its next resume share a
+process, so a convergence that depends on what the interrupted attempt held
+in memory passes it. The recipe `finalize-remembers-the-report-attempt-in-memory`
+lets the fresh branch trust a current report only when this process
+attempted the write, and otherwise return without pruning. It passes
+`kill_after_report_before_each_cleanup_step` and the single real kill, and
+fails this matrix at `Halted/RunDir.WriteReport/after` and
+`Complete/RunDir.WriteReport/after`.
+
+Until round 1 of #291 the next resume ran in the parent, one process for
+every cell of an outcome, and that left the same blind spot one step
+removed (F1). The reviewer's variant of the recipe remembers whether this
+process attempted any report write at all. It passed both halves at
+`af712163`, because cell 0's resume, run in the parent, had written one
+(`~/pr10-evidence/fix-g5-c/r1/before-af712163/unkeyed-memory.log`,
+`cargo exit=0`). With each resume in a fresh process it fails both halves at
+`RunDir.WriteReport/after`, *"(i) the closed generation's worktree is
+pruned"* (`r1/at-5eb16256/unkeyed-memory.log`). The path-keyed recipe fails
+there too (`path-keyed-memory.log`).
+
+The matrix fails at the cell named under four more recipes, all under
+`~/pr10-evidence/fix-g5-c/r1/at-5eb16256/round0-six/`:
+
+- `finalize-fresh-branch-skips-cleanup`, a resume that reads a current
+  report as a finished finalization: `…/RunDir.WriteReport/after`;
+- `finalize-reads-a-missing-report-as-current`:
+  `…/RunDir.WriteReport/before`;
+- `finalize-skips-candidate-pins-once-prepared-pins-are-gone`:
+  `…/Ref.DeletePreparedPin/after`;
+- `remove-execution-root-refuses-an-absent-root`, a removal that refuses a
+  root the dead child already removed: `…/Worktree.RemoveExecutionRoot/after`.
+
+On the build box each outcome took about 30 s alone with both children
+per cell: 31.05 s at Complete and 28.33 s at Halted
+(`~/pr10-evidence/fix-g5-c/r1/matrix/timing-complete-alone-5eb16256.log`,
+`timing-halted-alone-5eb16256.log`). With the resume in the parent they had
+taken 30.14 s and 28.38 s
+(`~/pr10-evidence/fix-g5-c/matrix/timing-complete-alone-71229117.log`,
+`timing-halted-alone-71229117.log`). The error-return matrix's 50 cells
+took 6.44 s (`r1/matrix/timing-error-matrix-alone-5eb16256.log`). About
+1.07 s of each cell is the kill child's spawn to its death
+(`matrix/profile-halted-instrumented.log`, an uncommitted timer, at
+`71229117`). On that host a `python3` `os.abort()` takes 1.06 s too, where
+`os._exit` and a `SIGKILL` of itself take 0.00 s, and `core_pattern` names
+a pipe helper (`matrix/abort-cost-on-this-box.log`).
+
+## `fn a_kill_at_every_cell_of_a_complete_finalization_converge…`
+
+The Complete half of the kill matrix: 26 cells, the candidates ref's
+deletion among them.
+
+## `fn a_kill_at_every_cell_of_a_halted_finalization_converges_…`
+
+The Halted half: 24 cells. One test per outcome, so the two halves run in
+parallel.
 
 ## `fn kill_after_run_finished_before_report() {`
 

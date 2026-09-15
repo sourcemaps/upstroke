@@ -207,14 +207,23 @@ and a call (PR10's round 9).
 
 ## `pub entry: Option<EntryObserved>,`
 
-For a directory barrier taken by `record_entry` — the checkout barrier of
-`workspace_manager::remove_worktree_proving` today — the entry the barrier
-was taken for and whether it was present, read by `symlink_metadata` in the
-statement immediately before the barrier; `None` for every other entry. A
-`SyncedDirectory` record that carries the checkout observed absent is the
-proof that the barrier followed the deletion, which a record of the
-directory alone, read at a hook phase, never gave (the round-9 fix-check
-lens, P1).
+For a directory barrier taken by `record_entry`, the entry the barrier was
+taken for and whether it was present, read by `symlink_metadata` in the
+statement immediately before the barrier. Two barriers take one:
+
+- the checkout barrier of `workspace_manager::remove_worktree_proving`;
+- the report staging reclaim's barrier (`rundir::sync_dir_observing`), which
+  carries the recorded staging directory.
+
+For the report staging directory's creation (`DirectoryCreated`), the entry
+is the record that names it. It is `None` for every other entry.
+
+A `SyncedDirectory` record that carries its entry observed absent is the
+proof that the barrier followed the deletion. A record of the directory
+alone never gave that proof: read at a hook phase, it did not (the round-9
+fix-check lens, P1), and written by a barrier moved ahead of the deletion,
+it does not either (the Gate 5 report's review, round 3, on the reclaim's
+power-loss witness).
 
 ## `pub struct EntryObserved {`
 

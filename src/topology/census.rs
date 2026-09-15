@@ -1627,11 +1627,11 @@ pub(crate) mod tests {
         out.push(Candidate::new(
             "design_defect",
             ev(TopologyEventBody::DesignDefect {
-                data: crate::events::DesignDefect {
-                    question: QuestionId::from("q-census-defect"),
-                    context: "a census defect".to_owned(),
-                    answer: "noted".to_owned(),
-                },
+                data: crate::events::DesignDefect::discovered(
+                    QuestionId::from("q-census-defect"),
+                    "a census defect".to_owned(),
+                    "noted".to_owned(),
+                ),
             }),
         ));
         out

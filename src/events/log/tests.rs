@@ -68,6 +68,8 @@ fn defect(question: &str) -> EventBody {
             question: QuestionId(question.to_owned()),
             context: "context Ünicode".to_owned(),
             answer: "answer".to_owned(),
+            attribution: None,
+            citation: None,
         },
     }
 }
@@ -730,6 +732,15 @@ fn the_legacy_open_is_byte_identical_to_the_pre_move_writer() {
 
 #[test]
 fn the_legacy_append_is_byte_identical_to_the_pre_move_writer() {
+    assert_eq!(
+        serde_json::to_value(defect("q-1")).expect("fixture")["data"],
+        serde_json::json!({
+            "question": "q-1",
+            "context": "context Ünicode",
+            "answer": "answer"
+        }),
+        "the fixture this test feeds both writers keeps its pre-taxonomy three-field payload"
+    );
     let bodies: Vec<EventBody> = vec![
         commit("0f5c1c4", "first"),
         defect("q-1"),

@@ -469,11 +469,108 @@ pub struct QuestionAnswered {
     pub via: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionAttribution {
+    DiscoveredHole,
+    DesignDefect,
+}
+
+impl fmt::Display for QuestionAttribution {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::DiscoveredHole => "discovered_hole",
+            Self::DesignDefect => "design_defect",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectiveAttribution<'a> {
+    Unclassified,
+    Discovered,
+    Convicted { citation: &'a str },
+}
+
+impl<'a> EffectiveAttribution<'a> {
+    #[must_use]
+    pub fn derive(stored: Option<QuestionAttribution>, citation: Option<&'a str>) -> Self {
+        match (stored, citation) {
+            (None, _) => Self::Unclassified,
+            (Some(QuestionAttribution::DesignDefect), Some(citation)) if cited(citation) => {
+                Self::Convicted { citation }
+            }
+            (Some(_), _) => Self::Discovered,
+        }
+    }
+
+    #[must_use]
+    pub fn attribution(self) -> Option<QuestionAttribution> {
+        match self {
+            Self::Unclassified => None,
+            Self::Discovered => Some(QuestionAttribution::DiscoveredHole),
+            Self::Convicted { .. } => Some(QuestionAttribution::DesignDefect),
+        }
+    }
+}
+
+#[must_use]
+pub fn cited(citation: &str) -> bool {
+    !citation.trim().is_empty()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "a design_defect conviction cites the design-phase checklist item or precedent that was \
+     available and unapplied; no citation, no conviction"
+)]
+pub struct UncitedConviction;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesignDefect {
     pub question: QuestionId,
     pub context: String,
     pub answer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<QuestionAttribution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub citation: Option<String>,
+}
+
+impl DesignDefect {
+    #[must_use]
+    pub fn discovered(question: QuestionId, context: String, answer: String) -> Self {
+        Self {
+            question,
+            context,
+            answer,
+            attribution: Some(QuestionAttribution::DiscoveredHole),
+            citation: None,
+        }
+    }
+
+    pub fn convicted(
+        question: QuestionId,
+        context: String,
+        answer: String,
+        citation: String,
+    ) -> Result<Self, UncitedConviction> {
+        if !cited(&citation) {
+            return Err(UncitedConviction);
+        }
+        Ok(Self {
+            question,
+            context,
+            answer,
+            attribution: Some(QuestionAttribution::DesignDefect),
+            citation: Some(citation),
+        })
+    }
+
+    #[must_use]
+    pub fn effective_attribution(&self) -> EffectiveAttribution<'_> {
+        EffectiveAttribution::derive(self.attribution, self.citation.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1887,7 +1984,25 @@ mod tests {
                     question: QuestionId::from("q-1"),
                     context: "cursor format was never decided".to_owned(),
                     answer: "use base64".to_owned(),
+                    attribution: None,
+                    citation: None,
                 },
+            },
+            EventBody::DesignDefect {
+                data: DesignDefect::discovered(
+                    QuestionId::from("q-2"),
+                    "the plan says nothing about cursors".to_owned(),
+                    "opaque cursors".to_owned(),
+                ),
+            },
+            EventBody::DesignDefect {
+                data: DesignDefect::convicted(
+                    QuestionId::from("q-3"),
+                    "the plan contradicts itself about cursors".to_owned(),
+                    "rescope".to_owned(),
+                    "design checklist item 2".to_owned(),
+                )
+                .expect("a cited conviction"),
             },
             EventBody::RunFinished {
                 data: RunFinished {
@@ -1898,6 +2013,21 @@ mod tests {
                 },
             },
         ];
+        let pre_taxonomy = bodies
+            .iter()
+            .find(|body| {
+                matches!(body, EventBody::DesignDefect { data } if data.question.as_str() == "q-1")
+            })
+            .expect("the corpus keeps its pre-taxonomy design_defect");
+        assert_eq!(
+            serde_json::to_value(pre_taxonomy).expect("fixture")["data"],
+            serde_json::json!({
+                "question": "q-1",
+                "context": "cursor format was never decided",
+                "answer": "use base64"
+            }),
+            "the existing fixture keeps its pre-taxonomy three-field payload"
+        );
         for body in bodies {
             let event = Event::now(body);
             let line = serde_json::to_string(&event).expect("serialize");
@@ -3370,5 +3500,201 @@ mod tests {
         file.write_all(b"{\"ts\":\"2026").expect("partial write");
         assert!(tail.poll(&mut warnings).expect("poll").is_empty());
         assert!(warnings.is_empty(), "not an error, just not finished yet");
+    }
+
+    #[test]
+    fn the_attribution_is_spelled_in_snake_case_on_the_wire() {
+        assert_eq!(
+            serde_json::to_string(&QuestionAttribution::DiscoveredHole).expect("serialize"),
+            r#""discovered_hole""#
+        );
+        assert_eq!(
+            serde_json::to_string(&QuestionAttribution::DesignDefect).expect("serialize"),
+            r#""design_defect""#
+        );
+        assert_eq!(
+            QuestionAttribution::DiscoveredHole.to_string(),
+            "discovered_hole"
+        );
+        assert_eq!(
+            QuestionAttribution::DesignDefect.to_string(),
+            "design_defect"
+        );
+        for spelling in [r#""DiscoveredHole""#, r#""discovered-hole""#, r#""defect""#] {
+            assert!(
+                serde_json::from_str::<QuestionAttribution>(spelling).is_err(),
+                "{spelling} is not a wire spelling"
+            );
+        }
+    }
+
+    #[test]
+    fn a_discovered_record_carries_its_attribution_and_no_citation_through_json() {
+        let record = DesignDefect::discovered(
+            QuestionId::from("q-1"),
+            "cursor format was never decided".to_owned(),
+            "use base64".to_owned(),
+        );
+        assert_eq!(
+            record.attribution,
+            Some(QuestionAttribution::DiscoveredHole)
+        );
+        assert_eq!(record.citation, None);
+        assert_eq!(
+            record.effective_attribution(),
+            EffectiveAttribution::Discovered
+        );
+        let json = serde_json::to_string(&record).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"question":"q-1","context":"cursor format was never decided","answer":"use base64","attribution":"discovered_hole"}"#
+        );
+        let back: DesignDefect = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, record);
+    }
+
+    #[test]
+    fn a_convicted_record_carries_its_citation_through_json() {
+        let record = DesignDefect::convicted(
+            QuestionId::from("q-1"),
+            "cursor format was never decided".to_owned(),
+            "use base64".to_owned(),
+            "design checklist item 2: the pagination contract is settled before execution"
+                .to_owned(),
+        )
+        .expect("a cited conviction is constructible");
+        assert_eq!(record.attribution, Some(QuestionAttribution::DesignDefect));
+        assert_eq!(
+            record.effective_attribution(),
+            EffectiveAttribution::Convicted {
+                citation: "design checklist item 2: the pagination contract is settled before execution"
+            }
+        );
+        assert_eq!(
+            record.effective_attribution().attribution(),
+            Some(QuestionAttribution::DesignDefect)
+        );
+        let json = serde_json::to_string(&record).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"question":"q-1","context":"cursor format was never decided","answer":"use base64","attribution":"design_defect","citation":"design checklist item 2: the pagination contract is settled before execution"}"#
+        );
+        let back: DesignDefect = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, record);
+    }
+
+    #[test]
+    fn an_unclassified_record_serialises_to_its_pre_taxonomy_bytes() {
+        let event = Event {
+            ts: "2026-09-14T00:00:00Z".to_owned(),
+            body: EventBody::DesignDefect {
+                data: DesignDefect {
+                    question: QuestionId::from("q-1"),
+                    context: "cursor format was never decided".to_owned(),
+                    answer: "use base64".to_owned(),
+                    attribution: None,
+                    citation: None,
+                },
+            },
+        };
+        let line = serde_json::to_string(&event).expect("serialize");
+        assert_eq!(
+            line,
+            r#"{"ts":"2026-09-14T00:00:00Z","event":"design_defect","data":{"question":"q-1","context":"cursor format was never decided","answer":"use base64"}}"#,
+            "a record written without a ruling is the record the schema-3 writer always wrote"
+        );
+        let back: Event = serde_json::from_str(&line).expect("deserialize");
+        assert_eq!(back, event);
+
+        let record: DesignDefect = serde_json::from_str(
+            r#"{"question":"q-1","context":"cursor format was never decided","answer":"use base64"}"#,
+        )
+        .expect("a pre-taxonomy record reads");
+        assert_eq!(record.attribution, None);
+        assert_eq!(record.citation, None);
+        assert_eq!(
+            record.effective_attribution(),
+            EffectiveAttribution::Unclassified,
+            "written before the taxonomy: unclassified, never defaulted to a discovery"
+        );
+        assert_eq!(record.effective_attribution().attribution(), None);
+    }
+
+    #[test]
+    fn convicted_refuses_an_empty_or_blank_citation() {
+        for citation in ["", " ", "   ", "\n", "\t \n"] {
+            assert_eq!(
+                DesignDefect::convicted(
+                    QuestionId::from("q-1"),
+                    "context".to_owned(),
+                    "answer".to_owned(),
+                    citation.to_owned(),
+                ),
+                Err(UncitedConviction),
+                "citation {citation:?}"
+            );
+        }
+        assert!(
+            DesignDefect::convicted(
+                QuestionId::from("q-1"),
+                "context".to_owned(),
+                "answer".to_owned(),
+                "§5 objective 2".to_owned(),
+            )
+            .is_ok()
+        );
+        assert!(
+            UncitedConviction
+                .to_string()
+                .contains("no citation, no conviction"),
+            "{UncitedConviction}"
+        );
+    }
+
+    #[test]
+    fn a_conviction_without_a_citation_reads_as_a_discovery() {
+        for raw in [
+            r#"{"question":"q-1","context":"c","answer":"a","attribution":"design_defect"}"#,
+            r#"{"question":"q-1","context":"c","answer":"a","attribution":"design_defect","citation":""}"#,
+            r#"{"question":"q-1","context":"c","answer":"a","attribution":"design_defect","citation":"  \n"}"#,
+        ] {
+            let record: DesignDefect = serde_json::from_str(raw).expect(raw);
+            assert_eq!(
+                record.attribution,
+                Some(QuestionAttribution::DesignDefect),
+                "the stored value is kept as written: {raw}"
+            );
+            assert_eq!(
+                record.effective_attribution(),
+                EffectiveAttribution::Discovered,
+                "and read as a discovery, derived rather than re-decided: {raw}"
+            );
+            assert_eq!(
+                record.effective_attribution().attribution(),
+                Some(QuestionAttribution::DiscoveredHole),
+                "{raw}"
+            );
+        }
+
+        let cited: DesignDefect = serde_json::from_str(
+            r#"{"question":"q-1","context":"c","answer":"a","attribution":"design_defect","citation":"§5 objective 2"}"#,
+        )
+        .expect("a cited conviction reads");
+        assert_eq!(
+            cited.effective_attribution(),
+            EffectiveAttribution::Convicted {
+                citation: "§5 objective 2"
+            }
+        );
+
+        let stray: DesignDefect = serde_json::from_str(
+            r#"{"question":"q-1","context":"c","answer":"a","attribution":"discovered_hole","citation":"a citation nothing convicts on"}"#,
+        )
+        .expect("a discovery with a stray citation reads");
+        assert_eq!(
+            stray.effective_attribution(),
+            EffectiveAttribution::Discovered,
+            "a citation does not convict by itself"
+        );
     }
 }
