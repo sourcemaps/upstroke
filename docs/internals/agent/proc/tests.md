@@ -225,11 +225,30 @@ The production adapter with an error return at the after phase of both process s
 (#292's fate fix). The timeout witnesses above reach `kill_tree` only on Windows: on Unix a timeout
 terminates through `terminate_supervised`, which stores the fate itself, so a `kill_tree` that
 stored it only on Windows kept the Linux suite green (#292's round-1 fix-check lens, finding 3).
-This reaches `kill_tree` on every host through the path that calls it when the spawn's after phase
-fails: the child is created (recorded once), the spawn's after phase returns the injected error,
+This reaches `kill_tree` on Linux and Windows through the path that calls it when the spawn's after
+phase fails: the child is created (recorded once), the spawn's after phase returns the injected error,
 the cleanup termination runs its before phase and its primitive, and its after phase returns the
 second error. The failure is the spawn's error with the termination's beside it, the child is gone
 when the funnel returns, and the fate is `Gone`.
+
+Not on macOS. On every Unix that error path drops the Supervisor before it calls `kill_tree`, and
+the drop's `finish` has the reaper kill the group and wait until it holds no non-zombie member, so
+the leader, this process's unreaped child, is a zombie when the primitive signals its group. On
+macOS that signal failed with `EPERM` (#292's CI, `test (macos-latest)`, job 104258732193:
+"terminating the agent process group did not establish it gone: the group signal failed (Operation
+not permitted (os error 1))"); `signal_group_kill` treats only `ESRCH` as gone, so the primitive
+fails before the fate store this witness is about and the fate stays `Unresolved`. That answer is
+the primitive's, not the store's: `PR292-MACOS-ZOMBIE-ONLY-GROUP-EPERM-FAILS-KILL-TREE`, deferred,
+whose repair runs this witness on macOS again. The direct witness below guards the store on every
+Unix.
+
+## `fn kill_tree_stores_a_terminated_groups_fate_before_its_after_phase_errs() {`
+
+`kill_tree` called directly on a live process group of its own, on every Unix host, with an error
+answered at `Process.Terminate`'s after phase: the primitive kills the group and reaps its leader,
+the error returned is the after phase's, the leader is gone, and the fate is `Gone`. The group is
+live when it is signalled, so the macOS answer above does not arise. With the store made
+Windows-only, the fate stays `Unresolved` and this fails.
 
 ## `fn a_child_registered_pre_exec_is_settled_when_the_parent_never_registers_it() {`
 

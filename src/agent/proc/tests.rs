@@ -500,11 +500,13 @@ fn a_fault_after_the_terminate_primitive_reports_the_child_gone() {
     );
 }
 
+#[cfg(not(target_os = "macos"))]
 struct SpawnAfterThenTerminateAfterFault {
     inner: crate::runner::HarnessHooks,
     created: Vec<(u32, u64)>,
 }
 
+#[cfg(not(target_os = "macos"))]
 impl SpawnHooks for SpawnAfterThenTerminateAfterFault {
     fn point(&mut self, point: SubEffectPoint) -> Injection {
         self.inner.point(point)
@@ -538,6 +540,7 @@ impl SpawnHooks for SpawnAfterThenTerminateAfterFault {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn a_spawn_fault_whose_cleanup_termination_faults_after_its_primitive_reports_the_child_gone() {
     use std::sync::{Arc, Mutex, PoisonError};
@@ -606,6 +609,55 @@ fn a_spawn_fault_whose_cleanup_termination_faults_after_its_primitive_reports_th
         "the cleanup termination's primitive completed before its after phase failed: {message}"
     );
     let _ = std::fs::remove_dir_all(&scratch);
+}
+
+#[cfg(unix)]
+#[test]
+fn kill_tree_stores_a_terminated_groups_fate_before_its_after_phase_errs() {
+    use std::os::unix::process::CommandExt;
+    use std::sync::{Arc, Mutex};
+
+    use crate::topology::effects::HookHarness;
+
+    let mut command = shell("sleep 60");
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: the closure calls one async-signal-safe syscall. The group is
+    // what `kill_tree` targets, so the fixture must have one of its own.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut tree = ProcessTree::spawn(&mut command, &mut NoHooks).expect("spawn a group leader");
+    let pid = tree.child.id();
+    let fate = std::cell::Cell::new(ProcessFate::Unresolved);
+    let mut hooks = TerminateFaultAt {
+        inner: crate::runner::HarnessHooks::new(Arc::new(Mutex::new(HookHarness::new()))),
+        at: HookPhase::After,
+    };
+    let error = kill_tree(&mut hooks, ProcessSite::Terminate, &mut tree, &fate)
+        .expect_err("the after phase returns the injected error");
+    assert!(
+        error
+            .to_string()
+            .contains("the process funnel was made to fail at `Terminate` (after)"),
+        "the error is the after phase's: {error}"
+    );
+    assert!(
+        terminate_fault_helper_gone(pid, 0),
+        "the group leader {pid} is gone once kill_tree returns"
+    );
+    assert_eq!(
+        fate.get(),
+        ProcessFate::Gone,
+        "the primitive completed before the after phase erred: {error}"
+    );
 }
 
 #[cfg(unix)]
