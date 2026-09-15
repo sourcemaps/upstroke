@@ -13696,6 +13696,17 @@ fn candidate_sequence_kill_child() {
             EffectSiteId::Object(ObjectSite::CandidateCommitTree),
             HookPhase::Before,
         ),
+        "commit-tree-id-unread" => (
+            EffectSiteId::Object(ObjectSite::CandidateCommitTree),
+            HookPhase::Point {
+                point: SubEffectPoint::IdUnread,
+                mode: InjectionMode::Kill,
+            },
+        ),
+        "before-candidate-pin" => (
+            EffectSiteId::Ref(RefSite::PinCandidatePrepared),
+            HookPhase::Before,
+        ),
         "after-candidates-ref" => (
             EffectSiteId::Ref(RefSite::CreateCandidates),
             HookPhase::After,
@@ -13703,7 +13714,15 @@ fn candidate_sequence_kill_child() {
         other => panic!("`{other}` is not a coordinate of the candidate sequence"),
     };
     let fixture = Fixture::adopted_by_a_kill_child(root, plan());
-    let mut hooks = EffectKilledAt::new(&harness(), at);
+    let armed = harness();
+    if let HookPhase::Point { point, mode } = at.1 {
+        armed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .arm(at.0, point, mode)
+            .expect("the point supports a kill");
+    }
+    let mut hooks = EffectKilledAt::new(&armed, at);
     let driven = drive_as(
         &fixture,
         RESUMER,
@@ -13939,6 +13958,202 @@ fn a_kill_before_the_candidate_commit_is_written_is_settled_interrupted_and_the_
         "{tag}: nothing is owed after the recovery"
     );
     assert_replays_twice_equal(&fixture, tag);
+}
+
+fn candidate_commits_left_to_git(fixture: &Fixture) -> Vec<String> {
+    use crate::workspace_manager::fixture::git;
+
+    crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+        .expect("fsck")
+        .into_iter()
+        .filter(|object| {
+            git(&fixture.repo_root, &["cat-file", "-t", object]) == "commit"
+                && git(&fixture.repo_root, &["show", "-s", "--format=%s", object])
+                    != "upstroke: ephemeral snapshot input"
+        })
+        .collect()
+}
+
+fn a_kill_after_the_candidate_commit_is_written_is_settled_interrupted_and_the_commit_left_to_git(
+    coordinate: &str,
+    tag: &str,
+) {
+    use crate::engine::topology::candidate::{CandidateRecovery, recovery_for};
+
+    let fixture = Fixture::healthy(tag);
+    let planted = kill_the_candidate_sequence(&fixture, coordinate, tag);
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec!["run_resumed", "task_dispatched", "attempt_started"],
+        "{tag}: the attempt is in flight and nothing durable names a candidate"
+    );
+    let manager = fixture.manager();
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let worktree = manager.slot_path(&slot);
+    assert!(
+        worktree.is_dir() && manager.intents().expect("intents").contains(&slot),
+        "{tag}: R9: the attempt's worktree and intent stand"
+    );
+    let left = candidate_commits_left_to_git(&fixture);
+    assert_eq!(
+        left.len(),
+        1,
+        "{tag}: the candidate commit the killed capture wrote is in the object store, and \
+         nothing references it: {left:?}"
+    );
+    assert!(
+        pins_of(&fixture).is_empty() && candidates_refs_of(&fixture).is_empty(),
+        "{tag}: no ref names it"
+    );
+    assert_eq!(
+        recovery_for(&manager, RUN_ID, &replayed(&fixture), ALPHA).expect("classify"),
+        CandidateRecovery {
+            promotion: None,
+            orphan_pin: None,
+            settles_interrupted: true,
+        },
+        "{tag}: the unsettled attempt is owed an interrupted settlement, and its object nothing"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (recovered, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut hooks,
+    )
+    .expect("the next incarnation resumes");
+    assert_eq!(
+        recovered.interrupted, 1,
+        "{tag}: step (d) settles the attempt the dead incarnation left in flight"
+    );
+    assert!(
+        recovered.finished.is_empty(),
+        "{tag}: there is no promotion to finish"
+    );
+    assert!(
+        !worktree.exists() && !manager.intents().expect("intents").contains(&slot),
+        "{tag}: the closed generation's worktree and intent are reclaimed"
+    );
+    assert_eq!(
+        candidate_commits_left_to_git(&fixture),
+        left,
+        "{tag}: the settlement leaves the dead capture's commit to Git, neither adopted nor \
+         deleted"
+    );
+    {
+        let seen = observed.lock().unwrap_or_else(PoisonError::into_inner);
+        for (site, phase) in [
+            (
+                EffectSiteId::Object(ObjectSite::CandidateCommitTree),
+                HookPhase::Before,
+            ),
+            (
+                EffectSiteId::Ref(RefSite::PinCandidatePrepared),
+                HookPhase::Before,
+            ),
+        ] {
+            assert!(
+                !seen.observed(site, phase),
+                "{tag}: the recovery performs no `{site}` ({phase}) of its own"
+            );
+        }
+    }
+    let runner = RecordingRunner::editing();
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Settled {
+                key: ALPHA,
+                accepted: true,
+                ..
+            }))
+        ),
+        "{tag}: the next generation's attempt is accepted: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec![
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "attempt_interrupted",
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "candidate_prepared",
+            "task_candidate_created",
+        ],
+        "{tag}: the settlement, then the next generation's whole candidate sequence"
+    );
+    let prepared = prepared_candidates_of(&fixture);
+    let [candidate] = prepared.as_slice() else {
+        panic!("{tag}: one candidate across the kill: {prepared:?}");
+    };
+    assert_eq!(candidate.generation, GenerationId(1), "{tag}");
+    assert_eq!(
+        candidates_refs_of(&fixture),
+        vec![(
+            candidate.candidate_ref.0.clone(),
+            candidate.commit_sha.0.clone()
+        )],
+        "{tag}: R11 at the commit the next generation wrote"
+    );
+    for phase in [HookPhase::Before, HookPhase::After] {
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(EffectSiteId::Object(ObjectSite::CandidateCommitTree), phase),
+            "{tag}: the next generation's capture performs its own commit-tree ({phase})"
+        );
+    }
+    let still_left = candidate_commits_left_to_git(&fixture);
+    assert!(
+        left.iter()
+            .all(|commit| still_left.contains(commit) || *commit == candidate.commit_sha.0),
+        "{tag}: the dead capture's commit is still Git's unless the next generation's own \
+         commit-tree wrote the same object: {left:?} then {still_left:?}"
+    );
+    assert!(
+        recovery_for(&manager, RUN_ID, &replayed(&fixture), ALPHA)
+            .expect("classify again")
+            .is_empty(),
+        "{tag}: nothing is owed after the recovery"
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+#[test]
+fn a_kill_before_the_candidate_pin_is_settled_interrupted_and_leaves_the_written_commit_to_git() {
+    a_kill_after_the_candidate_commit_is_written_is_settled_interrupted_and_the_commit_left_to_git(
+        "before-candidate-pin",
+        "kill-before-candidate-pin",
+    );
+}
+
+#[test]
+fn a_kill_before_the_candidate_commits_id_is_read_is_settled_interrupted_and_leaves_the_commit_to_git()
+ {
+    a_kill_after_the_candidate_commit_is_written_is_settled_interrupted_and_the_commit_left_to_git(
+        "commit-tree-id-unread",
+        "kill-candidate-commit-id-unread",
+    );
 }
 
 #[test]
@@ -15179,6 +15394,226 @@ fn a_kill_after_the_gate_containers_git_view_is_mounted_is_reclaimed_by_the_next
     a_kill_at_the_gate_containers_git_view_mount_is_reclaimed_by_the_next_resume(
         HookPhase::After,
         "mount-kill-after-engine",
+    );
+}
+
+fn a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
+    ref_created: bool,
+    tag: &str,
+) {
+    let fixture = Fixture::healthy(tag);
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(&fixture, &runtime, &certifies);
+    let integration_ref = fixture.started.integration_ref.as_str().to_owned();
+    let base = fixture.started.base_sha.as_str().to_owned();
+    let remove_marker = EffectSiteId::RunDir(RunDirSite::RemoveMarker);
+    let create_ref = EffectSiteId::Ref(RefSite::CreateIntegration);
+    let committed = fixture.log_bytes();
+    let marker = fixture.public().join(rundir::MARKER);
+    assert!(
+        marker.exists(),
+        "{tag}: the fixture's creator left its marker standing (P6)"
+    );
+
+    let constructed = harness();
+    rundir::remove_marker(
+        &fixture.public(),
+        &mut rundir::HarnessHooks::new(Arc::clone(&constructed)),
+    )
+    .expect("P7: the creator's marker is removed through its funnel");
+    if ref_created {
+        given
+            .refs
+            .create_zero_old(
+                &mut crate::workspace_manager::HarnessEffects::new(Arc::clone(&constructed)),
+                &integration_ref,
+                &base,
+            )
+            .expect("P8: the integration ref is created through its funnel");
+    }
+    {
+        let seen = constructed.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            seen.observed(remove_marker, HookPhase::After)
+                && seen.observed(create_ref, HookPhase::After) == ref_created,
+            "{tag}: the prefix was built through the funnels whose phases it ends at"
+        );
+    }
+    assert!(!marker.exists(), "{tag}: the marker is gone");
+    assert_eq!(
+        given.refs.target(),
+        ref_created.then(|| base.clone()),
+        "{tag}: the ref exists exactly when its creation was performed"
+    );
+    assert!(
+        !fixture.manager().execution_root().exists(),
+        "{tag}: nothing the run does after its creation is on disk"
+    );
+    assert_eq!(
+        fixture.log_bytes(),
+        committed,
+        "{tag}: the log is the creator's committed prefix"
+    );
+
+    let recovery = harness();
+    let (result, _) = resume(&fixture, &recovery, &given);
+    result.expect("the resume over the creation's prefix converges");
+    assert_eq!(
+        recovery
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .count(remove_marker, HookPhase::Before),
+        0,
+        "{tag}: the resume adopts the marker's removal and enters no `{remove_marker}`"
+    );
+    assert_eq!(
+        create_ref_entries(&recovery),
+        u32::from(!ref_created),
+        "{tag}: the resume creates the ref only when the prefix does not hold it"
+    );
+    assert_eq!(
+        given.refs.created(),
+        vec![(integration_ref, base.clone())],
+        "{tag}: across the prefix and the resume the ref was created once, at the recorded name \
+         and base"
+    );
+    assert_eq!(given.refs.target(), Some(base), "{tag}");
+    let after = fixture.log_bytes();
+    assert!(
+        after.starts_with(&committed)
+            && event_kinds(&after).last().map(String::as_str) == Some("run_resumed"),
+        "{tag}: the resume appended its `run_resumed` after the committed prefix"
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+#[test]
+fn a_resume_over_a_creation_that_stopped_after_removing_its_marker_creates_the_integration_ref_once()
+ {
+    a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
+        false,
+        "creation-stopped-at-p7",
+    );
+}
+
+#[test]
+fn a_resume_over_a_creation_that_stopped_after_creating_its_integration_ref_adopts_it() {
+    a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
+        true,
+        "creation-stopped-at-p8",
+    );
+}
+
+const STAGING_PATH_KILL_CHILD: &str = "engine::topology::recover::tests::staging_path_kill_child";
+
+#[test]
+#[ignore = "spawned as a subprocess by the staging-path kill witness"]
+fn staging_path_kill_child() {
+    let root = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_ROOT").expect("the parent names the fixture root"),
+    );
+    let at = match std::env::var("UPSTROKE_TEST_KILL_COORDINATE")
+        .expect("the parent names the coordinate")
+        .as_str()
+    {
+        "before-prepared-pin" => (EffectSiteId::Ref(RefSite::PinPrepared), HookPhase::Before),
+        other => panic!("`{other}` is not a coordinate of the staging path"),
+    };
+    let fixture = Fixture::adopted_by_a_kill_child(root, plan_with(true));
+    let mut hooks = EffectKilledAt::new(&harness(), at);
+    let driven = drive_hooked(&fixture, &DriveSeams::default(), 1, &mut hooks);
+    panic!(
+        "the kill at `{}` ({}) did not take this process: {:?}",
+        at.0,
+        at.1,
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_kill_before_the_proposals_pin_leaves_a_picked_staging_worktree_the_next_resume_reclaims_and_the_candidate_integrates()
+ {
+    use crate::workspace_manager::fixture::{died_by_abort, git, run_kill_child};
+
+    let tag = "kill-before-prepared-pin";
+    let fixture = Fixture::build(
+        tag,
+        Damage {
+            two_tasks: true,
+            ..Damage::default()
+        },
+    );
+    let (_planted, head) = plant_stale_queued_candidate(&fixture);
+    let planted = durable_kinds(&fixture).len();
+    let status = run_kill_child(
+        STAGING_PATH_KILL_CHILD,
+        &[
+            ("UPSTROKE_TEST_KILL_ROOT", fixture.root.as_os_str()),
+            (
+                "UPSTROKE_TEST_KILL_COORDINATE",
+                std::ffi::OsStr::new("before-prepared-pin"),
+            ),
+        ],
+    );
+    assert!(
+        died_by_abort(&status),
+        "{tag}: the child did not die by the kill before the proposal's pin: {status:?}"
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec!["run_resumed"],
+        "{tag}: the staging path records nothing before its pin"
+    );
+    let manager = fixture.manager();
+    let slot =
+        crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(1));
+    let staging = manager.slot_path(&slot);
+    assert!(
+        staging.is_dir() && manager.intents().expect("intents").contains(&slot),
+        "{tag}: R10: the staging worktree and its intent stand"
+    );
+    let proposal = git(&staging, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        git(&fixture.repo_root, &["rev-parse", &format!("{proposal}^")]),
+        head.0,
+        "{tag}: the pick completed: the staging worktree's head is the proposal on the moved head"
+    );
+    assert_eq!(
+        ref_target(
+            &fixture,
+            crate::engine::topology::integrate::prepared_pin_ref(
+                RUN_ID,
+                crate::topology::events::SequenceId(1)
+            )
+            .as_str()
+        ),
+        None,
+        "{tag}: and no prepared pin names it"
+    );
+    assert!(
+        !rundir::is_running(&fixture.public()),
+        "{tag}: the run lock went with the dead process"
+    );
+
+    let (_, handle) = resume_with_real_refs(&fixture, &harness())
+        .expect("the resume reclaims the picked staging worktree rather than refusing");
+    assert_staging_residue_reclaimed(&fixture, &staging, &handle);
+    drop(handle);
+    assert!(
+        crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+            .expect("fsck")
+            .contains(&proposal),
+        "{tag}: the unpinned proposal commit is left to Git"
+    );
+
+    let driven = drive(&fixture, &DriveSeams::default(), 1);
+    assert_the_candidate_integrates_under_the_next_sequence_on_the_moved_head(
+        &fixture, &driven, &head, tag,
     );
 }
 

@@ -4062,9 +4062,10 @@ dropped, because `Fixture`'s drop removes the tree the parent still has to read.
 Resumes the parent's healthy run as `RESUMER` and takes one step of the driver with an editing
 worker. With nothing planted, that step is a whole attempt: the dispatch, the attempt, the judge
 and then the candidate sequence. The child dies at the coordinate `UPSTROKE_TEST_KILL_COORDINATE`
-names, either before `Object.CandidateCommitTree` writes the candidate commit or after
-`Ref.CreateCandidates` has created the candidates ref. Reaching the panic means the kill did not
-land.
+names: before `Object.CandidateCommitTree` writes the candidate commit, at its `IdUnread` point
+(the object written and its id not yet read, a point armed in kill mode on the shared harness),
+before `Ref.PinCandidatePrepared` pins the written commit, or after `Ref.CreateCandidates` has
+created the candidates ref. Reaching the panic means the kill did not land.
 
 ## `fn kill_the_candidate_sequence(fixture: &Fixture, coordinate: &str, tag: &str) -> usize {`
 
@@ -4097,6 +4098,29 @@ action from the prefix in which nothing was performed. The next generation's att
 and writes the candidate commit through `Object.CandidateCommitTree` (both phases observed under
 the production adapter). It is pinned, prepared and created, the candidates ref names it, the pin
 is pruned, nothing is owed, and the log replays twice to equal states.
+
+## `fn candidate_commits_left_to_git(fixture: &Fixture) -> Vec<String> {`
+
+The commits the object store holds that nothing references, other than the judge's snapshot
+inputs: the candidate commits a dead capture wrote and never pinned.
+
+## `fn a_kill_after_the_candidate_commit_is_written_is_settled_interrupted_and_the_commit_left_to_git(`
+
+Rows 39, 55 and 56 of Gate 5's audit: `Ref.PinCandidatePrepared`/before, and
+`Object.CandidateCommitTree` after and at its `IdUnread` kill point. The first two share one
+durable prefix (only the id's read lies between the commit-tree's after phase and the pin's before
+phase), and the third leaves the same objects: the attempt in flight (`run_resumed`,
+`task_dispatched`, `attempt_started`), its worktree and intent standing, exactly one candidate
+commit in the object store that nothing references, and no pin or candidates ref. The candidate
+module's kill witnesses stop at `recovery_for`, a plan; here the next incarnation's resume
+performs it. Step (d) settles the attempt interrupted, finishes no promotion, reclaims the closed
+generation's worktree and intent, writes no commit and no pin of its own, and leaves the dead
+capture's commit to Git exactly as it was. The next generation's attempt is accepted with its own
+commit-tree performed, which, with a tree, parent and message identical to the dead one's, may
+write the same object: the dead commit is afterwards either still Git's or that commit, never
+adopted by name. The log holds the settlement and then one whole candidate sequence, nothing is
+owed afterwards, and the log replays twice to equal states. The kill child's record holds the
+coordinates; the parent never kills at them.
 
 ## `fn a_kill_after_the_candidates_ref_is_created_is_adopted_by_the_next_resume_which_appends_the_queue_position_once()`
 
@@ -4281,6 +4305,47 @@ the intent removed once) before it appends anything; neither survives, and the v
 kill took is settled interrupted after the planted one. A further step re-verifies the candidate
 and publishes it under the next sequence, and the log replays twice to equal states.
 
+
+## `fn a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(`
+
+Rows 31 and 32 of Gate 5's audit, `Ref.CreateIntegration` before and after, and row 68,
+`RunDir.RemoveMarker`/after. The creator removes its marker (P6 to P7) and then creates the
+integration ref (P8), with nothing durable between the two (`create.rs`, `p8_create_integration_ref`
+takes the `MarkerRemoved` state directly), so a creation killed after its marker's removal leaves
+row 68's prefix and row 31's alike. `Fixture::healthy` is the committed run with its marker still
+standing (P6); the prefix is built through the funnels whose phases it ends at: `rundir::remove_marker`
+under the production adapter, and for row 32 also the refs seam's `create_zero_old` under the
+production effects adapter, so the run's log is exactly its committed prefix, the marker is gone,
+the ref exists only when its creation was performed, and nothing a later step does (the execution
+root) is on disk. `kill_after_run_started_creates_integration_ref` and
+`a_resume_adopts_an_integration_ref_already_at_the_recorded_base` resume `Fixture::healthy` with its
+marker standing, a state no creation prefix has. The resume then adopts the marker's removal (it
+enters no `RunDir.RemoveMarker`), creates the ref only when the prefix lacks it (across the prefix
+and the resume, the ref is created once at the recorded name and base), appends `run_resumed`
+after the committed prefix, and the log replays twice to equal states.
+
+## `const STAGING_PATH_KILL_CHILD: &str = "engine::topology::recover::tests::staging_path_kill_child";`
+
+The kill child of the staging-path witness below.
+
+## `fn staging_path_kill_child() {`
+
+Adopts the parent's two-task run with a stale queued candidate on a moved head and drives one step,
+which takes the staging path, and dies before `Ref.PinPrepared` pins the proposal the pick produced.
+Reaching the panic means the kill did not land. This child's record holds the coordinates.
+
+## `fn a_kill_before_the_proposals_pin_leaves_a_picked_staging_worktree_the_next_resume_reclaims_and_the_candidate_integrates()`
+
+Rows 43 and 58 of Gate 5's audit, `Ref.PinPrepared`/before and `Object.ProposalCherryPick`/after,
+one durable prefix: the pick complete, the staging worktree's head the proposal commit on the moved
+head, no prepared pin. The committed plants put a pinned proposal (`Ref.PinPrepared`/after) or the
+integration head with the pick's internal residue in the staging worktree; this kills the staging
+path at the pin's before phase instead. The dead step recorded nothing but its `run_resumed`, the
+staging worktree and its intent stand (R10) and no pin names the proposal. The resume reclaims the
+staging worktree with force and its intent, creates no pin, leaves the candidate queued with nothing
+recorded for the interrupted pick, and leaves the proposal commit to Git. The next step takes the
+staging path again and publishes the candidate under sequence 1 on the moved head, and the log
+replays twice to equal states.
 ## `fn two_lineages_publish_in_lineage_order_and_the_younger_candidate_waits_behind_the_older() {`
 
 Two lineages overlapping on one path, the younger's repair already queued
