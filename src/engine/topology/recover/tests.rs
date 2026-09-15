@@ -13094,7 +13094,9 @@ fn answer_ingest_kill_child() {
 
 fn a_kill_at_the_answer_ingestion_converges_on_the_next_incarnation(phase: HookPhase, tag: &str) {
     use crate::topology::effects::{AnswerSite, EntryPhase, ResumeAction};
-    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child};
+    use crate::workspace_manager::fixture::{
+        KILL_CHILD_BOUND, died_by_abort, run_kill_child_within,
+    };
 
     let fixture = Fixture::build(
         tag,
@@ -13136,7 +13138,7 @@ fn a_kill_at_the_answer_ingestion_converges_on_the_next_incarnation(phase: HookP
         .expect("the planted log parses")
         .len();
 
-    let status = run_kill_child(
+    let Some(status) = run_kill_child_within(
         ANSWER_INGEST_KILL_CHILD,
         &[
             ("UPSTROKE_TEST_KILL_REPO", fixture.repo_root.as_os_str()),
@@ -13146,7 +13148,13 @@ fn a_kill_at_the_answer_ingestion_converges_on_the_next_incarnation(phase: HookP
                 std::ffi::OsStr::new(&phase.to_string()),
             ),
         ],
-    );
+        KILL_CHILD_BOUND,
+    ) else {
+        panic!(
+            "{tag}: the kill child armed at `Answer.Ingest` ({phase}) did not end within \
+             {KILL_CHILD_BOUND:?}, and was killed and reaped"
+        );
+    };
     assert!(
         died_by_abort(&status),
         "{tag}: the child did not die by the kill at `Answer.Ingest` ({phase}): {status:?}"
@@ -13941,10 +13949,12 @@ fn candidate_sequence_kill_child() {
 }
 
 fn kill_the_candidate_sequence(fixture: &Fixture, coordinate: &str, tag: &str) -> usize {
-    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child};
+    use crate::workspace_manager::fixture::{
+        KILL_CHILD_BOUND, died_by_abort, run_kill_child_within,
+    };
 
     let planted = durable_kinds(fixture).len();
-    let status = run_kill_child(
+    let Some(status) = run_kill_child_within(
         CANDIDATE_SEQUENCE_KILL_CHILD,
         &[
             ("UPSTROKE_TEST_KILL_ROOT", fixture.root.as_os_str()),
@@ -13953,7 +13963,13 @@ fn kill_the_candidate_sequence(fixture: &Fixture, coordinate: &str, tag: &str) -
                 std::ffi::OsStr::new(coordinate),
             ),
         ],
-    );
+        KILL_CHILD_BOUND,
+    ) else {
+        panic!(
+            "{tag}: the kill child armed at `{coordinate}` did not end within \
+             {KILL_CHILD_BOUND:?}, and was killed and reaped"
+        );
+    };
     assert!(
         died_by_abort(&status),
         "{tag}: the child did not die by the kill at `{coordinate}`: {status:?}"
@@ -14009,6 +14025,20 @@ fn assert_replays_twice_equal(fixture: &Fixture, tag: &str) {
     assert_eq!(once.state(), twice.state(), "{tag}: replay twice equal");
 }
 
+/// Whether Git lists `worktree` among the repository's registered worktrees: a
+/// settlement that removes only the intent, or the directory by hand, leaves the
+/// registration behind.
+fn registered_with_git(
+    manager: &crate::workspace_manager::WorkspaceManager,
+    worktree: &Path,
+) -> bool {
+    manager
+        .worktree_records()
+        .expect("worktree records")
+        .iter()
+        .any(|record| crate::util::same_path(record.path(), worktree))
+}
+
 #[test]
 fn a_kill_before_the_candidate_commit_is_written_is_settled_interrupted_and_the_next_generation_writes_it()
  {
@@ -14025,20 +14055,6 @@ fn a_kill_before_the_candidate_commit_is_written_is_settled_interrupted_and_the_
         semantics.rows.is_empty(),
         "{tag}: nothing of `{site}` was performed, so no row holds anything ({:?})",
         semantics.rows
-/// Whether Git lists `worktree` among the repository's registered worktrees: a
-/// settlement that removes only the intent, or the directory by hand, leaves the
-/// registration behind.
-fn registered_with_git(
-    manager: &crate::workspace_manager::WorkspaceManager,
-    worktree: &Path,
-) -> bool {
-    manager
-        .worktree_records()
-        .expect("worktree records")
-        .iter()
-        .any(|record| crate::util::same_path(record.path(), worktree))
-}
-
     );
     assert_eq!(semantics.action, ResumeAction::ResumeUnperformed, "{tag}");
     assert_eq!(
@@ -14052,6 +14068,10 @@ fn registered_with_git(
     assert!(
         worktree.is_dir() && manager.intents().expect("intents").contains(&slot),
         "{tag}: R9: the attempt's worktree and intent stand"
+    );
+    assert!(
+        registered_with_git(&manager, &worktree),
+        "{tag}: and Git lists the worktree"
     );
     assert_no_unreachable_commit_but_snapshot_inputs(&fixture, tag);
     assert!(
@@ -14069,10 +14089,6 @@ fn registered_with_git(
     );
 
     let observed = harness();
-    assert!(
-        registered_with_git(&manager, &worktree),
-        "{tag}: and Git lists the worktree"
-    );
     let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
     let (recovered, handle) = resume_as(
         &fixture,
@@ -14094,6 +14110,10 @@ fn registered_with_git(
         "{tag}: the closed generation's worktree and intent are reclaimed"
     );
     assert!(
+        !registered_with_git(&manager, &worktree),
+        "{tag}: and its Git registration is gone"
+    );
+    assert!(
         !observed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -14108,10 +14128,6 @@ fn registered_with_git(
         1,
         &runner,
         &mut hooks,
-    );
-    assert!(
-        !registered_with_git(&manager, &worktree),
-        "{tag}: and its Git registration is gone"
     );
     drop(hooks);
     assert!(
@@ -14212,6 +14228,10 @@ fn a_kill_after_the_candidate_commit_is_written_is_settled_interrupted_and_the_c
         worktree.is_dir() && manager.intents().expect("intents").contains(&slot),
         "{tag}: R9: the attempt's worktree and intent stand"
     );
+    assert!(
+        registered_with_git(&manager, &worktree),
+        "{tag}: and Git lists the worktree"
+    );
     let left = candidate_commits_left_to_git(&fixture);
     assert_eq!(
         left.len(),
@@ -14228,10 +14248,6 @@ fn a_kill_after_the_candidate_commit_is_written_is_settled_interrupted_and_the_c
         CandidateRecovery {
             promotion: None,
             orphan_pin: None,
-    assert!(
-        registered_with_git(&manager, &worktree),
-        "{tag}: and Git lists the worktree"
-    );
             settles_interrupted: true,
         },
         "{tag}: the unsettled attempt is owed an interrupted settlement, and its object nothing"
@@ -14258,6 +14274,10 @@ fn a_kill_after_the_candidate_commit_is_written_is_settled_interrupted_and_the_c
         !worktree.exists() && !manager.intents().expect("intents").contains(&slot),
         "{tag}: the closed generation's worktree and intent are reclaimed"
     );
+    assert!(
+        !registered_with_git(&manager, &worktree),
+        "{tag}: and its Git registration is gone"
+    );
     assert_eq!(
         candidate_commits_left_to_git(&fixture),
         left,
@@ -14274,10 +14294,6 @@ fn a_kill_after_the_candidate_commit_is_written_is_settled_interrupted_and_the_c
             (
                 EffectSiteId::Ref(RefSite::PinCandidatePrepared),
                 HookPhase::Before,
-    assert!(
-        !registered_with_git(&manager, &worktree),
-        "{tag}: and its Git registration is gone"
-    );
             ),
         ] {
             assert!(
@@ -14999,11 +15015,13 @@ fn process_spawn_kill_child() {
 }
 
 fn a_kill_in_the_workers_spawn_converges_on_the_next_resume(coordinate: &str, tag: &str) {
-    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child};
+    use crate::workspace_manager::fixture::{
+        KILL_CHILD_BOUND, died_by_abort, run_kill_child_within,
+    };
 
     let fixture = Fixture::healthy(tag);
     let planted = durable_kinds(&fixture).len();
-    let status = run_kill_child(
+    let Some(status) = run_kill_child_within(
         PROCESS_SPAWN_KILL_CHILD,
         &[
             ("UPSTROKE_TEST_KILL_ROOT", fixture.root.as_os_str()),
@@ -15012,7 +15030,13 @@ fn a_kill_in_the_workers_spawn_converges_on_the_next_resume(coordinate: &str, ta
                 std::ffi::OsStr::new(coordinate),
             ),
         ],
-    );
+        KILL_CHILD_BOUND,
+    ) else {
+        panic!(
+            "{tag}: the kill child armed at `{coordinate}` did not end within \
+             {KILL_CHILD_BOUND:?}, and was killed and reaped"
+        );
+    };
     assert!(
         died_by_abort(&status),
         "{tag}: the child did not die by the kill at `{coordinate}`: {status:?}"
@@ -15480,7 +15504,9 @@ fn a_kill_at_the_gate_containers_git_view_mount_is_reclaimed_by_the_next_resume(
     tag: &str,
 ) {
     use crate::topology::effects::{ContainerSite, EntryPhase, ResourceRow, ResumeAction};
-    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child};
+    use crate::workspace_manager::fixture::{
+        KILL_CHILD_BOUND, died_by_abort, run_kill_child_within,
+    };
 
     let fixture = Fixture::two_tasks(tag);
     plant_stale_verification(&fixture);
@@ -15491,7 +15517,7 @@ fn a_kill_at_the_gate_containers_git_view_mount_is_reclaimed_by_the_next_resume(
         HookPhase::After => EntryPhase::After,
         HookPhase::Point { .. } => panic!("the mount's coordinates are its two phases"),
     });
-    let status = run_kill_child(
+    let Some(status) = run_kill_child_within(
         CONTAINER_MOUNT_KILL_CHILD,
         &[
             ("UPSTROKE_TEST_KILL_ROOT", fixture.root.as_os_str()),
@@ -15500,7 +15526,13 @@ fn a_kill_at_the_gate_containers_git_view_mount_is_reclaimed_by_the_next_resume(
                 std::ffi::OsStr::new(&format!("{phase:?}")),
             ),
         ],
-    );
+        KILL_CHILD_BOUND,
+    ) else {
+        panic!(
+            "{tag}: the kill child armed at the mount ({phase}) did not end within \
+             {KILL_CHILD_BOUND:?}, and was killed and reaped"
+        );
+    };
     assert!(
         died_by_abort(&status),
         "{tag}: the child did not die by the kill at the mount ({phase}): {status:?}"
@@ -15764,7 +15796,9 @@ fn staging_path_kill_child() {
 #[test]
 fn a_kill_before_the_proposals_pin_leaves_a_picked_staging_worktree_the_next_resume_reclaims_and_the_candidate_integrates()
  {
-    use crate::workspace_manager::fixture::{died_by_abort, git, run_kill_child};
+    use crate::workspace_manager::fixture::{
+        KILL_CHILD_BOUND, died_by_abort, git, run_kill_child_within,
+    };
 
     let tag = "kill-before-prepared-pin";
     let fixture = Fixture::build(
@@ -15776,7 +15810,7 @@ fn a_kill_before_the_proposals_pin_leaves_a_picked_staging_worktree_the_next_res
     );
     let (_planted, head) = plant_stale_queued_candidate(&fixture);
     let planted = durable_kinds(&fixture).len();
-    let status = run_kill_child(
+    let Some(status) = run_kill_child_within(
         STAGING_PATH_KILL_CHILD,
         &[
             ("UPSTROKE_TEST_KILL_ROOT", fixture.root.as_os_str()),
@@ -15785,7 +15819,13 @@ fn a_kill_before_the_proposals_pin_leaves_a_picked_staging_worktree_the_next_res
                 std::ffi::OsStr::new("before-prepared-pin"),
             ),
         ],
-    );
+        KILL_CHILD_BOUND,
+    ) else {
+        panic!(
+            "{tag}: the kill child armed before the proposal's pin did not end within \
+             {KILL_CHILD_BOUND:?}, and was killed and reaped"
+        );
+    };
     assert!(
         died_by_abort(&status),
         "{tag}: the child did not die by the kill before the proposal's pin: {status:?}"

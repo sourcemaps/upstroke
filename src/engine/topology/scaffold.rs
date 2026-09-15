@@ -33,7 +33,7 @@ use crate::topology::schema::TOPOLOGY_SCHEMA;
 use crate::util::DurabilityLedger;
 use crate::workspace_manager::{
     EffectHooks, HarnessEffects, WorkspaceManager,
-    fixture::{Fixture, died_by_abort, run_kill_child, write_file},
+    fixture::{Fixture, KILL_CHILD_BOUND, died_by_abort, run_kill_child_within, write_file},
 };
 
 use super::attempt::{AttemptPlan, GatePlan, ReviewerPlan};
@@ -1552,13 +1552,19 @@ pub(super) fn kill_dir(tag: &str) -> PathBuf {
 }
 
 pub(super) fn kill_child_and_adopt(test: &str, dir: &Path, site: &str) -> Run {
-    let status = run_kill_child(
+    let Some(status) = run_kill_child_within(
         test,
         &[
             ("UPSTROKE_TEST_KILL_DIR", dir.as_os_str()),
             ("UPSTROKE_TEST_KILL_SITE", std::ffi::OsStr::new(site)),
         ],
-    );
+        KILL_CHILD_BOUND,
+    ) else {
+        panic!(
+            "`{site}`: the kill child `{test}` did not end within {KILL_CHILD_BOUND:?}, and was \
+             killed and reaped"
+        );
+    };
     assert!(
         died_by_abort(&status),
         "`{site}`: the child must have died by `std::process::abort()`, and it ended {status:?} \

@@ -669,6 +669,12 @@ really did not exit successfully. Both are needed: a child that returned
 early would satisfy neither, and a child that panicked would satisfy only
 this one.
 
+The child is given `fixture::KILL_CHILD_BOUND` through
+`run_kill_child_within`: a child that wedges instead of dying is killed and
+reaped at the bound, and the test fails naming the site and the child, not
+at whatever outer timeout would otherwise end the suite (#292's review round
+2, `standards/12`'s bounded waits).
+
 ## `pub(super) fn kill_child_environment() -> (PathBuf, String) {`
 
 The directory and site a kill child is given.

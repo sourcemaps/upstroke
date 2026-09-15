@@ -9161,22 +9161,19 @@ fn a_run_killed_once_its_parking_settlement_is_durable(
 ) -> (PathBuf, String, QuestionRecord) {
     let repo = temp_engine_repo(tag);
     seed(&repo, ASKING_PLAN, Some(PARKING_CONFIG));
-    let killed = Command::new(std::env::current_exe().expect("test binary"))
-        .args([
-            "--exact",
-            PARKING_SETTLEMENT_KILL_CHILD,
-            "--ignored",
-            "--test-threads",
-            "1",
-        ])
-        .env("UPSTROKE_CRASH_REPO", &repo)
-        .output()
-        .expect("spawn the parking run");
+    let Some(killed) = crate::workspace_manager::fixture::run_kill_child_within(
+        PARKING_SETTLEMENT_KILL_CHILD,
+        &[("UPSTROKE_CRASH_REPO", repo.as_os_str())],
+        crate::workspace_manager::fixture::KILL_CHILD_BOUND,
+    ) else {
+        panic!(
+            "{tag}: the parking run did not end within {:?}, and was killed and reaped",
+            crate::workspace_manager::fixture::KILL_CHILD_BOUND
+        );
+    };
     assert!(
-        crate::workspace_manager::fixture::died_by_abort(&killed.status),
-        "{tag}: the run must die once its parking settlement is durable: {:?}\n{}",
-        killed.status,
-        String::from_utf8_lossy(&killed.stderr)
+        crate::workspace_manager::fixture::died_by_abort(&killed),
+        "{tag}: the run must die once its parking settlement is durable: {killed:?}"
     );
     let run_id = rundir::latest_run(&repo).expect("the child started a run");
     let paths = paths_of(&repo, &run_id);
@@ -9263,23 +9260,27 @@ fn a_kill_at_the_question_payload_write_is_recovered_by_the_resume(
     });
     let (repo, run_id, record) = a_run_killed_once_its_parking_settlement_is_durable(tag);
     let payload = question_payload(&repo, &run_id, &record);
-    let killed = Command::new(std::env::current_exe().expect("test binary"))
-        .args([
-            "--exact",
-            QUESTION_PAYLOAD_KILL_CHILD,
-            "--ignored",
-            "--test-threads",
-            "1",
-        ])
-        .env("UPSTROKE_CRASH_REPO", &repo)
-        .env("UPSTROKE_TEST_KILL_COORDINATE", format!("{phase:?}"))
-        .output()
-        .expect("spawn the payload writer");
+    let coordinate = format!("{phase:?}");
+    let Some(killed) = crate::workspace_manager::fixture::run_kill_child_within(
+        QUESTION_PAYLOAD_KILL_CHILD,
+        &[
+            ("UPSTROKE_CRASH_REPO", repo.as_os_str()),
+            (
+                "UPSTROKE_TEST_KILL_COORDINATE",
+                std::ffi::OsStr::new(&coordinate),
+            ),
+        ],
+        crate::workspace_manager::fixture::KILL_CHILD_BOUND,
+    ) else {
+        panic!(
+            "{tag}: the payload writer armed at the {phase} phase did not end within {:?}, and \
+             was killed and reaped",
+            crate::workspace_manager::fixture::KILL_CHILD_BOUND
+        );
+    };
     assert!(
-        crate::workspace_manager::fixture::died_by_abort(&killed.status),
-        "{tag}: the payload writer must die at the {phase} phase: {:?}\n{}",
-        killed.status,
-        String::from_utf8_lossy(&killed.stderr)
+        crate::workspace_manager::fixture::died_by_abort(&killed),
+        "{tag}: the payload writer must die at the {phase} phase: {killed:?}"
     );
     assert_eq!(
         payload.is_file(),

@@ -484,6 +484,12 @@ pub(crate) fn run_kill_child(test: &str, env: &[(&str, &OsStr)]) -> std::process
     command.status().expect("spawn the kill child")
 }
 
+/// The deadline a kill child is given through [`run_kill_child_within`] by the
+/// Gate 5 witnesses in `src/engine/tests.rs`, `src/engine/topology/recover/tests.rs`
+/// and the scaffold's `kill_child_and_adopt`: the finalization matrix's 120
+/// seconds, which a loaded Windows guest has needed for a creation kill child.
+pub(crate) const KILL_CHILD_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// [`run_kill_child`] with a deadline: `Some` with the child's exit status
 /// once it ends within `bound`, and `None` when it has not — and then the
 /// child has been killed and reaped before this returns, so a child that
