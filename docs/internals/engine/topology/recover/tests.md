@@ -736,6 +736,9 @@ emptiness is asserted rather than assumed, and the anchor is the census's
 first effect *here*: if the barrier's three sites do not all precede it, the
 resume decided something from a prefix it had not proven.
 
+After the resume the durable log replays twice to states equal to each other
+and to the fold the resumed handle holds (`assert_log_replays_twice_equal`).
+
 ## `fn resume_establishes_stable_prefix_barrier_before_any_fold_derived_effect() {` › `assert_eq!(`
 
 Asserted **before** the resume, because the resume reclaims what it walks:
@@ -1031,6 +1034,22 @@ An intent this run's *creator* incarnation left behind, in the recorded
 root. It is dead by construction: the run lock is exclusive, so only one
 incarnation of a run is ever live, and this process is a different one.
 
+## `fn each_container_state_a_dead_incarnations_launch_or_release_leaves_is_reclaimed_by_the_next_resume()`
+
+The states a container launch or release can leave between its funnels,
+each left by the creator incarnation of a run with a log and resumed over:
+nothing; the intent alone (between `Container.WriteIntent` and the mount, or
+after the view's unmount); the intent and the view with no container (before
+`Container.Create`, or after `Container.Remove`); and the intent, the view and
+a container, exited (created and never started, or stopped) or running. The
+fake runtime gives a created container the state a stopped one has
+(`Liveness::Exited`), so those two are one cell. Each cell asserts the planted
+state before the resume, that the resume's container census leaves no
+container, intent or view, and that the log then replays twice to the fold
+the resumed handle holds (`assert_log_replays_twice_equal`): Gate 5's recovery
+audit found these states reclaimed by container unit fixtures, which carry no
+log to replay.
+
 ## `fn resume_reclaims_a_provable_husk_beside_the_run_and_retains_a_possibly_committed_one() {`
 
 A resume **reclaims** the husks beside the run it is resuming: the private
@@ -1079,6 +1098,9 @@ worth making: `run_dir_names` sorts ascending, so a census that stopped at
 the failure never reached this run's own directory at all — and recovery step
 (a1) gives this run's stale-marker repair to its owner, which is this
 process. So the repair was collateral damage of a different run's residue.
+
+After the resume the durable log replays twice to states equal to each other
+and to the fold the resumed handle holds (`assert_log_replays_twice_equal`).
 
 ## `fn resume_completes_past_a_husk_whose_private_half_cannot_be_removed() {` › `assert!(`
 
@@ -1129,6 +1151,12 @@ and asserts on both platforms that the observation site executed — a Windows
 build that skipped the question entirely would pass a test that only
 asserted the outcome.
 
+The resume that succeeds also takes and gives back the run lock's exclusive
+cleanup probe (`Lock.ProbeCleanupExclusive`, both phases), and its log replays
+twice to the fold its handle holds (`assert_log_replays_twice_equal`). The refused
+resume never reaches that probe: `LocksHeld::take` takes the worktree lease,
+whose `Lock.ObserveCleanupHold` refuses, before the run lock.
+
 ## `fn resume_refused_while_reaper_hold_observed_then_succeeds()` › `let cleanup = fixture.public().join("cleanup.lock");`
 
 Bound inside the `cfg`, because only the `cfg` uses it. Bound
@@ -1160,6 +1188,15 @@ Replaying rather than keeping the live fold is also the stronger assertion.
 INV-02's "live state and replay use one checked transition over the exact
 wire event" means a claim made against the replayed fold is a claim about
 the bytes, not about a `TopologyFold` this process happens to hold.
+
+## `fn assert_log_replays_twice_equal(fixture: &Fixture, live: Option<&TopologyFold>, context: &str) {`
+
+Replay twice equal, after a recovery: the log's bytes on disk replayed twice,
+the two states equal to each other and, where the recovery hands back the fold
+it holds (a resume's handle, or a driven run's `fold()`), equal to that fold's
+state. The once/twice pair of the two-crash proof, with the live comparison
+the scaffold's `Run::replay_twice_equal` makes. A resume that refuses hands
+back no fold, and passes `None`.
 
 ## `fn resume_clears_budget_stop_and_wakes_deferred() {`
 
@@ -1325,7 +1362,8 @@ whether the proven prefix contains the line".
 ## `fn resume_after_append_error_follows_surviving_prefix()` › `let second = harness();`
 
 The next resume: a fresh harness, nothing armed, and it follows the
-surviving prefix.
+surviving prefix. Its log then replays twice to the fold its handle holds
+(`assert_log_replays_twice_equal`).
 
 ## `fn an_append_error_during_recovery_cancels_the_reservation_and_every_running_invocation() {`
 
@@ -3061,7 +3099,9 @@ the candidate is still queued, and the next incarnation integrates it.
 
 The loss: the unsynced merge_prepared is gone, and the before-append
 order stands — the candidate queued, no transaction, the ref at the
-base — which the next incarnation carries through to publication.
+base — which the next incarnation carries through to publication. After
+that step the log replays twice to the driven run's fold
+(`drive_observing`, `assert_log_replays_twice_equal`).
 
 ## `fn a_resume_of_a_prepared_transaction_whose_ref_moved_elsewhere_refuses_a_third_sha() {` › `let fixture = Fixture::healthy("finish-third-sha");`
 
@@ -3093,7 +3133,9 @@ interrupted terminal is durable, the order the contract fixes.
 T-PROPOSAL (a', a, b) with no transaction open: a cherry-pick killed
 before anything was recorded left `merge/s0` and, killed between the pin
 and `merge_verification_started`, the exact orphan `prepared/<next_seq>`.
-Both are reclaimed; the proposal object is left to Git.
+Both are reclaimed; the proposal object is left to Git. After the resume
+the log replays twice to the fold its handle holds
+(`assert_log_replays_twice_equal`).
 
 ## `fn a_resume_reclaims_the_orphan_pin_at_the_next_sequence_and_orphan_staging() {` › `let snapshot = plant_snapshot(&fixture, 0, orphan_commit.as_str());`
 
@@ -3692,7 +3734,8 @@ the run's cleanup lease the way an engine `git update-ref` child does
 (`rundir::hold_cleanup_lease_for_child`) makes the resume refuse at its
 worktree lease, with the lock untouched and nothing appended; once it
 exits the kernel releases the lease, the lock is stale, and the next
-resume reclaims it and completes the publication.
+resume reclaims it and completes the publication. Its log then replays
+twice to the fold that resume's handle holds (`assert_log_replays_twice_equal`).
 
 ## `fn a_call_census_needle_is_not_satisfied_by_a_longer_name_ending_in_it() {`
 
@@ -3971,6 +4014,12 @@ failed the retry's `HoldsTree` verification and closed the generation.
 
 ## `fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnations_first_step() {`
 
+Staged and not yet published, the answer is resumed over first: that
+incarnation ingests nothing, parks the run again and leaves the partial
+byte-identical, and only then is the answer published. Both incarnations end
+with their log replayed twice to the driven run's fold (`drive_observing`,
+`assert_log_replays_twice_equal`).
+
 `T-ANSWER` through the production reader: with no answer file the run
 hard-blocks; an answer staged and published into `answers/` while the
 engine is away is ingested by the next incarnation's first step, `via`
@@ -4186,7 +4235,8 @@ tail was truncated. Until PR10's round 2 no test guarded the error's
 propagation from this append (the round-2 crash lens, P1-1), and until
 round 3 none produced the undetermined outcome at this caller, so a
 close that swallowed exactly that error and scrubbed survived (the
-round-3 fix-check lens, B6).
+round-3 fix-check lens, B6). In every case the fresh resume's log replays
+twice to the fold its handle holds (`assert_log_replays_twice_equal`).
 
 ## `fn run_finished_budget_exceeded_refused_after_halting_drain…`
 
@@ -4220,7 +4270,9 @@ the checked replay, live and at a resume's stable-prefix barrier.
 `append_error_inside_closure_ends_command_and_resume_completes_closure`
 (T-FINISH, T-APPEND): the `run_finished` append returns an error; the
 append-error protocol poisons the fold and ends the command with nothing
-finalized from memory; the next process's closure ends the run.
+finalized from memory; the next process's closure ends the run, and after
+its second step the log replays twice to the driven run's fold
+(`drive_observing`, `assert_log_replays_twice_equal`).
 
 ## `fn closure_kill_child() {`
 
@@ -4236,7 +4288,10 @@ the closure's `run_finished` append — the line torn, and the line
 complete — leaves a prefix the next process converges from: a torn line is
 truncated at open and the closure repeats; a complete line is the run's
 end and the next process finalizes it then refuses. Both reach one
-`run_finished`, one report, and the cleanup.
+`run_finished`, one report, and the cleanup. After the next process the
+log replays twice (`assert_log_replays_twice_equal`): to the driven run's fold
+for the torn line, and replay against replay for the complete one, whose
+refusing resume hands back no fold.
 
 ## `struct ArmedFinalization {`
 

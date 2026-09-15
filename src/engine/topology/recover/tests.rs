@@ -1523,8 +1523,8 @@ fn resume_establishes_stable_prefix_barrier_before_any_fold_derived_effect() {
          directory is the only one in the tree"
     );
 
-    let (outcome, _) = resume(&fixture, &harness, &given);
-    outcome.expect("the healthy resume completes");
+    let (outcome, _) = resume_holding(&fixture, &harness, &given);
+    let (_, handle) = outcome.expect("the healthy resume completes");
 
     let marker = first_observation(&harness, EffectSiteId::RunDir(RunDirSite::RemoveMarker))
         .expect("the census removes this run's stale marker");
@@ -1558,6 +1558,7 @@ fn resume_establishes_stable_prefix_barrier_before_any_fold_derived_effect() {
         ),
         "the SyncPrefix point is consulted, which is what makes it armable"
     );
+    assert_log_replays_twice_equal(&fixture, Some(&handle.fold), "after the resume");
 }
 
 #[test]
@@ -2590,7 +2591,7 @@ fn resume_completes_past_a_husk_whose_private_half_cannot_be_removed() {
     );
     let (outcome, _) = resume_with(&fixture, &mut hooks, &given);
 
-    outcome.expect("a husk beside the run cannot end the resume");
+    let (_, handle) = outcome.expect("a husk beside the run cannot end the resume");
 
     assert!(stuck.public.exists(), "the public half was removed anyway");
     assert!(
@@ -2618,6 +2619,7 @@ fn resume_completes_past_a_husk_whose_private_half_cannot_be_removed() {
         "the public half was removed after the private removal refused, which \
          orphans the private half permanently"
     );
+    assert_log_replays_twice_equal(&fixture, Some(&handle.fold), "after the resume");
 }
 
 #[test]
@@ -2707,8 +2709,8 @@ fn resume_refused_while_reaper_hold_observed_then_succeeds() {
     let runtime = runtime_holding_the_record();
     let certifies = AlwaysCertifies;
     let given = Given::healthy(&fixture, &runtime, &certifies);
-    let (result, _) = resume(&fixture, &harness, &given);
-    result.expect("with no hold observed, the resume proceeds");
+    let (result, _) = resume_holding(&fixture, &harness, &given);
+    let (_, handle) = result.expect("with no hold observed, the resume proceeds");
     let seen = harness.lock().unwrap_or_else(PoisonError::into_inner);
     assert!(
         seen.observed(
@@ -2724,6 +2726,17 @@ fn resume_refused_while_reaper_hold_observed_then_succeeds() {
         ) && seen.observed(EffectSiteId::Lock(LockSite::AcquireRun), HookPhase::Before),
         "and both R17 holds were taken"
     );
+    assert!(
+        seen.observed(
+            EffectSiteId::Lock(LockSite::ProbeCleanupExclusive),
+            HookPhase::Before
+        ) && seen.observed(
+            EffectSiteId::Lock(LockSite::ProbeCleanupExclusive),
+            HookPhase::After
+        ),
+        "and the run lock's exclusive cleanup probe was taken and given back"
+    );
+    assert_log_replays_twice_equal(&fixture, Some(&handle.fold), "after the resume");
 }
 
 fn replayed(fixture: &Fixture) -> TopologyFold {
@@ -2735,6 +2748,24 @@ fn replayed_with_events(fixture: &Fixture) -> (TopologyFold, Vec<TopologyEvent>)
     let events = TopologyFold::parse_log(&bytes).expect("the log parses");
     let fold = TopologyFold::replay(fixture.inputs(), &events).expect("and folds");
     (fold, events)
+}
+
+#[track_caller]
+fn assert_log_replays_twice_equal(fixture: &Fixture, live: Option<&TopologyFold>, context: &str) {
+    let events = TopologyFold::parse_log(&fixture.log_bytes())
+        .unwrap_or_else(|error| panic!("{context}: the log parses: {error}"));
+    let once = TopologyFold::replay(fixture.inputs(), &events)
+        .unwrap_or_else(|error| panic!("{context}: the log replays: {error:?}"));
+    let twice = TopologyFold::replay(fixture.inputs(), &events)
+        .unwrap_or_else(|error| panic!("{context}: the log replays again: {error:?}"));
+    assert_eq!(once.state(), twice.state(), "{context}: replay twice equal");
+    if let Some(live) = live {
+        assert_eq!(
+            live.state(),
+            once.state(),
+            "{context}: the live fold and a replay of the log disagree"
+        );
+    }
 }
 
 #[test]
@@ -3309,8 +3340,9 @@ fn resume_after_append_error_follows_surviving_prefix() {
     let second = harness();
     let runtime = runtime_holding_the_record();
     let given = Given::healthy(&fixture, &runtime, &certifies);
-    let (result, _) = resume(&fixture, &second, &given);
-    let recovered = result.expect("the next resume establishes its own barrier and continues");
+    let (result, _) = resume_holding(&fixture, &second, &given);
+    let (recovered, handle) =
+        result.expect("the next resume establishes its own barrier and continues");
     assert_eq!(
         recovered.resumed.epoch, 2,
         "the surviving prefix already carried one resume, so this is the second epoch"
@@ -3319,6 +3351,7 @@ fn resume_after_append_error_follows_surviving_prefix() {
         first_observation(&second, EffectSiteId::Event(EventSite::ProvePrefixStable)).is_some(),
         "and it proved the prefix before acting on it"
     );
+    assert_log_replays_twice_equal(&fixture, Some(&handle.fold), "after the next resume");
 }
 
 #[test]
@@ -7297,7 +7330,14 @@ fn barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss() {
         !String::from_utf8_lossy(&fixture.log_bytes()).contains("merge_prepared"),
         "the unsynced line was lost"
     );
-    let driven = drive(&fixture, &DriveSeams::default(), 1);
+    let seams = DriveSeams::default();
+    let driven = drive_observing(
+        &fixture,
+        &seams,
+        1,
+        &driven_runner(&seams),
+        &mut |_, run| assert_log_replays_twice_equal(&fixture, Some(run.fold()), "after the loss"),
+    );
     assert!(
         matches!(
             driven.progress.first(),
@@ -7566,7 +7606,8 @@ fn a_resume_reclaims_the_orphan_pin_at_the_next_sequence_and_orphan_staging() {
     let certifies = AlwaysCertifies;
     let given = Given::healthy(&fixture, &runtime, &certifies);
     let (outcome, _) = resume_holding(&fixture, &harness, &given);
-    outcome.expect("the resume reclaims the residue rather than refusing on an unexpected ref");
+    let (_, handle) =
+        outcome.expect("the resume reclaims the residue rather than refusing on an unexpected ref");
 
     assert_eq!(
         ref_target(&fixture, orphan_pin.as_str()),
@@ -7592,6 +7633,7 @@ fn a_resume_reclaims_the_orphan_pin_at_the_next_sequence_and_orphan_staging() {
         merged_sequences(&fixture).is_empty() && interrupted_sequences(&fixture).is_empty(),
         "no transaction was open, so no terminal was appended"
     );
+    assert_log_replays_twice_equal(&fixture, Some(&handle.fold), "after the resume");
 }
 
 #[test]
@@ -8916,7 +8958,7 @@ fn a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification
         fake.set_reachable(op);
     }
     let recovery = harness();
-    resume_as(
+    let (_, handle) = resume_as(
         &fixture,
         "resumer-2",
         &fake,
@@ -8944,6 +8986,8 @@ fn a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification
         snapshot_intents(&fixture).is_empty(),
         "the snapshot left after the terminal, once nothing could be running in it"
     );
+    assert_log_replays_twice_equal(&fixture, Some(&handle.fold), "after the resume");
+    drop(handle);
 
     let driven = drive(&fixture, &DriveSeams::default(), 1);
     assert!(
@@ -8958,6 +9002,115 @@ fn a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification
         "the candidate re-verifies and publishes under the next sequence: {:?}",
         driven.progress
     );
+}
+
+#[test]
+fn each_container_state_a_dead_incarnations_launch_or_release_leaves_is_reclaimed_by_the_next_resume()
+ {
+    use crate::runner::container::intent::{ContainerIntent, ContainerName};
+    use crate::runner::container::runtime::Liveness;
+    use crate::topology::effects::ContainerSite;
+
+    for (cell, intent, view, container) in [
+        ("nothing", false, false, None),
+        ("intent", true, false, None),
+        ("intent-and-view", true, true, None),
+        (
+            "intent-view-and-exited-container",
+            true,
+            true,
+            Some(Liveness::Exited),
+        ),
+        (
+            "intent-view-and-running-container",
+            true,
+            true,
+            Some(Liveness::Running),
+        ),
+    ] {
+        let fixture = Fixture::healthy(&format!("container-state-{cell}"));
+        let runtime = runtime_holding_the_record();
+        let invocation = crate::runner::InvocationId::probe(
+            crate::runner::ProbeTarget::Agent(crate::runner::AgentId::new(AGENT)),
+            0,
+        )
+        .expect("the agent probe identity");
+        let name = ContainerName::new(fixture.repo_key.as_str(), RUN_ID, CREATOR, &invocation)
+            .expect("a container name for the creator incarnation");
+        let record = ContainerIntent::new(
+            RUN_ID.to_owned(),
+            &fixture.public(),
+            CREATOR.to_owned(),
+            fixture.repo_key.as_str().to_owned(),
+            invocation.render(),
+            crate::runner::policy::runner_policy_sha256(&fixture.started.runner),
+        );
+        let view_path = crate::runner::container::exec::view_dir(&fixture.private_root, &name);
+        let mut container_hooks = crate::runner::container::NoHooks;
+        if intent {
+            crate::runner::container::write_intent(
+                &mut container_hooks,
+                ContainerSite::WriteIntent,
+                &fixture.private_root,
+                &name,
+                &record,
+            )
+            .expect("the container funnel writes the intent");
+        }
+        if view {
+            crate::runner::container::mount_git_view(
+                &mut container_hooks,
+                ContainerSite::MountGitView,
+                &DisposableDirView::new(ContainerTrace::off()),
+                &crate::runner::container::GitViewRequest {
+                    path: view_path.clone(),
+                    workspace: fixture.repo_root.clone(),
+                    head: None,
+                },
+            )
+            .expect("the container funnel mounts the view");
+        }
+        if let Some(state) = container {
+            runtime.seed_container(
+                name.as_str(),
+                record.labels(&fixture.private_root),
+                IMAGE_ID,
+                IMAGE_ID,
+                state,
+            );
+        }
+        assert_eq!(
+            (
+                !crate::runner::container::list_intents(&fixture.private_root)
+                    .expect("the namespace scans")
+                    .is_empty(),
+                view_path.exists(),
+                runtime.container_names().len(),
+            ),
+            (intent, view, usize::from(container.is_some())),
+            "{cell}: the planted state"
+        );
+
+        let harness = harness();
+        let certifies = AlwaysCertifies;
+        let given = Given::healthy(&fixture, &runtime, &certifies);
+        let (outcome, _) = resume_holding(&fixture, &harness, &given);
+        let (_, handle) =
+            outcome.unwrap_or_else(|error| panic!("{cell}: the resume converges: {error}"));
+        assert!(
+            runtime.container_names().is_empty(),
+            "{cell}: the census removed the container: {:?}",
+            runtime.container_names()
+        );
+        assert!(
+            crate::runner::container::list_intents(&fixture.private_root)
+                .expect("the namespace scans")
+                .is_empty(),
+            "{cell}: and the intent"
+        );
+        assert!(!view_path.exists(), "{cell}: and the view");
+        assert_log_replays_twice_equal(&fixture, Some(&handle.fold), cell);
+    }
 }
 
 #[test]
@@ -10935,9 +11088,10 @@ fn a_surviving_ref_writer_of_the_dead_coordinator_refuses_the_resume_until_it_ex
     );
 
     drop(writer);
-    resume_with_real_refs(&fixture, &harness())
+    let (_, handle) = resume_with_real_refs(&fixture, &harness())
         .expect("once the writer is gone the lock is stale and the publication completes");
     assert_publication_completed(&fixture, &planted, &lock);
+    assert_log_replays_twice_equal(&fixture, Some(&handle.fold), "after the resume");
 }
 
 #[test]
@@ -12706,10 +12860,52 @@ fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnatio
         &mut crate::rundir::NoHooks,
     )
     .expect("the answer is staged");
+    let partial = paths.answers().join(format!("{component}.json.partial"));
+    let staged = std::fs::read(&partial).expect("the staged answer");
+    let unpublished = drive_observing(
+        &fixture,
+        &seams,
+        1,
+        &driven_runner(&seams),
+        &mut |_, run| {
+            assert_log_replays_twice_equal(
+                &fixture,
+                Some(run.fold()),
+                "with the answer unpublished",
+            )
+        },
+    );
+    assert!(
+        matches!(
+            unpublished.progress.first(),
+            Some(Ok(Progress::Finished {
+                outcome: RunOutcome::Parked,
+                ..
+            }))
+        ),
+        "an answer staged and never published is not ingested, and the run parks again: {:?}",
+        unpublished.progress
+    );
+    assert!(answers_of(&unpublished.log, repair).is_empty());
+    assert_eq!(
+        std::fs::read(&partial).expect("the staged answer"),
+        staged,
+        "the incarnation that ingested nothing left the partial byte-identical"
+    );
     crate::rundir::publish_answer(&paths.answers(), &component, &mut crate::rundir::NoHooks)
         .expect("and published");
 
-    let driven = drive(&fixture, &seams, 2);
+    let driven = drive_observing(
+        &fixture,
+        &seams,
+        2,
+        &driven_runner(&seams),
+        &mut |step, run| {
+            if step == 2 {
+                assert_log_replays_twice_equal(&fixture, Some(run.fold()), "after the ingestion");
+            }
+        },
+    );
     assert!(
         matches!(
             driven.progress.first(),
@@ -14446,6 +14642,7 @@ fn an_append_error_at_the_run_ending_close_ends_the_command_and_the_next_resume_
 
         let (recovered, handle) =
             resume_with_real_refs(&fixture, &harness()).expect("the interrupted closure resumes");
+        assert_log_replays_twice_equal(&fixture, Some(&handle.fold), &tag);
         assert!(
             !worktree.exists() && !manager.intents().expect("intents").contains(&slot),
             "{tag}: the resume reclaims the closed generation's worktree and intent"
@@ -14774,7 +14971,18 @@ fn append_error_inside_closure_ends_command_and_resume_completes_closure() {
         .is_empty()
     );
 
-    let driven = drive(&fixture, &DriveSeams::default(), 2);
+    let seams = DriveSeams::default();
+    let driven = drive_observing(
+        &fixture,
+        &seams,
+        2,
+        &driven_runner(&seams),
+        &mut |step, run| {
+            if step == 2 {
+                assert_log_replays_twice_equal(&fixture, Some(run.fold()), "after the closure");
+            }
+        },
+    );
     assert!(
         matches!(
             driven.progress.first(),
@@ -14998,7 +15206,14 @@ fn kill_inside_closure_recovers() {
         );
 
         if torn {
-            let driven = drive(&fixture, &DriveSeams::default(), 1);
+            let seams = DriveSeams::default();
+            let driven = drive_observing(
+                &fixture,
+                &seams,
+                1,
+                &driven_runner(&seams),
+                &mut |_, run| assert_log_replays_twice_equal(&fixture, Some(run.fold()), shape),
+            );
             assert!(
                 matches!(
                     driven.progress.first(),
@@ -15022,6 +15237,7 @@ fn kill_inside_closure_recovers() {
                 text.contains("already finished as `complete`") && text.contains("finalized"),
                 "{shape}: the next process finalizes then refuses: {text}"
             );
+            assert_log_replays_twice_equal(&fixture, None, shape);
         }
         let log = TopologyFold::parse_log(&fixture.log_bytes()).expect("parses");
         let ends = finished_events(&log);

@@ -326,6 +326,19 @@ impl Journal {
             .and_then(|task| task.generations.first())
             .map(|generation| generation.class.clone())
     }
+
+    fn replay_twice_equal(&self) {
+        let bytes = std::fs::read(&self.path).expect("the log");
+        let events = TopologyFold::parse_log(&bytes).expect("the log parses");
+        let first = TopologyFold::replay(inputs(), &events).expect("the log replays");
+        let second = TopologyFold::replay(inputs(), &events).expect("the log replays again");
+        assert_eq!(first.state(), second.state(), "two replays disagree");
+        assert_eq!(
+            self.fold.state(),
+            first.state(),
+            "the live fold and a replay of its own log disagree"
+        );
+    }
 }
 
 impl CandidateJournal for Journal {
@@ -855,6 +868,7 @@ fn orphan_candidate_pin_removed_after_kill() {
         ),
         "the deletion went through its own funnel site"
     );
+    journal.replay_twice_equal();
 }
 
 #[test]
@@ -1093,6 +1107,7 @@ fn kill_after_candidate_prepared_appends_candidate_created_once() {
         refused.to_string().contains("is present at") && refused.to_string().contains(&commit.0),
         "the refusal names the ref's actual value: {refused}"
     );
+    journal.replay_twice_equal();
 }
 
 #[test]

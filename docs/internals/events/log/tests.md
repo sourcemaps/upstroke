@@ -765,6 +765,12 @@ repeats the barrier**".
 `SyncPrefix` — consulted before the sync, so the bytes are untouched and
 the next open is what makes them durable.
 
+## `fn a_kill_at_each_open_point_leaves_the_shape_the_packet_tables() {` › `let (replayable, seeded) = replayable_prefix("kill-sync-prefix-replayable");`
+
+The same kill over a run's prefix, which the checked fold accepts: the next
+open is the whole barrier, and the fold it recovers equals two replays of
+the surviving bytes (`assert_replays_twice_to`).
+
 ## `fn a_kill_at_each_append_point_leaves_the_shape_the_packet_tables() {`
 
 `Event.Append`'s kill entries: the two durable shapes `Written` tables and
@@ -905,6 +911,21 @@ would hold for the wrong reason.
 
 What the log would hold if the killed append had committed.
 
+## `fn replayable_prefix(tag: &str) -> (PathBuf, Vec<u8>) {`
+
+A durable prefix a run's checked fold accepts: `run_started`, with the
+registry digest this module's frozen inputs derive. `seeded_prefix`'s line
+is a `defer_wait_elapsed` with no `run_started` before it, which the checked
+fold refuses (`the_parsed_events_really_reach_the_checked_fold`), so a kill
+repeated over this prefix is what gives the next open a fold to compare
+with a replay.
+
+## `fn assert_replays_twice_to(path: &Path, recovered: &TopologyFold) {`
+
+Replay twice equal after the next open: the surviving bytes replayed twice,
+the two states equal to each other and to the state of the fold the barrier
+recovered from the same prefix.
+
 ## `fn torn_tail_truncated_on_open_and_recovery_matches_before_append_row() {`
 
 T-APPEND (w): "bytes partially written (torn tail: no terminating
@@ -945,6 +966,11 @@ only the disjunction would pass for a log that lost the whole prefix.
 T-APPEND (s): "synced". `durable_state` is "the prefix incl. the line" with
 no disjunction, which is the whole difference from (u) — and the reason
 this is a separate test rather than a second cell of the one above.
+
+The kill is then repeated over a run's prefix (`replayable_prefix`): the
+next open's barrier proves the prefix with the synced line in it, and the
+fold it recovers equals two replays of the surviving bytes
+(`assert_replays_twice_to`).
 
 ## `fn unsynced_line_made_durable_by_barrier_survives_later_power_loss() {`
 

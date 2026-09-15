@@ -413,6 +413,7 @@ fn kill_after_dispatch_recreates_worktree_without_spend() {
             vec!["run_started", "task_dispatched"],
             "`{site}`: recovery of an OpenNoAttempt generation appends nothing and spends nothing"
         );
+        run.replay_twice_equal();
     }
 }
 
@@ -568,6 +569,7 @@ fn repair_materialization_reproduced_after_kill() {
             run.observed(MATERIALIZE, HookPhase::After),
             "`{site}`: the recovery re-ran the recorded materialization"
         );
+        run.replay_twice_equal();
     }
 }
 
