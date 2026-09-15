@@ -35,8 +35,9 @@ use super::fixture::{
     Fixture, REPLACEMENT_DISABLED_EXIT, REPLACEMENT_WITNESS, ReplacementLiveness,
     ambient_replacement_controls, assert_replacement_controls_pinned, create_dir, died_by_abort,
     died_by_kill, environment_without_ambient_replacement_controls, fan_out_directory, git,
-    git_out, replacement_liveness, run_kill_child, run_replacement_witness_child, scratch,
-    without_ambient_replacement_controls, write_file, write_include_path,
+    git_out, replacement_liveness, run_kill_child, run_kill_child_within,
+    run_replacement_witness_child, scratch, without_ambient_replacement_controls, write_file,
+    write_include_path,
 };
 
 /// `value`, which the fixture read from Git, as the [`ObjectId`] every
@@ -9618,6 +9619,26 @@ fn exit_134_probe_helper() {
     std::process::exit(134);
 }
 
+/// How long [`the_abort_oracle_separates_an_abort_from_an_exit_of_one`] waits
+/// for each probe. A probe ends at once when it ends as its name says, so the
+/// bound bounds a probe that does not, never a healthy one.
+const PROBE_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Launch the probe `helper` with `switch` set, and return how it ended.
+///
+/// Through `run_kill_child_within`, so a probe still running at
+/// [`PROBE_BOUND`] is killed and reaped there, and this fails naming it rather
+/// than waiting on it (#292's review round 6: the oracle's test waited on its
+/// probes without a deadline).
+fn probe_end(helper: &str, switch: &str) -> std::process::ExitStatus {
+    run_kill_child_within(helper, &[(switch, std::ffi::OsStr::new("1"))], PROBE_BOUND)
+        .unwrap_or_else(|| {
+            panic!(
+                "the probe `{helper}` did not end within {PROBE_BOUND:?}, and was killed and reaped"
+            )
+        })
+}
+
 /// The abort oracle is tested, on every platform, against the ends it must
 /// not accept (PR #136 pass 2, finding 2; #292's review round 5, finding 1).
 ///
@@ -9637,20 +9658,19 @@ fn exit_134_probe_helper() {
 /// all three; `died_by_abort`, whose Windows arm now names the status an abort
 /// exits with, and a comparison against a *measured* abort accept only the
 /// abort. The abort is real, so a Windows whose abort ended with another
-/// status fails the first premise.
+/// status fails the first premise. Each probe is launched with a deadline
+/// ([`probe_end`]): one that does not end fails the test at [`PROBE_BOUND`],
+/// killed and reaped, instead of holding it.
 #[test]
 fn the_abort_oracle_separates_an_abort_from_an_exit_of_one() {
-    let aborted = run_kill_child(
-        "workspace_manager::tests::abort_probe_helper",
-        &[(ABORT_PROBE, std::ffi::OsStr::new("1"))],
-    );
-    let exited = run_kill_child(
+    let aborted = probe_end("workspace_manager::tests::abort_probe_helper", ABORT_PROBE);
+    let exited = probe_end(
         "workspace_manager::tests::exit_one_probe_helper",
-        &[(EXIT_ONE_PROBE, std::ffi::OsStr::new("1"))],
+        EXIT_ONE_PROBE,
     );
-    let exited_134 = run_kill_child(
+    let exited_134 = probe_end(
         "workspace_manager::tests::exit_134_probe_helper",
-        &[(EXIT_134_PROBE, std::ffi::OsStr::new("1"))],
+        EXIT_134_PROBE,
     );
 
     // The premises: each child really ended the way its name says.
