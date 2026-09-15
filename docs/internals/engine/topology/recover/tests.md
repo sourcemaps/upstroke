@@ -4147,6 +4147,21 @@ payload is still as it was written, and the log replays twice to equal states.
 
 As with row 36, this parent never executes the funnel, so the registry cites the kill child.
 
+## `fn an_error_after_the_logs_torn_tail_is_truncated_refuses_the_resume_before_any_effect_and_the_next_resume_converges()`
+
+Gate 5's strict re-audit, row 96: `Event.OpenLog`'s `TruncateTornTail` point in error-return mode had
+no committed witness. The coverage test fires it on a bare log and drives nothing.
+
+A committed run with an open generation gets an unterminated final line, and the resume is armed
+to fail at the point. The open truncates the torn tail, the point answers the error, and the
+barrier stops at the open. The refusal names the point and says the run is resumable. What the
+refusal leaves is the registry's residue for the point, R21 with the unterminated final line
+truncated, byte for byte the committed prefix. There is no proof, no census effect and no recovery
+event: nothing derived from the log was acted on. The next resume repeats the barrier: it opens
+and proves the prefix, and has nothing left to truncate because the refused open's truncation
+stands. It appends its `run_resumed` after the committed prefix, and the log replays twice to equal
+states.
+
 ## `fn two_lineages_publish_in_lineage_order_and_the_younger_candidate_waits_behind_the_older() {`
 
 Two lineages overlapping on one path, the younger's repair already queued

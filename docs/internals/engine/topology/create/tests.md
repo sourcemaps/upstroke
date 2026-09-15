@@ -1406,3 +1406,17 @@ are one answer.
 
 Finding 5's pair: the two committed shapes are one variant and two
 sentences, and only one of them promises a marker repair.
+
+## `fn an_error_after_the_log_is_created_refuses_the_run_resumably_and_the_next_creation_opens_it_again()`
+
+Gate 5's strict re-audit, row 94: `Event.OpenLog`'s `Create` point in error-return mode had no
+committed witness. The coverage test fires it on a bare path and drives nothing.
+
+A run creation is armed to fail at the point. P5 opens the log, creates the file and syncs its
+directory (the `SyncRecord` for the point says so), and then the point answers the error. The
+creation stops at P4 and names the point. Nothing past the open ran, so no commit record and no
+`run_started` exist. The creator proves the husk its own and removes both halves, which leaves no
+run directory for the next command to step around. The next creation over the same repository
+converges: its open creates the log and syncs the directory again, `run_started` is the log's one
+line, the run classifies committed, and the log replays twice to states equal to each other and to
+the live fold.

@@ -14148,6 +14148,102 @@ fn a_kill_after_a_parked_questions_payload_is_written_is_adopted_and_the_answer_
     assert_replays_twice_equal(&fixture, tag);
 }
 
+#[test]
+fn an_error_after_the_logs_torn_tail_is_truncated_refuses_the_resume_before_any_effect_and_the_next_resume_converges()
+ {
+    use crate::topology::effects::{EntryPhase, ResourceRow};
+
+    let tag = "open-log-truncate-error";
+    let fixture = Fixture::build(
+        tag,
+        Damage {
+            open_generation: true,
+            ..Damage::default()
+        },
+    );
+    let committed = fixture.log_bytes();
+    let planted = durable_kinds(&fixture).len();
+    crate::workspace_manager::fixture::write_file(
+        &fixture.log(),
+        &[
+            committed.as_slice(),
+            b"{\"ts\":\"2026-08-23T09:41".as_slice(),
+        ]
+        .concat(),
+    );
+    let site = EffectSiteId::Event(EventSite::OpenLog);
+    let point = SubEffectPoint::TruncateTornTail;
+    let mode = InjectionMode::ErrorReturn;
+    assert_eq!(
+        site.semantics(EntryPhase::Point { point, mode }).rows,
+        vec![ResourceRow::R21],
+        "{tag}"
+    );
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(&fixture, &runtime, &certifies);
+
+    let faulted = harness();
+    faulted
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .arm(site, point, mode)
+        .expect("TruncateTornTail supports an error return");
+    let (outcome, _) = resume(&fixture, &faulted, &given);
+    let text = message(&outcome.expect_err("the error after the truncation refuses the resume"));
+    assert!(
+        text.contains(point.name()) && text.contains("the run is resumable"),
+        "{tag}: the write command refuses resumably, naming the point: {text}"
+    );
+    assert_eq!(
+        fixture.log_bytes(),
+        committed,
+        "{tag}: the unterminated final line is truncated and nothing is appended"
+    );
+    {
+        let seen = faulted.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            seen.observed(site, HookPhase::Point { point, mode }),
+            "{tag}: the armed point fired"
+        );
+        assert!(
+            !seen.touched(EffectSiteId::Event(EventSite::ProvePrefixStable))
+                && !seen.touched(EffectSiteId::RunDir(RunDirSite::RemoveMarker))
+                && !seen.touched(EffectSiteId::Event(EventSite::Append)),
+            "{tag}: no proof, no census effect and no recovery event follow the refusal"
+        );
+    }
+
+    let observed = harness();
+    let (outcome, _) = resume(&fixture, &observed, &given);
+    outcome.expect("the next resume converges");
+    {
+        let seen = observed.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            seen.observed(site, HookPhase::After)
+                && seen.observed(
+                    EffectSiteId::Event(EventSite::ProvePrefixStable),
+                    HookPhase::After
+                ),
+            "{tag}: the next open repeats the barrier"
+        );
+        assert!(
+            !seen.reached_point(site, point, mode),
+            "{tag}: the truncation the refused open made stands, so nothing is truncated again"
+        );
+    }
+    assert!(
+        fixture.log_bytes().starts_with(&committed),
+        "{tag}: the committed prefix survives"
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec!["run_resumed"],
+        "{tag}: the next resume appends after the committed prefix"
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
 /// Beta's candidate queued at the base, unmerged, so that a second lineage
 /// can be rooted at beta.
 fn plant_queued_beta(fixture: &Fixture) -> crate::topology::events::CandidateRef {

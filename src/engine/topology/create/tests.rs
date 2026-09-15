@@ -4127,3 +4127,110 @@ fn the_deletion_boundary_falls_between_p5_and_p5b() {
         assert!(!kept.describe().is_empty());
     }
 }
+
+#[test]
+fn an_error_after_the_log_is_created_refuses_the_run_resumably_and_the_next_creation_opens_it_again()
+ {
+    use crate::events::log::SyncTarget;
+    use crate::topology::effects::{EntryPhase, ResourceRow};
+
+    let site = EffectSiteId::Event(EventSite::OpenLog);
+    let point = SubEffectPoint::Create;
+    let mode = InjectionMode::ErrorReturn;
+    assert_eq!(
+        site.semantics(EntryPhase::Point { point, mode }).rows,
+        vec![ResourceRow::R21]
+    );
+    let fixture = Fixture::new("open-log-create-error");
+    let probes = RecordingProbes::new(&host_digest());
+    let refs = FakeRefs::empty();
+
+    let mut hooks = TestHooks::new();
+    hooks.arm(EventSite::OpenLog, point, mode);
+    let mut driver = Driver::new(&fixture, &probes, &refs);
+    let refused = driver
+        .run(&mut hooks)
+        .expect_err("the error after the log's creation refuses the run");
+    assert_eq!(refused.reached, Prefix::P4);
+    assert!(
+        hooks.observed(site, HookPhase::Point { point, mode }),
+        "the armed point fired"
+    );
+    let created = hooks
+        .events
+        .synced
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .any(|record| {
+            record.point == point
+                && record.target == SyncTarget::LogDirectory
+                && record.path == fixture.public().join(EVENT_LOG)
+        });
+    assert!(
+        created,
+        "the refusal came after the log file was created and its directory synced"
+    );
+    assert!(
+        !hooks.observed(
+            EffectSiteId::Event(EventSite::AppendFirst),
+            HookPhase::Before
+        ) && !hooks.observed(
+            EffectSiteId::RunDir(RunDirSite::StageCommitRecord),
+            HookPhase::Before
+        ),
+        "nothing past the open ran: no commit record and no `run_started`"
+    );
+    assert!(
+        matches!(*refused.disposition, Disposition::BothHalvesRemoved { .. }),
+        "the creator reclaims the husk it can prove its own: {:?}",
+        refused.disposition
+    );
+    let sentence = refused.into_error().to_string();
+    assert!(
+        sentence.contains(point.name()),
+        "the refusal names the point: {sentence}"
+    );
+    assert!(
+        crate::rundir::run_dir_names(&fixture.repo).is_empty(),
+        "no run directory is left for the next command to step around"
+    );
+
+    let mut hooks = TestHooks::new();
+    let mut driver = Driver::new(&fixture, &probes, &refs);
+    let started = driver
+        .run(&mut hooks)
+        .map_err(Refused::into_error)
+        .expect("the next creation converges");
+    assert!(
+        hooks.observed(site, HookPhase::After)
+            && hooks
+                .events
+                .synced
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .any(|record| record.point == point && record.target == SyncTarget::LogDirectory),
+        "the next open creates the log and syncs its directory again"
+    );
+    assert_eq!(
+        crate::rundir::classify_run_dir(&fixture.public()),
+        crate::rundir::RunDirClass::Committed
+    );
+    let (_paths, lock, log, fold, _event) = started.into_parts();
+    drop(log);
+    let bytes = std::fs::read(fixture.public().join(EVENT_LOG)).expect("the log");
+    let events = TopologyFold::parse_log(&bytes).expect("the log parses");
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.body.kind())
+            .collect::<Vec<_>>(),
+        vec!["run_started"]
+    );
+    let once = TopologyFold::replay(inputs(), &events).expect("the log replays");
+    let twice = TopologyFold::replay(inputs(), &events).expect("the log replays again");
+    assert_eq!(once.state(), twice.state(), "replay twice equal");
+    assert_eq!(fold.state(), once.state(), "and equal to the live fold");
+    drop(lock);
+}
