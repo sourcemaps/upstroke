@@ -6,7 +6,8 @@ use super::*;
 use crate::engine::topology::dispatch::DispatchKind;
 use crate::engine::topology::identity::{ReservationKind, Reservations};
 use crate::engine::topology::scaffold::{
-    AGENT, ALPHA, RETAINED_SESSION, Run, kill_child_and_adopt, kill_child_environment, kill_dir,
+    AGENT, ALPHA, RETAINED_SESSION, Run, kill_child_and_adopt,
+    kill_child_and_adopt_in_a_scratch_tree, kill_child_environment, kill_dir,
 };
 use crate::engine::topology::settle::{self, ManagedWorktrees, RetryOutcome, RetryRequest};
 use crate::topology::effects::{
@@ -1085,7 +1086,7 @@ fn attempt_kill_child() {
     if which == "in_attempt" {
         run.arm(STAGE, HookPhase::Before, Injection::Kill);
         let _ = context!(run, process).capture(dispatched.site());
-        unreachable!("the kill must have taken this process");
+        panic!("`in_attempt`: the capture returned past the kill armed before the stage");
     }
 
     if which == "retry" {
@@ -1106,14 +1107,26 @@ fn attempt_kill_child() {
             .convert(ALPHA, ReservationKind::Retry)
             .expect("converted at `attempt_started(retry)`");
         let _ = context!(run, process).capture(dispatched.site());
-        unreachable!("the kill must have taken this process");
+        panic!("`retry`: the retry's capture returned past the kill armed before the stage");
     }
 
     agent_edits(&dispatched.worktree);
     if which == "after_capture" {
         run.arm(WRITE_TREE, HookPhase::After, Injection::Kill);
         let _ = context!(run, process).capture(dispatched.site());
-        unreachable!("the kill must have taken this process");
+        panic!("`after_capture`: the capture returned past the kill armed after the write-tree");
+    }
+    if which == "after_stage" {
+        run.arm(STAGE, HookPhase::After, Injection::Kill);
+        let _ = context!(run, process).capture(dispatched.site());
+        panic!("`after_stage`: the capture returned past the kill armed after the stage");
+    }
+    if which == "before_write_tree" {
+        run.arm(WRITE_TREE, HookPhase::Before, Injection::Kill);
+        let _ = context!(run, process).capture(dispatched.site());
+        panic!(
+            "`before_write_tree`: the capture returned past the kill armed before the write-tree"
+        );
     }
 
     let capture = context!(run, process)
@@ -1126,6 +1139,8 @@ fn attempt_kill_child() {
             SubEffectPoint::IdUnread,
             InjectionMode::Kill,
         ),
+        "after_snapshot_intent" => run.arm(SNAPSHOT_INTENT, HookPhase::After, Injection::Kill),
+        "before_snapshot_add" => run.arm(SNAPSHOT_ADD, HookPhase::Before, Injection::Kill),
         "after_snapshot_add" => run.arm(SNAPSHOT_ADD, HookPhase::After, Injection::Kill),
         other => panic!("unknown site `{other}`"),
     }
@@ -1154,7 +1169,7 @@ fn attempt_kill_child() {
             reask: started.identities.review_reask(pass, 0),
         },
     );
-    unreachable!("the kill must have taken this process");
+    panic!("`{which}`: the assessment and judgement returned past the kill armed for the snapshot");
 }
 
 fn adopted_generation(run: &Run) -> Dispatched {
@@ -1290,6 +1305,174 @@ fn kill_after_capture_leaves_index_referenced_objects_then_scrub_releases_them()
     run.replay_twice_equal();
 }
 
+/// Whether Git lists `worktree` among the repository's registered worktrees:
+/// a settlement that removes the directory by hand, or only the intent, leaves
+/// the registration, and `git worktree add` refuses the path until it is pruned.
+fn registered_with_git(run: &Run, worktree: &Path) -> bool {
+    run.fixture
+        .manager
+        .worktree_records()
+        .expect("worktree records")
+        .iter()
+        .any(|record| listed_as(record.path(), worktree))
+}
+
+/// Whether a registration's path names `worktree`, compared by name and by the
+/// parent directory, which outlives the worktree: `util::same_path` resolves
+/// both paths and cannot compare a removed worktree with a stale registration
+/// of it.
+fn listed_as(listed: &Path, worktree: &Path) -> bool {
+    listed.file_name() == worktree.file_name()
+        && match (listed.parent(), worktree.parent()) {
+            (Some(listed), Some(wanted)) => crate::util::same_path(listed, wanted),
+            _ => false,
+        }
+}
+
+#[test]
+fn kill_after_the_stage_before_the_tree_leaves_index_referenced_objects_then_scrub_releases_them() {
+    for site in ["after_stage", "before_write_tree"] {
+        let (_handoff, mut run) = kill_child_and_adopt_in_a_scratch_tree(CHILD, site);
+        let dispatched = adopted_generation(&run);
+        let mut process = Process::new();
+
+        assert_eq!(
+            run.emitter.durable_kinds(),
+            vec!["run_started", "task_dispatched", "attempt_started"],
+            "{site}: the child died inside the capture, before any capture event"
+        );
+        assert!(
+            dispatched.worktree.is_dir() && registered_with_git(&run, &dispatched.worktree),
+            "{site}: the task worktree stands, registered with Git"
+        );
+        let staged = index_blobs(&dispatched.worktree);
+        let worked = git(&dispatched.worktree, &["hash-object", WORKED_PATH]);
+        assert!(
+            staged.contains(&worked),
+            "{site}: the stage completed: the agent's file is in the index: {staged:?} does not \
+             hold {worked}"
+        );
+        assert!(
+            !unreachable_objects(&run.fixture.base)
+                .expect("fsck")
+                .contains(&worked),
+            "{site}: R9: the object the task index holds is reachable"
+        );
+
+        context!(run, process)
+            .settle_interrupted(
+                &dispatched,
+                crate::topology::events::AttemptNumber(1),
+                AttemptOutcome::Interrupted,
+            )
+            .expect("settle");
+
+        assert_eq!(
+            run.emitter.durable_kinds().last().copied(),
+            Some("attempt_interrupted"),
+            "{site}: the settlement appends the interruption"
+        );
+        assert_eq!(run.task_state(ALPHA), TaskState::Pending, "{site}");
+        assert!(
+            !dispatched.worktree.exists(),
+            "{site}: the task worktree is scrubbed with force"
+        );
+        assert!(
+            !registered_with_git(&run, &dispatched.worktree),
+            "{site}: and its Git registration is gone"
+        );
+        assert!(
+            unreachable_objects(&run.fixture.base)
+                .expect("fsck")
+                .contains(&worked),
+            "{site}: R27: the scrub released the staged object to Git"
+        );
+        assert!(
+            run.observed(SCRUB, HookPhase::After),
+            "{site}: the release is the forced scrub's"
+        );
+        run.replay_twice_equal();
+    }
+}
+
+#[test]
+fn kill_after_the_snapshot_intent_before_its_worktree_is_reclaimed_by_the_settlement() {
+    for site in ["after_snapshot_intent", "before_snapshot_add"] {
+        let (_handoff, mut run) = kill_child_and_adopt_in_a_scratch_tree(CHILD, site);
+        let dispatched = adopted_generation(&run);
+        let mut process = Process::new();
+
+        let snapshots: Vec<crate::workspace_manager::Slot> = run
+            .fixture
+            .manager
+            .intents()
+            .expect("intents")
+            .into_iter()
+            .filter(|slot| matches!(slot, crate::workspace_manager::Slot::Snapshot { .. }))
+            .collect();
+        assert_eq!(
+            snapshots.len(),
+            1,
+            "{site}: the synced snapshot intent survives: {snapshots:?}"
+        );
+        let path = run.fixture.manager.slot_path(&snapshots[0]);
+        assert!(
+            !path.exists(),
+            "{site}: and no snapshot worktree was added for it"
+        );
+        assert!(
+            !run.fixture
+                .manager
+                .worktree_records()
+                .expect("worktree records")
+                .iter()
+                .any(|record| record
+                    .path()
+                    .starts_with(run.fixture.manager.execution_root().join("snapshots"))),
+            "{site}: nor registered"
+        );
+        let orphans = unreachable_ephemeral_commits(&run.fixture.base);
+        assert_eq!(
+            orphans.len(),
+            1,
+            "{site}: the ephemeral commit written before the intent is unreferenced: {orphans:?}"
+        );
+        assert!(
+            dispatched.worktree.is_dir() && registered_with_git(&run, &dispatched.worktree),
+            "{site}: the task worktree stands, registered with Git"
+        );
+
+        context!(run, process)
+            .settle_interrupted(
+                &dispatched,
+                crate::topology::events::AttemptNumber(1),
+                AttemptOutcome::Interrupted,
+            )
+            .expect("settle");
+
+        assert!(
+            run.fixture.manager.intents().expect("intents").is_empty(),
+            "{site}: the snapshot intent naming no worktree was reclaimed, with the task's"
+        );
+        assert!(
+            !dispatched.worktree.exists() && !registered_with_git(&run, &dispatched.worktree),
+            "{site}: the task worktree is scrubbed with force and its Git registration is gone"
+        );
+        assert_eq!(
+            unreachable_ephemeral_commits(&run.fixture.base),
+            orphans,
+            "{site}: the ephemeral commit is left to Git"
+        );
+        assert_eq!(
+            run.emitter.durable_kinds().last().copied(),
+            Some("attempt_interrupted"),
+            "{site}: the settlement appends the interruption"
+        );
+        assert_eq!(run.task_state(ALPHA), TaskState::Pending, "{site}");
+        run.replay_twice_equal();
+    }
+}
+
 #[test]
 fn kill_after_ephemeral_snapshot_commit_before_worktree_leaves_gc_owned_object() {
     let dir = kill_dir("killephemeral");
@@ -1374,6 +1557,72 @@ fn kill_at_snapshot_commit_id_unread_point_leaves_gc_owned_object() {
         refusal.to_string().contains("ErrorReturn"),
         "the refusal must name the mode it will not arm: {refusal}"
     );
+}
+
+#[test]
+fn a_kill_before_the_snapshot_commits_id_is_read_is_settled_interrupted_and_leaves_the_commit_to_git()
+ {
+    let (_handoff, mut run) = kill_child_and_adopt_in_a_scratch_tree(CHILD, "id_unread");
+    let dispatched = adopted_generation(&run);
+    let mut process = Process::new();
+
+    let orphans = unreachable_ephemeral_commits(&run.fixture.base);
+    assert_eq!(
+        orphans.len(),
+        1,
+        "the object was written before the coordinator could read its id: {orphans:?}"
+    );
+    assert!(
+        run.fixture
+            .manager
+            .intents()
+            .expect("intents")
+            .iter()
+            .all(|slot| !matches!(slot, crate::workspace_manager::Slot::Snapshot { .. })),
+        "and no snapshot intent names it"
+    );
+    assert_eq!(
+        run.emitter.durable_kinds().last().copied(),
+        Some("attempt_started"),
+        "the attempt is in flight"
+    );
+    assert!(
+        dispatched.worktree.is_dir() && registered_with_git(&run, &dispatched.worktree),
+        "its task worktree stands, registered with Git"
+    );
+
+    context!(run, process)
+        .settle_interrupted(
+            &dispatched,
+            crate::topology::events::AttemptNumber(1),
+            AttemptOutcome::Interrupted,
+        )
+        .expect("settle");
+
+    assert!(
+        run.fixture.manager.intents().expect("intents").is_empty(),
+        "the settlement reclaims the attempt's intents"
+    );
+    assert!(
+        !dispatched.worktree.exists(),
+        "and scrubs the task worktree with force: the directory is gone"
+    );
+    assert!(
+        !registered_with_git(&run, &dispatched.worktree),
+        "and its Git registration is gone"
+    );
+    assert_eq!(
+        unreachable_ephemeral_commits(&run.fixture.base),
+        orphans,
+        "and leaves the unreferenced commit to Git"
+    );
+    assert_eq!(
+        run.emitter.durable_kinds().last().copied(),
+        Some("attempt_interrupted"),
+        "the settlement appends the interruption"
+    );
+    assert_eq!(run.task_state(ALPHA), TaskState::Pending);
+    run.replay_twice_equal();
 }
 
 #[test]

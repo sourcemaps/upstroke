@@ -167,8 +167,10 @@ T-DISPATCH — the kill
 
 The child of [`kill_after_dispatch_recreates_worktree_without_spend`].
 
-Dies at one of the two prefixes `T-DISPATCH`'s boundary names: "worktree
-intent or worktree not yet created" and "created without `attempt_started`".
+Dies at one of the prefixes `T-DISPATCH`'s boundary names: "worktree
+intent or worktree not yet created" — before the intent, and after the intent
+with no worktree (`after_intent`, whose durable prefix is also
+`Worktree.Add`'s before phase) — and "created without `attempt_started`".
 
 ## `fn kill_after_dispatch_recreates_worktree_without_spend() {`
 
@@ -176,11 +178,17 @@ intent or worktree not yet created" and "created without `attempt_started`".
 `OpenNoAttempt` generation with **no spend**, and the recovery rebuilds or
 reuses its worktree without repeating one.
 
-Both prefixes of the boundary, because their recoveries differ and only one
-of the two branches would otherwise be executed: at `before_intent` nothing
-on disk exists and the worktree is built from nothing, at `after_add` the
-worktree exists and quiesces and is reused. A test that drove only the first
-would pass against a recovery that force-removed every worktree it found.
+The prefixes of the boundary, because their recoveries differ and only one
+of the branches would otherwise be executed: at `before_intent` nothing on
+disk exists and the worktree is built from nothing, at `after_intent` the
+synced intent stands with no worktree (Gate 5's strict re-audit found
+`Worktree.WriteIntent`'s after phase and `Worktree.Add`'s before phase, one
+durable prefix, faulted by no committed test) and the recovery rebuilds from
+it, and at `after_add` the worktree exists and quiesces and is reused. A test
+that drove only the first would pass against a recovery that force-removed
+every worktree it found. The intent's presence is asserted per prefix, beside
+the worktree's, and each prefix's log replays twice to equal states after its
+recovery.
 
 "Without spend" is asserted three ways: no `attempt_started` in the durable
 log, the generation still `OpenNoAttempt`, and the task still `Pending`.
@@ -193,6 +201,15 @@ Each prefix ends with its durable log replayed twice from disk
 the parent adopted from the child's log. The recovery holds neither the log
 nor the fold and appends nothing, so what this pins is that the log it
 recovered over still replays to the state the recovery was handed.
+
+Each prefix's kill child is launched through
+`kill_child_and_adopt_in_a_scratch_tree`, so its handoff directory and
+everything the child makes in its temporary directory lie in a
+`rundir::scratch_tree` tree the iteration holds, reclaimed when the iteration
+ends and when it unwinds (#292's review round 7). Before, every iteration left
+an `upstroke-topo-killdispatch-<pid>-<n>` handoff directory and the child's
+neutral Git configuration in the temporary directory, the two prefixes this
+test had before #292 included.
 
 ## `fn kill_after_dispatch_recreates_worktree_without_spend()` › `let existed = dispatched.worktree.is_dir();`
 

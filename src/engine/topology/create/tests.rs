@@ -193,7 +193,9 @@ impl EventHooks for ArmedEvents {
                 .arm(EffectSiteId::Event(site), point, mode)
                 .expect("the site exposes this point in this mode");
         }
-        harness.hook(EffectSiteId::Event(site), HookPhase::Point { point, mode })
+        let injection = harness.hook(EffectSiteId::Event(site), HookPhase::Point { point, mode });
+        drop(harness);
+        crate::observations::Exported::new(Arc::clone(&self.harness)).carried(injection)
     }
 
     fn written_kill_shape(&mut self, site: EventSite) -> WrittenShape {
@@ -2388,6 +2390,11 @@ fn drive_into_the_kill(which: &str, fixture: &Fixture) -> ! {
             );
         }
         "p6" => kill_before(RunDirSite::RemoveMarker),
+        "p6synced" => hooks.arm(
+            EventSite::AppendFirst,
+            SubEffectPoint::Synced,
+            InjectionMode::Kill,
+        ),
         "p7" => refs.kill_on_create = true,
         "p8" => {}
         other => panic!("unknown prefix `{other}`"),
@@ -2398,7 +2405,7 @@ fn drive_into_the_kill(which: &str, fixture: &Fixture) -> ! {
         assert!(outcome.is_ok(), "P8 must have been reached");
         std::process::abort();
     }
-    unreachable!("the kill must have taken this process");
+    panic!("`{which}`: the creation driver returned past the kill armed for this prefix");
 }
 
 #[test]
@@ -4152,4 +4159,372 @@ fn the_deletion_boundary_falls_between_p5_and_p5b() {
         );
         assert!(!kept.describe().is_empty());
     }
+}
+
+#[test]
+fn an_error_after_the_log_is_created_refuses_the_run_resumably_and_the_next_creation_opens_it_again()
+ {
+    use crate::events::log::SyncTarget;
+    use crate::topology::effects::{EntryPhase, ResourceRow};
+
+    let site = EffectSiteId::Event(EventSite::OpenLog);
+    let point = SubEffectPoint::Create;
+    let mode = InjectionMode::ErrorReturn;
+    assert_eq!(
+        site.semantics(EntryPhase::Point { point, mode }).rows,
+        vec![ResourceRow::R21]
+    );
+    // Bound before the fixture, so it is reclaimed after everything built in it:
+    // the guard owns the fixture's tree until this witness returns or unwinds.
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "open-log-create-error")
+        .expect("a scratch tree for the fixture");
+    let fixture = Fixture::at(tree.path());
+    let probes = RecordingProbes::new(&host_digest());
+    let refs = FakeRefs::empty();
+
+    let mut hooks = TestHooks::new();
+    hooks.arm(EventSite::OpenLog, point, mode);
+    let mut driver = Driver::new(&fixture, &probes, &refs);
+    let refused = driver
+        .run(&mut hooks)
+        .expect_err("the error after the log's creation refuses the run");
+    assert_eq!(refused.reached, Prefix::P4);
+    assert!(
+        hooks.observed(site, HookPhase::Point { point, mode }),
+        "the armed point fired"
+    );
+    let created = hooks
+        .events
+        .synced
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .any(|record| {
+            record.point == point
+                && record.target == SyncTarget::LogDirectory
+                && record.path == fixture.public().join(EVENT_LOG)
+        });
+    assert!(
+        created,
+        "the refusal came after the log file was created and its directory synced"
+    );
+    assert!(
+        !hooks.observed(
+            EffectSiteId::Event(EventSite::AppendFirst),
+            HookPhase::Before
+        ) && !hooks.observed(
+            EffectSiteId::RunDir(RunDirSite::StageCommitRecord),
+            HookPhase::Before
+        ),
+        "nothing past the open ran: no commit record and no `run_started`"
+    );
+    assert!(
+        matches!(*refused.disposition, Disposition::BothHalvesRemoved { .. }),
+        "the creator reclaims the husk it can prove its own: {:?}",
+        refused.disposition
+    );
+    let sentence = refused.into_error().to_string();
+    assert!(
+        sentence.contains(point.name()),
+        "the refusal names the point: {sentence}"
+    );
+    assert!(
+        crate::rundir::run_dir_names(&fixture.repo).is_empty(),
+        "no run directory is left for the next command to step around"
+    );
+
+    let mut hooks = TestHooks::new();
+    let mut driver = Driver::new(&fixture, &probes, &refs);
+    let started = driver
+        .run(&mut hooks)
+        .map_err(Refused::into_error)
+        .expect("the next creation converges");
+    assert!(
+        hooks.observed(site, HookPhase::After)
+            && hooks
+                .events
+                .synced
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .any(|record| record.point == point && record.target == SyncTarget::LogDirectory),
+        "the next open creates the log and syncs its directory again"
+    );
+    assert_eq!(
+        crate::rundir::classify_run_dir(&fixture.public()),
+        crate::rundir::RunDirClass::Committed
+    );
+    let (_paths, lock, log, fold, _event) = started.into_parts();
+    drop(log);
+    let bytes = std::fs::read(fixture.public().join(EVENT_LOG)).expect("the log");
+    let events = TopologyFold::parse_log(&bytes).expect("the log parses");
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.body.kind())
+            .collect::<Vec<_>>(),
+        vec!["run_started"]
+    );
+    let once = TopologyFold::replay(inputs(), &events).expect("the log replays");
+    let twice = TopologyFold::replay(inputs(), &events).expect("the log replays again");
+    assert_eq!(once.state(), twice.state(), "replay twice equal");
+    assert_eq!(fold.state(), once.state(), "and equal to the live fold");
+    drop(lock);
+}
+
+fn kill_the_creation(root: &Path, site: &str) {
+    use crate::engine::topology::scaffold::KILL_CHILD_BOUND;
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child_within};
+
+    let status = run_kill_child_within(
+        "engine::topology::create::tests::create_kill_child",
+        &[
+            ("UPSTROKE_TEST_KILL_DIR", root.as_os_str()),
+            ("UPSTROKE_TEST_KILL_SITE", std::ffi::OsStr::new(site)),
+        ],
+        KILL_CHILD_BOUND,
+    );
+    assert!(
+        status.as_ref().is_some_and(died_by_abort),
+        "`{site}`: the creation kill child did not die by the armed abort within \
+         {KILL_CHILD_BOUND:?}: {status:?} (`None` is a child still running at the bound, killed \
+         and reaped there)"
+    );
+}
+
+#[test]
+fn a_kill_after_the_first_line_is_synced_leaves_a_committed_run_whose_next_census_repairs_its_marker()
+ {
+    use crate::engine::topology::startup::{CensusInputs, RunDirOutcome, census_run_dirs};
+    use crate::topology::effects::{EntryPhase, ResourceRow};
+
+    let site = EffectSiteId::Event(EventSite::AppendFirst);
+    let point = SubEffectPoint::Synced;
+    let mode = InjectionMode::Kill;
+    assert_eq!(
+        site.semantics(EntryPhase::Point { point, mode }).rows,
+        vec![ResourceRow::R21]
+    );
+    // Bound before the fixture, so it is reclaimed after everything built in it:
+    // the guard owns the fixture's tree until this witness returns or unwinds.
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "kill-p6-synced")
+        .expect("a scratch tree for the fixture");
+    let fixture = Fixture::at(tree.path());
+    kill_the_creation(&fixture.root, "p6synced");
+
+    let path = fixture.public().join(EVENT_LOG);
+    let bytes = std::fs::read(&path).expect("the log exists");
+    let events = TopologyFold::parse_log(&bytes).expect("the log parses");
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.body.kind())
+            .collect::<Vec<_>>(),
+        vec!["run_started"],
+        "the first line was written and synced, and nothing after it"
+    );
+    assert!(
+        fixture.public().join(MARKER).is_file(),
+        "P7 never ran, so the marker stands"
+    );
+    let commit: CommitRecord = serde_json::from_str(
+        &std::fs::read_to_string(fixture.private().join(COMMIT_RECORD))
+            .expect("the commit record is published"),
+    )
+    .expect("the commit record parses");
+    assert_eq!(
+        crate::rundir::classify_run_dir(&fixture.public()),
+        crate::rundir::RunDirClass::Committed
+    );
+
+    let mut hooks = TestHooks::new();
+    let mut warnings = Vec::new();
+    let stable = establish_stable_prefix(
+        &path,
+        inputs(),
+        Some(&commit.run_started_sha256),
+        &mut warnings,
+        hooks.events(),
+    )
+    .expect("the next open converges the synced line through the barrier");
+    assert_eq!(
+        stable.bytes(),
+        bytes.as_slice(),
+        "the stable prefix is the synced line"
+    );
+    assert_eq!(stable.events(), events.as_slice());
+    assert!(
+        fixture.public().join(MARKER).is_file(),
+        "the barrier acts on nothing derived from the log"
+    );
+    let runtime = crate::runner::container::FakeRuntime::new(
+        crate::runner::container::runtime::ContainerTrace::default(),
+    );
+    let liveness = crate::runner::container::FakeOwnerLiveness::new();
+    let view = crate::runner::container::DisposableDirView::new(
+        crate::runner::container::runtime::ContainerTrace::default(),
+    );
+    let report = census_run_dirs(
+        hooks.rundir(),
+        &CensusInputs {
+            repo_root: &fixture.repo,
+            repo_key: &fixture.repo_key,
+            authorized_root: &fixture.private_root,
+            incarnation: "01KZTINCB0CREATE0000000002",
+            runtime: &runtime,
+            liveness: &liveness,
+            view: &view,
+        },
+        None,
+    )
+    .expect("the census runs");
+    assert!(
+        matches!(
+            report.of(RUN_ID).map(|entry| &entry.outcome),
+            Some(RunDirOutcome::RepairedStaleMarker)
+        ),
+        "the next census repairs the committed run's stale marker: {report:?}"
+    );
+    assert!(
+        hooks.observed(
+            EffectSiteId::RunDir(RunDirSite::RemoveMarker),
+            HookPhase::After
+        ),
+        "through `RunDir.RemoveMarker`"
+    );
+    assert!(
+        !fixture.public().join(MARKER).exists() && !fixture.public().join(MARKER_STAGED).exists()
+    );
+    assert_eq!(
+        crate::rundir::classify_run_dir(&fixture.public()),
+        crate::rundir::RunDirClass::Committed
+    );
+    assert_eq!(
+        crate::rundir::list_runs(&fixture.repo),
+        vec![RUN_ID.to_owned()]
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("the log"),
+        bytes,
+        "the repair leaves the committed line as it was"
+    );
+    let once = TopologyFold::replay(inputs(), &events).expect("the log replays");
+    let twice = TopologyFold::replay(inputs(), &events).expect("the log replays again");
+    assert_eq!(once.state(), twice.state(), "replay twice equal");
+    assert_eq!(
+        stable.fold().state(),
+        once.state(),
+        "and equal to the barrier's fold"
+    );
+}
+
+fn census_of(
+    fixture: &Fixture,
+    hooks: &mut TestHooks,
+) -> crate::engine::topology::startup::RunDirCensusReport {
+    use crate::engine::topology::startup::{CensusInputs, census_run_dirs};
+
+    let runtime = crate::runner::container::FakeRuntime::new(
+        crate::runner::container::runtime::ContainerTrace::default(),
+    );
+    let liveness = crate::runner::container::FakeOwnerLiveness::new();
+    let view = crate::runner::container::DisposableDirView::new(
+        crate::runner::container::runtime::ContainerTrace::default(),
+    );
+    census_run_dirs(
+        hooks.rundir(),
+        &CensusInputs {
+            repo_root: &fixture.repo,
+            repo_key: &fixture.repo_key,
+            authorized_root: &fixture.private_root,
+            incarnation: "01KZTINCB0CREATE0000000002",
+            runtime: &runtime,
+            liveness: &liveness,
+            view: &view,
+        },
+        None,
+    )
+    .expect("the census runs")
+}
+
+#[test]
+fn a_kill_while_the_first_line_is_written_leaves_a_retained_husk_whose_next_open_truncates_it() {
+    use crate::engine::topology::startup::RunDirOutcome;
+
+    // Bound before the fixture, so it is reclaimed after everything built in it:
+    // the guard owns the fixture's tree until this witness returns or unwinds.
+    let tree =
+        crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "kill-p5b-torn-recovered")
+            .expect("a scratch tree for the fixture");
+    let fixture = Fixture::at(tree.path());
+    kill_the_creation(&fixture.root, "p5btorn");
+    let path = fixture.public().join(EVENT_LOG);
+    let torn = std::fs::read(&path).expect("the log exists");
+    assert!(
+        !torn.is_empty() && torn.last() != Some(&b'\n'),
+        "the kill left a torn first line: {} byte(s)",
+        torn.len()
+    );
+    let commit: CommitRecord = serde_json::from_str(
+        &std::fs::read_to_string(fixture.private().join(COMMIT_RECORD))
+            .expect("the commit record is published"),
+    )
+    .expect("the commit record parses");
+
+    let mut hooks = TestHooks::new();
+    let report = census_of(&fixture, &mut hooks);
+    assert!(
+        matches!(
+            report.of(RUN_ID).map(|entry| &entry.outcome),
+            Some(RunDirOutcome::Retained(RetainReason::PossiblyCommitted))
+        ),
+        "a torn first line past the commit record is retained possibly committed: {report:?}"
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("the log"),
+        torn,
+        "the census removes nothing, the torn line included"
+    );
+    assert!(
+        fixture.private().join(COMMIT_RECORD).is_file() && fixture.public().join(MARKER).is_file(),
+        "and neither half"
+    );
+
+    let mut warnings = Vec::new();
+    let refused = establish_stable_prefix(
+        &path,
+        inputs(),
+        Some(&commit.run_started_sha256),
+        &mut warnings,
+        hooks.events(),
+    )
+    .map(|_| ())
+    .expect_err("the commit record names a first line the proven prefix does not hold");
+    assert_eq!(refused.step, BarrierStep::ProvePrefixStable, "{refused}");
+    assert!(
+        refused.detail.contains("has no committed first line"),
+        "{refused}"
+    );
+    assert_eq!(
+        warnings.len(),
+        1,
+        "the next open truncated the torn line and said so: {warnings:?}"
+    );
+    let truncated = std::fs::read(&path).expect("the log");
+    assert!(truncated.is_empty(), "nothing committed is left in the log");
+    assert!(
+        TopologyFold::parse_log(&truncated)
+            .expect("an empty log parses")
+            .is_empty(),
+        "and it holds no event to replay"
+    );
+
+    let report = census_of(&fixture, &mut hooks);
+    assert!(
+        matches!(
+            report.of(RUN_ID).map(|entry| &entry.outcome),
+            Some(RunDirOutcome::Retained(RetainReason::PossiblyCommitted))
+        ),
+        "the husk is still retained possibly committed after the open: {report:?}"
+    );
 }

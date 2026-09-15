@@ -11,7 +11,7 @@ excerpt within the preceding item when a heading names both an item and a line i
 ## Module
 
 The ST-07 observation export: what a test's hook harness saw, written to a file named after the
-test when `UPSTROKE_HOOK_OBSERVATIONS` names a directory. Every harness adapter — the Worktree,
+test and the process that wrote it when `UPSTROKE_HOOK_OBSERVATIONS` names a directory. Every harness adapter — the Worktree,
 Snapshot, Ref and Object families' `HarnessEffects`, the run-directory `HarnessHooks`, the Event
 family's `HarnessEventHooks`, the container and process families' `HarnessHooks` — holds its
 harness through [`Exported`], so the record is written when the last clone of an adapter on a
@@ -30,8 +30,9 @@ is), so the merge check reads the run's own histogram beside the run's own recor
 One test's observations: what its harness saw executed (`observed`, which for a point means an
 injection fired there), what it reached without injecting, and the fast sequences it recorded.
 Records of one test merge by the larger count per coordinate, so a test that builds several
-adapters, or a kill child spawned more than once, exports one record. An empty record is not
-written.
+adapters, or a kill child spawned more than once, exports one record: the exporter merges within
+its process's file, and `engine::topology::coverage::load_observations` merges every file whose
+record names the same test. An empty record is not written.
 
 ## `pub struct Exported {`
 
@@ -66,10 +67,22 @@ for a kill-mode point. Call it with the harness's lock released: the export take
 
 Compiled two ways, cut at a module so the effects census's production region ends where every
 other module's does. Under `cfg(test)` the export reads the variable, names the record after the
-current thread — which `cargo test` names after the test — merges with the record an earlier
-drop or a spawned kill child of the same test wrote, and writes through the fixture's
-`write_file`, the one write a module outside the funnels may make in a test build. Outside tests
-it does nothing.
+current thread — which `cargo test` names after the test — and its file after the test and this
+process, merges with the record an earlier export of the same test in this process wrote, and
+writes through the fixture's `write_file`, the one write a module outside the funnels may make in
+a test build. Outside tests it does nothing.
+
+The process is in the file name because a file several processes share loses records. Until
+#292's first repair round every export of a test read `<test>.json`, merged and wrote it back
+unlocked, and two kill children of one test, spawned by two parents running at once, could
+interleave: a child that read the file before the other's writes and wrote after them replaced
+them. #292's round-1 regression lens found it, and bounded barriers placed around that read and
+write reproduced it: `candidate_sequence_kill_child`'s record lost `Ref.CreateCandidates/after`
+and the merge check refused. Within one process the exports named after a test are made by the
+thread `cargo test` named after it, one after another, so the read-merge-write over the process's
+own file cannot interleave; the
+loader merges the processes' records by the larger count per coordinate, the union a serial run's
+single file held.
 ## `mod export` › `pub(super) fn export(harness: &Arc<Mutex<HookHarness>>) {`
 
 Merge what `harness` observed into the record named after the current
