@@ -26,8 +26,12 @@ convicted (`reviews/2026-09-14-o3-attribution-record.md`) — the optional
 attribution a human rules, `discovered_hole` by default or `design_defect`
 with the citation that convicts. This command writes the record
 **unattributed**: it has no flag for a ruling, and `None` in the file means
-no ruling was made, which the engine that ingests it reads as the default
-rather than as a conviction. A ruling therefore arrives only through the
+no ruling was made. What ingests such a file today is the schema-3 engine,
+which writes its `design_defect` record unclassified (`attribution: None,
+citation: None`) whatever the file says, and whose reader reports
+`Unclassified`; the topology emitter that will apply the discovery default
+at ingest is not built (`reviews/2026-09-14-o3-attribution-record.md`
+§14). A ruling therefore arrives only through the
 answer channel's file, never through the `question_answered` transaction,
 and never without its citation — `interaction::write_answer` refuses a
 `design_defect` that cites nothing.

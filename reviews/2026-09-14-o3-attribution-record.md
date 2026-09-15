@@ -339,8 +339,11 @@ The brief names three (`events/mod.md`, `answer.md`, `topology/events.md`). `int
 changes too, because `src/interaction.rs` is where the answer file's type and writer live (R5);
 `engine/coordinator.md`'s §`self.emit(EventBody::DesignDefect {` section changes, because its
 sentence restates the presumption §5 retires and a note that disagrees with `DESIGN.md` is a defect
-in the note (`docs/internals/README.md`); `status/render.md` gains the arm R7 changes. No other note
-mentions the record.
+in the note (`docs/internals/README.md`); `status/render.md` gains the arm R7 changes. Two other
+notes mention the record and need no change: `docs/internals/engine/tests.md:1685` (a test's
+planted answered question whose `DesignDefect` append a resume repairs) and
+`docs/internals/events/log/tests.md:202` (the informational kinds transcribed from the topology's
+list); the search is in `e03f7eae…/round1/b7-searches.txt` (§16).
 
 ## 4. Findings this change closes or files
 
@@ -589,8 +592,12 @@ informational tests), `phase3/fmt-1.log` (clean after `cargo fmt`), `phase3/clip
 ## 9. The internals notes (Phase 4)
 
 Six notes files change, the three the brief names and the three R9 adds; every changed module
-keeps its single `Extended notes:` pointer and no other prose (§13), and every new item has a
-section headed by its source line (`docs/internals/README.md`'s grep-string rule):
+keeps its single `Extended notes:` pointer and no other prose (§13), and every new production item
+— type, field, function — has a section headed by its source line (`docs/internals/README.md`'s
+grep-string rule; the check per item is in `e03f7eae…/round1/b7-searches.txt`). Of the new tests,
+`docs/internals/topology/events.md` carries sections for the three whose purpose is not their
+name; the other new tests have none, which the convention asks of no test —
+`validate-internals-notes.sh` checks markers and backlinks (N1–N4), not sections:
 
 | notes file | what changed |
 |---|---|
@@ -927,3 +934,15 @@ where the execution is:
   body: the finding's `pr:` is `290` at every head since `e03f7eae`; the attempt-1 directory is
   `eight-logs-attempt1-failed/`; the fenced numstat is the literal output of the two commands,
   leading space included.
+- **B7 (record 4; contract R9 and its coverage note): two notes overstated, and two record
+  claims were false.** `docs/internals/answer.md` no longer says an unattributed file is read "as
+  the default" — the schema-3 engine that ingests it writes its record unclassified and the
+  reader reports `Unclassified`; the topology emitter that applies the default is unbuilt.
+  `docs/internals/events/mod.md`'s `pub struct DesignDefect {` section names exactly which sites
+  use the literal `None, None` form (the two legacy emitters and the four serialisation fixtures)
+  and which go through the constructors. R9's "No other note mentions the record" corrected to the
+  two that do; §9's "every new item" narrowed to every new production item, with the per-item
+  heading check saved. Searches in `round1/b7-searches.txt`: `git grep -n -i
+  'design_defect\|DesignDefect' -- docs/internals` (the six changed notes and the two others), and
+  for each new production item a grep of its notes file for a heading naming it.
+  `bash .github/scripts/test-internals-notes.sh` after the edits: `round1/b7-test-internals-notes.log`.

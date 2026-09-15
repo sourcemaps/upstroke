@@ -754,8 +754,14 @@ the answer, and since the taxonomy the attribution. Two writers write it
 unclassified — the schema-3 emitters in `engine/coordinator.rs` and
 `engine/resume.rs`, `None` and `None`, not routed through the constructors,
 so their bytes and their projections are unchanged and their records read
-as written before the taxonomy; everything else constructs it through
-`discovered` or `convicted`, which always write `Some`. No
+as written before the taxonomy. The same literal form, both fields `None`,
+is what the serialisation fixtures use so that their bytes stay the
+pre-taxonomy bytes: the canonical corpus pair in `src/topology/events.rs`'s
+tests, `defect()` in `src/events/log/tests.rs`, and the round-trip corpus
+entry and the unclassified pin in this module's tests. Every other
+construction goes through `discovered` or `convicted`, which always write
+`Some`: the census offer, the fold fixture, the attributed fixtures and
+siblings, and the topology writer that is still to come. No
 `deny_unknown_fields`, so an older reader tolerates the two columns, and the
 schema-4 decoder reads them through its informational-tolerance path.
 
