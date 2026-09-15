@@ -4369,3 +4369,115 @@ fn a_kill_after_the_first_line_is_synced_leaves_a_committed_run_whose_next_censu
         "and equal to the barrier's fold"
     );
 }
+
+fn census_of(
+    fixture: &Fixture,
+    hooks: &mut TestHooks,
+) -> crate::engine::topology::startup::RunDirCensusReport {
+    use crate::engine::topology::startup::{CensusInputs, census_run_dirs};
+
+    let runtime = crate::runner::container::FakeRuntime::new(
+        crate::runner::container::runtime::ContainerTrace::default(),
+    );
+    let liveness = crate::runner::container::FakeOwnerLiveness::new();
+    let view = crate::runner::container::DisposableDirView::new(
+        crate::runner::container::runtime::ContainerTrace::default(),
+    );
+    census_run_dirs(
+        hooks.rundir(),
+        &CensusInputs {
+            repo_root: &fixture.repo,
+            repo_key: &fixture.repo_key,
+            authorized_root: &fixture.private_root,
+            incarnation: "01KZTINCB0CREATE0000000002",
+            runtime: &runtime,
+            liveness: &liveness,
+            view: &view,
+        },
+        None,
+    )
+    .expect("the census runs")
+}
+
+#[test]
+fn a_kill_while_the_first_line_is_written_leaves_a_retained_husk_whose_next_open_truncates_it() {
+    use crate::engine::topology::startup::RunDirOutcome;
+
+    let fixture = Fixture::new("kill-p5b-torn-recovered");
+    let code = spawn_and_wait(
+        "engine::topology::create::tests::create_kill_child",
+        &fixture.root,
+        "p5btorn",
+        92,
+    );
+    assert_ne!(code, Some(0), "the child must have died");
+    let path = fixture.public().join(EVENT_LOG);
+    let torn = std::fs::read(&path).expect("the log exists");
+    assert!(
+        !torn.is_empty() && torn.last() != Some(&b'\n'),
+        "the kill left a torn first line: {} byte(s)",
+        torn.len()
+    );
+    let commit: CommitRecord = serde_json::from_str(
+        &std::fs::read_to_string(fixture.private().join(COMMIT_RECORD))
+            .expect("the commit record is published"),
+    )
+    .expect("the commit record parses");
+
+    let mut hooks = TestHooks::new();
+    let report = census_of(&fixture, &mut hooks);
+    assert!(
+        matches!(
+            report.of(RUN_ID).map(|entry| &entry.outcome),
+            Some(RunDirOutcome::Retained(RetainReason::PossiblyCommitted))
+        ),
+        "a torn first line past the commit record is retained possibly committed: {report:?}"
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("the log"),
+        torn,
+        "the census removes nothing, the torn line included"
+    );
+    assert!(
+        fixture.private().join(COMMIT_RECORD).is_file() && fixture.public().join(MARKER).is_file(),
+        "and neither half"
+    );
+
+    let mut warnings = Vec::new();
+    let refused = establish_stable_prefix(
+        &path,
+        inputs(),
+        Some(&commit.run_started_sha256),
+        &mut warnings,
+        hooks.events(),
+    )
+    .map(|_| ())
+    .expect_err("the commit record names a first line the proven prefix does not hold");
+    assert_eq!(refused.step, BarrierStep::ProvePrefixStable, "{refused}");
+    assert!(
+        refused.detail.contains("has no committed first line"),
+        "{refused}"
+    );
+    assert_eq!(
+        warnings.len(),
+        1,
+        "the next open truncated the torn line and said so: {warnings:?}"
+    );
+    let truncated = std::fs::read(&path).expect("the log");
+    assert!(truncated.is_empty(), "nothing committed is left in the log");
+    assert!(
+        TopologyFold::parse_log(&truncated)
+            .expect("an empty log parses")
+            .is_empty(),
+        "and it holds no event to replay"
+    );
+
+    let report = census_of(&fixture, &mut hooks);
+    assert!(
+        matches!(
+            report.of(RUN_ID).map(|entry| &entry.outcome),
+            Some(RunDirOutcome::Retained(RetainReason::PossiblyCommitted))
+        ),
+        "the husk is still retained possibly committed after the open: {report:?}"
+    );
+}

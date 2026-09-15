@@ -1446,3 +1446,21 @@ record's digest, proves the synced line as the stable prefix and acts on nothing
 and it replays twice to states equal to each other and to the barrier's fold.
 
 The kill child's record is the one that holds the point, because the parent never appends.
+
+## `fn census_of(`
+
+The next command's run-directory census over the fixture's repository, with a runtime, a
+liveness probe and a view that no run here uses.
+
+## `fn a_kill_while_the_first_line_is_written_leaves_a_retained_husk_whose_next_open_truncates_it() {`
+
+Gate 5's audit, row 103: `Event.AppendFirst`'s `Written` kill, recovered. The `p5btorn` arm of
+`create_kill_child` kills the creation part way through the first line, past the commit record,
+and `torn_first_line_without_commit_record_reclaimed_and_with_commit_record_retained` classifies
+what it leaves and stops. Here the later processes act on it. The census retains the husk possibly
+committed and removes nothing, the torn line included, because a torn first line past the commit
+record cannot be told from a truncated committed log. The next open through the barrier, given
+the commit record's digest, truncates the torn line (and warns once), then refuses resumably at
+`Event.ProvePrefixStable`: the commit record names a first line the proven prefix does not hold.
+Nothing committed is left in the log, so there is no event to replay, and a census after the open
+still retains the husk possibly committed.
