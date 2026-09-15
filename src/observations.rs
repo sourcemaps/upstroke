@@ -156,7 +156,10 @@ mod export {
         if record.is_empty() {
             return;
         }
-        let path = std::path::PathBuf::from(dir).join(ObservationRecord::file_name(test));
+        let path = std::path::PathBuf::from(dir).join(ObservationRecord::file_name(&format!(
+            "{test}.{}",
+            std::process::id()
+        )));
         if let Ok(bytes) = std::fs::read(&path) {
             if let Ok(earlier) = serde_json::from_slice::<ObservationRecord>(&bytes) {
                 record.merge(earlier);
