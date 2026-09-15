@@ -4263,9 +4263,13 @@ them.
 
 ## `fn an_error_at_the_ambient_job_join_refuses_the_write_command_and_the_next_resume_converges() {`
 
-Gate 5's strict re-audit, row 145, on Windows: `AmbientJobJoined` in error-return mode. The
-containment step refuses before the join, the armed point fires, and nothing is appended. The next
-resume converges, appends its `run_resumed`, and the log replays twice to equal states.
+On Windows, `AmbientJobJoined` in error-return mode: the containment step refuses before the join,
+the armed point fires, and nothing is appended; the next resume converges, appends its
+`run_resumed`, and the log replays twice to equal states. Row 145 of Gate 5's audit is cited to
+`engine::tests::a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converges`
+instead, which drives a production write-command facade whose continuation can be seen (#292's
+round-1 fix-check lens, finding 4): this test calls the containment step itself, so a facade that
+went on after the refusal would not be on its path.
 
 ## `const CONTAINER_MOUNT_KILL_CHILD: &str =`
 

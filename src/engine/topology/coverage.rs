@@ -518,12 +518,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Ref(RefSite::CreateIntegration),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+        test: "engine::topology::recover::tests::a_resume_over_a_creation_that_stopped_after_removing_its_marker_creates_the_integration_ref_once",
     },
     Claim {
         site: EffectSiteId::Ref(RefSite::CreateIntegration),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+        test: "engine::topology::recover::tests::a_resume_over_a_creation_that_stopped_after_creating_its_integration_ref_adopts_it",
     },
     Claim {
         site: EffectSiteId::Ref(RefSite::CompareAndSwapIntegration),
@@ -558,7 +558,7 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Ref(RefSite::PinCandidatePrepared),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+        test: "engine::topology::recover::tests::candidate_sequence_kill_child",
     },
     Claim {
         site: EffectSiteId::Ref(RefSite::PinCandidatePrepared),
@@ -578,7 +578,7 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Ref(RefSite::PinPrepared),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers",
+        test: "engine::topology::recover::tests::staging_path_kill_child",
     },
     Claim {
         site: EffectSiteId::Ref(RefSite::PinPrepared),
@@ -641,7 +641,7 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Object(ObjectSite::CandidateCommitTree),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+        test: "engine::topology::recover::tests::candidate_sequence_kill_child",
     },
     Claim {
         site: EffectSiteId::Object(ObjectSite::CandidateCommitTree),
@@ -649,7 +649,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::IdUnread,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::candidate::tests::candidate_kill_child",
+        test: "engine::topology::recover::tests::candidate_sequence_kill_child",
     },
     Claim {
         site: EffectSiteId::Object(ObjectSite::ProposalCherryPick),
@@ -659,7 +659,7 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Object(ObjectSite::ProposalCherryPick),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers",
+        test: "engine::topology::recover::tests::staging_path_kill_child",
     },
     Claim {
         site: EffectSiteId::Object(ObjectSite::RepairMaterialize),
@@ -709,12 +709,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::RemoveMarker),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+        test: "engine::topology::recover::tests::a_resume_over_a_creation_that_stopped_after_removing_its_marker_creates_the_integration_ref_once",
     },
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::CreatePrivateDir),
         phase: EntryPhase::Before,
-        test: "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+        test: "engine::topology::startup::tests::a_creation_stopped_before_its_private_half_leaves_a_released_run_lock_the_census_reclaims_public_only",
     },
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::CreatePrivateDir),
@@ -794,17 +794,17 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::WriteQuestionPayload),
         phase: EntryPhase::Before,
-        test: "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+        test: "engine::tests::question_payload_kill_child",
     },
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::WriteQuestionPayload),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::question_payload_kill_child",
+        test: "engine::tests::question_payload_kill_child",
     },
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::RemovePrivateHusk),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::kill_during_recovery_repeats_recovery",
+        test: "engine::topology::startup::tests::a_husk_whose_private_half_refused_removal_is_reclaimed_by_the_next_census_private_half_first",
     },
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::RemovePrivateHusk),
@@ -819,7 +819,7 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::RemovePublicHusk),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::kill_during_recovery_repeats_recovery",
+        test: "engine::topology::startup::tests::a_husk_whose_public_removal_erred_after_completing_is_gone_for_the_next_census",
     },
     Claim {
         site: EffectSiteId::Event(EventSite::OpenLog),
@@ -837,7 +837,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::Create,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::coverage::tests::event_kill_child",
+        test: "engine::topology::emit::tests::open_log_kill_child",
     },
     Claim {
         site: EffectSiteId::Event(EventSite::OpenLog),
@@ -853,7 +853,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::TruncateTornTail,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::coverage::tests::event_kill_child",
+        test: "engine::topology::emit::tests::open_log_kill_child",
     },
     Claim {
         site: EffectSiteId::Event(EventSite::OpenLog),
@@ -905,7 +905,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::Written,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::coverage::tests::event_kill_child",
+        test: "engine::topology::create::tests::create_kill_child",
     },
     Claim {
         site: EffectSiteId::Event(EventSite::AppendFirst),
@@ -1077,7 +1077,7 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Lock(LockSite::AcquireRun),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+        test: "engine::topology::startup::tests::a_run_lock_whose_acquisition_erred_after_taking_it_leaves_a_husk_the_census_reclaims_public_only",
     },
     Claim {
         site: EffectSiteId::Lock(LockSite::AcquireWorktree),
@@ -1163,7 +1163,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::AmbientJobJoined,
             mode: InjectionMode::ErrorReturn,
         },
-        test: "engine::topology::recover::tests::an_error_at_the_ambient_job_join_refuses_the_write_command_and_the_next_resume_converges",
+        test: "engine::tests::a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converges",
     },
     Claim {
         site: EffectSiteId::Process(ProcessSite::Spawn),
@@ -1254,12 +1254,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Container(ContainerSite::MountGitView),
         phase: EntryPhase::Before,
-        test: "runner::container::tests::a_fault_before_the_git_view_is_mounted_leaves_the_intent_and_the_next_census_reclaims_it",
+        test: "engine::topology::recover::tests::container_mount_kill_child",
     },
     Claim {
         site: EffectSiteId::Container(ContainerSite::MountGitView),
         phase: EntryPhase::After,
-        test: "runner::container::tests::a_fault_after_the_git_view_is_mounted_leaves_the_view_and_the_next_census_removes_it",
+        test: "engine::topology::recover::tests::container_mount_kill_child",
     },
     Claim {
         site: EffectSiteId::Container(ContainerSite::Stop),
