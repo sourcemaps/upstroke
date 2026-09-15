@@ -8449,11 +8449,11 @@ fn every_kind() -> Vec<TopologyEvent> {
             },
         }),
         ev(TopologyEventBody::DesignDefect {
-            data: DesignDefect {
-                question: QuestionId::from("q-design"),
-                context: "  the contract is ambiguous  ".to_owned(),
-                answer: "  ask the designer  ".to_owned(),
-            },
+            data: DesignDefect::discovered(
+                QuestionId::from("q-design"),
+                "  the contract is ambiguous  ".to_owned(),
+                "  ask the designer  ".to_owned(),
+            ),
         }),
     ];
     assert_eq!(
@@ -8465,6 +8465,43 @@ fn every_kind() -> Vec<TopologyEvent> {
         assert_eq!(event.body.kind(), kind, "the table is in vocabulary order");
     }
     events
+}
+
+#[test]
+fn an_attributed_design_defect_folds_to_no_derived_state() {
+    let mut fold = started();
+    merge_task(&mut fold, ALPHA, 0, 0);
+    let before = fold.state().cloned();
+    let attributed = [
+        DesignDefect::discovered(
+            QuestionId::from("q-design"),
+            "  the contract is ambiguous  ".to_owned(),
+            "  ask the designer  ".to_owned(),
+        ),
+        DesignDefect::convicted(
+            QuestionId::from("q-design"),
+            "  the contract is ambiguous  ".to_owned(),
+            "  ask the designer  ".to_owned(),
+            "design checklist item 2".to_owned(),
+        )
+        .expect("a cited conviction"),
+    ];
+    for data in attributed {
+        let event = ev(TopologyEventBody::DesignDefect { data });
+        let delta = fold
+            .plan_transition(&event)
+            .unwrap_or_else(|error| panic!("an attributed design_defect must apply: {error}"));
+        assert!(
+            matches!(delta.derived, Derived::None),
+            "the fold derives nothing from the record, attributed or not"
+        );
+        fold.apply_delta(delta);
+        assert_eq!(
+            fold.state().cloned(),
+            before,
+            "the record changes no state, whatever it carries"
+        );
+    }
 }
 
 #[test]

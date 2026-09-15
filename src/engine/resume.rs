@@ -586,6 +586,8 @@ pub(super) fn resume_harness_inner_on(
                 question,
                 context,
                 answer,
+                attribution: None,
+                citation: None,
             },
         })?;
     }
