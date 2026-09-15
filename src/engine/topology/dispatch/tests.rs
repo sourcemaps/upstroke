@@ -340,7 +340,7 @@ fn dispatch_kill_child() {
         other => panic!("unknown site `{other}`"),
     }
     let _ = run.try_dispatch(ALPHA, 0);
-    unreachable!("the kill must have taken this process");
+    panic!("`{which}`: the dispatch returned past the kill armed at its site");
 }
 
 #[test]

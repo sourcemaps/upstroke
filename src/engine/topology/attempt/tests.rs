@@ -1085,7 +1085,7 @@ fn attempt_kill_child() {
     if which == "in_attempt" {
         run.arm(STAGE, HookPhase::Before, Injection::Kill);
         let _ = context!(run, process).capture(dispatched.site());
-        unreachable!("the kill must have taken this process");
+        panic!("`in_attempt`: the capture returned past the kill armed before the stage");
     }
 
     if which == "retry" {
@@ -1106,24 +1106,26 @@ fn attempt_kill_child() {
             .convert(ALPHA, ReservationKind::Retry)
             .expect("converted at `attempt_started(retry)`");
         let _ = context!(run, process).capture(dispatched.site());
-        unreachable!("the kill must have taken this process");
+        panic!("`retry`: the retry's capture returned past the kill armed before the stage");
     }
 
     agent_edits(&dispatched.worktree);
     if which == "after_capture" {
         run.arm(WRITE_TREE, HookPhase::After, Injection::Kill);
         let _ = context!(run, process).capture(dispatched.site());
-        unreachable!("the kill must have taken this process");
+        panic!("`after_capture`: the capture returned past the kill armed after the write-tree");
     }
     if which == "after_stage" {
         run.arm(STAGE, HookPhase::After, Injection::Kill);
         let _ = context!(run, process).capture(dispatched.site());
-        unreachable!("the kill must have taken this process");
+        panic!("`after_stage`: the capture returned past the kill armed after the stage");
     }
     if which == "before_write_tree" {
         run.arm(WRITE_TREE, HookPhase::Before, Injection::Kill);
         let _ = context!(run, process).capture(dispatched.site());
-        unreachable!("the kill must have taken this process");
+        panic!(
+            "`before_write_tree`: the capture returned past the kill armed before the write-tree"
+        );
     }
 
     let capture = context!(run, process)
@@ -1166,7 +1168,7 @@ fn attempt_kill_child() {
             reask: started.identities.review_reask(pass, 0),
         },
     );
-    unreachable!("the kill must have taken this process");
+    panic!("`{which}`: the assessment and judgement returned past the kill armed for the snapshot");
 }
 
 fn adopted_generation(run: &Run) -> Dispatched {

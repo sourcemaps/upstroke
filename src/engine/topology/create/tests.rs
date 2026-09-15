@@ -2379,7 +2379,7 @@ fn drive_into_the_kill(which: &str, fixture: &Fixture) -> ! {
         assert!(outcome.is_ok(), "P8 must have been reached");
         std::process::abort();
     }
-    unreachable!("the kill must have taken this process");
+    panic!("`{which}`: the creation driver returned past the kill armed for this prefix");
 }
 
 #[test]
