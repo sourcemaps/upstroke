@@ -630,7 +630,7 @@ contract, and inventing one would be inventing a resume action nothing
 tables.
 
 What proves the kill landed *at the point* rather than somewhere else is
-the child's own `unreachable!`: nothing else in that path is armed, so a
+the child's own closing `panic!`: nothing else in that path is armed, so a
 point that was never consulted would let `judge` finish and the child would
 fail rather than die.
 
@@ -639,6 +639,15 @@ fail rather than die.
 The point supports one mode, and arming the other is refused rather than
 silently ignored — which is what stops a suite claiming coverage of an
 error contract this point does not have.
+
+## `fn a_kill_before_the_snapshot_commits_id_is_read_is_settled_interrupted_and_leaves_the_commit_to_git()`
+
+Row 53 of Gate 5's audit, `Object.SnapshotCommitTree`'s `IdUnread` kill point, recovered. The test
+above constructs the prefix and stops; here the same kill child's prefix is settled as the resume's
+step (d) settles it: one ephemeral commit written that nothing names, no snapshot intent, the
+attempt in flight (`attempt_started` last). `settle_interrupted` reclaims the attempt's intents,
+leaves the unreferenced commit to Git, appends `attempt_interrupted` and returns the task to
+`Pending`, and the log replays twice to equal states.
 
 ## `fn kill_after_snapshot_add_reclaims_snapshot_and_releases_its_commit() {`
 

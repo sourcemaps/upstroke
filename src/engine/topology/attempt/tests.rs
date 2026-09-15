@@ -1518,6 +1518,61 @@ fn kill_at_snapshot_commit_id_unread_point_leaves_gc_owned_object() {
 }
 
 #[test]
+fn a_kill_before_the_snapshot_commits_id_is_read_is_settled_interrupted_and_leaves_the_commit_to_git()
+ {
+    let dir = kill_dir("kill-id-unread-settled");
+    let mut run = kill_child_and_adopt(CHILD, &dir, "id_unread");
+    let dispatched = adopted_generation(&run);
+    let mut process = Process::new();
+
+    let orphans = unreachable_ephemeral_commits(&run.fixture.base);
+    assert_eq!(
+        orphans.len(),
+        1,
+        "the object was written before the coordinator could read its id: {orphans:?}"
+    );
+    assert!(
+        run.fixture
+            .manager
+            .intents()
+            .expect("intents")
+            .iter()
+            .all(|slot| !matches!(slot, crate::workspace_manager::Slot::Snapshot { .. })),
+        "and no snapshot intent names it"
+    );
+    assert_eq!(
+        run.emitter.durable_kinds().last().copied(),
+        Some("attempt_started"),
+        "the attempt is in flight"
+    );
+
+    context!(run, process)
+        .settle_interrupted(
+            &dispatched,
+            crate::topology::events::AttemptNumber(1),
+            AttemptOutcome::Interrupted,
+        )
+        .expect("settle");
+
+    assert!(
+        run.fixture.manager.intents().expect("intents").is_empty(),
+        "the settlement reclaims the attempt's intents"
+    );
+    assert_eq!(
+        unreachable_ephemeral_commits(&run.fixture.base),
+        orphans,
+        "and leaves the unreferenced commit to Git"
+    );
+    assert_eq!(
+        run.emitter.durable_kinds().last().copied(),
+        Some("attempt_interrupted"),
+        "the settlement appends the interruption"
+    );
+    assert_eq!(run.task_state(ALPHA), TaskState::Pending);
+    run.replay_twice_equal();
+}
+
+#[test]
 fn kill_after_snapshot_add_reclaims_snapshot_and_releases_its_commit() {
     let dir = kill_dir("killsnapshotadd");
     let mut run = kill_child_and_adopt(CHILD, &dir, "after_snapshot_add");
