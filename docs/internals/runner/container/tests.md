@@ -537,6 +537,9 @@ before the mount, mounted after it. The tabled recovery is the next write comman
 census (`T-CONTAINER`: "remove Git view -> remove intent"), here a fresh run whose census finds the
 intent of a run whose owner is not running and reclaims it through the funnels; the view's absence
 and the intent's are read after it, and a second census over the converged state reclaims nothing.
+No event log is involved at this level, so nothing replays here; the same coordinates in a run
+with a log, resumed and replayed twice, are
+`engine::topology::recover::tests::a_kill_at_the_gate_containers_git_view_mount_is_reclaimed_by_the_next_resume`.
 
 ## `fn the_intent_record_carries_the_six_fields_and_each_is_read_back() {`
 

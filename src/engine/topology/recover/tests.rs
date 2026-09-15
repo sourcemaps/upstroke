@@ -15194,6 +15194,221 @@ fn an_error_before_the_workers_process_is_spawned_spawns_nothing_and_the_next_st
     assert_replays_twice_equal(&fixture, tag);
 }
 
+const CONTAINER_MOUNT_KILL_CHILD: &str =
+    "engine::topology::recover::tests::container_mount_kill_child";
+
+struct ContainerKilledAt {
+    inner: crate::runner::container::HarnessHooks,
+    at: (EffectSiteId, HookPhase),
+}
+
+impl crate::runner::container::ContainerHooks for ContainerKilledAt {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        let answered = self.inner.phase(site, phase);
+        if (site, phase) == self.at {
+            crate::observations::Exported::new(Arc::clone(self.inner.harness()))
+                .carried(Injection::Kill)
+        } else {
+            answered
+        }
+    }
+
+    fn trace(&self) -> ContainerTrace {
+        self.inner.trace()
+    }
+}
+
+fn mount_phase_named(name: &str) -> HookPhase {
+    match name {
+        "Before" => HookPhase::Before,
+        "After" => HookPhase::After,
+        other => panic!("`{other}` is not a phase of `Container.MountGitView`"),
+    }
+}
+
+#[test]
+#[ignore = "spawned as a subprocess by the git-view mount kill witnesses"]
+fn container_mount_kill_child() {
+    use crate::topology::effects::ContainerSite;
+
+    let root = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_ROOT").expect("the parent names the fixture root"),
+    );
+    let phase = mount_phase_named(
+        &std::env::var("UPSTROKE_TEST_KILL_COORDINATE").expect("the parent names the phase"),
+    );
+    let fixture = Fixture::adopted_by_a_kill_child(root, plan_with(true));
+    let fake = runtime_holding_the_record();
+    let runner =
+        production_container_runner(&fixture, &fake).with_hooks(Box::new(ContainerKilledAt {
+            inner: crate::runner::container::HarnessHooks::new(harness()),
+            at: (EffectSiteId::Container(ContainerSite::MountGitView), phase),
+        }));
+    let driven = drive_with(
+        &fixture,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut HarnessTopologyHooks::new(harness()),
+    );
+    panic!(
+        "the kill at the git view's mount ({phase}) did not take this process: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+}
+
+fn a_kill_at_the_gate_containers_git_view_mount_is_reclaimed_by_the_next_resume(
+    phase: HookPhase,
+    tag: &str,
+) {
+    use crate::topology::effects::{ContainerSite, EntryPhase, ResourceRow, ResumeAction};
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child};
+
+    let fixture = Fixture::two_tasks(tag);
+    plant_stale_verification(&fixture);
+    let planted = durable_kinds(&fixture).len();
+    let site = EffectSiteId::Container(ContainerSite::MountGitView);
+    let semantics = site.semantics(match phase {
+        HookPhase::Before => EntryPhase::Before,
+        HookPhase::After => EntryPhase::After,
+        HookPhase::Point { .. } => panic!("the mount's coordinates are its two phases"),
+    });
+    let status = run_kill_child(
+        CONTAINER_MOUNT_KILL_CHILD,
+        &[
+            ("UPSTROKE_TEST_KILL_ROOT", fixture.root.as_os_str()),
+            (
+                "UPSTROKE_TEST_KILL_COORDINATE",
+                std::ffi::OsStr::new(&format!("{phase:?}")),
+            ),
+        ],
+    );
+    assert!(
+        died_by_abort(&status),
+        "{tag}: the child did not die by the kill at the mount ({phase}): {status:?}"
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec![
+            "merge_verification_interrupted",
+            "run_resumed",
+            "merge_verification_started"
+        ],
+        "{tag}: the kill came inside the re-verification's gate launch"
+    );
+    let intents = crate::runner::container::list_intents(&fixture.private_root)
+        .expect("the container namespace lists");
+    let [intent] = intents.as_slice() else {
+        panic!("{tag}: the launch left exactly its own intent: {intents:?}");
+    };
+    assert_eq!(
+        intent.record.incarnation, RESUMER,
+        "{tag}: the intent is the dead incarnation's"
+    );
+    let view = crate::runner::container::census::view_path(&fixture.private_root, &intent.name);
+    assert_eq!(
+        view.exists(),
+        semantics.rows.contains(&ResourceRow::R19),
+        "{tag}: the view is left exactly where the authority's rows say R19 holds it ({:?})",
+        semantics.rows
+    );
+    assert_eq!(
+        semantics.action,
+        match phase {
+            HookPhase::Before => ResumeAction::ResumeUnperformed,
+            _ => ResumeAction::AdoptPerformed,
+        },
+        "{tag}: the action the authority tables for `{site}` ({phase})"
+    );
+    assert!(
+        !rundir::is_running(&fixture.public()),
+        "{tag}: the run lock went with the dead process"
+    );
+
+    let recovery = harness();
+    let (_, handle) = resume_as(
+        &fixture,
+        "resumer-2",
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(Arc::clone(&recovery)),
+    )
+    .expect("the next resume converges");
+    drop(handle);
+    assert!(
+        crate::runner::container::list_intents(&fixture.private_root)
+            .expect("the container namespace lists")
+            .is_empty()
+            && !view.exists(),
+        "{tag}: neither the intent nor the view survives the census"
+    );
+    {
+        let seen = recovery.lock().unwrap_or_else(PoisonError::into_inner);
+        for (reclaim, reclaim_phase) in [
+            (ContainerSite::UnmountGitView, HookPhase::After),
+            (ContainerSite::RemoveIntent, HookPhase::After),
+        ] {
+            assert_eq!(
+                seen.count(EffectSiteId::Container(reclaim), reclaim_phase),
+                1,
+                "{tag}: the census reclaimed through `Container.{}` ({reclaim_phase}) once",
+                reclaim.name()
+            );
+        }
+    }
+    let reclaimed_at = first_observation(
+        &recovery,
+        EffectSiteId::Container(ContainerSite::RemoveIntent),
+    )
+    .expect("the intent was removed through its funnel");
+    let appended_at = first_observation(&recovery, EffectSiteId::Event(EventSite::Append))
+        .expect("the resume appended");
+    assert!(
+        reclaimed_at < appended_at,
+        "{tag}: the launch was reclaimed (at {reclaimed_at}) before any recovery event (at \
+         {appended_at})"
+    );
+    assert_eq!(
+        interrupted_sequences(&fixture),
+        vec![1, 2],
+        "{tag}: the verification the kill took is settled interrupted after the planted one"
+    );
+
+    let driven = drive(&fixture, &DriveSeams::default(), 1);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Integrated {
+                key: ALPHA,
+                sequence: crate::topology::events::SequenceId(3),
+                ..
+            }))
+        ),
+        "{tag}: the candidate re-verifies and publishes under the next sequence: {:?}",
+        driven.progress
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+#[test]
+fn a_kill_before_the_gate_containers_git_view_is_mounted_is_reclaimed_by_the_next_resume() {
+    a_kill_at_the_gate_containers_git_view_mount_is_reclaimed_by_the_next_resume(
+        HookPhase::Before,
+        "mount-kill-before-engine",
+    );
+}
+
+#[test]
+fn a_kill_after_the_gate_containers_git_view_is_mounted_is_reclaimed_by_the_next_resume() {
+    a_kill_at_the_gate_containers_git_view_mount_is_reclaimed_by_the_next_resume(
+        HookPhase::After,
+        "mount-kill-after-engine",
+    );
+}
+
 /// Beta's candidate queued at the base, unmerged, so that a second lineage
 /// can be rooted at beta.
 fn plant_queued_beta(fixture: &Fixture) -> crate::topology::events::CandidateRef {

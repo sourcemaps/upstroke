@@ -4291,6 +4291,44 @@ Gate 5's strict re-audit, row 145, on Windows: `AmbientJobJoined` in error-retur
 containment step refuses before the join, the armed point fires, and nothing is appended. The next
 resume converges, appends its `run_resumed`, and the log replays twice to equal states.
 
+## `const CONTAINER_MOUNT_KILL_CHILD: &str =`
+
+The kill child of the git-view mount witnesses below.
+
+## `struct ContainerKilledAt {`
+
+The container funnels' production adapter with a kill at one phase of one site. The harness
+records the phase first, and the kill is exported before it is handed back, because the funnel
+aborts the process on it.
+
+## `fn mount_phase_named(name: &str) -> HookPhase {`
+
+The phase `UPSTROKE_TEST_KILL_COORDINATE` names, in the parent's `Debug` spelling.
+
+## `fn container_mount_kill_child() {`
+
+Adopts the parent's two-task run with its stale verification, and drives one step with the
+production container runner (`production_container_runner`, the fake runtime, a disposable view)
+carrying `ContainerKilledAt` at `Container.MountGitView`'s phase. The step settles the planted
+verification interrupted, starts the re-verification, and launches its gate container: the intent
+is written and synced, and the process dies at the mount's phase. Reaching the panic means the kill
+did not land. This child's record holds the coordinate; the parent never mounts under the armed
+adapter.
+
+## `fn a_kill_at_the_gate_containers_git_view_mount_is_reclaimed_by_the_next_resume(`
+
+Rows 159 and 160 of Gate 5's audit, `Container.MountGitView` before and after, in a run that has a
+log. The module witnesses in `runner::container::tests` fault a bare `launch` and census the
+residue twice; they hold no event log, so nothing there replays (#292's round-1 fix-check lens,
+finding 5). Here the launch is a topology run's gate: the kill child dies at the phase with
+`merge_verification_interrupted`, `run_resumed` and `merge_verification_started` appended after
+the planted prefix, exactly the dead incarnation's intent in the container namespace, and the view
+present exactly where the authority's rows put R19. The run lock went with the process. The next
+resume's container census reclaims the dead launch through its funnels (the view unmounted once,
+the intent removed once) before it appends anything; neither survives, and the verification the
+kill took is settled interrupted after the planted one. A further step re-verifies the candidate
+and publishes it under the next sequence, and the log replays twice to equal states.
+
 ## `fn two_lineages_publish_in_lineage_order_and_the_younger_candidate_waits_behind_the_older() {`
 
 Two lineages overlapping on one path, the younger's repair already queued
