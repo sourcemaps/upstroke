@@ -1082,3 +1082,33 @@ for its runs to exist, then pushes.
   themselves, or a true use (`byte-identical` of the legacy projections; `unmodified` of the two
   corpus tests that are; `applies the` in the fold's and the reader's sentences). The
   round-1 searches for B3 and B7 are in §16 and `round1/b3-searches.txt`, `b7-searches.txt`.
+
+**Every mutation recipe re-run at the round's code head**, `5da89afbc621b11317224019af0d7202b72e47d5`
+(its `src` tree, `d645e14de72d6ff3ad344e5c3b6e22766e7d2d63`, is the B1 commit `0de39a89`'s: the
+commits between are this record's; the commit after it is this record's mutation table). Runner
+`mutate.py`, extended for the two-site M13 (its path heads the summary; its text is not saved) —
+`5da89afb…/mutations/summary.txt`, `<name>.diff`, `<name>.log`, each file restored and its SHA-256
+checked equal:
+
+| mutation | outcome at `5da89afb` |
+|---|---|
+| M1 `skip_serializing_if` removed from `attribution` | exit `101`: the three Phase 1 failures, the two round-1 pins, **and the round-2 pin** — `every_event_serializes_to_exactly_its_independently_written_payload`, the round-1 survivor, now fails |
+| M2 the reader returns the stored value | exit `101`: `a_conviction_without_a_citation_reads_as_a_discovery` |
+| M3 `DesignDefect::convicted` accepts an empty citation | exit `101`: `convicted_refuses_an_empty_or_blank_citation` |
+| M4 the writer's refusal removed | exit `101`: `the_writer_refuses_a_conviction_without_a_citation` |
+| M5 `#[serde(flatten)]` removed | exit `101`: the three Phase 2 failures and the two file round trips |
+| M6 the reader drops the attribution | exit `101`: the two Phase 2 failures |
+| M7 `deny_unknown_fields` removed from `QuestionAnswered4` | exit `101`: the two Phase 2 failures and `an_attributed_design_defect_reads_through_the_informational_path` |
+| M8 the topology's `DesignDefect` payload made strict | exit `101`: the two Phase 3 failures |
+| M9 the fold derives an answer from the record | exit `101`: `an_attributed_design_defect_folds_to_no_derived_state` |
+| M10 the pinned `defect()` converted to `discovered` | exit `101`: `the_legacy_append_is_byte_identical_to_the_pre_move_writer` |
+| M11 `AnswerRecord::convicted` accepts the empty string | exit `101`: `the_writer_refuses_a_conviction_without_a_citation` |
+| M12 `read_answer` routed through `AnswerRecord` | exit `101`: `a_legacy_answer_file_with_a_foreign_column_still_parks_rather_than_erroring`, and it alone |
+| B2's recipe, expected to pass | exit `0`: `an_answer_file_that_changes_nothing_does_not_spin_the_scheduler` passes |
+| M13 both canonical sites converted to a discovery (round 2, the contract lens's) | exit `101`: `every_event_serializes_to_exactly_its_independently_written_payload`; `every_event_decodes_from_its_independently_written_payload` passes, both sides converted alike |
+
+**The gates and the guest at the round's final head** are the body's to report, under that head's
+directory: the ten gates from a clean worktree, the read-only measurement of the guest's `C:`
+immediately before the push (answer 1's 12 GB threshold; §13), `git merge-tree --write-tree
+origin/master HEAD`, and both body validators. The body is applied before the push and its
+`edited` runs confirmed to exist before the push is made, so that the round-1 trap cannot recur.
