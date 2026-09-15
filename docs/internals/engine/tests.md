@@ -2452,3 +2452,99 @@ The same ordering, for the other coordinator. A resume is a write command:
 The resume's own refusal names the run directory it looked in; the
 containment refusal cannot, because it happens before the coordinator
 resolves anything.
+
+## `const PARKING_SETTLEMENT_KILL_CHILD: &str = "engine::tests::parking_settlement_kill_child";`
+
+The first kill child of the question-payload witnesses: the run dies once its parking settlement
+is durable.
+
+## `const QUESTION_PAYLOAD_KILL_CHILD: &str = "engine::tests::question_payload_kill_child";`
+
+The second: the payload's write dies at one of its phases.
+
+## `const ASKING_PLAN: &str =`
+
+One implementer task, whose worker (`Effect::AskQuestion`) stops and asks.
+
+## `const PARKING_CONFIG: &str = "[interaction]\nmode = \"never\"\n\n\`
+
+Never asks anyone and one attempt per rung, so the worker's question parks the task, and a resume
+with no answer parks it again.
+
+## `struct KillOnceTheParkingSettlementIsDurable {`
+
+The legacy log's hooks (`RunOptions::log_hooks`, the seam the legacy append tests use), aborting
+the process at the after phase of the append whose line is the `attempt_finished` carrying a
+parking decision. The after phase is consulted once the line is written and synced, and the
+coordinator's next effect is the payload write (`coordinator.rs`: `materialize_question` follows
+the settlement's `emit`, with only the settlement's error check between them), so the process dies
+with exactly the durable prefix `RunDir.WriteQuestionPayload`'s before phase has.
+
+## `fn parking_settlement_kill_child() {`
+
+Runs `ASKING_PLAN` under `PARKING_CONFIG` with the hooks above. Reaching the panic means the run
+went past its settlement.
+
+## `struct QuestionPayloadKilledAt {`
+
+The run-directory funnels' production adapter with a kill at one phase of
+`RunDir.WriteQuestionPayload`, exported before it is handed back.
+
+## `fn payload_phase_named(name: &str) -> crate::topology::effects::HookPhase {`
+
+The phase `UPSTROKE_TEST_KILL_COORDINATE` names, in the parent's `Debug` spelling.
+
+## `fn question_payload_kill_child() {`
+
+Over the run the first child left, writes the parked question's payload through
+`rundir::write_question_payload` with the adapter above, and dies at the phase. The arguments are
+the ones `interaction::write_question` passes it (the record's filename component, the questions
+directory, the record the log's settlement holds): the legacy engine reaches the funnel only
+through that wrapper, which passes `NoHooks`, and has no seam to arm it, so this is how a kill at
+the payload's own phase is constructed and observed under the production adapter. This child's
+record holds the coordinate.
+
+## `fn a_run_killed_once_its_parking_settlement_is_durable(`
+
+Seeds the plan, runs the first kill child, and reads back what it left: the log ends at the
+`attempt_finished` with its parking decision, the replayed state holds exactly one open question,
+no payload exists, and the run lock went with the process.
+
+## `fn question_payload(repo: &Path, run_id: &str, record: &QuestionRecord) -> PathBuf {`
+
+Where the question's payload lives.
+
+## `fn resume_parked(repo: &Path, run_id: &str, record: &QuestionRecord, tag: &str) {`
+
+The tabled recovery: `resume_harness_inner`, the legacy resume, whose question rewrite
+(`resume.rs`, every record of the replayed state written through `interaction::write_question`) is
+the production payload writer's recovery. With no answer the run parks again, the payload holds
+exactly the record the settlement recorded, the report names that one question, and the resumed
+state and report equal a replay of the log on each of two loads.
+
+## `fn a_kill_at_the_question_payload_write_is_recovered_by_the_resume(`
+
+Rows 85 and 86 of Gate 5's audit, `RunDir.WriteQuestionPayload` before and after, where the
+payload's only production writer runs: the legacy engine (#292's round-1 fix-check lens, finding 1,
+found the topology witness this replaced resuming a planted schema-4 run, which never runs that
+recovery). The first child leaves the settlement durable with no payload; the second dies at the
+phase, leaving the payload exactly where the authority's rows put R21 (absent before the write,
+present after it). The legacy resume then writes or adopts it: after the after-phase kill, its
+rewrite is byte-identical to what the killed write left. It appends after the durable prefix, and
+its state replays equal on two loads. With the rewrite made to clear each record's options (the
+lens's mutation), both witnesses fail on the payload's equality with the recorded question.
+
+## `struct CreationsRecorded {`
+
+The process funnel's production adapter, recording every `child_created` callback.
+
+## `fn a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converges() {`
+
+Row 145 of Gate 5's audit on Windows, `Process.Spawn`'s `AmbientJobJoined` point in error-return
+mode, at the write-command containment boundary with a continuation that can be seen: the legacy
+resume facade `resume_contained`, given a run that the first payload child left parked with its
+settlement durable. Its containment step is the production `contain_write_command` under the
+adapter above with the point armed. The facade refuses with the injected error and the point
+fired. Nothing the continuation does happened: no process was created (no `child_created`
+callback), the runner ran nothing, the log's bytes are unchanged, the question's payload was not
+written, and nothing holds the run lock. The next resume converges as `resume_parked` requires.

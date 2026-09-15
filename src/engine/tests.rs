@@ -8879,3 +8879,414 @@ fn a_facade_resume_refuses_before_any_effect_when_containment_fails() {
         "a successful establishment must not be reported as a refusal: {reached}"
     );
 }
+
+const PARKING_SETTLEMENT_KILL_CHILD: &str = "engine::tests::parking_settlement_kill_child";
+
+const QUESTION_PAYLOAD_KILL_CHILD: &str = "engine::tests::question_payload_kill_child";
+
+const ASKING_PLAN: &str =
+    "## Ask before building\n<!-- upstroke: id=t1 kind=implement depends= -->\n";
+
+const PARKING_CONFIG: &str = "[interaction]\nmode = \"never\"\n\n\
+     [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n";
+
+struct KillOnceTheParkingSettlementIsDurable {
+    repo: PathBuf,
+}
+
+impl crate::events::log::EventHooks for KillOnceTheParkingSettlementIsDurable {
+    fn phase(&mut self, site: EventSite, phase: crate::topology::effects::HookPhase) {
+        if site != EventSite::LegacyAppend || phase != crate::topology::effects::HookPhase::After {
+            return;
+        }
+        let Some(run_id) = rundir::latest_run(&self.repo) else {
+            return;
+        };
+        let log = fs::read_to_string(paths_of(&self.repo, &run_id).events()).unwrap_or_default();
+        if log.lines().last().is_some_and(|line| {
+            line.contains("\"attempt_finished\"") && line.contains("\"parking\":{")
+        }) {
+            std::process::abort();
+        }
+    }
+}
+
+fn kill_once_the_parking_settlement_is_durable() -> Box<dyn crate::events::log::EventHooks> {
+    Box::new(KillOnceTheParkingSettlementIsDurable {
+        repo: PathBuf::from(
+            std::env::var("UPSTROKE_CRASH_REPO").expect("the parent names the repository"),
+        ),
+    })
+}
+
+#[test]
+#[ignore = "spawned by the question payload witnesses"]
+fn parking_settlement_kill_child() {
+    let Ok(repo) = std::env::var("UPSTROKE_CRASH_REPO") else {
+        return;
+    };
+    let repo = PathBuf::from(repo);
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    opts.log_hooks = Some(kill_once_the_parking_settlement_is_durable);
+    let source = source(vec![Effect::AskQuestion], vec![ReviewBehavior::Pass]);
+    let outcome = run_with(&opts, &source).map(|report| report.outcome());
+    panic!("the run went on past its durable parking settlement: {outcome:?}");
+}
+
+struct QuestionPayloadKilledAt {
+    inner: rundir::HarnessHooks,
+    at: crate::topology::effects::HookPhase,
+}
+
+impl rundir::RunDirHooks for QuestionPayloadKilledAt {
+    fn hook(
+        &mut self,
+        site: crate::topology::effects::EffectSiteId,
+        phase: crate::topology::effects::HookPhase,
+    ) -> crate::topology::effects::Injection {
+        let answered = self.inner.hook(site, phase);
+        if site
+            == crate::topology::effects::EffectSiteId::RunDir(
+                crate::topology::effects::RunDirSite::WriteQuestionPayload,
+            )
+            && phase == self.at
+        {
+            crate::observations::Exported::new(std::sync::Arc::clone(self.inner.harness()))
+                .carried(crate::topology::effects::Injection::Kill)
+        } else {
+            answered
+        }
+    }
+
+    fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+        self.inner.durability_ledger()
+    }
+}
+
+fn payload_phase_named(name: &str) -> crate::topology::effects::HookPhase {
+    match name {
+        "Before" => crate::topology::effects::HookPhase::Before,
+        "After" => crate::topology::effects::HookPhase::After,
+        other => panic!("`{other}` is not a phase of `RunDir.WriteQuestionPayload`"),
+    }
+}
+
+#[test]
+#[ignore = "spawned by the question payload witnesses"]
+fn question_payload_kill_child() {
+    let Ok(repo) = std::env::var("UPSTROKE_CRASH_REPO") else {
+        return;
+    };
+    let repo = PathBuf::from(repo);
+    let at = payload_phase_named(
+        &std::env::var("UPSTROKE_TEST_KILL_COORDINATE").expect("the parent names the phase"),
+    );
+    let run_id = rundir::latest_run(&repo).expect("the parent's run");
+    let replayed = replay_of(&repo, &run_id);
+    let [record] = replayed.state.questions.as_slice() else {
+        panic!(
+            "the parking settlement records one question: {:?}",
+            replayed.state.questions
+        );
+    };
+    let mut hooks = QuestionPayloadKilledAt {
+        inner: rundir::HarnessHooks::new(std::sync::Arc::new(Mutex::new(
+            crate::topology::effects::HookHarness::new(),
+        ))),
+        at,
+    };
+    let written = rundir::write_question_payload(
+        &paths_of(&repo, &run_id).questions(),
+        &crate::util::filename_component(record.question.id.as_str()),
+        record,
+        &mut hooks,
+    );
+    panic!(
+        "the kill at `RunDir.WriteQuestionPayload` ({at}) did not take this process: {written:?}"
+    );
+}
+
+fn a_run_killed_once_its_parking_settlement_is_durable(
+    tag: &str,
+) -> (PathBuf, String, QuestionRecord) {
+    let repo = temp_engine_repo(tag);
+    seed(&repo, ASKING_PLAN, Some(PARKING_CONFIG));
+    let killed = Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            PARKING_SETTLEMENT_KILL_CHILD,
+            "--ignored",
+            "--test-threads",
+            "1",
+        ])
+        .env("UPSTROKE_CRASH_REPO", &repo)
+        .output()
+        .expect("spawn the parking run");
+    assert!(
+        crate::workspace_manager::fixture::died_by_abort(&killed.status),
+        "{tag}: the run must die once its parking settlement is durable: {:?}\n{}",
+        killed.status,
+        String::from_utf8_lossy(&killed.stderr)
+    );
+    let run_id = rundir::latest_run(&repo).expect("the child started a run");
+    let paths = paths_of(&repo, &run_id);
+    let log = fs::read_to_string(paths.events()).expect("the log");
+    let last = log.lines().last().expect("events");
+    assert!(
+        last.contains("\"attempt_finished\"") && last.contains("\"parking\":{"),
+        "{tag}: the log ends at the parking settlement: {last}"
+    );
+    let replayed = replay_of(&repo, &run_id);
+    let [record] = replayed.state.questions.as_slice() else {
+        panic!(
+            "{tag}: the settlement parks one question: {:?}",
+            replayed.state.questions
+        );
+    };
+    assert!(record.is_open(), "{tag}: nothing answered it");
+    assert_eq!(
+        fs::read_dir(paths.questions()).map_or(0, Iterator::count),
+        0,
+        "{tag}: the process died before the question's payload was written"
+    );
+    assert!(
+        !rundir::is_running(&paths.public),
+        "{tag}: the OS released the run lock"
+    );
+    (repo, run_id, record.clone())
+}
+
+fn question_payload(repo: &Path, run_id: &str, record: &QuestionRecord) -> PathBuf {
+    paths_of(repo, run_id).questions().join(format!(
+        "{}.json",
+        crate::util::filename_component(record.question.id.as_str())
+    ))
+}
+
+fn resume_parked(repo: &Path, run_id: &str, record: &QuestionRecord, tag: &str) {
+    let source = source(vec![Effect::AskQuestion], vec![ReviewBehavior::Pass]);
+    let (resumed, state) = resume_harness_inner(
+        &resume_options(repo, run_id),
+        &Harness {
+            adapters: &source,
+            answers: None,
+            sleeper: None,
+        },
+    )
+    .expect("the resume converges");
+    assert_eq!(
+        resumed.outcome(),
+        RunOutcome::Parked,
+        "{tag}: the question is still open, so the run parks again: {resumed:?}"
+    );
+    let payload = question_payload(repo, run_id, record);
+    let written: QuestionRecord = serde_json::from_slice(
+        &fs::read(&payload).expect("the resume leaves the question's payload"),
+    )
+    .expect("the payload is a question record");
+    assert_eq!(
+        &written, record,
+        "{tag}: the payload holds the question the parking settlement records"
+    );
+    assert_eq!(
+        resumed.questions,
+        vec![record.clone()],
+        "{tag}: the report names the one open question"
+    );
+    assert_live_equals_replay(repo, &state, &resumed);
+    assert_live_equals_replay(repo, &state, &resumed);
+}
+
+fn a_kill_at_the_question_payload_write_is_recovered_by_the_resume(
+    phase: crate::topology::effects::HookPhase,
+    tag: &str,
+) {
+    use crate::topology::effects::{
+        EffectSiteId, EntryPhase, HookPhase, ResourceRow, ResumeAction, RunDirSite,
+    };
+
+    let site = EffectSiteId::RunDir(RunDirSite::WriteQuestionPayload);
+    let semantics = site.semantics(match phase {
+        HookPhase::Before => EntryPhase::Before,
+        HookPhase::After => EntryPhase::After,
+        HookPhase::Point { .. } => panic!("the payload's coordinates are its two phases"),
+    });
+    let (repo, run_id, record) = a_run_killed_once_its_parking_settlement_is_durable(tag);
+    let payload = question_payload(&repo, &run_id, &record);
+    let killed = Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            QUESTION_PAYLOAD_KILL_CHILD,
+            "--ignored",
+            "--test-threads",
+            "1",
+        ])
+        .env("UPSTROKE_CRASH_REPO", &repo)
+        .env("UPSTROKE_TEST_KILL_COORDINATE", format!("{phase:?}"))
+        .output()
+        .expect("spawn the payload writer");
+    assert!(
+        crate::workspace_manager::fixture::died_by_abort(&killed.status),
+        "{tag}: the payload writer must die at the {phase} phase: {:?}\n{}",
+        killed.status,
+        String::from_utf8_lossy(&killed.stderr)
+    );
+    assert_eq!(
+        payload.is_file(),
+        semantics.rows.contains(&ResourceRow::R21),
+        "{tag}: the payload is left exactly where the authority's rows say R21 holds it ({:?})",
+        semantics.rows
+    );
+    assert_eq!(
+        semantics.action,
+        match phase {
+            HookPhase::Before => ResumeAction::ResumeUnperformed,
+            _ => ResumeAction::AdoptPerformed,
+        },
+        "{tag}: the action the authority tables for `{site}` ({phase})"
+    );
+    let left = fs::read(&payload).ok();
+    let log = fs::read(paths_of(&repo, &run_id).events()).expect("the log");
+
+    resume_parked(&repo, &run_id, &record, tag);
+    if let Some(left) = left {
+        assert_eq!(
+            fs::read(&payload).expect("the payload"),
+            left,
+            "{tag}: the resume's rewrite adopted the payload the killed write left, byte for byte"
+        );
+    }
+    assert!(
+        fs::read(paths_of(&repo, &run_id).events())
+            .expect("the log")
+            .starts_with(&log),
+        "{tag}: the resume appended after the durable prefix"
+    );
+}
+
+#[test]
+fn a_kill_before_a_parked_questions_payload_is_written_is_recovered_by_the_resume_writing_it() {
+    a_kill_at_the_question_payload_write_is_recovered_by_the_resume(
+        crate::topology::effects::HookPhase::Before,
+        "payload-kill-before",
+    );
+}
+
+#[test]
+fn a_kill_after_a_parked_questions_payload_is_written_is_recovered_by_the_resume_adopting_it() {
+    a_kill_at_the_question_payload_write_is_recovered_by_the_resume(
+        crate::topology::effects::HookPhase::After,
+        "payload-kill-after",
+    );
+}
+
+#[cfg(windows)]
+struct CreationsRecorded {
+    inner: crate::runner::HarnessHooks,
+    created: Vec<u32>,
+}
+
+#[cfg(windows)]
+impl crate::agent::proc::SpawnHooks for CreationsRecorded {
+    fn point(
+        &mut self,
+        point: crate::topology::effects::SubEffectPoint,
+    ) -> crate::topology::effects::Injection {
+        self.inner.point(point)
+    }
+
+    fn point_mode(
+        &mut self,
+        point: crate::topology::effects::SubEffectPoint,
+        mode: crate::topology::effects::InjectionMode,
+    ) -> crate::topology::effects::Injection {
+        self.inner.point_mode(point, mode)
+    }
+
+    fn phase(
+        &mut self,
+        site: crate::topology::effects::ProcessSite,
+        phase: crate::topology::effects::HookPhase,
+    ) -> crate::topology::effects::Injection {
+        self.inner.phase(site, phase)
+    }
+
+    fn child_created(&mut self, pid: u32) {
+        self.created.push(pid);
+        self.inner.child_created(pid);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converges() {
+    use crate::topology::effects::{HookHarness, HookPhase, InjectionMode, SubEffectPoint};
+
+    let tag = "ambient-join-error-resume";
+    let (repo, run_id, record) = a_run_killed_once_its_parking_settlement_is_durable(tag);
+    let paths = paths_of(&repo, &run_id);
+    let payload = question_payload(&repo, &run_id, &record);
+    let log = fs::read(paths.events()).expect("the log");
+    let site = crate::runner::SPAWN_SITE;
+    let point = SubEffectPoint::AmbientJobJoined;
+    let mode = InjectionMode::ErrorReturn;
+    let harness = std::sync::Arc::new(Mutex::new(HookHarness::new()));
+    harness
+        .lock()
+        .expect("the harness")
+        .arm(site, point, mode)
+        .expect("the ambient join supports an error return");
+    let mut hooks = CreationsRecorded {
+        inner: crate::runner::HarnessHooks::new(std::sync::Arc::clone(&harness)),
+        created: Vec::new(),
+    };
+    let source = source(vec![Effect::AskQuestion], vec![ReviewBehavior::Pass]);
+    let runner = RecordingRunner::new();
+
+    let refused = resume_contained(
+        &resume_options(&repo, &run_id),
+        &Harness::new(&source),
+        &runner,
+        || crate::runner::host::contain_write_command(&mut hooks),
+    )
+    .expect_err("a resume whose ambient job join errs refuses");
+    let refused = refused.to_string();
+    assert!(
+        refused.contains("containment step"),
+        "{tag}: the refusal is the injected one: {refused}"
+    );
+    assert!(
+        harness
+            .lock()
+            .expect("the harness")
+            .observed(site, HookPhase::Point { point, mode }),
+        "{tag}: the armed point fired"
+    );
+    assert!(
+        hooks.created.is_empty(),
+        "{tag}: the funnel created a process: {:?}",
+        hooks.created
+    );
+    assert!(
+        runner.seen().is_empty(),
+        "{tag}: the resume went on and ran a process: {:?}",
+        runner.seen()
+    );
+    assert_eq!(
+        fs::read(paths.events()).expect("the log"),
+        log,
+        "{tag}: the resume went on and appended: {refused}"
+    );
+    assert!(
+        !payload.exists(),
+        "{tag}: the resume went on and rewrote the question's payload: {refused}"
+    );
+    assert!(
+        !rundir::is_running(&paths.public),
+        "{tag}: nothing holds the run lock"
+    );
+    drop(hooks);
+
+    resume_parked(&repo, &run_id, &record, tag);
+}
