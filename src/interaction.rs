@@ -1014,11 +1014,13 @@ mod tests {
                 residue_of(&dir)
             );
         }
-        assert_eq!(
-            AnswerRecord::convicted(Answer::Declined, " \n".to_owned()),
-            Err(UncitedConviction),
-            "the constructor refuses what the writer refuses"
-        );
+        for citation in [String::new(), "   ".to_owned(), " \n".to_owned()] {
+            assert_eq!(
+                AnswerRecord::convicted(Answer::Declined, citation.clone()),
+                Err(UncitedConviction),
+                "the constructor refuses what the writer refuses: {citation:?}"
+            );
+        }
         assert_eq!(read_answer_record(&dir, &id).expect("read"), None);
     }
 
