@@ -14875,7 +14875,7 @@ fn a_kill_in_the_workers_spawn_converges_on_the_next_resume(coordinate: &str, ta
                 ..
             }))
         ),
-        "{tag}: the next attempt is spawned and accepted: {:?}",
+        "{tag}: the next attempt is accepted: {:?}",
         driven
             .progress
             .iter()
@@ -15091,6 +15091,7 @@ fn an_error_before_the_workers_process_is_spawned_spawns_nothing_and_the_next_st
     let planted = durable_kinds(&fixture).len();
     let site = crate::runner::SPAWN_SITE;
     let faulted = harness();
+    let created_in_the_refused_step = fixture.root.join("created-in-the-refused-step.pid");
     let runner = SpawningRunner {
         host: crate::runner::host::HostRunner::new().with_hooks(Box::new(SpawnPhaseFault {
             inner: crate::runner::HarnessHooks::new(Arc::clone(&faulted)),
@@ -15099,7 +15100,7 @@ fn an_error_before_the_workers_process_is_spawned_spawns_nothing_and_the_next_st
                 HookPhase::Before,
             )),
             injection: Injection::Error,
-            pid_file: None,
+            pid_file: Some(created_in_the_refused_step.clone()),
         })),
         editing: RecordingRunner::editing(),
         program: this_binary_running("a_test_this_tree_does_not_contain_and_never_will"),
@@ -15118,9 +15119,14 @@ fn an_error_before_the_workers_process_is_spawned_spawns_nothing_and_the_next_st
         let seen = faulted.lock().unwrap_or_else(PoisonError::into_inner);
         assert!(
             seen.observed(site, HookPhase::Before) && !seen.observed(site, HookPhase::After),
-            "{tag}: the error came at the spawn's before phase and nothing was spawned"
+            "{tag}: the error came at the spawn's before phase"
         );
     }
+    assert!(
+        !created_in_the_refused_step.exists(),
+        "{tag}: the funnel created a worker process before the refusal: {:?}",
+        std::fs::read_to_string(&created_in_the_refused_step)
+    );
     let kinds = kinds_after(&fixture, planted);
     assert!(
         kinds.starts_with(&[
@@ -15144,7 +15150,18 @@ fn an_error_before_the_workers_process_is_spawned_spawns_nothing_and_the_next_st
         &mut hooks,
     )
     .expect("the next resume converges");
-    let runner = RecordingRunner::editing();
+    let created_in_the_next_step = fixture.root.join("created-in-the-next-step.pid");
+    let runner = SpawningRunner {
+        host: crate::runner::host::HostRunner::new().with_hooks(Box::new(SpawnPhaseFault {
+            inner: crate::runner::HarnessHooks::new(harness()),
+            at: None,
+            injection: Injection::Proceed,
+            pid_file: Some(created_in_the_next_step.clone()),
+        })),
+        editing: RecordingRunner::editing(),
+        program: this_binary_running("a_test_this_tree_does_not_contain_and_never_will"),
+        timeout: None,
+    };
     let driven = drive_handle(
         &fixture,
         handle,
@@ -15155,6 +15172,10 @@ fn an_error_before_the_workers_process_is_spawned_spawns_nothing_and_the_next_st
     );
     drop(hooks);
     assert!(
+        created_in_the_next_step.exists(),
+        "{tag}: the next attempt's worker process was created through the funnel"
+    );
+    assert!(
         driven.progress.iter().any(|step| matches!(
             step,
             Ok(Progress::Settled {
@@ -15163,7 +15184,7 @@ fn an_error_before_the_workers_process_is_spawned_spawns_nothing_and_the_next_st
                 ..
             })
         )),
-        "{tag}: a later attempt spawns its worker and is accepted: {:?}",
+        "{tag}: the attempt whose worker was spawned is accepted: {:?}",
         driven
             .progress
             .iter()

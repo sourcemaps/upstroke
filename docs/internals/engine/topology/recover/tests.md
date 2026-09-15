@@ -4256,17 +4256,23 @@ minutes. A control run with the reaper's cleanup delayed by thirty seconds fails
 (`~/pr10-evidence/fix-g5-b/witness/controls/`). On Windows there is no reaper, and the worker the
 child recorded must be gone within the same bound, because the ambient job and the private job
 close with the process that held them. The run lock is gone. The next resume converges: step (d) settles the attempt
-interrupted, and the next attempt is spawned and accepted. The log replays twice to equal states.
+interrupted, and the next attempt, run through the recording runner (which spawns nothing), is
+accepted. The log replays twice to equal states.
 The kill child's record holds the coordinates, because the parent never spawns under the armed
 adapter.
 
 ## `fn an_error_before_the_workers_process_is_spawned_spawns_nothing_and_the_next_step_spawns_it() {`
 
 Gate 5's strict re-audit, row 140: `Process.Spawn`/before. The driver's step runs the worker with
-an error at the spawn's before phase. The phase is observed and the after phase is not, so nothing
-was spawned. The attempt started and produced no candidate, and no cleanup hold outlives a spawn
-that never happened. The next resume converges, a later attempt spawns its worker and is accepted,
-and the log replays twice to equal states.
+an error at the spawn's before phase. The phase is observed and the after phase is not. That the
+funnel created no process is measured, not inferred from the phases: the adapter records every
+`child_created` callback the funnel makes, and the refused step made none (#292's round-1
+fix-check lens, finding 2, whose mutation moves the before phase after `ProcessTree::spawn` and
+leaves the phase observations as they were; under it this assertion fails). The attempt started
+and produced no candidate, and no cleanup hold outlives the step. The next resume converges. Its
+step runs the implementer through the host runner under an unarmed adapter, which records the
+worker process the funnel creates, and that attempt is accepted. The log replays twice to equal
+states.
 
 ## `fn a_fault_at_the_workers_termination_ends_the_step_and_the_next_resume_converges(`
 
