@@ -260,9 +260,10 @@ On disk an answered record is therefore `{"answer":"answered","text":…,"attrib
 — the attribution sits on the answered record, as the brief says, and a file written before this
 change, or by `upstroke answer` today, is byte-identical. Three consequences decide it over adding
 the fields to `ir::Answer::Answered`:
-1. **The legacy engine never sees the attribution.** `read_answer` returns the `Answer` half, so the
-   schema-3 `question_answered` event (which embeds `ir::Answer`) and the questions payload keep
-   their bytes whatever the file carries, and the legacy `design_defect` stays unclassified — which is
+1. **The legacy engine never sees the attribution.** `read_answer` reads the `Answer` as the base
+   did (deserialised as `ir::Answer`, tolerant of columns it does not know), so the schema-3
+   `question_answered` event (which embeds `ir::Answer`) and the questions payload keep their
+   bytes whatever the file carries, and the legacy `design_defect` stays unclassified — which is
    what *"the legacy writer is not modified … its records read as unclassified"* requires. With the
    fields on `ir::Answer`, an attributed file ingested by a schema-3 run would carry the attribution
    on the wrong event, the one the contract says never carries it.
@@ -472,9 +473,20 @@ exit `0` (2026-09-15, 00:09:56Z–00:11:42Z) — 2595 at the base plus the eight
   are unchanged), and the two test callers in `src/interaction.rs` and the one in
   `src/engine/tests.rs` wrap their `Answer` the same way. No new effectful wrapper, so
   `clippy.toml`'s disallowed list is untouched; `write_answer` keeps its `effectful` row.
-- `read_answer_record(dir, id) -> Result<Option<AnswerRecord>, _>` reads the whole record;
-  `read_answer` now returns its `answer` half, so the legacy engine's `EventLogAnswers` and
-  `coordinator::ingest_answer` see exactly what they saw before (R5, consequence 1).
+- `read_answer_record(dir, id) -> Result<Option<AnswerRecord>, _>` reads the whole record and is
+  the one reader that validates the two attribution columns; `read_answer` deserialises
+  `ir::Answer` directly, as the base did, so a column the answer does not know is ignored as it
+  always was and the legacy engine's `EventLogAnswers` and `coordinator::ingest_answer` see exactly
+  what they saw before (R5, consequence 1). Both go through one private `read_answer_as<T>`. In the
+  first landing `read_answer` read through `AnswerRecord` and returned its `answer` half, which
+  refused a file such as `{"answer":"unanswered","citation":7}` that the base tolerated, and
+  `Run::sweep_answers` propagated the `Parse` error before task selection — the regression lens's
+  P2, round 1 B2. The lens's recipe (the scheduler-spin test's answer file replaced by that line)
+  executed: at the base `8b28944f`, exit `0`, parked; at `e03f7eae`, exit `101`,
+  `resume: Parse { … invalid type: integer `7`, expected a string at line 1 column 35 }`
+  (`e03f7eae…/round1/b2-recipe/{base,head-before-fix}.log` and the `.diff` of each); after the fix,
+  exit `0` again (`round1/b2-recipe/head-after-fix.log`, §16). The recipe turned permanent is
+  `engine::tests::a_legacy_answer_file_with_a_foreign_column_still_parks_rather_than_erroring`.
 - `effects/wrappers.toml`: `convicted`, `discovered`, `effective_attribution`,
   `read_answer_record`, `unattributed` classified `effect_free` in the `src/interaction.rs` entry.
 - `src/topology/events.rs` gains the executed refusal (below). `QuestionAnswered4` and `Answer4`
@@ -489,6 +501,7 @@ exit `0` (2026-09-15, 00:09:56Z–00:11:42Z) — 2595 at the base plus the eight
 | `interaction::tests::the_writer_refuses_a_conviction_without_a_citation` | `design_defect` with no citation, an empty one and a blank one are refused with the message above, naming the question, and the directory stays empty; `AnswerRecord::convicted` refuses the same |
 | `interaction::tests::a_conviction_without_a_citation_in_the_file_reads_as_a_discovery` | a hand-written `design_defect` with no `citation` keeps its stored value and reads as `Discovered`; `read_answer` still returns the answer |
 | `topology::events::tests::a_question_answered_transaction_refuses_an_attribution_key` | the canonical `question_answered` payload decodes; with `attribution` (either spelling) or `citation` added on the payload the decoder answers exactly `unknown field `attribution`, expected one of `key`, `question`, `answer`, `via`` (and likewise for `citation`); added inside `answer` it answers exactly `unknown field `attribution`, expected `option_index` or `binding_override`` |
+| `engine::tests::a_legacy_answer_file_with_a_foreign_column_still_parks_rather_than_erroring` (round 1) | a schema-3 run parked on a question; its answer file written by hand as `{"answer":"unanswered","citation":7}`; the resume runs and parks again, as the base did, instead of erroring on the column |
 
 Those two quoted strings are serde's own, from `QuestionAnswered4`'s and `Answer4`'s
 `deny_unknown_fields` (§2); `strict::checked`'s *"in a record embedded in a schema-4 transaction

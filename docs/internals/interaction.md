@@ -151,7 +151,9 @@ frozen inventory gives the answer command. Same two steps, same bytes.
 
 Read the whole record if one has been left — the answer and the ruling.
 `None` simply means not yet. This is what a writer of the attributed
-`design_defect` record reads; the legacy engine reads `read_answer`.
+`design_defect` record reads, and the one reader that validates the two
+attribution columns: a file whose `attribution` or `citation` is malformed
+is `UpstrokeError::Parse` here, where `read_answer` tolerates it.
 
 `Answer.Ingest` — a read-only observation, which is why it performs no
 effect and is still a site: the inventory names it and a site nothing calls
@@ -159,12 +161,24 @@ cannot be shown to execute.
 
 ## `pub fn read_answer(dir: &Path, id: &QuestionId) -> Result<Option<Answer>, UpstrokeError> {`
 
-The answer half of the record, and nothing of the ruling. The schema-3
-engine's `EventLogAnswers` and `coordinator::ingest_answer` read through
-this, so whatever ruling a file carries, a schema-3 `question_answered`
-event embeds the same `Answer` it always did and the legacy `design_defect`
-record stays unclassified: the ruling reaches no schema-3 record, which is
-the contract's "its records read as unclassified" (R5).
+The `Answer`, deserialised as `ir::Answer` exactly as the base did, so a
+column the answer does not know — a foreign or malformed `attribution` or
+`citation` included — is ignored as it always was; nothing of a ruling is
+read here. The schema-3 engine's `EventLogAnswers` and
+`coordinator::ingest_answer` read through this, so whatever a file carries,
+a schema-3 `question_answered` event embeds the same `Answer` it always did,
+the legacy `design_defect` record stays unclassified, and a resume that used
+to park still parks: the ruling reaches no schema-3 record, which is the
+contract's "its records read as unclassified" (R5). Round 1 of PR #290
+returned this reader to the base's behaviour: reading through
+`AnswerRecord` had made it refuse `{"answer":"unanswered","citation":7}`,
+which the base accepted, and `Run::sweep_answers` propagated the refusal
+before task selection.
+
+## `fn read_answer_as<T: serde::de::DeserializeOwned>(`
+
+The one read of the file, typed by its caller: `read_answer_record` asks for
+the record, `read_answer` for the answer alone.
 
 ## `pub fn render_question(question: &Question) -> String {`
 

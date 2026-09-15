@@ -163,6 +163,17 @@ pub fn read_answer_record(
     dir: &Path,
     id: &QuestionId,
 ) -> Result<Option<AnswerRecord>, UpstrokeError> {
+    read_answer_as(dir, id)
+}
+
+pub fn read_answer(dir: &Path, id: &QuestionId) -> Result<Option<Answer>, UpstrokeError> {
+    read_answer_as(dir, id)
+}
+
+fn read_answer_as<T: serde::de::DeserializeOwned>(
+    dir: &Path,
+    id: &QuestionId,
+) -> Result<Option<T>, UpstrokeError> {
     let component = util::filename_component(id.as_str());
     let path = answer_path(dir, id);
     match crate::rundir::ingest_answer(dir, &component, &mut crate::rundir::NoHooks)? {
@@ -173,10 +184,6 @@ pub fn read_answer_record(
             }),
         None => Ok(None),
     }
-}
-
-pub fn read_answer(dir: &Path, id: &QuestionId) -> Result<Option<Answer>, UpstrokeError> {
-    Ok(read_answer_record(dir, id)?.map(|record| record.answer))
 }
 
 pub fn render_question(question: &Question) -> String {

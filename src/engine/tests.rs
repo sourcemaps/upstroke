@@ -7217,6 +7217,43 @@ fn an_answer_file_that_changes_nothing_does_not_spin_the_scheduler() {
     );
 }
 
+#[test]
+fn a_legacy_answer_file_with_a_foreign_column_still_parks_rather_than_erroring() {
+    let repo = temp_engine_repo("foreigncolumn");
+    seed(
+        &repo,
+        "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some(
+            "[interaction]\nmode = \"never\"\n\n\
+                 [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n",
+        ),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let source = source(vec![Effect::NoEdit], vec![ReviewBehavior::Pass]);
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Parked);
+    let run_id = report.run_id.clone();
+    let question = report.questions[0].question.id.clone();
+
+    let answers = rundir::public_dir(&repo, &run_id).join("answers");
+    fs::create_dir_all(&answers).expect("answers dir");
+    fs::write(
+        interaction::answer_path(&answers, &question),
+        r#"{"answer":"unanswered","citation":7}"#,
+    )
+    .expect("a file the base tolerated: a column the answer does not know, of a foreign type");
+
+    let source = fake(Effect::EditFile);
+    let resumed = resume_with(&resume_options(&repo, &run_id), &source)
+        .expect("the legacy reader ignores the column, as the base did, and the resume runs");
+    assert_eq!(
+        resumed.outcome(),
+        RunOutcome::Parked,
+        "still waiting on a real answer, not erroring on the column: {resumed:?}"
+    );
+}
+
 struct LockReleasingSleeper {
     waits: Mutex<u32>,
     release_after: u32,
