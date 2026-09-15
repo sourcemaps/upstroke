@@ -657,10 +657,11 @@ The file a kill child writes its repository root into.
 
 ## `pub(super) const KILL_CHILD_BOUND: Duration = Duration::from_secs(120);`
 
-The deadline a topology kill child is given. `kill_child_and_adopt` and the kill witnesses in
-`recover/tests.rs` hand it to `run_kill_child_within`, and the informational-append and open-log
-witnesses in `emit/tests.rs` make it the process funnel's timeout for their children. It is the
-finalization matrix's 120 seconds, which a loaded Windows guest has needed for a creation kill child.
+The deadline a topology kill child is given. `kill_child_and_adopt`, the kill witnesses in
+`recover/tests.rs`, the informational-append and open-log witnesses in `emit/tests.rs` and the
+creation witnesses of rows 103 and 106 in `create/tests.rs` hand it to `run_kill_child_within`. It is
+the finalization matrix's 120 seconds, which a loaded Windows guest has needed for a creation kill
+child.
 A child still running at the bound is ended there, and the witness fails naming its cell rather than
 judging what the child left. `src/engine/tests.rs` cannot name this `#[cfg(test)]` module, so its
 two launches carry a constant of their own with the same value.

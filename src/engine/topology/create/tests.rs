@@ -4268,6 +4268,26 @@ fn an_error_after_the_log_is_created_refuses_the_run_resumably_and_the_next_crea
     drop(lock);
 }
 
+fn kill_the_creation(root: &Path, site: &str) {
+    use crate::engine::topology::scaffold::KILL_CHILD_BOUND;
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child_within};
+
+    let status = run_kill_child_within(
+        "engine::topology::create::tests::create_kill_child",
+        &[
+            ("UPSTROKE_TEST_KILL_DIR", root.as_os_str()),
+            ("UPSTROKE_TEST_KILL_SITE", std::ffi::OsStr::new(site)),
+        ],
+        KILL_CHILD_BOUND,
+    );
+    assert!(
+        status.as_ref().is_some_and(died_by_abort),
+        "`{site}`: the creation kill child did not die by the armed abort within \
+         {KILL_CHILD_BOUND:?}: {status:?} (`None` is a child still running at the bound, killed \
+         and reaped there)"
+    );
+}
+
 #[test]
 fn a_kill_after_the_first_line_is_synced_leaves_a_committed_run_whose_next_census_repairs_its_marker()
  {
@@ -4282,13 +4302,7 @@ fn a_kill_after_the_first_line_is_synced_leaves_a_committed_run_whose_next_censu
         vec![ResourceRow::R21]
     );
     let fixture = Fixture::new("kill-p6-synced");
-    let code = spawn_and_wait(
-        "engine::topology::create::tests::create_kill_child",
-        &fixture.root,
-        "p6synced",
-        91,
-    );
-    assert_ne!(code, Some(0), "the child must have died");
+    kill_the_creation(&fixture.root, "p6synced");
 
     let path = fixture.public().join(EVENT_LOG);
     let bytes = std::fs::read(&path).expect("the log exists");
@@ -4430,13 +4444,7 @@ fn a_kill_while_the_first_line_is_written_leaves_a_retained_husk_whose_next_open
     use crate::engine::topology::startup::RunDirOutcome;
 
     let fixture = Fixture::new("kill-p5b-torn-recovered");
-    let code = spawn_and_wait(
-        "engine::topology::create::tests::create_kill_child",
-        &fixture.root,
-        "p5btorn",
-        92,
-    );
-    assert_ne!(code, Some(0), "the child must have died");
+    kill_the_creation(&fixture.root, "p5btorn");
     let path = fixture.public().join(EVENT_LOG);
     let torn = std::fs::read(&path).expect("the log exists");
     assert!(

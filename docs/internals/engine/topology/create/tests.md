@@ -1436,6 +1436,21 @@ converges: its open creates the log and syncs the directory again, `run_started`
 line, the run classifies committed, and the log replays twice to states equal to each other and to
 the live fold.
 
+## `fn kill_the_creation(root: &Path, site: &str) {`
+
+Launch `create_kill_child` armed at `site`, and require that it died by the armed abort within
+`KILL_CHILD_BOUND`. The witnesses of rows 103 and 106 launch through it. It reads the child's exit
+status, which `run_kill_child_within` returns, through `died_by_abort`: on Unix, termination by
+`SIGABRT`, which an exit, an ordinary panic and a `Child::kill` do not produce. A child still running
+at the bound is killed and reaped there, and that fails the same assertion.
+
+`spawn_and_wait` would not do for these two. It launches through the host runner, whose
+`ProcessOutput` carries no signal on Unix, so its callers can only check what the output is not: a
+child the runner itself stopped at its output limit returns no code and passes a check for "not 0"
+(#292's review round 4). `run_kill_child_within` spawns through `std::process::Command` from
+`workspace_manager::fixture`, outside the topology modules, so calling it here is not the build
+error a `Command` of this module's own would be.
+
 ## `fn a_kill_after_the_first_line_is_synced_leaves_a_committed_run_whose_next_census_repairs_its_marker()`
 
 Gate 5's strict re-audit, row 106: `Event.AppendFirst`'s `Synced` kill had no committed witness. The

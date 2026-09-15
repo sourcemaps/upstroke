@@ -3011,51 +3011,35 @@ fn informational_append_kill_child() {
 }
 
 /// A started run, and the child killed at `coordinate` while it appends.
+///
+/// The child must die by the armed abort within `KILL_CHILD_BOUND`. Its exit status
+/// is read through `workspace_manager::fixture::died_by_abort`, so a child still
+/// running at the bound (killed and reaped there), a child that exits on its own
+/// and a child something else ended all fail here, naming the coordinate. The
+/// process funnel's `ProcessOutput` could not tell those apart from the abort: on
+/// Unix it carries no signal, and the funnel's own terminations at its timeout and
+/// its output limit left no code either.
 fn kill_the_informational_append(tag: &str, coordinate: &str) -> (Fixture, Vec<u8>) {
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child_within};
+
     let fixture = Fixture::started(tag);
     let before = fixture.log_bytes();
-    let exe = std::env::current_exe().expect("the test binary");
-    let spec = crate::runner::CommandSpec::new(exe.to_string_lossy().into_owned())
-        .arg("--exact")
-        .arg(INFORMATIONAL_KILL_CHILD)
-        .arg("--ignored")
-        .arg("--nocapture")
-        .env(
-            INFORMATIONAL_LOG_ENV,
-            fixture.log_path().to_string_lossy().into_owned(),
-        )
-        .env(INFORMATIONAL_COORDINATE_ENV, coordinate);
-    let spec = match std::env::var(crate::observations::OBSERVATIONS_ENV) {
-        Ok(dir) => spec.env(crate::observations::OBSERVATIONS_ENV, dir),
-        Err(_) => spec,
-    };
-    let output = crate::runner::Runner::run(
-        &crate::runner::host::HostRunner::new(),
-        &crate::runner::gate_request(
-            spec,
-            fixture.paths.public.clone(),
-            KILL_CHILD_BOUND,
-            crate::runner::InvocationId::attempt(
-                AAY,
-                GenerationId(0),
-                AttemptNumber(1),
-                crate::runner::invocation::AttemptRole::Gate(0),
-                0,
+    let log = fixture.log_path();
+    let status = run_kill_child_within(
+        INFORMATIONAL_KILL_CHILD,
+        &[
+            (INFORMATIONAL_LOG_ENV, log.as_os_str()),
+            (
+                INFORMATIONAL_COORDINATE_ENV,
+                std::ffi::OsStr::new(coordinate),
             ),
-        ),
-    )
-    .expect("the child runs through the process funnel");
-    assert!(
-        !output.timed_out,
-        "`{coordinate}`: the kill child did not end within {KILL_CHILD_BOUND:?}, and the process \
-         funnel terminated it at that timeout: {}",
-        output.stderr
+        ],
+        KILL_CHILD_BOUND,
     );
     assert!(
-        !output.stderr.contains("panicked at") && output.code != Some(0),
-        "`{coordinate}`: the child was not killed: {:?} {}",
-        output.code,
-        output.stderr
+        status.as_ref().is_some_and(died_by_abort),
+        "`{coordinate}`: the kill child did not die by the armed abort within {KILL_CHILD_BOUND:?}: \
+         {status:?} (`None` is a child still running at the bound, killed and reaped there)"
     );
     (fixture, before)
 }
@@ -3335,46 +3319,25 @@ fn open_log_kill_child() {
 }
 
 /// The child killed at `point` while it opens `path`.
-fn kill_the_open(path: &Path, point: &str, workspace: &Path) {
-    let exe = std::env::current_exe().expect("the test binary");
-    let spec = crate::runner::CommandSpec::new(exe.to_string_lossy().into_owned())
-        .arg("--exact")
-        .arg(OPEN_LOG_KILL_CHILD)
-        .arg("--ignored")
-        .arg("--nocapture")
-        .env(OPEN_LOG_PATH_ENV, path.to_string_lossy().into_owned())
-        .env(OPEN_LOG_POINT_ENV, point);
-    let spec = match std::env::var(crate::observations::OBSERVATIONS_ENV) {
-        Ok(dir) => spec.env(crate::observations::OBSERVATIONS_ENV, dir),
-        Err(_) => spec,
-    };
-    let output = crate::runner::Runner::run(
-        &crate::runner::host::HostRunner::new(),
-        &crate::runner::gate_request(
-            spec,
-            workspace.to_path_buf(),
-            KILL_CHILD_BOUND,
-            crate::runner::InvocationId::attempt(
-                AAY,
-                GenerationId(0),
-                AttemptNumber(1),
-                crate::runner::invocation::AttemptRole::Gate(0),
-                0,
-            ),
-        ),
-    )
-    .expect("the child runs through the process funnel");
-    assert!(
-        !output.timed_out,
-        "`{point}`: the kill child did not end within {KILL_CHILD_BOUND:?}, and the process \
-         funnel terminated it at that timeout: {}",
-        output.stderr
+///
+/// As for `kill_the_informational_append`: the child must die by the armed abort
+/// within `KILL_CHILD_BOUND`, read from its exit status through `died_by_abort`,
+/// or this fails naming the point.
+fn kill_the_open(path: &Path, point: &str) {
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child_within};
+
+    let status = run_kill_child_within(
+        OPEN_LOG_KILL_CHILD,
+        &[
+            (OPEN_LOG_PATH_ENV, path.as_os_str()),
+            (OPEN_LOG_POINT_ENV, std::ffi::OsStr::new(point)),
+        ],
+        KILL_CHILD_BOUND,
     );
     assert!(
-        !output.stderr.contains("panicked at") && output.code != Some(0),
-        "`{point}`: the child was not killed: {:?} {}",
-        output.code,
-        output.stderr
+        status.as_ref().is_some_and(died_by_abort),
+        "`{point}`: the kill child did not die by the armed abort within {KILL_CHILD_BOUND:?}: \
+         {status:?} (`None` is a child still running at the bound, killed and reaped there)"
     );
 }
 
@@ -3403,7 +3366,7 @@ fn a_kill_after_the_log_is_created_leaves_an_empty_log_whose_next_open_holds_the
     let paths = Scratch::acquire("open-kill-create");
     let path = paths.events();
     assert!(!path.exists(), "no log yet");
-    kill_the_open(&path, "create", &paths.public);
+    kill_the_open(&path, "create");
     assert!(
         path.is_file(),
         "the log the funnel created survives the kill"
@@ -3475,7 +3438,7 @@ fn a_kill_after_the_torn_tail_is_truncated_leaves_the_prefix_the_next_open_syncs
         &path,
         &[prefix.as_slice(), b"{\"ts\":\"2026".as_slice()].concat(),
     );
-    kill_the_open(&path, "truncate-torn-tail", &paths.public);
+    kill_the_open(&path, "truncate-torn-tail");
     assert_eq!(
         read(&path),
         prefix,
