@@ -14635,11 +14635,13 @@ fn a_fault_after_the_worktree_lease_is_taken_ends_the_resume_with_it_released_an
 }
 
 const PROCESS_SPAWN_KILL_CHILD: &str = "engine::topology::recover::tests::process_spawn_kill_child";
+const SPAWNED_WORKER_PID: &str = "spawned-worker.pid";
 
 struct SpawnPhaseFault {
     inner: crate::runner::HarnessHooks,
-    at: (crate::topology::effects::ProcessSite, HookPhase),
+    at: Option<(crate::topology::effects::ProcessSite, HookPhase)>,
     injection: Injection,
+    pid_file: Option<PathBuf>,
 }
 
 impl crate::agent::proc::SpawnHooks for SpawnPhaseFault {
@@ -14657,11 +14659,25 @@ impl crate::agent::proc::SpawnHooks for SpawnPhaseFault {
         phase: HookPhase,
     ) -> Injection {
         let answered = self.inner.phase(site, phase);
-        if (site, phase) == self.at {
+        if Some((site, phase)) == self.at {
             crate::observations::Exported::new(Arc::clone(self.inner.harness()))
                 .carried(self.injection)
         } else {
             answered
+        }
+    }
+
+    fn child_created(&mut self, pid: u32) {
+        self.inner.child_created(pid);
+        if let Some(file) = &self.pid_file {
+            #[cfg(windows)]
+            let record = format!(
+                "{pid} {}",
+                crate::agent::proc::process_creation_time(pid).unwrap_or(0)
+            );
+            #[cfg(not(windows))]
+            let record = pid.to_string();
+            crate::workspace_manager::fixture::write_file(file, record.as_bytes());
         }
     }
 }
@@ -14719,15 +14735,11 @@ fn process_spawn_kill_child() {
         std::env::var("UPSTROKE_TEST_KILL_COORDINATE").expect("the parent names the coordinate");
     let fixture = Fixture::adopted_by_a_kill_child(root, plan());
     let harness = harness();
-    let hooks: Box<dyn crate::agent::proc::SpawnHooks + Send> = if coordinate == "After" {
-        Box::new(SpawnPhaseFault {
-            inner: crate::runner::HarnessHooks::new(Arc::clone(&harness)),
-            at: (
-                crate::topology::effects::ProcessSite::Spawn,
-                HookPhase::After,
-            ),
-            injection: Injection::Kill,
-        })
+    let at = if coordinate == "After" {
+        Some((
+            crate::topology::effects::ProcessSite::Spawn,
+            HookPhase::After,
+        ))
     } else {
         harness
             .lock()
@@ -14738,15 +14750,22 @@ fn process_spawn_kill_child() {
                 InjectionMode::Kill,
             )
             .expect("the point supports a kill");
-        Box::new(crate::runner::HarnessHooks::new(Arc::clone(&harness)))
+        None
+    };
+    let mut hooks = SpawnPhaseFault {
+        inner: crate::runner::HarnessHooks::new(Arc::clone(&harness)),
+        at,
+        injection: Injection::Kill,
+        pid_file: Some(fixture.root.join(SPAWNED_WORKER_PID)),
     };
     if coordinate == "AmbientJobJoined" {
-        let mut hooks = hooks;
-        let contained = crate::runner::host::contain_write_command(&mut *hooks);
+        let contained = crate::runner::host::contain_write_command(&mut hooks);
         panic!("the kill at `{coordinate}` did not take this process: {contained:?}");
     }
+    crate::runner::host::contain_write_command(&mut crate::agent::proc::NoHooks)
+        .expect("the coordinator is contained, as every write command is before it spawns");
     let runner = SpawningRunner {
-        host: crate::runner::host::HostRunner::new().with_hooks(hooks),
+        host: crate::runner::host::HostRunner::new().with_hooks(Box::new(hooks)),
         editing: RecordingRunner::editing(),
         program: this_binary_running("engine::topology::coverage::tests::sleeps_until_terminated"),
         timeout: None,
@@ -14798,6 +14817,26 @@ fn a_kill_in_the_workers_spawn_converges_on_the_next_resume(coordinate: &str, ta
         wait_for_cleanup_hold_release(&fixture.public()),
         "{tag}: the run's cleanup hold is still observed: nothing settled what the spawn left"
     );
+    #[cfg(windows)]
+    if let Ok(record) = std::fs::read_to_string(fixture.root.join(SPAWNED_WORKER_PID)) {
+        let mut fields = record.split_whitespace();
+        let pid: u32 = fields
+            .next()
+            .and_then(|field| field.parse().ok())
+            .expect("the recorded pid");
+        let created: u64 = fields
+            .next()
+            .and_then(|field| field.parse().ok())
+            .expect("the recorded creation time");
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while crate::agent::proc::process_alive(pid, created) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{tag}: the worker the dead coordinator spawned is still alive (pid {pid})"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
     assert!(
         !rundir::is_running(&fixture.public()),
         "{tag}: the run lock went with the dead process"
@@ -14899,8 +14938,9 @@ fn a_fault_at_the_workers_termination_ends_the_step_and_the_next_resume_converge
     let runner = SpawningRunner {
         host: crate::runner::host::HostRunner::new().with_hooks(Box::new(SpawnPhaseFault {
             inner: crate::runner::HarnessHooks::new(Arc::clone(&faulted)),
-            at: (ProcessSite::Terminate, phase),
+            at: Some((ProcessSite::Terminate, phase)),
             injection: Injection::Error,
+            pid_file: None,
         })),
         editing: RecordingRunner::editing(),
         program: this_binary_running("engine::topology::coverage::tests::sleeps_until_terminated"),
@@ -15054,11 +15094,12 @@ fn an_error_before_the_workers_process_is_spawned_spawns_nothing_and_the_next_st
     let runner = SpawningRunner {
         host: crate::runner::host::HostRunner::new().with_hooks(Box::new(SpawnPhaseFault {
             inner: crate::runner::HarnessHooks::new(Arc::clone(&faulted)),
-            at: (
+            at: Some((
                 crate::topology::effects::ProcessSite::Spawn,
                 HookPhase::Before,
-            ),
+            )),
             injection: Injection::Error,
+            pid_file: None,
         })),
         editing: RecordingRunner::editing(),
         program: this_binary_running("a_test_this_tree_does_not_contain_and_never_will"),

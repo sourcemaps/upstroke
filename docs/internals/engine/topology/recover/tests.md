@@ -4212,9 +4212,15 @@ The kill child of the worker-spawn witnesses below.
 
 ## `struct SpawnPhaseFault {`
 
-The process funnel's production adapter with one injection at one phase of `Process.Spawn`. The
-harness records the phase, and the injection is exported before it is handed back, because a
-kill there aborts the process.
+The process funnel's production adapter with an optional injection at one phase of a process site.
+The harness records the phase, and the injection is exported before it is handed back, because a
+kill there aborts the process. With a `pid_file` it also records the spawned worker's pid (and its
+creation time on Windows) as soon as the child is created, so that the parent can check the
+worker is gone after its coordinator's death.
+
+## `const SPAWNED_WORKER_PID: &str = "spawned-worker.pid";`
+
+Where the kill child records the worker it spawned, beside the fixture.
 
 ## `struct SpawningRunner {`
 
@@ -4232,7 +4238,12 @@ Resumes the parent's healthy run as `RESUMER` and takes one driver step. Its wor
 dies at the coordinate `UPSTROKE_TEST_KILL_COORDINATE` names: `Process.Spawn`'s after phase, or one
 of its points armed in kill mode on the shared harness. `AmbientJobJoined`, which the containment
 step consults rather than the spawn, is driven through `contain_write_command` before anything is
-resumed. Reaching a panic means the kill did not land.
+resumed. Every other coordinate is reached by a coordinator already contained, as a write command
+is before it spawns anything: on Windows this is what puts a child created suspended inside the
+ambient kill-on-close job from its creation (INV-18). Without it, the first Windows guest run of
+the `CreatedSuspended` arm orphaned a suspended worker outside any job. That worker held the
+handles it inherited, and the guest's command wrapper could not append to its own log after cargo
+exited (`guest/variant-only-CreatedSuspended.log`). Reaching a panic means the kill did not land.
 
 ## `fn a_kill_in_the_workers_spawn_converges_on_the_next_resume(coordinate: &str, tag: &str) {`
 
@@ -4242,8 +4253,9 @@ attempt in flight (`run_resumed`, `task_dispatched`, `attempt_started`); the con
 leaves nothing appended. The run's cleanup hold is then released. On Unix this is the reaper
 settling the worker's process group, which would otherwise hold the lease for the sleeper's two
 minutes. A control run with the reaper's cleanup delayed by thirty seconds fails this assertion
-(`~/pr10-evidence/fix-g5-b/witness/controls/`). On Windows the private job closes with the process
-that held it. The run lock is gone. The next resume converges: step (d) settles the attempt
+(`~/pr10-evidence/fix-g5-b/witness/controls/`). On Windows there is no reaper, and the worker the
+child recorded must be gone within the same bound, because the ambient job and the private job
+close with the process that held them. The run lock is gone. The next resume converges: step (d) settles the attempt
 interrupted, and the next attempt is spawned and accepted. The log replays twice to equal states.
 The kill child's record holds the coordinates, because the parent never spawns under the armed
 adapter.
