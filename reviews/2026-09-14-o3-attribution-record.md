@@ -37,7 +37,7 @@ directory; `<sha>` is the full sha the measurement was taken at.
 | 4 the internals notes, held both ways by `test-internals-notes.sh` | **done** — §9; `test-internals-notes.sh` and `test-docs-consistency.sh` green from the worktree root |
 | 5 the design (O2): §5, §12, §23.1, each citing this record | **done** — §10; `test-docs-consistency.sh` green; `design/15`, `README.md`, `MAINTAINING.md` and `design/25` untouched |
 | 6 the findings-ledger file | **done** — §11; `test-pr-policy.sh` and `test-pr-ledger-evidence.sh` green, the row validated by both validators |
-| 7 the ten gates on this box, the guest, this record, the draft pull request | pending |
+| 7 the ten gates on this box, the guest, this record, the draft pull request | **in progress** — the ten gates green at `fcfedc75`, the code-complete head (§12); the guest run blocked on the guest's disk, question 1 to the orchestrator filed (§13); the draft pull request not yet opened |
 
 ## 1. What this pull request is, from the contract
 
@@ -615,11 +615,63 @@ passed`, exit `0` (`phase6/test-pr-policy.log`); `bash .github/scripts/test-pr-l
 
 ## 12. The ten gates on this box
 
-Pending.
+At `fcfedc755f99c39a9178630dd70eb58352c9c268`, the head that carries every code, notes, design
+and finding change of this pull request (the commits after it are this record's own; `git diff
+--stat fcfedc75 <head> -- . ':!reviews/2026-09-14-o3-attribution-record.md'` is empty at each).
+Logs under `fcfedc755f99c39a9178630dd70eb58352c9c268/gates/`: `box-load.log`,
+`w1-eight-iso.log`, `eight-logs/NN-<name>.log` (a copy of `~/eight-logs/fcfedc7/`),
+`test-pr-ready-audit.log`.
+
+`~/bin/w1-eight-iso /srv/worktrees/o3-attribution`, bare, from a clean worktree (`git status
+--porcelain` empty), after `git ls-files -z -- src build.rs Cargo.toml Cargo.lock | xargs -0 touch`
+so the crate was compiled again rather than taken from an earlier build; `/tmp/w1-eight.lock` was
+free when it started, the box's load average was 38.80 (`box-load.log`). The target base it
+derived, `/mnt/ramtarget/iso-o3-attribution`, is the symbolic link §2 describes, so its bytes are
+on disk and its cache is this pull request's own. It printed, 2026-09-15 00:41:54Z–00:45:18Z:
+
+| step | result |
+|---|---|
+| `cargo fmt --check` | PASS, 1 s |
+| `cargo clippy --all-targets --all-features -- -D warnings` | PASS, 25 s |
+| `cargo test --all-targets --all-features` | PASS, 133 s: library `2611 passed; 0 failed; 77 ignored` in 90.35 s, binary `10 passed`; `03-test.log` opens `Compiling upstroke v0.1.0 (/srv/worktrees/o3-attribution)` and runs `/mnt/ramtarget/iso-o3-attribution/slot1/debug/deps/upstroke-1f05c71869a3a005` |
+| `cargo +1.85.0 check --locked --all-targets --all-features` | PASS, 27 s |
+| `test-release-record.sh` | PASS |
+| `test-pr-policy.sh` | PASS, 16 s |
+| `test-pr-ledger-evidence.sh` | PASS |
+| `test-docs-consistency.sh` | PASS |
+| `test-internals-notes.sh` | PASS, 2 s |
+
+`ALL 9 PASS at fcfedc7`, exit `0`. Then, from the worktree root, `bash
+.github/scripts/test-pr-ready-audit.sh`: `test-pr-ready-audit: ok`, exit `0`
+(`test-pr-ready-audit.log`). The library count is Phase 3's 2611: the phases after it added no
+test.
+
+The same ten gates are run again at the head the body records, and that run is the body's to
+report, under `<that head>/gates/` in the evidence directory.
 
 ## 13. The Windows guest
 
-Pending.
+**Not run yet, and why.** The persistent guest (`windowsguest`, `ssh` reachable) had no room for
+a tree and a target of this pull request's own: `C:` had 1.69 GB free at 2026-09-14 23:52Z,
+0.51 GB at 00:2xZ and 0.50 GB at 00:4xZ, `D:`, `E:` and `F:` 0 bytes, with two `cargo.exe` and up
+to five `upstroke-*` test binaries of other sessions running throughout. What holds the disk is
+other sessions' trees and targets — `C:\upstroke\target` 6.7 GB (the tree the self-hosted CI
+runner uses), `C:\upstroke-pr10\target` 15.1 GB, `C:\upstroke-g5\target` 15.2 GB (the G5
+session's), and `upstroke-fix-target`, `upstroke-redo-target`, `upstroke-verify-target`,
+`pr9r3-target`, `pr8-fix8-target`, `cargo-target` beside a dozen `pr*` and `wingate-*` trees —
+none of it this session's to remove, and a build of this crate's test binary needs several GB. A
+tree of this pull request's was therefore not created there, and nothing of another session's was
+touched. Question 1 to the orchestrator
+(`/home/ubuntu/orch-o3-attribution/questions/impl_o3-attribution-1.md`) states the options: room
+freed and the run made in `C:\upstroke-o3` (the default if room appears); a run inside the G5
+session's tree with its owner's word; or CI's `test (winguest)` leg at the pushed head as the
+guest evidence. This section is rewritten with the outcome before the push.
+
+**What is path-shaped in this pull request**, and so owed a Windows run: the four answer-file
+tests in `src/interaction.rs` (an answer file under a temporary directory, its staging and
+rename), the two legacy-emitter tests in `src/engine/tests.rs` (a run directory and a git
+repository), and `answer::tests` unchanged but through the changed writer. The vocabulary, the
+decoder fixture, the fold test and the render arm are path-free.
 
 ## 14. What is not claimed
 
