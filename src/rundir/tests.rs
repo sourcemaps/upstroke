@@ -5692,6 +5692,12 @@ fn a_reclaimed_report_stage_remains_reclaimable_after_power_loss() {
 ///   recorded name, which it leaves as found.
 /// - A publication that renamed its report up and removed its emptied
 ///   directory B stops at its barrier with the record still naming B.
+/// - The fresh branch of terminal finalization (`sync_report_dir`), the
+///   reclaim's other caller, stops the same way on the directory it removed, on
+///   the name found gone and on a file at the name. The Gate 5 report's review,
+///   round 4, moved the reclaim's barrier after `begin_report_staging` in
+///   `write_report` alone. That left this caller retiring the record before any
+///   barrier, and no test that drives this caller failed.
 ///
 /// Every deletion a loss undoes is therefore still recorded, and with the
 /// barrier holding the next write reclaims by that record. Until the fix the
@@ -5776,6 +5782,78 @@ fn a_refused_public_barrier_leaves_the_record_of_the_staging_directory_it_remove
                 .is_empty(),
         "the record of the removed directory is reclaimed, and nothing is passed over"
     );
+
+    let leftover_d = plant_report_staging_of_a_dead_writer(&public, &private);
+    let staging_d = leftover_d
+        .parent()
+        .expect("the staged file is inside the staging directory")
+        .to_path_buf();
+    {
+        let _fault = util::fail_barriers_at(&public);
+        for attempt in [
+            "the fresh branch's reclaim that removed D",
+            "the fresh branch again, which finds D already gone",
+        ] {
+            let error = sync_report_dir(&public, &private, &mut NoHooks)
+                .expect_err("the fresh branch's reclaim barrier is refused");
+            assert!(
+                error.to_string().contains("injected barrier fault"),
+                "{attempt}: the failure is the barrier's, by name: {error}"
+            );
+            assert_eq!(
+                (
+                    staging_d.exists(),
+                    recorded_report_staging(&public, &private).expect("read")
+                ),
+                (false, Some(staging_d.clone())),
+                "{attempt}: stopped at the barrier with the record still naming D"
+            );
+        }
+    }
+    let passed_over = sync_report_dir(&public, &private, &mut NoHooks)
+        .expect("with the barrier holding, the fresh branch reclaims");
+    assert!(
+        passed_over.is_empty() && !record.exists(),
+        "the fresh branch reclaims by the record that outlived D's deletion, and passes nothing over"
+    );
+
+    let leftover_e = plant_report_staging_of_a_dead_writer(&public, &private);
+    let staging_e = leftover_e
+        .parent()
+        .expect("the staged file is inside the staging directory")
+        .to_path_buf();
+    fs::remove_dir_all(&staging_e).expect("the recorded directory gone");
+    fs::write(&staging_e, b"an operator's file at the recorded name\n")
+        .expect("a file at the recorded name");
+    {
+        let _fault = util::fail_barriers_at(&public);
+        let error = sync_report_dir(&public, &private, &mut NoHooks)
+            .expect_err("the fresh branch's barrier ahead of the record's removal is refused");
+        assert!(
+            error.to_string().contains("injected barrier fault"),
+            "the failure is the barrier's, by name: {error}"
+        );
+    }
+    assert_eq!(
+        (
+            recorded_report_staging(&public, &private).expect("read"),
+            fs::read(&staging_e).expect("the file stands")
+        ),
+        (
+            Some(staging_e.clone()),
+            b"an operator's file at the recorded name\n".to_vec()
+        ),
+        "on the fresh branch too, with something other than a directory at the recorded name, the \
+         record still names it after the refused barrier, and the file is as found"
+    );
+    let passed_over = sync_report_dir(&public, &private, &mut NoHooks)
+        .expect("with the barrier holding, the fresh branch reclaims");
+    assert_eq!(
+        (passed_over, record.exists()),
+        (vec![staging_e.clone()], false),
+        "the fresh branch retires the record once the barrier holds, and passes the file over by name"
+    );
+    fs::remove_file(&staging_e).expect("removed for the next case");
 
     let leftover_c = plant_report_staging_of_a_dead_writer(&public, &private);
     let staging_c = leftover_c
