@@ -17,6 +17,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::error::UpstrokeError;
+use crate::events::{EffectiveAttribution, QuestionAttribution, UncitedConviction, cited};
 use crate::ir::{Answer, Question, QuestionId};
 use crate::ulid;
 use crate::util;
@@ -74,6 +75,52 @@ impl QuestionRecord {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerRecord {
+    #[serde(flatten)]
+    pub answer: Answer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<QuestionAttribution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub citation: Option<String>,
+}
+
+impl AnswerRecord {
+    #[must_use]
+    pub fn unattributed(answer: Answer) -> Self {
+        Self {
+            answer,
+            attribution: None,
+            citation: None,
+        }
+    }
+
+    #[must_use]
+    pub fn discovered(answer: Answer) -> Self {
+        Self {
+            answer,
+            attribution: Some(QuestionAttribution::DiscoveredHole),
+            citation: None,
+        }
+    }
+
+    pub fn convicted(answer: Answer, citation: String) -> Result<Self, UncitedConviction> {
+        if !cited(&citation) {
+            return Err(UncitedConviction);
+        }
+        Ok(Self {
+            answer,
+            attribution: Some(QuestionAttribution::DesignDefect),
+            citation: Some(citation),
+        })
+    }
+
+    #[must_use]
+    pub fn effective_attribution(&self) -> EffectiveAttribution<'_> {
+        EffectiveAttribution::derive(self.attribution, self.citation.as_deref())
+    }
+}
+
 pub fn new_question_id() -> QuestionId {
     QuestionId(format!("q-{}", ulid::ulid()))
 }
@@ -94,14 +141,28 @@ pub fn answer_path(dir: &Path, id: &QuestionId) -> PathBuf {
 // The answer writer stages complete JSON before publishing it by rename; engine
 // readers may poll concurrently and must never see a partial payload. Failed
 // staging or publication can leave writer-owned .partial residue, which readers ignore.
-pub fn write_answer(dir: &Path, id: &QuestionId, answer: &Answer) -> Result<(), UpstrokeError> {
+pub fn write_answer(
+    dir: &Path,
+    id: &QuestionId,
+    record: &AnswerRecord,
+) -> Result<(), UpstrokeError> {
+    if record.attribution == Some(QuestionAttribution::DesignDefect)
+        && !record.citation.as_deref().is_some_and(cited)
+    {
+        return Err(UpstrokeError::Refused {
+            message: format!("answer {id} is not written: {UncitedConviction}"),
+        });
+    }
     let component = util::filename_component(id.as_str());
     let hooks = &mut crate::rundir::NoHooks;
-    crate::rundir::stage_answer(dir, &component, answer, hooks)?;
+    crate::rundir::stage_answer(dir, &component, record, hooks)?;
     crate::rundir::publish_answer(dir, &component, hooks)
 }
 
-pub fn read_answer(dir: &Path, id: &QuestionId) -> Result<Option<Answer>, UpstrokeError> {
+pub fn read_answer_record(
+    dir: &Path,
+    id: &QuestionId,
+) -> Result<Option<AnswerRecord>, UpstrokeError> {
     let component = util::filename_component(id.as_str());
     let path = answer_path(dir, id);
     match crate::rundir::ingest_answer(dir, &component, &mut crate::rundir::NoHooks)? {
@@ -112,6 +173,10 @@ pub fn read_answer(dir: &Path, id: &QuestionId) -> Result<Option<Answer>, Upstro
             }),
         None => Ok(None),
     }
+}
+
+pub fn read_answer(dir: &Path, id: &QuestionId) -> Result<Option<Answer>, UpstrokeError> {
+    Ok(read_answer_record(dir, id)?.map(|record| record.answer))
 }
 
 pub fn render_question(question: &Question) -> String {
@@ -634,8 +699,9 @@ mod tests {
             },
             Answer::Declined,
         ] {
-            write_answer(&dir, &id, &answer).expect("write");
-            assert_eq!(read_answer(&dir, &id).expect("read"), Some(answer));
+            let record = AnswerRecord::unattributed(answer);
+            write_answer(&dir, &id, &record).expect("write");
+            assert_eq!(read_answer(&dir, &id).expect("read"), Some(record.answer));
         }
         let leftovers: Vec<String> = std::fs::read_dir(&dir)
             .expect("list")
@@ -726,9 +792,9 @@ mod tests {
                 let _ = write_answer(
                     &self.dir,
                     &self.id,
-                    &Answer::Answered {
+                    &AnswerRecord::unattributed(Answer::Answered {
                         text: "opaque cursors".to_owned(),
-                    },
+                    }),
                 );
             }
         }
@@ -777,5 +843,206 @@ mod tests {
     fn unattended_parks_rather_than_declining() {
         let answer = UnattendedAnswers.resolve(&question()).expect("resolve");
         assert_eq!(answer, Answer::Unanswered);
+    }
+
+    fn answer_scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "upstroke-answer-record-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        dir
+    }
+
+    fn residue_of(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .expect("list")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn an_attributed_answer_file_is_read_back_with_its_ruling() {
+        let dir = answer_scratch("ruling");
+        let id = QuestionId::from("q-RULED");
+        let convicted = AnswerRecord::convicted(
+            Answer::Answered {
+                text: "use base64 cursors".to_owned(),
+            },
+            "design checklist item 2: the pagination contract is settled before execution"
+                .to_owned(),
+        )
+        .expect("a cited conviction is writable");
+        write_answer(&dir, &id, &convicted).expect("write");
+
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(answer_path(&dir, &id)).expect("file"))
+                .expect("json");
+        let mut keys: Vec<&str> = on_disk
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["answer", "attribution", "citation", "text"],
+            "the ruling sits beside the answer, on the answered record: {on_disk}"
+        );
+        assert_eq!(on_disk["attribution"], "design_defect");
+
+        let back = read_answer_record(&dir, &id)
+            .expect("read")
+            .expect("present");
+        assert_eq!(back, convicted);
+        assert_eq!(
+            back.effective_attribution(),
+            EffectiveAttribution::Convicted {
+                citation: "design checklist item 2: the pagination contract is settled before execution"
+            }
+        );
+        assert_eq!(
+            read_answer(&dir, &id).expect("read").as_ref(),
+            Some(&convicted.answer),
+            "the legacy reader sees the answer and nothing of the ruling"
+        );
+
+        let declined = AnswerRecord::discovered(Answer::Declined);
+        write_answer(&dir, &QuestionId::from("q-DECLINED"), &declined).expect("write");
+        let back = read_answer_record(&dir, &QuestionId::from("q-DECLINED"))
+            .expect("read")
+            .expect("present");
+        assert_eq!(back, declined, "a decline carries its attribution too");
+        assert_eq!(
+            back.effective_attribution(),
+            EffectiveAttribution::Discovered
+        );
+        assert!(
+            residue_of(&dir)
+                .iter()
+                .all(|name| !name.ends_with(".partial")),
+            "{:?}",
+            residue_of(&dir)
+        );
+    }
+
+    #[test]
+    fn an_unattributed_answer_file_keeps_the_bytes_the_writer_always_wrote() {
+        let dir = answer_scratch("bytes");
+        for (index, answer) in [
+            Answer::Answered {
+                text: "use base64 cursors".to_owned(),
+            },
+            Answer::Declined,
+            Answer::Unanswered,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let record = AnswerRecord::unattributed(answer.clone());
+            assert_eq!(
+                serde_json::to_string(&record).expect("record"),
+                serde_json::to_string(&answer).expect("answer"),
+                "the record without a ruling is the answer's own bytes"
+            );
+            let id = QuestionId::from(format!("q-{index}").as_str());
+            write_answer(&dir, &id, &record).expect("write");
+            assert_eq!(
+                std::fs::read_to_string(answer_path(&dir, &id)).expect("file"),
+                format!(
+                    "{}\n",
+                    serde_json::to_string_pretty(&answer).expect("answer")
+                ),
+                "the file `upstroke answer` writes is unchanged"
+            );
+        }
+
+        let pre_change = QuestionId::from("q-PRE");
+        std::fs::write(
+            answer_path(&dir, &pre_change),
+            "{\n  \"answer\": \"answered\",\n  \"text\": \"use base64 cursors\"\n}\n",
+        )
+        .expect("a file written before the taxonomy");
+        let back = read_answer_record(&dir, &pre_change)
+            .expect("read")
+            .expect("present");
+        assert_eq!(
+            back,
+            AnswerRecord::unattributed(Answer::Answered {
+                text: "use base64 cursors".to_owned(),
+            })
+        );
+        assert_eq!(
+            back.effective_attribution(),
+            EffectiveAttribution::Unclassified,
+            "no ruling in the file: unclassified, never defaulted"
+        );
+    }
+
+    #[test]
+    fn the_writer_refuses_a_conviction_without_a_citation() {
+        let dir = answer_scratch("uncited");
+        let id = QuestionId::from("q-UNCITED");
+        for citation in [None, Some(String::new()), Some("   ".to_owned())] {
+            let uncited = AnswerRecord {
+                answer: Answer::Answered {
+                    text: "use base64 cursors".to_owned(),
+                },
+                attribution: Some(QuestionAttribution::DesignDefect),
+                citation: citation.clone(),
+            };
+            let refused =
+                write_answer(&dir, &id, &uncited).expect_err("no citation, no conviction");
+            assert!(
+                matches!(&refused, UpstrokeError::Refused { message }
+                    if message.contains("q-UNCITED") && message.contains("no citation, no conviction")),
+                "citation {citation:?}: {refused}"
+            );
+            assert!(
+                residue_of(&dir).is_empty(),
+                "nothing staged and nothing published for {citation:?}: {:?}",
+                residue_of(&dir)
+            );
+        }
+        assert_eq!(
+            AnswerRecord::convicted(Answer::Declined, " \n".to_owned()),
+            Err(UncitedConviction),
+            "the constructor refuses what the writer refuses"
+        );
+        assert_eq!(read_answer_record(&dir, &id).expect("read"), None);
+    }
+
+    #[test]
+    fn a_conviction_without_a_citation_in_the_file_reads_as_a_discovery() {
+        let dir = answer_scratch("hand-edited");
+        let id = QuestionId::from("q-HAND");
+        std::fs::write(
+            answer_path(&dir, &id),
+            r#"{"answer":"answered","text":"use base64 cursors","attribution":"design_defect"}"#,
+        )
+        .expect("a file no writer of this crate produces");
+        let back = read_answer_record(&dir, &id)
+            .expect("read")
+            .expect("present");
+        assert_eq!(
+            back.attribution,
+            Some(QuestionAttribution::DesignDefect),
+            "the stored value is kept as written"
+        );
+        assert_eq!(back.citation, None);
+        assert_eq!(
+            back.effective_attribution(),
+            EffectiveAttribution::Discovered,
+            "and read as a discovery, derived rather than re-decided"
+        );
+        assert_eq!(
+            read_answer(&dir, &id).expect("read"),
+            Some(Answer::Answered {
+                text: "use base64 cursors".to_owned()
+            })
+        );
     }
 }

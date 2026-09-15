@@ -2173,6 +2173,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_question_answered_transaction_refuses_an_attribution_key() {
+        let canonical = every_kind()
+            .iter()
+            .zip(canonical_events())
+            .find(|(body, _)| body.kind() == "question_answered")
+            .map(|(_, canonical)| canonical)
+            .expect("the corpus has a question_answered payload");
+        serde_json::from_value::<TopologyEvent>(canonical.clone())
+            .expect("the canonical question_answered decodes before anything is added");
+
+        for (key, value) in [
+            ("attribution", serde_json::Value::from("design_defect")),
+            ("attribution", serde_json::Value::from("discovered_hole")),
+            ("citation", serde_json::Value::from("§5 objective 2")),
+        ] {
+            let mut on_the_payload = canonical.clone();
+            on_the_payload["data"][key] = value.clone();
+            let refused = serde_json::from_value::<TopologyEvent>(on_the_payload)
+                .expect_err("the transaction takes no attribution");
+            assert_eq!(
+                refused.to_string(),
+                format!(
+                    "unknown field `{key}`, expected one of `key`, `question`, `answer`, `via`"
+                ),
+                "on the payload"
+            );
+
+            let mut on_the_answer = canonical.clone();
+            on_the_answer["data"]["answer"][key] = value;
+            let refused = serde_json::from_value::<TopologyEvent>(on_the_answer)
+                .expect_err("the answer takes no attribution either");
+            assert_eq!(
+                refused.to_string(),
+                format!("unknown field `{key}`, expected `option_index` or `binding_override`"),
+                "on the answer"
+            );
+        }
+    }
+
     fn object_paths(value: &serde_json::Value, at: Vec<String>, found: &mut Vec<Vec<String>>) {
         match value {
             serde_json::Value::Object(map) => {

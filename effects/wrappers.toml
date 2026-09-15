@@ -553,7 +553,10 @@ effect_free = [
     "answer_for_option",
     "answer_path",
     "answers_for",
+    "convicted",
     "defer_backoff",
+    "discovered",
+    "effective_attribution",
     "fmt",
     "id",
     "interactive",
@@ -566,8 +569,10 @@ effect_free = [
     "open",
     "parse",
     "read_answer",
+    "read_answer_record",
     "render_question",
     "sleep",
+    "unattributed",
     "with_poll",
 ]
 

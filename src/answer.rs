@@ -80,13 +80,14 @@ pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, 
         path: answers.clone(),
         source,
     })?;
-    interaction::write_answer(&answers, &id, &answer)?;
+    let record = interaction::AnswerRecord::unattributed(answer);
+    interaction::write_answer(&answers, &id, &record)?;
 
     let run_is_live = rundir::is_running(&found.public);
     Ok(Answered {
         run_id: found.run_id,
         question_id: found.question_id,
-        answer,
+        answer: record.answer,
         run_is_live,
     })
 }

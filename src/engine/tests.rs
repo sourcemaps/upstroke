@@ -7201,7 +7201,12 @@ fn an_answer_file_that_changes_nothing_does_not_spin_the_scheduler() {
 
     let answers = rundir::public_dir(&repo, &run_id).join("answers");
     fs::create_dir_all(&answers).expect("answers dir");
-    interaction::write_answer(&answers, &question, &Answer::Unanswered).expect("write");
+    interaction::write_answer(
+        &answers,
+        &question,
+        &interaction::AnswerRecord::unattributed(Answer::Unanswered),
+    )
+    .expect("write");
 
     let source = fake(Effect::EditFile);
     let resumed = resume_with(&resume_options(&repo, &run_id), &source).expect("resume");

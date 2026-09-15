@@ -32,7 +32,7 @@ directory; `<sha>` is the full sha the measurement was taken at.
 |---|---|
 | 0 base measured, readings taken, record opened | **done** — this commit |
 | 1 the vocabulary (`src/events/mod.rs`): `QuestionAttribution`, the two fields, `discovered`, `convicted`, `effective_attribution`; the legacy emitters unclassified; the census offer and the fixtures through the constructors; the mutations | **done** — §6; the full suite green through the wrapper, the three mutations each killed by the tests named for them |
-| 2 the answer file (`src/interaction.rs`): the attributed answer record, the writer-side refusal, the schema-4 refusal executed | pending |
+| 2 the answer file (`src/interaction.rs`): the attributed answer record, the writer-side refusal, the schema-4 refusal executed | **done** — §7; the full suite green through the wrapper, four mutations each killed by the tests named for them; the guest run of the path-shaped tests is owed at the head the body records (§10) |
 | 3 the decoder fixture (`src/topology/events.rs`, `src/topology/fold/tests.rs`): an attributed record through the informational-tolerance path; the fold untouched | pending |
 | 4 the internals notes, held both ways by `test-internals-notes.sh` | pending |
 | 5 the design (O2): §5, §12, §23.1, each citing this record | pending |
@@ -429,7 +429,66 @@ exit `0` (2026-09-15, 00:09:56Z–00:11:42Z) — 2595 at the base plus the eight
 
 ## 7. The answer file (Phase 2)
 
-Pending.
+**What landed** (`src/interaction.rs`, R5):
+
+- `AnswerRecord { answer: Answer (flattened), attribution: Option<QuestionAttribution>, citation:
+  Option<String> }` — what `answers/<question-id>.json` holds. The two optional fields are in the
+  same serde mold as the record's (`#[serde(default, skip_serializing_if = "Option::is_none")]`),
+  so a record without a ruling serialises to the answer's own bytes.
+  `AnswerRecord::unattributed(answer)`, `::discovered(answer)`,
+  `::convicted(answer, citation) -> Result<Self, UncitedConviction>` (the same `cited` rule as
+  `DesignDefect::convicted`), and `effective_attribution()` through the same
+  `EffectiveAttribution::derive`.
+- `write_answer(dir, id, &AnswerRecord)` — the one writer of the file, and the writer-side rule:
+  `attribution: Some(DesignDefect)` with a citation that is absent or blank is refused with
+  `UpstrokeError::Refused` (*"answer {id} is not written: a design_defect conviction cites …; no
+  citation, no conviction"*) before anything is staged, so no `.partial` and no file. Its callers
+  moved with it: `src/answer.rs` writes `AnswerRecord::unattributed(answer)` (the command's files
+  are unchanged), and the two test callers in `src/interaction.rs` and the one in
+  `src/engine/tests.rs` wrap their `Answer` the same way. No new effectful wrapper, so
+  `clippy.toml`'s disallowed list is untouched; `write_answer` keeps its `effectful` row.
+- `read_answer_record(dir, id) -> Result<Option<AnswerRecord>, _>` reads the whole record;
+  `read_answer` now returns its `answer` half, so the legacy engine's `EventLogAnswers` and
+  `coordinator::ingest_answer` see exactly what they saw before (R5, consequence 1).
+- `effects/wrappers.toml`: `convicted`, `discovered`, `effective_attribution`,
+  `read_answer_record`, `unattributed` classified `effect_free` in the `src/interaction.rs` entry.
+- `src/topology/events.rs` gains the executed refusal (below). `QuestionAnswered4` and `Answer4`
+  are untouched.
+
+**Tests**, each existing exactly once:
+
+| test | what it proves |
+|---|---|
+| `interaction::tests::an_attributed_answer_file_is_read_back_with_its_ruling` | a `convicted` record is written, its file has exactly the keys `answer`, `attribution`, `citation`, `text`, `read_answer_record` reads it back equal and `Convicted`, and `read_answer` returns the answer alone; a `discovered` decline round-trips too; no `.partial` is left |
+| `interaction::tests::an_unattributed_answer_file_keeps_the_bytes_the_writer_always_wrote` | for `answered`, `declined` and `unanswered`, `to_string(&AnswerRecord::unattributed(a)) == to_string(&a)` and the file on disk is `to_string_pretty(&a)` plus a newline; a hand-written pre-change file reads as `Unclassified` |
+| `interaction::tests::the_writer_refuses_a_conviction_without_a_citation` | `design_defect` with no citation, an empty one and a blank one are refused with the message above, naming the question, and the directory stays empty; `AnswerRecord::convicted` refuses the same |
+| `interaction::tests::a_conviction_without_a_citation_in_the_file_reads_as_a_discovery` | a hand-written `design_defect` with no `citation` keeps its stored value and reads as `Discovered`; `read_answer` still returns the answer |
+| `topology::events::tests::a_question_answered_transaction_refuses_an_attribution_key` | the canonical `question_answered` payload decodes; with `attribution` (either spelling) or `citation` added on the payload the decoder answers exactly `unknown field `attribution`, expected one of `key`, `question`, `answer`, `via`` (and likewise for `citation`); added inside `answer` it answers exactly `unknown field `attribution`, expected `option_index` or `binding_override`` |
+
+Those two quoted strings are serde's own, from `QuestionAnswered4`'s and `Answer4`'s
+`deny_unknown_fields` (§2); `strict::checked`'s *"in a record embedded in a schema-4 transaction
+payload"* is the text for a legacy record embedded through `deserialize_with`, which
+`question_answered` does not carry. Executed in `phase2/targeted-1.log` and `phase2/full-1.log`;
+the test pins the strings, so a change to either text fails it.
+
+**Mutations, executed** (`phase2/mutations/summary.txt`, one `.diff` and `.log` each; both files
+restored from pristine copies and their SHA-256 checked equal after each):
+
+| mutation | tests that fail | tests that keep passing |
+|---|---|---|
+| M4 the writer's refusal removed | `the_writer_refuses_a_conviction_without_a_citation` | the other seven named |
+| M5 `#[serde(flatten)]` removed from `AnswerRecord.answer` | `an_unattributed_answer_file_keeps_the_bytes_the_writer_always_wrote`, `an_attributed_answer_file_is_read_back_with_its_ruling`, `a_conviction_without_a_citation_in_the_file_reads_as_a_discovery` | `answers_survive_the_trip_through_a_file` and `answer::tests::an_answer_lands_where_the_engine_will_find_it` — they write and read through the same type, so the shape moves under them unnoticed, which is why the literal-bytes test exists |
+| M6 the reader drops `attribution` (`skip_deserializing`) | `an_attributed_answer_file_is_read_back_with_its_ruling`, `a_conviction_without_a_citation_in_the_file_reads_as_a_discovery` | the rest |
+| M7 `deny_unknown_fields` removed from `QuestionAnswered4` | `a_question_answered_transaction_refuses_an_attribution_key`, and the existing `a_transaction_refuses_an_unknown_field_and_an_informational_record_ignores_it` | the rest |
+
+**Runs** (through the wrapper on the private target): `phase2/targeted-1.log` (197 passed over
+`interaction::`, `answer::`, `effects::`, the refusal test and the unanswered-answer engine test),
+`phase2/fmt-1.log` (clean after `cargo fmt`), `phase2/clippy-1.log` (`-D warnings`, clean),
+`phase2/full-1.log`: library `2608 passed; 0 failed; 77 ignored` in 88.02 s, binary `10 passed`,
+exit `0` (2026-09-15T00:17:01Z–2026-09-15T00:19:09Z) — Phase 1's 2603 plus the five tests above.
+
+**Not built here, by the brief:** the schema-4 answer-ingest that would read
+`read_answer_record` into a `design_defect`, and a command-line spelling of a ruling (§11).
 
 ## 8. The decoder fixture (Phase 3)
 
