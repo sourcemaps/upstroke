@@ -2828,3 +2828,437 @@ fn a_dropped_fixture_reclaims_its_tree_after_the_log_handle_is_closed() {
          declared before `log` costs"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The informational append's phases and points, each driven to its recovery
+// ---------------------------------------------------------------------------
+
+const INFORMATIONAL_KILL_CHILD: &str =
+    "engine::topology::emit::tests::informational_append_kill_child";
+const INFORMATIONAL_LOG_ENV: &str = "UPSTROKE_TEST_INFORMATIONAL_LOG";
+const INFORMATIONAL_COORDINATE_ENV: &str = "UPSTROKE_TEST_INFORMATIONAL_COORDINATE";
+const INFORMATIONAL_TS: &str = "2026-08-23T09:41:05Z";
+
+/// The event observer with a kill at one phase of `Event.AppendInformational`.
+///
+/// `EventHooks::phase` answers nothing, so no injection can be armed at a
+/// phase: the observer records it and then ends the process itself, exporting
+/// the observation first because an aborted process never reaches the drop
+/// that would write it.
+struct InformationalPhaseKill {
+    inner: HarnessEventHooks,
+    at: Option<HookPhase>,
+}
+
+impl crate::events::log::EventHooks for InformationalPhaseKill {
+    fn phase(&mut self, site: EventSite, phase: HookPhase) {
+        self.inner.phase(site, phase);
+        if site == EventSite::AppendInformational && self.at == Some(phase) {
+            let _ = crate::observations::Exported::new(Arc::clone(self.inner.harness()))
+                .carried(Injection::Kill);
+            std::process::abort();
+        }
+    }
+
+    fn point(&mut self, site: EventSite, point: SubEffectPoint, mode: InjectionMode) -> Injection {
+        self.inner.point(site, point, mode)
+    }
+
+    fn written_kill_shape(&mut self, site: EventSite) -> WrittenShape {
+        self.inner.written_kill_shape(site)
+    }
+
+    fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+        self.inner.durability_ledger()
+    }
+
+    fn synced(&mut self, record: &crate::events::log::SyncRecord) {
+        self.inner.synced(record);
+    }
+}
+
+/// Every family of the production bundle, with the event family swapped for
+/// [`InformationalPhaseKill`].
+struct InformationalKillHooks {
+    inner: HarnessTopologyHooks,
+    events: InformationalPhaseKill,
+}
+
+impl TopologyHooks for InformationalKillHooks {
+    fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+        self.inner.effects()
+    }
+
+    fn rundir(&mut self) -> &mut dyn RunDirHooks {
+        self.inner.rundir()
+    }
+
+    fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+        &mut self.events
+    }
+
+    fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+        self.inner.container()
+    }
+
+    fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+        self.inner.spawn()
+    }
+}
+
+/// The `pool_exhausted` line an append stamped at `ts` writes, byte for byte.
+fn informational_line(ts: &str) -> Vec<u8> {
+    TopologyLine::round_trip(&TopologyEvent {
+        ts: ts.to_owned(),
+        body: pool_body(),
+    })
+    .expect("a pool_exhausted survives its own wire format")
+    .0
+    .committed_bytes()
+    .to_vec()
+}
+
+/// Reopens the parent's started run through the barrier, as a fresh process
+/// does, and emits one `pool_exhausted` with a kill armed at the coordinate
+/// `UPSTROKE_TEST_INFORMATIONAL_COORDINATE` names. Reaching the panic means the
+/// kill did not land.
+#[test]
+#[ignore = "spawned as a subprocess by the informational append kill witnesses"]
+fn informational_append_kill_child() {
+    let path = PathBuf::from(
+        std::env::var(INFORMATIONAL_LOG_ENV).expect("the parent names the run's log"),
+    );
+    let coordinate =
+        std::env::var(INFORMATIONAL_COORDINATE_ENV).expect("the parent names the coordinate");
+    let harness = Arc::new(Mutex::new(HookHarness::new()));
+    let shape = if coordinate == "written-torn" {
+        WrittenShape::Torn
+    } else {
+        WrittenShape::Complete
+    };
+    let (point, at) = match coordinate.as_str() {
+        "before" => (None, Some(HookPhase::Before)),
+        "after" => (None, Some(HookPhase::After)),
+        "written-torn" | "written-complete" => (Some(SubEffectPoint::Written), None),
+        "synced" => (Some(SubEffectPoint::Synced), None),
+        other => panic!("`{other}` is not a coordinate of the informational append"),
+    };
+    if let Some(point) = point {
+        harness
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .arm(
+                EffectSiteId::Event(EventSite::AppendInformational),
+                point,
+                InjectionMode::Kill,
+            )
+            .expect("the point supports a kill");
+    }
+    let mut hooks = InformationalKillHooks {
+        inner: HarnessTopologyHooks::new(Arc::clone(&harness)),
+        events: InformationalPhaseKill {
+            inner: HarnessEventHooks::new(Arc::clone(&harness)).with_written_kill_shape(shape),
+            at,
+        },
+    };
+    let mut warnings = Vec::new();
+    let (mut log, _bytes, mut events, mut fold) =
+        establish_stable_prefix(&path, inputs(), None, &mut warnings, hooks.events())
+            .expect("the parent's started run reopens through the barrier")
+            .into_log_and_fold();
+    let mut reservations = Reservations::new();
+    let emitted = emit(
+        &RunIdentity {
+            run_id: RUN_ID.to_owned(),
+            inputs: inputs(),
+            committed_first_line_sha256: None,
+        },
+        &mut EmitState {
+            fold: &mut fold,
+            log: &mut log,
+            events: &mut events,
+            reservations: &mut reservations,
+            warnings: &mut warnings,
+        },
+        &FixedClock(INFORMATIONAL_TS),
+        pool_body(),
+        &mut hooks,
+    );
+    panic!("the kill at `{coordinate}` did not take this process: {emitted:?}");
+}
+
+/// A started run, and the child killed at `coordinate` while it appends.
+fn kill_the_informational_append(tag: &str, coordinate: &str) -> (Fixture, Vec<u8>) {
+    let fixture = Fixture::started(tag);
+    let before = fixture.log_bytes();
+    let exe = std::env::current_exe().expect("the test binary");
+    let spec = crate::runner::CommandSpec::new(exe.to_string_lossy().into_owned())
+        .arg("--exact")
+        .arg(INFORMATIONAL_KILL_CHILD)
+        .arg("--ignored")
+        .arg("--nocapture")
+        .env(
+            INFORMATIONAL_LOG_ENV,
+            fixture.log_path().to_string_lossy().into_owned(),
+        )
+        .env(INFORMATIONAL_COORDINATE_ENV, coordinate);
+    let spec = match std::env::var(crate::observations::OBSERVATIONS_ENV) {
+        Ok(dir) => spec.env(crate::observations::OBSERVATIONS_ENV, dir),
+        Err(_) => spec,
+    };
+    let output = crate::runner::Runner::run(
+        &crate::runner::host::HostRunner::new(),
+        &crate::runner::gate_request(
+            spec,
+            fixture.paths.public.clone(),
+            Duration::from_secs(120),
+            crate::runner::InvocationId::attempt(
+                AAY,
+                GenerationId(0),
+                AttemptNumber(1),
+                crate::runner::invocation::AttemptRole::Gate(0),
+                0,
+            ),
+        ),
+    )
+    .expect("the child runs through the process funnel");
+    assert!(
+        !output.stderr.contains("panicked at") && output.code != Some(0),
+        "`{coordinate}`: the child was not killed: {:?} {}",
+        output.code,
+        output.stderr
+    );
+    (fixture, before)
+}
+
+/// The next open over what the kill left, and the log replayed twice.
+#[track_caller]
+fn the_next_open_converges(fixture: &Fixture, expected: &[u8], coordinate: &str) -> StablePrefix {
+    let prefix = resume(&fixture.paths);
+    assert_eq!(
+        String::from_utf8_lossy(prefix.bytes()),
+        String::from_utf8_lossy(expected),
+        "`{coordinate}`: the prefix the next open proves"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&read(&fixture.log_path())),
+        String::from_utf8_lossy(expected),
+        "`{coordinate}`"
+    );
+    let once = TopologyFold::replay(inputs(), prefix.events()).expect("the prefix replays");
+    let twice = TopologyFold::replay(inputs(), prefix.events()).expect("the prefix replays again");
+    assert_eq!(
+        once.state(),
+        twice.state(),
+        "`{coordinate}`: replay twice equal"
+    );
+    assert_eq!(prefix.fold().state(), once.state(), "`{coordinate}`");
+    prefix
+}
+
+/// Gate 5's strict re-audit, row 115: `Event.AppendInformational` before.
+///
+/// Nothing of the line is written, and the tabled action is the site's own
+/// before-phase action from that prefix: the next process's barrier proves
+/// the run as it was, and the append performed through the handle it hands out
+/// lands exactly the line the dead process never wrote.
+#[test]
+fn a_kill_before_the_informational_append_leaves_the_prefix_and_the_next_process_appends_the_line()
+{
+    let (fixture, before) = kill_the_informational_append("informational-before", "before");
+    let (mut log, _bytes, mut events, mut fold) =
+        the_next_open_converges(&fixture, &before, "before").into_log_and_fold();
+    let harness = Arc::new(Mutex::new(HookHarness::new()));
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
+    let mut reservations = Reservations::new();
+    let mut warnings = Vec::new();
+    emit(
+        &RunIdentity {
+            run_id: RUN_ID.to_owned(),
+            inputs: inputs(),
+            committed_first_line_sha256: None,
+        },
+        &mut EmitState {
+            fold: &mut fold,
+            log: &mut log,
+            events: &mut events,
+            reservations: &mut reservations,
+            warnings: &mut warnings,
+        },
+        &FixedClock(INFORMATIONAL_TS),
+        pool_body(),
+        &mut hooks,
+    )
+    .expect("the next process performs the append");
+    drop(log);
+    let appended = [
+        before.as_slice(),
+        informational_line(INFORMATIONAL_TS).as_slice(),
+    ]
+    .concat();
+    the_next_open_converges(&fixture, &appended, "before, appended");
+}
+
+/// Gate 5's strict re-audit, row 116: `Event.AppendInformational` after.
+///
+/// The line is written and synced, and the process dies at the phase that
+/// follows. The tabled action is adoption: the next open proves the prefix
+/// with the line in it, replays it twice to equal states, and appends nothing
+/// again.
+#[test]
+fn a_kill_after_the_informational_append_leaves_the_line_the_next_open_adopts() {
+    let (fixture, before) = kill_the_informational_append("informational-after", "after");
+    let line = [
+        before.as_slice(),
+        informational_line(INFORMATIONAL_TS).as_slice(),
+    ]
+    .concat();
+    let prefix = the_next_open_converges(&fixture, &line, "after");
+    assert_eq!(
+        prefix
+            .events()
+            .last()
+            .map(|event| event.body.kind().to_owned()),
+        Some("pool_exhausted".to_owned()),
+        "the adopted line is the last event of the proven prefix"
+    );
+}
+
+/// Gate 5's strict re-audit, row 117: `Event.AppendInformational`'s `Written`
+/// kill, in both of the durable shapes its one entry tables.
+///
+/// Torn, the next open truncates the partial line and proves the previous
+/// prefix; complete, the next open proves the line. Neither needs a live
+/// action, and both replay twice to equal states.
+#[test]
+fn a_kill_at_the_informational_appends_written_point_converges_on_the_next_open_in_both_shapes() {
+    let (fixture, before) =
+        kill_the_informational_append("informational-written-torn", "written-torn");
+    let torn = read(&fixture.log_path());
+    assert!(
+        torn.len() > before.len() && torn.last() != Some(&b'\n'),
+        "the kill left a partial line after the prefix"
+    );
+    the_next_open_converges(&fixture, &before, "written-torn");
+
+    let (fixture, before) =
+        kill_the_informational_append("informational-written-complete", "written-complete");
+    let line = [
+        before.as_slice(),
+        informational_line(INFORMATIONAL_TS).as_slice(),
+    ]
+    .concat();
+    assert_eq!(read(&fixture.log_path()), line, "the whole line, unsynced");
+    the_next_open_converges(&fixture, &line, "written-complete");
+}
+
+/// Gate 5's strict re-audit, row 120: `Event.AppendInformational`'s `Synced`
+/// kill. The line is synced and the process dies before the append returns;
+/// the next open converges on the prefix with the line in it.
+#[test]
+fn a_kill_after_the_informational_line_is_synced_converges_on_the_next_open() {
+    let (fixture, before) = kill_the_informational_append("informational-synced", "synced");
+    let line = [
+        before.as_slice(),
+        informational_line(INFORMATIONAL_TS).as_slice(),
+    ]
+    .concat();
+    the_next_open_converges(&fixture, &line, "synced");
+}
+
+/// Gate 5's strict re-audit, rows 118 and 119: `Event.AppendInformational`'s
+/// `Written` and `WrittenFull` points in error-return mode.
+///
+/// The tabled action is the append-error protocol with the stable-prefix
+/// barrier at its reopen, and `emit` performs it: the fold is poisoned, nothing
+/// but the Event group runs, and the barrier decides the outcome — `Absent`
+/// for the torn line it truncates, `Present` for the complete line it syncs.
+/// The next process's open proves the same prefix and replays it twice; where
+/// the line is absent, its append through the handle the barrier hands out
+/// lands the line.
+fn an_error_at_the_informational_append_runs_the_protocol_and_the_next_open_converges(
+    point: SubEffectPoint,
+    outcome: &AppendOutcome,
+    tag: &str,
+) {
+    let mut fixture = Fixture::started(tag);
+    let before = fixture.log_bytes();
+    fixture.arm(
+        EventSite::AppendInformational,
+        point,
+        InjectionMode::ErrorReturn,
+    );
+    let error = fixture
+        .emit(pool_body())
+        .expect_err("the injected error fails the append");
+    let failed = append_error(&error);
+    assert_eq!(failed.site, EventSite::AppendInformational, "{tag}");
+    assert_eq!(failed.kind, "pool_exhausted", "{tag}");
+    assert_eq!(&failed.outcome, outcome, "{tag}: the barrier's answer");
+    assert!(fixture.fold.is_poisoned(), "{tag}: the fold is poisoned");
+    assert!(
+        fixture.non_event_sites().is_empty(),
+        "{tag}: nothing outside the Event group ran: {:?}",
+        fixture.non_event_sites()
+    );
+    fixture.disarm();
+    let expected = if *outcome == AppendOutcome::Present {
+        [
+            before.as_slice(),
+            informational_line(fixture.clock.0).as_slice(),
+        ]
+        .concat()
+    } else {
+        before.clone()
+    };
+    let prefix = the_next_open_converges(&fixture, &expected, tag);
+    if *outcome == AppendOutcome::Absent {
+        let (mut log, _bytes, mut events, mut fold) = prefix.into_log_and_fold();
+        let mut hooks = HarnessTopologyHooks::new(Arc::new(Mutex::new(HookHarness::new())));
+        let mut reservations = Reservations::new();
+        let mut warnings = Vec::new();
+        emit(
+            &RunIdentity {
+                run_id: RUN_ID.to_owned(),
+                inputs: inputs(),
+                committed_first_line_sha256: None,
+            },
+            &mut EmitState {
+                fold: &mut fold,
+                log: &mut log,
+                events: &mut events,
+                reservations: &mut reservations,
+                warnings: &mut warnings,
+            },
+            &FixedClock(INFORMATIONAL_TS),
+            pool_body(),
+            &mut hooks,
+        )
+        .expect("the next process appends the line the torn write lost");
+        drop(log);
+        let line = [
+            before.as_slice(),
+            informational_line(INFORMATIONAL_TS).as_slice(),
+        ]
+        .concat();
+        the_next_open_converges(&fixture, &line, tag);
+    }
+}
+
+#[test]
+fn a_written_error_at_the_informational_append_is_absent_and_the_next_process_appends_the_line() {
+    an_error_at_the_informational_append_runs_the_protocol_and_the_next_open_converges(
+        SubEffectPoint::Written,
+        &AppendOutcome::Absent,
+        "informational-written-error",
+    );
+}
+
+#[test]
+fn a_written_full_error_at_the_informational_append_is_present_and_the_next_open_proves_it() {
+    an_error_at_the_informational_append_runs_the_protocol_and_the_next_open_converges(
+        SubEffectPoint::WrittenFull,
+        &AppendOutcome::Present,
+        "informational-written-full-error",
+    );
+}
