@@ -294,7 +294,12 @@ impl Run<'_> {
     pub(super) fn drain_and_report(&mut self) -> Result<RunReport, UpstrokeError> {
         if let Err(error) = self.drain() {
             let partial = self.finish();
-            let _ = rundir::write_report(&self.paths.public, &partial, &mut rundir::NoHooks);
+            let _ = rundir::write_report(
+                &self.paths.public,
+                &self.paths.private,
+                &partial,
+                &mut rundir::NoHooks,
+            );
             return Err(error);
         }
         let report = self.finish();
@@ -316,7 +321,12 @@ impl Run<'_> {
                 parked: u32::try_from(report.parked_tasks().len()).unwrap_or(u32::MAX),
             },
         })?;
-        rundir::write_report(&self.paths.public, &report, &mut rundir::NoHooks)?;
+        rundir::write_report(
+            &self.paths.public,
+            &self.paths.private,
+            &report,
+            &mut rundir::NoHooks,
+        )?;
         Ok(report)
     }
 
