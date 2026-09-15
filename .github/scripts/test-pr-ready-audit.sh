@@ -1798,9 +1798,33 @@ contains MUT-JSON-REPEATED-NAME-CHOSEN "$got" "open-P1:CRITICAL"
 #     answers safely once and unsafely the next time -- a hook chosen by a call counter, a decoder
 #     rebound after first use -- escapes a probe that stops at the first call. Once nothing is left
 #     to alter, EVERY NATURAL RUN THAT MADE A SCAN IS MADE ONCE MORE and the second run's scan is
-#     answered like the first's. And the probe's OWN take-away is itself a later call: a reader that
-#     raises the second time makes the copied-default repeat raise before it decodes, so a REPEAT
-#     THAT REACHED NO SCAN OR BUILD FROM THE CALL THE NOTE WAS TAKEN AT is unproven, not clean.
+#     answered like the first's -- and A SECOND RUN THAT ENDS OTHERWISE THAN THE FIRST, returning
+#     where the first raised or raising where it returned, gave two answers to one question and is
+#     unproven. A take-away repeat THAT REACHED NO SCAN OR BUILD FROM THE CALL THE NOTE WAS TAKEN AT
+#     answered nothing, and is unproven, not clean.
+#   * A REPEAT STARTS WHERE THE RUN IT REPEATS STARTED. Every altered run repeats an earlier run,
+#     and a reader that keeps state between calls met round 9's repeats in a state the run they
+#     repeated never saw: a counter raising from the second call raised in the take-away's repeat
+#     and in the repeat that set `mode="loose"`, before either decoded. So MODULE'S STATE -- every
+#     dictionary, list, set, deque, byte array, cell, default and class attribute its namespace
+#     reaches, held by reference, and the process environment, the one input outside MODULE the
+#     probe varies -- is read before every natural run, put back to what the base run found before a
+#     repeat is made, and put back to what the natural runs left once it is done. The protocol names
+#     the interpreter keeps in MODULE's namespace on its behalf -- the loader's, `__builtins__`, the
+#     registry `warnings` writes there -- are put back with the rest and are not counted as state.
+#   * THE DOCUMENT THAT MATTERS IS ASKED IN EVERY STATE A CALL FOUND MODULE IN. A reader answering
+#     each call from the state it finds decides which call a document reaches, and the probe's order
+#     of calls is not the program's: `if calls % 2 == 0: return {"verdict": "PASS", ...}` puts every
+#     twice-named document the sweep hands it on an odd call. So every natural run handed a document
+#     naming something twice is repeated from each distinct state any natural run started from.
+#   * WHAT A CALL HANDS BACK IS A READING OR IT IS NOT, DECIDED BY WHAT IT IS. A reader returning
+#     `{"verdict": "PASS", "findings": []}` without decoding makes no scan to ask, and `decoded=yes`
+#     is the module's, not the reader's. So a call handed the document that names `findings` twice
+#     -- as text, or as a path to it -- that hands back a value holding one of that document's
+#     single-name readings, anywhere in what it returns, yields, or hands back through a callable it
+#     returns, has CHOSEN a name the document repeats and is unrefusing, however the value was made:
+#     decoded, built by a hook, or written out as a constant. A value a scan returned on that
+#     document is answered where the scan ran.
 #   * WHAT CANNOT RUN IS NOT ASKED FOR. Code written after a call of something that cannot return --
 #     `sys.exit`, or a function of Python with no return in it -- is not required, and that is
 #     decided from what the call was seen to call, not from how it is spelled.
@@ -1833,12 +1857,13 @@ REPORT-FILE and never to stdout, which belongs to MODULE:
 A swept function is called with the probe's document as text, then with one of its readings, then
 with a path to the document, until everything written in it has run; its outcomes are joined by `/`.
 `forced` counts the runs the probe repeated with something altered: a branch turned, an exception
-raised, a variable of the environment set, or a default taken out or changed. An empty
+raised, a variable of the environment set, a default taken out or changed, or a document naming
+something twice asked again in the state another run started from. An empty
 list is written `-`. Exit 0 means the report was written, and any other exit means it was not: a
 failure of the probe's own is never caught and never becomes a report.
 """
-import builtins, copy, dis, functools, gc, importlib.util, inspect, json.decoder, json.scanner
-import opcode, os, signal, sys, tempfile, time, types, weakref
+import builtins, collections, copy, dis, functools, gc, importlib.util, inspect, json.decoder
+import json.scanner, opcode, os, signal, sys, tempfile, time, types, weakref
 
 # Coverage is measured with `sys.monitoring`, which Python 3.12 introduced. An older interpreter
 # cannot run this probe, and it says so rather than reporting from a measurement it did not take.
@@ -1862,6 +1887,7 @@ sys.dont_write_bytecode = True
 DUPLICATE = '{"verdict":"PASS","findings":[{"id":"CRITICAL","severity":"P1"}],"findings":[]}'
 READINGS = ('{"verdict":"PASS","findings":[{"id":"CRITICAL","severity":"P1"}]}',
             '{"verdict":"PASS","findings":[]}')
+READ = tuple(json.loads(one) for one in READINGS)  # the values a decode that CHOSE a name gives
 
 target = os.path.abspath(sys.argv[1])
 MODULE = "under_probe"  # the name MODULE is loaded under
@@ -1877,9 +1903,12 @@ observed = [0]        # scanners reached -- made, or scanned with
 built = []            # (site, weak reference) for every scanner MODULE's code makes
 inner_of = weakref.WeakKeyDictionary()  # a watched scanner -> the scanner the standard library made
 faults = []           # the probe's own failures inside a call of MODULE's, raised again at the end
+answered = []         # every value a scan RETURNED on a document naming something twice -- already
+                      # answered for where the scan ran, and kept so that no identity is reused
 activity = [None]     # (label, replay) of what the probe is running now: `<module>`, `<drive>`,
                       # or the name of the callable the sweep is calling
 runs = []             # (label, replay, record) for every run the probe performed, in order
+started_from = {}     # id of a run's replay -> (the replay, MODULE's state when it first ran)
 this_run = [None]     # the record of the run now being performed, or None outside a run
 made_scan = [None]    # the record the last `perform` built, for the caller that asked for that run
 in_attempt = [0]      # > 0 while a run the probe altered is being performed
@@ -2262,7 +2291,10 @@ def watch(inner, carriers):
             defaulted(where, carriers)
             noted()
             observed[0] += 1
-            return where, twice(string, idx)
+            named = twice(string, idx)
+            if named and this_run[0] is not None:
+                this_run[0]["twice"] = True
+            return where, named
         where, named_twice = recorded(record)
         try:
             value = inner(string, idx, *rest, **named)
@@ -2272,6 +2304,7 @@ def watch(inner, carriers):
             raise
         if named_twice:
             answers[where].add("unrefusing")
+            answered.append(value[0] if isinstance(value, tuple) and value else value)
         return value
     inner_of[scanning] = inner
     return scanning
@@ -2542,15 +2575,123 @@ class Sink:
         pass
 
 
+EMPTY = object()      # what a cell with nothing in it holds, as the probe records it
+
+
+def kept(space, name, value):
+    """Whether NAME, in the dictionary SPACE, is MODULE's own state. Every entry of every dictionary
+    is, but the protocol names the interpreter keeps in MODULE's namespace on its behalf -- the
+    loader's `__spec__` and `__loader__`, `__builtins__`, the registry `warnings` writes there when
+    a warning is raised from MODULE's code -- which are `__dunder__` names holding no function
+    MODULE's file holds. They are still put back with the rest of the namespace; they are not what a
+    call of MODULE's leaves behind for the next one."""
+    return not (space is vars(module) and isinstance(name, str) and name[:2] == name[-2:] == "__"
+                and not (isinstance(value, types.FunctionType) and value.__code__ in mine))
+
+
+def state():
+    """MODULE'S STATE AS IT IS NOW: everything its namespace reaches that holds a value the probe
+    can read back and set again -- each dictionary's items, each list's, set's, deque's and byte
+    array's contents, each cell's value, each function's defaults, and the attributes of each class
+    MODULE wrote -- and the process environment, the one input outside MODULE the probe varies, read
+    underneath `os.environ` so that reading it is not a read of MODULE's. Held by reference, with
+    nothing copied, so what `restore` puts back is the very objects that were there, and read
+    through the base types' own methods, so nothing MODULE declares runs. Code, frames, modules,
+    classes written elsewhere and the probe's own functions are not MODULE's state, and are not
+    walked."""
+    saved, stack, seen = [(os.environ, dict(os.environ._data))], [vars(module)], set()
+    while stack:
+        one = stack.pop()
+        if (isinstance(one, ATOMS) or id(one) in seen
+                or isinstance(one, (types.CodeType, types.FrameType, types.ModuleType))
+                or (one is not vars(module) and elsewhere(one))):
+            continue
+        seen.add(id(one))
+        if isinstance(one, type):
+            items = dict(vars(one))
+            saved.append((one, items))
+            stack += list(items.values())
+        elif isinstance(one, dict):
+            items = dict.copy(one)
+            saved.append((one, items))
+            stack += [part for name, item in items.items() if kept(one, name, item) for part in (name, item)]
+        elif isinstance(one, (list, set, collections.deque, bytearray)):
+            items = (list.copy(one) if isinstance(one, list) else set.copy(one)
+                     if isinstance(one, set) else bytes(one) if isinstance(one, bytearray)
+                     else list(collections.deque.__iter__(one)))
+            saved.append((one, items))
+            stack += [] if isinstance(one, bytearray) else list(items)
+        elif isinstance(one, types.CellType):
+            try:
+                value = one.cell_contents
+            except ValueError:
+                value = EMPTY
+            saved.append((one, value))
+            stack.append(value)
+        elif isinstance(one, types.FunctionType):
+            saved.append((one, (one.__defaults__, one.__kwdefaults__)))
+            stack += [one.__defaults__, one.__kwdefaults__, one.__closure__, one.__dict__]
+        else:
+            try:
+                stack.append(object.__getattribute__(one, "__dict__"))
+            except (AttributeError, TypeError):
+                pass
+            stack += gc.get_referents(one)
+    return saved
+
+
+def restore(saved):
+    """Put back every value STATE read, into the object it read it from."""
+    for one, value in saved:
+        if one is os.environ:
+            for key in [key for key in one._data if key not in value]:
+                del one[one.decodekey(key)]
+            for key, item in value.items():
+                if one._data.get(key) != item:
+                    one[one.decodekey(key)] = one.decodevalue(item)
+        elif isinstance(one, type):
+            for name in [name for name in vars(one) if name not in value]:
+                type.__delattr__(one, name)
+            for name, item in value.items():
+                if vars(one).get(name, EMPTY) is not item:
+                    type.__setattr__(one, name, item)
+        elif isinstance(one, dict):
+            dict.clear(one)
+            dict.update(one, value)
+        elif isinstance(one, list):
+            list.__setitem__(one, slice(None), value)
+        elif isinstance(one, set):
+            set.clear(one)
+            set.update(one, value)
+        elif isinstance(one, collections.deque):
+            collections.deque.clear(one)
+            collections.deque.extend(one, value)
+        elif isinstance(one, bytearray):
+            bytearray.__setitem__(one, slice(None), value)
+        elif isinstance(one, types.CellType):
+            if value is not EMPTY:
+                one.cell_contents = value
+            elif "cell_contents" in dir(one):
+                try:
+                    del one.cell_contents
+                except ValueError:
+                    pass
+        else:
+            one.__defaults__, one.__kwdefaults__ = value
+
+
 def perform(label, replay):
-    record = {"events": [], "natural": not in_attempt[0], "cut": False}
+    now = state() if not in_attempt[0] or id(replay) not in started_from else None
+    started_from.setdefault(id(replay), (replay, now))
+    record = {"events": [], "natural": not in_attempt[0], "cut": False, "state": now}
     runs.append((label, replay, record))
     made_scan[0] = record
     saved = activity[0], sys.stdout, this_run[0]
     activity[0], sys.stdout, this_run[0] = (label, replay), Sink(), record
     signal.setitimer(signal.ITIMER_REAL, SECONDS, 1)
     try:
-        return replay()
+        record["ended"] = replay()
+        return record["ended"]
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         activity[0], sys.stdout, this_run[0] = saved
@@ -2676,13 +2817,15 @@ def run(function, positional, keywords, document, depth=0):
         values = asyncio.run(drained(result))
     elif inspect.isgenerator(result):
         values = list(result)
+    handed = list(values)
     for value in values:
         if depth < 3 and callable(value) and not isinstance(value, type):
             try:
                 signature = inspect.signature(value)
             except (TypeError, ValueError):
                 continue
-            run(value, *arguments(signature, document), document, depth + 1)
+            handed += run(value, *arguments(signature, document), document, depth + 1)
+    return handed
 
 
 def as_path():
@@ -2690,6 +2833,43 @@ def as_path():
     with os.fdopen(handle, "w", encoding="utf-8") as written:
         written.write(DUPLICATE)
     return path
+
+
+def carries(value, wanted):
+    """Whether VALUE holds WANTED: a mapping, every name of WANTED's with that name's value; a list,
+    each of WANTED's items in its place; anything else, WANTED itself. Read through the base types'
+    own methods, so nothing MODULE declares runs to answer it."""
+    if isinstance(wanted, dict):
+        return isinstance(value, dict) and all(
+            dict.__contains__(value, name) and carries(dict.__getitem__(value, name), one)
+            for name, one in wanted.items())
+    if isinstance(wanted, list):
+        return (isinstance(value, list) and list.__len__(value) == len(wanted)
+                and all(carries(list.__getitem__(value, index), one)
+                        for index, one in enumerate(wanted)))
+    return type(value) is type(wanted) and value == wanted
+
+
+def chose(handed):
+    """WHETHER WHAT A CALL HANDED BACK IS A READING, decided by what it is and never by how it was
+    made. A value holding one of the probe's own single-name readings -- itself, or anywhere in what
+    it refers to -- is a reading of the document that names `findings` twice, whether a scanner
+    made it, a hook built it, or the reader wrote it out as a constant. The one excepted is a value
+    a scan returned on that document, which is answered for where the scan ran."""
+    made = {id(one) for one in answered}
+    stack, seen = list(handed), set()
+    while stack:
+        one = stack.pop()
+        if isinstance(one, ATOMS) or id(one) in seen or isinstance(one, type) or elsewhere(one):
+            continue
+        seen.add(id(one))
+        if isinstance(one, dict) and id(one) not in made and any(carries(one, r) for r in READ):
+            return True
+        if isinstance(one, types.FunctionType):
+            stack += [one.__defaults__, one.__kwdefaults__, one.__closure__, one.__dict__]
+        else:
+            stack += gc.get_referents(one)
+    return False
 
 
 skipped, swept, called = [], [], set()
@@ -2716,12 +2896,19 @@ def sweep():
             positional, keywords = arguments(signature, text)
             sizes = {one: len(ran[one]) for one in tree}
 
-            def replay(function=function, positional=positional, keywords=keywords, text=text):
+            def replay(function=function, name=name, positional=positional, keywords=keywords,
+                       text=text):
+                if text != READINGS[1]:
+                    this_run[0]["twice"] = True
                 try:
-                    run(function, positional, keywords, text)
-                    return "returned"
+                    handed = run(function, positional, keywords, text)
                 except (Exception, SystemExit, Forced) as exc:
                     return "raised:" + type(exc).__name__
+                # A CALL HANDED THE DOCUMENT THAT NAMES `findings` TWICE -- as text, or as a path to
+                # it -- THAT HANDS BACK A READING OF IT HAS CHOSEN ONE, and is unrefusing.
+                if text != READINGS[1] and recorded(lambda: chose(handed)):
+                    recorded(lambda: answers.setdefault(name, set()).add("unrefusing"))
+                return "returned"
             attempts.append(perform(name, replay))
             reached |= {one for one in tree if len(ran[one]) != sizes[one]}
             if own and all(required(one, False) <= ran[one] for one in reached):
@@ -2788,21 +2975,29 @@ forced, tried = [], set()
 
 
 def attempt(key, label, base, alteration):
-    """BASE again, with ALTERATION in force for the whole of it."""
+    """BASE again, with ALTERATION in force for the whole of it -- AND FROM WHERE BASE STARTED:
+    MODULE's state is put back to what it was when BASE first ran, and after the repeat to what it
+    was before the repeat, so the natural runs go on from where they were."""
     tried.add(key)
+    start = started_from.get(id(base), (None, None))[1]
 
     def replay():
         undo = []
         forcing[0] += 1
         M.restart_events()
+        left = recorded(state)
         try:
+            if start is not None:
+                recorded(lambda: restore(start))
             recorded(lambda: alteration(undo))
             return base()
         finally:
             if forcing[0] == 1:
                 armed.clear()
             recorded(lambda: uninstall(undo))
+            recorded(lambda: restore(left))
             forcing[0] -= 1
+    started_from[id(replay)] = (replay, start)
     in_attempt[0] += 1
     try:
         perform(label, replay)
@@ -2892,6 +3087,14 @@ def environment():
     progress = False
     for key, (label, base) in list(read_from_environment.items()):
         for value in strings:
+            # A value the environment cannot hold -- a NUL, a string the file system's encoding
+            # cannot make -- is one no caller can set either, and is not tried.
+            try:
+                os.fsencode(value)
+            except UnicodeError:
+                continue
+            if "\0" in value:
+                continue
             k = ("environment", key, value)
             if k in tried:
                 continue
@@ -2993,7 +3196,56 @@ def selected():
     return progress
 
 
-while alter() or sweep() or together() or environment() or taken_away() or selected():
+def fingerprint(saved):
+    """What STATE read, by the identity of every object it read and of every value in each: two
+    states with the same fingerprint are the same state."""
+    marks = []
+    for one, value in saved:
+        if isinstance(one, types.FunctionType):
+            inner = (id(value[0]), id(value[1]))
+        elif isinstance(value, dict):
+            inner = tuple((id(name), id(item)) for name, item in value.items() if kept(one, name, item))
+        elif isinstance(value, list):
+            inner = tuple(map(id, value))
+        elif isinstance(value, set):
+            inner = tuple(sorted(map(id, value)))
+        elif isinstance(value, bytes):
+            inner = value
+        else:
+            inner = id(value)
+        marks.append((id(one), inner))
+    return tuple(marks)
+
+
+def every_state():
+    """AND THE DOCUMENT THAT MATTERS IS ASKED IN EVERY STATE A CALL FOUND MODULE IN. Which call a
+    reader takes its answer from is the reader's to decide: one keeping anything between calls -- a
+    counter, a flag, a table that fills -- answers each call from the state it finds, so the call
+    the probe's twice-named document happened to reach is not the call that matters. Every natural
+    run that handed MODULE a document naming something twice -- the sweep's, or any run a scan saw
+    one in -- is repeated from each state any natural run started from, and answered like any
+    other run: a reader that chooses on its second call, on every other call, or once a table has
+    filled, is asked the twice-named document in the state the probe's own calls left it in."""
+    progress, states, marks = False, [], set()
+    for _, _, record in runs:
+        if record["natural"] and record.get("state") is not None:
+            mark = fingerprint(record["state"])
+            if mark not in marks:
+                marks.add(mark)
+                states.append((mark, record["state"]))
+    for label, replay, record in [one for one in runs if one[2]["natural"] and one[2].get("twice")]:
+        own = fingerprint(started_from[id(replay)][1])
+        for mark, saved in states:
+            k = ("state", id(replay), mark)
+            if mark == own or k in tried:
+                continue
+            attempt(k, label, replay, lambda undo, saved=saved: restore(saved))
+            progress = True
+    return progress
+
+
+while (alter() or sweep() or together() or environment() or taken_away() or selected()
+       or every_state()):
     pass
 
 
@@ -3004,16 +3256,23 @@ def again():
     drive stops when the program returns, so neither reaches that later call. Once nothing is left
     to alter, every natural run that made a scan is made once more, and the scan it makes the
     second time is answered like any other: a call that decodes unhooked only after the first is
-    caught here. A run its bound ended is not made again, and each distinct run is repeated once."""
+    caught here. AND A SECOND RUN THAT ENDS OTHERWISE THAN THE FIRST -- returning where it raised,
+    raising where it returned, or raising something else -- gave two answers to one question, and
+    what it ran is unproven whether or not either end decoded. A run its bound ended is not made
+    again, and each distinct run is repeated once."""
     seen = set()
     for label, replay, record in [one for one in runs if one[2]["natural"]]:
         if id(replay) in seen or record["cut"] or not record["events"]:
             continue
         seen.add(id(replay))
-        perform(label, replay)
+        if perform(label, replay) != record.get("ended"):
+            answers.setdefault(label, set()).add("unproven")
 
 
 again()
+while (alter() or sweep() or together() or environment() or taken_away() or selected()
+       or every_state()):
+    pass
 
 gc.collect()
 for where, scanner in built:
@@ -3068,7 +3327,7 @@ decode_probe() {  # decode_probe MODULE DRIVE...: the report's two lines as one,
 }
 printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 # THE PROBE IS ITSELF UNDER TEST, because a probe that has stopped watching agrees with a clean
-# parser and says so in the same words. So it runs first over thirty-five stand-ins whose answers
+# parser and says so in the same words. So it runs first over forty-two stand-ins whose answers
 # are known, and MUTATIONS OF THE PROBE WERE WATCHED AGAINST THEM -- each the smallest text change
 # that undoes one rule, and each run through this whole file:
 #
@@ -3077,24 +3336,23 @@ printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 #     readings ignored (round 2's rule)
 #   the first reading alone asked                      `unrelated`
 #   the last reading alone asked                       `unrelated`
-#   the unproven left out of the verdict line          `bare`, `exhausted`, `settling`, `taken`,
-#                                                        `unnamed`, `unreadable`, `unrelated`
-#   `py_make_scanner` not replaced                     `scanner`, `swallowed`
-#   `c_make_scanner` left as the standard library's    `scanner`
-#     while `make_scanner` and `_json.make_scanner`
-#     are still watched
-#   `_json.make_scanner` not replaced                  `scanner`
-#   the scanners of decoders that already exist left   sixteen
+#   the unproven left out of the verdict line          eleven
+#   `py_make_scanner` not replaced                     `consumed`, `swallowed`
+#   `c_make_scanner` left as the standard library's    `consumed`
+#     while `make_scanner` and `_json.make_scanner` are
+#     still watched
+#   `_json.make_scanner` not replaced                  `consumed`
+#   the scanners of decoders that already exist left   eleven
 #     unwrapped
 #   a scanner MODULE built and still holds never asked `taken`, `unused`
-#   a refusal not followed out of the frames above     `delivered`, `swallowed`
-#     the scan
+#   a refusal not followed out of the frames above the `delivered`, `swallowed`
+#     scan
 #   the drive's entry point held to that rule too      `delivered`, and the parser itself
-#   only the swept callable's own frame held, and      `delivered`, `swallowed`
-#     only under the sweep (round 5's rule)
+#   only the swept callable's own frame held, and only `delivered`, `swallowed`
+#     under the sweep (round 5's rule)
 #   the document actually scanned not judged           `nested`
-#   a scan with no frame of MODULE's under it          `exhausted`, `held`, `reached`, `routes`,
-#     answered for by nobody (round 5's rule)            `threaded`, `unnamed`
+#   a scan with no frame of MODULE's under it answered `exhausted`, `held`, `reached`, `routes`,
+#     for by nobody (round 5's rule)                     `threaded`, `unnamed`
 #   only the code of callables MODULE holds held to    `exhausted`
 #     coverage, not every code object
 #   no instruction required to run                     `bare`, `branches`, `exhausted`, `settling`,
@@ -3102,12 +3360,12 @@ printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 #   handler code not required to run                   `contracts`, `delivered`, `handlers`,
 #                                                        `routes`, `swallowed`
 #   a handler no run entered left unentered            the same five, and the parser itself
-#   a branch taken one way only left unturned          ten, and the parser itself
+#   a branch taken one way only left unturned          thirteen, and the parser itself
 #   a code object's branches never turned together     `branches`
 #   a variable MODULE reads never set to the file's    `branches`, `contracts`, `delivered`,
-#     own strings                                        `swallowed`
-#   a call of something that cannot return not         `after-exit`
-#     ending its block
+#     own strings                                        `restarted`, `swallowed`, `unsettable`
+#   a call of something that cannot return not ending  `after-exit`
+#     its block
 #   the question put to the code as the probe altered  `pristine`, `settling`, `unrelated`
 #     it
 #   the sweep skipping every function anything has     `branches`, `exhausted`
@@ -3121,13 +3379,13 @@ printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 #   what a call returns not called                     `taken`, `unnamed`
 #   keyword-only parameters left out of the call       `contracts`, `exhausted`, `unused`
 #   a coroutine called and not awaited                 `contracts`
-#   the sweep's later documents never tried            fourteen
+#   the sweep's later documents never tried            twenty
 #   the report written to stdout (round 2's channel)   every stand-in, and the parser itself
 #   the skipped left out of the verdict line           `unreadable`
 #   the drive removed                                  every stand-in, and the parser itself
 #   only the first drive run                           the parser itself
-#   a sweep that calls nothing                         twenty-five
-#   a hardcoded clean verdict line                     twenty-six
+#   a sweep that calls nothing                         thirty-three
+#   a hardcoded clean verdict line                     thirty-five
 #   a class body held only for the functions MODULE    `held`, `unnamed`
 #     wrote (round 6's rule)
 #   a dictionary's keys not walked                     `held`
@@ -3137,8 +3395,8 @@ printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 #   a class written outside MODULE walked as MODULE's  every stand-in, and the parser itself
 #   the probe's own code walked and called             `taken`
 #   a decoder's own machinery walked and called        `taken`, `unused`
-#   a refusal a default holds never taken away         `taken`
-#     (round 6's rule)
+#   a refusal a default holds never taken away (round  `blocked`, `spent`, `taken`
+#     6's rule)
 #   the defaults of what the sweep is calling not      `taken`
 #     looked at
 #   what the hook calls not among what the scanner     `taken`
@@ -3147,22 +3405,40 @@ printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 #   the decoder not among them                         `taken`
 #   a function holding one not made again around the   `taken`
 #     copy
-#   a scan the module body makes not answered where    `taken`
-#     a default holds what it refuses with
+#   a scan the module body makes not answered where a  `taken`
+#     default holds what it refuses with
 #   a default that cannot be copied not unproven       `taken`
-#   a default never set to the file's values (round    `exhausted`, `scanner`, `selected`
-#     6's rule)
+#   a default never set to the file's values (round    `exhausted`, `restarted`, `scanner`,
+#     6's rule)                                          `selected`
 #   a kind's own empty value never tried               `selected`
 #   the question held outside the bound (round 6's     the probe never ends on `settling`, and the
-#     rule)                                              gate was killed at 400 seconds
-#   no natural run made once more (this round's rule)  `relay`
-#   a take-away that reached no scan not made          `spent`
-#     unproven (this round's rule)
+#     rule)                                              gate was killed at 600 seconds
+#   no natural run made once more (round 9's rule)     `alternating`, `disagreeing`, `relay`,
+#                                                        `restarted`, `spent`
+#   a take-away that reached no scan not made unproven `blocked`
+#     (round 9's rule)
+#   a reading a call hands back not judged (this       `alternating`, `handed`
+#     round's rule)
+#   a value a scan already answered for judged again   `scanner`, `taken`
+#     at the call that handed it back
+#   a later run's ending not compared with the first's `disagreeing`, `restarted`, `spent`
+#     (this round's rule)
+#   a repeat not started where its run started (this   `restarted`, `spent`
+#     round's rule)
+#   the natural runs' state not put back after a       `alternating`, `disagreeing`
+#     repeat
+#   the environment not part of MODULE's state         `restarted`
+#   the interpreter's own names counted as MODULE's    thirty-five
+#     state
+#   an object's inline attributes not read as state    `held`, `reached`, `taken`, `unused`
+#   the twice-named document not asked in every state  `alternating`, `disagreeing`, `restarted`,
+#     (this round's rule)                                `spent`
+#   a value the environment cannot hold tried          `unsettable`
 #
-# and none of the fifty-six that ran to their end moved an assertion of any other family in this
+# and none of the sixty-six that ran to their end moved an assertion of any other family in this
 # file. One more was measured and moves no assertion, because what it changes is a time: a question
 # whose time runs out while the probe is recording is ended when the recording is done, and without
-# that `settling` took 6, 12 and 13 seconds in three runs where it takes 4, as the timer fired again
+# that `settling` took 9, 9 and 17 seconds in three runs where it takes 6, as the timer fired again
 # and again inside the probe's own callback. The ten-second bound on a run is not in the table: it
 # is how the probe ends a run that would otherwise never end, and no stand-in here runs long enough
 # to reach it.
@@ -4429,7 +4705,7 @@ probe_expect settling \
 #     the repeat before it decodes at all, so round 8 saw the copied default reach no decode and read
 #     that silence as safe. A REPEAT THAT REACHED NO SCAN OR BUILD FROM THE CALL THE NOTE WAS TAKEN AT
 #     PROVES NOTHING, and leaves its function unproven. `spent` below is that reader -- master's grep
-#     refused it, round 8 accepted it, and it is the P1 this round was written for -- and it is red.
+#     refused it, round 8 accepted it, and it was the P1 round 9 was written for -- and it is red.
 cat > "$tmp/probe-relay.py" <<'PYSHAPE'
 import json
 
@@ -4462,9 +4738,12 @@ def main(argv):
 PYSHAPE
 probe_expect relay \
   'decoded=yes unrefusing=read unproven=- skipped=- | refusing=read drive=returned:0 swept=- forced=0'
-# The take-away's later call, blocked by a counter: the reader the drive and the sweep both refuse on
-# the first call, and whose copied-default repeat raises before it can decode. Reached no scan under
-# the copy -> unproven, not clean.
+# The take-away's later call, blocked by a counter: the reader the drive and the sweep both refuse
+# on the first call. Round 9 found its copied-default repeat raising before it could decode, and
+# called that unproven. That repeat now starts from the state the run it repeats started from, where
+# the counter has not counted, so the copy decodes unhooked and is unrefusing; and the second run
+# `again` makes raises `RuntimeError` where the first raised the refusal, which is unproven on its
+# own.
 probe_stand_in spent 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
 
 
@@ -4479,7 +4758,222 @@ def extra_review_reader(text, *, options={"object_pairs_hook": one_reading}):
     return json.loads(text, **options)
 PYSHAPE
 probe_expect spent \
-  'decoded=yes unrefusing=- unproven=extra_review_reader skipped=- | refusing=extra_review_reader,read drive=returned:0 swept=extra_review_reader:raised:ValueError/raised:RuntimeError forced=1'
+  'decoded=yes unrefusing=extra_review_reader unproven=extra_review_reader skipped=- | refusing=extra_review_reader,read drive=returned:0 swept=extra_review_reader:raised:ValueError/raised:RuntimeError forced=3'
+# ROUND 9'S ESCAPES, AND THE FAMILY THEY BELONG TO. Three readers walked past round 9, each executed
+# against the complete gate: one answering its second call with a PASS it never decoded, one whose
+# unsafe selection only a first call makes, and one that never decodes at all. What they share is
+# not a shape. THE PROBE TOOK A READER'S ANSWER FROM WHICHEVER CALL ITS OWN ORDER OF RUNS REACHED,
+# AND COUNTED A READER AS HAVING DECODED WHEN ANYTHING IN THE MODULE HAD. Four rules close it,
+# stated with the others at the top of this section, and each has a stand-in here:
+#
+#   * `handed` -- WHAT A CALL HANDS BACK IS A READING OR IT IS NOT. `extra_review_reader` returns
+#     `{"verdict": "PASS", "findings": []}` and decodes nothing; `by_wrapped_reading` returns a
+#     reading with one more name, inside a tuple; `by_constant_document` decodes, hooked, a document
+#     that is not the one it was handed. Each hands back a reading of the twice-named document, and
+#     each is red. `echo` hands back the text and `size` a mapping that is no reading: both green.
+#   * `disagreeing` -- A LATER CALL THAT ENDS OTHERWISE. `extra_review_reader` refuses on its first
+#     call and returns `None` from its second, so the run `again` makes returns where the first
+#     raised: unproven. `steady_reader` counts its calls and refuses on every one: green.
+#   * `restarted` -- A REPEAT STARTS WHERE ITS RUN STARTED. `extra_review_reader` is the selector
+#     round 9 had to disclose: `mode="strict"` hooked, `"loose"` unhooked, and a counter raising
+#     from the second call. Set to `"loose"` in a repeat that starts where the sweep's first call
+#     started, it decodes unhooked: unrefusing, and unproven as well by the rule above.
+#     `by_environment_count` keeps its count in the environment and chooses by `mode` only on its
+#     first call; the environment is put back with the rest, and it is red too. `counted_reader`
+#     counts, and every mode it can be given is hooked: green.
+#   * `alternating` -- THE DOCUMENT THAT MATTERS, IN EVERY STATE. `extra_review_reader` hands back
+#     PASS from every even call and decodes hooked on every odd one, and every twice-named document
+#     the sweep hands it lands on an odd call. Repeated from the state the sweep's second call
+#     found, it hands back PASS for the twice-named document: red. `cached_reader` keeps what it
+#     decoded, and asked the twice-named document with its table filled it still refuses: green.
+#
+# And `unsettable` is a false red the environment rule had, found while this was built: a module
+# holding `"\0"` among its strings and reading a variable ended the probe with no report, because a
+# variable was set to every string the file holds, NUL included. A value the environment cannot hold
+# is not tried now, and `by_flagged` -- unhooked under a variable the probe sets -- is reported red.
+probe_stand_in handed 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+def extra_review_reader(text):
+    return {"verdict": "PASS", "findings": []}
+
+
+def by_wrapped_reading(text):
+    return (True, {"verdict": "PASS", "findings": [], "reviewed": True})
+
+
+def by_constant_document(text):
+    return json.loads('{"verdict":"PASS","findings":[]}', object_pairs_hook=one_reading)
+
+
+def echo(text):
+    return text
+
+
+def size(text):
+    return {"bytes": len(text)}
+PYSHAPE
+probe_expect handed \
+  'decoded=yes unrefusing=by_constant_document,by_wrapped_reading,extra_review_reader unproven=- skipped=- | refusing=by_constant_document,read drive=returned:0 swept=by_constant_document:returned,by_wrapped_reading:returned,echo:returned,extra_review_reader:returned,size:returned forced=0'
+probe_stand_in disagreeing 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+_calls = 0
+
+
+def extra_review_reader(text):
+    global _calls
+    _calls += 1
+    if _calls >= 2:
+        return None
+    return json.loads(text, object_pairs_hook=one_reading)
+
+
+_steady_calls = 0
+
+
+def steady_reader(text):
+    global _steady_calls
+    _steady_calls += 1
+    return json.loads(text, object_pairs_hook=one_reading)
+PYSHAPE
+probe_expect disagreeing \
+  'decoded=yes unrefusing=- unproven=extra_review_reader skipped=- | refusing=extra_review_reader,read,steady_reader drive=returned:0 swept=extra_review_reader:raised:ValueError,steady_reader:raised:ValueError forced=7'
+probe_stand_in restarted 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+_reader_calls = 0
+
+
+def extra_review_reader(text, mode="strict"):
+    global _reader_calls
+    _reader_calls += 1
+    if _reader_calls >= 2:
+        raise RuntimeError("reader already used")
+    return json.loads(
+        text,
+        object_pairs_hook={"strict": one_reading, "loose": None}[mode],
+    )
+
+
+_counted = [0]
+
+
+def counted_reader(text, mode="strict"):
+    _counted[0] += 1
+    return json.loads(text, object_pairs_hook={"strict": one_reading, "also": one_reading}.get(mode, one_reading))
+
+
+import os
+
+
+def by_environment_count(text, mode="strict"):
+    calls = int(os.environ.get("UPSTROKE_READER_CALLS", "0")) + 1
+    os.environ["UPSTROKE_READER_CALLS"] = str(calls)
+    hook = {"strict": one_reading, "loose": None}[mode] if calls == 1 else one_reading
+    return json.loads(text, object_pairs_hook=hook)
+PYSHAPE
+probe_expect restarted \
+  'decoded=yes unrefusing=by_environment_count,extra_review_reader unproven=extra_review_reader skipped=- | refusing=by_environment_count,counted_reader,extra_review_reader,read drive=returned:0 swept=by_environment_count:raised:ValueError/returned,counted_reader:raised:ValueError,extra_review_reader:raised:ValueError/raised:RuntimeError forced=61'
+probe_stand_in alternating 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+_reader_calls = 0
+
+
+def extra_review_reader(text):
+    global _reader_calls
+    _reader_calls += 1
+    if _reader_calls % 2 == 0:
+        return {"verdict": "PASS", "findings": []}
+    return json.loads(text, object_pairs_hook=one_reading)
+
+
+_CACHE = {}
+
+
+def cached_reader(text):
+    if text not in _CACHE:
+        _CACHE[text] = json.loads(text, object_pairs_hook=one_reading)
+    return _CACHE[text]
+PYSHAPE
+probe_expect alternating \
+  'decoded=yes unrefusing=extra_review_reader unproven=- skipped=- | refusing=cached_reader,extra_review_reader,read drive=returned:0 swept=cached_reader:raised:ValueError/returned,extra_review_reader:raised:ValueError/returned forced=9'
+probe_stand_in unsettable 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+import os
+
+SEPARATOR = "\0"
+
+
+def by_flagged(text):
+    if os.environ.get("UPSTROKE_STRICT_OFF"):
+        return json.loads(text)
+    return json.loads(text, object_pairs_hook=one_reading)
+PYSHAPE
+probe_expect unsettable \
+  'decoded=yes unrefusing=by_flagged unproven=- skipped=- | refusing=by_flagged,read drive=returned:0 swept=by_flagged:raised:ValueError/returned/raised:JSONDecodeError forced=6'
+# AND TWO RULES THE RULES ABOVE LEFT WITHOUT A WITNESS, found by removing each. What a call hands
+# back is judged now, so a reader in `scanner` that hands back what it read is red with the scanner
+# watch or without it, and leaving `c_make_scanner` or `_json.make_scanner` unreplaced moved no
+# stand-in at all. `consumed` reads through each scanner the standard library makes, unhooked, and
+# hands back only how many findings it read: no reading, so only the scanner watch sees these three,
+# and they are red; `by_hooked_scanner_count` refuses, and is green. And a take-away that reached no
+# scan was unproven only in `spent`, whose repeat now starts where its run started and reaches the
+# scan. `blocked` keeps its count in an iterator, which the probe cannot put back, and from its
+# second call raises the same `ValueError` its first call's refusal raises: no later run ends
+# otherwise, no state tells one run from another, and the take-away's repeat reaches no scan --
+# unproven, by that rule alone.
+probe_stand_in consumed 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+import _json
+import json.scanner
+
+
+class Context:
+    strict = True
+    object_hook = None
+    object_pairs_hook = None
+    parse_float = float
+    parse_int = int
+    parse_constant = float
+    memo = {}
+
+
+def by_c_scanner_count(text):
+    return len(json.scanner.c_make_scanner(json.JSONDecoder())(text, 0)[0]["findings"])
+
+
+def by_python_scanner_count(text):
+    return len(json.scanner.py_make_scanner(json.JSONDecoder())(text, 0)[0]["findings"])
+
+
+def by_context_scanner_count(text):
+    return len(_json.make_scanner(Context())(text, 0)[0]["findings"])
+
+
+def by_hooked_scanner_count(text):
+    return len(json.JSONDecoder(object_pairs_hook=one_reading).scan_once(text, 0)[0]["findings"])
+PYSHAPE
+probe_expect consumed \
+  'decoded=yes unrefusing=by_c_scanner_count,by_context_scanner_count,by_python_scanner_count unproven=- skipped=- | refusing=by_hooked_scanner_count,read drive=returned:0 swept=by_c_scanner_count:returned,by_context_scanner_count:returned,by_hooked_scanner_count:raised:ValueError/returned,by_python_scanner_count:returned forced=0'
+probe_stand_in blocked 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+import itertools
+
+_reader_calls = itertools.count(1)
+
+
+def extra_review_reader(text, *, options={"object_pairs_hook": one_reading}):
+    if next(_reader_calls) >= 2:
+        raise ValueError("reader already used")
+    return json.loads(text, **options)
+PYSHAPE
+probe_expect blocked \
+  'decoded=yes unrefusing=- unproven=extra_review_reader skipped=- | refusing=extra_review_reader,read drive=returned:0 swept=extra_review_reader:raised:ValueError/raised:ValueError forced=1'
 # WHAT THIS DOES NOT REACH. Each shape below was written beside a hooked decode and run through this
 # probe, which reported nothing unrefusing, nothing unproven and nothing skipped -- and each one
 # returns without a refusal on a document naming `findings` twice (for the hook that counts names,
@@ -4522,16 +5016,20 @@ probe_expect spent \
 #   * and a hook that raises on the duplicate for something only both values together make. One
 #     refusing any object of more than two names raises on it, reads both readings, and is counted
 #     as refusing.
-#   * a SELECTING default whose unsafe value is blocked by the reader's own state: `def by_mode(text,
-#     mode="strict"): calls += 1; if calls >= 2: raise; return json.loads(text,
-#     object_pairs_hook={"strict": one_reading, "loose": None}[mode])`. Setting the default to
-#     `"loose"` is how the unhooked decode would be reached, but the run that first read `mode` has
-#     spent the reader, so the repeat raises before it decodes -- and unlike the copied-default
-#     re-run above, a selecting-default repeat that reaches no scan cannot be called unproven without
-#     also refusing `by_short_name`, whose unknown-mode lookup legitimately raises with nothing wrong.
-#     Master's grep refuses this reader for its unhooked spelling; here it needs a caller passing
-#     `mode="loose"` on a fresh reader, which the module does not have, and closing it wants a repeat
-#     on state the run never touched, which this probe does not build.
+#   * a value handed back that is no reading of the document: `return 0`, `return "PASS"`, `return
+#     {"verdict": "PASS"}`. A value is a reading when it holds every name of one of the twice-named
+#     document's single-name readings, each with its value; one holding neither is read into no
+#     further, and what it means to a caller is for the drives to show, on the parser's documents;
+#   * a choice made on a call the probe's runs never reach, through code that runs on every call:
+#     `object_pairs_hook=(one_reading, None)[calls == 100]`. The twice-named document is asked in
+#     every state a natural run found MODULE in, and no natural run finds a reader on its hundredth
+#     call. The same choice behind a branch is turned, and red;
+#   * state kept where the probe cannot read it back and set it in place: an iterator's position --
+#     `next(itertools.count(1)) == 1` choosing the hook by `mode` on the first call only -- and an
+#     attribute of another module, `json.calls = getattr(json, "calls", 0) + 1`, making the same
+#     choice. A repeat starts from MODULE's own state and the environment, and a count kept anywhere
+#     else goes on counting through it: the repeat that sets `mode="loose"` finds the count past one
+#     and decodes hooked. Master's grep refuses both, for their spelling.
 # AND WHAT IT REFUSES AND SHOULD NOT, OR MIGHT NOT -- because a guard is only honest if both sides
 # of it are written down. Each was run through this probe and reported red; the first, second and
 # fourth do what a parser should, the third is the cost of reading nothing into a value a function
@@ -4543,8 +5041,8 @@ probe_expect spent \
 #   * a property nothing reads whose getter calls anything at all -- `return self.text.upper()` --
 #     is code in the file that never ran, and unproven. The remedy is a drive that reads it;
 #   * a function that catches a refusal and returns anything but the refusal -- an error value,
-#     `None` -- is counted with the unrefusing, as round 5 counted it: nothing here reads what the
-#     returned value means;
+#     `None` -- is counted with the unrefusing, as round 5 counted it: nothing here reads what a
+#     returned value means, beyond whether it is a reading of the document;
 #   * a helper that reads an attribute of its argument before it does anything else -- `def
 #     path_label(path): return path.as_posix()` -- raises on every document the probe hands it, as
 #     text or as a path string, never runs past that line, and is unproven. The remedy is a drive
