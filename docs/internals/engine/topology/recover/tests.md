@@ -4177,6 +4177,31 @@ and proves the prefix, and has nothing left to truncate because the refused open
 stands. It appends its `run_resumed` after the committed prefix, and the log replays twice to equal
 states.
 
+## `fn worktree_lease_answer(fixture: &Fixture) -> String {`
+
+Asks `rundir::tests::worktree_lease_probe_child`, in a process of its own, whether the fixture's
+worktree lease is absent, free or refused. The lease is an `fcntl` lock, which never conflicts
+within the process that holds it, so only another process can say whether a hold survived. The
+probe is spawned through the process funnel, as this module requires.
+
+## `fn a_fault_at_the_worktree_lease_ends_the_resume_and_the_next_resume_converges(`
+
+Gate 5's strict re-audit, row 131, `Lock.AcquireWorktree`/after, together with the lease's other
+three coordinates. Rows 136 and 137 (`Lock.CreateWorktreeLockFile` before and after) and
+`Lock.AcquireWorktree`/before were witnessed at the module in `rundir::tests`, and those witnesses
+replay no log. Here each one is a resume of a planted run.
+
+The resume is armed with an error at the coordinate, and the command ends there. The error named is
+the injected one, nothing after the lease ran, and the log is untouched. The lease's file is left
+exactly when its create was performed, and the authority's rows agree: R25 after the create, R17
+after the hold, nothing before either. The run lock is gone, and another process finds the lease
+free (or its file absent), because the command that ended released its hold with it. The file the
+faulted command created is then marked. The next resume runs all four lease coordinates, holds the
+lease while its handle lives and releases it with the handle. It adopts the marked file rather than
+replacing it (read only after the release, because closing any descriptor of the file drops the
+process's `fcntl` lock), appends its `run_resumed` after the planted prefix, and the log replays
+twice to equal states.
+
 ## `fn two_lineages_publish_in_lineage_order_and_the_younger_candidate_waits_behind_the_older() {`
 
 Two lineages overlapping on one path, the younger's repair already queued

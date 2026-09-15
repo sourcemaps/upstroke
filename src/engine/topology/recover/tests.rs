@@ -14402,6 +14402,218 @@ fn an_error_after_the_logs_torn_tail_is_truncated_refuses_the_resume_before_any_
     assert_replays_twice_equal(&fixture, tag);
 }
 
+fn worktree_lease_answer(fixture: &Fixture) -> String {
+    let exe = std::env::current_exe().expect("the test binary");
+    let spec = CommandSpec::new(exe.to_string_lossy().into_owned())
+        .arg("--exact")
+        .arg("rundir::tests::worktree_lease_probe_child")
+        .arg("--ignored")
+        .arg("--nocapture")
+        .env(
+            "UPSTROKE_TEST_WORKTREE_DIR",
+            fixture.repo_root.to_string_lossy().into_owned(),
+        )
+        .env(
+            "UPSTROKE_TEST_WORKTREE_GIT_DIR",
+            fixture.git_dir.to_string_lossy().into_owned(),
+        );
+    let output = crate::runner::host::HostRunner::new()
+        .run(&crate::runner::gate_request(
+            spec,
+            fixture.root.clone(),
+            Duration::from_secs(60),
+            crate::runner::InvocationId::attempt(
+                ALPHA,
+                GEN,
+                crate::topology::events::AttemptNumber(1),
+                crate::runner::invocation::AttemptRole::Gate(0),
+                0,
+            ),
+        ))
+        .expect("the lease probe runs through the process funnel");
+    assert_eq!(
+        output.code,
+        Some(0),
+        "the lease probe failed: {}",
+        output.stderr
+    );
+    output
+        .stdout
+        .lines()
+        .find(|line| matches!(*line, "absent" | "free" | "refused"))
+        .unwrap_or_else(|| panic!("the lease probe gave no answer: {}", output.stdout))
+        .to_owned()
+}
+
+fn a_fault_at_the_worktree_lease_ends_the_resume_and_the_next_resume_converges(
+    site: LockSite,
+    phase: HookPhase,
+    tag: &str,
+) {
+    use crate::topology::effects::{EntryPhase, ResourceRow, ResumeAction};
+
+    let fixture = Fixture::healthy(tag);
+    let lock_file = fixture.worktree_lock_file();
+    assert!(
+        !lock_file.exists(),
+        "{tag}: the planted run has never taken its worktree lease"
+    );
+    let create = EffectSiteId::Lock(LockSite::CreateWorktreeLockFile);
+    let site = EffectSiteId::Lock(site);
+    let semantics = site.semantics(match phase {
+        HookPhase::Before => EntryPhase::Before,
+        HookPhase::After => EntryPhase::After,
+        HookPhase::Point { .. } => panic!("a lease site's coordinates are its two hook phases"),
+    });
+    assert_eq!(
+        semantics.rows,
+        match (phase, site == create) {
+            (HookPhase::After, true) => vec![ResourceRow::R25],
+            (HookPhase::After, false) => vec![ResourceRow::R17],
+            _ => Vec::new(),
+        },
+        "{tag}"
+    );
+    assert_eq!(
+        semantics.action,
+        if phase == HookPhase::Before {
+            ResumeAction::ResumeUnperformed
+        } else {
+            ResumeAction::AdoptPerformed
+        },
+        "{tag}"
+    );
+    let planted = durable_kinds(&fixture).len();
+    let before = fixture.log_bytes();
+
+    let faulted = harness();
+    let mut armed = ArmedFinalization::new(&faulted, (site, phase));
+    let error = message(
+        &resume_with_real_refs_hooked(&fixture, &mut armed)
+            .expect_err("the fault at the lease ends the resume"),
+    );
+    drop(armed);
+    assert!(
+        error.contains(&format!("`{site}` ({phase})")),
+        "{tag}: the injected error is the one returned: {error}"
+    );
+    {
+        let seen = faulted.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            seen.observed(site, phase),
+            "{tag}: the armed coordinate was reached"
+        );
+        assert!(
+            !seen.touched(EffectSiteId::Event(EventSite::OpenLog))
+                && !seen.touched(EffectSiteId::RunDir(RunDirSite::RemoveMarker))
+                && !seen.touched(EffectSiteId::Event(EventSite::Append)),
+            "{tag}: nothing after the lease ran"
+        );
+    }
+    assert_eq!(fixture.log_bytes(), before, "{tag}: nothing was appended");
+    let create_performed = (site, phase) != (create, HookPhase::Before);
+    assert_eq!(
+        lock_file.exists(),
+        create_performed,
+        "{tag}: the lease's file is left exactly when its create was performed"
+    );
+    assert!(
+        !rundir::is_running(&fixture.public()),
+        "{tag}: the run lock went with the command"
+    );
+    if create_performed {
+        assert_eq!(
+            worktree_lease_answer(&fixture),
+            "free",
+            "{tag}: the command that ended holds no lease"
+        );
+        crate::workspace_manager::fixture::write_file(&lock_file, b"adopted");
+    } else {
+        assert_eq!(worktree_lease_answer(&fixture), "absent", "{tag}");
+    }
+
+    let observed = harness();
+    let (_, handle) =
+        resume_with_real_refs(&fixture, &observed).expect("the next resume takes the lease");
+    {
+        let seen = observed.lock().unwrap_or_else(PoisonError::into_inner);
+        for (converged, phase) in [
+            (LockSite::CreateWorktreeLockFile, HookPhase::Before),
+            (LockSite::CreateWorktreeLockFile, HookPhase::After),
+            (LockSite::AcquireWorktree, HookPhase::Before),
+            (LockSite::AcquireWorktree, HookPhase::After),
+        ] {
+            assert!(
+                seen.observed(EffectSiteId::Lock(converged), phase),
+                "{tag}: the next resume runs `Lock.{}` ({phase})",
+                converged.name()
+            );
+        }
+    }
+    assert_eq!(
+        worktree_lease_answer(&fixture),
+        "refused",
+        "{tag}: the next resume holds the lease"
+    );
+    drop(handle);
+    assert_eq!(
+        worktree_lease_answer(&fixture),
+        "free",
+        "{tag}: and releases it with its handle"
+    );
+    if create_performed {
+        assert_eq!(
+            std::fs::read(&lock_file).expect("the lock file reads"),
+            b"adopted",
+            "{tag}: the file the faulted command created was adopted, not replaced"
+        );
+    }
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec!["run_resumed"],
+        "{tag}: the next resume appends after the planted prefix"
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+#[test]
+fn a_fault_before_the_worktree_lock_file_is_created_ends_the_resume_and_the_next_resume_creates_it()
+{
+    a_fault_at_the_worktree_lease_ends_the_resume_and_the_next_resume_converges(
+        LockSite::CreateWorktreeLockFile,
+        HookPhase::Before,
+        "resume-lease-create-before",
+    );
+}
+
+#[test]
+fn a_fault_after_the_worktree_lock_file_is_created_ends_the_resume_and_the_next_resume_adopts_it() {
+    a_fault_at_the_worktree_lease_ends_the_resume_and_the_next_resume_converges(
+        LockSite::CreateWorktreeLockFile,
+        HookPhase::After,
+        "resume-lease-create-after",
+    );
+}
+
+#[test]
+fn a_fault_before_the_worktree_lease_is_taken_ends_the_resume_and_the_next_resume_takes_it() {
+    a_fault_at_the_worktree_lease_ends_the_resume_and_the_next_resume_converges(
+        LockSite::AcquireWorktree,
+        HookPhase::Before,
+        "resume-lease-acquire-before",
+    );
+}
+
+#[test]
+fn a_fault_after_the_worktree_lease_is_taken_ends_the_resume_with_it_released_and_the_next_resume_takes_it_again()
+ {
+    a_fault_at_the_worktree_lease_ends_the_resume_and_the_next_resume_converges(
+        LockSite::AcquireWorktree,
+        HookPhase::After,
+        "resume-lease-acquire-after",
+    );
+}
+
 /// Beta's candidate queued at the base, unmerged, so that a second lineage
 /// can be rooted at beta.
 fn plant_queued_beta(fixture: &Fixture) -> crate::topology::events::CandidateRef {
