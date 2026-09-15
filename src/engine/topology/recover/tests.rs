@@ -14025,6 +14025,20 @@ fn a_kill_before_the_candidate_commit_is_written_is_settled_interrupted_and_the_
         semantics.rows.is_empty(),
         "{tag}: nothing of `{site}` was performed, so no row holds anything ({:?})",
         semantics.rows
+/// Whether Git lists `worktree` among the repository's registered worktrees: a
+/// settlement that removes only the intent, or the directory by hand, leaves the
+/// registration behind.
+fn registered_with_git(
+    manager: &crate::workspace_manager::WorkspaceManager,
+    worktree: &Path,
+) -> bool {
+    manager
+        .worktree_records()
+        .expect("worktree records")
+        .iter()
+        .any(|record| crate::util::same_path(record.path(), worktree))
+}
+
     );
     assert_eq!(semantics.action, ResumeAction::ResumeUnperformed, "{tag}");
     assert_eq!(
@@ -14055,6 +14069,10 @@ fn a_kill_before_the_candidate_commit_is_written_is_settled_interrupted_and_the_
     );
 
     let observed = harness();
+    assert!(
+        registered_with_git(&manager, &worktree),
+        "{tag}: and Git lists the worktree"
+    );
     let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
     let (recovered, handle) = resume_as(
         &fixture,
@@ -14090,6 +14108,10 @@ fn a_kill_before_the_candidate_commit_is_written_is_settled_interrupted_and_the_
         1,
         &runner,
         &mut hooks,
+    );
+    assert!(
+        !registered_with_git(&manager, &worktree),
+        "{tag}: and its Git registration is gone"
     );
     drop(hooks);
     assert!(
@@ -14206,6 +14228,10 @@ fn a_kill_after_the_candidate_commit_is_written_is_settled_interrupted_and_the_c
         CandidateRecovery {
             promotion: None,
             orphan_pin: None,
+    assert!(
+        registered_with_git(&manager, &worktree),
+        "{tag}: and Git lists the worktree"
+    );
             settles_interrupted: true,
         },
         "{tag}: the unsettled attempt is owed an interrupted settlement, and its object nothing"
@@ -14248,6 +14274,10 @@ fn a_kill_after_the_candidate_commit_is_written_is_settled_interrupted_and_the_c
             (
                 EffectSiteId::Ref(RefSite::PinCandidatePrepared),
                 HookPhase::Before,
+    assert!(
+        !registered_with_git(&manager, &worktree),
+        "{tag}: and its Git registration is gone"
+    );
             ),
         ] {
             assert!(

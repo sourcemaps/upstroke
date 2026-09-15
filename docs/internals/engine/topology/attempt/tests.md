@@ -578,22 +578,30 @@ two replays' states equal each other and the live fold's.
 The redispatch: a new generation, at the same base, and the fold accepts
 it — which it would not if the old generation were still open.
 
+## `fn registered_with_git(run: &Run, worktree: &Path) -> bool {`
+
+Whether Git lists the worktree among the repository's registered worktrees. A settlement that
+removes only the intent, or the directory by hand, leaves the registration behind, so the
+settlement witnesses assert the directory and the registration separately.
+
 ## `fn kill_after_the_stage_before_the_tree_leaves_index_referenced_objects_then_scrub_releases_them() {`
 
 Rows 48 and 49 of Gate 5's strict re-audit, one durable prefix killed at both of its coordinates,
 the stage's after phase and the write-tree's before phase. The child died inside the capture, so
 no capture event exists, and the index holds the worker's blob, which is reachable (R9). The
 interrupted settlement appends the interruption, returns the task to `Pending`, and scrubs the
-worktree with force through the scrub funnel, which releases the blob to Git (R27). Each prefix
-replays twice to equal states. The kill child's record holds both coordinates.
+worktree with force through the scrub funnel, which releases the blob to Git (R27): the directory
+is gone and Git no longer lists it (`registered_with_git`). Each prefix replays twice to equal
+states. The kill child's record holds both coordinates.
 
 ## `fn kill_after_the_snapshot_intent_before_its_worktree_is_reclaimed_by_the_settlement() {`
 
 Rows 24 and 25 of Gate 5's strict re-audit, one durable prefix killed at the snapshot intent's
 after phase and at the add's before phase. The synced snapshot intent names no worktree, added or
-registered, and the ephemeral commit written before it is unreferenced. The interrupted settlement
-reclaims the intent with the task's, leaves the commit to Git, appends the interruption and returns
-the task to `Pending`. Each prefix replays twice to equal states.
+registered, and the ephemeral commit written before it is unreferenced; the task worktree stands,
+registered. The interrupted settlement reclaims the intent with the task's, scrubs the task
+worktree (gone, and no longer registered with Git), leaves the commit to Git, appends the
+interruption and returns the task to `Pending`. Each prefix replays twice to equal states.
 
 ## `fn kill_after_capture_leaves_index_referenced_objects_then_scrub_releases_them() {`
 
@@ -655,9 +663,12 @@ error contract this point does not have.
 Row 53 of Gate 5's audit, `Object.SnapshotCommitTree`'s `IdUnread` kill point, recovered. The test
 above constructs the prefix and stops; here the same kill child's prefix is settled as the resume's
 step (d) settles it: one ephemeral commit written that nothing names, no snapshot intent, the
-attempt in flight (`attempt_started` last). `settle_interrupted` reclaims the attempt's intents,
-leaves the unreferenced commit to Git, appends `attempt_interrupted` and returns the task to
-`Pending`, and the log replays twice to equal states.
+attempt in flight (`attempt_started` last), its task worktree standing and registered with Git.
+`settle_interrupted` reclaims the attempt's intents, scrubs the task worktree with force (the
+directory gone and its Git registration with it), leaves the unreferenced commit to Git, appends
+`attempt_interrupted` and returns the task to `Pending`, and the log replays twice to equal
+states. The worktree assertions are review round 2's: a settlement that removed only the intent
+passed every assertion before them.
 
 ## `fn kill_after_snapshot_add_reclaims_snapshot_and_releases_its_commit() {`
 

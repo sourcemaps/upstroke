@@ -1304,6 +1304,18 @@ fn kill_after_capture_leaves_index_referenced_objects_then_scrub_releases_them()
     run.replay_twice_equal();
 }
 
+/// Whether Git lists `worktree` among the repository's registered worktrees:
+/// a settlement that removes the directory by hand, or only the intent, leaves
+/// the registration, and `git worktree add` refuses the path until it is pruned.
+fn registered_with_git(run: &Run, worktree: &Path) -> bool {
+    run.fixture
+        .manager
+        .worktree_records()
+        .expect("worktree records")
+        .iter()
+        .any(|record| crate::util::same_path(record.path(), worktree))
+}
+
 #[test]
 fn kill_after_the_stage_before_the_tree_leaves_index_referenced_objects_then_scrub_releases_them() {
     for site in ["after_stage", "before_write_tree"] {
@@ -1316,6 +1328,10 @@ fn kill_after_the_stage_before_the_tree_leaves_index_referenced_objects_then_scr
             run.emitter.durable_kinds(),
             vec!["run_started", "task_dispatched", "attempt_started"],
             "{site}: the child died inside the capture, before any capture event"
+        );
+        assert!(
+            dispatched.worktree.is_dir() && registered_with_git(&run, &dispatched.worktree),
+            "{site}: the task worktree stands, registered with Git"
         );
         let staged = index_blobs(&dispatched.worktree);
         let worked = git(&dispatched.worktree, &["hash-object", WORKED_PATH]);
@@ -1348,6 +1364,10 @@ fn kill_after_the_stage_before_the_tree_leaves_index_referenced_objects_then_scr
         assert!(
             !dispatched.worktree.exists(),
             "{site}: the task worktree is scrubbed with force"
+        );
+        assert!(
+            !registered_with_git(&run, &dispatched.worktree),
+            "{site}: and its Git registration is gone"
         );
         assert!(
             unreachable_objects(&run.fixture.base)
@@ -1406,6 +1426,10 @@ fn kill_after_the_snapshot_intent_before_its_worktree_is_reclaimed_by_the_settle
             1,
             "{site}: the ephemeral commit written before the intent is unreferenced: {orphans:?}"
         );
+        assert!(
+            dispatched.worktree.is_dir() && registered_with_git(&run, &dispatched.worktree),
+            "{site}: the task worktree stands, registered with Git"
+        );
 
         context!(run, process)
             .settle_interrupted(
@@ -1418,6 +1442,10 @@ fn kill_after_the_snapshot_intent_before_its_worktree_is_reclaimed_by_the_settle
         assert!(
             run.fixture.manager.intents().expect("intents").is_empty(),
             "{site}: the snapshot intent naming no worktree was reclaimed, with the task's"
+        );
+        assert!(
+            !dispatched.worktree.exists() && !registered_with_git(&run, &dispatched.worktree),
+            "{site}: the task worktree is scrubbed with force and its Git registration is gone"
         );
         assert_eq!(
             unreachable_ephemeral_commits(&run.fixture.base),
@@ -1548,6 +1576,10 @@ fn a_kill_before_the_snapshot_commits_id_is_read_is_settled_interrupted_and_leav
         Some("attempt_started"),
         "the attempt is in flight"
     );
+    assert!(
+        dispatched.worktree.is_dir() && registered_with_git(&run, &dispatched.worktree),
+        "its task worktree stands, registered with Git"
+    );
 
     context!(run, process)
         .settle_interrupted(
@@ -1560,6 +1592,14 @@ fn a_kill_before_the_snapshot_commits_id_is_read_is_settled_interrupted_and_leav
     assert!(
         run.fixture.manager.intents().expect("intents").is_empty(),
         "the settlement reclaims the attempt's intents"
+    );
+    assert!(
+        !dispatched.worktree.exists(),
+        "and scrubs the task worktree with force: the directory is gone"
+    );
+    assert!(
+        !registered_with_git(&run, &dispatched.worktree),
+        "and its Git registration is gone"
     );
     assert_eq!(
         unreachable_ephemeral_commits(&run.fixture.base),

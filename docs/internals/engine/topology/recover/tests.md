@@ -4129,6 +4129,11 @@ commit is unreferenced once its snapshot is removed (R27). Those commits are exp
 commit is the other unreferenced commit a kill here could leave, and it carries the attempt's own
 message, so this refuses any unreachable commit whose subject is not the snapshot input's.
 
+## `fn registered_with_git(`
+
+Whether Git lists the worktree among the repository's registered worktrees; the settlement
+witnesses below assert it before and after, beside the directory itself.
+
 ## `fn a_kill_before_the_candidate_commit_is_written_is_settled_interrupted_and_the_next_generation_writes_it()`
 
 Gate 5's strict re-audit, row 54: `Object.CandidateCommitTree`/before had no committed witness. The
@@ -4143,7 +4148,8 @@ no candidates ref, with the attempt's worktree and intent still standing (R9). T
 and the action is the before phase's. `recovery_for` agrees: settle interrupted, no object, no
 promotion. The next incarnation's recovery performs that settlement, step (d): one
 `attempt_interrupted` before its `run_resumed`, and the closed generation's worktree and intent
-reclaimed, without writing a candidate commit itself. Its first step then performs the site's
+reclaimed (the directory gone and no longer registered with Git, which it was before), without
+writing a candidate commit itself. Its first step then performs the site's
 action from the prefix in which nothing was performed. The next generation's attempt is accepted
 and writes the candidate commit through `Object.CandidateCommitTree` (both phases observed under
 the production adapter). It is pinned, prepared and created, the candidates ref names it, the pin
@@ -4164,7 +4170,8 @@ phase), and the third leaves the same objects: the attempt in flight (`run_resum
 commit in the object store that nothing references, and no pin or candidates ref. The candidate
 module's kill witnesses stop at `recovery_for`, a plan; here the next incarnation's resume
 performs it. Step (d) settles the attempt interrupted, finishes no promotion, reclaims the closed
-generation's worktree and intent, writes no commit and no pin of its own, and leaves the dead
+generation's worktree (gone and no longer registered with Git) and intent, writes no commit and no
+pin of its own, and leaves the dead
 capture's commit to Git exactly as it was. The next generation's attempt is accepted with its own
 commit-tree performed, which, with a tree, parent and message identical to the dead one's, may
 write the same object: the dead commit is afterwards either still Git's or that commit, never
