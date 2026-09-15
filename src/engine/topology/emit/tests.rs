@@ -3262,3 +3262,226 @@ fn a_written_full_error_at_the_informational_append_is_present_and_the_next_open
         "informational-written-full-error",
     );
 }
+
+// ---------------------------------------------------------------------------
+// The log's open points, each killed and the next open driven over what it left
+// ---------------------------------------------------------------------------
+
+const OPEN_LOG_KILL_CHILD: &str = "engine::topology::emit::tests::open_log_kill_child";
+const OPEN_LOG_PATH_ENV: &str = "UPSTROKE_TEST_OPEN_LOG_PATH";
+const OPEN_LOG_POINT_ENV: &str = "UPSTROKE_TEST_OPEN_LOG_POINT";
+
+/// Opens the log the parent names through the barrier, on the production
+/// event adapter, with a kill armed at the `Event.OpenLog` point
+/// `UPSTROKE_TEST_OPEN_LOG_POINT` names. The adapter exports the observation
+/// before it hands the kill back. Reaching the panic means the kill did not
+/// land.
+#[test]
+#[ignore = "spawned as a subprocess by the open-point kill witnesses"]
+fn open_log_kill_child() {
+    let path = PathBuf::from(std::env::var(OPEN_LOG_PATH_ENV).expect("the parent names the log"));
+    let point = match std::env::var(OPEN_LOG_POINT_ENV)
+        .expect("the parent names the point")
+        .as_str()
+    {
+        "create" => SubEffectPoint::Create,
+        "truncate-torn-tail" => SubEffectPoint::TruncateTornTail,
+        other => panic!("`{other}` is not a kill point of `Event.OpenLog` driven here"),
+    };
+    let harness = Arc::new(Mutex::new(HookHarness::new()));
+    harness
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .arm(
+            EffectSiteId::Event(EventSite::OpenLog),
+            point,
+            InjectionMode::Kill,
+        )
+        .expect("the point supports a kill");
+    let mut hooks = HarnessEventHooks::new(Arc::clone(&harness));
+    let mut warnings = Vec::new();
+    let opened =
+        establish_stable_prefix(&path, inputs(), None, &mut warnings, &mut hooks).map(|_| ());
+    panic!("the kill at `{point}` did not take this process: {opened:?}");
+}
+
+/// The child killed at `point` while it opens `path`.
+fn kill_the_open(path: &Path, point: &str, workspace: &Path) {
+    let exe = std::env::current_exe().expect("the test binary");
+    let spec = crate::runner::CommandSpec::new(exe.to_string_lossy().into_owned())
+        .arg("--exact")
+        .arg(OPEN_LOG_KILL_CHILD)
+        .arg("--ignored")
+        .arg("--nocapture")
+        .env(OPEN_LOG_PATH_ENV, path.to_string_lossy().into_owned())
+        .env(OPEN_LOG_POINT_ENV, point);
+    let spec = match std::env::var(crate::observations::OBSERVATIONS_ENV) {
+        Ok(dir) => spec.env(crate::observations::OBSERVATIONS_ENV, dir),
+        Err(_) => spec,
+    };
+    let output = crate::runner::Runner::run(
+        &crate::runner::host::HostRunner::new(),
+        &crate::runner::gate_request(
+            spec,
+            workspace.to_path_buf(),
+            Duration::from_secs(120),
+            crate::runner::InvocationId::attempt(
+                AAY,
+                GenerationId(0),
+                AttemptNumber(1),
+                crate::runner::invocation::AttemptRole::Gate(0),
+                0,
+            ),
+        ),
+    )
+    .expect("the child runs through the process funnel");
+    assert!(
+        !output.stderr.contains("panicked at") && output.code != Some(0),
+        "`{point}`: the child was not killed: {:?} {}",
+        output.code,
+        output.stderr
+    );
+}
+
+/// The `run_started` line a run's first append writes, byte for byte.
+fn run_started_line() -> Vec<u8> {
+    TopologyLine::round_trip(&TopologyEvent {
+        ts: "2026-08-23T09:41:02Z".to_owned(),
+        body: run_started_body(),
+    })
+    .expect("a run_started survives its own wire format")
+    .0
+    .committed_bytes()
+    .to_vec()
+}
+
+/// Gate 5's audit, row 93: `Event.OpenLog`'s `Create` kill, recovered.
+///
+/// The kill leaves the log the funnel created, empty; the committed tests
+/// assert that shape and never open it again, and the barrier test over a
+/// fresh log opens an absent one. The next open over the existing empty log
+/// holds the barrier with an empty prefix, syncs it, warns about nothing,
+/// replays no event (twice, to equal states) and hands out a handle; the run's
+/// first line appended through it is proven by the open after.
+#[test]
+fn a_kill_after_the_log_is_created_leaves_an_empty_log_whose_next_open_holds_the_barrier() {
+    let paths = Scratch::acquire("open-kill-create");
+    let path = paths.events();
+    assert!(!path.exists(), "no log yet");
+    kill_the_open(&path, "create", &paths.public);
+    assert!(
+        path.is_file(),
+        "the log the funnel created survives the kill"
+    );
+    assert!(read(&path).is_empty(), "and holds nothing");
+
+    let mut hooks = HarnessEventHooks::new(Arc::new(Mutex::new(HookHarness::new())));
+    let mut warnings = Vec::new();
+    let mut prefix = establish_stable_prefix(&path, inputs(), None, &mut warnings, &mut hooks)
+        .expect("the next open holds the barrier over the empty log");
+    assert!(prefix.bytes().is_empty(), "the proven prefix is empty");
+    assert!(warnings.is_empty(), "nothing is torn: {warnings:?}");
+    assert!(
+        hooks
+            .syncs()
+            .iter()
+            .any(|record| record.target == SyncTarget::LogFile && record.len == 0),
+        "the empty prefix is synced: {:?}",
+        hooks.syncs()
+    );
+    assert!(prefix.events().is_empty(), "no event to replay");
+    let once = TopologyFold::replay(inputs(), prefix.events()).expect("the empty prefix replays");
+    let twice =
+        TopologyFold::replay(inputs(), prefix.events()).expect("the empty prefix replays again");
+    assert_eq!(once.state(), twice.state(), "replay twice equal");
+    assert!(prefix.fold().started().is_none(), "and nothing folded");
+
+    let (line, _) = TopologyLine::round_trip(&TopologyEvent {
+        ts: "2026-08-23T09:41:02Z".to_owned(),
+        body: run_started_body(),
+    })
+    .expect("a run_started survives its own wire format");
+    prefix
+        .log()
+        .append_topology(EventSite::AppendFirst, &line)
+        .expect("the handle the barrier hands out appends the run's first line");
+    drop(prefix);
+    let mut warnings = Vec::new();
+    let after = establish_stable_prefix(
+        &path,
+        inputs(),
+        None,
+        &mut warnings,
+        &mut crate::events::log::NoEventHooks,
+    )
+    .expect("the open after proves the first line");
+    assert_eq!(after.bytes(), line.committed_bytes());
+    let once = TopologyFold::replay(inputs(), after.events()).expect("the first line replays");
+    let twice =
+        TopologyFold::replay(inputs(), after.events()).expect("the first line replays again");
+    assert_eq!(once.state(), twice.state(), "replay twice equal");
+}
+
+/// Gate 5's audit, row 95: `Event.OpenLog`'s `TruncateTornTail` kill,
+/// recovered.
+///
+/// The log holds a run's `run_started` and a torn line after it. The kill comes
+/// once the torn tail is truncated and before the prefix is synced; the
+/// committed tests assert the truncated shape and never open it again, and the
+/// torn-tail open test opens an untruncated tail. The next open finds nothing
+/// torn and warns about nothing, syncs the whole surviving prefix, and the
+/// prefix replays twice to equal states.
+#[test]
+fn a_kill_after_the_torn_tail_is_truncated_leaves_the_prefix_the_next_open_syncs_without_warning() {
+    let paths = Scratch::acquire("open-kill-truncate-torn-tail");
+    let path = paths.events();
+    let prefix = run_started_line();
+    crate::workspace_manager::fixture::write_file(
+        &path,
+        &[prefix.as_slice(), b"{\"ts\":\"2026".as_slice()].concat(),
+    );
+    kill_the_open(&path, "truncate-torn-tail", &paths.public);
+    assert_eq!(
+        read(&path),
+        prefix,
+        "the kill came after the torn tail was truncated"
+    );
+
+    let harness = Arc::new(Mutex::new(HookHarness::new()));
+    let mut hooks = HarnessEventHooks::new(Arc::clone(&harness));
+    let mut warnings = Vec::new();
+    let proven = establish_stable_prefix(&path, inputs(), None, &mut warnings, &mut hooks)
+        .expect("the next open converges");
+    assert!(
+        warnings.is_empty(),
+        "nothing is torn any more: {warnings:?}"
+    );
+    assert_eq!(
+        proven.bytes(),
+        prefix.as_slice(),
+        "the whole prefix is proven"
+    );
+    assert!(
+        hooks.syncs().iter().any(|record| record.target == SyncTarget::LogFile
+            && record.len == prefix.len() as u64),
+        "the whole surviving prefix is synced: {:?}",
+        hooks.syncs()
+    );
+    for mode in [InjectionMode::Kill, InjectionMode::ErrorReturn] {
+        assert!(
+            !harness
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .reached_point(
+                    EffectSiteId::Event(EventSite::OpenLog),
+                    SubEffectPoint::TruncateTornTail,
+                    mode
+                ),
+            "and reaches no truncation ({mode:?})"
+        );
+    }
+    let once = TopologyFold::replay(inputs(), proven.events()).expect("the prefix replays");
+    let twice = TopologyFold::replay(inputs(), proven.events()).expect("the prefix replays again");
+    assert_eq!(once.state(), twice.state(), "replay twice equal");
+    assert_eq!(proven.fold().state(), once.state());
+}
