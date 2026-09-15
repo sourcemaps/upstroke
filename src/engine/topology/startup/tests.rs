@@ -1899,6 +1899,26 @@ impl rundir::RunDirHooks for ExportedErrorAt {
     }
 }
 
+/// The husk a creator leaves when it dies after publishing its owner record: the
+/// marker published, `run.lock` taken at P2 and released by the death, the
+/// private half created and the owner record published. The lock file is part
+/// of that prefix, so the census reads it through `rundir::is_running`'s
+/// existing-but-unheld branch, as it would read a real husk.
+fn husk_its_creator_left_after_taking_the_run_lock<'a>(
+    fixture: &'a Fixture,
+    run_id: &str,
+) -> Husk<'a> {
+    let husk = Husk::at_p0(fixture, run_id).stage_marker().publish_marker();
+    let lock = RunLock::acquire(&husk.public()).expect("P2: the run lock");
+    let husk = husk.create_private().publish_owner();
+    drop(lock);
+    assert!(
+        exists(&husk.public().join("run.lock")),
+        "the lock file the creation took stands, unheld"
+    );
+    husk
+}
+
 /// Gate 5's audit, row 87: `RunDir.RemovePrivateHusk`/before, recovered.
 ///
 /// The census that refuses at the private removal's before phase keeps the
@@ -1909,11 +1929,8 @@ impl rundir::RunDirHooks for ExportedErrorAt {
 #[test]
 fn a_husk_whose_private_half_refused_removal_is_reclaimed_by_the_next_census_private_half_first() {
     let fixture = Fixture::new("private-refused-then-reclaimed");
-    let husk = Husk::at_p0(&fixture, "01PRIVREFUSED0000000000000")
-        .stage_marker()
-        .publish_marker()
-        .create_private()
-        .publish_owner();
+    let husk =
+        husk_its_creator_left_after_taking_the_run_lock(&fixture, "01PRIVREFUSED0000000000000");
     let private = tree_bytes(&husk.private());
     assert!(!private.is_empty());
 
@@ -1972,11 +1989,7 @@ fn a_husk_whose_private_half_refused_removal_is_reclaimed_by_the_next_census_pri
 fn a_husk_whose_public_removal_erred_after_completing_is_gone_for_the_next_census() {
     let fixture = Fixture::new("public-removed-then-erred");
     let run_id = "01PUBREMOVED00000000000000";
-    let husk = Husk::at_p0(&fixture, run_id)
-        .stage_marker()
-        .publish_marker()
-        .create_private()
-        .publish_owner();
+    let husk = husk_its_creator_left_after_taking_the_run_lock(&fixture, run_id);
 
     let site = EffectSiteId::RunDir(RunDirSite::RemovePublicHusk);
     let mut erring = ExportedErrorAt::new((site, HookPhase::After));
