@@ -35,7 +35,7 @@ directory; `<sha>` is the full sha the measurement was taken at.
 | 2 the answer file (`src/interaction.rs`): the attributed answer record, the writer-side refusal, the schema-4 refusal executed | **done** — §7; the full suite green through the wrapper, four mutations each killed by the tests named for them; the guest run of the path-shaped tests is owed at the head the body records (§13) |
 | 3 the decoder fixture (`src/topology/events.rs`, `src/topology/fold/tests.rs`): an attributed record through the informational-tolerance path; the fold untouched | **done** — §8; the full suite green through the wrapper, two mutations each killed by the tests named for them |
 | 4 the internals notes, held both ways by `test-internals-notes.sh` | **done** — §9; `test-internals-notes.sh` and `test-docs-consistency.sh` green from the worktree root |
-| 5 the design (O2): §5, §12, §23.1, each citing this record | pending |
+| 5 the design (O2): §5, §12, §23.1, each citing this record | **done** — §10; `test-docs-consistency.sh` green; `design/15`, `README.md`, `MAINTAINING.md` and `design/25` untouched |
 | 6 the findings-ledger file | pending |
 | 7 the ten gates on this box, the guest, this record, the draft pull request | pending |
 
@@ -557,7 +557,35 @@ exit `0` (`phase4/test-docs-consistency.log`).
 
 ## 10. The design (Phase 5)
 
-Pending.
+Three passages, and nothing else under `design/` or in `DESIGN.md` (R2). Each cites this record by
+path.
+
+- `design/05_design_work_unit_lifecycle.md:14` — the paragraph that began **The defect loop** is
+  replaced by the contract's O2 text beginning **The attribution loop**, verbatim through *"at
+  exactly the rate the checklist absorbs what execution discovers"*, followed by the citation
+  sentence (*"Decided 2026-09-01; the verdict, the engine's obligations and the vocabulary that
+  carries the attribution are recorded in `reviews/2026-09-14-o3-attribution-record.md`."*).
+- `design/12_design_interaction_model.md:5` — the pre-filter bullet's last clause, *"and every one
+  that does is logged as a `design_defect`."*, becomes the contract's *"and every one that does is
+  logged with its attribution: `discovered_hole` by default, `design_defect` only by citation
+  (§5; `reviews/2026-09-14-o3-attribution-record.md`)."*
+- `design/23_design_risks.md:37`–`:43` — the sentence *"Every `design_defect` is attributable to a
+  story and aggregable per sprint: … a Definition of Ready with a failure signal."* is split as the
+  O2 bullet says: **question volume** (`question_raised` counts, attributable to a story and
+  aggregable per sprint, unchanged and free — the badly refined story still parks on a recorded
+  question naming what refinement failed to settle) and **conviction rate** (the share ruled
+  `design_defect`, each citing the checklist item refinement skipped — a Definition of Ready
+  failure signal that cannot be gamed by punishing discovery). The bullet's other sentences are
+  unchanged.
+
+`design/15_design_event_log_resume_run_layout.md:107` still lists `design_defect` in the event
+list, and the wire tag stays. `git diff --stat fb92164c -- design/15_design_event_log_resume_run_layout.md
+README.md MAINTAINING.md design/25_design_export_decisions_schema.md` is empty, so the sentences
+`src/export.rs` pins are untouched. No other file copies the amended sentences: `git grep -n
+'defect loop\|attributable to a story\|logged as a `design_defect`' -- . ':!reviews/'` finds
+the three lines above and nothing else (the run in this phase's shell, before the edit). Gate from
+the worktree root: `bash .github/scripts/test-docs-consistency.sh` — `PASS`, exit `0`
+(`phase5/test-docs-consistency.log`).
 
 ## 11. The findings-ledger file (Phase 6)
 
