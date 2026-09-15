@@ -17089,6 +17089,8 @@ fn fresh_report_hook_errors_stop_cleanup_and_retry() {
 
 const FINALIZATION_KILL_CHILD: &str = "engine::topology::recover::tests::finalization_kill_child";
 
+const FINALIZATION_CHILD_BOUND: Duration = Duration::from_secs(120);
+
 #[test]
 #[ignore = "spawned as a subprocess by the finalization kill tests"]
 fn finalization_kill_child() {
@@ -17167,12 +17169,12 @@ fn kill_inside_finalization(
     cell: (EffectSiteId, HookPhase),
     tag: &str,
 ) -> Arc<Mutex<HookHarness>> {
-    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child};
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child_within};
 
     let fixture = &planted.fixture;
     let report_path = fixture.root.join("finalization-kill-report");
     let armed = serde_json::to_string(&cell).expect("a cell serializes");
-    let status = run_kill_child(
+    let Some(status) = run_kill_child_within(
         FINALIZATION_KILL_CHILD,
         &[
             ("UPSTROKE_TEST_KILL_REPO", fixture.repo_root.as_os_str()),
@@ -17180,7 +17182,16 @@ fn kill_inside_finalization(
             ("UPSTROKE_TEST_KILL_SITE", std::ffi::OsStr::new(&armed)),
             ("UPSTROKE_TEST_KILL_REPORT", report_path.as_os_str()),
         ],
-    );
+        FINALIZATION_CHILD_BOUND,
+    ) else {
+        panic!(
+            "{tag}: the kill child armed at `{}` ({}) did not end within \
+             {FINALIZATION_CHILD_BOUND:?}, and was killed and reaped; it reported:\n{}",
+            cell.0,
+            cell.1,
+            std::fs::read_to_string(&report_path).unwrap_or_default()
+        );
+    };
     assert!(
         died_by_abort(&status),
         "{tag}: the child did not die by the kill inside finalization: {status:?}; it reported:\n{}",
@@ -17228,7 +17239,7 @@ fn a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_t
             EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot),
             HookPhase::After,
         ),
-        "the kill after the execution root is removed",
+        "Complete/Worktree.RemoveExecutionRoot/after, the single real kill",
     );
     assert_eq!(fixture.log_bytes(), before, "the death appended nothing");
     let effects = finalization_effects(&RunOutcome::Complete);
