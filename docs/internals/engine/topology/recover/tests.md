@@ -4018,6 +4018,21 @@ step, through the production reader: it ingests the answer exactly once, `via` `
 activated repair runs, the file is left as it was published, and the log replays twice to equal
 states.
 
+A further incarnation then resumes with the file still on disk and ingests nothing, because the
+question the file answers is closed. The log still holds one `question_answered` and the file is
+untouched. That is the claim Gate 5's temporary witness B made for `Answer.Ingest`/after (row 127
+of the strict re-audit): an answer on disk is read again by every later incarnation, and only a
+still-open question makes the read an ingestion. The witness below commits B itself.
+
+## `fn an_answer_left_on_disk_under_a_budget_stop_is_ingested_once_by_the_resume_in_its_epoch_and_never_again()`
+
+Gate 5's temporary witness B, committed under a house name. An over-limit repair's question is
+open when a budget stop is appended, and the answer is published into `answers/` while the run is
+stopped. The resume's first step ingests it, in epoch 1 rather than in the stopped epoch: the stop
+is cleared, the question is closed, and the file is retained byte for byte (R21). A second resume
+with the file still on disk ingests nothing, the log still holds exactly one `question_answered`
+for the repair, and it replays twice to equal states.
+
 ## `const CANDIDATE_SEQUENCE_KILL_CHILD: &str =`
 
 The kill child of the two candidate-sequence witnesses below.

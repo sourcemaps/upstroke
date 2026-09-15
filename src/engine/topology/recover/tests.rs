@@ -13072,6 +13072,38 @@ fn a_kill_at_the_answer_ingestion_converges_on_the_next_incarnation(phase: HookP
         answer_bytes,
         "{tag}: the ingested file is left as it was published"
     );
+    let again = drive_as(
+        &fixture,
+        "01KZTDDDDDDDDDDDDDDDDDDDDD",
+        &runtime_holding_the_record(),
+        &seams,
+        2,
+        &driven_runner(&seams),
+        &mut HarnessTopologyHooks::new(harness()),
+    );
+    assert!(
+        again
+            .progress
+            .iter()
+            .all(|step| !matches!(step, Ok(Progress::Answered { .. }))),
+        "{tag}: a further resume with the file still on disk ingests nothing, because its \
+         question is closed: {:?}",
+        again
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        answers_of(&again.log, repair).len(),
+        1,
+        "{tag}: still exactly one `question_answered`"
+    );
+    assert_eq!(
+        std::fs::read(&published).expect("R21: the answer file is never pruned"),
+        answer_bytes,
+        "{tag}: and the file is untouched"
+    );
     let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("parses");
     let once = TopologyFold::replay(fixture.inputs(), &events).expect("replays");
     let twice = TopologyFold::replay(fixture.inputs(), &events).expect("replays again");
@@ -13092,6 +13124,132 @@ fn a_kill_after_an_answer_is_read_appends_nothing_and_the_next_incarnation_inges
         HookPhase::After,
         "answer-ingest-kill-after",
     );
+}
+
+#[test]
+fn an_answer_left_on_disk_under_a_budget_stop_is_ingested_once_by_the_resume_in_its_epoch_and_never_again()
+ {
+    let fixture = Fixture::build(
+        "answers-stopped-epoch",
+        Damage {
+            two_tasks: true,
+            no_automatic_repairs: true,
+            ..Damage::default()
+        },
+    );
+    let (rejection, repair) = plant_over_limit_repair(&fixture);
+    let question = rejection
+        .repair
+        .admission
+        .question()
+        .expect("a human admission carries its question")
+        .clone();
+    append_events(
+        &fixture,
+        &[TopologyEventBody::BudgetExceeded {
+            data: BudgetExceeded4 {
+                epoch: Epoch(0),
+                budget: BudgetKind::Run,
+                limit_usd: 1.0,
+                spent_usd: 2.0,
+                key: Some(repair),
+            },
+        }],
+    );
+    let paths = crate::rundir::RunPaths::with_private_root(
+        &fixture.repo_root,
+        &fixture.started.run_id,
+        &fixture.private_root,
+    );
+    paths.create().expect("the run directories are creatable");
+    let component = crate::util::filename_component(question.id.as_str());
+    crate::rundir::stage_answer(
+        &paths.answers(),
+        &component,
+        &crate::ir::Answer::Answered {
+            text: question.options.first().expect("an option").clone(),
+        },
+        &mut crate::rundir::NoHooks,
+    )
+    .expect("the answer is staged");
+    crate::rundir::publish_answer(&paths.answers(), &component, &mut crate::rundir::NoHooks)
+        .expect("and published");
+    let published = crate::interaction::answer_path(&paths.answers(), &question.id);
+    let bytes = std::fs::read(&published).expect("the published answer");
+    let stopped = replayed(&fixture);
+    assert!(
+        stopped.budget_stop().is_some()
+            && stopped
+                .open_questions()
+                .is_some_and(|open| open.contains_key(&question.id)),
+        "the durable state is budget-stopped in epoch 0 with the question open"
+    );
+
+    let seams = DriveSeams {
+        answers_from_run_dir: true,
+        ..DriveSeams::default()
+    };
+    let first = drive(&fixture, &seams, 2);
+    assert!(
+        matches!(
+            first.progress.first(),
+            Some(Ok(Progress::Answered { key, declined: false, .. })) if *key == repair
+        ),
+        "the resume's first step ingests the answer left on disk under the stop: {:?}",
+        first
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    let (resumed, log) = replayed_with_events(&fixture);
+    assert_eq!(answers_of(&log, repair).len(), 1, "ingested exactly once");
+    assert_eq!(
+        resumed.epoch().map(|epoch| epoch.0),
+        Some(1),
+        "in the resumed epoch, not the stopped one"
+    );
+    assert!(
+        resumed.budget_stop().is_none(),
+        "the resume cleared the stop"
+    );
+    assert!(
+        resumed
+            .open_questions()
+            .is_none_or(|open| !open.contains_key(&question.id)),
+        "the ingestion closes the question"
+    );
+    assert_eq!(
+        std::fs::read(&published).expect("retained"),
+        bytes,
+        "R21: the answer file is retained byte for byte after its ingestion"
+    );
+
+    let second = drive(&fixture, &seams, 2);
+    assert!(
+        second
+            .progress
+            .iter()
+            .all(|step| !matches!(step, Ok(Progress::Answered { .. }))),
+        "the file names a closed question and is not ingested again: {:?}",
+        second
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    let (_, log) = replayed_with_events(&fixture);
+    assert_eq!(
+        answers_of(&log, repair).len(),
+        1,
+        "still exactly one `question_answered` for the repair"
+    );
+    assert_eq!(
+        std::fs::read(&published).expect("retained"),
+        bytes,
+        "and the file is untouched"
+    );
+    assert_replays_twice_equal(&fixture, "answers-stopped-epoch");
 }
 
 fn plant_a_budget_stopped_run_whose_finalization_pruned_the_root(
