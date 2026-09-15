@@ -68,6 +68,8 @@ fn defect(question: &str) -> EventBody {
             question: QuestionId(question.to_owned()),
             context: "context Ünicode".to_owned(),
             answer: "answer".to_owned(),
+            attribution: None,
+            citation: None,
         },
     }
 }
@@ -730,6 +732,15 @@ fn the_legacy_open_is_byte_identical_to_the_pre_move_writer() {
 
 #[test]
 fn the_legacy_append_is_byte_identical_to_the_pre_move_writer() {
+    assert_eq!(
+        serde_json::to_value(defect("q-1")).expect("fixture")["data"],
+        serde_json::json!({
+            "question": "q-1",
+            "context": "context Ünicode",
+            "answer": "answer"
+        }),
+        "the fixture this test feeds both writers keeps its pre-taxonomy three-field payload"
+    );
     let bodies: Vec<EventBody> = vec![
         commit("0f5c1c4", "first"),
         defect("q-1"),
@@ -1989,6 +2000,24 @@ fn a_kill_at_each_open_point_leaves_the_shape_the_packet_tables() {
         "\"the next open repeats the barrier\": it syncs the whole surviving prefix"
     );
     assert!(warnings.is_empty(), "nothing was torn: {warnings:?}");
+
+    let (replayable, seeded) = replayable_prefix("kill-sync-prefix-replayable");
+    let after = kill_at("sync-prefix", SubEffectPoint::SyncPrefix, &replayable);
+    assert_eq!(
+        after, seeded,
+        "a kill at SyncPrefix leaves a run's prefix exactly as it found it"
+    );
+    let mut warnings = Vec::new();
+    let recovered = establish_stable_prefix(
+        &replayable,
+        inputs(),
+        None,
+        &mut warnings,
+        &mut NoEventHooks,
+    )
+    .expect("the next open repeats the barrier over the run's prefix");
+    assert_eq!(recovered.bytes(), &seeded[..]);
+    assert_replays_twice_to(&replayable, recovered.fold());
 }
 
 #[test]
@@ -2361,6 +2390,47 @@ fn after_append_events(before: &[TopologyEvent]) -> Vec<TopologyEvent> {
     events
 }
 
+fn replayable_prefix(tag: &str) -> (PathBuf, Vec<u8>) {
+    let mut started = run_started_event();
+    let TopologyEventBody::RunStarted { data } = &mut started.body else {
+        panic!("`run_started_event` builds a `run_started`");
+    };
+    let digest = crate::topology::registry::TaskRegistry::originals_with_agents(
+        &inputs().plan,
+        &data.registry_record(),
+        &data.probed_agents,
+    )
+    .expect("the fixture record derives a registry")
+    .digest();
+    data.registry_digest = digest;
+    let line = TopologyLine::round_trip(&started)
+        .expect("a run_started survives its own wire format")
+        .0;
+    let path = log_path(tag);
+    let mut warnings = Vec::new();
+    let mut log = EventLog::open(EventSite::OpenLog, &path, &mut warnings).expect("open");
+    log.append_topology(EventSite::AppendFirst, &line)
+        .expect("the replayable prefix");
+    drop(log);
+    let bytes = fs::read(&path).expect("the seeded log");
+    (path, bytes)
+}
+
+#[track_caller]
+fn assert_replays_twice_to(path: &Path, recovered: &TopologyFold) {
+    let bytes = fs::read(path).expect("the log after the next open");
+    let events = TopologyFold::parse_log(&bytes).expect("the surviving prefix parses");
+    let once = TopologyFold::replay(inputs(), &events).expect("the surviving prefix replays");
+    let twice =
+        TopologyFold::replay(inputs(), &events).expect("the surviving prefix replays again");
+    assert_eq!(once.state(), twice.state(), "two replays disagree");
+    assert_eq!(
+        recovered.state(),
+        once.state(),
+        "the next open's fold and a replay of the surviving prefix disagree"
+    );
+}
+
 #[test]
 fn torn_tail_truncated_on_open_and_recovery_matches_before_append_row() {
     let (path, before, before_events) = seeded_prefix("torn-before-append-row");
@@ -2462,6 +2532,25 @@ fn synced_line_recovery_matches_after_append_row() {
         "recovery followed the before-append row for a line that was made durable"
     );
     assert!(warnings.is_empty(), "{warnings:?}");
+
+    let (replayable, seeded) = replayable_prefix("synced-after-append-row-replayable");
+    let killed = kill_at("synced", SubEffectPoint::Synced, &replayable);
+    assert!(killed.ends_with(b"\n") && killed.len() > seeded.len());
+    let mut warnings = Vec::new();
+    let recovered = establish_stable_prefix(
+        &replayable,
+        inputs(),
+        None,
+        &mut warnings,
+        &mut NoEventHooks,
+    )
+    .expect("the next open proves the run's prefix with the synced line in it");
+    assert_eq!(
+        recovered.events(),
+        &after_append_events(&TopologyFold::parse_log(&seeded).expect("the seed parses"))[..],
+        "a synced line is part of the run's surviving prefix"
+    );
+    assert_replays_twice_to(&replayable, recovered.fold());
 }
 
 #[test]

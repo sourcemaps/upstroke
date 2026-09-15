@@ -1417,7 +1417,17 @@ Informational: a pool reported itself empty.
 
 ## `pub enum TopologyEventBody` › `DesignDefect {`
 
-Informational: a question routed to the designer rather than execution.
+Informational: a question that reached a person, with its answer and its
+attribution — `discovered_hole` by default, `design_defect` only by
+citation — the record the 2026-09-01 decision attributes
+(`reviews/2026-09-14-o3-attribution-record.md`). The payload is the shared
+`events::DesignDefect`, read without `strict::field`, so its two optional
+columns, or a column this binary does not know, decode through the
+informational-tolerance path below; the same columns on the
+`question_answered` transaction are refused by construction. The topology
+has no production emitter of the record yet: the writer that adds one
+constructs it through `DesignDefect::discovered` by default and
+`::convicted` when the answer file carries a citation.
 
 ## `pub const TOPOLOGY_EVENT_KINDS: [&str; 24] = [`
 
@@ -1442,7 +1452,9 @@ Whether a fold applies this event, as opposed to merely recording it.
 The distinction the unknown-field rule turns on: a transaction carrying
 a field this binary does not understand is one it cannot claim to have
 applied, while an informational record with an extra column costs
-nothing to ignore.
+nothing to ignore. The `attribution` and `citation` columns of
+`design_defect` are exactly such columns: an older binary ignores them, this
+one reads them, and neither refuses the record.
 
 ## `impl TopologyEventBody` › `pub fn key(&self) -> Option<TaskKey> {`
 
@@ -1559,6 +1571,14 @@ not a refusal — it cannot be written.
 ------------------------------------------------------------------
 Unknown fields (deny_unknown_fields on transactions only)
 ------------------------------------------------------------------
+
+## `mod tests` › `fn a_question_answered_transaction_refuses_an_attribution_key() {`
+
+The contract's "never the `question_answered` transaction, whose unknown
+fields are refused by construction", executed: `attribution` and `citation`
+added to the canonical payload, and inside its `answer`, are refused with
+serde's own unknown-field text, which the test pins so a change to either
+`deny_unknown_fields` fails it.
 
 ## `mod tests` › `fn object_paths(value: &serde_json::Value, at: Vec<String>, found: &mut Vec<Vec<String>>) {`
 
@@ -2278,6 +2298,26 @@ respelled. A1 embeds those types; it does not declare or freeze their
 shape, and their keys are already pinned by the schema-1..3 suite that
 reads them. What is written out by hand here is exactly what schema 4
 froze, which is exactly what this slice owns.
+
+## `mod tests` › `fn attributed_design_defects() -> Vec<AttributedDesignDefect> {`
+
+The decoder fixture the 2026-09-01 decision asked for, beside the corpus and
+not in it: a discovery and a cited conviction, each built through its
+constructor and paired with an independently written payload — a literal,
+where the corpus's own `design_defect` entry serialises the struct — and
+with what it must read as.
+
+## `mod tests` › `fn an_attributed_design_defect_serializes_to_its_independently_written_payload() {`
+
+Each attributed body serialises to exactly its literal.
+
+## `mod tests` › `fn an_attributed_design_defect_reads_through_the_informational_path() {`
+
+Each literal decodes to its body, informational and `design_defect`, and
+reads as `Discovered` or `Convicted`; with an unknown column added it still
+decodes, while the same column on the canonical `question_answered` is
+refused. The 24-and-21 counts are asserted in passing; the corpus keeps its
+pre-taxonomy entry.
 
 ## `fn every_event_decodes_from_its_independently_written_payload() {` › `for (body, canonical) in every_kind().iter().zip(canonical_events()) {`
 

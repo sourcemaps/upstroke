@@ -1416,6 +1416,2566 @@ else
   echo 'note: skipping the symlinked-findings-directory cases (this filesystem will not create one)' >&2
 fi
 
+# ---- a 160000 GITLINK is a recorded type too, and the SUPERPROJECT records it -----------------
+#
+# The recorded type decided what the listing path IS for 100644, 100755 and
+# 120000, and 160000 was decided by WHERE DISCOVERY LANDED instead. An
+# INITIALISED submodule at findings is a work tree of its own, so
+# `rev-parse --show-toplevel` from inside it answers the SUBMODULE'S root, the
+# listing is named by the empty path in THAT index, and the submodule's entries
+# were read as this repository's ledger. Measured on a clean checkout -- `git
+# status --porcelain` exit 0 and empty -- with a finding-shaped file at the
+# submodule's root: the three tree listings refuse at exit 1, `names no finding`,
+# and the same checkout's findings DIRECTORY conformed at exit 0. The
+# superproject's gitlink is the authority, and a submodule's own index is not a
+# statement about what THIS repository tracks.
+#
+# THE GITLINK IS BUILT WITH `update-index --cacheinfo` AND NOT WITH `submodule
+# add`, which wants `protocol.file.allow` for a local path from git 2.38 and
+# writes a `.gitmodules` no rule here reads. What makes the shape is the 160000
+# entry in the superproject's index and a work tree git can discover beneath it;
+# both are asserted before anything is judged, so a fixture that failed to build
+# the shape cannot pass as one that did.
+repo_gitlink="$fixture_dir/repo-initialised-submodule"
+new_repo "$repo_gitlink"
+echo seed > "$repo_gitlink/seed.txt"
+git -C "$repo_gitlink" add -A && git -C "$repo_gitlink" commit -q -m base
+gitlink_base="$(git -C "$repo_gitlink" rev-parse HEAD)"
+new_repo "$repo_gitlink/findings"
+echo fixture > "$repo_gitlink/findings/P2_correctness_202609100001_inside-a-submodule.md"
+git -C "$repo_gitlink/findings" add -A
+git -C "$repo_gitlink/findings" commit -q -m 'the submodule ledger'
+git -C "$repo_gitlink" update-index --add --cacheinfo \
+  "160000,$(git -C "$repo_gitlink/findings" rev-parse HEAD),findings"
+git -C "$repo_gitlink" commit -q -m 'an initialised submodule at findings'
+gitlink_head="$(git -C "$repo_gitlink" rev-parse HEAD)"
+if ! git -C "$repo_gitlink" ls-tree "$gitlink_head" | grep -q $'^160000 commit [0-9a-f]*\tfindings$' \
+  || [[ -n "$(git -C "$repo_gitlink" status --porcelain)" ]] \
+  || [[ ! -f "$repo_gitlink/findings/P2_correctness_202609100001_inside-a-submodule.md" ]]; then
+  echo 'the fixture was meant to record findings as a clean 160000 gitlink holding a finding' >&2
+  exit 1
+fi
+both_apis 'an initialised submodule at findings holds no finding of this repository' \
+  "$repo_gitlink" "$gitlink_base" "$gitlink_head" 'fix-P2/correctness_inside-a-submodule' 1
+# Every spelling, because appending `/.` moves the last component and has moved a
+# verdict with it before now.
+spelling_case 'an initialised submodule at findings, every spelling' \
+  'fix-P2/correctness_inside-a-submodule' 1 "$repo_gitlink/findings"
+# AND FROM INSIDE THE SUBMODULE, where the listing is spelled `.`: the caller's
+# components still name the superproject's root, so the same gitlink answers.
+gitlink_inside_rc=0
+( cd "$repo_gitlink/findings" \
+  && "$BASH" "$branch_validator" 'fix-P2/correctness_inside-a-submodule' . ) >/dev/null 2>&1 \
+  || gitlink_inside_rc=$?
+if [[ "$gitlink_inside_rc" != 1 ]]; then
+  echo "a listing spelled '.' inside an initialised submodule was meant to refuse; got $gitlink_inside_rc" >&2
+  exit 1
+fi
+# A PATH BELOW A GITLINK IS UNNAMEABLE AND NOT RESOLVED, which is the ancestor
+# half of the same rule: no index entry and no tree entry of this repository is
+# named by a path through a gitlink.
+#
+# THE ROW THAT STOOD HERE ASSERTED THAT AND WITNESSED NOTHING, AND BOTH HALVES
+# OF THAT WERE MEASURED. It created an UNSTAGED file in a directory under the
+# INITIALISED submodule above and asserted exit 1: `git ls-files -s -- deeper`
+# exits 0 with empty output whichever repository is asked, so the diagnostic was
+# `git records nothing at …` and the row held with the ancestor walk taken out.
+# STAGING IT DOES NOT REPAIR THE ROW, IT INVERTS IT -- committed in the submodule
+# with the outer gitlink updated, the same listing conforms at exit 0 on both
+# trees, because a listing INSIDE an initialised submodule is named by THAT
+# submodule's index. That is the project-in-a-submodule rule the next block
+# states and measures; it is not this one, and the two cannot both hold of one
+# path.
+#
+# SO THE WITNESS IS A GITLINK WITH NO WORK TREE AT IT, where this repository is
+# the one that names the path: discovery from `findings/` lands in the
+# SUPERPROJECT, which records `findings` at 160000 and records nothing under it.
+# The input that separates the two answers is a REGULAR FILE, because a file
+# listing is READ wherever the records hold nothing at all -- it is the shape the
+# workflow hands in from RUNNER_TEMP -- and is NOT read where a recorded blob
+# stands above it. With the ancestor walk in `recorded_kind_of` taken out, this
+# file conforms at exit 0 naming a finding this repository never filed; with it,
+# the refusal quotes the recorded mode, which is what the assertion below reads.
+repo_below="$fixture_dir/repo-gitlink-with-no-work-tree"
+new_repo "$repo_below"
+echo seed > "$repo_below/seed.txt"
+git -C "$repo_below" add -A && git -C "$repo_below" commit -q -m base
+below_base="$(git -C "$repo_below" rev-parse HEAD)"
+git -C "$repo_below" update-index --add --cacheinfo \
+  "160000,$(git -C "$repo_gitlink/findings" rev-parse HEAD),findings"
+git -C "$repo_below" commit -q -m 'a gitlink at findings with no work tree at it'
+below_head="$(git -C "$repo_below" rev-parse HEAD)"
+mkdir -p "$repo_below/findings"
+printf 'P2_correctness_202609100002_under-a-submodule.md\n' > "$repo_below/findings/listing.txt"
+if ! git -C "$repo_below" ls-tree "$below_head" | grep -q $'^160000 commit [0-9a-f]*\tfindings$' \
+  || [[ -e "$repo_below/findings/.git" ]] \
+  || [[ "$(git -C "$repo_below" ls-files -- findings)" != findings ]]; then
+  echo 'the fixture was meant to record findings as a gitlink with no work tree at it' >&2
+  exit 1
+fi
+both_apis 'a file below a gitlink is named by no ledger of this repository' \
+  "$repo_below" "$below_base" "$below_head" 'fix-P2/correctness_under-a-submodule' 1 \
+  "$repo_below/findings/listing.txt"
+# AND IT REFUSES FOR THE GITLINK. Every refusal here is exit 1 and `names no
+# finding` is one of them, so the row that reads the code alone cannot tell the
+# repaired fixture from the one it replaced.
+below_rc=0
+below_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_under-a-submodule' \
+  "$repo_below/findings/listing.txt" 2>&1)" || below_rc=$?
+if [[ "$below_rc" != 1 ]] || [[ "$below_out" != *"records 'findings' as mode 160000"* ]]; then
+  echo "a file below a gitlink was meant to refuse for the recorded mode; got $below_rc" >&2
+  printf '%s\n' "$below_out" >&2
+  exit 1
+fi
+# AND AN ORDINARY findings DIRECTORY STILL RESOLVES THE SAME NAME, so the rule
+# above is a filter on the RECORDED TYPE and not on the shape of the checkout.
+repo_plain_dir="$fixture_dir/repo-ordinary-findings-directory"
+new_repo "$repo_plain_dir"
+echo seed > "$repo_plain_dir/seed.txt"
+git -C "$repo_plain_dir" add -A && git -C "$repo_plain_dir" commit -q -m base
+plain_dir_base="$(git -C "$repo_plain_dir" rev-parse HEAD)"
+commit_finding "$repo_plain_dir" 'P2_correctness_202609100001_inside-a-submodule.md' 'an ordinary finding'
+plain_dir_head="$(git -C "$repo_plain_dir" rev-parse HEAD)"
+both_apis 'and an ordinary findings directory still resolves that name' \
+  "$repo_plain_dir" "$plain_dir_base" "$plain_dir_head" 'fix-P2/correctness_inside-a-submodule' 0
+
+# ---- WHICH repository answers is decided by the NAME, and not by the submodule ----------------
+#
+# The block above is the hostile half: a listing that IS an initialised
+# submodule's root is named by the EMPTY path in that submodule's index, and the
+# empty path is the whole of another repository's ledger. The ascent out of it
+# was written for that, and the first cut of it ascended out of EVERY submodule
+# whatever the listing was called inside one -- which threw away the ledger of a
+# project that simply lives in a submodule. Every shape below is the LEGITIMATE
+# counterpart of one above it, and the false green that repair created is the
+# first.
+#
+# A PROJECT IN A SUBMODULE KEEPS ITS OWN LEDGER, AND EQUIVALENT INPUTS AGREE.
+# The project is an initialised submodule at `project`; its base holds one
+# finding and its head holds another of the SAME description and a different
+# timestamp, so the three listings hold two and the checkout holds one. Measured
+# against the unrepaired ascent: the merge-base listing plus the project's own
+# `findings/` answered exit 0 `conforms` where the three generated tree listings
+# answered exit 1 `names 2 findings`, and that directory alone answered exit 1
+# `names no finding` where the project's own ledger holds one. A false green, a
+# false red, and two equivalent inputs disagreeing about one commit -- so all
+# three input forms are asserted here, and against each other.
+repo_host="$fixture_dir/repo-project-in-a-submodule"
+new_repo "$repo_host"
+echo seed > "$repo_host/seed.txt"
+git -C "$repo_host" add -A && git -C "$repo_host" commit -q -m base
+new_repo "$repo_host/project"
+echo seed > "$repo_host/project/seed.txt"
+git -C "$repo_host/project" add -A && git -C "$repo_host/project" commit -q -m 'the project base'
+commit_finding "$repo_host/project" 'P2_correctness_202609100011_a-project-of-its-own.md' 'the project files a finding'
+host_base="$(git -C "$repo_host/project" rev-parse HEAD)"
+git -C "$repo_host/project" rm -q 'findings/P2_correctness_202609100011_a-project-of-its-own.md'
+commit_finding "$repo_host/project" 'P2_correctness_202609100012_a-project-of-its-own.md' 'and files its twin'
+host_head="$(git -C "$repo_host/project" rev-parse HEAD)"
+git -C "$repo_host" update-index --add --cacheinfo "160000,$host_head,project"
+git -C "$repo_host" commit -q -m 'the project as an initialised submodule'
+if ! git -C "$repo_host" ls-tree HEAD | grep -q $'^160000 commit [0-9a-f]*\tproject$' \
+  || [[ -n "$(git -C "$repo_host" status --porcelain)" ]] \
+  || [[ -n "$(git -C "$repo_host/project" status --porcelain)" ]] \
+  || [[ ! -f "$repo_host/project/findings/P2_correctness_202609100012_a-project-of-its-own.md" ]]; then
+  echo 'the fixture was meant to record the project as a clean 160000 gitlink over a clean project' >&2
+  exit 1
+fi
+host_out="$(mktemp -d "$fixture_dir/host-listings-XXXXXX")"
+if ! ( cd "$repo_host/project" && "$BASH" "$range_script" "$host_base" "$host_head" "$host_out" ) >/dev/null 2>&1; then
+  echo 'findings-in-range.sh failed inside a project that is a submodule' >&2
+  exit 1
+fi
+host_trees_rc=0
+host_trees_out="$( cd "$repo_host/project" \
+  && "$BASH" "$branch_validator" 'fix-P2/correctness_a-project-of-its-own' \
+       "$host_out/merge-base-findings" "$host_out/head-findings" "$host_out/range-findings" 2>&1 )" \
+  || host_trees_rc=$?
+host_mixed_rc=0
+host_mixed_out="$( cd "$repo_host/project" \
+  && "$BASH" "$branch_validator" 'fix-P2/correctness_a-project-of-its-own' \
+       "$host_out/merge-base-findings" findings 2>&1 )" || host_mixed_rc=$?
+if [[ "$host_trees_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$host_trees_out" \
+  || [[ "$host_mixed_rc" != "$host_trees_rc" ]] || ! grep -q 'names 2 findings' <<< "$host_mixed_out"; then
+  echo "a project in a submodule is judged by its own ledger: the three listings answered" >&2
+  echo "  $host_trees_rc and the merge-base listing beside its own directory $host_mixed_rc" >&2
+  exit 1
+fi
+# AND ITS OWN DIRECTORY ALONE RESOLVES THE NAME, which is the half the ascent
+# turned into a false red: one finding in the checkout, one candidate, exit 0.
+# Every spelling, and from inside the project as well as from outside it.
+host_dir_rc=0
+( cd "$repo_host/project" \
+  && "$BASH" "$branch_validator" 'fix-P2/correctness_a-project-of-its-own' findings ) >/dev/null 2>&1 \
+  || host_dir_rc=$?
+if [[ "$host_dir_rc" != 0 ]]; then
+  echo "a project in a submodule must resolve its own finding from its own findings/; got $host_dir_rc" >&2
+  exit 1
+fi
+spelling_case 'a project in a submodule, its own findings directory, every spelling' \
+  'fix-P2/correctness_a-project-of-its-own' 0 "$repo_host/project/findings"
+
+# AN ORDINARY NESTED REPOSITORY INSIDE A SUBMODULE DOES NOT HIDE THE GITLINK
+# ABOVE IT. The submodule records nothing at `nested`, so the query that asks
+# for an immediate superproject answers empty there and the ascent used to stop:
+# the nested repository's own index was read as this repository's ledger, and a
+# finding at its root conformed at exit 0 while the same commit's three tree
+# listings refused at exit 1 `names no finding`. The ascent goes on past a
+# repository that records nothing, and the 160000 one level further out is what
+# answers.
+repo_under="$fixture_dir/repo-nested-under-a-gitlink"
+new_repo "$repo_under"
+echo seed > "$repo_under/seed.txt"
+git -C "$repo_under" add -A && git -C "$repo_under" commit -q -m base
+under_base="$(git -C "$repo_under" rev-parse HEAD)"
+new_repo "$repo_under/findings"
+echo fixture > "$repo_under/findings/seed.txt"
+git -C "$repo_under/findings" add -A && git -C "$repo_under/findings" commit -q -m 'the submodule ledger'
+new_repo "$repo_under/findings/nested"
+echo fixture > "$repo_under/findings/nested/P2_correctness_202609100013_under-a-gitlink.md"
+git -C "$repo_under/findings/nested" add -A
+git -C "$repo_under/findings/nested" commit -q -m 'a repository nested inside the submodule'
+printf 'nested/\n' > "$repo_under/findings/.gitignore"
+git -C "$repo_under/findings" add .gitignore
+git -C "$repo_under/findings" commit -q -m 'ignore the ordinary nested repository'
+git -C "$repo_under" update-index --add --cacheinfo \
+  "160000,$(git -C "$repo_under/findings" rev-parse HEAD),findings"
+git -C "$repo_under" commit -q -m 'an initialised submodule at findings'
+under_head="$(git -C "$repo_under" rev-parse HEAD)"
+if ! git -C "$repo_under" ls-tree "$under_head" | grep -q $'^160000 commit [0-9a-f]*\tfindings$' \
+  || [[ -n "$(git -C "$repo_under" status --porcelain)" ]] \
+  || [[ -n "$(git -C "$repo_under/findings" ls-files -s -- nested)" ]] \
+  || [[ ! -f "$repo_under/findings/nested/P2_correctness_202609100013_under-a-gitlink.md" ]]; then
+  echo 'the fixture was meant to nest an unrecorded repository under a clean 160000 gitlink' >&2
+  exit 1
+fi
+both_apis 'a repository nested under a gitlink is no ledger of this repository' \
+  "$repo_under" "$under_base" "$under_head" 'fix-P2/correctness_under-a-gitlink' 1 \
+  "$repo_under/findings/nested"
+
+# AND AN ORDINARY NESTED REPOSITORY WITH NO GITLINK OVER IT STILL ANSWERS FROM
+# ITS OWN INDEX, which is that shape's legitimate counterpart and the branch of
+# the ascent that finds nothing recorded anywhere above. The surrounding
+# repository records nothing at `nested`, so there is no recorded type to decide
+# from and the nested repository's own ledger is the answer, exactly as before
+# any of this.
+repo_beside="$fixture_dir/repo-ordinary-nested-repository"
+new_repo "$repo_beside"
+echo seed > "$repo_beside/seed.txt"
+printf 'nested/\n' > "$repo_beside/.gitignore"
+git -C "$repo_beside" add -A && git -C "$repo_beside" commit -q -m base
+new_repo "$repo_beside/nested"
+echo fixture > "$repo_beside/nested/P2_correctness_202609100013_under-a-gitlink.md"
+git -C "$repo_beside/nested" add -A
+git -C "$repo_beside/nested" commit -q -m 'an ordinary nested repository with its own ledger'
+if [[ -n "$(git -C "$repo_beside" ls-files -s -- nested)" ]] \
+  || [[ -n "$(git -C "$repo_beside" status --porcelain)" ]]; then
+  echo 'the fixture was meant to leave the nested repository unrecorded by the one around it' >&2
+  exit 1
+fi
+beside_rc=0
+"$BASH" "$branch_validator" 'fix-P2/correctness_under-a-gitlink' "$repo_beside/nested" \
+  >/dev/null 2>&1 || beside_rc=$?
+if [[ "$beside_rc" != 0 ]]; then
+  echo "an ordinary nested repository nothing records must answer from its own index; got $beside_rc" >&2
+  exit 1
+fi
+
+# THE QUESTION EVERY CANDIDATE IS ASKED IS FIXED AT THE LISTING ROOT, AND ONLY
+# THE CANDIDATE ADVANCES. The ascent carried the WALKER as the subject, so the
+# question mutated as the walk rose: it set out asking who records the listing
+# and ended up asking who records wherever it had got to. THREE ORDINARY
+# REPOSITORIES AND NO GITLINK ANYWHERE is what that costs. `outer` tracks
+# `project/seed.txt` and nothing else below `project`; `outer/project` is a
+# repository of its own that ignores `nested/`; `outer/project/nested` is a
+# repository whose ledger is at its own root. Nothing records `project/nested`
+# -- but `records_path outer project` answers YES on an ANCESTOR MATCH, because
+# `project/seed.txt` is under `project`, so the walker-subject ascent made
+# `outer` the authority and the nested repository's ledger vanished with it:
+# the same base listing beside that directory conformed at exit 0 where it
+# refused at exit 1 `names 2 findings` beside a generated head listing of the
+# same commit. `records_path outer project/nested` answers NO, and that is the
+# question the loop asks now.
+#
+# AGREEMENT IS ASSERTED BETWEEN EQUIVALENT CANDIDATE SETS AND NOT BETWEEN ALL
+# THREE INPUT FORMS. The base listing plus the head listing and the base listing
+# plus the same ledger DIRECTORY denote one set -- the twin at the boundary and
+# the finding at the head -- and must answer alike. The directory ALONE denotes
+# only what the checkout holds, which is one finding and not two, so exit 0
+# there is the right answer and not a disagreement; asserting all three alike
+# would be asserting something false.
+repo_unrec="$fixture_dir/repo-unrecorded-nested-ledger"
+new_repo "$repo_unrec"
+mkdir -p "$repo_unrec/project"
+printf 'outer tracks a sibling\n' > "$repo_unrec/project/seed.txt"
+printf 'project/.gitignore\nproject/nested/\n' > "$repo_unrec/.gitignore"
+git -C "$repo_unrec" add -A
+git -C "$repo_unrec" commit -q -m 'only a sibling file below project'
+new_repo "$repo_unrec/project"
+printf 'nested/\n' > "$repo_unrec/project/.gitignore"
+git -C "$repo_unrec/project" add -A
+git -C "$repo_unrec/project" commit -q -m 'the middle repository ignores nested'
+new_repo "$repo_unrec/project/nested"
+printf 'fixture\n' > "$repo_unrec/project/nested/P2_correctness_202609130002_unrecorded-nested-ledger.md"
+git -C "$repo_unrec/project/nested" add -A
+git -C "$repo_unrec/project/nested" commit -q -m 'the nested repository files its finding'
+for unrec_repo in "$repo_unrec" "$repo_unrec/project" "$repo_unrec/project/nested"; do
+  if [[ -n "$(git -C "$unrec_repo" status --porcelain)" ]] \
+    || git -C "$unrec_repo" ls-files -s | grep -q '^160000 '; then
+    echo "the fixture was meant to be three clean repositories with no gitlink: $unrec_repo" >&2
+    exit 1
+  fi
+done
+if [[ -n "$(git -C "$repo_unrec" ls-files -s -- project/nested)" ]] \
+  || [[ -n "$(git -C "$repo_unrec/project" ls-files -s -- nested)" ]] \
+  || [[ -z "$(git -C "$repo_unrec" ls-files -s -- project)" ]]; then
+  echo 'the fixture was meant to record a sibling under project and nothing at project/nested' >&2
+  exit 1
+fi
+printf 'P2_correctness_202609130001_unrecorded-nested-ledger.md\n' > "$repo_unrec/base.txt"
+git -C "$repo_unrec/project/nested" ls-tree --name-only HEAD > "$repo_unrec/head.txt"
+unrec_trees_rc=0
+unrec_trees_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_unrecorded-nested-ledger' \
+  "$repo_unrec/base.txt" "$repo_unrec/head.txt" 2>&1)" || unrec_trees_rc=$?
+unrec_mixed_rc=0
+unrec_mixed_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_unrecorded-nested-ledger' \
+  "$repo_unrec/base.txt" "$repo_unrec/project/nested" 2>&1)" || unrec_mixed_rc=$?
+if [[ "$unrec_trees_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$unrec_trees_out" \
+  || [[ "$unrec_mixed_rc" != "$unrec_trees_rc" ]] || ! grep -q 'names 2 findings' <<< "$unrec_mixed_out"; then
+  echo "an unrecorded nested repository keeps its own ledger: the generated head listing answered" >&2
+  echo "  $unrec_trees_rc and the same ledger directory $unrec_mixed_rc" >&2
+  printf '%s\n' "$unrec_mixed_out" >&2
+  exit 1
+fi
+unrec_dir_rc=0
+"$BASH" "$branch_validator" 'fix-P2/correctness_unrecorded-nested-ledger' \
+  "$repo_unrec/project/nested" >/dev/null 2>&1 || unrec_dir_rc=$?
+if [[ "$unrec_dir_rc" != 0 ]]; then
+  echo "that ledger alone holds one finding of that description; got $unrec_dir_rc" >&2
+  exit 1
+fi
+spelling_case 'an unrecorded nested ledger, every spelling' \
+  'fix-P2/correctness_unrecorded-nested-ledger' 0 "$repo_unrec/project/nested"
+
+# AND ITS PAIR, WHERE THE ANCESTOR RECORDS THE LISTING ROOT ITSELF AND AUTHORITY
+# REALLY DOES MOVE OUT. The two fixtures differ in ONE thing -- whether `outer`'s
+# tracked file is UNDER the listing root or BESIDE it -- and they must answer
+# differently, which is what makes the question above a question and not a
+# formality. Here `outer` records `project/nested/tracked.txt`, so `project/nested`
+# is a directory of OUTER'S ledger and what the repository somebody nested there
+# holds is not this repository's record of that path: the listing names no
+# finding, though a finding-shaped file is committed at the nested root.
+#
+# THIS ONE IS A GUARD AND NOT A RED WITNESS for the subject-fixed question: the
+# walker-subject ascent reached `outer` here too, by the ANCESTOR match on
+# `project`, and answered the same. It witnesses the half of `records_path` the
+# new multi-component subject relies on -- that entries UNDER a path count as
+# that path being recorded -- which the single-component subject never exercised.
+repo_records_root="$fixture_dir/repo-outer-records-the-nested-root"
+mkdir -p "$repo_records_root/project/nested"
+new_repo "$repo_records_root"
+printf 'outer tracks a file UNDER the nested root\n' > "$repo_records_root/project/nested/tracked.txt"
+printf 'project/.gitignore\nproject/nested/P2_*\n' > "$repo_records_root/.gitignore"
+git -C "$repo_records_root" add -A
+git -C "$repo_records_root" commit -q -m 'outer tracks a file under project/nested'
+new_repo "$repo_records_root/project"
+printf 'nested/\n' > "$repo_records_root/project/.gitignore"
+git -C "$repo_records_root/project" add -A
+git -C "$repo_records_root/project" commit -q -m 'the middle repository ignores nested'
+new_repo "$repo_records_root/project/nested"
+printf 'fixture\n' > "$repo_records_root/project/nested/P2_correctness_202609130006_outer-records-the-root.md"
+git -C "$repo_records_root/project/nested" add -A
+git -C "$repo_records_root/project/nested" commit -q -m 'the nested repository files a finding of its own'
+for rec_repo in "$repo_records_root" "$repo_records_root/project" "$repo_records_root/project/nested"; do
+  if [[ -n "$(git -C "$rec_repo" status --porcelain)" ]] \
+    || git -C "$rec_repo" ls-files -s | grep -q '^160000 '; then
+    echo "the fixture was meant to be three clean repositories with no gitlink: $rec_repo" >&2
+    exit 1
+  fi
+done
+if [[ -z "$(git -C "$repo_records_root" ls-files -s -- project/nested)" ]] \
+  || [[ -n "$(git -C "$repo_records_root/project" ls-files -s -- nested)" ]] \
+  || [[ ! -f "$repo_records_root/project/nested/P2_correctness_202609130006_outer-records-the-root.md" ]]; then
+  echo 'the fixture was meant to record entries UNDER project/nested and nothing at nested' >&2
+  exit 1
+fi
+rec_rc=0
+rec_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_outer-records-the-root' \
+  "$repo_records_root/project/nested" 2>&1)" || rec_rc=$?
+if [[ "$rec_rc" != 1 ]] || ! grep -q 'names no finding' <<< "$rec_out"; then
+  echo "a nested root the repository above RECORDS is judged by that repository; got $rec_rc" >&2
+  printf '%s\n' "$rec_out" >&2
+  exit 1
+fi
+spelling_case 'a nested root the outer repository records, every spelling' \
+  'fix-P2/correctness_outer-records-the-root' 1 "$repo_records_root/project/nested"
+
+# AND A WORK TREE WITH NO REPOSITORY ABOVE IT AT ALL, which is the branch of the
+# ascent that finds no candidate on its FIRST step rather than on a later one.
+# It is the shape every ordinary checkout has and the one a mutation that made
+# the ascent unconditional would break, so it is asserted rather than assumed.
+repo_alone="$fixture_dir/repo-with-nothing-above-it"
+new_repo "$repo_alone"
+printf 'fixture\n' > "$repo_alone/P2_correctness_202609130005_nothing-above-it.md"
+git -C "$repo_alone" add -A
+git -C "$repo_alone" commit -q -m 'a ledger at the root of a repository nothing contains'
+if git -C "$fixture_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo 'the fixture directory is itself inside a work tree, so "nothing above it" is not the shape' >&2
+  exit 1
+fi
+alone_rc=0
+"$BASH" "$branch_validator" 'fix-P2/correctness_nothing-above-it' "$repo_alone" >/dev/null 2>&1 \
+  || alone_rc=$?
+if [[ "$alone_rc" != 0 ]]; then
+  echo "a work tree with nothing above it answers from its own index; got $alone_rc" >&2
+  exit 1
+fi
+
+# ---- A BARE REPOSITORY IN THE WAY IS NOT THE TOP OF THE WALK -----------------------------------
+#
+# `rev-parse --is-inside-work-tree` answering `false` says THAT DIRECTORY has no
+# work tree over it -- it is a bare repository, or the inside of a `.git`. Two
+# places read it as "and nothing above records the listing either", which is a
+# clause git had not said, and each gave a false green for it: a bare repository
+# can sit inside a superproject that records the whole path.
+#
+# The shape is one superproject recording `findings` at 160000, an IGNORED bare
+# repository at `findings/bare.git`, and a ledger under that. TWO ledgers are
+# built on it, because the two readings are in different functions and one
+# fixture reaches only one of them:
+#
+#   bare.git/nested   an ordinary repository, so the listing IS a work tree root,
+#                     its name in its own index is empty, and `enclosing_work_tree`
+#                     makes the ascent. That is the walk that stopped.
+#   bare.git/holder   a PLAIN DIRECTORY, so `locate_listing`'s own discovery
+#                     answers `false` FOR THE LISTING, and the `filesystem` world
+#                     was chosen before any ascent could begin.
+#
+# AND THE WITNESS THAT SAYS WHICH DEFECT THIS IS: renaming `bare.git/HEAD` away
+# stops that directory LOOKING bare, and at the previous head its presence alone
+# decided the verdict -- exit 0 with the file, exit 1 without it -- while nothing
+# about what any repository RECORDS changed. Both states must now refuse.
+repo_bare="$fixture_dir/repo-behind-a-bare-boundary"
+new_repo "$repo_bare"
+echo seed > "$repo_bare/seed.txt"
+git -C "$repo_bare" add -A && git -C "$repo_bare" commit -q -m base
+bare_base="$(git -C "$repo_bare" rev-parse HEAD)"
+new_repo "$repo_bare/findings"
+printf 'bare.git/\n' > "$repo_bare/findings/.gitignore"
+git -C "$repo_bare/findings" add -A
+git -C "$repo_bare/findings" commit -q -m 'the submodule ledger ignores the bare repository'
+git -C "$repo_bare" update-index --add --cacheinfo \
+  "160000,$(git -C "$repo_bare/findings" rev-parse HEAD),findings"
+git -C "$repo_bare" commit -q -m 'an initialised submodule at findings'
+bare_head="$(git -C "$repo_bare" rev-parse HEAD)"
+mkdir -p "$repo_bare/findings/bare.git"
+git -C "$repo_bare/findings/bare.git" init -q --bare .
+new_repo "$repo_bare/findings/bare.git/nested"
+printf 'fixture\n' \
+  > "$repo_bare/findings/bare.git/nested/P2_correctness_202609130010_behind-a-bare-boundary.md"
+git -C "$repo_bare/findings/bare.git/nested" add -A
+git -C "$repo_bare/findings/bare.git/nested" commit -q -m 'the nested repository files its finding'
+mkdir -p "$repo_bare/findings/bare.git/holder"
+printf 'fixture\n' \
+  > "$repo_bare/findings/bare.git/holder/P2_correctness_202609130011_inside-a-bare-repository.md"
+if ! git -C "$repo_bare" ls-tree "$bare_head" | grep -q $'^160000 commit [0-9a-f]*\tfindings$' \
+  || [[ -n "$(git -C "$repo_bare" status --porcelain)" ]] \
+  || [[ -n "$(git -C "$repo_bare/findings" status --porcelain)" ]] \
+  || [[ -n "$(git -C "$repo_bare/findings/bare.git/nested" status --porcelain)" ]] \
+  || [[ -n "$(git -C "$repo_bare/findings" ls-files -s -- bare.git)" ]] \
+  || [[ "$(git -C "$repo_bare/findings/bare.git" rev-parse --is-bare-repository)" != true ]] \
+  || [[ "$(git -C "$repo_bare/findings/bare.git" rev-parse --is-inside-work-tree)" != false ]]; then
+  echo 'the fixture was meant to be a bare repository, ignored, under a clean 160000 gitlink' >&2
+  exit 1
+fi
+both_apis 'a ledger behind a bare boundary is under the superproject gitlink' \
+  "$repo_bare" "$bare_base" "$bare_head" 'fix-P2/correctness_behind-a-bare-boundary' 1 \
+  "$repo_bare/findings/bare.git/nested"
+bare_nested_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_behind-a-bare-boundary' \
+  "$repo_bare/findings/bare.git/nested" 2>&1)" || true
+if ! grep -q 'mode 160000' <<< "$bare_nested_out"; then
+  echo 'the refusal was meant to be the superproject gitlink, reached past the bare repository' >&2
+  printf '%s\n' "$bare_nested_out" >&2
+  exit 1
+fi
+spelling_case 'a ledger behind a bare boundary, every spelling' \
+  'fix-P2/correctness_behind-a-bare-boundary' 1 "$repo_bare/findings/bare.git/nested"
+both_apis 'a plain directory inside a bare repository is no ledger either' \
+  "$repo_bare" "$bare_base" "$bare_head" 'fix-P2/correctness_inside-a-bare-repository' 1 \
+  "$repo_bare/findings/bare.git/holder"
+spelling_case 'a plain directory inside a bare repository, every spelling' \
+  'fix-P2/correctness_inside-a-bare-repository' 1 "$repo_bare/findings/bare.git/holder"
+# AND THE ANSWER DOES NOT COME FROM `bare.git/HEAD`. Renaming it away leaves a
+# directory git no longer reads as a repository at all; the verdict must not move,
+# and at the previous head it moved from exit 0 to exit 1 on that rename alone.
+mv "$repo_bare/findings/bare.git/HEAD" "$repo_bare/findings/bare.git/HEAD.renamed"
+head_gone_rc=0
+head_gone_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_behind-a-bare-boundary' \
+  "$repo_bare/findings/bare.git/nested" 2>&1)" || head_gone_rc=$?
+mv "$repo_bare/findings/bare.git/HEAD.renamed" "$repo_bare/findings/bare.git/HEAD"
+head_back_rc=0
+head_back_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_behind-a-bare-boundary' \
+  "$repo_bare/findings/bare.git/nested" 2>&1)" || head_back_rc=$?
+if [[ "$head_gone_rc" != 1 ]] || [[ "$head_back_rc" != 1 ]] \
+  || ! grep -q 'mode 160000' <<< "$head_gone_out" \
+  || ! grep -q 'mode 160000' <<< "$head_back_out"; then
+  echo "whether bare.git/HEAD is there must not decide the verdict; got" \
+    "$head_gone_rc without it and $head_back_rc with it" >&2
+  exit 1
+fi
+
+# AND THE SAME BOUNDARY WITH NOTHING ABOVE IT, which is the ascent running out of
+# levels rather than finding a candidate. A bare repository nobody contains is
+# still a place where the filesystem is the whole of the evidence, and these are
+# the legitimate callers the ascent must not have turned red: a plain directory
+# inside a loose bare repository, the same spelled `.` from inside it -- which is
+# the arm that continues a relative spelling through `$PWD` -- and an ordinary
+# repository nested inside one, which keeps its own index because nothing above
+# records it.
+loose_bare="$fixture_dir/loose-bare-repository/bare.git"
+mkdir -p "$loose_bare"
+git -C "$loose_bare" init -q --bare .
+mkdir -p "$loose_bare/holder"
+printf 'fixture\n' > "$loose_bare/holder/P2_correctness_202609130012_a-loose-bare-repository.md"
+loose_rc=0
+"$BASH" "$branch_validator" 'fix-P2/correctness_a-loose-bare-repository' "$loose_bare/holder" \
+  >/dev/null 2>&1 || loose_rc=$?
+loose_dot_rc=0
+( cd "$loose_bare/holder" \
+  && "$BASH" "$branch_validator" 'fix-P2/correctness_a-loose-bare-repository' . >/dev/null 2>&1 ) \
+  || loose_dot_rc=$?
+loose_rel_rc=0
+( cd "$loose_bare" \
+  && "$BASH" "$branch_validator" 'fix-P2/correctness_a-loose-bare-repository' holder \
+    >/dev/null 2>&1 ) || loose_rel_rc=$?
+if [[ "$loose_rc" != 0 ]] || [[ "$loose_dot_rc" != 0 ]] || [[ "$loose_rel_rc" != 0 ]]; then
+  echo "a listing inside a bare repository nothing contains is the filesystem's to answer;" \
+    "got $loose_rc absolute, $loose_dot_rc as '.', $loose_rel_rc relative" >&2
+  exit 1
+fi
+new_repo "$loose_bare/nested"
+printf 'fixture\n' > "$loose_bare/nested/P2_correctness_202609130013_behind-a-loose-boundary.md"
+git -C "$loose_bare/nested" add -A
+git -C "$loose_bare/nested" commit -q -m 'its own ledger, with nothing above the bare one'
+loose_nested_rc=0
+"$BASH" "$branch_validator" 'fix-P2/correctness_behind-a-loose-boundary' "$loose_bare/nested" \
+  >/dev/null 2>&1 || loose_nested_rc=$?
+if [[ "$loose_nested_rc" != 0 ]]; then
+  echo "a repository behind a bare boundary that nothing records keeps its own ledger;" \
+    "got $loose_nested_rc" >&2
+  exit 1
+fi
+
+# ---- A COMPONENT THAT IS A SYMLINK MUST NOT LOSE THE PHYSICAL REPOSITORY ------------------------
+#
+# The ascent above steps to the WRITTEN parent, and that is right for naming the
+# listing and wrong for finding the repository. `git -C <path>` chdirs and
+# resolves the path PHYSICALLY, so where a component of the listing is a SYMLINK
+# OUT OF THE WRITTEN TREE the two chains part and the ascent walks up a tree git
+# was never in.
+#
+# The shape is the section above's, reached the other way round: a work tree that
+# IGNORES a bare repository under it, a plain directory inside that bare
+# repository holding a matching finding, and a directory in NO REPOSITORY AT ALL
+# holding a symlink to the bare one. Git answers `false` for the listing -- it is
+# inside the bare repository the link points at -- the ascent then asked about the
+# written parents, which are in no repository, ran out of levels, chose the
+# `filesystem` world and CONFORMED AT EXIT 0. The same directory spelled
+# physically refused at exit 1: one directory, two spellings, two verdicts.
+#
+# AND THE WITNESS THAT SAYS WHICH DEFECT IT IS is the section above's too.
+# Renaming `bare.git/HEAD` away leaves a directory git no longer reads as a
+# repository, which changes nothing about what any repository RECORDS, and it
+# flipped the verdict. Both states must refuse, and with the same words: the
+# repair is that the ascent asks GIT where the git directory physically is and
+# continues from that directory's parent, so `HEAD` decides nothing either way.
+#
+# RUNS NATIVELY ON WINDOWS: where a symlink can be made there, yes -- every name
+# here is an ordinary one and nothing is spelled with a backslash or a drive
+# designator. Where one cannot, the probe skips it loudly, as it does for every
+# other symlink case in this file.
+if [[ -L "$symlink_probe" ]]; then
+  sym_root="$fixture_dir/symlinked-component"
+  sym_ext="$sym_root/physical"
+  sym_written="$sym_root/written"
+  new_repo "$sym_ext"
+  printf 'bare.git/\n' > "$sym_ext/.gitignore"
+  echo seed > "$sym_ext/seed.txt"
+  git -C "$sym_ext" add -A \
+    && git -C "$sym_ext" commit -q -m 'a work tree that ignores the bare repository'
+  mkdir -p "$sym_ext/bare.git"
+  git -C "$sym_ext/bare.git" init -q --bare .
+  mkdir -p "$sym_ext/bare.git/holder"
+  printf 'fixture\n' \
+    > "$sym_ext/bare.git/holder/P2_correctness_202609130014_through-a-symlinked-component.md"
+  mkdir -p "$sym_written"
+  ln -s "$sym_ext/bare.git" "$sym_written/alias"
+  # The written side must really be outside every repository, or the case is
+  # about nothing: it is the ascent finding NOTHING up the written chain that
+  # chose the filesystem.
+  if [[ -n "$(git -C "$sym_ext" status --porcelain)" ]] \
+    || [[ -n "$(git -C "$sym_ext" ls-files -- bare.git)" ]] \
+    || [[ ! -L "$sym_written/alias" ]] \
+    || git -C "$sym_written" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo 'the fixture was meant to put the link in no repository, over an ignored bare one' >&2
+    exit 1
+  fi
+  sym_case() {  # sym_case -> "<exit> <first line of the refusal>"
+    local rc=0 out
+    out="$( cd "$sym_written" \
+      && "$BASH" "$branch_validator" \
+        'fix-P2/correctness_through-a-symlinked-component' 'alias/holder' 2>&1 )" || rc=$?
+    printf '%s %s\n' "$rc" "${out%%$'\n'*}"
+  }
+  sym_with_head="$(sym_case)"
+  mv "$sym_ext/bare.git/HEAD" "$sym_ext/bare.git/HEAD.renamed"
+  sym_no_head="$(sym_case)"
+  mv "$sym_ext/bare.git/HEAD.renamed" "$sym_ext/bare.git/HEAD"
+  sym_back="$(sym_case)"
+  if [[ "$sym_with_head" != 1\ * ]] || [[ "$sym_no_head" != "$sym_with_head" ]] \
+    || [[ "$sym_back" != "$sym_with_head" ]]; then
+    echo "a listing reached through a symlinked component must refuse whatever" \
+      "bare.git/HEAD is doing; got '$sym_with_head' with it, '$sym_no_head' without" \
+      "it and '$sym_back' with it back" >&2
+    exit 1
+  fi
+  # THE CONTROL IS THE SAME DIRECTORY SPELLED PHYSICALLY, which is the half that
+  # makes this two verdicts for one directory rather than one opinion about a
+  # link.
+  sym_physical_rc=0
+  "$BASH" "$branch_validator" 'fix-P2/correctness_through-a-symlinked-component' \
+    "$sym_ext/bare.git/holder" >/dev/null 2>&1 || sym_physical_rc=$?
+  if [[ "$sym_physical_rc" != 1 ]]; then
+    echo "the physical spelling of the same directory must refuse too; got $sym_physical_rc" >&2
+    exit 1
+  fi
+  # AND THE LEGITIMATE SHAPE THE SAME MECHANISM PRODUCES, because a hop to git's
+  # own position must not turn a listing red that nothing records. The loose bare
+  # repository above has nothing over it, so the filesystem is the whole of the
+  # evidence there whichever way the listing is reached -- and reached through a
+  # link it must still conform, exactly as its direct spelling does.
+  loose_alias="$fixture_dir/loose-bare-alias"
+  ln -s "$loose_bare" "$loose_alias"
+  loose_alias_rc=0
+  "$BASH" "$branch_validator" 'fix-P2/correctness_a-loose-bare-repository' \
+    "$loose_alias/holder" >/dev/null 2>&1 || loose_alias_rc=$?
+  if [[ "$loose_alias_rc" != 0 ]]; then
+    echo "a listing inside a bare repository nothing contains is the filesystem's to" \
+      "answer through a link too; got $loose_alias_rc" >&2
+    exit 1
+  fi
+  # AND RULE 6'S ONE DELIBERATE DIFFERENCE, WITH THE SHAPE THAT BOUNDS IT BESIDE
+  # IT. The refusal above is the shape where the CALLER'S OWN spelling never
+  # named its listing's root, and respelling the listing is the remedy it gives.
+  # THIS is the other shape: the caller's spelling named its listing's root
+  # exactly, nothing in that repository names the listing, the ascent moves
+  # authority to a work tree ABOVE it, and the root the listing must now be named
+  # in is one THIS WALK chose. A component of the path is a link out of the
+  # written tree, so the caller's chain does not reach that root and they wrote
+  # no name inside it at all.
+  #
+  # THAT USED TO REFUSE, AND REFUSING WAS TWO ANSWERS FOR ONE DIRECTORY: the
+  # physical spelling conformed at exit 0 where the written one refused at exit
+  # 1. The name now comes from git's own spelling -- `subject` and the answering
+  # root are both `--show-toplevel` answers, so the segment between them is
+  # exactly what `records_path` has just matched.
+  #
+  # AND THE PAIR IS WHAT KEEPS IT FROM BEING THE GENERAL RULE. Where the caller's
+  # chain DOES reach the new root, their components still decide, because the
+  # index records what they wrote and not what the link lands on: with the
+  # enclosing tree recording `alias` at 120000 pointing at `real` AND a finding
+  # under `real`, and `real` a nested repository of its own, `alias` must be
+  # answered from the caller's name -- mode 120000, no listing, no finding --
+  # while `real` conforms. Both match what a tree listing of that commit gives
+  # for the same path. A repair that took git's spelling whenever it could would
+  # turn the first into the second, which is `04432736`'s own `loop` false green
+  # one level further out.
+  auth_ext="$sym_root/authority-physical"
+  auth_written="$sym_root/authority-written"
+  new_repo "$auth_ext"
+  mkdir -p "$auth_ext/project"
+  printf 'fixture\n' > "$auth_ext/project/P2_correctness_202609130017_an-authority-move.md"
+  git -C "$auth_ext" add -A \
+    && git -C "$auth_ext" commit -q -m 'the enclosing tree records the listing root'
+  new_repo "$auth_ext/project"
+  mkdir -p "$auth_written"
+  ln -s "$auth_ext/project" "$auth_written/link"
+  auth_physical_rc=0
+  ( cd "$auth_ext" && "$BASH" "$branch_validator" \
+    'fix-P2/correctness_an-authority-move' 'project' ) >/dev/null 2>&1 || auth_physical_rc=$?
+  auth_written_rc=0
+  ( cd "$auth_written" && "$BASH" "$branch_validator" \
+    'fix-P2/correctness_an-authority-move' 'link' ) >/dev/null 2>&1 || auth_written_rc=$?
+  if [[ "$auth_physical_rc" != 0 ]] || [[ "$auth_written_rc" != "$auth_physical_rc" ]]; then
+    echo "one directory whose authority moved above it must answer the same by either" \
+      "spelling; the physical one answered $auth_physical_rc and the one through a link" \
+      "out of the written tree answered $auth_written_rc" >&2
+    exit 1
+  fi
+  # AND THE CALLER'S NAME STILL DECIDES WHERE THEY GAVE ONE.
+  auth_named="$sym_root/authority-named"
+  new_repo "$auth_named"
+  mkdir -p "$auth_named/real"
+  printf 'fixture\n' > "$auth_named/real/P2_correctness_202609130018_a-name-the-caller-gave.md"
+  ln -s real "$auth_named/alias"
+  git -C "$auth_named" add -A \
+    && git -C "$auth_named" commit -q -m 'a link the index records beside the tree it points at'
+  new_repo "$auth_named/real"
+  if [[ "$(git -C "$auth_named" ls-files -s -- alias | cut -d' ' -f1)" != 120000 ]]; then
+    echo 'the fixture was meant to record the link as a symlink, not as whatever it points at' >&2
+    exit 1
+  fi
+  auth_alias_rc=0
+  ( cd "$auth_named" && "$BASH" "$branch_validator" \
+    'fix-P2/correctness_a-name-the-caller-gave' 'alias' ) >/dev/null 2>&1 || auth_alias_rc=$?
+  auth_real_rc=0
+  ( cd "$auth_named" && "$BASH" "$branch_validator" \
+    'fix-P2/correctness_a-name-the-caller-gave' 'real' ) >/dev/null 2>&1 || auth_real_rc=$?
+  if [[ "$auth_alias_rc" != 1 ]] || [[ "$auth_real_rc" != 0 ]]; then
+    echo "a name the caller gave must be answered from the index entry it names: 'alias' is a" \
+      "120000 and holds no finding, 'real' is a tree and conforms; got $auth_alias_rc and" \
+      "$auth_real_rc" >&2
+    exit 1
+  fi
+else
+  echo 'note: skipping the symlinked-component cases (no symlink could be made)' >&2
+fi
+
+# ---- AND A GIT DIRECTORY THAT IS NOT ABOVE THE ANCHOR IS NOT HOPPED TO -------------------------
+#
+# RULE 5: `--absolute-git-dir` says where git's METADATA is, and metadata is not
+# a container. A repository whose `.git` is a DIRECTORY and whose config says
+# `core.bare = true` answers `--is-inside-work-tree` `false` at its own root and
+# `--absolute-git-dir` `<root>/.git` -- a directory that does NOT contain the
+# listing, and whose parent is the anchor itself. Measured with git 2.43 here:
+# `--is-inside-git-dir` is `false` from `<root>/holder` and from `<root>`, so the
+# hop is not taken and the lexical step is what runs.
+#
+# THIS FIXTURE USED TO PIN THE OTHER HALF -- that a hop landing where it started
+# still terminates -- and with rule 5's gate in place that shape cannot arise at
+# all: the gate is true only where the anchor is AT OR BELOW the git directory,
+# so the directory's parent is STRICTLY ABOVE the anchor and every hop shortens.
+# The assertion is still a TIMEOUT, because the failure worth pinning here is a
+# hang in a required check and not a wrong answer, and the `hopped` bound is kept
+# in the validator for the same reason: this pull request's own history is six
+# rounds of an argument that held in five shapes and not the sixth.
+#
+# THE PROBE IS A DIRECTORY IDENTITY AND NOT A TEXT MATCH, which is what it had
+# been. Git answers `C:/Users/.../.git` natively on Windows where the fixture
+# holds `/tmp/.../.git`; those name one directory and `-ef` says so, but the text
+# comparison did not, so the case SKIPPED there while reporting that git had not
+# produced the required shape -- a case that never ran on the one platform whose
+# spellings this whole section is about.
+#
+# RUNS NATIVELY ON WINDOWS: yes -- every name here is an ordinary one -- provided
+# `timeout` is on PATH, which is what the guard tests.
+if command -v timeout >/dev/null 2>&1; then
+  selfhop_dir="$fixture_dir/bare-config-in-a-git-directory"
+  mkdir -p "$selfhop_dir"
+  new_repo "$selfhop_dir"
+  git -C "$selfhop_dir" config core.bare true
+  mkdir -p "$selfhop_dir/holder"
+  printf 'fixture\n' > "$selfhop_dir/holder/P2_correctness_202609130015_a-hop-that-lands-where-it-started.md"
+  # The fixture is about nothing unless git really answers that way.
+  selfhop_gitdir="$(git -C "$selfhop_dir" rev-parse --absolute-git-dir 2>/dev/null)"
+  if [[ "$(git -C "$selfhop_dir" rev-parse --is-inside-work-tree 2>/dev/null)" != false ]] \
+    || [[ -z "$selfhop_gitdir" ]] || [[ ! "$selfhop_gitdir" -ef "$selfhop_dir/.git" ]]; then
+    echo 'note: skipping the self-hop case (this git does not answer false with a .git directory beside it)' >&2
+  else
+    # AND THE GATE ITSELF, ON REAL GIT: the anchor is not inside that git
+    # directory, so rule 5 says the metadata answer is not an answer about the
+    # listing. A `true` here would mean this fixture no longer covers what it
+    # says it covers.
+    if [[ "$(git -C "$selfhop_dir/holder" rev-parse --is-inside-git-dir 2>/dev/null)" != false ]]; then
+      echo 'git says the listing is inside a git directory whose parent is the anchor, so the' \
+        'hop gate no longer separates this shape from the one it is for' >&2
+      exit 1
+    fi
+    selfhop_rc=0
+    timeout 60 "$BASH" "$branch_validator" \
+      'fix-P2/correctness_a-hop-that-lands-where-it-started' "$selfhop_dir/holder" \
+      >/dev/null 2>&1 || selfhop_rc=$?
+    if [[ "$selfhop_rc" == 124 ]]; then
+      echo 'the ascent did not terminate where git names a git directory whose parent is the anchor' >&2
+      exit 1
+    fi
+    if [[ "$selfhop_rc" != 0 ]]; then
+      echo "a listing inside a bare-configured repository nothing contains is the filesystem's to" \
+        "answer; got $selfhop_rc" >&2
+      exit 1
+    fi
+  fi
+else
+  echo 'note: skipping the self-hop case (no timeout(1) to bound it with)' >&2
+fi
+
+# ---- AND THE GIT DIRECTORY THAT IS SOMEWHERE ELSE ENTIRELY --------------------------------------
+#
+# RULE 5's counter-example, and the P1 the round before this one introduced while
+# repairing the symlinked component. `git init --separate-git-dir` puts the
+# metadata OUTSIDE the tree it records; with `core.bare` true on it, git answers
+# `false` for a listing inside that tree and then names a directory that is no
+# ancestor of the listing at all. Hopping to its parent left the enclosing work
+# tree behind, the walk found no repository over what was left, and THE
+# FILESYSTEM answered: exit 0 `conforms`, where the same commit's superproject
+# records nothing there and the three tree listings refuse at exit 1.
+#
+# The superproject IGNORES `findings/`, so what it records for the listing is
+# nothing -- which is the whole point: the listing is inside a work tree, and a
+# work tree's untracked names are not its ledger. Losing the work tree is what
+# turned that into a conforming answer.
+#
+# RUNS NATIVELY ON WINDOWS: yes. Every name is an ordinary one, nothing is
+# spelled with a backslash or a drive designator, and `--separate-git-dir` is
+# not platform-specific.
+extgd_super="$fixture_dir/external-gitdir-super"
+extgd_meta="$fixture_dir/external-gitdir-metadata"
+new_repo "$extgd_super"
+printf 'findings/\n' > "$extgd_super/.gitignore"
+echo seed > "$extgd_super/seed.txt"
+git -C "$extgd_super" add -A \
+  && git -C "$extgd_super" commit -q -m 'a work tree that ignores the findings directory'
+mkdir -p "$extgd_super/findings/holder"
+git -C "$extgd_super/findings" init -q --separate-git-dir "$extgd_meta"
+git --git-dir="$extgd_meta" config core.bare true
+printf 'fixture\n' \
+  > "$extgd_super/findings/holder/P2_correctness_202609130016_a-git-directory-somewhere-else.md"
+# The fixture is about nothing unless git really answers that way: `false` for
+# the listing, a git directory OUTSIDE the superproject, and `--is-inside-git-dir`
+# `false`, which is the one answer that separates this from the symlinked
+# component above.
+extgd_iwt="$(git -C "$extgd_super/findings/holder" rev-parse --is-inside-work-tree 2>/dev/null)"
+extgd_igd="$(git -C "$extgd_super/findings/holder" rev-parse --is-inside-git-dir 2>/dev/null)"
+extgd_agd="$(git -C "$extgd_super/findings/holder" rev-parse --absolute-git-dir 2>/dev/null)"
+if [[ "$extgd_iwt" != false ]] || [[ "$extgd_igd" != false ]] \
+  || [[ -z "$extgd_agd" ]] || [[ ! "$extgd_agd" -ef "$extgd_meta" ]]; then
+  echo 'note: skipping the external git directory case (this git does not separate the' \
+    "metadata that way: is-inside-work-tree=$extgd_iwt is-inside-git-dir=$extgd_igd" \
+    "absolute-git-dir=$extgd_agd)" >&2
+else
+  extgd_rc=0
+  ( cd "$extgd_super" \
+    && "$BASH" "$branch_validator" \
+      'fix-P2/correctness_a-git-directory-somewhere-else' 'findings/holder' ) \
+    >/dev/null 2>&1 || extgd_rc=$?
+  if [[ "$extgd_rc" != 1 ]]; then
+    echo "a listing whose git directory is outside the work tree over it must be answered by" \
+      "that work tree's records and not by the filesystem; got $extgd_rc" >&2
+    exit 1
+  fi
+  # AND THE SAME QUESTION PUT TO THE SUPERPROJECT'S OWN RECORDS, which is what
+  # makes this two answers for one commit rather than an opinion about a
+  # directory. The superproject tracks one file and it is not a finding.
+  extgd_trees="$fixture_dir/external-gitdir-trees"
+  mkdir -p "$extgd_trees"
+  git -C "$extgd_super" ls-tree -r --name-only HEAD > "$extgd_trees/base"
+  cp "$extgd_trees/base" "$extgd_trees/head"
+  cp "$extgd_trees/base" "$extgd_trees/range"
+  extgd_tree_rc=0
+  "$BASH" "$branch_validator" 'fix-P2/correctness_a-git-directory-somewhere-else' \
+    "$extgd_trees/base" "$extgd_trees/head" "$extgd_trees/range" >/dev/null 2>&1 \
+    || extgd_tree_rc=$?
+  if [[ "$extgd_tree_rc" != 1 ]]; then
+    echo "the superproject's own tree listings must refuse the same name; got $extgd_tree_rc" >&2
+    exit 1
+  fi
+fi
+
+# ---- AND A PATH WHOSE RESOLUTION IS NOT STABLE DOES NOT REACH THE HOP ---------------------------
+#
+# The hop carries a path GIT resolved, which is why it is `--absolute-git-dir`
+# and not a `cd -P` in a subshell: that resolves `/proc/self` to the SUBSHELL's
+# pid, a directory gone before the next command runs. `/proc/self` does not reach
+# the hop at all, because git exits 128 for it rather than answering `false` --
+# and that is pinned here rather than left true by accident, since it is a fact
+# about git's behaviour and not about this file.
+#
+# RUNS NATIVELY ON WINDOWS: NO -- there is no `/proc` there, and the skip says so.
+# The property it pins is a property of `/proc`, so there is nothing to assert on
+# a platform that has none.
+proc_listing=/proc/self/fd
+if [[ -d "$proc_listing" ]]; then
+  proc_probe_rc=0
+  proc_probe="$(git -C "$proc_listing" rev-parse --is-inside-work-tree 2>/dev/null)" \
+    || proc_probe_rc=$?
+  if [[ "$proc_probe_rc" == 0 ]]; then
+    echo "git answered '$proc_probe' for '$proc_listing' at exit 0, so the ascent can now" \
+      "hop on a path whose resolution is per-process; the hop needs a reading for it" >&2
+    exit 1
+  fi
+  proc_rc=0
+  "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' "$proc_listing" \
+    >/dev/null 2>&1 || proc_rc=$?
+  if [[ "$proc_rc" == 0 ]]; then
+    echo "a listing whose resolution is per-process conformed" >&2
+    exit 1
+  fi
+else
+  echo 'note: skipping the unstable-resolution case (no /proc/self here)' >&2
+fi
+
+# AND A REPOSITORY ABOVE THAT GIT FAILED ABOUT AND THIS CAN EXAMINE, which is the
+# third of `repository_above`'s three answers and the one no fixture reached: an
+# unreadable `.git/config` fails DISCOVERY at the superproject while
+# `rev-parse --resolve-git-dir`, which reads no config, still resolves it. The
+# ascent must refuse rather than read git's silence as nothing being recorded
+# above, and restoring the mode must give the gitlink's own verdict.
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo 'note: skipping the unreadable-superproject-config case (running as root)' >&2
+else
+  repo_conf="$fixture_dir/repo-unreadable-superproject-config"
+  new_repo "$repo_conf"
+  echo seed > "$repo_conf/seed.txt"
+  git -C "$repo_conf" add -A && git -C "$repo_conf" commit -q -m base
+  new_repo "$repo_conf/findings"
+  echo fixture > "$repo_conf/findings/P2_correctness_202609130014_behind-a-shut-config.md"
+  git -C "$repo_conf/findings" add -A
+  git -C "$repo_conf/findings" commit -q -m 'the submodule ledger'
+  git -C "$repo_conf" update-index --add --cacheinfo \
+    "160000,$(git -C "$repo_conf/findings" rev-parse HEAD),findings"
+  git -C "$repo_conf" commit -q -m 'an initialised submodule at findings'
+  if ! chmod 000 "$repo_conf/.git/config" 2>/dev/null \
+    || git -C "$repo_conf" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || ! git rev-parse --resolve-git-dir "$repo_conf/.git" >/dev/null 2>&1; then
+    chmod 600 "$repo_conf/.git/config" 2>/dev/null || true
+    echo 'note: skipping the unreadable-superproject-config case (chmod had no effect)' >&2
+  else
+    conf_rc=0
+    conf_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_behind-a-shut-config' \
+      "$repo_conf/findings" 2>&1)" || conf_rc=$?
+    chmod 600 "$repo_conf/.git/config"
+    if [[ "$conf_rc" != 1 ]] || ! grep -q 'there is a repository at it or above it' <<< "$conf_out" \
+      || grep -q 'conforms' <<< "$conf_out"; then
+      echo "a superproject git could not read and this could examine was meant to refuse;" \
+        "got $conf_rc" >&2
+      printf '%s\n' "$conf_out" >&2
+      exit 1
+    fi
+    conf_open_rc=0
+    conf_open_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_behind-a-shut-config' \
+      "$repo_conf/findings" 2>&1)" || conf_open_rc=$?
+    if [[ "$conf_open_rc" != 1 ]] || ! grep -q 'mode 160000' <<< "$conf_open_out"; then
+      echo "with the config readable again the gitlink was meant to decide; got $conf_open_rc" >&2
+      printf '%s\n' "$conf_open_out" >&2
+      exit 1
+    fi
+  fi
+fi
+
+# ---- A NAME THIS FILESYSTEM WILL HOLD IS NOT A NAME EVERY CALLER MAY WRITE ---------------------
+#
+# `C:` and `\weird` are ORDINARY FILENAMES here and are ANCHORED PATH SPELLINGS
+# on Windows, which is the whole reason the arms below exist -- and it is also
+# why a fixture that BUILDS a directory called `C:` cannot run there. Measured
+# natively on Windows Server 2025 against the previous head: the backslash case
+# below treats `\weird` as a relative filename and its assertion fails, and the
+# anchored case exits 128, `cannot change to '…/C:': Invalid argument`, BEFORE it
+# reaches the validator at all. A case that cannot run there cannot test
+# behaviour there, and one that dies before the validator runs proves nothing
+# about the validator.
+#
+# So every case that needs such a name is guarded by this probe and says so, and
+# the rule those cases are about is asserted a second way by `path_parent`'s
+# table below -- which touches no filesystem, needs no such name, and therefore
+# RUNS NATIVELY ON WINDOWS. That table is where the backslash and UNC spellings
+# are pinned for the platform they belong to; these cases are the POSIX halves
+# beside it.
+#
+# THE PROBE READS THE NAME BACK OUT OF THE PARENT'S OWN ENTRIES rather than
+# trusting `mkdir`'s status, because on Windows the status is not the question:
+# something may well be made, and what matters is whether the parent then holds
+# an entry spelled exactly the way the fixture asked for.
+odd_name_probe="$fixture_dir/odd-name-probe"
+mkdir -p "$odd_name_probe"
+posix_names=1
+for odd_name in 'C:' '\weird'; do
+  mkdir "$odd_name_probe/$odd_name" 2>/dev/null || posix_names=0
+done
+if (( posix_names )); then
+  odd_entries="$( cd "$odd_name_probe" && printf '%s\n' * )"
+  for odd_name in 'C:' '\weird'; do
+    case $'\n'"$odd_entries"$'\n' in
+      *$'\n'"$odd_name"$'\n'*) ;;
+      *) posix_names=0 ;;
+    esac
+  done
+fi
+if (( ! posix_names )); then
+  echo "note: skipping the cases that need a directory named 'C:' or '\weird'" \
+    "(this platform reads those spellings as anchored paths and not as names)" >&2
+fi
+# AND A DIRECTORY WHOSE NAME BEGINS WITH A BACKSLASH, which is the POSIX half of
+# the anchored set `list_dir` tests. On Windows a leading backslash is
+# `\\server\share\…` or the drive-relative `\Windows\…` and must not be
+# `./`-prefixed; on POSIX it is an ordinary relative name, so what this can assert
+# is that leaving it unprefixed still enumerates it -- written relative and
+# written absolute, which must agree. The Windows half cannot be witnessed here
+# and is measured on a guest; the same is true of the drive designator beside it.
+# RUNS NATIVELY ON WINDOWS: NO -- `\weird` is not a name there, it is a
+# drive-relative path, and this assertion failed when it was run.
+if (( posix_names )); then
+  back_parent="$fixture_dir/backslash-listing"
+  mkdir -p "$back_parent/\\weird"
+  echo one > "$back_parent/\\weird/P2_correctness_202609130001_shared-name.md"
+  echo two > "$back_parent/\\weird/P2_correctness_202609130002_shared-name.md"
+  back_abs_rc=0
+  back_abs_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+    "$back_parent/\\weird" 2>&1)" || back_abs_rc=$?
+  back_rel_rc=0
+  back_rel_out="$( cd "$back_parent" \
+    && "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' '\weird' 2>&1 )" \
+    || back_rel_rc=$?
+  if [[ "$back_abs_rc" != 1 ]] || [[ "$back_rel_rc" != 1 ]] \
+    || ! grep -q 'names 2 findings' <<< "$back_abs_out" \
+    || ! grep -q 'names 2 findings' <<< "$back_rel_out"; then
+    echo "a directory whose name begins with a backslash must enumerate written either way;" \
+      "got $back_abs_rc absolute and $back_rel_rc relative" >&2
+    printf '%s\n' "$back_abs_out" "$back_rel_out" >&2
+    exit 1
+  fi
+fi
+
+
+# ---- AN ANCHORED SPELLING IS ANCHORED PER PLATFORM, AND find'S GRAMMAR IS NOT ------------------
+#
+# The case above is `list_dir`'s question -- CAN THIS SPELLING PARSE AS A find
+# EXPRESSION -- and it is closed PER GRAMMAR, so its answer is the same on every
+# platform and POSIX cannot witness the half the prefix exists for.
+# `locate_listing` asked a DIFFERENT question with the same three arms: DOES THIS
+# SPELLING HAVE A TOP OF ITS OWN, which is closed PER PLATFORM. `C:/x` and `\x`
+# are anchored on Windows and are ORDINARY RELATIVE NAMES here, the arm matched
+# them and did nothing, and every such POSIX listing reached the ascent UNROOTED
+# -- it ran out of separators at `C:` and reported no repository above a
+# directory that has one.
+#
+# SO THIS ONE CAN FAIL ON POSIX, unlike the two before it, because the defect IS
+# a POSIX path read as an anchored one. Measured at `7ab8329d`: a plain directory
+# `holder` inside an ignored bare repository named `C:`, in a work tree that
+# records nothing under it, answered exit 0 `conforms` spelled `C:/holder` and
+# exit 1 spelled absolutely -- two spellings of one directory, two verdicts --
+# and the same pair at `231c1aad`.
+#
+# A LEGITIMATE CALLER FOR EACH HOSTILE ONE, because the arm cannot simply be
+# deleted: joining `$PWD` onto a NATIVE `C:/…` builds `/c/…/repo/C:/…`, which
+# names nothing, and that was a measured false red. The repair joins only where
+# `-ef` says the join names the same directory, so it can supply a top and can
+# never move the anchor -- and a TRACKED directory whose name begins with either
+# token, which never ascends at all, is what holds it to that. One resolves and
+# one is ambiguous, so both verdicts are pinned and not just the refusals.
+# RUNS NATIVELY ON WINDOWS: NO. Every case here needs a real directory named
+# `C:` or `\weird`, which is a name only POSIX holds; there `C:` is a drive
+# designator and the fixture exited 128 before reaching the validator.
+if (( posix_names )); then
+  anchored_rel_case() {  # anchored_rel_case <label> <parent> <relative path> <branch> <want>
+    local label="$1" parent="$2" rel="$3" branch="$4" want="$5" abs_rc=0 rel_rc=0
+    "$BASH" "$branch_validator" "$branch" "$parent/$rel" >/dev/null 2>&1 || abs_rc=$?
+    ( cd "$parent" && "$BASH" "$branch_validator" "$branch" "$rel" >/dev/null 2>&1 ) || rel_rc=$?
+    if [[ "$rel_rc" != "$abs_rc" ]]; then
+      echo "$label: '$rel' answered $rel_rc where the same directory spelled absolutely" \
+        "answered $abs_rc" >&2
+      exit 1
+    fi
+    if [[ "$rel_rc" != "$want" ]]; then
+      echo "$label: both spellings answered $rel_rc, and $want was expected" >&2
+      exit 1
+    fi
+  }
+  anchored_repo="$fixture_dir/repo-anchored-spelling"
+  new_repo "$anchored_repo"
+  echo seed > "$anchored_repo/seed.txt"
+  git -C "$anchored_repo" add -A && git -C "$anchored_repo" commit -q -m base
+  printf 'C:\n\\\\weird\n' > "$anchored_repo/.git/info/exclude"
+  for anchored_name in 'C:' '\weird'; do
+    mkdir -p "$anchored_repo/$anchored_name"
+    git -C "$anchored_repo/$anchored_name" init -q --bare .
+    mkdir -p "$anchored_repo/$anchored_name/holder"
+    printf 'fixture\n' \
+      > "$anchored_repo/$anchored_name/holder/P2_correctness_202609130020_inside-an-anchored-bare-repository.md"
+    if [[ -n "$(git -C "$anchored_repo" status --porcelain)" ]] \
+      || [[ -n "$(git -C "$anchored_repo" ls-files -s -- ":(literal)$anchored_name")" ]] \
+      || [[ "$(git -C "$anchored_repo/$anchored_name" rev-parse --is-inside-work-tree)" != false ]]; then
+      echo "the fixture was meant to be an ignored bare repository named [$anchored_name]" \
+        "that the work tree above records nothing under" >&2
+      exit 1
+    fi
+    anchored_rel_case "a listing inside a bare repository named [$anchored_name]" \
+      "$anchored_repo" "$anchored_name/holder" \
+      'fix-P2/correctness_inside-an-anchored-bare-repository' 1
+  done
+
+  # THE LEGITIMATE CALLERS. A TRACKED directory whose name begins with the same
+  # token is inside the work tree, so discovery answers `true` at the listing and
+  # no ascent happens at all -- which is exactly why it holds the repair to
+  # supplying a top and nothing else. These answer the same at the previous head;
+  # a repair that broke them would be the false red the arm was written against.
+  anchored_ledger="$fixture_dir/repo-anchored-ledger"
+  new_repo "$anchored_ledger"
+  echo seed > "$anchored_ledger/seed.txt"
+  mkdir -p "$anchored_ledger/C:" "$anchored_ledger/\\weird"
+  printf 'fixture\n' > "$anchored_ledger/C:/P2_correctness_202609130021_an-anchored-ledger.md"
+  printf 'one\n' > "$anchored_ledger/\\weird/P2_correctness_202609130022_an-anchored-twin.md"
+  printf 'two\n' > "$anchored_ledger/\\weird/P2_correctness_202609130023_an-anchored-twin.md"
+  git -C "$anchored_ledger" add -A
+  git -C "$anchored_ledger" commit -q -m 'ledgers in directories named for an anchored token'
+  if [[ "$(git -C "$anchored_ledger" ls-files -- ':(literal)C:' | wc -l)" != 1 ]] \
+    || [[ "$(git -C "$anchored_ledger" ls-files -- ':(literal)\weird' | wc -l)" != 2 ]]; then
+    echo 'the fixture was meant to record one finding under C: and two under \weird' >&2
+    exit 1
+  fi
+  anchored_rel_case 'a tracked ledger in a directory named [C:] resolves' \
+    "$anchored_ledger" 'C:' 'fix-P2/correctness_an-anchored-ledger' 0
+  anchored_rel_case 'a tracked ledger in a directory named [\weird] is ambiguous' \
+    "$anchored_ledger" '\weird' 'fix-P2/correctness_an-anchored-twin' 1
+  spelling_case 'a tracked ledger in a directory named [C:], every spelling' \
+    'fix-P2/correctness_an-anchored-ledger' 0 "$anchored_ledger/C:"
+fi
+
+# A SUPERPROJECT WHOSE RECORDS CANNOT BE READ IS REFUSED AND NEVER READ AS A
+# SUPERPROJECT THAT RECORDS NOTHING. `rev-parse --show-superproject-working-tree`
+# answers 0 with empty stdout AND empty stderr while the `ls-files` beneath it
+# exits 128 `Permission denied`, so CHECKING THAT PROBE'S STATUS DOES NOT DETECT
+# ITS SUPPRESSED PARENT-READ FAILURE: the listing was answered out of the
+# submodule's own index and conformed at exit 0, on a checkout the same
+# validator refuses at exit 1 the moment the index is readable again. Both files
+# a read of the parent needs are injected, because they fail in different places
+# -- the INDEX, which the submodule query reads and swallows, and the `.git`
+# DIRECTORY, which stops discovery one step earlier -- and the restored
+# permissions are asserted to give the gitlink's own verdict, so the refusal is
+# not simply a repository this cannot read for any reason.
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo 'note: skipping the unreadable-superproject cases (running as root)' >&2
+else
+  repo_shut="$fixture_dir/repo-unreadable-superproject"
+  new_repo "$repo_shut"
+  echo seed > "$repo_shut/seed.txt"
+  git -C "$repo_shut" add -A && git -C "$repo_shut" commit -q -m base
+  new_repo "$repo_shut/findings"
+  echo fixture > "$repo_shut/findings/P2_correctness_202609100014_behind-a-shut-index.md"
+  git -C "$repo_shut/findings" add -A
+  git -C "$repo_shut/findings" commit -q -m 'the submodule ledger'
+  git -C "$repo_shut" update-index --add --cacheinfo \
+    "160000,$(git -C "$repo_shut/findings" rev-parse HEAD),findings"
+  git -C "$repo_shut" commit -q -m 'an initialised submodule at findings'
+  for shut in "$repo_shut/.git/index" "$repo_shut/.git"; do
+    if ! chmod 000 "$shut" 2>/dev/null \
+      || git -C "$repo_shut" ls-files -s >/dev/null 2>&1; then
+      chmod u+rwX "$shut" 2>/dev/null || true
+      echo "note: skipping the unreadable-superproject case for $shut (chmod had no effect)" >&2
+      continue
+    fi
+    shut_rc=0
+    shut_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_behind-a-shut-index' \
+      "$repo_shut/findings" 2>&1)" || shut_rc=$?
+    chmod u+rwX "$shut" 2>/dev/null || true
+    if [[ "$shut_rc" != 1 ]] || ! grep -q 'is not known' <<< "$shut_out" \
+      || grep -q 'conforms' <<< "$shut_out"; then
+      echo "an unreadable $shut was meant to refuse rather than answer; got $shut_rc" >&2
+      printf '%s\n' "$shut_out" >&2
+      exit 1
+    fi
+    # AND THE SAME LISTING WITH THE PERMISSIONS BACK, so the refusal above is
+    # the unreadable metadata and not the shape of the fixture.
+    open_rc=0
+    open_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_behind-a-shut-index' \
+      "$repo_shut/findings" 2>&1)" || open_rc=$?
+    if [[ "$open_rc" != 1 ]] || ! grep -q 'mode 160000' <<< "$open_out"; then
+      echo "with $shut readable again the gitlink was meant to decide; got $open_rc" >&2
+      printf '%s\n' "$open_out" >&2
+      exit 1
+    fi
+  done
+fi
+
+# ---- ONE RULE FOR SHORTENING A PATH, AND EVERY SEPARATOR GOES THROUGH IT ------------------------
+#
+# Four walks in the validator step from a path to its parent, and each used to
+# own its arithmetic. Each round taught ONE of them ONE more spelling: round 4
+# gave two of them a drive root, round 6 gave the anchor an anchored set, and the
+# ascent was still stripping a FORWARD SLASH ONLY. On `C:\repo\findings` or
+# `\\server\share\findings` that strip removes NOTHING, so the walk read "did not
+# shorten" as "is a top" and the ascent never ran at all -- the same false green
+# the forward-slash spelling had before round 6, on the arm nobody had been shown
+# yet. THREE ROUNDS, THREE SPELLINGS, and the fourth was only a matter of which
+# one a reviewer wrote down next.
+#
+# `path_parent` is the one place that decides it now, and this is the table it
+# decides. Every walk above and below is driven through it, so a row here is a
+# row for all four. NOTHING ON THIS PLATFORM REACHES THE NATIVE ROWS -- every
+# path those walks are handed here begins with `/` -- so the rule is driven
+# directly, which is the same kind of witness the walks' own root tests have.
+#
+# THE `\ird` ROW IS THE LEGITIMATE SHAPE THE OBVIOUS REPAIR BREAKS. A BACKSLASH
+# IS A LEGAL BYTE IN A POSIX FILENAME, so a rule that always spelled both
+# separators would answer `/tmp/we\ird/x` with `/tmp/we` -- a directory that is
+# not there, which `repository_above` reads as metadata it cannot examine and
+# REFUSES. Which separators divide a path's components is decided by HOW IT IS
+# ROOTED, and that row is what holds it.
+#
+# RUNS NATIVELY ON WINDOWS: YES, and it is the only case here that does. It makes
+# no directory and asks nothing of the filesystem, so the backslash and UNC rows
+# are the same rows there as here -- which matters, because those spellings exist
+# only on that platform and every case that builds one of them as a NAME is
+# skipped there.
+rule_harness="$fixture_dir/path-parent-rule.sh"
+cat > "$rule_harness" <<'RULE'
+set -uo pipefail
+validator="$1"; start="$2"
+rule="$(awk '/^path_parent\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$rule" ]] || { echo 'harness: path_parent was not extracted'; exit 3; }
+bash -n <<< "$rule" || { echo 'harness: the extract does not parse'; exit 3; }
+eval "$rule"
+p="$start"; out="$start"; n=0
+while path_parent "$p"; do
+  p="$parent_path"; out="$out -> $p"; n=$(( n + 1 ))
+  if (( n > 16 )); then echo "harness: $n steps and still at '$p'"; exit 124; fi
+done
+printf '%s\n' "$out"
+RULE
+rule_case() {  # rule_case <path> <the whole chain, ending at its top>
+  local got rc=0
+  got="$("$BASH" "$rule_harness" "$branch_validator" "$1" 2>&1)" || rc=$?
+  if [[ "$rc" != 0 ]] || [[ "$got" != "$2" ]]; then
+    echo "shortening '$1': expected '$2' at exit 0; got '$got' at exit $rc" >&2
+    exit 1
+  fi
+}
+rule_case '/a/b/c' '/a/b/c -> /a/b -> /a -> /'
+rule_case '/a' '/a -> /'
+rule_case '/' '/'
+rule_case '.' '.'
+rule_case 'findings' 'findings'
+rule_case '/tmp/we\ird/x' '/tmp/we\ird/x -> /tmp/we\ird -> /tmp -> /'
+# AND AN ORDINARY RELATIVE PATH IS NOT RESPELLED AS A ROOT. What is left when
+# the last separator goes is a root when there is nothing before it, and on a
+# WINDOWS-rooted path when what is left holds no separator -- which there is
+# exactly the drive designator. On a `/`-rooted path the same test would make
+# `p/q` shorten to `p/`: the same directory, but a spelling this hands to git.
+rule_case 'p/q' 'p/q -> p'
+rule_case 'p/q/r' 'p/q/r -> p/q -> p'
+# A DRIVE ROOT IS A ROOT AND `C:` IS NOT ONE: it names the drive's CURRENT
+# directory, and respelling it as a root would move the question to a different
+# directory. It is a top because the rule cannot shorten it, exactly as `.` is.
+rule_case 'C:/repo/findings' 'C:/repo/findings -> C:/repo -> C:/'
+rule_case 'C:\repo\findings' 'C:\repo\findings -> C:\repo -> C:\'
+rule_case 'C:' 'C:'
+rule_case 'C:/' 'C:/'
+rule_case 'C:\' 'C:\'
+rule_case 'C:findings' 'C:findings'
+# A ROOT IS SPELLED WITH THE SEPARATOR THAT ROOTED IT, and a backslash roots the
+# CURRENT drive exactly as `/` roots the filesystem.
+rule_case '\Windows\System32' '\Windows\System32 -> \Windows -> \'
+rule_case '\' '\'
+# AND A UNC PATH'S TOP IS ITS SHARE, in both spellings. `\\server` names no
+# directory on any host, so a walk that asked about it would turn an ordinary
+# listing on a share, outside any repository, from the filesystem's answer into
+# a refusal about a `.git` nothing could stat.
+rule_case '\\server\share\dir\deep' '\\server\share\dir\deep -> \\server\share\dir -> \\server\share'
+rule_case '\\server\share' '\\server\share'
+rule_case '//server/share/dir' '//server/share/dir -> //server/share'
+rule_case '//server/share' '//server/share'
+# A TRAILING SEPARATOR IS NOT A COMPONENT, because one directory must not have
+# two verdicts. `normalise_listing_path` takes it off a `/` spelling before any
+# walk sees it and knows no other separator, so a native spelling would otherwise
+# arrive with an empty last component and be read as a root -- the ascent
+# skipped, on one spelling of a listing whose other spelling ascends.
+rule_case 'C:\repo\findings\' 'C:\repo\findings\ -> C:\repo -> C:\'
+rule_case '/a/b/' '/a/b/ -> /a -> /'
+
+# ---- A WALK THAT CANNOT SHORTEN THE PATH DOES NOT TERMINATE ------------------------------------
+#
+# `enclosing_work_tree` ascends by `${parent%/*}`, and the test at the top of its
+# loop is `$parent != /`. That pair bounds every POSIX path, because stripping a
+# component off one always shortens it and `/` is what is left. IT DOES NOT BOUND
+# A DRIVE ROOT: `C:/repo` strips to `C:`, and `C:` strips to `C:`.
+#
+# While a `false` from `--is-inside-work-tree` ENDED the walk, that was a wrong
+# answer at such a root and nothing worse. The section above makes a `false` a
+# reason to CONTINUE -- which is the right repair, and this is its cost -- and the
+# same input is then an UNBOUNDED LOOP asking about `C:` for ever. Unbounded
+# rather than slow, in a required check. `repository_above` and `locate_listing`
+# both make the shortening test on the same arithmetic; this walk carried the
+# comment that every step must move strictly upwards and not the test.
+#
+# NOTHING ON THIS PLATFORM CAN REACH IT -- every path git hands this ascent here
+# begins with `/` -- so the function is driven directly with `git_probe` stubbed,
+# which is what a native `C:/...` work-tree root would produce. That is the same
+# kind of witness the walk's other root test has, and it is written down here
+# rather than run by hand because a hand-run witness is not a gate.
+#
+# THE HARNESS IS BOUNDED BY A CALL CAP, NOT BY WALL CLOCK, so a regression FAILS
+# rather than hangs CI, and it needs no `timeout` to do it: every turn of this
+# loop probes, so counting probes counts turns, and the stub exits 124 on the
+# cap+1'th. It asserts the probe's argument shape before reading it, so a call
+# that stops looking like the one this stubs is a loud failure and not a silent
+# pass.
+#
+# AND COUNTING PROBES IS NOT THE WHOLE OF IT, WHICH IS WHAT THE FIRST CUT OF THIS
+# SECTION MISSED. TERMINATION AND INTERPRETATION ARE DIFFERENT PROPERTIES: a
+# stubbed probe can show that the walk STOPS and can say nothing about WHICH
+# directory each turn asked about, and `C:/repo` stripped to `C:` terminates
+# perfectly well while asking about the drive's current directory instead of the
+# drive root. So the stub records the path it is handed and the rows below assert
+# the sequence, not just its length. What no run on this platform can supply is
+# the fact underneath -- that `C:` and `C:/` are DIFFERENT DIRECTORIES -- because
+# here they are the same one; that is executed natively and the rows say where.
+#
+# TWO DRIVE-ROOTED CASES, BECAUSE THEY PULL IN OPPOSITE DIRECTIONS: the walk must
+# STOP at a drive root, and it must NOT stop at the bare boundary the section
+# above is about -- a `false` under a work tree that does record the listing has
+# to keep ascending. A POSIX row runs the same harness to show the terminator
+# moved nothing there.
+walk_harness="$fixture_dir/drive-root-walk.sh"
+cat > "$walk_harness" <<'WALK'
+set -uo pipefail
+validator="$1"; start="$2"; true_at="$3"; cap="$4"
+src="$(awk '/^enclosing_work_tree\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$src" ]] || { echo 'harness: enclosing_work_tree was not extracted'; exit 3; }
+# THE SHORTENING RULE COMES OUT OF THE VALIDATOR TOO, because it is the thing
+# under test. It used to be written inline in the walk; a harness that stubbed it
+# would assert the harness's arithmetic and not the file's.
+rule="$(awk '/^path_parent\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$rule" ]] || { echo 'harness: path_parent was not extracted'; exit 3; }
+src="$rule
+$src"
+bash -n <<< "$src" || { echo 'harness: the extract does not parse'; exit 3; }
+eval "$src"
+probe_status=0; probe_text=''; probe_stderr=''; unexaminable_git=''
+branch='fix-P1/security-trust_x'
+asked=0
+at=''
+git_probe() {
+  [[ "$1" == 0,128 || "$1" == 0 ]] && [[ "$2" == -- ]] && [[ "$3" == -C ]] \
+    && [[ "$5" == rev-parse ]] || { echo "harness: unexpected call: git_probe $*"; exit 3; }
+  probe_status=0
+  case "$6" in
+    --is-inside-work-tree)
+      asked=$(( asked + 1 ))
+      # THE PATH IT WAS HANDED IS RECORDED, NOT JUST THE COUNT. Counting probes
+      # bounds the loop and says nothing about WHICH directory each one asked
+      # about, and the two are different properties: `C:` and `C:/` are one probe
+      # either way and are not one directory.
+      at="${at:+$at }$4"
+      if (( asked > cap )); then
+        echo "harness: $asked probes and still asking about '$4'"
+        exit 124
+      fi
+      if [[ -n "$true_at" && "$4" == "$true_at" ]]; then probe_text=true; else probe_text=false; fi
+      ;;
+    --show-toplevel) probe_text="$true_at" ;;
+    *) echo "harness: unexpected probe '$6'"; exit 3 ;;
+  esac
+}
+repository_above() { echo 'harness: no probe here fails, so this is unreachable'; exit 3; }
+enclosing_root=''
+rc=0
+enclosing_work_tree "$start" "$start/findings" || rc=$?
+echo "rc=$rc root=$enclosing_root asked=$asked at=[$at]"
+WALK
+walk_case() {
+  local name="$1" start="$2" true_at="$3" want="$4" got rc=0
+  got="$("$BASH" "$walk_harness" "$branch_validator" "$start" "$true_at" 40 2>&1)" || rc=$?
+  if [[ "$rc" != 0 ]] || [[ "$got" != "$want" ]]; then
+    echo "$name: expected '$want' at exit 0; got '$got' at exit $rc" >&2
+    exit 1
+  fi
+}
+walk_case 'a drive root with no work tree over it must end the ascent' \
+  'C:/repo' '' 'rc=0 root= asked=1 at=[C:/]'
+# AND A SHARE ROOT ENDS IT TOO, which is the row THIS ROUND'S MATRIX ASKED FOR.
+# Reversing this walk to the arithmetic it carried before rule 1 to 3 were one
+# rule reded NOTHING in the whole fixture set: every row here spelled its paths
+# `C:/…` or `/…`, and on those two the old walk and `path_parent` agree exactly,
+# so the reversal was invisible and the claim that this walk goes through the one
+# rule rested on reading the code. A WORK TREE ON A UNC SHARE IS A SPELLING GIT
+# REALLY ANSWERS `--show-toplevel` WITH, and it is where the two part: the share
+# IS the top, and the old arithmetic walked past it to `//server` -- a name no
+# host holds, which `repository_above` cannot stat, reads as metadata it cannot
+# examine and REFUSES. An ordinary listing on a share, in no repository, would go
+# from the filesystem's answer to a refusal. Measured through this harness: the
+# rule stops at one probe, the old arithmetic takes three, `at=[//server/share
+# //server /]`.
+walk_case 'a share root with no work tree over it must end the ascent' \
+  '//server/share/repo' '' 'rc=0 root= asked=1 at=[//server/share]'
+walk_case 'a work tree above a share-rooted false must still be reached' \
+  '//server/share/outer/bare/nested' '//server/share/outer' \
+  'rc=0 root=//server/share/outer asked=2 at=[//server/share/outer/bare //server/share/outer]'
+walk_case 'a work tree above a drive-rooted false must still be reached' \
+  'C:/outer/bare/nested' 'C:/outer' 'rc=0 root=C:/outer asked=2 at=[C:/outer/bare C:/outer]'
+walk_case 'the same ascent on a POSIX path is unchanged' \
+  '/outer/bare/nested' '/outer' 'rc=0 root=/outer asked=2 at=[/outer/bare /outer]'
+
+# AND THE SPELLING OF THE ROOT EACH WALK ENDS AT, which is what the count above
+# cannot see and what round 5's harness therefore could not have caught. THE
+# DEFECT IS ONE CHARACTER: `C:/repo` strips to `C:`, and on Windows `C:` is the
+# drive's CURRENT directory while `C:/` is the drive root -- so the first row
+# above asked a real question about the wrong directory, once, and terminated
+# tidily. Executed natively on Windows Server 2025 (bash 5.2.37, git
+# 2.50.1.windows.1), from inside a clean repository directly under `C:/`:
+# `git -C C: rev-parse --show-toplevel` exits 0 and answers THAT REPOSITORY,
+# `git -C C: rev-parse --is-inside-work-tree` exits 0 `true`, and
+# `git -C C:/ rev-parse --is-inside-work-tree` exits 128. The walk read the
+# repository as its own container and refused it, and the same guest runs the
+# validator itself at exit 1 for `04432736`'s exit 0.
+#
+# THE POSIX HALF OF THE SAME ARM IS NOT HYPOTHETICAL EITHER, and it is what
+# makes these rows a witness for the whole rule rather than for one platform:
+# `/repo` strips to the EMPTY STRING, and `git -C ''` is a documented NO-OP that
+# answers about the process's own current directory -- measured here, exit 0
+# answering the cwd's toplevel where `git -C /` exits 128. A root that loses its
+# separator stops naming a root and starts naming a current directory, on both
+# platforms, and one arm now spells both.
+walk_case 'a POSIX root is spelled with its separator too' \
+  '/repo' '' 'rc=0 root= asked=1 at=[/]'
+walk_case 'the descent to a drive root passes through it once' \
+  'C:/a/b' '' 'rc=0 root= asked=2 at=[C:/a C:/]'
+# AND A STRIP THAT REMOVED NOTHING IS NOT A ROOT AND IS NOT RESPELLED. `C:` is
+# drive-relative on Windows exactly as `.` is relative here; calling either a
+# root and appending a separator would move the question to a different
+# directory, which is this defect the other way round. The walk ends there
+# because it cannot shorten the path -- round 5's test, unchanged -- and asks
+# nothing at all.
+walk_case 'a drive-relative spelling is a top and is asked nothing' \
+  'C:' '' 'rc=0 root= asked=0 at=[]'
+
+# AND THE ANCHOR ASCENT IS THE OTHER WALK ON THAT ARITHMETIC, so it gets the same
+# witness. `locate_listing` strips its anchor the same way and hands each level
+# to `git -C`, so `C:/a` strips to `C:` there too. Nothing on this platform
+# reaches it through the whole validator -- the anchor arrives ROOTED wherever the
+# listing exists, and a listing that does not exist is refused before this
+# function is called -- so the function is driven directly, as the walk above is,
+# and with REAL DIRECTORIES under it so the anchor is the one the enter loop
+# actually lands on. The probes are stubbed and say `false` throughout, which is
+# what a bare repository answers; what is asserted is the sequence of directories
+# they were asked about.
+anchor_harness="$fixture_dir/anchor-walk.sh"
+cat > "$anchor_harness" <<'ANCHOR'
+set -uo pipefail
+validator="$1"; start="$2"; cap="$3"; gitdir="${4:-}"; insidegitdir="${5:-true}"; pwdas="${6:-}"
+src="$(awk '/^locate_listing\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$src" ]] || { echo 'harness: locate_listing was not extracted'; exit 3; }
+rule="$(awk '/^path_parent\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$rule" ]] || { echo 'harness: path_parent was not extracted'; exit 3; }
+src="$rule
+$src"
+bash -n <<< "$src" || { echo 'harness: the extract does not parse'; exit 3; }
+eval "$src"
+probe_status=0; probe_text=''; probe_stderr=''; unexaminable_git=''
+listing_world=''; listing_toplevel=''; listing_relpath=''
+branch='fix-P1/security-trust_x'
+asked=0
+at=''
+git_probe() {
+  [[ "$1" == 0,128 || "$1" == 0 ]] && [[ "$2" == -- ]] && [[ "$3" == -C ]] \
+    && [[ "$5" == rev-parse ]] || { echo "harness: unexpected call: git_probe $*"; exit 3; }
+  probe_status=0
+  case "$6" in
+    --is-inside-work-tree)
+      asked=$(( asked + 1 ))
+      at="${at:+$at }$4"
+      if (( asked > cap )); then
+        echo "harness: $asked probes and still asking about '$4'"
+        exit 124
+      fi
+      probe_text=false
+      ;;
+    # EVERY DIRECTORY HERE IS A BARE REPOSITORY, which is what `false`
+    # throughout means, and a bare repository's git directory IS the directory
+    # asked about -- so the anchor IS inside it, which is why the default answer
+    # to rule 5's gate is `true`. The hop then lands exactly where the lexical
+    # step lands, and these rows measure the arithmetic and not the hop;
+    # `$gitdir` is what moves the two apart, and `$insidegitdir` is what decides
+    # whether that directory may be read as an answer about the listing at all.
+    --is-inside-git-dir) probe_text="$insidegitdir" ;;
+    --absolute-git-dir) probe_text="${gitdir:-$4}" ;;
+    *) echo "harness: unexpected probe '$6'"; exit 3 ;;
+  esac
+}
+repository_above() { echo 'harness: no probe here fails, so this is unreachable'; exit 3; }
+indent() { :; }
+# RULE 4'S ONLY INPUT IS THE SHELL'S OWN DIRECTORY, and bash repairs `$PWD` at
+# startup, so the spellings that rule has to defend against cannot be reached by
+# `cd`. `PWD` is an ordinary shell variable and assigning it moves nothing, which
+# is exactly the shape a caller that clobbered it would present.
+[[ -z "$pwdas" ]] || PWD="$pwdas"
+rc=0
+locate_listing "$start" || rc=$?
+echo "rc=$rc world=$listing_world asked=$asked at=[$at]"
+ANCHOR
+# RUNS NATIVELY ON WINDOWS: NO. The rows need a REAL directory named `C:` for
+# the enter loop to land in, and that is a name only POSIX holds. What they
+# assert about the drive root is asserted a second way by the rule table above,
+# which touches no filesystem and does run there.
+if (( posix_names )); then
+  anchor_dir="$fixture_dir/anchor-walk"
+  mkdir -p "$anchor_dir/C:/a" "$anchor_dir/C:\\a"
+  # A STATUS CAPTURED AFTER THE ASSIGNMENT IS NEVER READ under `set -e`: the
+  # shell leaves on the failing substitution and the row says nothing at all,
+  # which is what the harness's own cap exit looked like. `|| rc=$?` is what
+  # keeps a regression a MESSAGE and not a silent 124.
+  anchor_rc=0
+  anchor_got="$( cd "$anchor_dir" && "$BASH" "$anchor_harness" "$branch_validator" 'C:/a/b' 40 2>&1 )" \
+    || anchor_rc=$?
+  if [[ "$anchor_rc" != 0 ]] \
+    || [[ "$anchor_got" != 'rc=0 world=filesystem asked=2 at=[C:/a C:/]' ]]; then
+    echo "the anchor ascent must strip C:/a to the drive ROOT and stop there; got" \
+      "'$anchor_got' at exit $anchor_rc" >&2
+    exit 1
+  fi
+  # AND THE ANCHOR THAT EXISTS ARRIVES ROOTED, which is the precondition the walk's
+  # own comment rests on: the first directory asked about is absolute, so the chain
+  # has a top and the ascent is not cut off at `C:`.
+  anchor_rooted_rc=0
+  anchor_rooted="$( cd "$anchor_dir" && "$BASH" "$anchor_harness" "$branch_validator" 'C:/a' 80 2>&1 )" \
+    || anchor_rooted_rc=$?
+  if [[ "$anchor_rooted_rc" != 0 ]] || [[ "$anchor_rooted" != *" at=[$anchor_dir/C:/a "* ]] \
+    || [[ "$anchor_rooted" != *' /]' ]]; then
+    echo "an anchor that exists must be rooted and its chain must end at '/'; got" \
+      "'$anchor_rooted' at exit $anchor_rooted_rc" >&2
+    exit 1
+  fi
+
+  # AND THE JOIN THAT ROOTS IT MUST NOT DOUBLE THE SEPARATOR. Run from `/`,
+  # `${PWD}/$path` is `//tmp/…`, and A LEADING RUN OF TWO SEPARATORS IS HOW A UNC
+  # PATH IS SPELLED: the rule above reads `//server/share` as a share root and
+  # stops there, so a join that manufactured one would make `//tmp/<dir>` a top and
+  # report no repository above a directory that has one. The chain must still reach
+  # `/`, and nothing on it may be spelled with a doubled separator.
+  anchor_root_rc=0
+  anchor_root_got="$( cd / && "$BASH" "$anchor_harness" "$branch_validator" \
+    "${anchor_dir#/}/C:/a" 80 2>&1 )" || anchor_root_rc=$?
+  if [[ "$anchor_root_rc" != 0 ]] || [[ "$anchor_root_got" != *' /]' ]] \
+    || [[ "$anchor_root_got" == *'=[//'* ]] || [[ "$anchor_root_got" == *' //'* ]]; then
+    echo "run from '/', the anchor must be joined without doubling the separator and its" \
+      "chain must still end at '/'; got '$anchor_root_got' at exit $anchor_root_rc" >&2
+    exit 1
+  fi
+
+  # AND RULE 4: A ROOTING THAT DOES NOT PRODUCE A ROOT IS NOT ONE. `${PWD:-.}`
+  # stood at the one place a caller's spelling is rooted, and a `.` is the one
+  # unrooted spelling that can reach all four walks: the enter loop shortens
+  # `./findings` to `.`, which is not an ancestor of the listing at all, and the
+  # ascent has no top to stop at. `$PWD` is repaired by bash at startup -- unset,
+  # empty, relative and wrong all answer with the current directory -- so the
+  # fallback defended nothing; what it did was contradict the rule, and a caller
+  # that clobbers `PWD` is the shape that reaches it. The answer is the rule: a
+  # shell whose own directory is not rooted cannot root anything against it, and
+  # that is REFUSED rather than walked from a guess.
+  anchor_unrooted_rc=0
+  anchor_unrooted="$( cd "$anchor_dir" \
+    && "$BASH" "$anchor_harness" "$branch_validator" 'C:/a/b' 40 '' true 'not-a-rooted-path' 2>&1 )" \
+    || anchor_unrooted_rc=$?
+  if [[ "$anchor_unrooted_rc" != 0 ]] || [[ "$anchor_unrooted" != *'rc=1 world= asked=0 at=[]'* ]] \
+    || [[ "$anchor_unrooted" != *'is not a'* ]] || [[ "$anchor_unrooted" != *'rooted path'* ]]; then
+    echo "an unrooted current directory must refuse rather than walk from a guess; got" \
+      "'$anchor_unrooted' at exit $anchor_unrooted_rc" >&2
+    exit 1
+  fi
+  # AND A LEADING RUN OF TWO SEPARATORS IS THE OTHER UNROOTED SPELLING, because
+  # rule 1 reads it as a UNC SHARE: `//tmp/findings` IS a share root, so from a
+  # current directory of `//tmp` the enter loop cannot shorten past the listing
+  # and nothing above it is ever asked about. WHICH OF THE TWO READINGS IS RIGHT
+  # IS THE FILESYSTEM'S TO SAY AND NOT A PLATFORM'S: where `//tmp` and `/tmp` are
+  # one directory the run must be one walk, and where they are not -- a real UNC
+  # share, whose first component names a HOST -- the share is the top rule 3 says
+  # it is. Both arms are asserted, and which one runs is decided by `-ef`.
+  # A name nothing can be standing on, because the row is about the walk above
+  # the listing and an enterable listing would shorten nothing.
+  rooting_name='no-such-listing-202609131500'
+  anchor_plain_rc=0
+  anchor_plain="$( cd "$anchor_dir" \
+    && "$BASH" "$anchor_harness" "$branch_validator" "$rooting_name" 40 '' true '/tmp' 2>&1 )" \
+    || anchor_plain_rc=$?
+  anchor_dbl_rc=0
+  anchor_dbl="$( cd "$anchor_dir" \
+    && "$BASH" "$anchor_harness" "$branch_validator" "$rooting_name" 40 '' true '//tmp' 2>&1 )" \
+    || anchor_dbl_rc=$?
+  if [[ "$anchor_plain_rc" != 0 ]] || [[ "$anchor_plain" != 'rc=0 world=filesystem asked=2 at=[/tmp /]' ]]; then
+    echo "the plain spelling of the current directory must walk to '/'; got" \
+      "'$anchor_plain' at exit $anchor_plain_rc" >&2
+    exit 1
+  fi
+  if [[ /tmp -ef //tmp ]]; then
+    if [[ "$anchor_dbl_rc" != 0 ]] || [[ "$anchor_dbl" != "$anchor_plain" ]]; then
+      echo "'//tmp' and '/tmp' are one directory here, so they must be one walk; got" \
+        "'$anchor_dbl' at exit $anchor_dbl_rc against '$anchor_plain'" >&2
+      exit 1
+    fi
+  elif [[ "$anchor_dbl_rc" != 0 ]] || [[ "$anchor_dbl" != *'at=[]'* ]]; then
+    echo "'//tmp' is not '/tmp' here, so it is a share root and nothing above it may be" \
+      "asked about; got '$anchor_dbl' at exit $anchor_dbl_rc" >&2
+    exit 1
+  fi
+
+  # AND THE HOP TO GIT'S OWN POSITION, which is the other thing a `false` sets off.
+  # The rows above stub every directory as a bare repository -- which is what
+  # `false` throughout means -- so the hop lands exactly where the lexical step
+  # lands and they measure the arithmetic. Handing the stub a git directory
+  # SOMEWHERE ELSE is what separates the two: the ascent must continue from THAT
+  # directory's parent, because git resolved the anchor physically and the written
+  # parent is in whatever tree the caller's own spelling walks up.
+  #
+  # AND AT MOST ONCE, WHICH IS THE WHOLE OF THE TERMINATION ARGUMENT. A hop
+  # shortens nothing, so it may not be the step that repeats; it does not need to
+  # be, because `--absolute-git-dir` is canonical and the anchor after one hop
+  # holds no symlink. Without that bound this row does not merely answer wrongly --
+  # `/elsewhere` hops to `/elsewhere` for ever and the harness's cap fires at 124.
+  anchor_hop_rc=0
+  anchor_hop="$( cd "$anchor_dir" \
+    && "$BASH" "$anchor_harness" "$branch_validator" 'C:/a/b' 40 '/elsewhere/bare.git' 2>&1 )" \
+    || anchor_hop_rc=$?
+  if [[ "$anchor_hop_rc" != 0 ]] \
+    || [[ "$anchor_hop" != 'rc=0 world=filesystem asked=3 at=[C:/a /elsewhere /]' ]]; then
+    echo "a false must hop to the parent of git's own git directory, once; got" \
+      "'$anchor_hop' at exit $anchor_hop_rc" >&2
+    exit 1
+  fi
+  # AND A BACKSLASH-ROOTED ANCHOR IS SHORTENED AT ALL, which is this function's
+  # TWO walks on one row: the enter loop that descends to a directory it can
+  # stand in, and the ascent that climbs back out of it. `C:\a\b` holds no
+  # forward slash, so a `/`-only strip removes nothing from it -- the descent
+  # read "no separator" as "relative" and fell back to `.`, THE SHELL'S OWN
+  # DIRECTORY, which is not an ancestor of the path at all, and the ascent read
+  # it as a top and chose the filesystem without asking about anything. Both
+  # walks now go through the one rule, and the row is what says so: the anchor
+  # the enter loop lands on is `C:\a`, and the ascent climbs from it to the
+  # drive root.
+  anchor_native_rc=0
+  anchor_native="$( cd "$anchor_dir" \
+    && "$BASH" "$anchor_harness" "$branch_validator" 'C:\a\b' 40 2>&1 )" || anchor_native_rc=$?
+  if [[ "$anchor_native_rc" != 0 ]] \
+    || [[ "$anchor_native" != 'rc=0 world=filesystem asked=2 at=[C:\a C:\]' ]]; then
+    echo "a backslash-rooted anchor must be shortened by the descent and by the ascent;" \
+      "got '$anchor_native' at exit $anchor_native_rc" >&2
+    exit 1
+  fi
+  # AND THE ASCENT KEEPS SHORTENING AFTER THE HOP, which is the half the row
+  # above cannot see: the hop itself goes through the one rule, so a walk whose
+  # LEXICAL step still stripped a forward slash only would be carried over its
+  # first level by the hop and stop at the second. Hopping to a git directory
+  # three components deep is what puts the lexical step on a native path with
+  # somewhere left to go -- `C:\x\y` to `C:\x` to the drive root -- where a
+  # `/`-only strip reads the first as a top and chooses the filesystem at once.
+  anchor_after_hop_rc=0
+  anchor_after_hop="$( cd "$anchor_dir" \
+    && "$BASH" "$anchor_harness" "$branch_validator" 'C:\a\b' 40 'C:\x\y\.git' 2>&1 )" \
+    || anchor_after_hop_rc=$?
+  if [[ "$anchor_after_hop_rc" != 0 ]] \
+    || [[ "$anchor_after_hop" != 'rc=0 world=filesystem asked=4 at=[C:\a C:\x\y C:\x C:\]' ]]; then
+    echo "after the hop the ascent must go on shortening a native path; got" \
+      "'$anchor_after_hop' at exit $anchor_after_hop_rc" >&2
+    exit 1
+  fi
+  # AND A GIT DIRECTORY THAT DOES NOT CONTAIN THE ANCHOR IS NOT HOPPED TO, which
+  # is rule 5 and is the row that separates the hop's legitimate shape from the
+  # P1 the round before this introduced. The two rows differ in ONE stubbed
+  # answer: `--is-inside-git-dir`. With `true` the hop runs and the chain is the
+  # row above; with `false` the metadata directory is somewhere else, it is no
+  # answer about where the listing is, and the walk is the purely lexical one the
+  # unpinned rows measure -- the same chain, to the same top, with the hop gone.
+  anchor_nohop_rc=0
+  anchor_nohop="$( cd "$anchor_dir" \
+    && "$BASH" "$anchor_harness" "$branch_validator" 'C:/a/b' 40 '/elsewhere/bare.git' false 2>&1 )" \
+    || anchor_nohop_rc=$?
+  if [[ "$anchor_nohop_rc" != 0 ]] \
+    || [[ "$anchor_nohop" != 'rc=0 world=filesystem asked=2 at=[C:/a C:/]' ]]; then
+    echo "a git directory the anchor is not inside must leave the ascent lexical; got" \
+      "'$anchor_nohop' at exit $anchor_nohop_rc" >&2
+    exit 1
+  fi
+  # AND THE GATE THE ROW ABOVE STUBS IS A FACT ABOUT GIT, SO IT IS PINNED AGAINST
+  # REAL GIT. `--is-inside-git-dir` must answer `false` for a git directory the
+  # anchor is not inside and `true` for one it is; the row above stubs both
+  # answers, and a stub proves what the walk does with an answer and nothing
+  # about which answer git gives. An exported `GIT_DIR` is the cheapest way to
+  # build the first shape and is used for that here and for nothing else -- the
+  # validator unsets it at the top of the file, so no pinned caller reaches this
+  # walk any more, but `git init --separate-git-dir` and a `.git` file pointing
+  # elsewhere put metadata outside the anchor with no environment at all.
+  pinned_probe_dir="$fixture_dir/pinned-environment"
+  mkdir -p "$pinned_probe_dir/outside"
+  git init -q --bare "$pinned_probe_dir/pinned.git"
+  pinned_outside="$( GIT_DIR="$pinned_probe_dir/pinned.git" \
+    git -C "$pinned_probe_dir/outside" rev-parse --is-inside-git-dir 2>/dev/null )"
+  pinned_inside="$( GIT_DIR="$pinned_probe_dir/pinned.git" \
+    git -C "$pinned_probe_dir/pinned.git" rev-parse --is-inside-git-dir 2>/dev/null )"
+  if [[ "$pinned_outside" != false ]] || [[ "$pinned_inside" != true ]]; then
+    echo "git no longer answers rule 5's gate false for a git directory the anchor is" \
+      "outside and true for one it is inside; got '$pinned_outside' and '$pinned_inside'," \
+      "so the stubbed row above is stubbing an answer git does not give" >&2
+    exit 1
+  fi
+fi
+
+# ---- AND repository_above IS THE THIRD WALK ON THAT RULE ----------------------------------------
+#
+# `repository_above` decides whether git's failure at a listing may be read as an
+# absence, and it decides it by WALKING UP asking about each level. It carried
+# its own copy of the shortening arithmetic until this round, and a copy is
+# exactly what lets one spelling be repaired and another left: with a
+# forward-slash strip, `C:\y` shortens to itself, the walk reads "did not
+# shorten" as "is a top" and answers ABSENCE at the first level -- no repository
+# above a directory that may well have one, which is the reading the whole
+# function exists to refuse.
+#
+# IT IS DRIVEN DIRECTLY, like the two walks above, because nothing on this
+# platform hands it a native path -- and with REAL DIRECTORIES under it, because
+# its levels are decided by `-e <level>/.` and a level that is not there is a
+# refusal and not a step. The probe is stubbed to fail at every level, which is
+# what "no repository anywhere" looks like, and WHAT IS ASSERTED IS THE SEQUENCE
+# OF PATHS IT ASKED ABOUT: a walk that terminates tidily while asking about `C:`
+# rather than `C:/` is the same one-character defect the walks above have rows
+# for, and only the sequence can see it.
+#
+# RUNS NATIVELY ON WINDOWS: NO, for the same reason those do -- the rows need
+# real directories named `C:`, `C:\` and `C:\y`, which only POSIX holds.
+above_harness="$fixture_dir/repository-above-walk.sh"
+cat > "$above_harness" <<'ABOVE'
+set -uo pipefail
+validator="$1"; start="$2"; cap="$3"
+src="$(awk '/^repository_above\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$src" ]] || { echo 'harness: repository_above was not extracted'; exit 3; }
+# THE HELPERS IT CALLS COME OUT WITH IT. `path_parent` is the thing under test;
+# `gitdir_shaped` is reached only where a level HAS a `.git` directory, which no
+# row below builds -- and a harness that would die `command not found` on the
+# first row that did is an instrument with a trapdoor in it, which is the shape
+# this whole file is written against.
+rule="$(awk '/^path_parent\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$rule" ]] || { echo 'harness: path_parent was not extracted'; exit 3; }
+shaped="$(awk '/^gitdir_shaped\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$shaped" ]] || { echo 'harness: gitdir_shaped was not extracted'; exit 3; }
+src="$rule
+$shaped
+$src"
+bash -n <<< "$src" || { echo 'harness: the extract does not parse'; exit 3; }
+eval "$src"
+unset GIT_DIR GIT_WORK_TREE
+probe_status=0; probe_text=''; probe_stderr=''; unexaminable_git=''
+asked=0
+at=''
+git_probe() {
+  [[ "$1" == 0,128 ]] && [[ "$2" == -- ]] && [[ "$3" == rev-parse ]] \
+    && [[ "$4" == --resolve-git-dir ]] || { echo "harness: unexpected call: git_probe $*"; exit 3; }
+  asked=$(( asked + 1 ))
+  at="${at:+$at }$5"
+  if (( asked > cap )); then
+    echo "harness: $asked probes and still asking about '$5'"
+    exit 124
+  fi
+  probe_status=128
+}
+rc=0
+repository_above "$start" || rc=$?
+echo "rc=$rc asked=$asked at=[$at]"
+ABOVE
+if (( posix_names )); then
+  above_dir="$fixture_dir/repository-above-walk"
+  mkdir -p "$above_dir/C:/y" "$above_dir/C:\\y" "$above_dir/C:\\" "$above_dir/p/q"
+  above_case() {  # above_case <label> <start> <expected line>
+    local label="$1" got rc=0
+    got="$( cd "$above_dir" && "$BASH" "$above_harness" "$branch_validator" "$2" 20 2>&1 )" || rc=$?
+    if [[ "$rc" != 0 ]] || [[ "$got" != "$3" ]]; then
+      echo "$label: expected '$3' at exit 0; got '$got' at exit $rc" >&2
+      exit 1
+    fi
+  }
+  above_case 'an ordinary path shortens and runs out of levels' \
+    'p/q' 'rc=1 asked=2 at=[p/q/.git p/.git]'
+  above_case 'a drive-rooted path reaches the drive ROOT' \
+    'C:/y' 'rc=1 asked=2 at=[C:/y/.git C://.git]'
+  above_case 'a backslash-rooted path shortens at all, and at its own separator' \
+    'C:\y' 'rc=1 asked=2 at=[C:\y/.git C:\/.git]'
+fi
+
+# ---- WHICH REPOSITORY THE ENVIRONMENT NAMES IS GIT'S TO SAY, AND A LISTING IS JUDGED IN IT ----------
+#
+# `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` tell git which repository a
+# directory belongs to, and rounds 10 to 12 read their VALUES in the validator:
+# relative or absolute, `.` or a trailing `/.`, which directory a `-C` left git in.
+# Each round's review met a spelling that reading got wrong, and four were exit 1
+# at `231c1aad` and exit 0 `conforms` at `9980591a` -- the hidden superproject, a
+# `GIT_WORK_TREE=.`, a relative `GIT_DIR` re-anchored onto metadata planted inside
+# the listing, and a file listing below a pinned `160000`. The validator now asks
+# GIT, once, from the caller's own directory with the names as exported, which
+# repository they select, and judges a listing in that repository or not at all.
+# Its environment section states the four arms; these rows hold each of them.
+#
+# WHAT IS ASSERTED FOLLOWS FROM THOSE ARMS, IN THREE SHAPES. `env_case`: where the
+# repository the names select records at the listing what the path's own
+# repository records there, the run with them exported IS the run without them --
+# the same exit code AND the same bytes. `env_refuses`: where the names select a
+# repository git cannot resolve, a work tree the listing is not in, a ledger that
+# disagrees with the path's, or a git directory with no work tree over a listing no
+# repository reaches, the run refuses AND SAYS WHICH NAMES WERE EXPORTED -- because
+# every refusal this validator makes is exit 1 and `names no finding` is one of
+# them. `env_pinned`: where no repository reaches the path, the named repository's
+# records answer, and the row says what they answered.
+#
+# THE CONTROL IS THE CLEAN ENVIRONMENT AND IT IS ASSERTED FIRST IN EVERY SHAPE,
+# so a fixture that stopped being the shape it is named for cannot pass this by
+# refusing everywhere alike.
+env_case() {  # env_case <label> <cwd> <listing> <branch> <want-exit> <VAR=VALUE>...
+  local label="$1" cwd="$2" listing="$3" branch="$4" want="$5"
+  shift 5
+  local clean_out pinned_out pin clean_rc=0 pinned_rc=0
+  clean_out="$( cd "$cwd" && "$BASH" "$branch_validator" "$branch" "$listing" 2>&1 )" || clean_rc=$?
+  if [[ "$clean_rc" != "$want" ]]; then
+    echo "$label: the clean-environment control answered $clean_rc, and $want was expected" >&2
+    echo "  ${clean_out%%$'\n'*}" >&2
+    exit 1
+  fi
+  for pin in "$@"; do
+    pinned_rc=0
+    pinned_out="$( cd "$cwd" && env "$pin" "$BASH" "$branch_validator" "$branch" "$listing" 2>&1 )" \
+      || pinned_rc=$?
+    if [[ "$pinned_rc" != "$clean_rc" ]] || [[ "$pinned_out" != "$clean_out" ]]; then
+      echo "$label: with ${pin%%=*} exported the run answered $pinned_rc where the same run in a" \
+        "clean environment answered $clean_rc, and the repository it names records what the" \
+        "path's own repository records here" >&2
+      echo "  exported: ${pinned_out%%$'\n'*}" >&2
+      echo "  clean:    ${clean_out%%$'\n'*}" >&2
+      exit 1
+    fi
+  done
+}
+
+# THE FILED REPRODUCTION, which is a LEGITIMATE CALLER and not a hostile one: a
+# clean standalone repository, one committed finding at its root, asked about its
+# own directory, by somebody who exports the variable git documents for exactly
+# that repository. Each name selects the very repository discovery finds, so the
+# two ledgers are one and the run is the clean run. `GIT_DIR` is here beside it
+# because only `GIT_WORK_TREE` reached the original defect -- with a git directory
+# pinned, discovery succeeds from every directory and the 128 never happens -- so a
+# `GIT_DIR` row alone would have passed against that code and proved nothing.
+env_standalone="$fixture_dir/env-standalone"
+new_repo "$env_standalone"
+echo fixture > "$env_standalone/P2_correctness_202609130713_an-exported-work-tree.md"
+git -C "$env_standalone" add -A
+git -C "$env_standalone" commit -q -m 'one finding at the root'
+if [[ -n "$(git -C "$env_standalone" status --porcelain)" ]] \
+  || [[ "$(git -C "$env_standalone" ls-files)" \
+    != 'P2_correctness_202609130713_an-exported-work-tree.md' ]]; then
+  echo 'the fixture was meant to be a clean standalone repository holding one committed finding' >&2
+  exit 1
+fi
+env_case 'a standalone repository asked about its own root' \
+  "$env_standalone" . 'fix-P2/correctness_an-exported-work-tree' 0 \
+  "GIT_WORK_TREE=$env_standalone" \
+  "GIT_DIR=$env_standalone/.git" \
+  "GIT_INDEX_FILE=$env_standalone/.git/index"
+
+# AND WHERE THE NAMES DO NOT SELECT A REPOSITORY THE LISTING CAN BE JUDGED IN, THE
+# PINNED RUN REFUSES RATHER THAN MATCHING THE CLEAN ONE, and says which names were
+# exported. The clean control is asserted the same way first.
+env_refuses() {  # env_refuses <label> <cwd> <listing> <branch> <clean-exit> <VAR=VALUE>...
+  local label="$1" cwd="$2" listing="$3" branch="$4" want="$5"
+  shift 5
+  local clean_out pinned_out pin clean_rc=0 pinned_rc=0
+  clean_out="$( cd "$cwd" && "$BASH" "$branch_validator" "$branch" "$listing" 2>&1 )" || clean_rc=$?
+  if [[ "$clean_rc" != "$want" ]]; then
+    echo "$label: the clean-environment control answered $clean_rc, and $want was expected" >&2
+    echo "  ${clean_out%%$'\n'*}" >&2
+    exit 1
+  fi
+  for pin in "$@"; do
+    pinned_rc=0
+    pinned_out="$( cd "$cwd" && env "$pin" "$BASH" "$branch_validator" "$branch" "$listing" 2>&1 )" \
+      || pinned_rc=$?
+    if (( pinned_rc != 1 )); then
+      echo "$label: with ${pin%%=*} exported the run answered $pinned_rc, and a listing is judged" \
+        "in the repository the environment names or not at all" >&2
+      echo "  exported: ${pinned_out%%$'\n'*}" >&2
+      exit 1
+    fi
+    if [[ "$pinned_out" != *"the environment names one: ${pin%%=*}"* ]]; then
+      echo "$label: with ${pin%%=*} exported the run refused for a different reason, and a" \
+        "row that reads the exit code alone cannot tell the two refusals apart" >&2
+      echo "  exported: ${pinned_out%%$'\n'*}" >&2
+      exit 1
+    fi
+  done
+}
+
+# A DIRECTORY IN NO REPOSITORY AT ALL. The clean run counts the names in the
+# directory and conforms. Exported one at a time, `GIT_WORK_TREE` and
+# `GIT_INDEX_FILE` leave git to find a repository from the caller's directory,
+# which has none -- arm 1, unresolvable -- and `GIT_DIR` alone roots its work tree
+# wherever git is asked from, which places no listing -- arm 4. Measured against
+# `231c1aad`: `GIT_WORK_TREE` refuses there, `git could not say what it records`;
+# `GIT_DIR` refuses, `names no finding`; and `GIT_INDEX_FILE` CONFORMS at exit 0,
+# counting the filesystem's names under an index the path cannot reach.
+env_loose="$fixture_dir/env-no-repository/listing"
+mkdir -p "$env_loose"
+echo fixture > "$env_loose/P2_correctness_202609130715_no-repository-at-all.md"
+env_refuses 'a listing in no repository at all' \
+  "$env_loose" . 'fix-P2/correctness_no-repository-at-all' 0 \
+  "GIT_WORK_TREE=$env_standalone" \
+  "GIT_DIR=$env_standalone/.git" \
+  "GIT_INDEX_FILE=$env_standalone/.git/index"
+
+# AND A DEPLOYMENT REACHABLE ONLY THROUGH THE NAMES. `git --git-dir=… --work-tree=…`
+# with no `.git` at or above the work tree: discovery from the work tree with the
+# names cleared is `fatal: not a git repository`. It IGNORES `findings/`, so its own
+# answer for this listing is `git ls-files -- findings` printing nothing. One name
+# alone never reaches its ledger, for the reasons the row above gives, and each of
+# the three refuses. The clean control is exit 0 because without the names there is
+# nothing to see but the filesystem's names.
+env_deployment="$fixture_dir/env-separate-deployment"
+mkdir -p "$env_deployment/wt/findings"
+new_repo "$env_deployment/meta"
+printf 'findings/\n' > "$env_deployment/exclude"
+git -C "$env_deployment/meta" config core.excludesFile "$env_deployment/exclude"
+echo fixture > "$env_deployment/wt/findings/P2_correctness_202609131731_a-cleared-pin.md"
+env_refuses 'a work tree reachable only through the environment' \
+  "$env_deployment/wt" findings 'fix-P2/correctness_a-cleared-pin' 0 \
+  "GIT_WORK_TREE=$env_deployment/wt" \
+  "GIT_DIR=$env_deployment/meta/.git" \
+  "GIT_INDEX_FILE=$env_deployment/meta/.git/index"
+
+# AND A NAME SET TO THE EMPTY STRING IS ONE OF THE THREE. Git honours all three
+# empty: `GIT_DIR=` is `fatal: not a git repository: ''`, `GIT_WORK_TREE=` is
+# `fatal: The empty string is not a valid path`, and `GIT_INDEX_FILE=` makes
+# `git ls-files` print nothing and exit 0, which is an empty LEDGER. So what was
+# exported is recorded with `${NAME+set}` and not from the value, and each is a
+# repository git cannot resolve from here.
+env_refuses 'a name exported empty is still a ledger the path cannot reach' \
+  "$env_deployment/wt" findings 'fix-P2/correctness_a-cleared-pin' 0 \
+  "GIT_WORK_TREE=" \
+  "GIT_DIR=" \
+  "GIT_INDEX_FILE="
+
+# AND THE SAME DEPLOYMENT NAMED THE WAY IT IS SPELLED -- BOTH NAMES -- WHERE NO
+# REPOSITORY REACHES THE PATH: ARM 4, and the named repository's records answer.
+# The two rows differ in ONE thing, whether the finding is TRACKED, and the
+# filesystem cannot see it: this one holds a COMMITTED finding and must conform,
+# exactly as `231c1aad` and the deployment's own repository answer.
+env_pinned_out=''
+env_pinned() {  # env_pinned <label> <cwd> <listing> <branch> <clean-exit> <pinned-exit> <VAR=VALUE>...
+  local label="$1" cwd="$2" listing="$3" branch="$4" clean_want="$5" pinned_want="$6"
+  shift 6
+  local clean_out clean_rc=0 pinned_rc=0
+  clean_out="$( cd "$cwd" && "$BASH" "$branch_validator" "$branch" "$listing" 2>&1 )" || clean_rc=$?
+  if [[ "$clean_rc" != "$clean_want" ]]; then
+    echo "$label: the clean-environment control answered $clean_rc, and $clean_want was expected" >&2
+    echo "  ${clean_out%%$'\n'*}" >&2
+    exit 1
+  fi
+  env_pinned_out="$( cd "$cwd" && env "$@" "$BASH" "$branch_validator" "$branch" "$listing" 2>&1 )" \
+    || pinned_rc=$?
+  if [[ "$pinned_rc" != "$pinned_want" ]]; then
+    echo "$label: with $* exported the run answered $pinned_rc, and $pinned_want was expected" >&2
+    echo "  exported: ${env_pinned_out%%$'\n'*}" >&2
+    exit 1
+  fi
+}
+
+env_tracked="$fixture_dir/env-deployment-tracked"
+mkdir -p "$env_tracked/meta"
+new_repo "$env_tracked/wt"
+mkdir -p "$env_tracked/wt/findings"
+echo fixture > "$env_tracked/wt/findings/P2_correctness_202609140901_a-pin-that-reaches-a-ledger.md"
+echo fixture > "$env_tracked/wt/P2_correctness_202609140902_a-pin-outside-its-work-tree.md"
+git -C "$env_tracked/wt" add -A
+git -C "$env_tracked/wt" commit -q -m 'a committed finding, and one at the root'
+mv "$env_tracked/wt/.git" "$env_tracked/meta/repo.git"
+env_tracked_pins=( "GIT_DIR=$env_tracked/meta/repo.git" "GIT_WORK_TREE=$env_tracked/wt" )
+# THE SHAPE IS ASSERTED BEFORE ANYTHING IS JUDGED: the work tree has no `.git`
+# at or above it and discovery from it with the names cleared says so, the index
+# is clean, and it records the two findings and nothing else. A fixture that
+# stopped being a deployment would otherwise pass this by being an ordinary
+# repository.
+if [[ -e "$env_tracked/wt/.git" ]] \
+  || ( cd "$env_tracked/wt" && git rev-parse --show-toplevel ) >/dev/null 2>&1 \
+  || [[ -n "$( cd "$env_tracked/wt" && env "${env_tracked_pins[@]}" git status --porcelain )" ]] \
+  || [[ "$( cd "$env_tracked/wt" && env "${env_tracked_pins[@]}" git ls-files | tr '\n' ' ' )" \
+    != 'P2_correctness_202609140902_a-pin-outside-its-work-tree.md findings/P2_correctness_202609140901_a-pin-that-reaches-a-ledger.md ' ]]; then
+  echo 'the fixture was meant to be a clean deployment reachable only through the environment' >&2
+  exit 1
+fi
+
+env_pinned 'a deployment whose finding is committed is not refused' \
+  "$env_tracked/wt" findings 'fix-P2/correctness_a-pin-that-reaches-a-ledger' 0 0 \
+  "${env_tracked_pins[@]}"
+
+# AND ITS HOSTILE TWIN UNDER THE SAME TWO NAMES: the checkout holds a
+# finding-shaped name and the named ledger records nothing there. Arm 4 reads that
+# ledger exactly as any records are read, so the refusal is the records' own --
+# `git records nothing at` -- and not a second message the environment adds. The
+# clean run conforms on the filesystem's names, which is the false green the names
+# exist to take away.
+env_pinned 'a deployment whose finding is untracked still refuses' \
+  "$env_deployment/wt" findings 'fix-P2/correctness_a-cleared-pin' 0 1 \
+  "GIT_DIR=$env_deployment/meta/.git" "GIT_WORK_TREE=$env_deployment/wt"
+if [[ "$env_pinned_out" != *"git records nothing at 'findings'"* ]]; then
+  echo 'a deployment whose finding is untracked refused for a different reason' >&2
+  echo "  ${env_pinned_out%%$'\n'*}" >&2
+  exit 1
+fi
+
+# A GIT DIRECTORY SAYS WHERE GIT IS, NOT WHERE THE LISTING IS. With no work tree
+# named git takes the directory it is asked FROM as the work tree's root, so the
+# named index's ROOT entries would come back as this listing's own children -- and
+# `env_standalone` keeps its one committed finding at its root. Without arm 4's
+# bound, a directory in NO repository, holding nothing of the kind, conforms for a
+# finding filed somewhere else entirely.
+env_refuses 'a git directory alone does not place a listing' \
+  "$env_loose" . 'fix-P2/correctness_an-exported-work-tree' 1 \
+  "GIT_DIR=$env_standalone/.git"
+
+# AND A LISTING OUTSIDE THE WORK TREE THOSE NAMES SELECT IS NOT ITS LISTING -- ARM
+# 2. `$env_tracked/wt` keeps a committed finding at its root for exactly this: a
+# reading that took the work tree's root for the listing would offer it. The clean
+# control is `names no finding`, which is also what the deployment's own
+# repository says.
+env_pinned 'a listing outside the selected work tree is not its listing' \
+  "$env_loose" . 'fix-P2/correctness_a-pin-outside-its-work-tree' 1 1 \
+  "${env_tracked_pins[@]}"
+if [[ "$env_pinned_out" != *'the environment names one: GIT_DIR GIT_WORK_TREE'* ]]; then
+  echo 'a listing outside the selected work tree refused for a different reason' >&2
+  echo "  ${env_pinned_out%%$'\n'*}" >&2
+  exit 1
+fi
+
+# AND A LISTING WRITTEN THROUGH A `..` THAT CLIMBS OUT OF THAT WORK TREE IS OUTSIDE
+# IT TOO. A git directory exported alone roots its work tree where git is asked --
+# here `sub` -- so `../findings` written from `sub` is matched at that root and then
+# leaves it, the pathspec `git ls-files` refuses as `outside repository`. It is arm 2
+# and says so, rather than handing git a name that leaves its work tree and reading
+# git's 128 as a status nobody enumerated.
+env_ordinary="$fixture_dir/env-ordinary"
+new_repo "$env_ordinary"
+mkdir -p "$env_ordinary/findings" "$env_ordinary/sub"
+echo fixture > "$env_ordinary/findings/P2_correctness_202609141804_climbs-out-of-the-work-tree.md"
+echo seed > "$env_ordinary/sub/seed"
+git -C "$env_ordinary" add -A && git -C "$env_ordinary" commit -q -m 'a finding, and a subdirectory'
+env_pinned 'a listing that climbs out of the work tree git roots where it is asked' \
+  "$env_ordinary/sub" ../findings 'fix-P2/correctness_climbs-out-of-the-work-tree' 0 1 \
+  "GIT_DIR=$env_ordinary/.git"
+if [[ "$env_pinned_out" != *"is not inside '"*"the environment names one: GIT_DIR"* ]]; then
+  echo 'a listing that climbs out of the work tree refused for a different reason' >&2
+  echo "  ${env_pinned_out%%$'\n'*}" >&2
+  exit 1
+fi
+
+# A REPOSITORY UNDER A 160000 GITLINK, WITH ITS OWN METADATA EXPORTED -- ARM 3, AND
+# THE TWO LEDGERS DISAGREE. The superproject is discoverable and records `inner` at
+# 160000, so the clean run refuses for the gitlink. Each name below selects the
+# inner repository itself, and the repository the environment selects is the one
+# that is READ: its index records a matching finding at its own root while the
+# superproject records a gitlink over the same directory, and one directory with two
+# ledgers is refused rather than settled by either. When the walks still ran with
+# the names exported, `GIT_DIR` and `GIT_INDEX_FILE` made every probe answer out of
+# the inner repository and this row conformed.
+#
+# UNTIL ROUND 14 THIS ROW ASSERTED THE CLEAN RUN'S BYTES, AND THOSE BYTES WERE THE
+# SUBSTITUTION. The ascent above `inner` was taken for the selected repository too and
+# replaced its ledger with the superproject's, so both readings were the
+# superproject's `160000` and `inner/.git/index` was never opened -- the same move that
+# let a selected index recording a twin conform (the section after the four routes).
+# It is the hidden superproject below turned round: there the names select the
+# superproject and the path reaches the submodule, here the names select the submodule
+# and the path reaches the superproject, and both refuse for one reason.
+#
+# AND AGAINST TWO VARIABLES THAT ARE NOT NAMES OF A REPOSITORY BUT MOVED IT ALL THE
+# SAME. `GIT_TRACE=3` wrote git's trace into descriptor 3 -- which `capture` had
+# open as the copy of git's stdout, so `--is-inside-work-tree` read `true` as
+# `false`, the ascent to the superproject was skipped, and the submodule's own index
+# answered. `GIT_LITERAL_PATHSPECS=1` turns the `:(literal)<path>` every `ls-files`
+# here sends into the literal name `:(literal)<path>`, which matches nothing, so the
+# ascent's `records_path` saw no `160000` and did not refuse. `capture` runs the
+# producer with 3 and 4 closed, and the pathspec-magic variables are unset at the
+# top of the validator.
+env_super="$fixture_dir/env-superproject"
+new_repo "$env_super"
+new_repo "$env_super/inner"
+echo fixture > "$env_super/inner/P2_correctness_202609130714_under-a-pinned-gitlink.md"
+git -C "$env_super/inner" add -A
+git -C "$env_super/inner" commit -q -m 'the inner ledger'
+git -C "$env_super" update-index --add --cacheinfo \
+  "160000,$(git -C "$env_super/inner" rev-parse HEAD),inner"
+echo seed > "$env_super/seed.txt"
+git -C "$env_super" add seed.txt
+git -C "$env_super" commit -q -m 'a gitlink at inner'
+if ! git -C "$env_super" ls-tree HEAD | grep -q $'^160000 commit [0-9a-f]*\tinner$'; then
+  echo 'the fixture was meant to record inner as a clean 160000 gitlink' >&2
+  exit 1
+fi
+for env_super_pin in "GIT_WORK_TREE=$env_super/inner" "GIT_DIR=$env_super/inner/.git" \
+  "GIT_INDEX_FILE=$env_super/inner/.git/index"; do
+  env_pinned "a repository the superproject records at 160000, selected by ${env_super_pin%%=*}" \
+    "$env_super/inner" . 'fix-P2/correctness_under-a-pinned-gitlink' 1 1 "$env_super_pin"
+  if [[ "$env_pinned_out" != *"the environment names one: ${env_super_pin%%=*}."*'Two ledgers answering differently'* ]]; then
+    echo "a submodule selected by ${env_super_pin%%=*} under its superproject's 160000 must refuse as two" \
+      "ledgers disagreeing, and not answer the superproject's record for it" >&2
+    printf '%s\n' "$env_pinned_out" >&2
+    exit 1
+  fi
+done
+env_case 'a repository the superproject records at 160000, under two variables that name none' \
+  "$env_super/inner" . 'fix-P2/correctness_under-a-pinned-gitlink' 1 \
+  "GIT_TRACE=3" \
+  "GIT_LITERAL_PATHSPECS=1"
+
+# AND A NAME THAT SELECTS NOTHING THE LISTING IS IN REFUSES -- ARMS 1 AND 2. A
+# `GIT_DIR` that is not a git directory is a repository git cannot resolve, and a
+# `GIT_WORK_TREE` that names no directory is a work tree the listing is not inside.
+# Round 9 asserted the clean verdict here, under the rule that the path alone
+# decides. Measured against `231c1aad`: the `GIT_DIR` refuses, `git could not say
+# what it records`, and the `GIT_WORK_TREE` conforms at exit 0. This head refuses
+# both and says why.
+env_refuses 'a standalone repository under a pin that names nothing' \
+  "$env_standalone" . 'fix-P2/correctness_an-exported-work-tree' 0 \
+  "GIT_DIR=$env_standalone/there-is-no-git-directory-here" \
+  "GIT_WORK_TREE=$env_standalone/there-is-no-work-tree-here"
+
+# AND A FOREIGN LEDGER OVER A REPOSITORY THAT HAS ITS OWN -- ARM 3, AND THE TWO
+# LEDGERS DISAGREE. The superproject's index over the standalone repository records
+# `inner` and `seed.txt` at the root and no finding; the standalone repository's own
+# records its one finding. One directory, two answers, and neither settles it: the
+# run refuses and says so, where `231c1aad` refuses as `names no finding`.
+env_refuses 'a standalone repository under another repository index' \
+  "$env_standalone" . 'fix-P2/correctness_an-exported-work-tree' 0 \
+  "GIT_INDEX_FILE=$env_super/.git/index"
+env_pinned 'a standalone repository under another repository index, and why' \
+  "$env_standalone" . 'fix-P2/correctness_an-exported-work-tree' 0 1 \
+  "GIT_INDEX_FILE=$env_super/.git/index"
+if [[ "$env_pinned_out" != *'Two ledgers answering differently'* ]]; then
+  echo 'a foreign index over a repository must refuse as two ledgers disagreeing' >&2
+  echo "  ${env_pinned_out%%$'\n'*}" >&2
+  exit 1
+fi
+
+# ---- THE FOUR ROUTES ROUND 12'S REVIEW EXECUTED, EACH `231c1aad` 1 AND `9980591a` 0 ------------
+#
+# Each was a site where the validator read a name's value instead of asking git,
+# and each is now a row. The clean control is asserted wherever there is one.
+
+# ROUTE 1: THE HIDDEN SUPERPROJECT. A superproject records `findings` at 160000 and
+# `findings` is an initialised repository holding a matching finding at its root --
+# and the superproject's `.git` is OUTSIDE its work tree, so the names are the only
+# way to it. Cleared, `findings` is a standalone repository and conforms, exactly
+# as `env_standalone` does; that is the clean control, and it is right. Exported,
+# the names select the superproject, whose records say `findings` is a gitlink:
+# arm 3, two ledgers, refused -- from the superproject's root, from inside the
+# submodule, and with a git directory alone.
+hidden_wt="$fixture_dir/hidden-superproject/wt"
+new_repo "$hidden_wt"
+echo seed > "$hidden_wt/seed"
+git -C "$hidden_wt" add -A && git -C "$hidden_wt" commit -q -m 'the superproject'
+new_repo "$hidden_wt/findings"
+echo fixture > "$hidden_wt/findings/P2_correctness_202609141801_a-hidden-superproject.md"
+git -C "$hidden_wt/findings" add -A && git -C "$hidden_wt/findings" commit -q -m 'the submodule ledger'
+git -C "$hidden_wt" update-index --add --cacheinfo \
+  "160000,$(git -C "$hidden_wt/findings" rev-parse HEAD),findings"
+git -C "$hidden_wt" commit -q -m 'findings is a gitlink'
+mv "$hidden_wt/.git" "$fixture_dir/hidden-superproject/super.git"
+hidden_pins=( "GIT_DIR=$fixture_dir/hidden-superproject/super.git" "GIT_WORK_TREE=$hidden_wt" )
+if [[ -n "$( cd "$hidden_wt" && env "${hidden_pins[@]}" git status --porcelain )" ]] \
+  || ! ( cd "$hidden_wt" && env "${hidden_pins[@]}" git ls-files -s -- findings ) | grep -q '^160000 '; then
+  echo 'the fixture was meant to be a clean superproject, reachable only through the names, recording findings at 160000' >&2
+  exit 1
+fi
+env_pinned 'a superproject reachable only through the names records the submodule' \
+  "$hidden_wt" findings 'fix-P2/correctness_a-hidden-superproject' 0 1 "${hidden_pins[@]}"
+if [[ "$env_pinned_out" != *'Two ledgers answering differently'* ]]; then
+  echo 'the hidden superproject refused for a different reason' >&2
+  echo "  ${env_pinned_out%%$'\n'*}" >&2
+  exit 1
+fi
+env_pinned 'the hidden superproject, asked from inside its submodule' \
+  "$hidden_wt/findings" . 'fix-P2/correctness_a-hidden-superproject' 0 1 "${hidden_pins[@]}"
+env_pinned 'the hidden superproject, named by its git directory alone' \
+  "$hidden_wt" findings 'fix-P2/correctness_a-hidden-superproject' 0 1 \
+  "GIT_DIR=$fixture_dir/hidden-superproject/super.git"
+
+# ROUTE 4: A FILE LISTING BELOW A 160000 THE NAMES RECORD, WITH NO SUBMODULE AT ALL.
+# `findings` is a gitlink in a deployment reachable only through the names, and the
+# checkout holds a plain directory there with a file naming a finding. The
+# fallback that stood here asked what the ledger records AT the file and not above
+# it, found nothing, and read the file: exit 0. The named repository's records are
+# read by `recorded_kind_of`, ancestors and all, so the gitlink above it answers.
+below_wt="$fixture_dir/pinned-below-gitlink/wt"
+new_repo "$below_wt"
+echo seed > "$below_wt/seed"
+git -C "$below_wt" add -A && git -C "$below_wt" commit -q -m seed
+git -C "$below_wt" update-index --add --cacheinfo "160000,$(git -C "$below_wt" rev-parse HEAD),findings"
+git -C "$below_wt" commit -q -m 'findings is a gitlink'
+mkdir -p "$below_wt/findings"
+echo 'P2_correctness_202609141802_below-a-pinned-gitlink.md' > "$below_wt/findings/list.txt"
+mv "$below_wt/.git" "$fixture_dir/pinned-below-gitlink/repo.git"
+env_pinned 'a file listing below a gitlink the names record' \
+  "$below_wt" findings/list.txt 'fix-P2/correctness_below-a-pinned-gitlink' 0 1 \
+  "GIT_DIR=$fixture_dir/pinned-below-gitlink/repo.git" "GIT_WORK_TREE=$below_wt"
+if [[ "$env_pinned_out" != *"records 'findings' as mode 160000, so"* ]]; then
+  echo 'a file listing below a pinned gitlink refused for a different reason' >&2
+  echo "  ${env_pinned_out%%$'\n'*}" >&2
+  exit 1
+fi
+
+# ROUTE 3: A RELATIVE `GIT_DIR` THAT NAMES NOTHING WHERE THE CALLER STANDS, WITH
+# MATCHING METADATA PLANTED AT THE SAME SPELLING INSIDE THE LISTING. The rooting that
+# stood here tested `-ef` against the caller's directory, found nothing there, left
+# the pin relative, and `git -C <listing>` read the planted repository: exit 0. Git
+# is now asked from the caller's own directory with the name exactly as exported,
+# says `not a git repository`, and arm 1 refuses; nothing inside the listing is
+# ever asked. The absolute spelling of the same absent directory is the control.
+# RUNS NATIVELY ON WINDOWS: NO -- a directory named `C:` is a POSIX name.
+if (( posix_names )); then
+  planted_wt="$fixture_dir/planted-relative-pin/wt"
+  new_repo "$planted_wt"
+  printf 'findings/\n' > "$planted_wt/.gitignore"
+  git -C "$planted_wt" add -A && git -C "$planted_wt" commit -q -m 'the intended ledger records no finding'
+  mv "$planted_wt/.git" "$fixture_dir/planted-relative-pin/intended.git"
+  mkdir -p "$planted_wt/findings/C:"
+  echo untracked > "$planted_wt/findings/P2_correctness_202609141803_a-planted-pin.md"
+  new_repo "$fixture_dir/planted-relative-pin/donor"
+  mkdir -p "$fixture_dir/planted-relative-pin/donor/findings"
+  echo planted > "$fixture_dir/planted-relative-pin/donor/findings/P2_correctness_202609141803_a-planted-pin.md"
+  git -C "$fixture_dir/planted-relative-pin/donor" add -A
+  git -C "$fixture_dir/planted-relative-pin/donor" commit -q -m 'a planted ledger'
+  mv "$fixture_dir/planted-relative-pin/donor/.git" "$planted_wt/findings/C:/not-there.git"
+  for planted_dir in 'C:/not-there.git' "$fixture_dir/planted-relative-pin/C:/not-there.git"; do
+    env_pinned "a GIT_DIR naming nothing where the caller stands ($planted_dir)" \
+      "$fixture_dir/planted-relative-pin" "$planted_wt/findings" 'fix-P2/correctness_a-planted-pin' 0 1 \
+      "GIT_DIR=$planted_dir" "GIT_WORK_TREE=$planted_wt"
+    if [[ "$env_pinned_out" != *'git could not resolve a repository from'* ]]; then
+      echo "a GIT_DIR naming nothing where the caller stands refused for a different reason" >&2
+      echo "  ${env_pinned_out%%$'\n'*}" >&2
+      exit 1
+    fi
+  done
+fi
+
+# AND A RELATIVE PIN THAT DOES NAME THE CALLER'S METADATA IS THE CALLER'S. The same
+# spellings round 12 was shown -- `C:/repo.git` and `\meta/repo.git`, POSIX-relative
+# names that look anchored -- with the intended metadata at `<caller>/<spelling>`
+# recording no finding and a second repository's metadata planted at
+# `<listing>/<spelling>` recording one. Git resolves the name from the caller's
+# directory, reads the intended ledger, and that ledger records nothing at the
+# listing: refused, where the planted ledger would have conformed. The absolute
+# spelling is the control.
+if (( posix_names )); then
+  relpin_wt="$fixture_dir/relpin/wt"
+  new_repo "$relpin_wt"
+  printf 'findings/\n' > "$relpin_wt/.gitignore"
+  echo seed > "$relpin_wt/seed"
+  git -C "$relpin_wt" add -A && git -C "$relpin_wt" commit -q -m 'the intended ledger records no finding'
+  mkdir -p "$fixture_dir/relpin/C:" "$fixture_dir/relpin/\\meta"
+  mv "$relpin_wt/.git" "$fixture_dir/relpin/C:/repo.git"
+  cp -R "$fixture_dir/relpin/C:/repo.git" "$fixture_dir/relpin/\\meta/repo.git"
+  mkdir -p "$relpin_wt/findings"
+  echo untracked > "$relpin_wt/findings/P2_correctness_202609100001_relative-pin.md"
+  new_repo "$fixture_dir/relpin/donor"
+  mkdir -p "$fixture_dir/relpin/donor/findings"
+  echo rogue > "$fixture_dir/relpin/donor/findings/P2_correctness_202609100001_relative-pin.md"
+  git -C "$fixture_dir/relpin/donor" add -A && git -C "$fixture_dir/relpin/donor" commit -q -m 'a rogue ledger'
+  mkdir -p "$relpin_wt/findings/C:" "$relpin_wt/findings/\\meta"
+  cp -R "$fixture_dir/relpin/donor/.git" "$relpin_wt/findings/\\meta/repo.git"
+  mv "$fixture_dir/relpin/donor/.git" "$relpin_wt/findings/C:/repo.git"
+  for relpin_dir in 'C:/repo.git' '\meta/repo.git' "$fixture_dir/relpin/C:/repo.git"; do
+    env_pinned "a relative GIT_DIR is resolved where the caller stands ($relpin_dir)" \
+      "$fixture_dir/relpin" "$relpin_wt/findings" 'fix-P2/correctness_relative-pin' 0 1 \
+      "GIT_DIR=$relpin_dir" "GIT_WORK_TREE=$relpin_wt"
+    if [[ "$env_pinned_out" != *"git records nothing at"* ]]; then
+      echo "a relative GIT_DIR naming the caller's metadata refused for a different reason" >&2
+      echo "  ${env_pinned_out%%$'\n'*}" >&2
+      exit 1
+    fi
+  done
+fi
+
+# AND THE LEGITIMATE SHAPE BESIDE BOTH: a deployment named by RELATIVE names, whose
+# ledger records the finding. Git resolves both names from the caller's directory,
+# so the run conforms from the parent and from the work tree with `.`. `231c1aad`
+# refuses these, for `git could not say what it records` -- its `git -C <listing>`
+# resolved the names inside the listing, where they name nothing -- and `9980591a`
+# conforms, which is the answer the deployment's own `git ls-files` gives.
+env_pinned 'a deployment named by relative names, from its parent' \
+  "$env_tracked" wt/findings 'fix-P2/correctness_a-pin-that-reaches-a-ledger' 0 0 \
+  "GIT_DIR=meta/repo.git" "GIT_WORK_TREE=wt"
+env_pinned 'a deployment named by relative names, from its work tree' \
+  "$env_tracked/wt" findings 'fix-P2/correctness_a-pin-that-reaches-a-ledger' 0 0 \
+  "GIT_DIR=../meta/repo.git" "GIT_WORK_TREE=."
+
+# ---- ROUTE 2: THE LEDGER'S RECORDED TYPE DECIDES, NOT THE CHECKOUT'S SHAPE, AND NOT A SPELLING ----
+#
+# A `skip-worktree` finding whose directory the deployment REMOVED is recorded all
+# the same: the index still holds `findings/<finding>` at 100644 and `git status` is
+# clean. It conforms whether or not the checkout materialised the directory -- and
+# whatever spelling names the work tree. Round 12's review executed the false red
+# with `GIT_WORK_TREE=.`, `<wt>/` and `<wt>/.`: the fallback stripped the work tree's
+# prefix from the listing BY SPELLING, `<caller>/.` was no prefix of
+# `<caller>/findings`, and every recorded entry was discarded. Git resolves each
+# spelling to one work tree now, and the listing is named inside it by inode.
+sparse_wt="$fixture_dir/sparse-deployment/wt"
+mkdir -p "$fixture_dir/sparse-deployment"
+new_repo "$sparse_wt"
+mkdir -p "$sparse_wt/findings"
+echo fixture > "$sparse_wt/findings/P2_correctness_202609100004_a-sparse-finding.md"
+git -C "$sparse_wt" add -A && git -C "$sparse_wt" commit -q -m 'one committed finding'
+mv "$sparse_wt/.git" "$fixture_dir/sparse-deployment/repo.git"
+sparse_pins=( "GIT_DIR=$fixture_dir/sparse-deployment/repo.git" "GIT_WORK_TREE=$sparse_wt" )
+( cd "$sparse_wt" && env "${sparse_pins[@]}" \
+  git update-index --skip-worktree findings/P2_correctness_202609100004_a-sparse-finding.md )
+rm "$sparse_wt/findings/P2_correctness_202609100004_a-sparse-finding.md"
+rmdir "$sparse_wt/findings"
+if [[ -n "$( cd "$sparse_wt" && env "${sparse_pins[@]}" git status --porcelain )" ]] \
+  || [[ -e "$sparse_wt/findings" ]]; then
+  echo 'the sparse fixture was meant to be a clean index with its findings/ directory removed' >&2
+  exit 1
+fi
+for sparse_tree in "$sparse_wt" . "$sparse_wt/" "$sparse_wt/."; do
+  env_pinned "a committed finding whose checkout directory was removed (GIT_WORK_TREE=$sparse_tree)" \
+    "$sparse_wt" findings 'fix-P2/correctness_a-sparse-finding' 1 0 \
+    "GIT_DIR=$fixture_dir/sparse-deployment/repo.git" "GIT_WORK_TREE=$sparse_tree"
+done
+
+# A committed symlink materialised by `core.symlinks=false` is a REGULAR FILE on disk
+# holding its target text. Reading those bytes as a listing MANUFACTURED a finding:
+# the ledger records `findings` at 120000, and the records world refuses that. It is
+# refused for the recorded mode under every spelling of the work tree -- the same
+# `GIT_WORK_TREE=.` that made the sparse row refuse made this one conform.
+mat_wt="$fixture_dir/materialised-deployment/wt"
+mkdir -p "$fixture_dir/materialised-deployment"
+new_repo "$mat_wt"
+ln -s P2_correctness_202609100005_a-materialised-link.md "$mat_wt/findings"
+git -C "$mat_wt" add -A && git -C "$mat_wt" commit -q -m 'findings is a symlink naming a finding'
+git -C "$mat_wt" config core.symlinks false
+rm "$mat_wt/findings"
+git -C "$mat_wt" checkout -- findings
+if [[ -L "$mat_wt/findings" || ! -f "$mat_wt/findings" ]]; then
+  echo 'note: skipping the materialised-symlink deployment case (this git left the link a link)' >&2
+else
+  mv "$mat_wt/.git" "$fixture_dir/materialised-deployment/repo.git"
+  for mat_tree in "$mat_wt" . "$mat_wt/" "$mat_wt/."; do
+    env_pinned "a materialised 120000 link under the names (GIT_WORK_TREE=$mat_tree)" \
+      "$mat_wt" findings 'fix-P2/correctness_a-materialised-link' 0 1 \
+      "GIT_DIR=$fixture_dir/materialised-deployment/repo.git" "GIT_WORK_TREE=$mat_tree"
+    if [[ "$env_pinned_out" != *'as mode 120000'* ]]; then
+      echo "a materialised 120000 link under the names must refuse for the recorded mode, not read" \
+        "its target text (GIT_WORK_TREE=$mat_tree)" >&2
+      printf '%s\n' "$env_pinned_out" >&2
+      exit 1
+    fi
+  done
+  # AND WITH A GIT DIRECTORY ALONE FROM A SIBLING DIRECTORY, whose work tree is rooted
+  # where git is asked: the file is outside it, and read as a caller's file listing
+  # it would name the finding its target text spells. Arm 2 makes no exception there.
+  mkdir -p "$fixture_dir/materialised-elsewhere"
+  env_pinned 'a materialised 120000 link outside a git directory exported alone' \
+    "$fixture_dir/materialised-elsewhere" "$mat_wt/findings" 'fix-P2/correctness_a-materialised-link' 0 1 \
+    "GIT_DIR=$fixture_dir/materialised-deployment/repo.git"
+  if [[ "$env_pinned_out" != *'is not inside'* ]]; then
+    echo 'a materialised link outside a git directory exported alone refused for a different reason' >&2
+    echo "  ${env_pinned_out%%$'\n'*}" >&2
+    exit 1
+  fi
+fi
+
+# ---- THE REPOSITORY THE ENVIRONMENT SELECTS IS THE ONE THAT IS READ ----------------------------
+#
+# The arms above settle which repository JUDGES a listing, and until round 14 nothing settled
+# which one is READ to judge it. The ascent that carries a listing named at a work tree's own
+# root out to a repository above was taken for the selected repository as well as for the
+# path's, and for the selected one it cleared the ledger it was reading on the way: `outer`
+# commits a finding under `findings/`, the names select `outer/findings` through a git directory
+# of their own, and `.` asked from `outer/findings` compared `outer`'s records with themselves.
+# Measured at `e3a91ff3`, each exit 0 `conforms` where `231c1aad` refuses: a selected index
+# recording that finding and a twin of it -- `strace` counted three opens of `outer/.git/index`
+# and none of the selected one -- a selected index recording no finding, and one recording
+# nothing at all. Each of those rows refuses only if the selected index is READ. The fourth, an
+# index recording exactly what `outer` records, is what reading it costs a caller whose two
+# ledgers agree: nothing.
+sel_dir="$fixture_dir/selected-index"
+sel_a='P2_correctness_202609141401_the-selected-index-is-read.md'
+sel_b='P2_correctness_202609141402_the-selected-index-is-read.md'
+new_repo "$sel_dir/outer"
+mkdir -p "$sel_dir/outer/findings"
+echo fixture > "$sel_dir/outer/findings/$sel_a"
+git -C "$sel_dir/outer" add -A && git -C "$sel_dir/outer" commit -q -m 'outer commits one finding'
+# sel_meta <name> [<file>...]: a git directory at `<name>.git` for the work tree
+# `outer/findings`, whose index records those files and nothing else -- `skip-worktree`
+# where the checkout does not hold one -- and whose exclude ignores the finding the checkout
+# does hold, so its status is clean whatever it records.
+sel_meta() {
+  local name="$1" file blob
+  shift
+  new_repo "$sel_dir/src-$name"
+  mv "$sel_dir/src-$name/.git" "$sel_dir/$name.git"
+  rmdir "$sel_dir/src-$name"
+  mkdir -p "$sel_dir/$name.git/info"
+  printf '%s\n' "$sel_a" > "$sel_dir/$name.git/info/exclude"
+  for file in "$@"; do
+    blob="$( printf 'fixture\n' | git --git-dir="$sel_dir/$name.git" hash-object -w --stdin )"
+    ( cd "$sel_dir/outer/findings" \
+      && GIT_DIR="$sel_dir/$name.git" GIT_WORK_TREE="$sel_dir/outer/findings" \
+        git update-index --add --cacheinfo "100644,$blob,$file" )
+    if [[ ! -e "$sel_dir/outer/findings/$file" ]]; then
+      ( cd "$sel_dir/outer/findings" \
+        && GIT_DIR="$sel_dir/$name.git" GIT_WORK_TREE="$sel_dir/outer/findings" \
+          git update-index --skip-worktree -- "$file" )
+    fi
+  done
+  if (( $# > 0 )); then
+    ( cd "$sel_dir/outer/findings" \
+      && GIT_DIR="$sel_dir/$name.git" GIT_WORK_TREE="$sel_dir/outer/findings" \
+        git commit -q -m "the $name ledger" )
+  fi
+}
+sel_meta twin "$sel_a" "$sel_b"
+sel_meta none seed.txt
+sel_meta empty
+sel_meta agree "$sel_a"
+# THE SHAPE IS ASSERTED BEFORE ANYTHING IS JUDGED: both repositories clean, `outer` recording
+# its one finding, and each selected index recording what its name says and nothing else.
+if [[ -n "$(git -C "$sel_dir/outer" status --porcelain)" ]] \
+  || [[ "$(git -C "$sel_dir/outer" ls-files)" != "findings/$sel_a" ]]; then
+  echo 'the selected-index fixture was meant to have a clean outer repository recording one finding' >&2
+  exit 1
+fi
+for sel in twin:"$sel_a $sel_b " none:'seed.txt ' empty:'' agree:"$sel_a "; do
+  if [[ -n "$( cd "$sel_dir/outer/findings" && GIT_DIR="$sel_dir/${sel%%:*}.git" \
+      GIT_WORK_TREE="$sel_dir/outer/findings" git status --porcelain )" ]] \
+    || [[ "$( cd "$sel_dir/outer/findings" && GIT_DIR="$sel_dir/${sel%%:*}.git" \
+      GIT_WORK_TREE="$sel_dir/outer/findings" git ls-files | tr '\n' ' ' )" != "${sel#*:}" ]]; then
+    echo "the selected index '${sel%%:*}' was meant to be clean and to record exactly '${sel#*:}'" >&2
+    exit 1
+  fi
+done
+for sel in twin none empty; do
+  case "$sel" in
+    twin) sel_says='that finding and a twin of it' ;;
+    none) sel_says='no finding' ;;
+    empty) sel_says='nothing at all' ;;
+  esac
+  for sel_listing in . "$sel_dir/outer/findings"; do
+    env_pinned "a selected index recording $sel_says, under a repository recording one ($sel_listing)" \
+      "$sel_dir/outer/findings" "$sel_listing" 'fix-P2/correctness_the-selected-index-is-read' 0 1 \
+      "GIT_DIR=$sel_dir/$sel.git" "GIT_WORK_TREE=$sel_dir/outer/findings"
+    if [[ "$env_pinned_out" != *'the environment names one: GIT_DIR GIT_WORK_TREE.'*'Two ledgers answering differently'* ]]; then
+      echo "a selected index recording $sel_says must refuse as two ledgers disagreeing, and not be" \
+        "replaced by the records of the repository above it ($sel_listing)" >&2
+      printf '%s\n' "$env_pinned_out" >&2
+      exit 1
+    fi
+  done
+done
+for sel_listing in . "$sel_dir/outer/findings"; do
+  env_pinned "a selected index recording what the repository above it records ($sel_listing)" \
+    "$sel_dir/outer/findings" "$sel_listing" 'fix-P2/correctness_the-selected-index-is-read' 0 0 \
+    "GIT_DIR=$sel_dir/agree.git" "GIT_WORK_TREE=$sel_dir/outer/findings"
+done
+
+# ---- AND WHAT GIT ANSWERS IS A PATH, WHATEVER BYTES FOLLOW ITS ROOT -------------------------------
+#
+# `resolve_deployment` refused any answer holding a newline, to catch a git too old for
+# `--path-format` echoing that option ahead of the index path -- and a newline is a legal byte
+# in a path. A clean deployment whose git directory is `meta<LF>repo.git`, or whose index is
+# `index<LF>copy`, resolves at exit 0 for all three asks and records its finding, and
+# `e3a91ff3` refused both as repositories git could not resolve where `231c1aad` conforms. What
+# separates a path from an echoed option is where it BEGINS: every ask answers an absolute path,
+# and an option begins with `-`. The finding is `skip-worktree` with its directory removed, so
+# the clean control refuses and nothing but the named records can make the pinned run conform.
+# RUNS NATIVELY ON WINDOWS: NO -- no Windows path component holds a newline; a platform that
+# will not make one says so and skips.
+nl_dir="$fixture_dir/newline-metadata"
+nl_git="$nl_dir/meta"$'\n'"repo.git"
+nl_finding='P2_correctness_202609141403_a-newline-in-a-metadata-path.md'
+mkdir -p "$nl_dir"
+if mkdir "$nl_git" 2>/dev/null && rmdir "$nl_git"; then
+  new_repo "$nl_dir/wt"
+  mkdir -p "$nl_dir/wt/findings"
+  echo fixture > "$nl_dir/wt/findings/$nl_finding"
+  git -C "$nl_dir/wt" add -A && git -C "$nl_dir/wt" commit -q -m 'one committed finding'
+  mv "$nl_dir/wt/.git" "$nl_git"
+  ( cd "$nl_dir/wt" && GIT_DIR="$nl_git" GIT_WORK_TREE="$nl_dir/wt" \
+    git update-index --skip-worktree -- "findings/$nl_finding" )
+  rm -r "$nl_dir/wt/findings"
+  cp "$nl_git/index" "$nl_git/index"$'\n'"copy"
+  for nl_index in "$nl_git/index" "$nl_git/index"$'\n'"copy"; do
+    if [[ -n "$( cd "$nl_dir/wt" && GIT_DIR="$nl_git" GIT_WORK_TREE="$nl_dir/wt" GIT_INDEX_FILE="$nl_index" \
+        git status --porcelain )" ]] \
+      || [[ "$( cd "$nl_dir/wt" && GIT_DIR="$nl_git" GIT_WORK_TREE="$nl_dir/wt" GIT_INDEX_FILE="$nl_index" \
+        git ls-files )" != "findings/$nl_finding" ]] \
+      || [[ "$( cd "$nl_dir/wt" && GIT_DIR="$nl_git" GIT_WORK_TREE="$nl_dir/wt" GIT_INDEX_FILE="$nl_index" \
+        git rev-parse --path-format=absolute --git-path index )" != "$nl_index" ]]; then
+      echo 'the newline fixture was meant to be a clean deployment git resolves, recording one finding' >&2
+      exit 1
+    fi
+  done
+  env_pinned 'a git directory whose path holds a newline' \
+    "$nl_dir/wt" findings 'fix-P2/correctness_a-newline-in-a-metadata-path' 1 0 \
+    "GIT_DIR=$nl_git" "GIT_WORK_TREE=$nl_dir/wt"
+  env_pinned 'an index whose path holds a newline' \
+    "$nl_dir/wt" findings 'fix-P2/correctness_a-newline-in-a-metadata-path' 1 0 \
+    "GIT_DIR=$nl_git" "GIT_WORK_TREE=$nl_dir/wt" "GIT_INDEX_FILE=$nl_git/index"$'\n'"copy"
+else
+  echo "note: skipping the newline-in-a-metadata-path cases (this platform will not name a directory with one)" >&2
+fi
+
+# AND THE ANSWER THAT DOES NOT RESOLVE COMES FROM A GIT THIS SUITE DOES NOT RUN, so
+# `resolve_deployment` is driven directly with `git_probe` stubbed, as the walks above are, and
+# what the stub hands back is the shape an old git gives: an option it does not know, echoed
+# ahead of the path. The rows hold the rule from both sides -- a rooted answer resolves whatever
+# bytes follow its root, and an echoed option does not, on either ask it can reach.
+resolve_harness="$fixture_dir/resolve-deployment.sh"
+cat > "$resolve_harness" <<'RESOLVE'
+set -uo pipefail
+validator="$1"; git_dir_answer="$2"; index_answer="$3"
+src="$(awk '/^resolve_deployment\(\) \{$/{f=1} f{print} f&&/^\}$/{exit}' "$validator")"
+[[ -n "$src" ]] || { echo 'harness: resolve_deployment was not extracted'; exit 3; }
+bash -n <<< "$src" || { echo 'harness: the extract does not parse'; exit 3; }
+eval "$src"
+environment_git_dir_named=1; environment_git_dir=/meta/repo.git
+environment_work_tree_named=1; environment_work_tree=/wt
+environment_index_file_named=0; environment_index_file=''
+deployment_resolved=0; deployment_git_dir=''; deployment_top=''; deployment_index=''; deployment_said=''
+probe_status=0; probe_text=''; probe_stderr=''
+git_probe() {
+  [[ "$1" == 0,128 ]] && [[ "$2" == -- ]] && [[ "$3" == rev-parse ]] \
+    || { echo "harness: unexpected call: git_probe $*"; exit 3; }
+  probe_status=0
+  case "${*:4}" in
+    --absolute-git-dir) probe_text="$git_dir_answer" ;;
+    --show-toplevel) probe_text=/wt ;;
+    '--path-format=absolute --git-path index') probe_text="$index_answer" ;;
+    *) echo "harness: unexpected probe '${*:4}'"; exit 3 ;;
+  esac
+}
+resolve_deployment
+echo "resolved=$deployment_resolved"
+RESOLVE
+resolve_case() {  # resolve_case <label> <git-dir answer> <index answer> <want resolved>
+  local got rc=0
+  got="$( "$BASH" "$resolve_harness" "$branch_validator" "$2" "$3" 2>&1 )" || rc=$?
+  if [[ "$rc" != 0 ]] || [[ "$got" != "resolved=$4" ]]; then
+    echo "$1: expected 'resolved=$4' at exit 0; got '$got' at exit $rc" >&2
+    exit 1
+  fi
+}
+resolve_case 'three rooted answers resolve' '/meta/repo.git' '/meta/repo.git/index' 1
+resolve_case 'a rooted answer holding a newline resolves' $'/meta\nrepo.git' $'/meta\nrepo.git/index' 1
+resolve_case 'a drive-rooted answer resolves' 'C:/meta/repo.git' 'C:/meta/repo.git/index' 1
+resolve_case 'an index path an old git answered after echoing --path-format does not resolve' \
+  '/meta/repo.git' $'--path-format=absolute\n/meta/repo.git/index' 0
+resolve_case 'a git directory an old git answered by echoing the option does not resolve' \
+  '--absolute-git-dir' '/meta/repo.git/index' 0
+# AND THE STUB'S SHAPE IS GIT'S, checked against the git this suite runs: inside a repository an
+# option `rev-parse` does not know is echoed AHEAD of the path, at exit 0 -- an invented option
+# standing in for one an old git lacks. A git that refuses unknown options instead no longer
+# makes the shape at all, which retires none of the rows above: the gits that do are still the
+# ones the rule is for.
+echo_rc=0
+echo_out="$( git -C "$sel_dir/outer" rev-parse --path-formatx=absolute --git-path index 2>/dev/null )" || echo_rc=$?
+if (( echo_rc == 0 )) && [[ "$echo_out" != $'--path-formatx=absolute\n'?* ]]; then
+  echo "git echoed an unknown rev-parse option somewhere other than ahead of the path, so the stub" \
+    "above hands back a shape git does not give; got '$echo_out'" >&2
+  exit 1
+fi
+if (( echo_rc != 0 )); then
+  echo "note: this git refuses an unknown rev-parse option (exit $echo_rc), so the echoed shape the" \
+    "resolve rows stub is not made here" >&2
+fi
+
 # ---- what git RECORDS, not what the checkout happens to hold -----------------------------------
 #
 # A TRACKED finding need not be in the working tree, and the candidate names
@@ -2576,6 +5136,92 @@ else
     "$fixture_dir/inject-twin-a.txt" "$inject_toplevel_repo/findings"
 fi
 
+# ---- the sentinel is this primitive's OWN write, and its status is a status --------------------
+#
+# `capture` appends a sentinel byte to each copy so a truncated capture can be
+# told from a whole one, AND CHECKED NEITHER WRITE. What makes that a refusal
+# rather than an inconvenience is a listing whose own last byte IS the sentinel:
+# fail only the STDOUT sentinel once the copy is written -- the real builtin
+# `printf` exiting 1, `Bad file descriptor` -- and the INPUT'S trailing byte is
+# mistaken for the marker the helper never wrote, and stripped as if it were that
+# marker. A filename that was never filed appears and MATCHES. Measured against
+# the unrepaired file: exit 0 `conforms` with empty stderr, where the same
+# listing refuses at exit 1 with the write intact. A failed write there does not
+# lose a finding, it MANUFACTURES one.
+#
+# THE INJECTION IS AN EXPORTED `printf` FUNCTION, which shadows the builtin in
+# the validator's own shell: everything else is the real builtin, and exactly one
+# sentinel write is made against a closed descriptor. ONLY the stdout one --
+# failing both is the weaker test the unrepaired file already refuses, because a
+# stderr copy with no sentinel on it fails `read_private` first. It fires ONCE,
+# after the private copy holds the listing, and the fixture asserts that it fired
+# and that the refusal is the READ one: a hook that matched nothing, or a refusal
+# for some other reason, would pass this file forever while proving nothing.
+sentinel_dir="$fixture_dir/sentinel"
+mkdir -p "$sentinel_dir"
+printf 'P2_correctness_202609100001_never-filed-at-all.md\001' > "$sentinel_dir/listing.txt"
+sentinel_fired="$sentinel_dir/fired"
+: > "$sentinel_fired"
+sentinel_probe="$fixture_dir/sentinel-probe.sh"
+cat > "$sentinel_probe" <<'SENTINEL'
+# sentinel-probe.sh <fired-marker> <trigger> <validator> <branch> <listing>...
+# The first sentinel write made once the private copy holds <trigger> -- which is
+# the STDOUT one, because capture writes stdout's marker before stderr's -- is
+# made against a closed descriptor, and every other printf is the builtin.
+export SENTINEL_FIRED="$1"
+export SENTINEL_TRIGGER="$2"
+shift 2
+printf() {
+  local d
+  if [[ $# -eq 1 && "$1" == '\001' && ! -s "$SENTINEL_FIRED" ]]; then
+    for d in "${TMPDIR:-/tmp}"/branch-name-policy.*; do
+      if [[ -r "$d/slurp" ]] \
+        && command grep -q -- "$SENTINEL_TRIGGER" "$d/slurp" 2>/dev/null; then
+        builtin printf x >> "$SENTINEL_FIRED"
+        builtin printf "$@" >&-
+        return
+      fi
+    done
+  fi
+  builtin printf "$@"
+}
+export -f printf
+rc=0
+out="$("$BASH" "$@" 2>&1)" || rc=$?
+builtin printf '%s\n' "$rc"
+builtin printf '%s\n' "$out"
+SENTINEL
+# The control first, so a refusal under injection is not the same refusal: the
+# listing names a finding that is not there, WITH ITS OWN 0x01 ON THE END, and
+# that is exit 1 `names no finding` when both markers are written.
+sentinel_control_rc=0
+sentinel_control_out="$(TMPDIR="$sentinel_dir" "$BASH" "$branch_validator" \
+  'fix-P2/correctness_never-filed-at-all' "$sentinel_dir/listing.txt" 2>&1)" || sentinel_control_rc=$?
+if [[ "$sentinel_control_rc" != 1 ]] \
+  || ! grep -q 'names no finding' <<< "$sentinel_control_out"; then
+  echo "the sentinel control was meant to refuse a name no listing holds; got $sentinel_control_rc" >&2
+  printf '%s\n' "$sentinel_control_out" >&2
+  exit 1
+fi
+sentinel_out="$(TMPDIR="$sentinel_dir" BASH="$BASH" "$BASH" "$sentinel_probe" \
+  "$sentinel_fired" 202609100001 "$branch_validator" \
+  'fix-P2/correctness_never-filed-at-all' "$sentinel_dir/listing.txt" 2>&1)"
+sentinel_rc="${sentinel_out%%$'\n'*}"
+if [[ ! -s "$sentinel_fired" ]]; then
+  echo 'the sentinel injection never fired, so this case proves nothing' >&2
+  exit 1
+fi
+if [[ "$sentinel_rc" == 0 ]]; then
+  echo 'a capture whose own sentinel write failed conformed at exit 0, on a name nobody filed' >&2
+  printf '%s\n' "$sentinel_out" >&2
+  exit 1
+fi
+if ! grep -q 'the marker that says it was captured whole could not be written' <<< "$sentinel_out"; then
+  echo 'a failed sentinel write must refuse BY NAMING THE MARKER, and this refusal did not' >&2
+  printf '%s\n' "$sentinel_out" >&2
+  exit 1
+fi
+
 # ---- a directory's NAMES and its STATUS must come from one run of one command ------------------
 #
 # `ls` was run for its status and a GLOB then supplied the names, and the two are
@@ -2654,6 +5300,84 @@ else
     exit 1
   fi
 fi
+
+# ---- a starting path is a PATH and never an EXPRESSION -----------------------------------------
+#
+# `list_dir` handed a RELATIVE path straight to `find`, whose operands are a
+# starting-point list followed by an EXPRESSION and which tells the two apart by
+# SPELLING. A directory named `!` was read as the negation operator: `find !
+# -mindepth 1 -maxdepth 1 -print0` is exit 0 AND NO OUTPUT, so the enumeration was
+# empty, an empty enumeration read as "this directory names no finding", and an
+# ambiguous name conformed at exit 0 -- where the SAME directory named by its
+# absolute path refused it at exit 1.
+#
+# EVERY RELATIVE PATH IS PREFIXED, and the fixture is a set of names rather than
+# the one that was filed, because the hostile set belongs to the implementation
+# and not to us. Measured on findutils 4.9.0: `(` is exit 1 `invalid expression`,
+# a false red on a real listing; `-H` is exit 0 having enumerated the CURRENT
+# directory, because it is an option and the starting-point list was then empty;
+# and `)` and `,` are accepted as paths in leading position, which the next find
+# need not do. Each name is asserted BOTH WAYS -- written relative and written
+# absolute -- so what is checked is one listing giving one answer, not a table of
+# exit codes that could all be wrong together.
+#
+# `-` IS ASSERTED ABSOLUTE ONLY, and deliberately. Bash's `cd` reads a bare `-`
+# as `$OLDPWD` even after `--`, so the anchor probe in locate_listing answers
+# about a different directory for that one spelling; that is a mechanism of its
+# own and not this one, and a fixture that quietly depended on OLDPWD would be
+# asserting something else.
+token_dir="$fixture_dir/find-token-names"
+mkdir -p "$token_dir"
+printf 'P2_correctness_202609100001_token-named-listing.md\n' > "$token_dir/twin-a.txt"
+token_case() {  # token_case <name> <relative too: yes|no>
+  local name="$1" relative="$2" rel_rc=0 abs_rc=0 rel_out='' abs_out=''
+  mkdir -p -- "$token_dir/$name"
+  echo fixture > "$token_dir/$name/P2_correctness_202609100002_token-named-listing.md"
+  abs_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_token-named-listing' \
+    "$token_dir/twin-a.txt" "$token_dir/$name" 2>&1)" || abs_rc=$?
+  if [[ "$abs_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$abs_out"; then
+    echo "a listing named [$name] written absolute answered $abs_rc, and an ambiguous name must refuse" >&2
+    printf '%s\n' "$abs_out" >&2
+    exit 1
+  fi
+  [[ "$relative" == yes ]] || return 0
+  rel_out="$( cd "$token_dir" && "$BASH" "$branch_validator" \
+    'fix-P2/correctness_token-named-listing' twin-a.txt "$name" 2>&1 )" || rel_rc=$?
+  if [[ "$rel_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$rel_out"; then
+    echo "a listing named [$name] written relative answered $rel_rc, and the same listing written absolute refused" >&2
+    printf '%s\n' "$rel_out" >&2
+    exit 1
+  fi
+}
+for token_name in '!' '(' ')' ',' '-o' '-a' '-not' '-name' '-H' 'ordinary'; do
+  token_case "$token_name" yes
+done
+# RUNS NATIVELY ON WINDOWS: the rows above do -- every one of those names is a
+# legal filename there -- and `C:` does not, which is why it is guarded and they
+# are not. It is a drive designator there and no directory can be called it.
+if (( posix_names )); then
+  token_case 'C:' yes
+fi
+token_case '-' no
+
+# `C:` IS IN THAT LIST FOR THE OTHER HALF OF THE RULE, AND IT WITNESSES ONLY THE
+# POSIX HALF. The prefix is for paths that are ACTUALLY RELATIVE, and on a native
+# Windows shell `C:/…` is absolute and fails the `/` arm, so prefixing it builds
+# `./C:/…`, which is no path at all. Measured in Git Bash on Windows Server 2025
+# (bash 5.2.37, git 2.50.1.windows.1, findutils 4.10.0), on a directory inside a
+# real `.git` -- where discovery answers `false` and the filesystem is the whole
+# of the evidence: `find C:/… -mindepth 1 -maxdepth 1 -print0` exit 0 and
+# enumerates, `find ./C:/… …` exit 1 `No such file or directory`, and the
+# validator itself refused the listing as "a directory whose entries could not be
+# listed" where the same directory spelled `/c/…` answered `names 2 findings`.
+#
+# NONE OF THAT CAN FAIL ON POSIX, where `C:/x` is an ordinary relative path and
+# `./C:/x` names the same directory, so THIS CASE IS NOT A RED WITNESS FOR THE
+# WINDOWS REPAIR and nothing in this file is: the Windows run is the witness and
+# the pull request body carries it. What this case does assert is the half that
+# CAN regress here -- that a listing whose name begins with a drive designator,
+# which the arm now leaves unprefixed, still answers the same written relative
+# and written absolute.
 
 # ---- the cost of answering from the records, asserted rather than described -------------------
 #

@@ -782,6 +782,30 @@ fn committed_first_line(public: &Path) -> Option<TopologyEvent> {
     serde_json::from_slice(&bytes[..end]).ok()
 }
 
+#[track_caller]
+fn assert_replays_twice_to_the_next_open(fixture: &Fixture) {
+    let log = fixture.public().join(EVENT_LOG);
+    let bytes = std::fs::read(&log).expect("the log is readable");
+    let events = TopologyFold::parse_log(&bytes).expect("the log parses");
+    let once = TopologyFold::replay(inputs(), &events).expect("the log replays");
+    let twice = TopologyFold::replay(inputs(), &events).expect("the log replays again");
+    assert_eq!(once.state(), twice.state(), "two replays disagree");
+    let mut warnings = Vec::new();
+    let recovered = establish_stable_prefix(
+        &log,
+        inputs(),
+        None,
+        &mut warnings,
+        &mut crate::events::log::NoEventHooks,
+    )
+    .expect("the next open proves the prefix the append-error protocol left");
+    assert_eq!(
+        recovered.fold().state(),
+        once.state(),
+        "the next open's fold and a replay of the log disagree"
+    );
+}
+
 fn marker_of(public: &Path) -> CreatingMarker {
     let text = std::fs::read_to_string(public.join(MARKER)).expect("the marker is published");
     serde_json::from_str(&text).expect("the marker parses")
@@ -1874,6 +1898,7 @@ fn append_first_flush_error_after_full_line_reports_by_replay_without_retry() {
         crate::rundir::RunDirClass::Committed,
         "the line the barrier proved is a valid committed `run_started`"
     );
+    assert_replays_twice_to_the_next_open(&fixture);
 }
 
 #[test]
@@ -1917,6 +1942,7 @@ fn append_first_sync_error_reports_by_replay_and_never_deletes() {
         ),
         "a removal funnel was entered on the append-error path"
     );
+    assert_replays_twice_to_the_next_open(&fixture);
 }
 
 #[test]

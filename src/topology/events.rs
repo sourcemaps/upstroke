@@ -1423,6 +1423,8 @@ impl TopologyEvent {
 mod tests {
     use std::time::Duration;
 
+    use crate::events::EffectiveAttribution;
+
     use super::*;
     use crate::events::{FailureRecord, PoolSnapshot, ReviewPassOutcome};
     use crate::gates::ShellKind;
@@ -2074,6 +2076,8 @@ mod tests {
                     question: QuestionId::from("q-design-0001"),
                     context: "  the plan contradicts itself about Ünicode paths  ".to_owned(),
                     answer: "rescope".to_owned(),
+                    attribution: None,
+                    citation: None,
                 },
             },
         ]
@@ -2167,6 +2171,46 @@ mod tests {
                 body.is_transaction(),
                 "{} accepted/refused an unknown field against its class",
                 body.kind()
+            );
+        }
+    }
+
+    #[test]
+    fn a_question_answered_transaction_refuses_an_attribution_key() {
+        let canonical = every_kind()
+            .iter()
+            .zip(canonical_events())
+            .find(|(body, _)| body.kind() == "question_answered")
+            .map(|(_, canonical)| canonical)
+            .expect("the corpus has a question_answered payload");
+        serde_json::from_value::<TopologyEvent>(canonical.clone())
+            .expect("the canonical question_answered decodes before anything is added");
+
+        for (key, value) in [
+            ("attribution", serde_json::Value::from("design_defect")),
+            ("attribution", serde_json::Value::from("discovered_hole")),
+            ("citation", serde_json::Value::from("§5 objective 2")),
+        ] {
+            let mut on_the_payload = canonical.clone();
+            on_the_payload["data"][key] = value.clone();
+            let refused = serde_json::from_value::<TopologyEvent>(on_the_payload)
+                .expect_err("the transaction takes no attribution");
+            assert_eq!(
+                refused.to_string(),
+                format!(
+                    "unknown field `{key}`, expected one of `key`, `question`, `answer`, `via`"
+                ),
+                "on the payload"
+            );
+
+            let mut on_the_answer = canonical.clone();
+            on_the_answer["data"]["answer"][key] = value;
+            let refused = serde_json::from_value::<TopologyEvent>(on_the_answer)
+                .expect_err("the answer takes no attribution either");
+            assert_eq!(
+                refused.to_string(),
+                format!("unknown field `{key}`, expected `option_index` or `binding_override`"),
+                "on the answer"
             );
         }
     }
@@ -4362,11 +4406,123 @@ mod tests {
                         question: QuestionId::from("q-design-0001"),
                         context: "  the plan contradicts itself about Ünicode paths  ".to_owned(),
                         answer: "rescope".to_owned(),
+                        attribution: None,
+                        citation: None,
                     })
                     .expect("legacy design defect"),
                 ),
             ),
         ]
+    }
+
+    struct AttributedDesignDefect {
+        body: TopologyEventBody,
+        payload: serde_json::Value,
+        reads_as: EffectiveAttribution<'static>,
+    }
+
+    fn attributed_design_defects() -> Vec<AttributedDesignDefect> {
+        let ts = "2026-08-17T03:04:05.678Z";
+        let envelope = |data: serde_json::Value| serde_json::json!({"ts": ts, "event": "design_defect", "data": data});
+        vec![
+            AttributedDesignDefect {
+                body: TopologyEventBody::DesignDefect {
+                    data: DesignDefect::discovered(
+                        QuestionId::from("q-design-0002"),
+                        "  the plan says nothing about Ünicode cursors  ".to_owned(),
+                        "opaque cursors".to_owned(),
+                    ),
+                },
+                payload: envelope(serde_json::json!({
+                    "question": "q-design-0002",
+                    "context": "  the plan says nothing about Ünicode cursors  ",
+                    "answer": "opaque cursors",
+                    "attribution": "discovered_hole",
+                })),
+                reads_as: EffectiveAttribution::Discovered,
+            },
+            AttributedDesignDefect {
+                body: TopologyEventBody::DesignDefect {
+                    data: DesignDefect::convicted(
+                        QuestionId::from("q-design-0003"),
+                        "  the plan contradicts itself about Ünicode paths  ".to_owned(),
+                        "rescope".to_owned(),
+                        "design checklist item 2: path encoding is settled before execution"
+                            .to_owned(),
+                    )
+                    .expect("a cited conviction"),
+                },
+                payload: envelope(serde_json::json!({
+                    "question": "q-design-0003",
+                    "context": "  the plan contradicts itself about Ünicode paths  ",
+                    "answer": "rescope",
+                    "attribution": "design_defect",
+                    "citation": "design checklist item 2: path encoding is settled before execution",
+                })),
+                reads_as: EffectiveAttribution::Convicted {
+                    citation: "design checklist item 2: path encoding is settled before execution",
+                },
+            },
+        ]
+    }
+
+    #[test]
+    fn an_attributed_design_defect_serializes_to_its_independently_written_payload() {
+        for fixture in attributed_design_defects() {
+            assert_eq!(
+                payload_of(&fixture.body),
+                fixture.payload,
+                "{:?} does not serialize to its independently written payload",
+                fixture.reads_as
+            );
+        }
+    }
+
+    #[test]
+    fn an_attributed_design_defect_reads_through_the_informational_path() {
+        let question_answered = every_kind()
+            .iter()
+            .zip(canonical_events())
+            .find(|(body, _)| body.kind() == "question_answered")
+            .map(|(_, canonical)| canonical)
+            .expect("the corpus has a question_answered payload");
+        assert_eq!(TOPOLOGY_EVENT_KINDS.len(), 24);
+        assert_eq!(TOPOLOGY_TRANSACTION_KINDS, 21);
+
+        for fixture in attributed_design_defects() {
+            let decoded: TopologyEvent = serde_json::from_value(fixture.payload.clone())
+                .unwrap_or_else(|error| panic!("{error} in {}", fixture.payload));
+            assert_eq!(decoded.body, fixture.body);
+            assert_eq!(decoded.body.kind(), "design_defect");
+            assert!(
+                !decoded.body.is_transaction(),
+                "the attribution rides an informational record"
+            );
+            let TopologyEventBody::DesignDefect { data } = &decoded.body else {
+                panic!("not a design_defect: {}", decoded.body.kind());
+            };
+            assert_eq!(data.effective_attribution(), fixture.reads_as);
+
+            let mut widened = fixture.payload.clone();
+            widened["data"]["Ünknown Column  "] = serde_json::Value::from("injected");
+            let decoded: TopologyEvent = serde_json::from_value(widened)
+                .expect("an informational record with an extra column costs nothing to ignore");
+            assert_eq!(
+                decoded.body, fixture.body,
+                "the column is ignored, not kept"
+            );
+
+            let mut transaction = question_answered.clone();
+            transaction["data"]["Ünknown Column  "] = serde_json::Value::from("injected");
+            let refused = serde_json::from_value::<TopologyEvent>(transaction)
+                .expect_err("the same column on a transaction is refused");
+            assert!(
+                refused
+                    .to_string()
+                    .starts_with("unknown field `Ünknown Column  `"),
+                "{refused}"
+            );
+        }
     }
 
     #[test]
@@ -4377,6 +4533,19 @@ mod tests {
             canonical.len(),
             TOPOLOGY_EVENT_KINDS.len(),
             "the canonical corpus does not cover the whole vocabulary"
+        );
+        let pre_taxonomy = canonical
+            .iter()
+            .find(|value| value["event"] == "design_defect")
+            .expect("the corpus has a design_defect payload");
+        assert_eq!(
+            pre_taxonomy["data"],
+            serde_json::json!({
+                "question": "q-design-0001",
+                "context": "  the plan contradicts itself about Ünicode paths  ",
+                "answer": "rescope"
+            }),
+            "the canonical design_defect keeps its pre-taxonomy three-field payload"
         );
         for (body, expected) in events.iter().zip(&canonical) {
             assert_eq!(

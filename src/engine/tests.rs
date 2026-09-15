@@ -3337,6 +3337,113 @@ fn answering_the_question_retries_the_task_with_the_operators_words() {
     );
 }
 
+fn design_defect_lines(paths: &RunPaths) -> Vec<serde_json::Value> {
+    let text = fs::read_to_string(paths.events()).expect("log");
+    text.lines()
+        .filter(|line| line.contains("\"event\":\"design_defect\""))
+        .map(|line| serde_json::from_str(line).expect("the record parses"))
+        .collect()
+}
+
+fn assert_unclassified_on_disk(line: &serde_json::Value) {
+    let data = line
+        .get("data")
+        .and_then(serde_json::Value::as_object)
+        .expect("the record has a payload object");
+    let mut keys: Vec<&str> = data.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["answer", "context", "question"],
+        "the schema-3 writer writes the record it always wrote, with no attribution and no \
+         citation key: {line}"
+    );
+    let event: events::Event = serde_json::from_value(line.clone()).expect("the line reads");
+    let EventBody::DesignDefect { data } = &event.body else {
+        panic!("not a design_defect line: {line}");
+    };
+    assert_eq!(
+        data.effective_attribution(),
+        events::EffectiveAttribution::Unclassified,
+        "written before the taxonomy, so unclassified, never a discovery: {line}"
+    );
+}
+
+#[test]
+fn the_legacy_ingest_writes_an_unclassified_design_defect() {
+    let repo = temp_engine_repo("legacydefectbytes");
+    seed(
+        &repo,
+        "## Implement the widget\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let source = source(
+        vec![Effect::NoEdit, Effect::EditFile],
+        vec![ReviewBehavior::Pass],
+    );
+    let answers = ScriptedAnswers::new(vec![Answer::Answered {
+        text: "the widget lives in src/widget.rs — write it there".to_owned(),
+    }]);
+    let report = run_harness(
+        &opts,
+        &Harness {
+            adapters: &source,
+            answers: Some(&answers),
+            sleeper: None,
+        },
+    )
+    .expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let lines = design_defect_lines(&paths_of(&repo, &report.run_id));
+    assert_eq!(lines.len(), 1, "one answered question, one record");
+    assert_unclassified_on_disk(lines.first().expect("the one record"));
+}
+
+#[test]
+fn the_resume_repair_writes_an_unclassified_design_defect() {
+    let repo = temp_engine_repo("legacydefectresume");
+    seed(
+        &repo,
+        "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let source = source(vec![Effect::NoEdit], vec![ReviewBehavior::Pass]);
+    let answers = ScriptedAnswers::new(vec![Answer::Declined]);
+    let report = run_harness(
+        &opts,
+        &Harness {
+            adapters: &source,
+            answers: Some(&answers),
+            sleeper: None,
+        },
+    )
+    .expect("build a complete decline sequence");
+    let paths = paths_of(&repo, &report.run_id);
+    truncate_log_after(&paths, "question_answered");
+    assert!(
+        design_defect_lines(&paths).is_empty(),
+        "the crash prefix ends before the record"
+    );
+
+    let resumed_source = fake(Effect::EditFile);
+    let resumed = resume_with(&resume_options(&repo, &report.run_id), &resumed_source)
+        .expect("resume repairs the incomplete settlement");
+    assert_eq!(resumed.outcome(), RunOutcome::Halted, "{resumed:?}");
+    assert!(
+        resumed_source.adapter.runs().is_empty(),
+        "the repair settles the decline before another paid attempt"
+    );
+
+    let lines = design_defect_lines(&paths);
+    assert_eq!(lines.len(), 1, "the missing record is appended once");
+    assert_unclassified_on_disk(lines.first().expect("the one record"));
+}
+
 #[test]
 fn declining_fails_the_task_and_halt_is_the_default() {
     let repo = temp_engine_repo("declined");
@@ -7094,7 +7201,12 @@ fn an_answer_file_that_changes_nothing_does_not_spin_the_scheduler() {
 
     let answers = rundir::public_dir(&repo, &run_id).join("answers");
     fs::create_dir_all(&answers).expect("answers dir");
-    interaction::write_answer(&answers, &question, &Answer::Unanswered).expect("write");
+    interaction::write_answer(
+        &answers,
+        &question,
+        &interaction::AnswerRecord::unattributed(Answer::Unanswered),
+    )
+    .expect("write");
 
     let source = fake(Effect::EditFile);
     let resumed = resume_with(&resume_options(&repo, &run_id), &source).expect("resume");
@@ -7102,6 +7214,43 @@ fn an_answer_file_that_changes_nothing_does_not_spin_the_scheduler() {
         resumed.outcome(),
         RunOutcome::Parked,
         "still waiting on a real answer, and the run ended saying so: {resumed:?}"
+    );
+}
+
+#[test]
+fn a_legacy_answer_file_with_a_foreign_column_still_parks_rather_than_erroring() {
+    let repo = temp_engine_repo("foreigncolumn");
+    seed(
+        &repo,
+        "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some(
+            "[interaction]\nmode = \"never\"\n\n\
+                 [routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n",
+        ),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let source = source(vec![Effect::NoEdit], vec![ReviewBehavior::Pass]);
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Parked);
+    let run_id = report.run_id.clone();
+    let question = report.questions[0].question.id.clone();
+
+    let answers = rundir::public_dir(&repo, &run_id).join("answers");
+    fs::create_dir_all(&answers).expect("answers dir");
+    fs::write(
+        interaction::answer_path(&answers, &question),
+        r#"{"answer":"unanswered","citation":7}"#,
+    )
+    .expect("a file the base tolerated: a column the answer does not know, of a foreign type");
+
+    let source = fake(Effect::EditFile);
+    let resumed = resume_with(&resume_options(&repo, &run_id), &source)
+        .expect("the legacy reader ignores the column, as the base did, and the resume runs");
+    assert_eq!(
+        resumed.outcome(),
+        RunOutcome::Parked,
+        "still waiting on a real answer, not erroring on the column: {resumed:?}"
     );
 }
 

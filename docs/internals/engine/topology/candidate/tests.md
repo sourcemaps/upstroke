@@ -165,6 +165,12 @@ replay-then-continue, and there is no second path`.
 
 How many committed lines of `kind` the log carries.
 
+## `impl Journal` › `fn replay_twice_equal(&self) {`
+
+The log's bytes replayed twice from disk: the two replays' states equal
+each other and this journal's live fold's, the scaffold's
+`Run::replay_twice_equal` over this module's journal.
+
 ## `struct ArmedEffects {`
 
 -----------------------------------------------------------------------
@@ -325,6 +331,10 @@ T-CAND-OBJ (b): the pin exists and `candidate_prepared` does not, so the
 resume deletes the exact orphan pin expected-old and the object is again
 Git's.
 
+After the prune the journal's log replays twice to its live fold
+(`Journal::replay_twice_equal`). The prune appends nothing, so this is the
+log the parent's journal wrote, unchanged by the recovery.
+
 ## `fn unpinned_object_never_adopted_on_resume() {`
 
 `resume_action` (a) is "nothing to delete: the unpinned object is left
@@ -424,6 +434,10 @@ wrote, not a count of calls: the fold refuses a second
 `task_candidate_created` for a generation it has already closed, and a
 closure procedure that did not read that would append a line the fold
 then refuses on the next replay — a log that cannot be resumed.
+
+It ends with that replay: after the recovery, its repeat and the forged
+refusal, the log replays twice to states equal to each other and to the
+journal's live fold (`Journal::replay_twice_equal`).
 
 ## `fn kill_after_candidate_prepared_appends_candidate_created_once() {` › `let mut hooks = Hooks::new();`
 

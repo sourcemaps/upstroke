@@ -1256,6 +1256,7 @@ fn kill_during_attempt_settles_interrupted_and_redispatches_new_generation() {
         next.worktree, dispatched.worktree,
         "a new generation, a new worktree"
     );
+    run.replay_twice_equal();
 }
 
 #[test]
@@ -1300,6 +1301,7 @@ fn kill_after_capture_leaves_index_referenced_objects_then_scrub_releases_them()
         run.observed(SCRUB, HookPhase::After),
         "the release is the forced scrub's, not something else's"
     );
+    run.replay_twice_equal();
 }
 
 #[test]
@@ -1479,6 +1481,7 @@ fn kill_after_ephemeral_snapshot_commit_before_worktree_leaves_gc_owned_object()
         orphans,
         "the recovery leaves an unreferenced object to Git rather than pruning it"
     );
+    run.replay_twice_equal();
 }
 
 #[test]
@@ -1626,6 +1629,7 @@ fn kill_after_snapshot_add_reclaims_snapshot_and_releases_its_commit() {
             .contains(&head),
         "R27: and the ephemeral commit went back to Git"
     );
+    run.replay_twice_equal();
 }
 
 #[test]
@@ -1680,6 +1684,7 @@ fn kill_during_retry_attempt_closes_generation() {
     );
     assert_eq!(run.task_state(ALPHA), TaskState::Pending);
     assert!(!dispatched.worktree.exists());
+    run.replay_twice_equal();
 }
 
 #[test]

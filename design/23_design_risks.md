@@ -34,9 +34,13 @@ engineering consequences other documents rely on are retained here, unchanged in
   `fix`, spike → `design`, acceptance criteria → `acceptance`, component → `path_hints`,
   blocked-by → `depends_on`), so backlog import is translation, not authoring — an importer
   under §9's posture, never HTTP of our own. Writeback is a `Notifier` over the event log.
-  Every `design_defect` is attributable to a story and aggregable per sprint: a badly
+  The refinement metric is two numbers, not one. **Question volume**: `question_raised`
+  counts, attributable to a story and aggregable per sprint, unchanged and free — a badly
   refined story parks on a recorded question naming exactly what refinement failed to
-  settle — a Definition of Ready with a failure signal. The importer is the
+  settle. **Conviction rate**: the share of those questions ruled `design_defect`, each
+  citing the checklist item refinement skipped (§5) — a Definition of Ready with a failure
+  signal that cannot be gamed by punishing discovery, since a discovery is not a demerit
+  (`reviews/2026-09-14-o3-attribution-record.md`). The importer is the
   highest-leverage unbuilt item; the near-term version is one developer hand-translating
   two stories in ten minutes.
 - **Sequencing.** Prove the loop unattended (§21's acceptance run), use it on real work

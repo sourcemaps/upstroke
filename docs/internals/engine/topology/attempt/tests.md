@@ -569,6 +569,10 @@ the one that matters most — "later dispatch **new generation** (spend may
 repeat)" — because a recovery that reused the generation would silently
 claim the dead coordinator's unknown spend as its own.
 
+It ends with the durable log replayed twice from disk
+(`Run::replay_twice_equal`), after the settlement and the redispatch: the
+two replays' states equal each other and the live fold's.
+
 ## `fn kill_during_attempt_settles_interrupted_and_redispatches_new_generation() {` › `let next = run.dispatch(ALPHA, 1);`
 
 The redispatch: a new generation, at the same base, and the fold accepts
@@ -604,6 +608,9 @@ is the same query answering differently after the scrub. Asserting only the
 second would pass for an object that was already unreachable before the
 scrub ran.
 
+After the settlement the durable log replays twice to states equal to each
+other and to the live fold (`Run::replay_twice_equal`).
+
 ## `fn kill_after_ephemeral_snapshot_commit_before_worktree_leaves_gc_owned_object() {`
 
 **`T-ATTEMPT`, sub-prefix (c).** An ephemeral snapshot commit written before
@@ -617,6 +624,9 @@ no snapshot worktree, and after the tabled recovery the object is still
 there — "an ephemeral commit without a snapshot … is left to Git (nothing to
 reclaim)". An engine that pruned it would be establishing authority over the
 object store.
+
+After the settlement the durable log replays twice to states equal to each
+other and to the live fold (`Run::replay_twice_equal`).
 
 ## `fn kill_at_snapshot_commit_id_unread_point_leaves_gc_owned_object() {`
 
@@ -660,6 +670,9 @@ report it; once the snapshot is removed nothing does, so fsck does. A test
 that checked only the second would pass against a snapshot that never
 referenced the commit at all.
 
+After the settlement the durable log replays twice to states equal to each
+other and to the live fold (`Run::replay_twice_equal`).
+
 ## `fn kill_during_retry_attempt_closes_generation() {`
 
 **`T-RETRY` meeting `T-ATTEMPT`.** A kill during a retry closes the
@@ -671,6 +684,9 @@ it closes that generation rather than retaining it — "the generation does
 *not* survive an interruption". So the recovered state is generation 0
 `Closed` with attempt **2** named in the terminal, and the retained session
 is gone with it.
+
+After the settlement the durable log replays twice to states equal to each
+other and to the live fold (`Run::replay_twice_equal`).
 
 ## `fn halt_cancels_in_flight_attempt() {`
 

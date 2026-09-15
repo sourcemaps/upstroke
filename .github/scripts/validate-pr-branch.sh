@@ -163,6 +163,15 @@
 # two ways in are now one code path from the index down, so the equivalence
 # this gate claims holds by construction rather than by fixture.
 #
+# AND WHICH REPOSITORY'S RECORDS, WHICH IS A SEVENTH SHAPE AND NOT A SEVENTH
+# DEFECT. Locating the repository lands in the DEEPEST work tree the path enters,
+# and for an INITIALISED SUBMODULE that is the submodule's own: its index was
+# read as this repository's ledger, while the superproject records the path at
+# mode 160000 -- a GITLINK, and not a directory to descend into. The walk now
+# continues out of a submodule into its superproject before anything is asked
+# about the path, so a recorded type decides here exactly as 120000 already does.
+# locate_listing states it and measures it.
+#
 # WHAT THAT COSTS, STATED PLAINLY. An UNTRACKED finding file inside a tracked
 # findings/ no longer counts for the directory input: the ledger is what
 # is committed, and a merge gate decides about commits and never about a work
@@ -346,6 +355,157 @@
 #   read_file set for it, lost a `.git` file's gitdir pointer, and put the listing
 #   back on the filesystem.
 #
+#   And the round after that, IN `capture`: A STEP THAT RAN AND WAS NEVER ASKED
+#   HOW IT WENT. It writes a sentinel byte to each copy so a truncated capture
+#   can be told from a whole one, AND CHECKED NEITHER WRITE. On a listing whose own last
+#   byte is `0x01`, failing only the STDOUT sentinel -- the real builtin `printf`
+#   exiting 1, `Bad file descriptor` -- left the INPUT'S trailing byte to be
+#   mistaken for the marker the helper never wrote and stripped as if it were
+#   that marker. A filename that was never filed appeared and MATCHED: exit 0
+#   `conforms` with empty stderr, where the same listing refuses at exit 1 with
+#   the write intact. A failed write there does not merely lose bytes; it
+#   MANUFACTURES a finding. The marker's own status is now checked before
+#   anything is read back through it.
+#
+#   And the round after that, IN `list_dir`: A VALUE HANDED TO A TOOL WITH AN
+#   ARGUMENT GRAMMAR OF ITS OWN. A RELATIVE starting path went straight to
+#   `find`, whose operands are a starting-point list followed by an EXPRESSION
+#   and which tells the two apart by SPELLING. Measured on findutils 4.9.0, each
+#   on a directory a caller named: `find ! -mindepth 1 -maxdepth 1 -print0` is
+#   exit 0 AND NO OUTPUT, so
+#   an empty enumeration read as "this directory names no finding" and an
+#   ambiguous name that the SAME listing refuses at exit 1 by its absolute
+#   spelling conformed at exit 0; `find ( -mindepth 1 …` is exit 1, `invalid
+#   expression`, a false red on a real listing; and `find -H -mindepth 1 …` is
+#   exit 0 having enumerated the CURRENT directory, because `-H` is an option and
+#   the starting-point list was then empty. `--` saves none of them -- find's
+#   expression grammar begins before the operand list and no separator moves it,
+#   and `find -- ! -mindepth 1 -maxdepth 1 -print0` is exit 0 with no output too.
+#   So the rule is by CONSTRUCTION and not a list of hostile spellings: that list
+#   belongs to the implementation and not to us, and `)` and `,` are tokens of the
+#   same grammar that findutils 4.9.0 happens to accept as paths in leading
+#   position. An absolute path begins with `/`, which starts no token of it, so
+#   only a relative one is prefixed.
+#
+#   AND THE ROUND AFTER THAT, IN THE SAME `case`: A PREFIX IS A REWRITE, AND A
+#   REWRITE HAS TO ASK WHICH INPUTS IT IS REWRITING THAT IT DID NOT MEAN TO. `./`
+#   is a valid thing to prepend only to a path that is ACTUALLY RELATIVE, and the
+#   arm that prefixed everything failing `/*` prefixed a native Windows absolute
+#   path too: `C:/…` begins with a drive designator and not a separator, so
+#   `./C:/…` is no path at all. Measured in Git Bash on Windows Server 2025 --
+#   bash 5.2.37, git 2.50.1.windows.1, GNU findutils 4.10.0 -- on a directory
+#   inside a real `.git`, which is one of the shapes where discovery answers
+#   `false` and the filesystem is the whole of the evidence: `find C:/…
+#   -mindepth 1 -maxdepth 1 -print0` is exit 0 and enumerates both names, and
+#   `find ./C:/… …` is exit 1 `No such file or directory`. Whole-validator, same
+#   listing, four spellings: `C:/…` and `C:\…` were REFUSED as "a directory whose
+#   entries could not be listed" while `/c/…` and the relative name answered exit
+#   1 `names 2 findings`. So the arm is the set of spellings that are already
+#   ANCHORED -- a leading `/`, and a drive designator -- which is closed PER
+#   PLATFORM where find's token set is open PER IMPLEMENTATION. Leaving a drive
+#   designator unprefixed is safe on POSIX too, where `C:/x` is an ordinary
+#   relative path: the prefix exists only to stop find reading a path as an
+#   expression, and no token of that grammar begins with a letter. That also
+#   means POSIX CANNOT WITNESS THIS HALF -- `./C:/x` names the same directory
+#   there -- so the fixture asserts only that the unprefixed spelling still
+#   answers alike written relative and written absolute, and the Windows run is
+#   the witness.
+#
+#   AND THE ROUND AFTER THAT: THE ANCHORED SET WAS NAMED FROM ONE SPELLING AND
+#   NOT FROM THE CLASS. `C:/…` was added and `\\server\share\…` and the
+#   drive-relative `\Windows\…` were left in the prefixed arm, so the repair
+#   closed the spelling it was shown and not the set the sentence above claims to
+#   describe. A BACKSLASH now anchors too, which is both of those at once, and the
+#   three arms are every spelling Windows roots a path with: `/…` and `/c/…`,
+#   `C:\…` and `C:/…`, `\\server\share\…` and `\Windows\…`. Safe on POSIX by
+#   the same argument as the drive designator -- no token of find's grammar begins
+#   with a backslash either, and a POSIX directory named `\Windows` enumerates
+#   from its bare relative spelling: measured on findutils 4.9.0, exit 0 naming
+#   `\Windows/inside`.
+#
+#   ABSOLUTISING THE STARTING PATH INSTEAD WOULD NOT CLOSE THIS CLASS, and it was
+#   asked. The bang finding offered it and its evidence is right that an absolute
+#   path cannot parse as an expression -- but `${PWD%/}/$dir` has to decide WHICH
+#   paths are relative for exactly the same reason `./$dir` does, and its failure
+#   on the ones it gets wrong is identical: `/c/repo/C:/x` names nothing where
+#   `./C:/x` names nothing. It would move this decision from one that needs no
+#   platform test to one that does, because "is already anchored" is closed per
+#   platform while "no find token begins with this" is closed per grammar. The
+#   one construction that needs no classification at all -- appending `/.`, so the
+#   string can be no exact token -- does not close it either: measured on the same
+#   findutils, `-name/.` is exit 1 `unknown predicate`, and a SYMLINK to a
+#   directory goes from enumerating nothing to enumerating its target, which is a
+#   different answer and not a repair.
+#
+#   AND THE ROUND AFTER THAT: THE SAME DEFECT WAS LIVE ON A THIRD ARM, AND THE
+#   ANSWER IS NOT A THIRD ARM. Three rounds had each taught ONE walk ONE more
+#   spelling -- the drive root, then the anchored set -- while FOUR separate
+#   `${x%/*}` strips decided what "one component shorter" meant, and the ascent's
+#   was still forward-slash only: `C:\repo\findings` and `\\server\share\findings`
+#   strip to themselves there, the walk reads "did not shorten" as "is a top", and
+#   THE ASCENT NEVER RUNS. That is the same false green the forward-slash spelling
+#   had a round earlier, on the arm nobody had been shown yet, and a fourth
+#   spelling would have been a fourth round. `path_parent` is now the only place
+#   that decides it and all four walks go through it; its header states the rule,
+#   the roots, the UNC share and why a POSIX path keeps its own separator set.
+#
+#   THE THREE SITES THAT SHARE THE VOCABULARY ASK THREE DIFFERENT QUESTIONS, and
+#   that is why their bodies differ and should. `list_dir` asks whether a spelling
+#   is ALREADY ANCHORED so that a `./` prefix would break it -- closed PER GRAMMAR,
+#   the same answer for all three arms, so its body does nothing for all three.
+#   `locate_listing` asks whether a spelling HAS A TOP OF ITS OWN -- closed PER
+#   PLATFORM, so `/` is anchored everywhere while `\…` and `C:…` are anchored only
+#   where they name what they name, which is the `-ef` test and is why those two
+#   arms are together and `/` is apart. `path_parent` asks WHICH BYTES DIVIDE THE
+#   COMPONENTS, and answers it from the same three arms. One vocabulary, three
+#   questions, each stated -- rather than three bodies that differ because of
+#   which round met which spelling.
+#
+#   TWO OTHER SITES READ A NATIVE WINDOWS ABSOLUTE PATH AS A RELATIVE ONE, AND ONE
+#   OF THEM IS NOW REPAIRED. `repository_above` joined `${PWD%/}/$dir` onto
+#   anything not beginning with `/` so its walk had a top to stop at; the ascent
+#   then made GIT hand it a native parent, and the false red stopped needing a
+#   native spelling from the caller to reach it at all. The join has moved to
+#   `locate_listing`, which roots the caller's anchor once -- AGAINST A SET THAT IS
+#   NOT THIS ONE, and reading this one's answer as that one's was a false green:
+#   "can this spelling parse as a find expression" is closed PER GRAMMAR, "does
+#   this spelling have a top of its own" is closed PER PLATFORM, and the second
+#   question with the first's three arms left every POSIX listing spelled `C:/…`
+#   or `\…` unrooted. See that function's own paragraphs. The walk there has a
+#   root test that is not `/`. Measured on the same guest: a clean standalone repository, one
+#   committed finding at its root, spelled `.`, exit 1 `git could not say whether
+#   'C:/Users/…' is inside a work tree` before and exit 0 `conforms` after; and a
+#   LOOSE directory holding two findings, in no repository at all, exit 1 `git
+#   could not say what it records for 'C:/…'` before and exit 1 `names 2 findings`
+#   -- the real verdict -- after, for `C:/…`, `C:\…` and `\\localhost\C$\…` alike.
+#
+#   THE SITE THAT IS NOT REPAIRED is `locate_listing`'s COMPONENT CHAIN, built from
+#   `${PWD}/$path` so it holds the components the caller named plus the ones the
+#   shell is standing in. Rooting that chain natively is not the same one-line
+#   decision: its prefix arithmetic is `/`-rooted throughout and a drive root would
+#   need a terminator in the chain walk as well as in this test, and skipping the
+#   join for a drive designator would truncate a POSIX chain over a directory
+#   legitimately named `C:`. Measured on the same guest it is a FALSE RED and not a
+#   false green: a repository's own root spelled `C:/…` refuses as "no part of the
+#   path as it was written names that root", where `/c/…` and `.` both answer.
+#
+#   WHAT THAT CHAIN DID TAKE is the join itself: `$PWD` reaches it and the anchor
+#   with its trailing separator removed, because run from `/` the join spells
+#   `//findings` and a LEADING RUN OF TWO SEPARATORS is how a UNC path is written.
+#   `path_parent` stops at a share root, so a manufactured one would make
+#   `//a/b` a top and hide a repository at `/a`. The chain matches by INODE and
+#   cannot care which spelling it holds; the anchor walks, and does.
+#
+#   AND `normalise_listing_path` IS `/`-ONLY ON PURPOSE, which is the other place
+#   a separator is read. It canonicalises THE CALLER'S OWN TEXT -- a listing
+#   spelled `findings/.` is the directory `findings` -- where the walks work on a
+#   path that has been ROOTED and whose separator set the rooting decides. A
+#   backslash is a legal byte in a POSIX filename, so splitting the caller's text
+#   on one would break a directory legitimately named `a\b`. The cost is that a
+#   NATIVE spelling with a trailing backslash arrives uncanonicalised, and
+#   `path_parent` takes it off rather than reading the empty last component as a
+#   root: one directory, one verdict, which is the property that rule exists for.
+#
 # Three helpers were not a chokepoint while each had its own way to bytes, so
 # there is ONE CAPTURE PRIMITIVE and they are its callers. `git_probe` is the
 # only place this file runs git, `read_file` the only place it opens a file for
@@ -406,6 +566,178 @@ export PATH="/usr/bin:/bin:$PATH"
 # executed too.
 shopt -s nullglob
 unset GLOBIGNORE
+
+# AND THE PATHSPEC-MAGIC VARIABLES ARE UNSET, because they change WHICH PATHS git
+# matches for the pathspecs THIS FILE constructs, and that moves a verdict. Every
+# `ls-files` below names its path as `:(literal)<path>`, so that a listing at
+# `:weird` is a name and not pathspec magic; `GIT_LITERAL_PATHSPECS=1` turns that
+# whole prefix INTO the literal name `:(literal)<path>`, which matches nothing, so
+# the ascent that reads a superproject's `160000 findings` saw no record, did not
+# refuse, and answered a submodule's own index -- the initialised-submodule ledger
+# switch reached through the environment. Measured at git 2.43.0: with it exported,
+# a clean superproject recording `findings` at a gitlink conformed at exit 0 where
+# the clean run refuses; `GIT_GLOB_PATHSPECS`, `GIT_NOGLOB_PATHSPECS` and
+# `GIT_ICASE_PATHSPECS` are compatible with an explicit `:(literal)` and moved no
+# verdict, but they narrow or widen a match all the same and are unset with it. None
+# of them names a repository, so none is put back for any probe -- not even for the
+# asks below that put back the three names that do -- and it is why `GIT_CONFIG_*` and
+# the trace variables, which do NOT change which paths a pathspec names, are still left
+# alone (a trace descriptor that collided with a capture copy is handled where the copy
+# is opened, not here).
+unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
+
+# AND WHICH REPOSITORY A CALLER'S ENVIRONMENT NAMES IS GIT'S TO SAY. THIS FILE ASKS
+# GIT AND NEVER WORKS IT OUT. `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` are how
+# a caller tells git which git directory, work tree and index a directory belongs to,
+# and git is the only thing that defines what a spelling of them means: relative to
+# which directory, what `.` and a trailing `/.` name, what a git directory with no work
+# tree takes as its root, what an index path is relative to. Rounds 10 to 12 read those
+# values here, and each round's review met a spelling the reading got wrong -- a
+# `GIT_WORK_TREE=.` whose prefix was stripped by spelling, so a materialised 120000
+# conformed and a sparse finding refused; a relative `GIT_DIR` that named nothing at
+# the caller's directory, re-anchored by `-C` onto metadata planted inside the listing;
+# a fallback that never asked the recorded ancestors, so a file listing below a
+# `160000` was read; and a superproject reachable ONLY through the names, hidden with
+# them, and its `160000` with it. Each was exit 1 at `231c1aad` and exit 0 `conforms`
+# at `9980591a`, and each was a site where this file answered git's question for it.
+#
+# SO A LISTING CAN BE IN TWO REPOSITORIES, AND GIT IS ASKED ABOUT EACH.
+#
+#   THE ONE ITS PATH REACHES is git's discovery from the listing, and every walk below
+#   asks it with the three names CLEARED -- here, once, above every probe -- because a
+#   name left exported makes every step of a walk answer about the name rather than
+#   about the path. Measured while the walks still ran with the names exported, one at
+#   a time against the clean control: `GIT_WORK_TREE` made the ascent's question about a
+#   PARENT directory answer about the pin, and a clean standalone repository spelled
+#   `.` refused; `GIT_DIR` or `GIT_INDEX_FILE` pointed at a gitlinked repository's own
+#   metadata made every probe answer out of that repository, and the gitlink conformed.
+#
+#   THE ONE THE ENVIRONMENT NAMES is asked of git ONCE, from the caller's own directory,
+#   with the names put back exactly as exported, empty ones included: `rev-parse
+#   --absolute-git-dir`, `--show-toplevel` and `--path-format=absolute --git-path
+#   index`. What comes back is three absolute paths GIT printed, and every later read of
+#   that repository's records exports those three and nothing the caller spelled, so no
+#   `-C` can re-anchor anything. `resolve_deployment` asks; `ledger_probe` reads.
+#
+# AND A LISTING IS JUDGED IN THE REPOSITORY THE ENVIRONMENT NAMES, OR NOT AT ALL.
+# `judge_in_deployment` is the whole of the rule and it has four arms:
+#
+#   1. Git could not resolve that repository -- a git directory that is not one, a name
+#      exported empty, a work tree it will not take. REFUSED: a repository nothing can
+#      be asked about is not one a listing conforms in.
+#   2. The listing is not inside its work tree. REFUSED, save one input: a regular file
+#      in no repository at all is a list of names somebody wrote -- the workflow builds
+#      three -- and not a ledger, so it is read exactly as it is read with nothing
+#      exported. Not where `GIT_DIR` is exported without `GIT_WORK_TREE`: that work
+#      tree is rooted wherever git is asked from, so "outside" says where the CALLER
+#      stands, and a materialised 120000 outside the caller's directory is a regular
+#      file whose target text would be read as names. A listing is inside the work
+#      tree where a component the caller WROTE is that root, matched by inode, and the
+#      rest of what they wrote does not climb back out of it through a `..` -- the
+#      test `name_listing` makes, and the one git makes of a pathspec: measured at git
+#      2.43.0, a path written through a link TO the work tree's root is inside it, and
+#      one written through a link to a directory BELOW the root is `outside repository`.
+#   3. The path reaches a repository of its own as well. Both are asked what they record
+#      at the listing, and anything but the same answer is REFUSED. One directory with
+#      two ledgers is settled by neither: this is where a hidden superproject's `160000`
+#      refuses over the submodule's own index -- and, nested the other way round, where a
+#      submodule's own index the names select refuses under its superproject's `160000`
+#      -- and a foreign `GIT_INDEX_FILE` over a repository refuses rather than answers.
+#   4. The path reaches no repository. The named repository's records DECIDE, read by
+#      `recorded_kind_of` exactly as any records are -- recorded type before checkout
+#      shape, ancestors included -- where the environment names BOTH its git directory
+#      and its work tree, which is how `git --git-dir=… --work-tree=…` is spelled. A git
+#      directory alone makes whatever directory git is asked from the work tree's root,
+#      which says where the ASKER stands and places no listing; a work tree or an index
+#      alone takes its repository from discovery at the caller's directory, which is not
+#      the listing's. Either is refused.
+#
+# AND THE REPOSITORY THE ENVIRONMENT NAMES IS THE ONE THAT IS READ, WHICH IS THE HALF THE
+# FOUR ARMS DID NOT SAY. They settle which repository JUDGES a listing; which one is READ
+# to judge it was left to `name_listing`, whose ascent -- discovery's way from a work
+# tree's own root out to the repository above that records it -- was taken for the named
+# repository too, and cleared `ledger_is_deployment` as it went. So arm 3 compared the
+# repository above with ITSELF. `outer` committing finding A under `findings/`, the names
+# selecting `outer/findings` through a second index recording A and a twin B, and `.`
+# asked from `outer/findings`: exit 0 `conforms` at `e3a91ff3`, an untruncated `strace`
+# counting three opens of `outer/.git/index` and none of the selected one, where
+# `231c1aad` refuses `names 2 findings`; a selected index recording no finding, or nothing
+# at all, conformed alike. It entered with `62bc799b`, which cleared the names for every
+# probe -- `4bcf49f3` exit 1, `62bc799b` exit 0, on all three -- and each round since
+# closed another face of that one move. So the named repository's root is never ascended
+# from, and no ascent ever stands in for the selected ledger. A repository above it is
+# the PATH's, which `locate_listing` reaches by that same ascent, and where it records the
+# listing otherwise than the selected one does, that is arm 3's refusal -- whichever of the
+# two is nested in the other.
+#
+# SO WHAT EXPORTING THE NAMES CAN CHANGE IS STATED HERE RATHER THAN LEFT TO BE FOUND.
+# Where the path reaches a repository, the run with them exported gives exactly the
+# answer the run without them gives, or it refuses. Where the path reaches none, the
+# named repository's records answer in place of the names the filesystem holds, or it
+# refuses -- save a regular file or a link outside the named work tree, which is read
+# as it always is wherever that work tree is not simply the caller's own directory.
+#
+# WHAT THIS DOES NOT ENFORCE, MEASURED RATHER THAN ASSUMED, because "cannot move
+# a verdict" stood here as an assertion and two reviews then argued it both ways.
+# `GIT_CONFIG_*` and the trace variables change how git talks rather than which
+# repository it talks about, and are left alone. What was RUN, at git 2.43.0:
+# injecting `core.bare=true` through `GIT_CONFIG_COUNT`/`_KEY_n`/`_VALUE_n`
+# leaves `--is-inside-work-tree` `true` and `--is-bare-repository` `false`, with
+# `git config --get core.bare` answering `true` as the control that the injection
+# reaches git at all -- git honours the value as CONFIG and still decides
+# bare-ness from the DISCOVERED LAYOUT. That is one key at one version and not a
+# property of the namespace. `GIT_CEILING_DIRECTORIES` DOES move a verdict and is
+# deliberately not enforced: with the repository's own root as a ceiling, a
+# listing that conforms at exit 0 refuses at exit 1 `git could not say what it
+# records`, `GIT_CEILING_DIRECTORIES` naming a path that is not there conforms as
+# the control, and `231c1aad` refuses identically -- a REFUSAL WITH A NAMED
+# REASON, which is the direction this file wants, and not this pull request's
+# regression. The rule above is about the three names, and is not widened to a
+# fourth. `GIT_DISCOVERY_ACROSS_FILESYSTEM=0` did not move the verdict in the
+# fixture that was run, and that fixture crosses no filesystem boundary: UNTESTED,
+# not cleared. Nor did `GIT_COMMON_DIR` naming a BARE repository's directory, which
+# is where a discovered repository's config would be read from: over an ordinary
+# repository whose index records two findings of one description and whose checkout
+# holds one, `--is-inside-work-tree` stayed `true` and the run refused `names 2
+# findings` at `231c1aad`, at `9980591a` and here alike -- one shape at git 2.43.0,
+# and not a property of the variable.
+#
+# THE NAMES ARE RECORDED BEFORE THEY ARE CLEARED, because the refusal has to say
+# which of them was there, and SET BUT EMPTY IS ONE OF THEM: at git 2.43.0 an
+# empty `GIT_DIR` is `fatal: not a git repository: ''`, an empty `GIT_WORK_TREE`
+# is `fatal: The empty string is not a valid path`, and an empty `GIT_INDEX_FILE`
+# makes `git ls-files` print nothing and exit 0 -- an empty ledger, which is the
+# substitution this gate is about. This is one process's environment and nothing
+# the caller's own git commands see.
+#
+# THE VALUES ARE RECORDED WITH THEM, for the one ask `resolve_deployment` makes
+# and for nothing else: nothing in this file reads them, it hands them back to git.
+# They are held in variables this file writes and never in the environment, so
+# outside that ask and `ledger_probe` there is no exported name for a probe to find.
+environment_ledger=''
+environment_git_dir=''
+environment_work_tree=''
+environment_index_file=''
+environment_git_dir_named=0
+environment_work_tree_named=0
+environment_index_file_named=0
+if [[ -n "${GIT_DIR+set}" ]]; then
+  environment_ledger="$environment_ledger GIT_DIR"
+  environment_git_dir="$GIT_DIR"
+  environment_git_dir_named=1
+fi
+if [[ -n "${GIT_WORK_TREE+set}" ]]; then
+  environment_ledger="$environment_ledger GIT_WORK_TREE"
+  environment_work_tree="$GIT_WORK_TREE"
+  environment_work_tree_named=1
+fi
+if [[ -n "${GIT_INDEX_FILE+set}" ]]; then
+  environment_ledger="$environment_ledger GIT_INDEX_FILE"
+  environment_index_file="$GIT_INDEX_FILE"
+  environment_index_file_named=1
+fi
+environment_ledger="${environment_ledger# }"
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
 branch="${1:-}"
 merge_base_findings="${2:-}"
@@ -565,20 +897,22 @@ read_private() {
 #      the file, sentinel and all. The open here is `exec`, whose status is a
 #      status, and it truncates, so a destination that opens holds nothing from
 #      before.
-#   2. The producer ran, and ITS status is `capture_status`, for the caller to
-#      enumerate rather than for this to interpret.
-#   3. Both copies read back as far as their sentinel.
-#   4. Nothing is handed back unless 1 to 3 held. `capture_records` and
+#   2. The producer ran WITH FDS 3 AND 4 CLOSED, so `GIT_TRACE=3` could not write git's
+#      trace into a copy and be parsed as its output, and ITS status is `capture_status`.
+#   3. BOTH SENTINELS WERE WRITTEN. The marker is this primitive's OWN write, its
+#      status was the one nobody read, and the cost was a finding nobody filed.
+#   4. Both copies read back as far as their sentinel.
+#   5. Nothing is handed back unless 1 to 4 held. `capture_records` and
 #      `capture_tail` are the producer's stdout; `capture_err` is its stderr past
 #      the last NUL, which for the text git writes is all of it, and is QUOTED in
-#      a refusal and never parsed; `capture_error` says which of the four failed.
+#      a refusal and never parsed; `capture_error` says which of the five failed.
 capture_status=0
 capture_records=()
 capture_tail=''
 capture_err=''
 capture_error=''
 capture() {
-  local out="$1" err="$2" stdin="$3"
+  local out="$1" err="$2" stdin="$3" marked_out=0 marked_err=0
   shift 3
   [[ "${1:-}" == -- ]] || {
     echo "branch-name-policy: internal error: capture was called without --" >&2
@@ -595,11 +929,13 @@ capture() {
   { exec 4> "$err"; } 2>/dev/null \
     || { exec 3>&-; capture_error="its errors could not be captured: '$err' would not open"; return 1; }
   if [[ "$stdin" == fd9 ]]; then
-    { "$@" || capture_status=$?; printf '\001'; printf '\001' >&2; } >&3 2>&4 <&9
+    { "$@" 3>&- 4>&- || capture_status=$?; printf '\001' || marked_out=$?; printf '\001' >&2 || marked_err=$?; } >&3 2>&4 <&9
   else
-    { "$@" || capture_status=$?; printf '\001'; printf '\001' >&2; } >&3 2>&4 </dev/null
+    { "$@" 3>&- 4>&- || capture_status=$?; printf '\001' || marked_out=$?; printf '\001' >&2 || marked_err=$?; } >&3 2>&4 </dev/null
   fi
   exec 3>&- 4>&-
+  (( marked_out == 0 && marked_err == 0 )) \
+    || { capture_error='the marker that says it was captured whole could not be written'; return 1; }
   read_private "$err" \
     || { capture_error='what it printed could not be read back'; return 1; }
   capture_err="${private_tail%$'\n'}"
@@ -720,9 +1056,12 @@ dir_entries=()
 list_dir() {
   local dir="$1" record
   dir_entries=()
-  # A leading dash is part of a name and not a set of options.
+  # EVERY RELATIVE STARTING PATH IS PREFIXED WITH `./`, SO A PATH IS ALWAYS A PATH:
+  # `find` reads a directory named `!` as its negation operator -- and ONLY a
+  # relative one: a prefix on an ANCHORED spelling is no path at all. Both above.
   case "$dir" in
-    -*) dir="./$dir" ;;
+    /* | '\'* | [A-Za-z]:*) ;;
+    *) dir="./$dir" ;;
   esac
   capture "$probe_dir/dir.out" "$probe_dir/dir.err" none -- \
     find "$dir" -mindepth 1 -maxdepth 1 -print0 || return 1
@@ -847,6 +1186,277 @@ gitdir_pointer() {
   esac
 }
 
+# ==== THE WALK, AND THE SIX RULES EVERY SITE OF IT SATISFIES ==================
+#
+# FOUR WALKS CLIMB A PATH IN THIS FILE. `locate_listing`'s ENTER LOOP descends
+# to the deepest ancestor of the listing it can stand in; `locate_listing`'s
+# ASCENT climbs back out of it looking for a work tree; `repository_above` asks
+# whether there was a repository for git to have failed ABOUT; and
+# `enclosing_work_tree` looks for the work tree that CONTAINS another. Each one
+# carried its own arithmetic and its own idea of where a path stops, and each
+# round of repair taught ONE of them ONE more spelling: a bare repository, an
+# unbounded ascent, a symlinked component, an anchored spelling, a backslash, a
+# git directory that is not above what it records. FOUR OF THOSE SIX WERE
+# INTRODUCED BY THE ROUND BEFORE THEM, and the round that named the pattern
+# produced another instance of it.
+#
+# So what follows is not a seventh arm. It is the rule each site is supposed to
+# satisfy, written down once, in one place, so that the next spelling is
+# measured against a rule instead of against whichever case its round happened
+# to be shown. The measurements that produced each rule stay at the site that
+# made them; what is here is the rule.
+#
+# WHERE A SITE MUST DIFFER, THE RULE SAYS WHICH SITE AND WHY. One does, and it
+# is named in rule 6.
+#
+# ---- RULE 1. A ROOT IS A PATH WHOSE SEPARATOR IS PART OF IT, AND WHICH
+#      SEPARATORS DIVIDE A PATH IS DECIDED BY HOW IT WAS ROOTED -------------
+#
+# `/`, `C:/`, `C:\`, `\` and a UNC share `//server/share` are roots. `C:` and
+# `findings` are not: they are drive- and directory-relative, and name whatever
+# the current directory of that drive or that process happens to be.
+#
+# NO SITE TESTS WHICH PLATFORM IT IS ON, because the spelling already says. A
+# path beginning with a backslash or with a drive designator is one WINDOWS
+# rooted, and there both separators divide components; every other path reaching
+# these walks was rooted with `/` -- by `$PWD`, by `--show-toplevel`, or by being
+# written that way -- and there only `/` divides. A backslash is a LEGAL BYTE IN
+# A POSIX FILENAME, so a rule that always spelled both would cut `/tmp/we\ird/x`
+# at a directory that is not there. `path_parent` is the one place this is
+# decided.
+#
+# THREE SITES TEST THE SAME THREE ARMS AND THEIR BODIES DIFFER, WHICH IS RIGHT
+# AND IS WHY IT IS SAID HERE. `list_dir` asks whether a spelling can parse as a
+# `find` expression, which is closed PER GRAMMAR and is the same answer for all
+# three arms. `locate_listing` asks whether a spelling has a top of its own,
+# which is closed PER PLATFORM, so the `/` arm is apart from the other two. THIS
+# rule asks which bytes divide the components. One vocabulary, three questions,
+# stated rather than left to whichever round met which spelling.
+#
+# ---- RULE 2. A STRIP THAT REMOVES NOTHING IS A TOP, WHATEVER ROOTED IT ------
+#
+# Running out of levels is the only absence any of these walks has, and it is
+# one answer for a filesystem root, a drive root, a share root and a path that
+# cannot be shortened at all. A walk that reads "did not shorten" as anything
+# else does not terminate; a walk that reads it as "there is nothing above"
+# without the strip having been attempted for ITS spelling reports an absence
+# that is not one, which is the false green four of these rounds closed.
+#
+# ---- RULE 3. A STRIP THAT REMOVES THE LAST SEPARATOR RESPELLS A ROOT, IT DOES
+#      NOT PRODUCE A NAME ---------------------------------------------------
+#
+# `/repo` shortens to `/` and never to the empty string; `C:/repo` to `C:/` and
+# `C:\repo` to `C:\`, never to `C:`; `\Windows` to `\`. A root that loses its
+# separator stops naming a root and starts naming a current directory, and both
+# halves of that are measured: `git -C ''` is a documented no-op about the
+# process's own directory, and `git -C C:` answers about the repository the
+# drive is currently standing in. The share is the top of a UNC path, because
+# `//server` names no directory on any host.
+#
+# ---- RULE 4. THE CALLER ROOTS A PATH. NO WALK EVER DOES --------------------
+#
+# Every walk here requires a path that already has a top to stop at, and none of
+# them may supply one: a walk is handed paths from two sources -- the caller's
+# spelling and git's answers -- and it cannot tell them apart, so a walk that
+# rooted what it was given would join `$PWD` onto the native `C:/…` that
+# `--show-toplevel` returns on Windows and produce a path naming nothing. That
+# was measured as a clean standalone repository going from `conforms` to a
+# refusal with nothing native anywhere in the caller's input.
+#
+# So there is exactly ONE place a caller's spelling is rooted -- `locate_listing`,
+# which knows how its path was written -- and git's answers are rooted already.
+# A ROOTING THAT DOES NOT PRODUCE A ROOT IS NOT ONE: the shell's own directory
+# is the only thing this has to root against, and if it is not itself a rooted
+# path then nothing relative to it can be walked and the run is refused rather
+# than walked from a guess. `${PWD:-.}` was such a guess -- a `.` fallback is
+# the one unrooted spelling that could reach these walks -- and a leading run of
+# two separators is the other, because rule 1 reads it as a UNC share and stops
+# two components down. Both are closed at that one site.
+#
+# ---- RULE 5. GIT ANSWERS TWO DIFFERENT KINDS OF QUESTION, AND ONLY ONE KIND
+#      IS AUTHORITY ABOUT WHERE THE LISTING IS ------------------------------
+#
+# ABOUT THE LISTING: `--is-inside-work-tree`, `--is-inside-git-dir` and
+# `--show-toplevel` are answers about the directory git was pointed at. They may
+# be read as statements about where that directory sits.
+#
+# ABOUT GIT'S METADATA: `--absolute-git-dir` and `--git-dir` say where the
+# repository's own directory is, and METADATA IS NOT A CONTAINER. A `.git` FILE
+# is a pointer and points anywhere; `git init --separate-git-dir` puts the
+# directory on another filesystem entirely. A canonical metadata path need not
+# be an ancestor of the listing, and reading it as one is how the round before
+# this reintroduced the false green it had just closed.
+#
+# So a metadata answer becomes an answer about the listing only when a LISTING
+# answer says it contains the listing, and that is `--is-inside-git-dir`. An
+# EXPORTED `GIT_DIR` used to be the interesting case of this -- it makes
+# `--absolute-git-dir` answer the pinned directory wherever the anchor is, and
+# `--is-inside-git-dir` is `false` there for exactly the reason the hop must not
+# fire -- and it is no longer reachable: the pins are unset at the top of this
+# file, so every answer below is about the path git was pointed at.
+#
+# AND A STATUS IS NOT AN ANSWER EITHER, which is the same rule about the other
+# half of what git returns: an empty success is not evidence of absence, and
+# `repository_above` -- not git's exit status and not git's words -- is what
+# separates "there is no repository" from "there is one this cannot examine".
+#
+# ---- RULE 6. THE PHYSICAL CHAIN FINDS THE REPOSITORY, THE WRITTEN CHAIN NAMES
+#      THE LISTING, AND THEY MEET AT THE LISTING'S OWN ROOT -----------------
+#
+# Finding a repository means ENTERING directories, which follows links; naming
+# the listing means taking the CALLER'S OWN COMPONENTS, which does not. The two
+# chains are matched at one point and by INODE: the work tree's root against the
+# caller's prefixes. Below that point the caller's spelling is the authority --
+# a `findings` that is a link to `saved-findings` is recorded under the name the
+# caller wrote and not under the one the link lands on -- and above it the
+# caller wrote nothing at all.
+#
+# THE SITE THAT DIFFERS IS THE GITLINK ASCENT, AND THE DIFFERENCE IS EXACTLY
+# "THE CALLER WROTE NO NAME HERE". When nothing in the listing's own repository
+# names it, authority moves to a work tree ABOVE that root and the listing must
+# be named in THAT index. Where the caller's components reach the new root they
+# still decide, because the index records what they wrote and not what a link
+# lands on. Where a component was a symlink OUT of the written tree they do not
+# reach it and the caller named nothing inside it at all -- and there, and only
+# there, the name is git's own spelling of the listing root within that
+# repository, which is the segment `records_path` has just matched. Refusing
+# instead was measured as two answers for one directory.
+#
+# =============================================================================
+
+# path_parent <path>: the same path ONE COMPONENT SHORTER, in `parent_path`, or
+# 1 where it cannot be shortened at all -- the top of whatever rooted it, which
+# is the only absence any walk in this file has.
+#
+# RULES 1, 2 AND 3 ARE DECIDED HERE AND NOWHERE ELSE, and this is where their
+# measurements are. There were four copies of this arithmetic and they had been
+# repaired one spelling at a time: `repository_above`, `enclosing_work_tree` and
+# `locate_listing`'s two walks each wrote their own `${x%/*}`, and each round
+# taught ONE of them ONE more spelling: round 4 gave two of them a drive root,
+# round 6 gave the anchor an anchored set, and the ascent was still stripping a
+# FORWARD SLASH ONLY. On `C:\repo\findings` or `\\server\share\findings` that
+# removes NOTHING, so the strip did not shorten the path, the walk read "did not
+# shorten" as "is a top", and the ascent never ran -- the same false green the
+# forward-slash spelling had before round 6, on the arm nobody had been shown
+# yet. One rule in one place is what stops a fourth spelling being a fourth
+# round, and it is the rule these four sites now share.
+#
+# WHICH SEPARATORS A PATH IS WRITTEN WITH IS DECIDED BY HOW IT IS ROOTED, and
+# that needs no platform test. A BACKSLASH IS A LEGAL BYTE IN A POSIX FILENAME,
+# so a class that always spelled both would answer `/tmp/we\ird/x` with `/tmp/we`
+# -- a directory that is not there, which `repository_above` reads as metadata it
+# cannot examine and REFUSES, a false red on an ordinary POSIX listing. A path
+# that begins with a backslash or with a drive designator is one WINDOWS rooted,
+# and only there do both separators divide components; every other path reaching
+# these walks was rooted with `/`, by `$PWD` or by `--show-toplevel` or by being
+# written that way.
+#
+# THE THREE ARMS ARE RULE 1'S AND THE THREE SITES THAT TEST THEM DO NOT HAVE THE
+# SAME BODY, which is stated there. What matters here is the reason this one's
+# differs: `locate_listing`'s arms are closed PER PLATFORM, so `\…` and `C:…` go
+# together and `/` is apart -- which is the `-ef` test it makes -- where this
+# rule's question, which bytes divide the components, puts `/` with neither.
+#
+# A ROOT IS SPELLED WITH ITS OWN SEPARATOR AND IS A TOP. `/repo` shortens to `/`,
+# `C:/repo` to `C:/`, `C:\repo` to `C:\` -- never to `C:`, which names the
+# drive's CURRENT directory -- and `\Windows` to `\`. Executed natively on
+# Windows Server 2025 from inside a clean repository directly under `C:/`: `git
+# -C C: rev-parse --show-toplevel` exits 0 and answers THAT REPOSITORY, where
+# `git -C C:/ rev-parse --is-inside-work-tree` exits 128, so a walk that landed
+# on `C:` read the repository as its own container and refused it. The POSIX half
+# is not hypothetical either: `/repo` strips to the EMPTY STRING, and `git -C ''`
+# is a documented no-op that answers about the process's own current directory.
+# A root that loses its separator stops naming a root.
+#
+# AND A PATH WITH NO SEPARATOR LEFT TO STRIP IS A TOP because it cannot be
+# shortened at all: `C:`, `.` and `findings` are each drive- or
+# directory-relative, and respelling any of them as a root would move the
+# question to another directory -- this defect the other way round.
+#
+# WHICH IS WHY THE RESPELLING IS ASKED OF A NATIVE PATH AND NOT OF EVERY PATH.
+# What is left when the last separator goes is a root when there is nothing
+# before it -- `/repo` -- and, on a WINDOWS-rooted path, when what is left holds
+# no separator, which there is exactly the drive designator: a `\`-rooted path
+# leaves either nothing or something with a separator in it, and a `C:`-rooted
+# one leaves `C:` or nothing. On a `/`-rooted path the same test would respell
+# the ordinary relative `p` in `p/q` as `p/`, which names the same directory and
+# is merely a spelling -- but it is a spelling this hands to git, and a rule that
+# is exact costs nothing over one that is nearly right.
+#
+# AND A UNC PATH'S TOP IS ITS SHARE, which is the one place the arithmetic alone
+# gets it wrong. `\\server\share` shortens to `\\server`, which names no
+# directory on any host: `repository_above` cannot stat it, reads that as a
+# `.git` it cannot examine, and refuses -- so an ordinary listing on a share,
+# outside any repository, would go from the filesystem's answer to a refusal. The
+# share IS the top. Both spellings arrive: a caller writes `\\server\share\…`
+# and git answers `//server/share/…`.
+#
+# A TRAILING SEPARATOR IS NOT A COMPONENT, because one directory must not have
+# two verdicts. `normalise_listing_path` takes it off a `/` spelling before any
+# of this, and knows no other separator, so `C:\repo\findings\` would otherwise
+# have reached here as a path with an empty last component and been read as a
+# root -- the ascent skipped, on a spelling of a listing whose other spelling
+# ascends. It comes off here while something with a separator in it is left,
+# which is what keeps `/`, `C:\` and `\` spelled as the roots they are.
+#
+# AND TWO WALKS IN THIS FILE DO NOT COME THROUGH HERE, WHICH IS A DIFFERENT
+# DOMAIN AND NOT A MISSED SITE. `records_path` and `recorded_kind_of` each climb
+# their argument with `anc="${anc%/*}"`, and what they climb is A GIT INDEX PATH:
+# every level goes straight to `ls-files -- ":(literal)$anc"`, git records index
+# entries with `/` and no other separator, and both arguments are built that way
+# -- `locate_listing` splits the caller's spelling on `/` alone to make
+# `listing_relpath`, and the other is one `--show-toplevel` answer with another
+# stripped off its front, which git writes with `/` on every platform, Windows
+# included. THIS rule is for NATIVE spellings, the ones a caller or a filesystem
+# wrote, which is exactly what its `'\'*` and `[A-Za-z]:*` arms are testing for.
+#
+# APPLYING IT THERE WOULD SKIP AN ANCESTOR THE INDEX CAN HOLD, and that is the
+# reason rather than the tidiness. Driven directly against this function:
+# `c:/sub` answers `c:/`, where the index walk answers `c:` -- a directory named
+# `c:` is an ordinary tracked path with its own fixtures in this suite, and `c:/`
+# is an entry no index holds, so the ancestor would be asked about under a name
+# that cannot match and the walk would end a level early. `\weird` answers `\`
+# where the index walk correctly stops, there being no ancestor: `\weird` is ONE
+# component of a POSIX path and the backslash in it divides nothing. For every
+# ordinary path the two agree -- `findings/deeper` gives `findings` either way --
+# and they part exactly where the native rule reads a separator the index does
+# not have.
+parent_path=''
+path_parent() {
+  local path="$1" seps='/' nots='[!/]' native=0 tail upto stem
+  parent_path=''
+  case "$path" in
+    '\'* | [A-Za-z]:*) native=1 seps='[/\\]' nots='[!/\\]' ;;
+  esac
+  while [[ "$path" == *$seps ]]; do
+    stem="${path%?}"
+    case "$stem" in
+      *$seps*) path="$stem" ;;
+      *) break ;;
+    esac
+  done
+  tail="${path##*$seps}"
+  [[ -n "$tail" && "$tail" != "$path" ]] || return 1
+  upto="${path%"$tail"}"
+  stem="${upto%?}"
+  case "$stem" in
+    $seps$seps$nots*)
+      case "${stem#??}" in
+        *$seps*) ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  if [[ "$stem" == *$seps* ]]; then
+    parent_path="$stem"
+  elif [[ -z "$stem" ]] || (( native )); then
+    parent_path="$upto"
+  else
+    parent_path="$stem"
+  fi
+  return 0
+}
+
 # repository_above <directory>: is there a repository for git to have failed
 # ABOUT? A `.git` at that directory or at any ancestor, and `git rev-parse
 # --resolve-git-dir` -- which answers by EXIT STATUS, prints what this never
@@ -856,7 +1466,8 @@ gitdir_pointer() {
 # `.git` from being one: a stray /tmp/.git would otherwise refuse every by-hand
 # listing under /tmp, and that is a false red on a legitimate branch.
 #
-# THE ANSWER IS ONE OF THREE AND NEVER ONE OF TWO: 0 a repository, 1 none, and
+# RULE 5'S SECOND HALF: A STATUS IS NOT AN ANSWER, SO THE ANSWER IS ONE OF
+# THREE AND NEVER ONE OF TWO. 0 a repository, 1 none, and
 # 2 "there is a repository here and this cannot examine it". Treating every
 # unsuccessful resolution as an absence is the discarded read failure one level
 # up, one level down, and it has now been measured four ways: an unreadable
@@ -885,13 +1496,44 @@ gitdir_pointer() {
 # a healthy `.git` file, and a refusal on one that names a gitdir is a repository
 # this cannot read.
 #
-# A GIT_DIR or GIT_WORK_TREE in the environment points git at an index this walk
-# cannot reach, so it counts as a repository in play and the answer is yes.
+# AND A PINNED ENVIRONMENT IS NOT ONE OF THE THREE, because this walk never sees
+# one. The line that stood here answered YES for any `GIT_DIR` or `GIT_WORK_TREE`
+# in the environment -- an index the walk cannot reach is a repository in play --
+# and that is right for `locate_listing`, which asks whether git's failure AT THE
+# LISTING may be read as an absence, and wrong for `enclosing_work_tree`, which
+# asks whether a work tree CONTAINS this one: a work tree the caller selected is
+# not a container of itself, and a clean standalone repository spelled `.` was
+# refused for it. Both readings are gone with the pins, which are unset at the
+# top of the file where nothing has to remember which question is being asked --
+# and the repository they name is asked about by git, and never by this walk.
+#
+# RULE 4: THE PATH MUST ARRIVE ROOTED AND THIS NO LONGER ROOTS IT, because the
+# join it used to make was `${PWD%/}/$dir` for anything not beginning with `/` -- true of
+# every path a POSIX caller writes, and FALSE of the native `C:/…` that
+# `rev-parse --show-toplevel` answers with on Windows. The ascent then handed this
+# such a parent and the join made `/c/…/repo/C:/…`, which names nothing, so the
+# walk reported a `.git` it could not examine and the run refused: a CLEAN
+# STANDALONE REPOSITORY, one committed finding at its root, spelled `.`, went from
+# `conforms` to exit 1 -- and nothing the caller wrote was native. Measured in Git
+# Bash on Windows Server 2025, bash 5.2.37, git 2.50.1.windows.1: exit 1 `git
+# could not say whether 'C:/Users/…' is inside a work tree` at the previous head,
+# exit 0 `conforms` with the join gone.
+#
+# Sanitising what a CALLER passes in does not reach what GIT hands back, so the
+# join moved to the one caller that knows how its path was spelled rather than
+# being taught a second spelling here. `locate_listing` roots the caller's anchor
+# once, against the same anchored set list_dir tests, and `enclosing_work_tree`
+# walks what `--show-toplevel` answered. Both are rooted before they arrive.
+#
+# THE WALK THEN NEEDS A ROOT IT CAN RECOGNISE that is not `/`: stripping a
+# component off `C:` leaves `C:`, so the `== /` test never fires and the loop
+# would not end. A strip that does not shorten the path IS the root of whatever
+# rooted it, and that is the second test below. Measured by driving this function
+# alone with `C:/y` under a stubbed `git_probe`: it returns 1, and with that test
+# removed it does not return at all.
 repository_above() {
-  local dir="$1" gitdir pointer
-  [[ -z "${GIT_DIR:-}" && -z "${GIT_WORK_TREE:-}" ]] || return 0
-  # The path AS IT WAS WRITTEN, made absolute with `$PWD` so the walk has a top
-  # to stop at. It is NOT resolved through `cd -P`: that costs a subshell, and
+  local dir="$1" gitdir pointer parent
+  # The path is NOT resolved through `cd -P`: that costs a subshell, and
   # `/proc/self` -- a listing the fixtures use precisely because every read of it
   # fails -- resolves there to the SUBSHELL'S pid, a directory that is gone
   # before the next command runs, which turned a readable listing into "git could
@@ -902,10 +1544,6 @@ repository_above() {
   # TARGET and not above the link itself is not -- and cannot matter: no index in
   # it can hold an entry named by this path, so locate_listing refuses that path
   # whether or not this walk found the repository.
-  case "$dir" in
-    /*) ;;
-    *) dir="${PWD%/}/$dir" ;;
-  esac
   while :; do
     git_probe '0,128' -- rev-parse --resolve-git-dir "$dir/.git"
     if (( probe_status == 0 )); then
@@ -949,11 +1587,14 @@ repository_above() {
       unexaminable_git="$gitdir"
       return 2
     fi
-    if [[ "$dir" == / ]]; then
-      return 1
-    fi
-    dir="${dir%/*}"
-    [[ -n "$dir" ]] || dir=/
+    # RULE 2. Running out of levels is the only absence, and `path_parent` is
+    # what says where the levels stop -- for every separator, on every platform,
+    # in the one place all four walks in this file share. A filesystem root, a drive
+    # root, a share root and a path that cannot be shortened at all are one
+    # answer here, because running out of levels is running out of levels however
+    # the path was rooted.
+    path_parent "$dir" || return 1
+    dir="$parent_path"
   done
 }
 
@@ -980,6 +1621,92 @@ repository_above() {
 listing_world=''
 listing_toplevel=''
 listing_relpath=''
+# The shell's own directory, rooted -- `locate_listing` sets it, and every chain a
+# listing is named along starts from it.
+here=''
+
+# resolve_deployment: the repository `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE`
+# name, AS GIT RESOLVES IT from the caller's own directory with the names put back
+# exactly as they were exported -- `deployment_git_dir`, `deployment_top` and
+# `deployment_index`, three absolute paths git printed -- and `deployment_resolved`
+# set only where git printed all three. Where it could not, `deployment_said` is what
+# it said. Asked once, and only when one of the names was exported; the environment
+# section at the top of this file is why, and what is done with the answer.
+#
+# NOTHING HERE READS A VALUE. Git takes a relative `GIT_DIR` from the directory it is
+# run in -- this one, since nothing below the top ever changes it -- takes `.` and a
+# trailing `/.` as the directory they name, takes a git directory with no work tree
+# as rooted wherever it is asked from, and takes a relative `GIT_INDEX_FILE` from the
+# work tree's top when it is run inside the work tree and from where it is run when it
+# is not. Each of those was measured at git 2.43.0, and each is git's to decide; the
+# three answers are what it decided.
+deployment_resolved=0
+deployment_git_dir=''
+deployment_top=''
+deployment_index=''
+deployment_said=''
+resolve_deployment() {
+  local answer
+  if (( environment_git_dir_named )); then export GIT_DIR="$environment_git_dir"; fi
+  if (( environment_work_tree_named )); then export GIT_WORK_TREE="$environment_work_tree"; fi
+  if (( environment_index_file_named )); then export GIT_INDEX_FILE="$environment_index_file"; fi
+  git_probe '0,128' -- rev-parse --absolute-git-dir
+  deployment_git_dir="$probe_text"
+  if (( probe_status == 0 )); then
+    git_probe '0,128' -- rev-parse --show-toplevel
+    deployment_top="$probe_text"
+  fi
+  if (( probe_status == 0 )); then
+    git_probe '0,128' -- rev-parse --path-format=absolute --git-path index
+    deployment_index="$probe_text"
+  fi
+  deployment_said="$probe_stderr"
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+  # EACH ANSWER IS A ROOTED PATH OR IT IS NOT AN ANSWER. Inside a repository `rev-parse`
+  # ECHOES an option it does not know and exits 0 -- measured at git 2.43.0 with an
+  # invented `--path-formatx=absolute`, printed back ahead of the path -- so a git
+  # too old for `--path-format` would answer the index as two lines, the first of
+  # them the option, and a path exported from that would read an index that is not
+  # there: an empty ledger, which is the substitution this gate is about.
+  #
+  # WHAT TELLS THAT FROM A PATH IS WHERE THE ANSWER BEGINS, NOT WHETHER IT HOLDS A
+  # NEWLINE. The guard that stood here refused any answer holding one, and a newline is
+  # a legal byte in a path: a clean deployment whose git directory is `meta<LF>repo.git`,
+  # or whose `GIT_INDEX_FILE` is `index<LF>copy`, resolves at exit 0 for all three asks
+  # and `ls-files` records its committed finding, and it was refused as a repository
+  # git could not resolve -- `231c1aad` exit 0, `e3a91ff3` exit 1. All three asks answer
+  # an ABSOLUTE path, and an option echoed ahead of one begins with `-`, which roots
+  # nothing. So each answer must begin with a root -- `/`, a backslash or a drive
+  # designator, the spellings git roots a path with here and on Windows -- and whatever
+  # follows is the path's own bytes.
+  (( probe_status == 0 )) || return 0
+  for answer in "$deployment_git_dir" "$deployment_top" "$deployment_index"; do
+    case "$answer" in
+      /* | '\'* | [A-Za-z]:*) ;;
+      *) return 0 ;;
+    esac
+  done
+  deployment_resolved=1
+}
+
+# ledger_probe <expected-statuses> -- <git arguments>: `git_probe`, reading the
+# records of the repository the environment names while `ledger_is_deployment` is
+# set -- with the three names set to what `resolve_deployment` heard git answer, never
+# to what the caller spelled -- and with them cleared otherwise. `recorded_tree` and
+# `recorded_kind_of`, which read the ledger a listing is named in, go through here.
+# Every probe that asks WHICH repository answers -- discovery, and the ascent's
+# `records_path` over a repository found above a work tree -- runs cleared, and
+# never through here; and none of them is asked on the named repository's behalf, so
+# nothing between `name_listing` setting this flag and `judge_in_deployment` reading the
+# named records clears it.
+ledger_is_deployment=0
+ledger_probe() {
+  if (( ledger_is_deployment )); then
+    export GIT_DIR="$deployment_git_dir" GIT_WORK_TREE="$deployment_top" GIT_INDEX_FILE="$deployment_index"
+  fi
+  git_probe "$@"
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+}
 
 # recorded_tree <work-tree root> <path within it>: does the index record ENTRIES
 # UNDER that path -- is it a DIRECTORY in the ledger? A path the index records AT
@@ -987,7 +1714,7 @@ listing_relpath=''
 # there; a path it records nowhere is not a directory of the ledger's either.
 recorded_tree() {
   local where="$1" rel="$2" record name
-  git_probe '0' -- -C "$where" ls-files -sz -- ":(literal)$rel"
+  ledger_probe '0' -- -C "$where" ls-files -sz -- ":(literal)$rel"
   (( ${#probe_records[@]} > 0 )) || return 1
   for record in "${probe_records[@]}"; do
     name="${record#*$'\t'}"
@@ -998,29 +1725,301 @@ recorded_tree() {
   return 0
 }
 
+# enclosing_work_tree <work-tree root> <listing, for the message>: the root of
+# the work tree that CONTAINS that one, left in `enclosing_root`, or the empty
+# string where there is none. The answer is 0 or a REFUSAL: 1 says whether there
+# is one is NOT KNOWN, and that is never read as an absence.
+#
+# WHY THE QUESTION IS PUT TO THE PARENT DIRECTORY AND NOT TO GIT'S SUBMODULE
+# QUERY. `rev-parse --show-superproject-working-tree` answers "which repository
+# records this one" in a single call, and answers it EMPTY for three different
+# worlds: there is no repository above; there is one and it records nothing
+# here; and there is one whose index could not be read. Measured on a
+# superproject recording `findings` at mode 160000, with `chmod 000` on its
+# `.git/index`: `git -C <super> ls-files -s` exits 128 `Permission denied`, that
+# query exits 0 with EMPTY STDOUT AND EMPTY STDERR, and the listing was then
+# answered out of the submodule's own index -- exit 0 `conforms`, on the
+# checkout the same validator refuses at exit 1 the moment the index is readable
+# again. THAT QUERY'S SUCCESSFUL EMPTY ANSWER IS INSUFFICIENT: an empty success
+# is not evidence of absence, which is the shape a producer's exit status not
+# being evidence its output was consumed already has.
+#
+# So the question is put to two things that FAIL when the look fails. Git's own
+# discovery from the parent directory says where the containing work tree is and
+# exits non-zero when it cannot say; `repository_above` then decides whether
+# that non-zero is an absence, and decides it from the FILESYSTEM rather than
+# from git's status -- it is the helper that already separates "no repository"
+# from "a repository this cannot examine" in four measured shapes. `chmod 000`
+# on the superproject's `.git` DIRECTORY rather than on its index is the second
+# of those: discovery exits 128, `repository_above` answers 2, and this refuses
+# where the submodule query answered empty and conformed.
+enclosing_root=''
+enclosing_work_tree() {
+  local root="$1" listing="$2" parent above
+  enclosing_root=''
+  parent="$root"
+  while :; do
+    # RULE 2, and `path_parent` is the whole of
+    # the bound. This walk carried its own arithmetic and its own root tests until
+    # the round that found a THIRD spelling nobody's copy shortened; the rule, the
+    # roots and their measurements are stated there once, for all four walks. What
+    # matters here is that a top is a 0 and never a refusal: running out of levels
+    # is running out of levels however the path was rooted.
+    path_parent "$parent" || return 0
+    parent="$parent_path"
+    git_probe '0,128' -- -C "$parent" rev-parse --is-inside-work-tree
+    if (( probe_status != 0 )); then
+      above=0
+      repository_above "$parent" || above=$?
+      if (( above == 1 )); then
+        return 0
+      fi
+      echo "branch-name-policy: git could not say whether '$parent' is inside a work" >&2
+      if (( above == 2 )); then
+        echo "  tree, and '$unexaminable_git' is there and cannot be examined, so" >&2
+      else
+        echo "  tree, and there is a repository at it or above it, so" >&2
+      fi
+      echo "  whether a repository above '$root' records '$listing' is not known." >&2
+      echo "  That is refused rather than read as nothing being recorded above it," >&2
+      echo "  which is the reading that let an unreadable index conform. '$branch'" >&2
+      echo "  was not judged." >&2
+      return 1
+    fi
+    # A `false` IS A REAL ANSWER AND IT IS NOT THE END OF THE ASCENT. It says
+    # THIS PARENT has no work tree over it -- it is a bare repository, or the
+    # inside of a `.git` -- and the reading that ended the walk there added a
+    # clause git had not said: that nothing ABOVE it records the listing either.
+    # A bare repository can sit inside a superproject that does. Measured with
+    # `findings` recorded at 160000, an ignored bare repository at
+    # `findings/bare.git` and an ordinary repository holding a matching finding
+    # at `findings/bare.git/nested`: the walk stopped at the bare one, the
+    # listing conformed at exit 0, and the same commit's three tree listings
+    # refused it at exit 1 -- and renaming `bare.git/HEAD` away, which changes
+    # nothing about what any repository RECORDS, flipped the answer to the
+    # refusal. A file that merely makes a directory LOOK bare decided it.
+    #
+    # So the probe moves up a level and asks again. The half the wrong reading
+    # got right is kept whole: an absence is not a failure to look, so a `false`
+    # never becomes a refusal. It is simply not an answer about anything above.
+    [[ "$probe_text" != true ]] || break
+  done
+  git_probe '0' -- -C "$parent" rev-parse --show-toplevel
+  if [[ -z "$probe_text" ]]; then
+    echo "branch-name-policy: git says '$parent' is inside a work tree and did not say" >&2
+    echo "  where its root is, so whether that repository records '$listing' cannot" >&2
+    echo "  be worked out. '$branch' was not judged." >&2
+    return 1
+  fi
+  # EVERY STEP MOVES STRICTLY UPWARDS or the walk that calls this is not bounded:
+  # the answer is the work-tree root that CONTAINS the one asked about, so a
+  # reply that is not a proper ancestor is refused rather than followed. `/` is
+  # spelled its own way and is tested first: it contains every other root, and
+  # `/` followed by a component is `//...`, which matches nothing -- a work tree
+  # at the filesystem root would otherwise be refused as not containing what it
+  # plainly contains. `$root` is never `/` here; that returned above.
+  if [[ "$probe_text" == / ]]; then
+    enclosing_root="$probe_text"
+  else
+    case "$root" in
+      "$probe_text"/?*) enclosing_root="$probe_text" ;;
+      *)
+        echo "branch-name-policy: git says the work tree at '$root' is inside the one at" >&2
+        echo "  '$probe_text', which does not contain it, so which repository records" >&2
+        echo "  '$listing' is not known. That is refused rather than answered from" >&2
+        echo "  whichever index is nearest. '$branch' was not judged." >&2
+        return 1
+        ;;
+    esac
+  fi
+  return 0
+}
+
+# records_path <work-tree root> <path within it>: do that repository's records
+# NAME that path? 0 they do -- there is an entry AT it, an entry UNDER it, or a
+# blob ABOVE it. 1 they say nothing about it at all. 2 the index could not be
+# read, which is the caller's refusal and is never read as a 1: `ls-files` is
+# enumerated as 0 AND 128 here for exactly the reason recorded_kind_of enumerates
+# it as 0 alone -- a status that is not an answer must not become an absence.
+#
+# IT IS recorded_kind_of'S QUESTION ASKED OF ANOTHER REPOSITORY, and the ancestor
+# half is counted the way that function counts it: an ancestor the records hold
+# ENTRIES UNDER is a directory of that ledger's and says nothing about a
+# repository somebody nested inside it, while an ancestor recorded AT ITS OWN
+# NAME is a blob, and no entry of that ledger is named by a path through it.
+#
+# THE ANCESTOR WALK IS OVER AN INDEX PATH, which is why it shortens with
+# `${anc%/*}` and not through `path_parent` -- the two domains, and what the
+# native rule would do to `c:/sub` here, are in that function's header.
+records_path() {
+  local where="$1" rel="$2" record name anc
+  git_probe '0,128' -- -C "$where" ls-files -sz -- ":(literal)$rel"
+  if (( probe_status != 0 )); then
+    return 2
+  fi
+  (( ${#probe_records[@]} == 0 )) || return 0
+  anc="$rel"
+  while [[ "$anc" == */* ]]; do
+    anc="${anc%/*}"
+    git_probe '0,128' -- -C "$where" ls-files -sz -- ":(literal)$anc"
+    if (( probe_status != 0 )); then
+      return 2
+    fi
+    (( ${#probe_records[@]} > 0 )) || continue
+    for record in "${probe_records[@]}"; do
+      name="${record#*$'\t'}"
+      if [[ "$name" == "$anc" ]]; then
+        return 0
+      fi
+    done
+    return 1
+  done
+  return 1
+}
+
 locate_listing() {
-  local path="$1" anchor entered=0 said top spelled prefix rest component index above=0
-  local prefixes rests shallow deep named_root segment nameable
+  local path="$1" anchor entered=0 said top above=0 hopped=0
   listing_world=''
   listing_toplevel=''
   listing_relpath=''
+  ledger_is_deployment=0
   # An ANCHOR to ask git from: the deepest ancestor of the listing this can
-  # enter, HANDED ON AS THE CALLER SPELLED IT. Entering is a test and nothing
-  # else -- git chdirs for itself and resolves its own physical path -- so no
-  # resolved path is carried between commands, which is what `/proc/self` breaks.
+  # enter. Entering is a test and nothing else -- git chdirs for itself and
+  # resolves its own physical path -- so no resolved path is carried between
+  # commands, which is what `/proc/self` breaks.
+  #
+  # IT IS ROOTED ONCE, HERE, AND THE ANCHORED SET IS NOT THE ONE `list_dir` TESTS.
+  # The ascent below and `repository_above` both need a path with a top to stop
+  # at, and both used to be handed the caller's own spelling and join `$PWD` onto
+  # anything not beginning with `/` -- which is every path a POSIX caller writes,
+  # and NOT the native `C:/…` a Windows caller may write or git may answer with.
+  # One join, in the one place that knows how the path was spelled.
+  #
+  # THE TWO FUNCTIONS ASK DIFFERENT QUESTIONS AND BORROWING THE ANSWER WAS THE
+  # DEFECT. `list_dir` asks WHETHER A SPELLING CAN PARSE AS A `find` EXPRESSION,
+  # and that is closed PER GRAMMAR: no token of find's begins with `/`, with a
+  # backslash, or with a letter and a colon, on any platform, so leaving those
+  # three arms unprefixed is right on both and costs nothing on POSIX, where
+  # `./C:/x` names the same directory as `C:/x`. THIS asks whether a spelling HAS
+  # A TOP OF ITS OWN, and that is closed PER PLATFORM: `C:/holder` and `\weird`
+  # are anchored on Windows and are ORDINARY RELATIVE NAMES on POSIX. The same
+  # three arms were written here, they matched and did nothing, and every such
+  # POSIX listing was left UNROOTED -- so the ascent ran out of separators at
+  # `C:` and reported no repository above a directory that has one.
+  #
+  # THAT WAS A FALSE GREEN AND THE PARAGRAPH THAT STOOD HERE DENIED IT. It said
+  # the cost was "the ascent not reaching as far as it could, never an answer
+  # taken from the wrong repository, because the walk that stops early reports NO
+  # repository above and the listing keeps its own index". The last clause is
+  # where it fails: a listing INSIDE A BARE REPOSITORY has no index of its own,
+  # so "keeps its own index" degrades to "is answered by the filesystem", which
+  # is the one world that counts names git records nothing for. Measured twice,
+  # from opposite directions:
+  #
+  #   A plain directory `holder` inside an IGNORED BARE REPOSITORY named `C:`, in
+  #   a work tree that records nothing under it, holding one finding that matches
+  #   the branch: `C:/holder` exit 0 `conforms`, and the same directory spelled
+  #   absolutely exit 1 `git records nothing at …`. Two spellings of one
+  #   directory, two verdicts. It answers that way at `231c1aad` too, so the
+  #   unrooted anchor did not introduce it -- it carried it forward.
+  #
+  #   A TRACKED `C:` holding two findings of one description, the second marked
+  #   `skip-worktree` with its checkout copy removed and `.git/config` unreadable
+  #   so discovery exits 128: `C:` exit 0 `conforms` where the records say `names
+  #   2 findings`, the absolute spelling exit 1, and `231c1aad` exit 1. This one
+  #   arrived with the join's move out of `repository_above`, which used to root
+  #   `C:` on the way past; reversing that commit restores the refusal.
+  #
+  # THE JOIN IS MADE WHERE IT PROVABLY CHANGES NOTHING, and that needs no platform
+  # test at all. `$anchor` and `${PWD}/$anchor` ARE THE SAME DIRECTORY exactly
+  # when the spelling is relative, and the filesystem answers that: on POSIX
+  # `C:/holder` is `${PWD}/C:/holder` and `-ef` says so, while on Windows no path
+  # component may hold a `:` or a backslash, so the joined spelling names nothing
+  # and `-ef` is false. The join can therefore only ever SUPPLY A TOP; it can
+  # never move the anchor to another directory, which is what a bare join did to
+  # the native spelling and what this arm doing nothing did to the POSIX one.
+  #
+  # A SPELLING THAT NAMES NOTHING IS LEFT AS IT WAS, and no answer rests on it:
+  # the walk below may then stop early, but `read_listing` has no directory to
+  # enumerate and refuses, where a false green needs a listing that is really
+  # there. `-ef` stats in THIS shell, so `/proc/self` is the same directory in
+  # both operands -- and reaches neither, being absolute.
+  #
+  # THE SHELL'S OWN DIRECTORY IS JOINED WITHOUT DOUBLING THE SEPARATOR, and that
+  # is not tidiness. Run from `/`, `${PWD}/$path` is `//findings`, and a LEADING
+  # RUN OF TWO SEPARATORS is how a UNC path is spelled -- `path_parent` reads
+  # `//server/share` as a share root and stops there, so a join that manufactured
+  # one would make `//a/b` a top and hide a repository at `/a`. A trailing
+  # separator comes off `$PWD` instead; `/` becomes the empty string and the join
+  # spells `/a/b`. `$PWD` is POSIX-spelled even in Git Bash, so `/` is the only
+  # separator this has to take off.
+  #
+  # RULE 4'S SITE, AND A ROOTING THAT DOES NOT PRODUCE A ROOT IS NOT ONE. The
+  # shell's own directory is the only thing there is to root against, and
+  # `${PWD:-.}` stood here: a `.` fallback is the ONE UNROOTED SPELLING that
+  # could reach these walks, and it reaches all four of them at once. Driven
+  # through `locate_listing` with `git_probe` stubbed, a relative listing from
+  # `/tmp` walks `[/tmp /]` and answers `filesystem`; with `here` a `.` the
+  # enter loop shortens `./findings` to `.`, which is not an ancestor of the
+  # listing at all, and the ascent has no top to stop at. The fallback cannot
+  # fire in bash -- `$PWD` is repaired at startup to an absolute pathname of the
+  # current directory, measured here with it unset, empty, relative and wrong,
+  # all four answering `/tmp` -- so it defended nothing and contradicted the
+  # rule. What replaces it is the rule: a shell whose own directory is not a
+  # rooted path cannot root anything relative to it, and that is refused.
+  here="$PWD"
+  case "$here" in
+    /* | '\'* | [A-Za-z]:*) ;;
+    *)
+      echo "branch-name-policy: the shell's own directory is '$here', which is not a" >&2
+      echo "  rooted path, so '$path' cannot be rooted against it and the walk above it" >&2
+      echo "  has no top to stop at. That is refused rather than walked from a guess." >&2
+      echo "  '$branch' was not judged." >&2
+      return 1
+      ;;
+  esac
+  # AND A LEADING RUN OF TWO SEPARATORS IS THE OTHER UNROOTED SPELLING, because
+  # rule 1 reads it as a UNC SHARE: `path_parent` answers `//tmp/findings` with
+  # "this is a top", so from a current directory of `//tmp` the enter loop cannot
+  # shorten past the listing itself and the run is refused as "no directory on
+  # the way ... could be entered", where the same directory spelled `/tmp` walks
+  # to `/` and is judged. It is collapsed here EXACTLY WHERE THE COLLAPSED
+  # SPELLING IS THE SAME DIRECTORY, which is the test the join below makes for
+  # the same reason and needs no platform test either: on POSIX `//tmp` IS
+  # `/tmp` and `-ef` says so, while a real UNC share's first component names a
+  # HOST, so `/server/share` names nothing and `-ef` is false. A share root
+  # therefore keeps its run and stays the top rule 3 says it is.
+  while [[ "$here" == //* ]]; do
+    [[ "${here#/}" -ef "$here" ]] || break
+    here="${here#/}"
+  done
+  while [[ "$here" == */ ]]; do
+    here="${here%/}"
+  done
   anchor="$path"
+  case "$anchor" in
+    /*) ;;
+    .) anchor="${here:-/}" ;;
+    '\'* | [A-Za-z]:*)
+      if [[ "$anchor" -ef "$here/$anchor" ]]; then
+        anchor="$here/$anchor"
+      fi
+      ;;
+    *) anchor="$here/$anchor" ;;
+  esac
   while :; do
     if ( CDPATH= cd -P -- "$anchor" ) 2>/dev/null; then
       entered=1
       break
     fi
-    case "$anchor" in
-      /|.) anchor='' ;;
-      */*) anchor="${anchor%/*}"
-           [[ -n "$anchor" ]] || anchor='/' ;;
-      *) anchor='.' ;;
-    esac
-    [[ -n "$anchor" ]] || break
+    # RULE 2, THE SAME SHORTENING EVERY OTHER WALK HERE MAKES. This one used to have its
+    # own, and its own was the one that read a path with no separator as `.` --
+    # the shell's own directory, which is not an ancestor of the path at all. It
+    # is unreachable now that the anchor is rooted above, and it was never the
+    # right answer: running out of levels means no directory on the way to the
+    # listing could be entered, which is the refusal below.
+    path_parent "$anchor" || break
+    anchor="$parent_path"
   done
   if (( ! entered )); then
     echo "branch-name-policy: no directory on the way to '$path' could be entered," >&2
@@ -1028,40 +2027,159 @@ locate_listing() {
     echo "  rather than judged by the filesystem, which cannot see a recorded mode." >&2
     return 1
   fi
-  git_probe '0,128' -- -C "$anchor" rev-parse --is-inside-work-tree
-  if (( probe_status != 0 )); then
-    # git_probe is about to be called again and its answers are one set, so
-    # git's words are kept here or lost.
-    said="$probe_stderr"
-    repository_above "$anchor" || above=$?
-    if (( above == 1 )); then
+  # THE SAME ASCENT enclosing_work_tree MAKES, AND FOR THE SAME REASON, because
+  # the reading that ended that walk at a `false` ended this one there too and
+  # the second was the same false green measured a second way: with `findings`
+  # recorded at 160000, an ignored bare repository at `findings/bare.git` and a
+  # PLAIN DIRECTORY at `findings/bare.git/holder` holding a matching finding --
+  # no nested repository anywhere -- the listing conformed at exit 0 where the
+  # same commit's three tree listings refused it at exit 1. A listing inside a
+  # bare repository, or inside a `.git`, is named by no index of THAT repository;
+  # a work tree ABOVE it may name it perfectly well, and here that one records a
+  # gitlink over the whole path. So a `false` moves the question up a level
+  # rather than handing the listing to the filesystem, and only running out of
+  # levels is the absence the `filesystem` world is for.
+  while :; do
+    git_probe '0,128' -- -C "$anchor" rev-parse --is-inside-work-tree
+    if (( probe_status != 0 )); then
+      # git_probe is about to be called again and its answers are one set, so
+      # git's words are kept here or lost.
+      said="$probe_stderr"
+      above=0
+      repository_above "$anchor" || above=$?
+      if (( above == 1 )); then
+        listing_world=filesystem
+        return 0
+      fi
+      echo "branch-name-policy: git could not say what it records for '$path':" >&2
+      if [[ -n "$said" ]]; then
+        indent "$said"
+      fi
+      if (( above == 2 )); then
+        echo "  '$unexaminable_git' is there and cannot be examined, so whether this" >&2
+        echo "  listing is inside a repository is not known either. Metadata that" >&2
+        echo "  cannot be read is refused rather than read as metadata that is not" >&2
+        echo "  there, because only the second may be judged by the filesystem --" >&2
+        echo "  which cannot see a recorded mode at all." >&2
+      else
+        echo "  A listing inside a repository this cannot read is refused rather than" >&2
+        echo "  judged by the filesystem, which cannot see a recorded mode at all." >&2
+      fi
+      return 1
+    fi
+    # Stdout alone, so the answer is `true` or `false` and nothing else: a warning
+    # about some other file git could not read is on stderr and is not an answer.
+    [[ "$probe_text" != true ]] || break
+    # A `false` IS GIT SAYING WHERE IT IS, AND THE WRITTEN PARENT IS NOT WHERE GIT
+    # WAS. This walk finds a repository by ENTERING directories and names the
+    # listing LEXICALLY, and stepping to the written parent is right for the
+    # second and wrong for the first: `git -C <path>` chdirs and resolves the path
+    # PHYSICALLY, so where a component of the listing is a SYMLINK OUT OF THE
+    # WRITTEN TREE the two chains part and the ascent walks up a tree git was
+    # never in. Measured on this box: a work tree `$EXT` that ignores a bare
+    # repository at `$EXT/bare.git`, a plain directory `$EXT/bare.git/holder`
+    # holding a matching finding, and a plain directory `$W` -- in NO repository
+    # -- holding a symlink `alias` to that bare repository. `alias/holder` from
+    # `$W` conformed at EXIT 0, where the same directory spelled
+    # `$EXT/bare.git/holder` refused at exit 1, and renaming `bare.git/HEAD` away
+    # -- which changes nothing about what any repository RECORDS -- flipped it to
+    # exit 1 and back again. That is the very defect the round before this closed
+    # for a directly spelled path: a file that merely makes a directory LOOK bare
+    # decided the verdict.
+    #
+    # So the hop is to GIT'S OWN POSITION. `--absolute-git-dir` answers where the
+    # git directory it found physically IS -- `$EXT/bare.git` from both spellings
+    # alike, and `<wt>/.git` for a path inside a non-bare `.git` -- and the ascent
+    # continues from that directory's PARENT, which is `$EXT`, where
+    # `--is-inside-work-tree` is `true` and both `HEAD` states then refuse alike.
+    # The path carried is one GIT resolved and not one a subshell resolved, which
+    # is the distinction this function's own header draws: `cd -P` in a subshell
+    # answers `/proc/self` with the SUBSHELL's pid, a directory gone before the
+    # next command runs.
+    #
+    # IT HAPPENS AT MOST ONCE, and that is the whole of the termination argument.
+    # The lexical walk is bounded because every step shortens the path; a hop
+    # shortens nothing, so it may not be the thing that repeats. It does not need
+    # to be: `--absolute-git-dir` is CANONICAL, so the anchor after a hop holds no
+    # symlink and its lexical parents are its physical ones. The written and
+    # physical chains have met and cannot part again, and every later `false` is
+    # the ordinary step above a bare repository or a `.git` -- which the lexical
+    # walk already gets right, because that is what the round before this fixed.
+    #
+    # AND A GIT DIRECTORY IS NOT A CONTAINER, WHICH IS THE HALF THE ROUND THAT
+    # WROTE THIS HOP HAD WRONG. `--absolute-git-dir` is RULE 5's second kind of
+    # answer: it says where git's METADATA is, and metadata need not sit above
+    # what it records -- `git init --separate-git-dir` puts it on another
+    # filesystem, and a `.git` FILE is a pointer that points anywhere. Measured
+    # here with git 2.43: a clean work tree `super` that IGNORES `findings/`,
+    # `super/findings` initialised with `--separate-git-dir` at a directory
+    # outside `super` whose `core.bare` is `true`, and one matching finding at
+    # `super/findings/holder`. Git answers `false`, then names that EXTERNAL
+    # directory; the hop followed its parent, lost `super`, found no repository
+    # over what was left and let the filesystem answer -- exit 0 `conforms`,
+    # where the same commit's three tree listings refuse at exit 1 `names no
+    # finding`. The round that closed the false green reopened it on the arm
+    # where git's metadata is not above the listing.
+    #
+    # SO THE HOP IS TAKEN ONLY WHERE GIT ALSO SAYS THE ANCHOR IS INSIDE THAT
+    # DIRECTORY, and `--is-inside-git-dir` is that answer -- RULE 5's first kind,
+    # about the listing rather than about the metadata. It is `true` for exactly
+    # the case the hop exists for, a listing inside a bare repository or inside a
+    # `.git` however it was spelled to get there, and `false` for a metadata
+    # directory somewhere else, where the written parent is the only chain there
+    # is and the lexical step below is right. It is also what makes the hop a
+    # step UPWARDS: the anchor is at or below that directory, so the directory's
+    # parent is strictly above the anchor.
+    #
+    # A PINNED ENVIRONMENT IS NOT A SECOND TEST HERE AND IS NOT A FIRST ONE
+    # EITHER. The test that stood here was `repository_above`'s first line --
+    # refuse to hop whenever `GIT_DIR` or `GIT_WORK_TREE` is exported -- then
+    # became the special case of the rule above, and is now unreachable from
+    # either direction: both pins, and `GIT_INDEX_FILE` with them, are unset at
+    # the top of this file, because a verdict an exported variable can flip is
+    # the "one directory, two answers" shape by another route. That was
+    # `PR280-ENV-EXPORTED-WORK-TREE-REFUSES-A-VALID-CALLER`, filed as wanting a
+    # reading of an explicitly selected work tree and repaired by giving the walk
+    # no pin to read; the measurements are with the `unset`. WHAT WAS EXPORTED IS
+    # STILL RECORDED, and it is handed back to GIT, once, by `resolve_deployment`:
+    # the repository those names select is git's answer, and `judge_in_deployment`
+    # judges the listing in it as the environment section at the top states. THIS
+    # WALK NEVER READS IT, so discovery from the path is still discovery from the
+    # path, which is what that judgement compares the named repository against.
+    #
+    # `/proc/self` does not reach here either: git exits 128 for it rather than
+    # answering `false`, so the refusal above is what it gets, and the fixtures
+    # pin that rather than leave it true by accident.
+    if (( ! hopped )); then
+      git_probe '0' -- -C "$anchor" rev-parse --is-inside-git-dir
+      if [[ "$probe_text" == true ]]; then
+        hopped=1
+        git_probe '0' -- -C "$anchor" rev-parse --absolute-git-dir
+        if [[ -n "$probe_text" ]]; then
+          # The git directory's own parent. A git directory AT a top -- `/.git`
+          # is the shape -- has nothing above it, and that is the same absence
+          # running out of levels is.
+          if ! path_parent "$probe_text"; then
+            listing_world=filesystem
+            return 0
+          fi
+          anchor="$parent_path"
+          continue
+        fi
+      fi
+    fi
+    # THE PARENT, by rules 1 to 3 -- the one rule every walk in this file
+    # shortens a path with -- and running out of levels is the only absence. The
+    # work tree this lands on is git's own physical path while the caller's
+    # components are matched against it BY INODE further down, which is rule 6:
+    # the physical chain finds and the written chain names, and that is where
+    # they meet.
+    if ! path_parent "$anchor"; then
       listing_world=filesystem
       return 0
     fi
-    echo "branch-name-policy: git could not say what it records for '$path':" >&2
-    if [[ -n "$said" ]]; then
-      indent "$said"
-    fi
-    if (( above == 2 )); then
-      echo "  '$unexaminable_git' is there and cannot be examined, so whether this" >&2
-      echo "  listing is inside a repository is not known either. Metadata that" >&2
-      echo "  cannot be read is refused rather than read as metadata that is not" >&2
-      echo "  there, because only the second may be judged by the filesystem --" >&2
-      echo "  which cannot see a recorded mode at all." >&2
-    else
-      echo "  A listing inside a repository this cannot read is refused rather than" >&2
-      echo "  judged by the filesystem, which cannot see a recorded mode at all." >&2
-    fi
-    return 1
-  fi
-  # Stdout alone, so the answer is `true` or `false` and nothing else: a warning
-  # about some other file git could not read is on stderr and is not an answer.
-  # `false` is a repository with no work tree over this path -- a bare one, or
-  # the inside of a `.git` -- where no index entry can name the listing.
-  if [[ "$probe_text" != true ]]; then
-    listing_world=filesystem
-    return 0
-  fi
+    anchor="$parent_path"
+  done
   git_probe '0' -- -C "$anchor" rev-parse --show-toplevel
   top="$probe_text"
   if [[ -z "$top" ]]; then
@@ -1070,6 +2188,27 @@ locate_listing() {
     echo "  was not judged." >&2
     return 1
   fi
+  name_listing "$path" "$top" path
+}
+
+# name_listing <listing> <work-tree root> <path|deployment>: the listing's name in
+# that work tree's index, and the repository whose records answer for it, left in
+# `listing_world`, `listing_toplevel` and `listing_relpath`. `locate_listing` hands it
+# the root git DISCOVERED from the path; `judge_in_deployment` hands it the root git
+# RESOLVED from the environment, with `ledger_is_deployment` set so every record read
+# here is that repository's -- and for that caller the root is never ascended from, so
+# the name in it is the whole answer and no repository above replaces the one the
+# environment selected. The first caller's ascent is what reaches a repository above,
+# and arm 3 is where the two are compared. 1 is a refusal, stated;
+# 3, for the second caller only, is "no component the caller wrote is this root, or
+# what they wrote climbs back out of it", which for that caller is a listing the named
+# work tree does not hold and is not this function's to refuse.
+name_listing() {
+  local path="$1" top="$2" ledger="$3" spelled prefix rest component index
+  local prefixes rests shallow deep named_root segment nameable answering walker named
+  local subject subrel moved=0 answering_rel='' moved_rel='' physical_name=''
+  ledger_is_deployment=0
+  [[ "$ledger" != deployment ]] || ledger_is_deployment=1
   # The caller's own components, DEEPEST FIRST, until one of them IS the work
   # tree's root. What is left is the listing's name in the index, and no part of
   # it has been resolved on the filesystem.
@@ -1095,8 +2234,8 @@ locate_listing() {
   rests=()
   case "$path" in
     /*) spelled="$path" ;;
-    .) spelled="${PWD:-.}" ;;
-    *) spelled="${PWD:-.}/$path" ;;
+    .) spelled="${here:-/}" ;;
+    *) spelled="$here/$path" ;;
   esac
   if [[ "$spelled" == /* ]]; then
     prefix='/'
@@ -1121,7 +2260,7 @@ locate_listing() {
       *) prefix="$prefix/$component" ;;
     esac
   done
-  # THE ROOT IS MATCHED BY INODE AND THE PATH THROUGH IT BY RECORDED MODE, and
+  # RULE 6: THE ROOT IS MATCHED BY INODE AND THE PATH THROUGH IT BY RECORDED MODE, and
   # the second half is the half an inode comparison cannot do. `-ef` FOLLOWS a
   # symlink, so with `loop` a committed symlink to the work tree's own root
   # the prefix `<repo>/loop` IS that root by inode: handed `<repo>/loop/elsewhere`,
@@ -1145,56 +2284,248 @@ locate_listing() {
   # at all -- `a/..` is `a`'s parent only when `a` is a directory. They reach
   # here only from the leading `..` of a spelling like `../../repo/src`,
   # which is an ordinary one.
-  shallow=-1
-  deep=-1
-  index=0
-  while (( index < ${#prefixes[@]} )); do
-    if [[ "${prefixes[index]}" -ef "$top" ]]; then
-      if (( shallow < 0 )); then
-        shallow=$index
+  #
+  # AND AN EMPTY NAME IS NOT A LISTING'S NAME, WHICH IS WHERE THE QUESTION MOVES
+  # TO ANOTHER REPOSITORY. The name below comes out empty exactly where the
+  # listing IS a work tree's own root, and the empty path names THE WHOLE OF
+  # THAT REPOSITORY'S INDEX -- every entry it holds, read as this repository's
+  # ledger. For an INITIALISED SUBMODULE at `findings` that is what happened:
+  # discovery lands in the DEEPEST work tree the path enters, `rev-parse
+  # --show-toplevel` from inside `<super>/findings` answers `<super>/findings`,
+  # and the submodule's entries were counted as findings while the superproject
+  # records the path at mode 160000 -- a GITLINK, which is a recorded type and
+  # not a directory to descend into. Measured on a clean checkout -- `git status
+  # --porcelain` exit 0 and empty -- of a superproject recording `findings` at
+  # 160000 with a finding-shaped file at the submodule's root: the three tree
+  # listings refuse at exit 1 `names no finding` and the same checkout's
+  # `findings` DIRECTORY conformed at exit 0.
+  #
+  # Answering from the repository that RECORDS that root is what puts 160000
+  # under the rule that already decides the other three: 100644 and 100755 are a
+  # file listing, 120000 is neither a listing nor a finding, and 160000 joins
+  # them at the same place -- recorded_kind_of sees the gitlink AT the path and
+  # reports a blob at mode 160000, or sees it ABOVE the path and reports the path
+  # unnameable. Both are what a tree listing of the same commit says for the same
+  # path.
+  #
+  # THE EMPTY NAME IS THE WHOLE OF THE CONDITION, AND THAT IS THE HALF THE FIRST
+  # CUT OF THIS GOT WRONG. It ascended out of EVERY submodule, whatever the
+  # listing was called inside it, and so threw away the ledger of a project that
+  # simply lives in one. Measured with the project itself an initialised
+  # submodule at `host/project`, its base holding one finding and its head
+  # holding another of the same description -- both checkouts clean -- and the
+  # validator run from `project` with its ordinary `findings/`: the merge-base
+  # listing plus that directory answered exit 0 `conforms` where the same state
+  # through the three generated tree listings answered exit 1 `names 2
+  # findings`, and the directory alone answered exit 1 `names no finding` where
+  # the project's own ledger holds one. A false green, a false red, and two
+  # EQUIVALENT INPUTS disagreeing about one commit. A listing INSIDE a work tree
+  # is named by that work tree's index and nothing above it is asked, which is
+  # the case an ordinary project is, and it is the case this walk never enters.
+  #
+  # THE ASCENT REPEATS AND DOES NOT STOP AT THE FIRST REPOSITORY THAT DISCLAIMS A
+  # PARENT. An ordinary nested repository inside a submodule is recorded by
+  # nothing -- the submodule's index holds no entry for it -- and the gitlink
+  # that blocks it is one level further out: with `<super>/findings` a clean
+  # 160000 and an ignored repository at `<super>/findings/nested` holding a
+  # finding-shaped file at its own root, the listing conformed at exit 0 while
+  # the same commit's three tree listings refused at exit 1 `names no finding`.
+  # So `walker` is how far out the ascent has got and `answering` is the
+  # OUTERMOST work tree whose records NAME THE LISTING ROOT -- never whatever the
+  # walk has reached, which is the drift the loop below is written against. A
+  # repository nothing above records keeps its own index, exactly as before, and
+  # the ascent above it only looks.
+  #
+  # WHAT IT COSTS, counted with GIT_TRACE on this tree rather than read off the
+  # code: nothing at all unless the listing is a work tree's own root, because
+  # the name is worked out FIRST and a non-empty one ends this before a single
+  # call is made. An ordinary repository's `findings/` directory with no
+  # repository above it goes from 4 git invocations to 3 -- the submodule query
+  # the previous head made unconditionally is gone -- and the five files
+  # .github/workflows/pr-policy.yml builds under RUNNER_TEMP and hands in make
+  # the same 27 in a byte-identical sequence, because nothing records them and
+  # they return above without reaching here. A listing that IS a submodule's root
+  # pays for the ascent: 6 invocations become 14, seven of them `repository_above`
+  # walking to `/` to decide that git's silence about a repository above is an
+  # absence and not a failure to look. An ordinary repository nested under a
+  # gitlink goes from 5 to 18, which is that walk at two levels.
+  while :; do
+    shallow=-1
+    deep=-1
+    index=0
+    while (( index < ${#prefixes[@]} )); do
+      if [[ "${prefixes[index]}" -ef "$top" ]]; then
+        if (( shallow < 0 )); then
+          shallow=$index
+        fi
+        deep=$index
       fi
-      deep=$index
+      index=$(( index + 1 ))
+    done
+    # RULE 6'S ONE DELIBERATE DIFFERENCE, AND IT IS HERE. The written chain names
+    # the listing, and this is the point where a caller may have written no name
+    # at all: the ascent has moved authority to a work tree ABOVE the listing's
+    # own root, the caller's components stop at a root further in -- a component
+    # of the path was a link OUT of the written tree -- and no prefix is that new
+    # root. Refusing was measured: with `EXT` recording `project/P2_…md`,
+    # `EXT/project` its own repository and `W/link -> EXT/project`, `project`
+    # spelled from `EXT` conformed at exit 0 while `link` spelled from `W`
+    # refused at exit 1. One directory, two spellings, two answers, which is the
+    # shape every P1 in this file has been.
+    #
+    # THE NAME IS TAKEN FROM GIT'S OWN SPELLING, AND ONLY BECAUSE THE CALLER GAVE
+    # NONE. `subject` and the root that answers are both `--show-toplevel`
+    # answers, so the segment between them is physical and is exactly what
+    # `records_path` has just matched. It is NOT the general rule, and the
+    # difference is not which case a round was shown: WHERE THE CALLER'S CHAIN
+    # DOES REACH THE NEW ROOT their components still decide, because the index
+    # records what they wrote and not what the link lands on. Measured, with
+    # `EXT` recording `alias` at 120000 pointing at `real` AND `real/P2_…md`
+    # underneath, and `EXT/real` a nested repository: `alias` is answered from
+    # the caller's name -- mode 120000, not a listing, no finding -- while `real`
+    # is a tree and conforms. Both match what a tree listing of that commit gives
+    # for the same path, and this arm does not touch either, because the prefix
+    # match succeeds for both.
+    #
+    # A CALLER'S PATH THAT NEVER NAMED ITS OWN LISTING ROOT IS STILL REFUSED, and
+    # that is the branch below: the ascent has not moved, the root is the
+    # listing's own, and respelling the listing is a remedy the caller can act
+    # on. Blaming the caller's spelling for a root THIS WALK chose is not.
+    if (( shallow < 0 )); then
+      if (( moved )); then
+        physical_name="$moved_rel"
+        break
+      fi
+      [[ "$ledger" != deployment ]] || return 3
+      echo "branch-name-policy: '$path' is inside the work tree at '$top' and no part" >&2
+      echo "  of the path as it was written names that root, so what the index records" >&2
+      echo "  for it cannot be worked out. Give the listing as a path that goes through" >&2
+      echo "  the repository's own directory. '$branch' was not judged." >&2
+      return 1
     fi
-    index=$(( index + 1 ))
-  done
-  if (( shallow < 0 )); then
-    echo "branch-name-policy: '$path' is inside the work tree at '$top' and no part" >&2
-    echo "  of the path as it was written names that root, so what the index records" >&2
-    echo "  for it cannot be worked out. Give the listing as a path that goes through" >&2
-    echo "  the repository's own directory. '$branch' was not judged." >&2
-    return 1
-  fi
-  named_root=$shallow
-  segment=''
-  nameable=1
-  index=$(( shallow + 1 ))
-  while (( index <= deep )); do
-    component="${rests[index - 1]%%/*}"
-    if [[ -n "$segment" ]]; then
-      segment="$segment/$component"
-    else
-      segment="$component"
+    named_root=$shallow
+    segment=''
+    nameable=1
+    index=$(( shallow + 1 ))
+    while (( index <= deep )); do
+      component="${rests[index - 1]%%/*}"
+      if [[ -n "$segment" ]]; then
+        segment="$segment/$component"
+      else
+        segment="$component"
+      fi
+      case "$component" in
+        .|..) nameable=0 ;;
+      esac
+      if (( nameable )); then
+        recorded_tree "$top" "$segment" || break
+      fi
+      if [[ "${prefixes[index]}" -ef "$top" ]]; then
+        named_root=$index
+        segment=''
+        nameable=1
+      fi
+      index=$(( index + 1 ))
+    done
+    # A NAME THAT CLIMBS OUT OF THE ROOT IT WAS MATCHED AT NAMES NOTHING IN IT, and
+    # only the second caller is ever handed such a root. Git finds the environment's
+    # work tree from the CALLER'S directory, so `../findings` written from inside it
+    # matches that root and then leaves it -- the pathspec `git ls-files` refuses as
+    # `outside repository`. A root DISCOVERY finds holds the directory it was
+    # discovered from, and a component the caller wrote cannot leave it.
+    #
+    # AND FOR THAT CALLER THE NAME IS THE WHOLE OF THE ANSWER, EMPTY OR NOT: THE
+    # REPOSITORY THE ENVIRONMENT SELECTS IS THE ONE THAT IS READ, SO NOTHING BELOW MOVES
+    # IT. The ascent below is DISCOVERY's -- discovery lands in the deepest work tree a
+    # path enters and must go and find which repository records it -- and a root the
+    # environment selected was not found that way. Taken for both callers, it moved an
+    # empty name out to whatever repository above recorded the root and cleared
+    # `ledger_is_deployment` on the way, so the records `judge_in_deployment` compared
+    # were that repository's and the selected index was never opened: exit 0 `conforms`
+    # at `e3a91ff3` over a selected index recording a twin, where `231c1aad` refuses --
+    # the environment section at the top of this file has the run and its `strace`. The
+    # repository above is not lost: it is the PATH's, reached by this same ascent from
+    # `locate_listing`, and arm 3 compares what it records with what the selected one
+    # records.
+    if [[ "$ledger" == deployment ]]; then
+      case "/${rests[named_root]}/" in
+        */../*) return 3 ;;
+      esac
+      break
     fi
-    case "$component" in
-      .|..) nameable=0 ;;
-    esac
-    if (( nameable )); then
-      recorded_tree "$top" "$segment" || break
-    fi
-    if [[ "${prefixes[index]}" -ef "$top" ]]; then
-      named_root=$index
-      segment=''
-      nameable=1
-    fi
-    index=$(( index + 1 ))
+    # A name the work tree's own index can hold. Only an EMPTY one asks another
+    # repository, and only then is anything above this one looked at.
+    [[ -z "${rests[named_root]}" ]] || break
+    # THE QUESTION IS FIXED AT THE LISTING ROOT AND ONLY THE CANDIDATE ANCESTOR
+    # ADVANCES. `subject` is what every candidate is asked about and it never
+    # moves; `walker` is only how far out the ascent has got, and asking a
+    # candidate about IT mutates the question as the walk rises -- setting out
+    # asking who records the listing and ending up asking who records wherever
+    # the walk has reached. The false green that drift cost is a fixture: an
+    # ancestor recording a SIBLING under the listing's parent answered yes for
+    # the listing, so `outer` tracking `project/seed.txt` took authority over an
+    # unrecorded repository at `outer/project/nested` and its ledger vanished.
+    # A GITLINK ANCESTOR ANSWERS THE SAME EITHER WAY and is not evidence this is
+    # right: `records_path` counts an ancestor recorded AT ITS OWN NAME as a
+    # blob above the path, so `findings` at 160000 answers yes for
+    # `findings/nested` as it did for `findings`. The sibling is the case that
+    # separates them, because an ancestor the records hold ENTRIES UNDER is a
+    # directory of that ledger's and says nothing about what is nested in it.
+    subject="$top"
+    answering="$top"
+    walker="$top"
+    while :; do
+      enclosing_work_tree "$walker" "$path" || return 1
+      [[ -n "$enclosing_root" ]] || break
+      named=0
+      # The LISTING ROOT's path within the candidate, and the separator is
+      # dropped on its own rather than as part of the prefix: with `/` the root
+      # above, `${subject#"/"/}` strips nothing and an ABSOLUTE path would go to
+      # `ls-files` as a pathspec leaving the work tree. Every candidate is a
+      # proper ancestor of `walker` and `walker` is `subject` or an ancestor of
+      # it, so a candidate is always a proper ancestor of `subject` too and this
+      # is always a prefix strip.
+      subrel="${subject#"$enclosing_root"}"
+      records_path "$enclosing_root" "${subrel#/}" || named=$?
+      if (( named == 2 )); then
+        echo "branch-name-policy: the repository at '$enclosing_root' contains the work" >&2
+        echo "  tree at '$walker' and its index could not be read, so whether it records" >&2
+        echo "  '$path' is not known. That is refused rather than answered out of the" >&2
+        echo "  nearest index below it, which is what a successful empty answer to the" >&2
+        echo "  same question was read as. '$branch' was not judged." >&2
+        if [[ -n "$probe_stderr" ]]; then
+          indent "$probe_stderr"
+        fi
+        return 1
+      fi
+      if (( named == 0 )); then
+        answering="$enclosing_root"
+        answering_rel="${subrel#/}"
+      fi
+      walker="$enclosing_root"
+    done
+    # Nothing above records this root, so its own index is the answer and the
+    # name stays the empty one. Every ascent that does move goes strictly
+    # UPWARDS, which is what bounds this.
+    [[ "$answering" != "$top" ]] || break
+    top="$answering"
+    moved_rel="$answering_rel"
+    moved=1
   done
   listing_world=records
   listing_toplevel="$top"
-  listing_relpath="${rests[named_root]}"
+  if [[ -n "$physical_name" ]]; then
+    listing_relpath="$physical_name"
+  else
+    listing_relpath="${rests[named_root]}"
+  fi
   return 0
 }
 
-# WHAT GIT RECORDS FOR THE LISTING, and nothing about what the checkout holds.
+# WHAT GIT RECORDS FOR THE LISTING, and nothing about what the checkout holds:
+# `recorded_kind_of <work-tree root> <path within it>`, read through `ledger_probe`
+# so the one function answers for the repository the path reaches and for the one
+# the environment names alike.
 #
 #   tree        it records entries UNDER the path. `recorded_children` holds the
 #               immediate ones, `<mode><TAB><name>` per line.
@@ -1232,20 +2563,25 @@ locate_listing() {
 # ancestor's exact name is a blob, and the path is unnameable; anything else
 # means the ancestor is a directory in the ledger and the path below it is
 # simply untracked.
+#
+# AND THAT WALK IS OVER AN INDEX PATH TOO, shortened with `${anc%/*}` rather than
+# through `path_parent` for the reason stated in that function's header: this
+# climbs `listing_relpath`, which is built by splitting on `/` alone, and the
+# native rule would answer `c:/` where the index records `c:`.
 recorded_kind=''
 recorded_mode=''
 recorded_children=''
 unnameable_component=''
 recorded_kind_of() {
-  local rel="$1" record name rest anc
+  local top="$1" rel="$2" record name rest anc
   recorded_kind=''
   recorded_mode=''
   recorded_children=''
   unnameable_component=''
   if [[ -z "$rel" ]]; then
-    git_probe '0' -- -C "$listing_toplevel" ls-files -sz
+    ledger_probe '0' -- -C "$top" ls-files -sz
   else
-    git_probe '0' -- -C "$listing_toplevel" ls-files -sz -- ":(literal)$rel"
+    ledger_probe '0' -- -C "$top" ls-files -sz -- ":(literal)$rel"
   fi
   if (( ${#probe_records[@]} > 0 )); then
     for record in "${probe_records[@]}"; do
@@ -1281,7 +2617,7 @@ recorded_kind_of() {
   anc="$rel"
   while [[ "$anc" == */* ]]; do
     anc="${anc%/*}"
-    git_probe '0' -- -C "$listing_toplevel" ls-files -sz -- ":(literal)$anc"
+    ledger_probe '0' -- -C "$top" ls-files -sz -- ":(literal)$anc"
     if (( ${#probe_records[@]} > 0 )); then
       for record in "${probe_records[@]}"; do
         name="${record#*$'\t'}"
@@ -1313,6 +2649,127 @@ add_candidate() {
   candidate_lines="$candidate_lines$1"$'\n'
 }
 
+# The findings in `recorded_children`, which is `<mode><TAB><name>` per line.
+#
+# Two sets rather than a lookup per name: bash 3.2 has no associative array and
+# this file runs wherever the suite is run by hand. A name is wrapped in newlines
+# on both sides, so a membership test is exact and not a prefix -- WHICH HOLDS
+# ONLY BECAUSE NO NAME IN EITHER SET CARRIES A NEWLINE. A CONFLICTED entry is
+# recorded at SEVERAL stages: an ordinary content conflict is a regular blob at
+# every stage and stays a finding, while a regular file conflicting with a
+# symlink is recorded at both kinds, lands in both sets, and is not a finding --
+# the non-regular set is tested first.
+add_recorded_candidates() {
+  local record mode name regular other
+  regular=$'\n'
+  other=$'\n'
+  while IFS= read -r record; do
+    [[ -n "$record" ]] || continue
+    mode="${record%%$'\t'*}"
+    name="${record#*$'\t'}"
+    case "$mode" in
+      100644|100755) regular="$regular$name"$'\n' ;;
+      *) other="$other$name"$'\n' ;;
+    esac
+  done <<< "$recorded_children"
+  while IFS= read -r record; do
+    [[ -n "$record" ]] || continue
+    name="${record#*$'\t'}"
+    case "$other" in
+      *$'\n'"$name"$'\n'*) continue ;;
+    esac
+    case "$regular" in
+      *$'\n'"$name"$'\n'*) add_candidate "$name" ;;
+    esac
+  done <<< "$recorded_children"
+}
+
+# judge_in_deployment <listing>: the four arms the environment section at the top of
+# this file states, for a listing whose own repository -- or the absence of one --
+# `locate_listing` has already found. 1 is a refusal, and says which arm refused. 0
+# hands the listing back to `read_listing` either as it was found, or ANSWERED: with
+# `listing_classified` set, the records that decide it are already read, and they
+# are the repository the environment names wherever the path reaches none.
+#
+# ARM 3 COMPARES WHAT IS RECORDED, NOT WHICH REPOSITORY RECORDS IT, because the two
+# can be one repository reached two ways -- `GIT_DIR` naming the very `.git`
+# discovery finds -- or two with one answer, and either way the listing has one
+# ledger. Kind, mode and children are the whole of what `read_listing` decides from,
+# so equal ones decide identically; what is refused is two DIFFERENT answers for one
+# directory, and neither is chosen. When they are equal the path's own reading is
+# what is kept, so the run's words are the words the run with nothing exported says.
+listing_classified=0
+judge_in_deployment() {
+  local listing="$1" world="$listing_world" top="$listing_toplevel" rel="$listing_relpath"
+  local placed=0 kind mode children said_kind
+  if (( ! deployment_resolved )); then
+    echo "branch-name-policy: git could not resolve a repository from '$PWD' with the names" >&2
+    echo "  this environment exported, so '$listing' has no repository to be judged in, and" >&2
+    echo "  the environment names one: $environment_ledger." >&2
+    echo "  A listing is judged in the repository those names select or not at all. Correct" >&2
+    echo "  them, or clear them to judge by the path alone. '$branch' was not judged." >&2
+    if [[ -n "$deployment_said" ]]; then
+      indent "$deployment_said"
+    fi
+    return 1
+  fi
+  name_listing "$listing" "$deployment_top" deployment || placed=$?
+  if (( placed == 1 )); then
+    ledger_is_deployment=0
+    return 1
+  fi
+  if (( placed == 3 )); then
+    ledger_is_deployment=0
+    listing_world="$world" listing_toplevel="$top" listing_relpath="$rel"
+    # A git directory exported WITHOUT a work tree is rooted wherever git is asked
+    # from, so "outside it" says where the caller stands and not where the listing
+    # is: a regular file git records at 120000 from its own directory is outside the
+    # caller's, and its target text would be read as names. The exception is not made.
+    if [[ "$world" == filesystem ]] && [[ -L "$listing" || -f "$listing" ]]; then
+      (( environment_git_dir_named && ! environment_work_tree_named )) || return 0
+    fi
+    echo "branch-name-policy: '$listing' is not inside '$deployment_top', the work tree git" >&2
+    echo "  resolves from '$PWD' with the names this environment exported, and" >&2
+    echo "  the environment names one: $environment_ledger." >&2
+    echo "  A listing is judged in the repository those names select or not at all, so this" >&2
+    echo "  is refused rather than answered by another. Clear them to judge by the path alone," >&2
+    echo "  or export GIT_WORK_TREE with GIT_DIR so the work tree is not wherever git is run." >&2
+    return 1
+  fi
+  recorded_kind_of "$listing_toplevel" "$listing_relpath"
+  ledger_is_deployment=0
+  if [[ "$world" == records ]]; then
+    kind="$recorded_kind" mode="$recorded_mode" children="$recorded_children"
+    listing_world="$world" listing_toplevel="$top" listing_relpath="$rel"
+    recorded_kind_of "$top" "$rel"
+    if [[ "$kind" != "$recorded_kind" || "$mode" != "$recorded_mode" || "$children" != "$recorded_children" ]]; then
+      said_kind="$kind${mode:+ at mode $mode}"
+      [[ "$kind" != "$recorded_kind" || "$mode" != "$recorded_mode" ]] || said_kind="$said_kind with other entries"
+      echo "branch-name-policy: the repository whose work tree is '$top' records '$listing' as" >&2
+      echo "  $recorded_kind${recorded_mode:+ at mode $recorded_mode}, and the one git resolves from '$PWD' with the" >&2
+      echo "  names this environment exported records it as $said_kind, and" >&2
+      echo "  the environment names one: $environment_ledger." >&2
+      echo "  Two ledgers answering differently for one directory is refused rather than" >&2
+      echo "  settled by either of them." >&2
+      return 1
+    fi
+    listing_classified=1
+    return 0
+  fi
+  if (( ! environment_git_dir_named || ! environment_work_tree_named )); then
+    echo "branch-name-policy: no repository the path reaches records '$listing', and" >&2
+    echo "  the environment names one: $environment_ledger." >&2
+    echo "  Its records answer for such a listing only where GIT_DIR and GIT_WORK_TREE are" >&2
+    echo "  both exported: a git directory alone takes whatever directory git is asked from" >&2
+    echo "  as its work tree's root, and a work tree alone takes its repository from wherever" >&2
+    echo "  git is run. Export both, or clear them to judge by the path alone." >&2
+    return 1
+  fi
+  listing_world=records
+  listing_classified=1
+  return 0
+}
+
 # read_listing <listing>: add every finding filename in one listing to the
 # candidate set. A read that FAILS returns non-zero and never an empty set.
 #
@@ -1327,42 +2784,19 @@ add_candidate() {
 # whatever the checkout put in its place.
 read_listing() {
   local listing="$1" out='' entry record mode name read_status=0 is_file=0
-  local regular other
+  listing_classified=0
   locate_listing "$listing" || return 1
+  # WHERE THE ENVIRONMENT NAMES A REPOSITORY, THE LISTING IS JUDGED IN IT OR NOT AT
+  # ALL, by the four arms the environment section at the top of this file states.
+  # Nothing below knows which repository's records it is reading, and needs not to.
+  if [[ -n "$environment_ledger" ]]; then
+    judge_in_deployment "$listing" || return 1
+  fi
   if [[ "$listing_world" == records ]]; then
-    recorded_kind_of "$listing_relpath"
+    (( listing_classified )) || recorded_kind_of "$listing_toplevel" "$listing_relpath"
     case "$recorded_kind" in
       tree)
-        # Two sets rather than a lookup per name: bash 3.2 has no associative
-        # array and this file runs wherever the suite is run by hand. A name is
-        # wrapped in newlines on both sides, so a membership test is exact and
-        # not a prefix -- WHICH HOLDS ONLY BECAUSE NO NAME IN EITHER SET CARRIES
-        # A NEWLINE. A CONFLICTED entry is recorded at SEVERAL stages: an
-        # ordinary content conflict is a regular blob at every stage and stays a
-        # finding, while a regular file conflicting with a symlink is recorded at
-        # both kinds, lands in both sets, and is not a finding -- the non-regular
-        # set is tested first.
-        regular=$'\n'
-        other=$'\n'
-        while IFS= read -r record; do
-          [[ -n "$record" ]] || continue
-          mode="${record%%$'\t'*}"
-          name="${record#*$'\t'}"
-          case "$mode" in
-            100644|100755) regular="$regular$name"$'\n' ;;
-            *) other="$other$name"$'\n' ;;
-          esac
-        done <<< "$recorded_children"
-        while IFS= read -r record; do
-          [[ -n "$record" ]] || continue
-          name="${record#*$'\t'}"
-          case "$other" in
-            *$'\n'"$name"$'\n'*) continue ;;
-          esac
-          case "$regular" in
-            *$'\n'"$name"$'\n'*) add_candidate "$name" ;;
-          esac
-        done <<< "$recorded_children"
+        add_recorded_candidates
         return 0
         ;;
       blob)
@@ -1737,6 +3171,11 @@ collect_candidates() {
 }
 
 if [[ -n "$merge_base_findings$head_findings$range_findings" ]]; then
+  # Git is asked once which repository the environment names, before any listing is
+  # judged in it; the two diff listings below are no ledger and never ask.
+  if [[ -n "$environment_ledger" ]]; then
+    resolve_deployment
+  fi
   collect_candidates \
     || fail "'$branch' could not be checked: a findings listing could not be read.
   The error is above. A gate that cannot see its input refuses rather than
