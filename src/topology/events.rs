@@ -1423,6 +1423,8 @@ impl TopologyEvent {
 mod tests {
     use std::time::Duration;
 
+    use crate::events::EffectiveAttribution;
+
     use super::*;
     use crate::events::{FailureRecord, PoolSnapshot, ReviewPassOutcome};
     use crate::gates::ShellKind;
@@ -4411,6 +4413,116 @@ mod tests {
                 ),
             ),
         ]
+    }
+
+    struct AttributedDesignDefect {
+        body: TopologyEventBody,
+        payload: serde_json::Value,
+        reads_as: EffectiveAttribution<'static>,
+    }
+
+    fn attributed_design_defects() -> Vec<AttributedDesignDefect> {
+        let ts = "2026-08-17T03:04:05.678Z";
+        let envelope = |data: serde_json::Value| serde_json::json!({"ts": ts, "event": "design_defect", "data": data});
+        vec![
+            AttributedDesignDefect {
+                body: TopologyEventBody::DesignDefect {
+                    data: DesignDefect::discovered(
+                        QuestionId::from("q-design-0002"),
+                        "  the plan says nothing about Ünicode cursors  ".to_owned(),
+                        "opaque cursors".to_owned(),
+                    ),
+                },
+                payload: envelope(serde_json::json!({
+                    "question": "q-design-0002",
+                    "context": "  the plan says nothing about Ünicode cursors  ",
+                    "answer": "opaque cursors",
+                    "attribution": "discovered_hole",
+                })),
+                reads_as: EffectiveAttribution::Discovered,
+            },
+            AttributedDesignDefect {
+                body: TopologyEventBody::DesignDefect {
+                    data: DesignDefect::convicted(
+                        QuestionId::from("q-design-0003"),
+                        "  the plan contradicts itself about Ünicode paths  ".to_owned(),
+                        "rescope".to_owned(),
+                        "design checklist item 2: path encoding is settled before execution"
+                            .to_owned(),
+                    )
+                    .expect("a cited conviction"),
+                },
+                payload: envelope(serde_json::json!({
+                    "question": "q-design-0003",
+                    "context": "  the plan contradicts itself about Ünicode paths  ",
+                    "answer": "rescope",
+                    "attribution": "design_defect",
+                    "citation": "design checklist item 2: path encoding is settled before execution",
+                })),
+                reads_as: EffectiveAttribution::Convicted {
+                    citation: "design checklist item 2: path encoding is settled before execution",
+                },
+            },
+        ]
+    }
+
+    #[test]
+    fn an_attributed_design_defect_serializes_to_its_independently_written_payload() {
+        for fixture in attributed_design_defects() {
+            assert_eq!(
+                payload_of(&fixture.body),
+                fixture.payload,
+                "{:?} does not serialize to its independently written payload",
+                fixture.reads_as
+            );
+        }
+    }
+
+    #[test]
+    fn an_attributed_design_defect_reads_through_the_informational_path() {
+        let question_answered = every_kind()
+            .iter()
+            .zip(canonical_events())
+            .find(|(body, _)| body.kind() == "question_answered")
+            .map(|(_, canonical)| canonical)
+            .expect("the corpus has a question_answered payload");
+        assert_eq!(TOPOLOGY_EVENT_KINDS.len(), 24);
+        assert_eq!(TOPOLOGY_TRANSACTION_KINDS, 21);
+
+        for fixture in attributed_design_defects() {
+            let decoded: TopologyEvent = serde_json::from_value(fixture.payload.clone())
+                .unwrap_or_else(|error| panic!("{error} in {}", fixture.payload));
+            assert_eq!(decoded.body, fixture.body);
+            assert_eq!(decoded.body.kind(), "design_defect");
+            assert!(
+                !decoded.body.is_transaction(),
+                "the attribution rides an informational record"
+            );
+            let TopologyEventBody::DesignDefect { data } = &decoded.body else {
+                panic!("not a design_defect: {}", decoded.body.kind());
+            };
+            assert_eq!(data.effective_attribution(), fixture.reads_as);
+
+            let mut widened = fixture.payload.clone();
+            widened["data"]["Ünknown Column  "] = serde_json::Value::from("injected");
+            let decoded: TopologyEvent = serde_json::from_value(widened)
+                .expect("an informational record with an extra column costs nothing to ignore");
+            assert_eq!(
+                decoded.body, fixture.body,
+                "the column is ignored, not kept"
+            );
+
+            let mut transaction = question_answered.clone();
+            transaction["data"]["Ünknown Column  "] = serde_json::Value::from("injected");
+            let refused = serde_json::from_value::<TopologyEvent>(transaction)
+                .expect_err("the same column on a transaction is refused");
+            assert!(
+                refused
+                    .to_string()
+                    .starts_with("unknown field `Ünknown Column  `"),
+                "{refused}"
+            );
+        }
     }
 
     #[test]

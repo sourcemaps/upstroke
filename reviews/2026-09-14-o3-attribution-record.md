@@ -33,7 +33,7 @@ directory; `<sha>` is the full sha the measurement was taken at.
 | 0 base measured, readings taken, record opened | **done** — this commit |
 | 1 the vocabulary (`src/events/mod.rs`): `QuestionAttribution`, the two fields, `discovered`, `convicted`, `effective_attribution`; the legacy emitters unclassified; the census offer and the fixtures through the constructors; the mutations | **done** — §6; the full suite green through the wrapper, the three mutations each killed by the tests named for them |
 | 2 the answer file (`src/interaction.rs`): the attributed answer record, the writer-side refusal, the schema-4 refusal executed | **done** — §7; the full suite green through the wrapper, four mutations each killed by the tests named for them; the guest run of the path-shaped tests is owed at the head the body records (§10) |
-| 3 the decoder fixture (`src/topology/events.rs`, `src/topology/fold/tests.rs`): an attributed record through the informational-tolerance path; the fold untouched | pending |
+| 3 the decoder fixture (`src/topology/events.rs`, `src/topology/fold/tests.rs`): an attributed record through the informational-tolerance path; the fold untouched | **done** — §8; the full suite green through the wrapper, two mutations each killed by the tests named for them |
 | 4 the internals notes, held both ways by `test-internals-notes.sh` | pending |
 | 5 the design (O2): §5, §12, §23.1, each citing this record | pending |
 | 6 the findings-ledger file | pending |
@@ -492,7 +492,48 @@ exit `0` (2026-09-15T00:17:01Z–2026-09-15T00:19:09Z) — Phase 1's 2603 plus t
 
 ## 8. The decoder fixture (Phase 3)
 
-Pending.
+**What landed.** In `src/topology/events.rs`'s tests, beside `canonical_events()` and not in it:
+`attributed_design_defects()`, two fixtures each pairing a body built through a constructor with an
+**independently written** payload (a `json!` literal, not `to_value` of the struct — the pin the
+corpus's own `design_defect` entry lacks, §2): a discovery (`DesignDefect::discovered`, payload
+with `attribution: "discovered_hole"` and no `citation`) and a cited conviction
+(`DesignDefect::convicted`, payload with both keys), each with the `EffectiveAttribution` it must
+read as. In `src/topology/fold/tests.rs`, one test that drives both records through the fold.
+`canonical_events()` and `every_kind()` keep their pre-taxonomy `design_defect` entry (R1);
+`src/topology/fold/apply.rs` and `src/topology/fold/start.rs` are byte-identical to the base
+(`git diff 8b28944f -- src/topology/fold/apply.rs src/topology/fold/start.rs` is empty at every
+commit of this branch; §2's blob hashes).
+
+**Tests**, each existing exactly once:
+
+| test | what it proves |
+|---|---|
+| `topology::events::tests::an_attributed_design_defect_serializes_to_its_independently_written_payload` | each attributed body serialises to exactly its literal payload |
+| `topology::events::tests::an_attributed_design_defect_reads_through_the_informational_path` | each payload decodes to its body; `kind()` is `design_defect`; `is_transaction()` is false; `effective_attribution()` is `Discovered` / `Convicted { citation }`; with an unknown column (`"Ünknown Column  "`) added to `data` the record still decodes, equal to the body — *"an informational record with an extra column costs nothing to ignore"* — while the same column on the canonical `question_answered` payload is refused with `unknown field `Ünknown Column  ``; and, in passing, `TOPOLOGY_EVENT_KINDS.len() == 24` and `TOPOLOGY_TRANSACTION_KINDS == 21` |
+| `topology::fold::tests::an_attributed_design_defect_folds_to_no_derived_state` | on a fold with a merged task, `plan_transition` of the discovery and of the conviction each yields a delta whose `derived` is `Derived::None`, and `apply_delta` leaves `state()` equal to what it was |
+
+The invariants the contract names are held by the existing assertions, unmodified:
+`every_kind_is_represented_exactly_once_and_the_list_agrees` (24 kinds, 21 transactions, the
+informational three named), `every_event_serializes_to_exactly_its_independently_written_payload`
+(the corpus covers all 24 and the `design_defect` payload is the pre-taxonomy one), and the type of
+`TOPOLOGY_EVENT_KINDS` itself, `[&str; 24]`. `a_transaction_refuses_an_unknown_field_and_an_informational_record_ignores_it`
+already sweeps every kind with an unknown field; the new test adds the attributed shapes it cannot
+see.
+
+**Mutations, executed** (`phase3/mutations/summary.txt`, `.diff` and `.log` each; files restored
+from pristine copies and their SHA-256 checked equal):
+
+| mutation | tests that fail | tests that keep passing |
+|---|---|---|
+| M8 the topology's `DesignDefect` payload made strict (`#[serde(deserialize_with = "strict::field")]`) | `an_attributed_design_defect_reads_through_the_informational_path`, and the existing `a_transaction_refuses_an_unknown_field_and_an_informational_record_ignores_it` | the serialisation pin, the corpus tests, the fold test |
+| M9 `fold/start.rs` derives `Derived::Answer(QuestionOrigin::Admission)` from a `design_defect` | `an_attributed_design_defect_folds_to_no_derived_state` | the rest (`apply.rs` still matches the record to nothing, so `a_delta_carries_the_exact_event_it_was_checked_against` cannot see it) |
+
+M9 is a mutation of the fold and was restored; the fold is untouched at every commit.
+
+**Runs**: `phase3/targeted-1.log` (53 passed over `topology::events::tests` and the fold's
+informational tests), `phase3/fmt-1.log` (clean after `cargo fmt`), `phase3/clippy-1.log`
+(`-D warnings`, clean), `phase3/full-1.log`: library `2611 passed; 0 failed; 77 ignored` in
+90.83 s, binary `10 passed`, exit `0` (2026-09-15T00:29:45Z–2026-09-15T00:31:57Z) — Phase 2's 2608 plus the three tests above.
 
 ## 9. The ten gates on this box
 
