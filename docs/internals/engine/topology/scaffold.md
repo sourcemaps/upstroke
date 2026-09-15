@@ -170,6 +170,13 @@ So the arming is local and the **recording is not**: every call reaches
 `HarnessEffects` first, so the observation lands in the one harness
 `check_bijection` reads, and only the answer is this type's.
 
+An armed answer is handed back through `Exported::carried`, so a `Kill` writes
+the observation export before the funnel aborts. `HarnessEffects` exports
+before a kill only when the harness itself answers one, which it never does
+at a phase, so until Gate 5's strict re-audit a kill child dying at an armed
+phase lost the record of the coordinate it died at, and no registry claim
+could name the child for that coordinate.
+
 ## `impl ArmedEffects` › `pub(super) fn arm(&mut self, site: EffectSiteId, phase: HookPhase, injection: Injection) {`
 
 Answer `injection` the next time `site` reaches `phase`.
@@ -648,6 +655,17 @@ refuses.
 
 The file a kill child writes its repository root into.
 
+## `pub(super) const KILL_CHILD_BOUND: Duration = Duration::from_secs(120);`
+
+The deadline a topology kill child is given. `kill_child_and_adopt`, the kill witnesses in
+`recover/tests.rs`, the informational-append and open-log witnesses in `emit/tests.rs` and the
+creation witnesses of rows 103 and 106 in `create/tests.rs` hand it to `run_kill_child_within`. It is
+the finalization matrix's 120 seconds, which a loaded Windows guest has needed for a creation kill
+child.
+A child still running at the bound is ended there, and the witness fails naming its cell rather than
+judging what the child left. `src/engine/tests.rs` cannot name this `#[cfg(test)]` module, so its
+two launches carry a constant of their own with the same value.
+
 ## `pub(super) fn kill_dir(tag: &str) -> PathBuf {`
 
 A directory this process owns, unique to this call, for one kill test.
@@ -661,6 +679,53 @@ injection stops killing; this end asserts the other half — that the process
 really did not exit successfully. Both are needed: a child that returned
 early would satisfy neither, and a child that panicked would satisfy only
 this one.
+
+The child is given `KILL_CHILD_BOUND` through
+`run_kill_child_within`: a child that wedges instead of dying is killed and
+reaped at the bound, and the test fails naming the site and the child, not
+at whatever outer timeout would otherwise end the suite (#292's review round
+2, `standards/12`'s bounded waits).
+
+The launch and the checks are `launch_the_kill_child_and_adopt`'s, which this
+calls with no environment beyond the directory and the site.
+
+## `pub(super) fn kill_child_and_adopt_in_a_scratch_tree(`
+
+`kill_child_and_adopt` over a directory the witness owns, for a witness that
+must leave nothing behind (#292's review round 7). It acquires a
+`rundir::scratch_tree` tree in the temporary directory, hands it to the child
+as the handoff directory **and** as its temporary directory (`TMPDIR`, and the
+`TMP` and `TEMP` Windows reads), and returns the guard with the adopted run.
+So everything the child makes in its temporary directory lies inside the tree:
+the fixture it builds and hands off, and the neutral Git configuration its Git
+calls write once per process (`fixture::neutral_git_config`), which the child's
+abort would otherwise leave behind. The witness binds the guard before the run
+(`let (_handoff, mut run) = ...`), so the run drops first, removing the fixture
+it adopted, and the guard then reclaims the tree, when the witness returns and
+when it unwinds. A reclaim that fails on the return fails the test naming the
+root; one that fails while the test unwinds is reported without a second panic
+(`rundir::scratch_tree`'s own tests witness both). `kill_dir` and
+`kill_child_and_adopt`, which the older kill witnesses use, are left as they
+were: their handoff directory is named for the process and nothing removes it.
+
+The tree's tag is `kill`, the same for every site, and short on purpose. The
+nesting lengthens every path under the child's fixture by the tree's name, and
+Git for Windows does not add a worktree whose `.git` path is longer than 220
+characters: `git worktree add` exits 128 with `fatal: '$GIT_DIR' too big`
+(measured on the Windows guest, with Git 2.50.1, the version CI's
+`test (winguest)` runs, and `core.longpaths` unset: 220 added, 221 refused).
+With the site in the tag, that leg failed at `2780e0e4` on the
+`after_snapshot_intent` child, which ended 101 instead of aborting; the launch
+discards the child's standard error, so that is all CI shows. On the guest,
+under the same temporary directory, `C:\Users\Administrator\AppData\Local\Temp`,
+and with that standard error kept by a diagnostic build, the child had
+panicked in its dispatch: Git refused its task worktree, whose `.git` path was
+223 characters (#292's review round 8).
+
+## `fn launch_the_kill_child_and_adopt(`
+
+The launch, the abort check and the adoption both entry points share: the child
+gets the handoff directory and the site, and whatever `temporary` adds.
 
 ## `pub(super) fn kill_child_environment() -> (PathBuf, String) {`
 

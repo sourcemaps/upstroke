@@ -234,10 +234,7 @@ fn run_with_timeout_and_limit(
         #[cfg(unix)]
         if let Err(error) = termination.register(child.id()) {
             drop(termination);
-            let killed = kill_tree(hooks, terminate_site, &mut child);
-            if killed.is_ok() {
-                fate.set(ProcessFate::Gone);
-            }
+            let killed = kill_tree(hooks, terminate_site, &mut child, &fate);
             return Err(error.with_cleanup(killed));
         }
         #[cfg(unix)]
@@ -252,10 +249,7 @@ fn run_with_timeout_and_limit(
         ) {
             #[cfg(unix)]
             drop(termination);
-            let killed = kill_tree(hooks, terminate_site, &mut child);
-            if killed.is_ok() {
-                fate.set(ProcessFate::Gone);
-            }
+            let killed = kill_tree(hooks, terminate_site, &mut child, &fate);
             return Err(error.with_cleanup(killed));
         }
 
@@ -298,10 +292,7 @@ fn run_with_timeout_and_limit(
                 }
                 #[cfg(not(unix))]
                 {
-                    let killed = kill_tree(hooks, terminate_site, &mut child);
-                    if killed.is_ok() {
-                        fate.set(ProcessFate::Gone);
-                    }
+                    let killed = kill_tree(hooks, terminate_site, &mut child, &fate);
                     return Err(error.with_cleanup(killed));
                 }
             }
@@ -372,13 +363,11 @@ fn run_with_timeout_and_limit(
                 Ok(None) => {
                     if drain_limit_exceeded(&stdout_drain, &stderr_drain) {
                         output_limited = true;
-                        kill_tree(hooks, terminate_site, &mut child)?;
-                        fate.set(ProcessFate::Gone);
+                        kill_tree(hooks, terminate_site, &mut child, &fate)?;
                         break None;
                     } else if started.elapsed() >= timeout {
                         timed_out = true;
-                        kill_tree(hooks, terminate_site, &mut child)?;
-                        fate.set(ProcessFate::Gone);
+                        kill_tree(hooks, terminate_site, &mut child, &fate)?;
                         break None;
                     }
                     thread::sleep(Duration::from_millis(50));
@@ -387,10 +376,7 @@ fn run_with_timeout_and_limit(
                     let primary = UpstrokeError::Agent {
                         message: format!("waiting on agent process: {e}"),
                     };
-                    let killed = kill_tree(hooks, terminate_site, &mut child);
-                    if killed.is_ok() {
-                        fate.set(ProcessFate::Gone);
-                    }
+                    let killed = kill_tree(hooks, terminate_site, &mut child, &fate);
                     return Err(primary.with_cleanup(killed));
                 }
             }
@@ -506,6 +492,7 @@ fn kill_tree(
     hooks: &mut dyn SpawnHooks,
     terminate_site: ProcessSite,
     child: &mut ProcessTree,
+    fate: &std::cell::Cell<ProcessFate>,
 ) -> Result<(), UpstrokeError> {
     debug_assert_eq!(terminate_site, ProcessSite::Terminate);
     apply_phase(
@@ -514,6 +501,7 @@ fn kill_tree(
         HookPhase::Before,
     )?;
     kill_tree_primitive(child)?;
+    fate.set(ProcessFate::Gone);
     apply_phase(
         hooks.phase(terminate_site, HookPhase::After),
         terminate_site,

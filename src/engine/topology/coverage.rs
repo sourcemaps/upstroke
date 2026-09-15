@@ -368,12 +368,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+        test: "engine::topology::recover::tests::a_resume_after_finalization_pruned_the_execution_root_and_the_pins_recreates_the_root_and_integrates_the_queued_candidate",
     },
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+        test: "engine::topology::recover::tests::a_fault_after_the_execution_root_is_recreated_leaves_the_root_and_the_next_resume_adopts_it",
     },
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot),
@@ -393,12 +393,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::WriteIntent),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+        test: "engine::topology::dispatch::tests::kill_after_dispatch_recreates_worktree_without_spend",
     },
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::Add),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+        test: "engine::topology::dispatch::tests::kill_after_dispatch_recreates_worktree_without_spend",
     },
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::Add),
@@ -438,7 +438,7 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::WriteStagingIntent),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+        test: "engine::topology::recover::tests::a_resume_over_a_stale_queued_candidate_with_nothing_staged_takes_the_staging_path_and_publishes_the_proposal",
     },
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::WriteStagingIntent),
@@ -453,7 +453,7 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::AddStaging),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+        test: "engine::topology::recover::tests::a_clean_staging_worktree_left_at_the_integration_head_is_reclaimed_and_the_candidate_integrates",
     },
     Claim {
         site: EffectSiteId::Worktree(WorktreeSite::RemoveStaging),
@@ -483,12 +483,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Snapshot(SnapshotSite::WriteIntent),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+        test: "engine::topology::attempt::tests::attempt_kill_child",
     },
     Claim {
         site: EffectSiteId::Snapshot(SnapshotSite::Add),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+        test: "engine::topology::attempt::tests::attempt_kill_child",
     },
     Claim {
         site: EffectSiteId::Snapshot(SnapshotSite::Add),
@@ -518,12 +518,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Ref(RefSite::CreateIntegration),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+        test: "engine::topology::recover::tests::a_resume_over_a_creation_that_stopped_after_removing_its_marker_creates_the_integration_ref_once",
     },
     Claim {
         site: EffectSiteId::Ref(RefSite::CreateIntegration),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+        test: "engine::topology::recover::tests::a_resume_over_a_creation_that_stopped_after_creating_its_integration_ref_adopts_it",
     },
     Claim {
         site: EffectSiteId::Ref(RefSite::CompareAndSwapIntegration),
@@ -543,7 +543,7 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Ref(RefSite::CreateCandidates),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+        test: "engine::topology::recover::tests::candidate_sequence_kill_child",
     },
     Claim {
         site: EffectSiteId::Ref(RefSite::DeleteCandidatesRef),
@@ -558,7 +558,7 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Ref(RefSite::PinCandidatePrepared),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+        test: "engine::topology::recover::tests::candidate_sequence_kill_child",
     },
     Claim {
         site: EffectSiteId::Ref(RefSite::PinCandidatePrepared),
@@ -578,7 +578,7 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Ref(RefSite::PinPrepared),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers",
+        test: "engine::topology::recover::tests::staging_path_kill_child",
     },
     Claim {
         site: EffectSiteId::Ref(RefSite::PinPrepared),
@@ -603,12 +603,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Object(ObjectSite::CandidateStage),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+        test: "engine::topology::attempt::tests::attempt_kill_child",
     },
     Claim {
         site: EffectSiteId::Object(ObjectSite::CandidateWriteTree),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+        test: "engine::topology::attempt::tests::attempt_kill_child",
     },
     Claim {
         site: EffectSiteId::Object(ObjectSite::CandidateWriteTree),
@@ -636,12 +636,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Object(ObjectSite::CandidateCommitTree),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+        test: "engine::topology::recover::tests::a_kill_before_the_candidate_commit_is_written_is_settled_interrupted_and_the_next_generation_writes_it",
     },
     Claim {
         site: EffectSiteId::Object(ObjectSite::CandidateCommitTree),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+        test: "engine::topology::recover::tests::candidate_sequence_kill_child",
     },
     Claim {
         site: EffectSiteId::Object(ObjectSite::CandidateCommitTree),
@@ -649,17 +649,17 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::IdUnread,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::candidate::tests::candidate_kill_child",
+        test: "engine::topology::recover::tests::candidate_sequence_kill_child",
     },
     Claim {
         site: EffectSiteId::Object(ObjectSite::ProposalCherryPick),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers",
+        test: "engine::topology::recover::tests::a_clean_staging_worktree_left_at_the_integration_head_is_reclaimed_and_the_candidate_integrates",
     },
     Claim {
         site: EffectSiteId::Object(ObjectSite::ProposalCherryPick),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers",
+        test: "engine::topology::recover::tests::staging_path_kill_child",
     },
     Claim {
         site: EffectSiteId::Object(ObjectSite::RepairMaterialize),
@@ -709,12 +709,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::RemoveMarker),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+        test: "engine::topology::recover::tests::a_resume_over_a_creation_that_stopped_after_removing_its_marker_creates_the_integration_ref_once",
     },
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::CreatePrivateDir),
         phase: EntryPhase::Before,
-        test: "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+        test: "engine::topology::startup::tests::a_creation_stopped_before_its_private_half_leaves_a_released_run_lock_the_census_reclaims_public_only",
     },
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::CreatePrivateDir),
@@ -794,17 +794,17 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::WriteQuestionPayload),
         phase: EntryPhase::Before,
-        test: "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+        test: "engine::tests::question_payload_kill_child",
     },
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::WriteQuestionPayload),
         phase: EntryPhase::After,
-        test: "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+        test: "engine::tests::question_payload_kill_child",
     },
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::RemovePrivateHusk),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::kill_during_recovery_repeats_recovery",
+        test: "engine::topology::startup::tests::a_husk_whose_private_half_refused_removal_is_reclaimed_by_the_next_census_private_half_first",
     },
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::RemovePrivateHusk),
@@ -819,7 +819,7 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::RunDir(RunDirSite::RemovePublicHusk),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::kill_during_recovery_repeats_recovery",
+        test: "engine::topology::startup::tests::a_husk_whose_public_removal_erred_after_completing_is_gone_for_the_next_census",
     },
     Claim {
         site: EffectSiteId::Event(EventSite::OpenLog),
@@ -837,7 +837,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::Create,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::coverage::tests::event_kill_child",
+        test: "engine::topology::emit::tests::open_log_kill_child",
     },
     Claim {
         site: EffectSiteId::Event(EventSite::OpenLog),
@@ -845,7 +845,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::Create,
             mode: InjectionMode::ErrorReturn,
         },
-        test: "engine::topology::coverage::tests::every_error_return_point_of_the_event_funnels_fires_under_the_production_adapter",
+        test: "engine::topology::create::tests::an_error_after_the_log_is_created_refuses_the_run_resumably_and_the_next_creation_opens_it_again",
     },
     Claim {
         site: EffectSiteId::Event(EventSite::OpenLog),
@@ -853,7 +853,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::TruncateTornTail,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::coverage::tests::event_kill_child",
+        test: "engine::topology::emit::tests::open_log_kill_child",
     },
     Claim {
         site: EffectSiteId::Event(EventSite::OpenLog),
@@ -861,7 +861,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::TruncateTornTail,
             mode: InjectionMode::ErrorReturn,
         },
-        test: "engine::topology::coverage::tests::every_error_return_point_of_the_event_funnels_fires_under_the_production_adapter",
+        test: "engine::topology::recover::tests::an_error_after_the_logs_torn_tail_is_truncated_refuses_the_resume_before_any_effect_and_the_next_resume_converges",
     },
     Claim {
         site: EffectSiteId::Event(EventSite::OpenLog),
@@ -905,7 +905,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::Written,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::coverage::tests::event_kill_child",
+        test: "engine::topology::create::tests::create_kill_child",
     },
     Claim {
         site: EffectSiteId::Event(EventSite::AppendFirst),
@@ -929,7 +929,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::Synced,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::coverage::tests::event_kill_child",
+        test: "engine::topology::create::tests::create_kill_child",
     },
     Claim {
         site: EffectSiteId::Event(EventSite::AppendFirst),
@@ -992,12 +992,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Event(EventSite::AppendInformational),
         phase: EntryPhase::Before,
-        test: "engine::topology::coverage::tests::event_kill_child",
+        test: "engine::topology::emit::tests::a_kill_before_the_informational_append_leaves_the_prefix_and_the_next_process_appends_the_line",
     },
     Claim {
         site: EffectSiteId::Event(EventSite::AppendInformational),
         phase: EntryPhase::After,
-        test: "engine::topology::emit::tests::poisoned_fold_refuses_every_later_transition",
+        test: "engine::topology::emit::tests::informational_append_kill_child",
     },
     Claim {
         site: EffectSiteId::Event(EventSite::AppendInformational),
@@ -1005,7 +1005,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::Written,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::coverage::tests::event_kill_child",
+        test: "engine::topology::emit::tests::informational_append_kill_child",
     },
     Claim {
         site: EffectSiteId::Event(EventSite::AppendInformational),
@@ -1013,7 +1013,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::Written,
             mode: InjectionMode::ErrorReturn,
         },
-        test: "engine::topology::coverage::tests::every_error_return_point_of_the_event_funnels_fires_under_the_production_adapter",
+        test: "engine::topology::emit::tests::a_written_error_at_the_informational_append_is_absent_and_the_next_process_appends_the_line",
     },
     Claim {
         site: EffectSiteId::Event(EventSite::AppendInformational),
@@ -1021,7 +1021,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::WrittenFull,
             mode: InjectionMode::ErrorReturn,
         },
-        test: "engine::topology::coverage::tests::every_error_return_point_of_the_event_funnels_fires_under_the_production_adapter",
+        test: "engine::topology::emit::tests::a_written_full_error_at_the_informational_append_is_present_and_the_next_open_proves_it",
     },
     Claim {
         site: EffectSiteId::Event(EventSite::AppendInformational),
@@ -1029,7 +1029,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::Synced,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::coverage::tests::event_kill_child",
+        test: "engine::topology::emit::tests::informational_append_kill_child",
     },
     Claim {
         site: EffectSiteId::Event(EventSite::AppendInformational),
@@ -1062,12 +1062,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Answer(AnswerSite::Ingest),
         phase: EntryPhase::Before,
-        test: "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+        test: "engine::topology::recover::tests::a_kill_before_an_answer_is_read_leaves_the_question_open_and_the_next_incarnation_ingests_it",
     },
     Claim {
         site: EffectSiteId::Answer(AnswerSite::Ingest),
         phase: EntryPhase::After,
-        test: "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+        test: "engine::topology::recover::tests::a_kill_after_an_answer_is_read_appends_nothing_and_the_next_incarnation_ingests_it",
     },
     Claim {
         site: EffectSiteId::Lock(LockSite::AcquireRun),
@@ -1077,17 +1077,17 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Lock(LockSite::AcquireRun),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+        test: "engine::topology::startup::tests::a_run_lock_whose_acquisition_erred_after_taking_it_leaves_a_husk_the_census_reclaims_public_only",
     },
     Claim {
         site: EffectSiteId::Lock(LockSite::AcquireWorktree),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+        test: "engine::topology::recover::tests::a_fault_before_the_worktree_lease_is_taken_ends_the_resume_and_the_next_resume_takes_it",
     },
     Claim {
         site: EffectSiteId::Lock(LockSite::AcquireWorktree),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+        test: "engine::topology::recover::tests::a_fault_after_the_worktree_lease_is_taken_ends_the_resume_with_it_released_and_the_next_resume_takes_it_again",
     },
     Claim {
         site: EffectSiteId::Lock(LockSite::ProbeCleanupExclusive),
@@ -1112,12 +1112,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Lock(LockSite::CreateWorktreeLockFile),
         phase: EntryPhase::Before,
-        test: "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+        test: "engine::topology::recover::tests::a_fault_before_the_worktree_lock_file_is_created_ends_the_resume_and_the_next_resume_creates_it",
     },
     Claim {
         site: EffectSiteId::Lock(LockSite::CreateWorktreeLockFile),
         phase: EntryPhase::After,
-        test: "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+        test: "engine::topology::recover::tests::a_fault_after_the_worktree_lock_file_is_created_ends_the_resume_and_the_next_resume_adopts_it",
     },
     Claim {
         site: EffectSiteId::Lock(LockSite::ObserveCleanupHold),
@@ -1132,22 +1132,22 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Process(ProcessSite::Spawn),
         phase: EntryPhase::Before,
-        test: "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+        test: "engine::topology::recover::tests::an_error_before_the_workers_process_is_spawned_spawns_nothing_and_the_next_step_spawns_it",
     },
     Claim {
         site: EffectSiteId::Process(ProcessSite::Spawn),
         phase: EntryPhase::After,
-        test: "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+        test: "engine::topology::recover::tests::process_spawn_kill_child",
     },
     Claim {
         site: EffectSiteId::Process(ProcessSite::Terminate),
         phase: EntryPhase::Before,
-        test: "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+        test: "engine::topology::recover::tests::a_fault_before_the_workers_termination_ends_the_step_and_the_next_resume_converges",
     },
     Claim {
         site: EffectSiteId::Process(ProcessSite::Terminate),
         phase: EntryPhase::After,
-        test: "engine::topology::coverage::tests::the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_production_adapter",
+        test: "engine::topology::recover::tests::a_fault_after_the_workers_termination_ends_the_step_and_the_next_resume_converges",
     },
     Claim {
         site: EffectSiteId::Process(ProcessSite::Spawn),
@@ -1155,7 +1155,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::AmbientJobJoined,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::coverage::tests::spawn_kill_child",
+        test: "engine::topology::recover::tests::process_spawn_kill_child",
     },
     Claim {
         site: EffectSiteId::Process(ProcessSite::Spawn),
@@ -1163,7 +1163,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::AmbientJobJoined,
             mode: InjectionMode::ErrorReturn,
         },
-        test: "engine::topology::coverage::tests::the_ambient_job_join_error_return_point_fires_under_the_process_funnel",
+        test: "engine::tests::a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converges",
     },
     Claim {
         site: EffectSiteId::Process(ProcessSite::Spawn),
@@ -1171,7 +1171,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::CreatedSuspended,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::coverage::tests::spawn_kill_child",
+        test: "engine::topology::recover::tests::process_spawn_kill_child",
     },
     Claim {
         site: EffectSiteId::Process(ProcessSite::Spawn),
@@ -1179,7 +1179,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::PrivateJobAssigned,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::coverage::tests::spawn_kill_child",
+        test: "engine::topology::recover::tests::process_spawn_kill_child",
     },
     Claim {
         site: EffectSiteId::Process(ProcessSite::Spawn),
@@ -1187,7 +1187,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::Resumed,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::coverage::tests::spawn_kill_child",
+        test: "engine::topology::recover::tests::process_spawn_kill_child",
     },
     Claim {
         site: EffectSiteId::Process(ProcessSite::Spawn),
@@ -1195,7 +1195,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::ReaperStarted,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::coverage::tests::spawn_kill_child",
+        test: "engine::topology::recover::tests::process_spawn_kill_child",
     },
     Claim {
         site: EffectSiteId::Process(ProcessSite::Spawn),
@@ -1203,7 +1203,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::PreExecPgidAndRegister,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::coverage::tests::spawn_kill_child",
+        test: "engine::topology::recover::tests::process_spawn_kill_child",
     },
     Claim {
         site: EffectSiteId::Process(ProcessSite::Spawn),
@@ -1211,7 +1211,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::Exec,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::coverage::tests::spawn_kill_child",
+        test: "engine::topology::recover::tests::process_spawn_kill_child",
     },
     Claim {
         site: EffectSiteId::Process(ProcessSite::Spawn),
@@ -1219,7 +1219,7 @@ pub const CLAIMS: &[Claim] = &[
             point: SubEffectPoint::Registered,
             mode: InjectionMode::Kill,
         },
-        test: "engine::topology::coverage::tests::spawn_kill_child",
+        test: "engine::topology::recover::tests::process_spawn_kill_child",
     },
     Claim {
         site: EffectSiteId::Container(ContainerSite::WriteIntent),
@@ -1254,12 +1254,12 @@ pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Container(ContainerSite::MountGitView),
         phase: EntryPhase::Before,
-        test: "engine::topology::coverage::tests::the_container_launch_funnels_execute_both_phases_under_the_production_adapter",
+        test: "engine::topology::recover::tests::container_mount_kill_child",
     },
     Claim {
         site: EffectSiteId::Container(ContainerSite::MountGitView),
         phase: EntryPhase::After,
-        test: "engine::topology::coverage::tests::the_container_launch_funnels_execute_both_phases_under_the_production_adapter",
+        test: "engine::topology::recover::tests::container_mount_kill_child",
     },
     Claim {
         site: EffectSiteId::Container(ContainerSite::Stop),

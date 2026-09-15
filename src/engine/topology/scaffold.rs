@@ -33,7 +33,7 @@ use crate::topology::schema::TOPOLOGY_SCHEMA;
 use crate::util::DurabilityLedger;
 use crate::workspace_manager::{
     EffectHooks, HarnessEffects, WorkspaceManager,
-    fixture::{Fixture, died_by_abort, run_kill_child, write_file},
+    fixture::{Fixture, died_by_abort, run_kill_child_within, write_file},
 };
 
 use super::attempt::{AttemptPlan, GatePlan, ReviewerPlan};
@@ -319,7 +319,8 @@ impl EffectHooks for ArmedEffects {
         let shared = self.inner.phase(site, phase);
         for (armed_site, armed_phase, injection) in &self.armed {
             if *armed_site == site && *armed_phase == phase {
-                return *injection;
+                return crate::observations::Exported::new(Arc::clone(self.inner.harness()))
+                    .carried(*injection);
             }
         }
         shared
@@ -1539,6 +1540,8 @@ impl Run {
 
 const HANDOFF: &str = "fixture-root";
 
+pub(super) const KILL_CHILD_BOUND: Duration = Duration::from_secs(120);
+
 pub(super) fn kill_dir(tag: &str) -> PathBuf {
     static ORDINAL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let ordinal = ORDINAL.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1551,13 +1554,47 @@ pub(super) fn kill_dir(tag: &str) -> PathBuf {
 }
 
 pub(super) fn kill_child_and_adopt(test: &str, dir: &Path, site: &str) -> Run {
-    let status = run_kill_child(
+    launch_the_kill_child_and_adopt(test, dir, site, &[])
+}
+
+pub(super) fn kill_child_and_adopt_in_a_scratch_tree(
+    test: &str,
+    site: &str,
+) -> (crate::rundir::scratch_tree::ScratchTree, Run) {
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "kill").unwrap_or_else(
+        |refusal| panic!("`{site}`: a scratch tree for the kill child: {refusal:?}"),
+    );
+    let temporary = tree.path().as_os_str();
+    let run = launch_the_kill_child_and_adopt(
         test,
+        tree.path(),
+        site,
         &[
-            ("UPSTROKE_TEST_KILL_DIR", dir.as_os_str()),
-            ("UPSTROKE_TEST_KILL_SITE", std::ffi::OsStr::new(site)),
+            ("TMPDIR", temporary),
+            ("TMP", temporary),
+            ("TEMP", temporary),
         ],
     );
+    (tree, run)
+}
+
+fn launch_the_kill_child_and_adopt(
+    test: &str,
+    dir: &Path,
+    site: &str,
+    temporary: &[(&str, &std::ffi::OsStr)],
+) -> Run {
+    let mut env = vec![
+        ("UPSTROKE_TEST_KILL_DIR", dir.as_os_str()),
+        ("UPSTROKE_TEST_KILL_SITE", std::ffi::OsStr::new(site)),
+    ];
+    env.extend_from_slice(temporary);
+    let Some(status) = run_kill_child_within(test, &env, KILL_CHILD_BOUND) else {
+        panic!(
+            "`{site}`: the kill child `{test}` did not end within {KILL_CHILD_BOUND:?}, and was \
+             killed and reaped"
+        );
+    };
     assert!(
         died_by_abort(&status),
         "`{site}`: the child must have died by `std::process::abort()`, and it ended {status:?} \

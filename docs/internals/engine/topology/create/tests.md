@@ -98,6 +98,13 @@ Armed in the shared harness at the moment it becomes due, so
 the injection and the coverage record still come from one
 place rather than two that could disagree.
 
+## `fn point(&mut self, site: EventSite, point: SubEffectPoint, mode: InjectionMode) -> Injection {` › `crate::observations::Exported::new(Arc::clone(&self.harness)).carried(injection)`
+
+A kill point's observation is exported before the kill is handed back. The funnel aborts right
+after, and a process that dies at a hook never reaches the drop that would otherwise write the
+record, so without this a kill child's record never names the point it died at. The harness guard is
+released first, because the export takes the same lock.
+
 ## `struct ArmedContainer {`
 
 The container funnel, armed and recording.
@@ -201,7 +208,10 @@ build error in a `TOPOLOGY_MODULE` — tests included.
 ## `impl Fixture` › `fn at(root: &Path) -> Self {`
 
 The same layout at a root that already exists — how a kill child
-lands in the directory its parent will inspect.
+lands in the directory its parent will inspect, and how the witnesses
+of rows 94, 103 and 106 build their fixture inside a
+`rundir::scratch_tree` tree they hold, which reclaims it however the
+witness ends.
 
 ## `impl Fixture` › `fn private_root_canonical(&self) -> PathBuf {`
 
@@ -1414,3 +1424,75 @@ are one answer.
 
 Finding 5's pair: the two committed shapes are one variant and two
 sentences, and only one of them promises a marker repair.
+
+## `fn an_error_after_the_log_is_created_refuses_the_run_resumably_and_the_next_creation_opens_it_again()`
+
+Gate 5's strict re-audit, row 94: `Event.OpenLog`'s `Create` point in error-return mode had no
+committed witness. The coverage test fires it on a bare path and drives nothing.
+
+A run creation is armed to fail at the point. P5 opens the log, creates the file and syncs its
+directory (the `SyncRecord` for the point says so), and then the point answers the error. The
+creation stops at P4 and names the point. Nothing past the open ran, so no commit record and no
+`run_started` exist. The creator proves the husk its own and removes both halves, which leaves no
+run directory for the next command to step around. The next creation over the same repository
+converges: its open creates the log and syncs the directory again, `run_started` is the log's one
+line, the run classifies committed, and the log replays twice to states equal to each other and to
+the live fold. Its fixture is built with `Fixture::at` inside a `rundir::scratch_tree` tree the
+witness holds, reclaimed when the witness returns and when it unwinds (#292's review round 6).
+
+## `fn kill_the_creation(root: &Path, site: &str) {`
+
+Launch `create_kill_child` armed at `site`, and require that it died by the armed abort within
+`KILL_CHILD_BOUND`. The witnesses of rows 103 and 106 launch through it. It reads the child's exit
+status, which `run_kill_child_within` returns, through `died_by_abort`: on Unix, termination by
+`SIGABRT`, and on Windows the exit status `0xC0000409` an abort ends with there, neither of which an
+exit, an ordinary panic or a `Child::kill` produces. A child still running at the bound is killed and
+reaped there, and that fails the same assertion.
+
+`spawn_and_wait` would not do for these two. It launches through the host runner, whose
+`ProcessOutput` carries no signal on Unix, so its callers can only check what the output is not: a
+child the runner itself stopped at its output limit returns no code and passes a check for "not 0"
+(#292's review round 4). `run_kill_child_within` spawns through `std::process::Command` from
+`workspace_manager::fixture`, outside the topology modules, so calling it here is not the build
+error a `Command` of this module's own would be.
+
+## `fn a_kill_after_the_first_line_is_synced_leaves_a_committed_run_whose_next_census_repairs_its_marker()`
+
+Gate 5's strict re-audit, row 106: `Event.AppendFirst`'s `Synced` kill had no committed witness. The
+prefix test killed at P6 only before the marker's removal, after the append had returned, and
+`event_kill_child` kills a bare log. The `p6synced` arm of `create_kill_child` kills run creation at
+the first line's `Synced` point: `run_started` is written and synced, and nothing after it runs.
+
+What the kill leaves is one committed line and nothing else in the log, the commit record, and the
+marker P7 never removed, so the directory classifies committed. The authority's action for the
+point is that the next open converges the surviving prefix through its stable-prefix barrier
+before any fold-derived effect, and the next command's census repairs the marker. Both are
+performed here with production code, in that order. `establish_stable_prefix`, given the commit
+record's digest, proves the synced line as the stable prefix and acts on nothing. Then
+`census_run_dirs` plans the committed run's stale marker for repair and removes it through
+`RunDir.RemoveMarker`. The run still classifies committed, readers list it, the log is untouched,
+and it replays twice to states equal to each other and to the barrier's fold.
+
+The kill child's record is the one that holds the point, because the parent never appends. Its
+fixture is built with `Fixture::at` inside a `rundir::scratch_tree` tree the witness holds,
+reclaimed when the witness returns and when it unwinds (#292's review round 6).
+
+## `fn census_of(`
+
+The next command's run-directory census over the fixture's repository, with a runtime, a
+liveness probe and a view that no run here uses.
+
+## `fn a_kill_while_the_first_line_is_written_leaves_a_retained_husk_whose_next_open_truncates_it() {`
+
+Gate 5's audit, row 103: `Event.AppendFirst`'s `Written` kill, recovered. The `p5btorn` arm of
+`create_kill_child` kills the creation part way through the first line, past the commit record,
+and `torn_first_line_without_commit_record_reclaimed_and_with_commit_record_retained` classifies
+what it leaves and stops. Here the later processes act on it. The census retains the husk possibly
+committed and removes nothing, the torn line included, because a torn first line past the commit
+record cannot be told from a truncated committed log. The next open through the barrier, given
+the commit record's digest, truncates the torn line (and warns once), then refuses resumably at
+`Event.ProvePrefixStable`: the commit record names a first line the proven prefix does not hold.
+Nothing committed is left in the log, so there is no event to replay, and a census after the open
+still retains the husk possibly committed. Its fixture is built with `Fixture::at` inside a
+`rundir::scratch_tree` tree the witness holds, reclaimed when the witness returns and when it
+unwinds (#292's review round 6).

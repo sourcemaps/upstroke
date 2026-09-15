@@ -35,8 +35,9 @@ use super::fixture::{
     Fixture, REPLACEMENT_DISABLED_EXIT, REPLACEMENT_WITNESS, ReplacementLiveness,
     ambient_replacement_controls, assert_replacement_controls_pinned, create_dir, died_by_abort,
     died_by_kill, environment_without_ambient_replacement_controls, fan_out_directory, git,
-    git_out, replacement_liveness, run_kill_child, run_replacement_witness_child, scratch,
-    without_ambient_replacement_controls, write_file, write_include_path,
+    git_out, replacement_liveness, run_kill_child, run_kill_child_within,
+    run_replacement_witness_child, scratch, without_ambient_replacement_controls, write_file,
+    write_include_path,
 };
 
 /// `value`, which the fixture read from Git, as the [`ObjectId`] every
@@ -9518,19 +9519,19 @@ fn a_kill_at_id_unread_aborts_before_the_id_is_recorded() {
     );
     // **And it must be an abort by this platform's own measure, not merely
     // an exit that is neither success nor a panic** (PR #136 pass 2,
-    // finding 2). `died_by_abort` names `SIGABRT` on Unix, but on Windows it
-    // is a negation — unsuccessful and not the panic's 101 — because
-    // `abort()` reaches `__fastfail`, whose code has moved between CRT
-    // versions and so cannot be written down. A negation accepts far too
-    // much: change only the Windows arm of `Injection::Kill` from `abort()`
-    // to `process::exit(1)` and the helper still dies at `IdUnread`, still
-    // leaves the object, and still satisfies every assertion here.
+    // finding 2). Until #292, `died_by_abort` named `SIGABRT` on Unix but was
+    // a negation on Windows — unsuccessful and not the panic's 101 — and a
+    // negation accepts far too much: change only the Windows arm of
+    // `Injection::Kill` from `abort()` to `process::exit(1)` and the helper
+    // still dies at `IdUnread`, still leaves the object, and still satisfies
+    // every assertion here. Its Windows arm now names the status an abort
+    // exits with there; this comparison stays beside it.
     //
-    // What cannot be written down can still be **measured**. This runs one
-    // child whose whole body is `std::process::abort()`, on this machine and
-    // this CRT, moments before the comparison — so the oracle is the exit
-    // status an abort actually produces here, and `exit(1)` is not equal to
-    // it on either platform.
+    // It **measures** that status rather than naming it. This runs one child
+    // whose whole body is `std::process::abort()`, on this machine, moments
+    // before the comparison — so the oracle is the exit status an abort
+    // actually produces here, and `exit(1)` is not equal to it on either
+    // platform.
     let aborted = run_kill_child(
         "workspace_manager::tests::abort_probe_helper",
         &[(ABORT_PROBE, std::ffi::OsStr::new("1"))],
@@ -9604,33 +9605,72 @@ fn exit_one_probe_helper() {
     std::process::exit(1);
 }
 
-/// The abort oracle is tested, on every platform, against the thing it must
-/// not accept (PR #136 pass 2, finding 2).
+/// Set to make [`exit_134_probe_helper`] exit 134.
+const EXIT_134_PROBE: &str = "UPSTROKE_PR292_EXIT_134_PROBE";
+
+/// Exit 134, the number a shell gives a death by `SIGABRT`, which is what
+/// #292's review turned its kill children's aborts into.
+#[test]
+#[ignore = "subprocess helper"]
+fn exit_134_probe_helper() {
+    if std::env::var_os(EXIT_134_PROBE).is_none() {
+        return;
+    }
+    std::process::exit(134);
+}
+
+/// How long [`the_abort_oracle_separates_an_abort_from_an_exit_of_one`] waits
+/// for each probe. A probe ends at once when it ends as its name says, so the
+/// bound bounds a probe that does not, never a healthy one.
+const PROBE_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Launch the probe `helper` with `switch` set, and return how it ended.
 ///
-/// The finding is Windows-shaped: there `died_by_abort` is a *negation* —
-/// unsuccessful, and not the panic's 101 — because `abort()` reaches
-/// `__fastfail`, whose code has moved between CRT versions. A negation admits
+/// Through `run_kill_child_within`, so a probe still running at
+/// [`PROBE_BOUND`] is killed and reaped there, and this fails naming it rather
+/// than waiting on it (#292's review round 6: the oracle's test waited on its
+/// probes without a deadline).
+fn probe_end(helper: &str, switch: &str) -> std::process::ExitStatus {
+    run_kill_child_within(helper, &[(switch, std::ffi::OsStr::new("1"))], PROBE_BOUND)
+        .unwrap_or_else(|| {
+            panic!(
+                "the probe `{helper}` did not end within {PROBE_BOUND:?}, and was killed and reaped"
+            )
+        })
+}
+
+/// The abort oracle is tested, on every platform, against the ends it must
+/// not accept (PR #136 pass 2, finding 2; #292's review round 5, finding 1).
+///
+/// The finding was Windows-shaped: there `died_by_abort` was a *negation* —
+/// unsuccessful, and not the panic's 101. A negation admits
 /// `process::exit(1)`, so changing only the Windows arm of `Injection::Kill`
 /// from `abort()` to `exit(1)` left `a_kill_at_id_unread_aborts_before_the_id_is_recorded`
-/// green there. **The Unix legs cannot see that mutation** — measured: with
-/// `Injection::Kill` changed to `exit(1)`, that test fails on Linux at the
-/// reviewed head as well, because the Unix arm names `SIGABRT` — so Linux was
-/// never going to witness the repair through that test.
+/// green there, and #292's kill witnesses passed over children that exited
+/// 134 instead of aborting. **The Unix legs cannot see that mutation** —
+/// measured: with `Injection::Kill` changed to `exit(1)`, that test fails on
+/// Linux at the reviewed head as well, because the Unix arm names `SIGABRT` —
+/// so Linux was never going to witness the repair through that test.
 ///
 /// This one witnesses it everywhere, by testing the oracle rather than the
-/// funnel: two real children, one aborting and one exiting 1, and the two
-/// predicates applied to both. It says in one place what the repair claims —
-/// that the shared predicate accepts an exit this suite must reject, and that
-/// comparing against a *measured* abort does not.
+/// funnel: real children, one aborting, one exiting 1 and one exiting 134, and
+/// the predicates applied to each. The negation the Windows arm was accepts
+/// all three; `died_by_abort`, whose Windows arm now names the status an abort
+/// exits with, and a comparison against a *measured* abort accept only the
+/// abort. The abort is real, so a Windows whose abort ended with another
+/// status fails the first premise. Each probe is launched with a deadline
+/// ([`probe_end`]): one that does not end fails the test at [`PROBE_BOUND`],
+/// killed and reaped, instead of holding it.
 #[test]
 fn the_abort_oracle_separates_an_abort_from_an_exit_of_one() {
-    let aborted = run_kill_child(
-        "workspace_manager::tests::abort_probe_helper",
-        &[(ABORT_PROBE, std::ffi::OsStr::new("1"))],
-    );
-    let exited = run_kill_child(
+    let aborted = probe_end("workspace_manager::tests::abort_probe_helper", ABORT_PROBE);
+    let exited = probe_end(
         "workspace_manager::tests::exit_one_probe_helper",
-        &[(EXIT_ONE_PROBE, std::ffi::OsStr::new("1"))],
+        EXIT_ONE_PROBE,
+    );
+    let exited_134 = probe_end(
+        "workspace_manager::tests::exit_134_probe_helper",
+        EXIT_134_PROBE,
     );
 
     // The premises: each child really ended the way its name says.
@@ -9643,20 +9683,33 @@ fn the_abort_oracle_separates_an_abort_from_an_exit_of_one() {
         Some(1),
         "the exit probe must exit 1: {exited:?}"
     );
+    assert_eq!(
+        exited_134.code(),
+        Some(134),
+        "the second exit probe must exit 134: {exited_134:?}"
+    );
 
-    // What `died_by_abort` is on Windows, written out and applied here so the
-    // weakness is demonstrated rather than described: unsuccessful, and not
-    // the panic's 101. It accepts BOTH children.
+    // What `died_by_abort` was on Windows until #292, written out and applied
+    // here so the weakness stays demonstrated rather than described:
+    // unsuccessful, and not the panic's 101. It accepts EVERY child.
     let windows_form = |status: &std::process::ExitStatus| {
         const PANIC: i32 = 101;
         !status.success() && status.code() != Some(PANIC)
     };
     assert!(
-        windows_form(&aborted) && windows_form(&exited),
-        "the negation accepts both ends, which is the finding: {aborted:?} vs {exited:?}"
+        windows_form(&aborted) && windows_form(&exited) && windows_form(&exited_134),
+        "the negation accepts every end, which is the finding: {aborted:?} vs {exited:?} vs \
+         {exited_134:?}"
     );
 
-    // And what the repair uses does not.
+    // And the oracle does not, on any platform.
+    assert!(
+        !died_by_abort(&exited) && !died_by_abort(&exited_134),
+        "`died_by_abort` must reject an exit of 1 and an exit of 134 on every platform: \
+         {exited:?}, {exited_134:?}"
+    );
+
+    // Nor does a comparison against the measured abort.
     assert!(
         !same_end(&aborted, &exited),
         "an abort and an exit of 1 must not be the same end on any platform: {aborted:?} \
@@ -9670,9 +9723,9 @@ fn the_abort_oracle_separates_an_abort_from_an_exit_of_one() {
 
 /// Whether two exit statuses are the **same end**, by value.
 ///
-/// Not "both unsuccessful": that is the negation `died_by_abort` has to fall
-/// back on for Windows, and it accepts every failing exit there is. On Unix an
-/// end is a signal or a code; on Windows it is a code. Two ends are the same
+/// Not "both unsuccessful": that is the negation `died_by_abort` fell back on
+/// for Windows until #292, and it accepts every failing exit there is. On Unix
+/// an end is a signal or a code; on Windows it is a code. Two ends are the same
 /// when those agree.
 fn same_end(left: &std::process::ExitStatus, right: &std::process::ExitStatus) -> bool {
     #[cfg(unix)]

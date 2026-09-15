@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::engine::topology::scaffold::{
-    ALPHA, BETA, OUTCOME, Run, kill_child_and_adopt, kill_child_environment, kill_dir,
+    ALPHA, BETA, OUTCOME, Run, kill_child_and_adopt, kill_child_and_adopt_in_a_scratch_tree,
+    kill_child_environment, kill_dir,
 };
 use crate::topology::effects::{
     EffectSiteId, HookPhase, Injection, ObjectResidue, ObjectSite, RefSite, ResidueElement,
@@ -335,20 +336,19 @@ fn dispatch_kill_child() {
     run.hand_off(&dir);
     match which.as_str() {
         "before_intent" => run.arm(INTENT, HookPhase::Before, Injection::Kill),
+        "after_intent" => run.arm(INTENT, HookPhase::After, Injection::Kill),
         "after_add" => run.arm(ADD, HookPhase::After, Injection::Kill),
         other => panic!("unknown site `{other}`"),
     }
     let _ = run.try_dispatch(ALPHA, 0);
-    unreachable!("the kill must have taken this process");
+    panic!("`{which}`: the dispatch returned past the kill armed at its site");
 }
 
 #[test]
 fn kill_after_dispatch_recreates_worktree_without_spend() {
-    for site in ["before_intent", "after_add"] {
-        let dir = kill_dir("killdispatch");
-        let mut run = kill_child_and_adopt(
+    for site in ["before_intent", "after_intent", "after_add"] {
+        let (_handoff, mut run) = kill_child_and_adopt_in_a_scratch_tree(
             "engine::topology::dispatch::tests::dispatch_kill_child",
-            &dir,
             site,
         );
 
@@ -385,6 +385,15 @@ fn kill_after_dispatch_recreates_worktree_without_spend() {
             existed,
             site == "after_add",
             "`{site}`: the child left the wrong prefix on disk"
+        );
+        assert_eq!(
+            run.fixture
+                .manager
+                .intents()
+                .expect("the intents list")
+                .contains(&dispatched.slot),
+            site != "before_intent",
+            "`{site}`: the durable intent is there exactly when the child died after writing it"
         );
 
         let reuse = resume_open_no_attempt(

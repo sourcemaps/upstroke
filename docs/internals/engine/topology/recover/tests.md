@@ -4025,6 +4025,390 @@ hard-blocks; an answer staged and published into `answers/` while the
 engine is away is ingested by the next incarnation's first step, `via`
 `event-log`, before anything else is selected.
 
+## `const ANSWER_INGEST_KILL_CHILD: &str =`
+
+The kill child of the two `Answer.Ingest` witnesses below.
+
+## `struct IngestKilledAt {`
+
+The run directory's production adapter with a kill armed at one phase of `Answer.Ingest`. The
+harness records the phase first; the kill is exported (`Exported::carried`) before it is handed
+back, because the funnel aborts right after and a process that dies at a hook never reaches the
+drop that would otherwise write the record.
+
+## `struct FunnelAnswers {`
+
+The answer reader the kill child ingests through. The production reader, `EventLogAnswers`,
+reaches `rundir::ingest_answer` with `NoHooks` (`interaction::read_answer`), so no hook of
+`Answer.Ingest` is ever consulted on the schema-4 ingestion path and no adapter can be armed
+there. This reads the same file through the same funnel with an armed adapter, answering `id`
+`event-log` as the production reader does; it is the seam, not a second reader — the recovery in
+the witnesses ingests through the production `EventLogAnswers`.
+
+## `fn answer_ingest_kill_child() {`
+
+Resumes the planted run as `RESUMER` and takes one step with `FunnelAnswers`, whose adapter kills
+the process at the phase `UPSTROKE_TEST_KILL_PHASE` names. The first step's first branch is the
+ingestion, so the process dies inside the read of the published answer, before (or just after)
+the file is read and before any `question_answered` exists. Reaching the panic means the kill did
+not land.
+
+## `fn a_kill_at_the_answer_ingestion_converges_on_the_next_incarnation(`
+
+G5's clause 2 found both phases of `Answer.Ingest` observed under the production adapter and
+faulted by no committed test; G4 had killed the ingestion's append (`T-ANSWER`, `G4B-O9`) with
+temporary tests it did not commit. This kills a real process at each phase of the read itself: an
+over-limit repair's human admission is planted, the answer is staged and published into
+`answers/`, and the child dies at the phase. What it leaves is the exact durable prefix — the
+planted log plus the child's `run_resumed` and nothing after it, no `question_answered` — and the
+answer file byte for byte (R21), read here through `Answer.Ingest` under the production adapter.
+The authority's rows for both phases are empty (a read-only observation) and its actions are the
+before phase's and the repeated observation. The tabled recovery is the next incarnation's first
+step, through the production reader: it ingests the answer exactly once, `via` `event-log`, the
+activated repair runs, the file is left as it was published, and the log replays twice to equal
+states.
+
+A further incarnation then resumes with the file still on disk and ingests nothing, because the
+question the file answers is closed. The log still holds one `question_answered` and the file is
+untouched. That is the claim Gate 5's temporary witness B made for `Answer.Ingest`/after (row 127
+of the strict re-audit): an answer on disk is read again by every later incarnation, and only a
+still-open question makes the read an ingestion. The witness below commits B itself.
+
+## `fn an_answer_left_on_disk_under_a_budget_stop_is_ingested_once_by_the_resume_in_its_epoch_and_never_again()`
+
+Gate 5's temporary witness B, committed under a house name. An over-limit repair's question is
+open when a budget stop is appended, and the answer is published into `answers/` while the run is
+stopped. The resume's first step ingests it, in epoch 1 rather than in the stopped epoch: the stop
+is cleared, the question is closed, and the file is retained byte for byte (R21). A second resume
+with the file still on disk ingests nothing, the log still holds exactly one `question_answered`
+for the repair, and it replays twice to equal states.
+
+## `const CANDIDATE_SEQUENCE_KILL_CHILD: &str =`
+
+The kill child of the two candidate-sequence witnesses below.
+
+## `struct EffectKilledAt {`
+
+The production adapter bundle with a kill armed at one phase of one Git-effect site. Only the
+effects family is wrapped; the run directory, the event log, the container and the process
+funnels answer through the bundle unchanged, and the fold projections are handed on.
+
+## `struct KillingEffects {`
+
+The effect family's production adapter, with the kill answered at `at`. The harness records the
+phase first, and the observation is exported (`Exported::carried`) before the kill is handed back:
+the funnel aborts right after, and a process that dies at a hook never reaches the drop that would
+otherwise write the record. The existing `ArmedFinalization` answers its injection without that
+export, so it is not reused here.
+
+## `fn adopted_by_a_kill_child(root: PathBuf, plan: Plan) -> std::mem::ManuallyDrop<Self> {`
+
+The parent's fixture, as its kill child sees it. Every path is the parent's, and the recorded
+start is read back from the planted log's first line rather than built again. The value is never
+dropped, because `Fixture`'s drop removes the tree the parent still has to read.
+
+## `fn candidate_sequence_kill_child() {`
+
+Resumes the parent's healthy run as `RESUMER` and takes one step of the driver with an editing
+worker. With nothing planted, that step is a whole attempt: the dispatch, the attempt, the judge
+and then the candidate sequence. The child dies at the coordinate `UPSTROKE_TEST_KILL_COORDINATE`
+names: before `Object.CandidateCommitTree` writes the candidate commit, at its `IdUnread` point
+(the object written and its id not yet read, a point armed in kill mode on the shared harness),
+before `Ref.PinCandidatePrepared` pins the written commit, or after `Ref.CreateCandidates` has
+created the candidates ref. Reaching the panic means the kill did not land.
+
+## `fn kill_the_candidate_sequence(fixture: &Fixture, coordinate: &str, tag: &str) -> usize {`
+
+Runs the child at one coordinate and returns how many events the planted log held, so a witness
+reads exactly the prefix the dead process appended.
+
+## `fn assert_no_unreachable_commit_but_snapshot_inputs(fixture: &Fixture, tag: &str) {`
+
+The judge snapshots the attempt's tree for its gates and reviewers, and every snapshot's ephemeral
+commit is unreferenced once its snapshot is removed (R27). Those commits are expected. A candidate
+commit is the other unreferenced commit a kill here could leave, and it carries the attempt's own
+message, so this refuses any unreachable commit whose subject is not the snapshot input's.
+
+## `fn registered_with_git(`
+
+Whether Git lists the worktree among the repository's registered worktrees; the settlement
+witnesses below assert it before and after, beside the directory itself. A registration is compared
+by its name and its parent directory, which outlives the removed worktree: `util::same_path` on the
+full paths panics when neither resolves.
+
+## `fn a_kill_before_the_candidate_commit_is_written_is_settled_interrupted_and_the_next_generation_writes_it()`
+
+Gate 5's strict re-audit, row 54: `Object.CandidateCommitTree`/before had no committed witness. The
+audit's shape was a `candidate_kill_child` arm classified by `recovery_for`, but review round 3
+refused exactly that for the adjacent row 39: `recovery_for` describes the interrupted settlement
+and nothing performs it. Only a resume performs it, so the kill is taken inside the driver's own
+candidate sequence and the recovery is the next incarnation's.
+
+The kill leaves the exact prefix the authority tables for this phase: `run_resumed`,
+`task_dispatched` and `attempt_started`, no `candidate_prepared`, no candidate commit, no pin and
+no candidates ref, with the attempt's worktree and intent still standing (R9). The rows are empty
+and the action is the before phase's. `recovery_for` agrees: settle interrupted, no object, no
+promotion. The next incarnation's recovery performs that settlement, step (d): one
+`attempt_interrupted` before its `run_resumed`, and the closed generation's worktree and intent
+reclaimed (the directory gone and no longer registered with Git, which it was before), without
+writing a candidate commit itself. Its first step then performs the site's
+action from the prefix in which nothing was performed. The next generation's attempt is accepted
+and writes the candidate commit through `Object.CandidateCommitTree` (both phases observed under
+the production adapter). It is pinned, prepared and created, the candidates ref names it, the pin
+is pruned, nothing is owed, and the log replays twice to equal states.
+
+## `fn candidate_commits_left_to_git(fixture: &Fixture) -> Vec<String> {`
+
+The commits the object store holds that nothing references, other than the judge's snapshot
+inputs: the candidate commits a dead capture wrote and never pinned.
+
+## `fn a_kill_after_the_candidate_commit_is_written_is_settled_interrupted_and_the_commit_left_to_git(`
+
+Rows 39, 55 and 56 of Gate 5's audit: `Ref.PinCandidatePrepared`/before, and
+`Object.CandidateCommitTree` after and at its `IdUnread` kill point. The first two share one
+durable prefix (only the id's read lies between the commit-tree's after phase and the pin's before
+phase), and the third leaves the same objects: the attempt in flight (`run_resumed`,
+`task_dispatched`, `attempt_started`), its worktree and intent standing, exactly one candidate
+commit in the object store that nothing references, and no pin or candidates ref. The candidate
+module's kill witnesses stop at `recovery_for`, a plan; here the next incarnation's resume
+performs it. Step (d) settles the attempt interrupted, finishes no promotion, reclaims the closed
+generation's worktree (gone and no longer registered with Git) and intent, writes no commit and no
+pin of its own, and leaves the dead
+capture's commit to Git exactly as it was. The next generation's attempt is accepted with its own
+commit-tree performed, which, with a tree, parent and message identical to the dead one's, may
+write the same object: the dead commit is afterwards either still Git's or that commit, never
+adopted by name. The log holds the settlement and then one whole candidate sequence, nothing is
+owed afterwards, and the log replays twice to equal states. The kill child's record holds the
+coordinates; the parent never kills at them.
+
+## `fn a_kill_after_the_candidates_ref_is_created_is_adopted_by_the_next_resume_which_appends_the_queue_position_once()`
+
+Gate 5's strict re-audit, row 36: `Ref.CreateCandidates`/after had no committed witness. It is
+driven the same way as row 54, and for the same reason: the recovery the authority tables is the
+resume's step (f), `finish_promotions`, which composes `create_candidates_ref`,
+`append_candidate_created` and `reclaim_after_creation`. That step is not called by hand.
+
+The kill leaves the candidate prepared and its candidates ref created (R11, at the recorded
+commit), with the pin not yet pruned, the worktree not reclaimed, the generation `Promoting` and
+no `task_candidate_created`. The rows are R11 and the action is adoption. The next incarnation's
+recovery finishes the promotion. It enters no create funnel for the ref the dead process created
+(`Ref.CreateCandidates` before is never reached), and it appends `task_candidate_created` before
+its own `run_resumed`. It leaves the ref where it was, prunes the pin and reclaims the worktree and
+intent. The next step integrates the adopted candidate: the integration ref is at the commit the
+dead incarnation prepared, the log holds one queue position across the kill and the recovery, and
+it replays twice to equal states.
+
+Because the recovery adopts, this parent's own observation record never holds the coordinate. The
+registry cites the kill child for it, whose record does.
+
+## `fn an_error_after_the_logs_torn_tail_is_truncated_refuses_the_resume_before_any_effect_and_the_next_resume_converges()`
+
+Gate 5's strict re-audit, row 96: `Event.OpenLog`'s `TruncateTornTail` point in error-return mode had
+no committed witness. The coverage test fires it on a bare log and drives nothing.
+
+A committed run with an open generation gets an unterminated final line, and the resume is armed
+to fail at the point. The open truncates the torn tail, the point answers the error, and the
+barrier stops at the open. The refusal names the point and says the run is resumable. What the
+refusal leaves is the registry's residue for the point, R21 with the unterminated final line
+truncated, byte for byte the committed prefix. There is no proof, no census effect and no recovery
+event: nothing derived from the log was acted on. The next resume repeats the barrier: it opens
+and proves the prefix, and has nothing left to truncate because the refused open's truncation
+stands. It appends its `run_resumed` after the committed prefix, and the log replays twice to equal
+states.
+
+## `fn worktree_lease_answer(fixture: &Fixture) -> String {`
+
+Asks `rundir::tests::worktree_lease_probe_child`, in a process of its own, whether the fixture's
+worktree lease is absent, free or refused. The lease is an `fcntl` lock, which never conflicts
+within the process that holds it, so only another process can say whether a hold survived. The
+probe is spawned through the process funnel, as this module requires.
+
+## `fn a_fault_at_the_worktree_lease_ends_the_resume_and_the_next_resume_converges(`
+
+Gate 5's strict re-audit, row 131, `Lock.AcquireWorktree`/after, together with the lease's other
+three coordinates. Rows 136 and 137 (`Lock.CreateWorktreeLockFile` before and after) and
+`Lock.AcquireWorktree`/before were witnessed at the module in `rundir::tests`, and those witnesses
+replay no log. Here each one is a resume of a planted run.
+
+The resume is armed with an error at the coordinate, and the command ends there. The error named is
+the injected one, nothing after the lease ran, and the log is untouched. The lease's file is left
+exactly when its create was performed, and the authority's rows agree: R25 after the create, R17
+after the hold, nothing before either. The run lock is gone, and another process finds the lease
+free (or its file absent), because the command that ended released its hold with it. The file the
+faulted command created is then marked. The next resume runs all four lease coordinates, holds the
+lease while its handle lives and releases it with the handle. It adopts the marked file rather than
+replacing it (read only after the release, because closing any descriptor of the file drops the
+process's `fcntl` lock), appends its `run_resumed` after the planted prefix, and the log replays
+twice to equal states.
+
+## `const PROCESS_SPAWN_KILL_CHILD: &str = "engine::topology::recover::tests::process_spawn_kill_child";`
+
+The kill child of the worker-spawn witnesses below.
+
+## `struct SpawnPhaseFault {`
+
+The process funnel's production adapter with an optional injection at one phase of a process site.
+The harness records the phase, and the injection is exported before it is handed back, because a
+kill there aborts the process. With a `pid_file` it also records the spawned worker's pid (and its
+creation time on Windows) as soon as the child is created, so that the parent can check the
+worker is gone after its coordinator's death.
+
+## `const SPAWNED_WORKER_PID: &str = "spawned-worker.pid";`
+
+Where the kill child records the worker it spawned, beside the fixture.
+
+## `struct SpawningRunner {`
+
+The runner the spawn witnesses run the driver with. The implementer's invocation runs a real
+process, this test binary, through the host runner and so through `Process.Spawn` under whatever
+adapter the host runner carries. It then edits the worktree as `RecordingRunner::editing` does, so
+an attempt that survives its spawn is accepted. Every other invocation is the recording runner's.
+The driver's own step holds the run's cleanup scope while it runs, so the reaper the funnel starts
+takes the run's cleanup lease, just as it does in production.
+
+## `fn process_spawn_kill_child() {`
+
+Resumes the parent's healthy run as `RESUMER` and takes one driver step. Its worker is
+`sleeps_until_terminated`, a process that outlives the kill unless something settles it. The child
+dies at the coordinate `UPSTROKE_TEST_KILL_COORDINATE` names: `Process.Spawn`'s after phase, or one
+of its points armed in kill mode on the shared harness. `AmbientJobJoined`, which the containment
+step consults rather than the spawn, is driven through `contain_write_command` before anything is
+resumed. Every other coordinate is reached by a coordinator already contained, as a write command
+is before it spawns anything: on Windows this is what puts a child created suspended inside the
+ambient kill-on-close job from its creation (INV-18). Without it, the first Windows guest run of
+the `CreatedSuspended` arm orphaned a suspended worker outside any job. That worker held the
+handles it inherited, and the guest's command wrapper could not append to its own log after cargo
+exited (`guest/variant-only-CreatedSuspended.log`). Reaching a panic means the kill did not land.
+
+## `fn a_kill_in_the_workers_spawn_converges_on_the_next_resume(coordinate: &str, tag: &str) {`
+
+Gate 5's strict re-audit, rows 141 and 144 to 152: `Process.Spawn`'s after phase and the spawn's
+kill points, each driven to the recovery the authority tables. The kill leaves the worker's
+attempt in flight (`run_resumed`, `task_dispatched`, `attempt_started`); the containment kill
+leaves nothing appended. The run's cleanup hold is then released. On Unix this is the reaper
+settling the worker's process group, which would otherwise hold the lease for the sleeper's two
+minutes. A control run with the reaper's cleanup delayed by thirty seconds fails this assertion
+(`~/pr10-evidence/fix-g5-b/witness/controls/`). On Windows there is no reaper, and the worker the
+child recorded must be gone within the same bound, because the ambient job and the private job
+close with the process that held them. The run lock is gone. The next resume converges: step (d) settles the attempt
+interrupted, and the next attempt, run through the recording runner (which spawns nothing), is
+accepted. The log replays twice to equal states.
+The kill child's record holds the coordinates, because the parent never spawns under the armed
+adapter.
+
+## `fn an_error_before_the_workers_process_is_spawned_spawns_nothing_and_the_next_step_spawns_it() {`
+
+Gate 5's strict re-audit, row 140: `Process.Spawn`/before. The driver's step runs the worker with
+an error at the spawn's before phase. The phase is observed and the after phase is not. That the
+funnel created no process is measured, not inferred from the phases: the adapter records every
+`child_created` callback the funnel makes, and the refused step made none (#292's round-1
+fix-check lens, finding 2, whose mutation moves the before phase after `ProcessTree::spawn` and
+leaves the phase observations as they were; under it this assertion fails). The attempt started
+and produced no candidate, and no cleanup hold outlives the step. The next resume converges. Its
+step runs the implementer through the host runner under an unarmed adapter, which records the
+worker process the funnel creates, and that attempt is accepted. The log replays twice to equal
+states.
+
+## `fn a_fault_at_the_workers_termination_ends_the_step_and_the_next_resume_converges(`
+
+`Process.Terminate` before and after (rows 142 and 143 of Gate 5's strict re-audit), driven through
+the driver rather than the funnel alone. The funnel witnesses in `agent::proc::tests` replay no log.
+The worker is the sleeper with a one-second timeout, so the funnel terminates it, and an error is
+armed at the phase. The step returns that error with the attempt in flight, and the funnel has
+settled the worker it could not terminate cleanly: no cleanup hold outlives the step. The next
+resume settles the attempt interrupted, the next attempt is accepted, and the log replays twice to
+equal states. This parent's record holds both phases, because its own runner's adapter observed
+them.
+
+## `fn an_error_at_the_ambient_job_join_refuses_the_write_command_and_the_next_resume_converges() {`
+
+On Windows, `AmbientJobJoined` in error-return mode: the containment step refuses before the join,
+the armed point fires, and nothing is appended; the next resume converges, appends its
+`run_resumed`, and the log replays twice to equal states. Row 145 of Gate 5's audit is cited to
+`engine::tests::a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converges`
+instead, which drives a production write-command facade whose continuation can be seen (#292's
+round-1 fix-check lens, finding 4): this test calls the containment step itself, so a facade that
+went on after the refusal would not be on its path.
+
+## `const CONTAINER_MOUNT_KILL_CHILD: &str =`
+
+The kill child of the git-view mount witnesses below.
+
+## `struct ContainerKilledAt {`
+
+The container funnels' production adapter with a kill at one phase of one site. The harness
+records the phase first, and the kill is exported before it is handed back, because the funnel
+aborts the process on it.
+
+## `fn mount_phase_named(name: &str) -> HookPhase {`
+
+The phase `UPSTROKE_TEST_KILL_COORDINATE` names, in the parent's `Debug` spelling.
+
+## `fn container_mount_kill_child() {`
+
+Adopts the parent's two-task run with its stale verification, and drives one step with the
+production container runner (`production_container_runner`, the fake runtime, a disposable view)
+carrying `ContainerKilledAt` at `Container.MountGitView`'s phase. The step settles the planted
+verification interrupted, starts the re-verification, and launches its gate container: the intent
+is written and synced, and the process dies at the mount's phase. Reaching the panic means the kill
+did not land. This child's record holds the coordinate; the parent never mounts under the armed
+adapter.
+
+## `fn a_kill_at_the_gate_containers_git_view_mount_is_reclaimed_by_the_next_resume(`
+
+Rows 159 and 160 of Gate 5's audit, `Container.MountGitView` before and after, in a run that has a
+log. The module witnesses in `runner::container::tests` fault a bare `launch` and census the
+residue twice; they hold no event log, so nothing there replays (#292's round-1 fix-check lens,
+finding 5). Here the launch is a topology run's gate: the kill child dies at the phase with
+`merge_verification_interrupted`, `run_resumed` and `merge_verification_started` appended after
+the planted prefix, exactly the dead incarnation's intent in the container namespace, and the view
+present exactly where the authority's rows put R19. The run lock went with the process. The next
+resume's container census reclaims the dead launch through its funnels (the view unmounted once,
+the intent removed once) before it appends anything; neither survives, and the verification the
+kill took is settled interrupted after the planted one. A further step re-verifies the candidate
+and publishes it under the next sequence, and the log replays twice to equal states.
+
+
+## `fn a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(`
+
+Rows 31 and 32 of Gate 5's audit, `Ref.CreateIntegration` before and after, and row 68,
+`RunDir.RemoveMarker`/after. The creator removes its marker (P6 to P7) and then creates the
+integration ref (P8), with nothing durable between the two (`create.rs`, `p8_create_integration_ref`
+takes the `MarkerRemoved` state directly), so a creation killed after its marker's removal leaves
+row 68's prefix and row 31's alike. `Fixture::healthy` is the committed run with its marker still
+standing (P6); the prefix is built through the funnels whose phases it ends at: `rundir::remove_marker`
+under the production adapter, and for row 32 also the refs seam's `create_zero_old` under the
+production effects adapter, so the run's log is exactly its committed prefix, the marker is gone,
+the ref exists only when its creation was performed, and nothing a later step does (the execution
+root) is on disk. `kill_after_run_started_creates_integration_ref` and
+`a_resume_adopts_an_integration_ref_already_at_the_recorded_base` resume `Fixture::healthy` with its
+marker standing, a state no creation prefix has. The resume then adopts the marker's removal (it
+enters no `RunDir.RemoveMarker`), creates the ref only when the prefix lacks it (across the prefix
+and the resume, the ref is created once at the recorded name and base), appends `run_resumed`
+after the committed prefix, and the log replays twice to equal states.
+
+## `const STAGING_PATH_KILL_CHILD: &str = "engine::topology::recover::tests::staging_path_kill_child";`
+
+The kill child of the staging-path witness below.
+
+## `fn staging_path_kill_child() {`
+
+Adopts the parent's two-task run with a stale queued candidate on a moved head and drives one step,
+which takes the staging path, and dies before `Ref.PinPrepared` pins the proposal the pick produced.
+Reaching the panic means the kill did not land. This child's record holds the coordinates.
+
+## `fn a_kill_before_the_proposals_pin_leaves_a_picked_staging_worktree_the_next_resume_reclaims_and_the_candidate_integrates()`
+
+Rows 43 and 58 of Gate 5's audit, `Ref.PinPrepared`/before and `Object.ProposalCherryPick`/after,
+one durable prefix: the pick complete, the staging worktree's head the proposal commit on the moved
+head, no prepared pin. The committed plants put a pinned proposal (`Ref.PinPrepared`/after) or the
+integration head with the pick's internal residue in the staging worktree; this kills the staging
+path at the pin's before phase instead. The dead step recorded nothing but its `run_resumed`, the
+staging worktree and its intent stand (R10) and no pin names the proposal. The resume reclaims the
+staging worktree with force and its intent, creates no pin, leaves the candidate queued with nothing
+recorded for the interrupted pick, and leaves the proposal commit to Git. The next step takes the
+staging path again and publishes the candidate under sequence 1 on the moved head, and the log
+replays twice to equal states.
 ## `fn two_lineages_publish_in_lineage_order_and_the_younger_candidate_waits_behind_the_older() {`
 
 Two lineages overlapping on one path, the younger's repair already queued

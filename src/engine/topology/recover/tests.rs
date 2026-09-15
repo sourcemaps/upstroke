@@ -12939,6 +12939,2951 @@ fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnatio
     assert_eq!(answers[0].question, question.id);
 }
 
+const ANSWER_INGEST_KILL_CHILD: &str = "engine::topology::recover::tests::answer_ingest_kill_child";
+
+struct IngestKilledAt {
+    inner: rundir::HarnessHooks,
+    at: HookPhase,
+}
+
+impl rundir::RunDirHooks for IngestKilledAt {
+    fn hook(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        let answered = self.inner.hook(site, phase);
+        if site == EffectSiteId::Answer(crate::topology::effects::AnswerSite::Ingest)
+            && phase == self.at
+        {
+            crate::observations::Exported::new(Arc::clone(self.inner.harness()))
+                .carried(Injection::Kill)
+        } else {
+            answered
+        }
+    }
+}
+
+struct FunnelAnswers {
+    dir: PathBuf,
+    hooks: Mutex<IngestKilledAt>,
+}
+
+impl crate::interaction::AnswerSource for FunnelAnswers {
+    fn id(&self) -> &'static str {
+        "event-log"
+    }
+
+    fn resolve(&self, question: &crate::ir::Question) -> Result<crate::ir::Answer, UpstrokeError> {
+        self.poll(question)
+    }
+
+    fn poll(&self, question: &crate::ir::Question) -> Result<crate::ir::Answer, UpstrokeError> {
+        let component = crate::util::filename_component(question.id.as_str());
+        let mut hooks = self.hooks.lock().unwrap_or_else(PoisonError::into_inner);
+        match rundir::ingest_answer(&self.dir, &component, &mut *hooks)? {
+            Some(text) => serde_json::from_str(&text).map_err(|error| UpstrokeError::Parse {
+                message: format!("{component}: {error}"),
+            }),
+            None => Ok(crate::ir::Answer::Unanswered),
+        }
+    }
+}
+
+#[test]
+#[ignore = "spawned as a subprocess by the answer-ingestion kill witnesses"]
+fn answer_ingest_kill_child() {
+    use crate::engine::topology::run::{RunSeams, TopologyRun};
+    use crate::engine::topology::select::Ceiling;
+
+    let repo_root = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_REPO").expect("the parent names the repository"),
+    );
+    let git_dir = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_GITDIR").expect("the parent names the git dir"),
+    );
+    let at = match std::env::var("UPSTROKE_TEST_KILL_PHASE")
+        .expect("the parent names the phase")
+        .as_str()
+    {
+        "before" => HookPhase::Before,
+        "after" => HookPhase::After,
+        other => panic!("`{other}` is not a phase of `Answer.Ingest`"),
+    };
+    let repo_key = RepoKey::v1(&std::fs::canonicalize(&git_dir).expect("the git dir exists"));
+    let harness = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
+    let runtime = runtime_holding_the_record();
+    let liveness = FakeOwnerLiveness::new();
+    let view = DisposableDirView::new(ContainerTrace::default());
+    let incarnation = IncarnationId(RESUMER.to_owned());
+    let today = container_selection();
+    let root = RootDerived::derive_with(&repo_root, RUN_ID, None, TOPOLOGY_SCHEMA)
+        .expect("(a0) derives in the child");
+    let private_root = root.private_root().to_path_buf();
+    let manager = crate::workspace_manager::WorkspaceManager::derive(
+        &repo_root,
+        &private_root,
+        RUN_ID,
+        RESUMER,
+    )
+    .expect("the child's repository and private root are real directories");
+    let inputs = FrozenInputs {
+        plan: plan_with(true),
+        normalized_plan_digest: "sha256:aaaa".to_owned(),
+    };
+    let mut warnings = Vec::new();
+    let (_recovered, handle) = run_recovery_order(
+        root,
+        &ResumeSeams {
+            repo_root: &repo_root,
+            worktree_git_dir: &git_dir,
+            repo_key: &repo_key,
+            incarnation: &incarnation,
+            inputs: inputs.clone(),
+            today: &today,
+            runtime: &runtime,
+            liveness: &liveness,
+            view: &view,
+            preflight: &AlwaysCertifies,
+            refs: &manager,
+            manager: &manager,
+            clock: &Frozen,
+        },
+        &mut hooks,
+        &mut warnings,
+    )
+    .expect("the child resumes the planted run");
+    let mut run = TopologyRun::resumed(handle, inputs, Ceiling::unlimited());
+    let sleeper = RecordingSleeper::default();
+    let runner = RecordingRunner::default();
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
+    let paths = crate::rundir::RunPaths::with_private_root(&repo_root, RUN_ID, &private_root);
+    let plans = crate::engine::assembly::FrozenPlans {
+        adapters: &adapters,
+        paths: &paths,
+        gates: &[],
+        pools: &[],
+        caps: &[],
+        worker_timeout: Duration::from_secs(300),
+        decisions: &[],
+    };
+    let answers = FunnelAnswers {
+        dir: paths.answers(),
+        hooks: Mutex::new(IngestKilledAt {
+            inner: rundir::HarnessHooks::new(Arc::clone(&harness)),
+            at,
+        }),
+    };
+    let seams = RunSeams {
+        manager: &manager,
+        clock: &Frozen,
+        sleeper: &sleeper,
+        runner: &runner,
+        adapters: &adapters,
+        paths: &paths,
+        plans: &plans,
+        reviews: &crate::engine::attempt::LegacyReviewPasses,
+        input_policy: &crate::engine::attempt::LegacyReviewInputPolicy,
+        answers: &answers,
+        ids: &FixedIds,
+        halts_run: false,
+    };
+    let stepped = run.step(&seams, &mut hooks);
+    panic!(
+        "the kill at `Answer.Ingest` ({at}) did not take this process: {:?}",
+        stepped.map(|_| ())
+    );
+}
+
+fn a_kill_at_the_answer_ingestion_converges_on_the_next_incarnation(phase: HookPhase, tag: &str) {
+    use crate::engine::topology::scaffold::KILL_CHILD_BOUND;
+    use crate::topology::effects::{AnswerSite, EntryPhase, ResumeAction};
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child_within};
+
+    let fixture = Fixture::build(
+        tag,
+        Damage {
+            two_tasks: true,
+            no_automatic_repairs: true,
+            ..Damage::default()
+        },
+    );
+    let (rejection, repair) = plant_over_limit_repair(&fixture);
+    let question = rejection
+        .repair
+        .admission
+        .question()
+        .expect("a human admission carries its question")
+        .clone();
+    let paths = crate::rundir::RunPaths::with_private_root(
+        &fixture.repo_root,
+        &fixture.started.run_id,
+        &fixture.private_root,
+    );
+    paths.create().expect("the run directories are creatable");
+    let component = crate::util::filename_component(question.id.as_str());
+    crate::rundir::stage_answer(
+        &paths.answers(),
+        &component,
+        &crate::ir::Answer::Answered {
+            text: question.options.first().expect("an option").clone(),
+        },
+        &mut crate::rundir::NoHooks,
+    )
+    .expect("the answer is staged");
+    crate::rundir::publish_answer(&paths.answers(), &component, &mut crate::rundir::NoHooks)
+        .expect("and published");
+    let published = paths.answers().join(format!("{component}.json"));
+    let answer_bytes = std::fs::read(&published).expect("the published answer");
+    let before = fixture.log_bytes();
+    let events_before = TopologyFold::parse_log(&before)
+        .expect("the planted log parses")
+        .len();
+
+    let Some(status) = run_kill_child_within(
+        ANSWER_INGEST_KILL_CHILD,
+        &[
+            ("UPSTROKE_TEST_KILL_REPO", fixture.repo_root.as_os_str()),
+            ("UPSTROKE_TEST_KILL_GITDIR", fixture.git_dir.as_os_str()),
+            (
+                "UPSTROKE_TEST_KILL_PHASE",
+                std::ffi::OsStr::new(&phase.to_string()),
+            ),
+        ],
+        KILL_CHILD_BOUND,
+    ) else {
+        panic!(
+            "{tag}: the kill child armed at `Answer.Ingest` ({phase}) did not end within \
+             {KILL_CHILD_BOUND:?}, and was killed and reaped"
+        );
+    };
+    assert!(
+        died_by_abort(&status),
+        "{tag}: the child did not die by the kill at `Answer.Ingest` ({phase}): {status:?}"
+    );
+    assert!(
+        !rundir::is_running(&fixture.public()),
+        "{tag}: the run lock went with the dead process"
+    );
+    let after_kill = fixture.log_bytes();
+    assert!(
+        after_kill.starts_with(&before),
+        "{tag}: the kill rewrote nothing of the planted log"
+    );
+    let events = TopologyFold::parse_log(&after_kill).expect("the log the kill left parses");
+    assert_eq!(
+        events
+            .iter()
+            .skip(events_before)
+            .map(|event| event.body.kind())
+            .collect::<Vec<_>>(),
+        vec!["run_resumed"],
+        "{tag}: the durable prefix is the child's resume and nothing after it"
+    );
+    assert!(
+        answers_of(&events, repair).is_empty(),
+        "{tag}: no `question_answered` precedes the recovery"
+    );
+    let site = EffectSiteId::Answer(AnswerSite::Ingest);
+    let semantics = site.semantics(match phase {
+        HookPhase::Before => EntryPhase::Before,
+        HookPhase::After => EntryPhase::After,
+        HookPhase::Point { .. } => panic!("the ingestion's coordinates are its two phases"),
+    });
+    assert!(
+        semantics.rows.is_empty(),
+        "{tag}: a read-only observation leaves no row holding anything ({:?})",
+        semantics.rows
+    );
+    assert_eq!(
+        semantics.action,
+        match phase {
+            HookPhase::Before => ResumeAction::ResumeUnperformed,
+            _ => ResumeAction::RepeatObservation,
+        },
+        "{tag}: the action the authority tables for `{site}` ({phase})"
+    );
+
+    let observed = harness();
+    let mut read_hooks = rundir::HarnessHooks::new(Arc::clone(&observed));
+    let read = rundir::ingest_answer(&paths.answers(), &component, &mut read_hooks)
+        .expect("the answer file reads")
+        .expect("R21: the published answer survives the kill");
+    drop(read_hooks);
+    assert_eq!(
+        read.as_bytes(),
+        answer_bytes.as_slice(),
+        "{tag}: byte for byte"
+    );
+    for seen in [HookPhase::Before, HookPhase::After] {
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(site, seen),
+            "{tag}: the surviving file is read through `{site}` ({seen}) under the production \
+             adapter"
+        );
+    }
+
+    let seams = DriveSeams {
+        answers_from_run_dir: true,
+        ..DriveSeams::default()
+    };
+    let runner = driven_runner(&seams);
+    let mut hooks = HarnessTopologyHooks::new(harness());
+    let driven = drive_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &seams,
+        2,
+        &runner,
+        &mut hooks,
+    );
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Answered {
+                key,
+                declined: false,
+                ..
+            })) if *key == repair
+        ),
+        "{tag}: the next incarnation's first step ingests the answer the dead one did not: {:?}",
+        driven.progress
+    );
+    assert!(
+        matches!(
+            driven.progress.get(1),
+            Some(Ok(Progress::Settled {
+                key,
+                accepted: true,
+                ..
+            })) if *key == repair
+        ),
+        "{tag}: and the activated repair runs: {:?}",
+        driven.progress
+    );
+    let answers = answers_of(&driven.log, repair);
+    assert_eq!(
+        answers.len(),
+        1,
+        "{tag}: exactly one `question_answered` across the kill and the recovery"
+    );
+    assert_eq!(answers[0].question, question.id);
+    assert_eq!(answers[0].via, "event-log");
+    assert_eq!(
+        std::fs::read(&published).expect("R21: the answer file is never pruned"),
+        answer_bytes,
+        "{tag}: the ingested file is left as it was published"
+    );
+    let again = drive_as(
+        &fixture,
+        "01KZTDDDDDDDDDDDDDDDDDDDDD",
+        &runtime_holding_the_record(),
+        &seams,
+        2,
+        &driven_runner(&seams),
+        &mut HarnessTopologyHooks::new(harness()),
+    );
+    assert!(
+        again
+            .progress
+            .iter()
+            .all(|step| !matches!(step, Ok(Progress::Answered { .. }))),
+        "{tag}: a further resume with the file still on disk ingests nothing, because its \
+         question is closed: {:?}",
+        again
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        answers_of(&again.log, repair).len(),
+        1,
+        "{tag}: still exactly one `question_answered`"
+    );
+    assert_eq!(
+        std::fs::read(&published).expect("R21: the answer file is never pruned"),
+        answer_bytes,
+        "{tag}: and the file is untouched"
+    );
+    let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("parses");
+    let once = TopologyFold::replay(fixture.inputs(), &events).expect("replays");
+    let twice = TopologyFold::replay(fixture.inputs(), &events).expect("replays again");
+    assert_eq!(once.state(), twice.state(), "{tag}: replay twice equal");
+}
+
+#[test]
+fn a_kill_before_an_answer_is_read_leaves_the_question_open_and_the_next_incarnation_ingests_it() {
+    a_kill_at_the_answer_ingestion_converges_on_the_next_incarnation(
+        HookPhase::Before,
+        "answer-ingest-kill-before",
+    );
+}
+
+#[test]
+fn a_kill_after_an_answer_is_read_appends_nothing_and_the_next_incarnation_ingests_it() {
+    a_kill_at_the_answer_ingestion_converges_on_the_next_incarnation(
+        HookPhase::After,
+        "answer-ingest-kill-after",
+    );
+}
+
+#[test]
+fn an_answer_left_on_disk_under_a_budget_stop_is_ingested_once_by_the_resume_in_its_epoch_and_never_again()
+ {
+    let fixture = Fixture::build(
+        "answers-stopped-epoch",
+        Damage {
+            two_tasks: true,
+            no_automatic_repairs: true,
+            ..Damage::default()
+        },
+    );
+    let (rejection, repair) = plant_over_limit_repair(&fixture);
+    let question = rejection
+        .repair
+        .admission
+        .question()
+        .expect("a human admission carries its question")
+        .clone();
+    append_events(
+        &fixture,
+        &[TopologyEventBody::BudgetExceeded {
+            data: BudgetExceeded4 {
+                epoch: Epoch(0),
+                budget: BudgetKind::Run,
+                limit_usd: 1.0,
+                spent_usd: 2.0,
+                key: Some(repair),
+            },
+        }],
+    );
+    let paths = crate::rundir::RunPaths::with_private_root(
+        &fixture.repo_root,
+        &fixture.started.run_id,
+        &fixture.private_root,
+    );
+    paths.create().expect("the run directories are creatable");
+    let component = crate::util::filename_component(question.id.as_str());
+    crate::rundir::stage_answer(
+        &paths.answers(),
+        &component,
+        &crate::ir::Answer::Answered {
+            text: question.options.first().expect("an option").clone(),
+        },
+        &mut crate::rundir::NoHooks,
+    )
+    .expect("the answer is staged");
+    crate::rundir::publish_answer(&paths.answers(), &component, &mut crate::rundir::NoHooks)
+        .expect("and published");
+    let published = crate::interaction::answer_path(&paths.answers(), &question.id);
+    let bytes = std::fs::read(&published).expect("the published answer");
+    let stopped = replayed(&fixture);
+    assert!(
+        stopped.budget_stop().is_some()
+            && stopped
+                .open_questions()
+                .is_some_and(|open| open.contains_key(&question.id)),
+        "the durable state is budget-stopped in epoch 0 with the question open"
+    );
+
+    let seams = DriveSeams {
+        answers_from_run_dir: true,
+        ..DriveSeams::default()
+    };
+    let first = drive(&fixture, &seams, 2);
+    assert!(
+        matches!(
+            first.progress.first(),
+            Some(Ok(Progress::Answered { key, declined: false, .. })) if *key == repair
+        ),
+        "the resume's first step ingests the answer left on disk under the stop: {:?}",
+        first
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    let (resumed, log) = replayed_with_events(&fixture);
+    assert_eq!(answers_of(&log, repair).len(), 1, "ingested exactly once");
+    assert_eq!(
+        resumed.epoch().map(|epoch| epoch.0),
+        Some(1),
+        "in the resumed epoch, not the stopped one"
+    );
+    assert!(
+        resumed.budget_stop().is_none(),
+        "the resume cleared the stop"
+    );
+    assert!(
+        resumed
+            .open_questions()
+            .is_none_or(|open| !open.contains_key(&question.id)),
+        "the ingestion closes the question"
+    );
+    assert_eq!(
+        std::fs::read(&published).expect("retained"),
+        bytes,
+        "R21: the answer file is retained byte for byte after its ingestion"
+    );
+
+    let second = drive(&fixture, &seams, 2);
+    assert!(
+        second
+            .progress
+            .iter()
+            .all(|step| !matches!(step, Ok(Progress::Answered { .. }))),
+        "the file names a closed question and is not ingested again: {:?}",
+        second
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    let (_, log) = replayed_with_events(&fixture);
+    assert_eq!(
+        answers_of(&log, repair).len(),
+        1,
+        "still exactly one `question_answered` for the repair"
+    );
+    assert_eq!(
+        std::fs::read(&published).expect("retained"),
+        bytes,
+        "and the file is untouched"
+    );
+    assert_replays_twice_equal(&fixture, "answers-stopped-epoch");
+}
+
+fn plant_a_budget_stopped_run_whose_finalization_pruned_the_root(
+    tag: &str,
+) -> (Fixture, crate::topology::events::CandidateRef) {
+    use crate::workspace_manager::fixture::git;
+
+    let fixture = Fixture::build(
+        tag,
+        Damage {
+            two_tasks: true,
+            extra: vec![
+                dispatched(),
+                attempt_started(1),
+                attempt_finished(
+                    1,
+                    AttemptSettlement::Closed {
+                        transition: SettlementTransition::Retry,
+                        lease: LeaseDisposition::PredictedReleased,
+                    },
+                ),
+            ],
+            ..Damage::default()
+        },
+    );
+    let beta = plant_queued_beta(&fixture);
+    git(
+        &fixture.repo_root,
+        &[
+            "update-ref",
+            fixture.started.integration_ref.as_str(),
+            fixture.base_sha.as_str(),
+        ],
+    );
+    let names = crate::engine::topology::candidate::CandidateNames::of(RUN_ID, BETA, GEN);
+    assert!(
+        ref_target(&fixture, names.prepared_ref.as_str()).is_some(),
+        "{tag}: beta's candidate-prepared pin stands before the budget stop"
+    );
+    let stopped = drive(
+        &fixture,
+        &DriveSeams {
+            run_ceiling_usd: Some(0.000_001),
+            ..DriveSeams::default()
+        },
+        2,
+    );
+    let shapes: Vec<String> = stopped.progress.iter().map(progress_shape).collect();
+    assert!(
+        matches!(
+            stopped.progress.get(1),
+            Some(Ok(Progress::Finished {
+                outcome: RunOutcome::BudgetExceeded,
+                execution_root_removed: true,
+                ..
+            }))
+        ),
+        "{tag}: the run ends BudgetExceeded and finalization removes the execution root: {shapes:?}"
+    );
+    assert!(
+        !fixture.manager().execution_root().exists(),
+        "{tag}: the durable state the next resume starts from has no execution root"
+    );
+    assert_eq!(
+        ref_target(&fixture, names.prepared_ref.as_str()),
+        None,
+        "{tag}: finalization pruned beta's candidate-prepared pin (R23)"
+    );
+    assert_eq!(
+        ref_target(&fixture, beta.candidate_ref.as_str()).as_deref(),
+        Some(beta.commit_sha.as_str()),
+        "{tag}: the authoritative candidates ref stands (R11)"
+    );
+    (fixture, beta)
+}
+
+#[track_caller]
+fn assert_the_resume_integrates_the_queued_candidate(
+    fixture: &Fixture,
+    beta: &crate::topology::events::CandidateRef,
+    resumed: &Driven,
+    tag: &str,
+) {
+    let shapes: Vec<String> = resumed.progress.iter().map(progress_shape).collect();
+    assert!(
+        resumed
+            .progress
+            .iter()
+            .any(|step| matches!(step, Ok(Progress::Integrated { key, .. }) if *key == BETA)),
+        "{tag}: the resume publishes the queued candidate without its pruned pin: {shapes:?}"
+    );
+    assert_eq!(
+        ref_target(fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(beta.commit_sha.as_str()),
+        "{tag}: the integration ref is at beta's candidate commit"
+    );
+    let (once, events) = replayed_with_events(fixture);
+    let twice = TopologyFold::replay(fixture.inputs(), &events).expect("replays again");
+    assert_eq!(once.state(), twice.state(), "{tag}: replay twice equal");
+}
+
+#[test]
+fn a_resume_after_finalization_pruned_the_execution_root_and_the_pins_recreates_the_root_and_integrates_the_queued_candidate()
+ {
+    let tag = "pruned-root-and-pins";
+    let (fixture, beta) = plant_a_budget_stopped_run_whose_finalization_pruned_the_root(tag);
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let resumed = drive_hooked(
+        &fixture,
+        &DriveSeams {
+            run_ceiling_usd: Some(10.0),
+            ..DriveSeams::default()
+        },
+        6,
+        &mut hooks,
+    );
+    drop(hooks);
+    let create_root = EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot);
+    for phase in [HookPhase::Before, HookPhase::After] {
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(create_root, phase),
+            "{tag}: the resume recreates the pruned root through `{create_root}` ({phase})"
+        );
+    }
+    assert_the_resume_integrates_the_queued_candidate(&fixture, &beta, &resumed, tag);
+}
+
+#[test]
+fn a_fault_after_the_execution_root_is_recreated_leaves_the_root_and_the_next_resume_adopts_it() {
+    let tag = "root-recreated-then-faulted";
+    let (fixture, beta) = plant_a_budget_stopped_run_whose_finalization_pruned_the_root(tag);
+    let create_root = EffectSiteId::Worktree(WorktreeSite::CreateExecutionRoot);
+    let before = fixture.log_bytes();
+
+    let faulted = harness();
+    let mut armed = ArmedFinalization::new(&faulted, (create_root, HookPhase::After));
+    let error = message(
+        &resume_with_real_refs_hooked(&fixture, &mut armed)
+            .expect_err("the fault after the root's creation ends the resume"),
+    );
+    drop(armed);
+    assert!(
+        error.contains(&format!("{create_root}")) && error.contains("after"),
+        "{tag}: the injected error is the one returned: {error}"
+    );
+    assert!(
+        faulted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .observed(create_root, HookPhase::After),
+        "{tag}: the armed coordinate was reached"
+    );
+    assert!(
+        fixture.manager().execution_root().is_dir(),
+        "{tag}: the root the funnel created stands (R18)"
+    );
+    assert_eq!(
+        fixture.log_bytes(),
+        before,
+        "{tag}: nothing was appended before the fault"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let resumed = drive_hooked(
+        &fixture,
+        &DriveSeams {
+            run_ceiling_usd: Some(10.0),
+            ..DriveSeams::default()
+        },
+        6,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert_eq!(
+        observed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .count(create_root, HookPhase::Before),
+        0,
+        "{tag}: the next resume adopts the root the faulted one created and does not create it \
+         again"
+    );
+    assert_the_resume_integrates_the_queued_candidate(&fixture, &beta, &resumed, tag);
+}
+
+#[track_caller]
+fn assert_the_candidate_integrates_under_the_next_sequence_on_the_moved_head(
+    fixture: &Fixture,
+    driven: &Driven,
+    head: &CommitSha,
+    tag: &str,
+) {
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Integrated {
+                key: ALPHA,
+                sequence: crate::topology::events::SequenceId(1),
+                ..
+            }))
+        ),
+        "{tag}: the stale candidate integrates under sequence 1: {:?}",
+        driven.progress
+    );
+    let published =
+        ref_target(fixture, fixture.started.integration_ref.as_str()).expect("the ref moved");
+    assert_eq!(
+        crate::workspace_manager::fixture::git(
+            &fixture.repo_root,
+            &["rev-parse", &format!("{published}^")]
+        ),
+        head.0,
+        "{tag}: the proposal sits on the moved head"
+    );
+    assert!(
+        fixture.manager().intents().expect("intents").is_empty(),
+        "{tag}: nothing of the staging path is left after the publication"
+    );
+    assert_eq!(merged_sequences(fixture), vec![0, 1], "{tag}");
+    let (once, events) = replayed_with_events(fixture);
+    let twice = TopologyFold::replay(fixture.inputs(), &events).expect("replays again");
+    assert_eq!(once.state(), twice.state(), "{tag}: replay twice equal");
+}
+
+#[test]
+fn a_resume_over_a_stale_queued_candidate_with_nothing_staged_takes_the_staging_path_and_publishes_the_proposal()
+ {
+    let tag = "stale-nothing-staged";
+    let fixture = Fixture::build(
+        tag,
+        Damage {
+            two_tasks: true,
+            ..Damage::default()
+        },
+    );
+    let (_planted, head) = plant_stale_queued_candidate(&fixture);
+    assert!(
+        fixture.manager().intents().expect("intents").is_empty(),
+        "{tag}: the durable prefix stages nothing: no staging intent, no staging worktree"
+    );
+    assert_eq!(
+        ref_target(
+            &fixture,
+            crate::engine::topology::integrate::prepared_pin_ref(
+                RUN_ID,
+                crate::topology::events::SequenceId(1)
+            )
+            .as_str()
+        ),
+        None,
+        "{tag}: and no prepared pin for the next sequence"
+    );
+    assert_eq!(merged_sequences(&fixture), vec![0], "{tag}");
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let driven = drive_hooked(&fixture, &DriveSeams::default(), 1, &mut hooks);
+    drop(hooks);
+    for (site, phase) in [
+        (
+            EffectSiteId::Worktree(WorktreeSite::WriteStagingIntent),
+            HookPhase::Before,
+        ),
+        (
+            EffectSiteId::Worktree(WorktreeSite::WriteStagingIntent),
+            HookPhase::After,
+        ),
+        (
+            EffectSiteId::Worktree(WorktreeSite::AddStaging),
+            HookPhase::After,
+        ),
+        (
+            EffectSiteId::Object(ObjectSite::ProposalCherryPick),
+            HookPhase::After,
+        ),
+        (EffectSiteId::Ref(RefSite::PinPrepared), HookPhase::After),
+    ] {
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(site, phase),
+            "{tag}: the resumed step takes the staging path through `{site}` ({phase})"
+        );
+    }
+    assert_the_candidate_integrates_under_the_next_sequence_on_the_moved_head(
+        &fixture, &driven, &head, tag,
+    );
+}
+
+#[test]
+fn a_clean_staging_worktree_left_at_the_integration_head_is_reclaimed_and_the_candidate_integrates()
+{
+    let tag = "clean-staging-left";
+    let fixture = Fixture::build(
+        tag,
+        Damage {
+            two_tasks: true,
+            ..Damage::default()
+        },
+    );
+    let (_planted, head) = plant_stale_queued_candidate(&fixture);
+    let staging = plant_staging_worktree(&fixture, 1, head.as_str());
+    let site = EffectSiteId::Object(ObjectSite::ProposalCherryPick);
+    let target = crate::workspace_manager::ResidueTarget::new(&fixture.repo_root)
+        .at(&staging)
+        .from_base(head.as_str());
+    assert_eq!(
+        crate::workspace_manager::classify_object_residue(site, &target).expect("classified"),
+        crate::topology::effects::ObjectResidue::None,
+        "{tag}: the staging worktree stands at the integration head with nothing cherry-picked \
+         into it: `Worktree.AddStaging`'s after phase, `{site}`'s before phase"
+    );
+
+    let (_, handle) = resume_with_real_refs(&fixture, &harness())
+        .expect("the resume reclaims the clean staging worktree rather than refusing");
+    assert_staging_residue_reclaimed(&fixture, &staging, &handle);
+    drop(handle);
+
+    let driven = drive(&fixture, &DriveSeams::default(), 1);
+    assert_the_candidate_integrates_under_the_next_sequence_on_the_moved_head(
+        &fixture, &driven, &head, tag,
+    );
+}
+
+const CANDIDATE_SEQUENCE_KILL_CHILD: &str =
+    "engine::topology::recover::tests::candidate_sequence_kill_child";
+
+struct EffectKilledAt {
+    inner: HarnessTopologyHooks,
+    effects: KillingEffects,
+}
+
+struct KillingEffects {
+    inner: crate::workspace_manager::HarnessEffects,
+    harness: Arc<Mutex<HookHarness>>,
+    at: (EffectSiteId, HookPhase),
+}
+
+impl EffectKilledAt {
+    fn new(harness: &Arc<Mutex<HookHarness>>, at: (EffectSiteId, HookPhase)) -> Self {
+        Self {
+            inner: HarnessTopologyHooks::new(Arc::clone(harness)),
+            effects: KillingEffects {
+                inner: crate::workspace_manager::HarnessEffects::new(Arc::clone(harness)),
+                harness: Arc::clone(harness),
+                at,
+            },
+        }
+    }
+}
+
+impl crate::workspace_manager::EffectHooks for KillingEffects {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        let answered = self.inner.phase(site, phase);
+        if (site, phase) == self.at {
+            crate::observations::Exported::new(Arc::clone(&self.harness)).carried(Injection::Kill)
+        } else {
+            answered
+        }
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        self.inner.refusal_cause()
+    }
+}
+
+impl TopologyHooks for EffectKilledAt {
+    fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+        &mut self.effects
+    }
+
+    fn rundir(&mut self) -> &mut dyn rundir::RunDirHooks {
+        self.inner.rundir()
+    }
+
+    fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+        self.inner.events()
+    }
+
+    fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+        self.inner.container()
+    }
+
+    fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+        self.inner.spawn()
+    }
+
+    fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+        self.inner.folded(fold, events);
+    }
+}
+
+impl Fixture {
+    fn adopted_by_a_kill_child(root: PathBuf, plan: Plan) -> std::mem::ManuallyDrop<Self> {
+        let repo_root = root.join("repo");
+        let git_dir = repo_root.join(".git");
+        let private_root = root.join("private");
+        let log = crate::util::read_file_bounded(
+            &rundir::public_dir(&repo_root, RUN_ID).join(rundir::EVENT_LOG),
+        )
+        .expect("the parent planted the log");
+        let events = TopologyFold::parse_log(&log).expect("the planted log parses");
+        let Some(TopologyEventBody::RunStarted { data }) = events.first().map(|event| &event.body)
+        else {
+            panic!("the planted log opens with `run_started`");
+        };
+        let started = (**data).clone();
+        let first_line = log
+            .split(|byte| *byte == b'\n')
+            .next()
+            .expect("the log has a first line")
+            .to_vec();
+        std::mem::ManuallyDrop::new(Self {
+            root,
+            base_sha: started.base_sha.clone(),
+            repo_key: RepoKey::v1(&std::fs::canonicalize(&git_dir).expect("the git dir exists")),
+            repo_root,
+            git_dir,
+            private_root,
+            started,
+            first_line,
+            plan,
+        })
+    }
+}
+
+#[test]
+#[ignore = "spawned as a subprocess by the candidate-sequence kill witnesses"]
+fn candidate_sequence_kill_child() {
+    let root = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_ROOT").expect("the parent names the fixture root"),
+    );
+    let at = match std::env::var("UPSTROKE_TEST_KILL_COORDINATE")
+        .expect("the parent names the coordinate")
+        .as_str()
+    {
+        "before-commit-tree" => (
+            EffectSiteId::Object(ObjectSite::CandidateCommitTree),
+            HookPhase::Before,
+        ),
+        "commit-tree-id-unread" => (
+            EffectSiteId::Object(ObjectSite::CandidateCommitTree),
+            HookPhase::Point {
+                point: SubEffectPoint::IdUnread,
+                mode: InjectionMode::Kill,
+            },
+        ),
+        "before-candidate-pin" => (
+            EffectSiteId::Ref(RefSite::PinCandidatePrepared),
+            HookPhase::Before,
+        ),
+        "after-candidates-ref" => (
+            EffectSiteId::Ref(RefSite::CreateCandidates),
+            HookPhase::After,
+        ),
+        other => panic!("`{other}` is not a coordinate of the candidate sequence"),
+    };
+    let fixture = Fixture::adopted_by_a_kill_child(root, plan());
+    let armed = harness();
+    if let HookPhase::Point { point, mode } = at.1 {
+        armed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .arm(at.0, point, mode)
+            .expect("the point supports a kill");
+    }
+    let mut hooks = EffectKilledAt::new(&armed, at);
+    let driven = drive_as(
+        &fixture,
+        RESUMER,
+        &runtime_holding_the_record(),
+        &DriveSeams::default(),
+        1,
+        &RecordingRunner::editing(),
+        &mut hooks,
+    );
+    panic!(
+        "the kill at `{}` ({}) did not take this process: {:?}",
+        at.0,
+        at.1,
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+}
+
+fn kill_the_candidate_sequence(fixture: &Fixture, coordinate: &str, tag: &str) -> usize {
+    use crate::engine::topology::scaffold::KILL_CHILD_BOUND;
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child_within};
+
+    let planted = durable_kinds(fixture).len();
+    let Some(status) = run_kill_child_within(
+        CANDIDATE_SEQUENCE_KILL_CHILD,
+        &[
+            ("UPSTROKE_TEST_KILL_ROOT", fixture.root.as_os_str()),
+            (
+                "UPSTROKE_TEST_KILL_COORDINATE",
+                std::ffi::OsStr::new(coordinate),
+            ),
+        ],
+        KILL_CHILD_BOUND,
+    ) else {
+        panic!(
+            "{tag}: the kill child armed at `{coordinate}` did not end within \
+             {KILL_CHILD_BOUND:?}, and was killed and reaped"
+        );
+    };
+    assert!(
+        died_by_abort(&status),
+        "{tag}: the child did not die by the kill at `{coordinate}`: {status:?}"
+    );
+    assert!(
+        !rundir::is_running(&fixture.public()),
+        "{tag}: the run lock went with the dead process"
+    );
+    planted
+}
+
+fn kinds_after(fixture: &Fixture, planted: usize) -> Vec<String> {
+    durable_kinds(fixture).into_iter().skip(planted).collect()
+}
+
+fn unreachable_commit_subjects_of(fixture: &Fixture) -> Vec<String> {
+    use crate::workspace_manager::fixture::git;
+
+    crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+        .expect("fsck")
+        .into_iter()
+        .filter(|object| git(&fixture.repo_root, &["cat-file", "-t", object]) == "commit")
+        .map(|commit| git(&fixture.repo_root, &["show", "-s", "--format=%s", &commit]))
+        .collect()
+}
+
+#[track_caller]
+fn assert_no_unreachable_commit_but_snapshot_inputs(fixture: &Fixture, tag: &str) {
+    let subjects = unreachable_commit_subjects_of(fixture);
+    assert!(
+        subjects
+            .iter()
+            .all(|subject| subject == "upstroke: ephemeral snapshot input"),
+        "{tag}: the only unreferenced commits are the judge's snapshot inputs: {subjects:?}"
+    );
+}
+
+fn prepared_candidates_of(fixture: &Fixture) -> Vec<crate::topology::events::CandidatePrepared> {
+    TopologyFold::parse_log(&fixture.log_bytes())
+        .expect("the log parses")
+        .into_iter()
+        .filter_map(|event| match event.body {
+            TopologyEventBody::CandidatePrepared { data } => Some(*data),
+            _ => None,
+        })
+        .collect()
+}
+
+#[track_caller]
+fn assert_replays_twice_equal(fixture: &Fixture, tag: &str) {
+    let (once, events) = replayed_with_events(fixture);
+    let twice = TopologyFold::replay(fixture.inputs(), &events).expect("replays again");
+    assert_eq!(once.state(), twice.state(), "{tag}: replay twice equal");
+}
+
+/// Whether Git lists `worktree` among the repository's registered worktrees: a
+/// settlement that removes only the intent, or the directory by hand, leaves the
+/// registration behind.
+fn registered_with_git(
+    manager: &crate::workspace_manager::WorkspaceManager,
+    worktree: &Path,
+) -> bool {
+    manager
+        .worktree_records()
+        .expect("worktree records")
+        .iter()
+        .any(|record| {
+            record.path().file_name() == worktree.file_name()
+                && match (record.path().parent(), worktree.parent()) {
+                    (Some(listed), Some(wanted)) => crate::util::same_path(listed, wanted),
+                    _ => false,
+                }
+        })
+}
+
+#[test]
+fn a_kill_before_the_candidate_commit_is_written_is_settled_interrupted_and_the_next_generation_writes_it()
+ {
+    use crate::engine::topology::candidate::{CandidateRecovery, recovery_for};
+    use crate::topology::effects::{EntryPhase, ResumeAction};
+
+    let tag = "kill-before-candidate-commit";
+    let fixture = Fixture::healthy(tag);
+    let planted = kill_the_candidate_sequence(&fixture, "before-commit-tree", tag);
+
+    let site = EffectSiteId::Object(ObjectSite::CandidateCommitTree);
+    let semantics = site.semantics(EntryPhase::Before);
+    assert!(
+        semantics.rows.is_empty(),
+        "{tag}: nothing of `{site}` was performed, so no row holds anything ({:?})",
+        semantics.rows
+    );
+    assert_eq!(semantics.action, ResumeAction::ResumeUnperformed, "{tag}");
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec!["run_resumed", "task_dispatched", "attempt_started"],
+        "{tag}: the attempt is in flight and nothing durable names a candidate"
+    );
+    let manager = fixture.manager();
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let worktree = manager.slot_path(&slot);
+    assert!(
+        worktree.is_dir() && manager.intents().expect("intents").contains(&slot),
+        "{tag}: R9: the attempt's worktree and intent stand"
+    );
+    assert!(
+        registered_with_git(&manager, &worktree),
+        "{tag}: and Git lists the worktree"
+    );
+    assert_no_unreachable_commit_but_snapshot_inputs(&fixture, tag);
+    assert!(
+        pins_of(&fixture).is_empty() && candidates_refs_of(&fixture).is_empty(),
+        "{tag}: and no ref names one"
+    );
+    assert_eq!(
+        recovery_for(&manager, RUN_ID, &replayed(&fixture), ALPHA).expect("classify"),
+        CandidateRecovery {
+            promotion: None,
+            orphan_pin: None,
+            settles_interrupted: true,
+        },
+        "{tag}: the unsettled attempt is owed an interrupted settlement and no object"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (recovered, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut hooks,
+    )
+    .expect("the next incarnation resumes");
+    assert_eq!(
+        recovered.interrupted, 1,
+        "{tag}: step (d) settles the attempt the dead incarnation left in flight"
+    );
+    assert!(
+        recovered.finished.is_empty(),
+        "{tag}: there is no promotion to finish"
+    );
+    assert!(
+        !worktree.exists() && !manager.intents().expect("intents").contains(&slot),
+        "{tag}: the closed generation's worktree and intent are reclaimed"
+    );
+    assert!(
+        !registered_with_git(&manager, &worktree),
+        "{tag}: and its Git registration is gone"
+    );
+    assert!(
+        !observed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .observed(site, HookPhase::Before),
+        "{tag}: the recovery writes no candidate commit of its own"
+    );
+    let runner = RecordingRunner::editing();
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Settled {
+                key: ALPHA,
+                accepted: true,
+                ..
+            }))
+        ),
+        "{tag}: the next generation's attempt is accepted: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec![
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "attempt_interrupted",
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "candidate_prepared",
+            "task_candidate_created",
+        ],
+        "{tag}: the settlement, then the next generation's whole candidate sequence"
+    );
+    for phase in [HookPhase::Before, HookPhase::After] {
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(site, phase),
+            "{tag}: the resumed incarnation performs `{site}` ({phase}) from the prefix in which \
+             nothing was performed"
+        );
+    }
+    let prepared = prepared_candidates_of(&fixture);
+    assert_eq!(prepared.len(), 1, "{tag}: one candidate across the kill");
+    let candidate = prepared.first().expect("the next generation's candidate");
+    assert_eq!(candidate.generation, GenerationId(1), "{tag}");
+    assert_eq!(
+        candidates_refs_of(&fixture),
+        vec![(
+            candidate.candidate_ref.0.clone(),
+            candidate.commit_sha.0.clone()
+        )],
+        "{tag}: R11 at the commit the next generation wrote"
+    );
+    assert!(pins_of(&fixture).is_empty(), "{tag}: its pin is pruned");
+    assert_no_unreachable_commit_but_snapshot_inputs(&fixture, tag);
+    assert!(
+        recovery_for(&manager, RUN_ID, &replayed(&fixture), ALPHA)
+            .expect("classify again")
+            .is_empty(),
+        "{tag}: nothing is owed after the recovery"
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+fn candidate_commits_left_to_git(fixture: &Fixture) -> Vec<String> {
+    use crate::workspace_manager::fixture::git;
+
+    crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+        .expect("fsck")
+        .into_iter()
+        .filter(|object| {
+            git(&fixture.repo_root, &["cat-file", "-t", object]) == "commit"
+                && git(&fixture.repo_root, &["show", "-s", "--format=%s", object])
+                    != "upstroke: ephemeral snapshot input"
+        })
+        .collect()
+}
+
+fn a_kill_after_the_candidate_commit_is_written_is_settled_interrupted_and_the_commit_left_to_git(
+    coordinate: &str,
+    tag: &str,
+) {
+    use crate::engine::topology::candidate::{CandidateRecovery, recovery_for};
+
+    let fixture = Fixture::healthy(tag);
+    let planted = kill_the_candidate_sequence(&fixture, coordinate, tag);
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec!["run_resumed", "task_dispatched", "attempt_started"],
+        "{tag}: the attempt is in flight and nothing durable names a candidate"
+    );
+    let manager = fixture.manager();
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let worktree = manager.slot_path(&slot);
+    assert!(
+        worktree.is_dir() && manager.intents().expect("intents").contains(&slot),
+        "{tag}: R9: the attempt's worktree and intent stand"
+    );
+    assert!(
+        registered_with_git(&manager, &worktree),
+        "{tag}: and Git lists the worktree"
+    );
+    let left = candidate_commits_left_to_git(&fixture);
+    assert_eq!(
+        left.len(),
+        1,
+        "{tag}: the candidate commit the killed capture wrote is in the object store, and \
+         nothing references it: {left:?}"
+    );
+    assert!(
+        pins_of(&fixture).is_empty() && candidates_refs_of(&fixture).is_empty(),
+        "{tag}: no ref names it"
+    );
+    assert_eq!(
+        recovery_for(&manager, RUN_ID, &replayed(&fixture), ALPHA).expect("classify"),
+        CandidateRecovery {
+            promotion: None,
+            orphan_pin: None,
+            settles_interrupted: true,
+        },
+        "{tag}: the unsettled attempt is owed an interrupted settlement, and its object nothing"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (recovered, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut hooks,
+    )
+    .expect("the next incarnation resumes");
+    assert_eq!(
+        recovered.interrupted, 1,
+        "{tag}: step (d) settles the attempt the dead incarnation left in flight"
+    );
+    assert!(
+        recovered.finished.is_empty(),
+        "{tag}: there is no promotion to finish"
+    );
+    assert!(
+        !worktree.exists() && !manager.intents().expect("intents").contains(&slot),
+        "{tag}: the closed generation's worktree and intent are reclaimed"
+    );
+    assert!(
+        !registered_with_git(&manager, &worktree),
+        "{tag}: and its Git registration is gone"
+    );
+    assert_eq!(
+        candidate_commits_left_to_git(&fixture),
+        left,
+        "{tag}: the settlement leaves the dead capture's commit to Git, neither adopted nor \
+         deleted"
+    );
+    {
+        let seen = observed.lock().unwrap_or_else(PoisonError::into_inner);
+        for (site, phase) in [
+            (
+                EffectSiteId::Object(ObjectSite::CandidateCommitTree),
+                HookPhase::Before,
+            ),
+            (
+                EffectSiteId::Ref(RefSite::PinCandidatePrepared),
+                HookPhase::Before,
+            ),
+        ] {
+            assert!(
+                !seen.observed(site, phase),
+                "{tag}: the recovery performs no `{site}` ({phase}) of its own"
+            );
+        }
+    }
+    let runner = RecordingRunner::editing();
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Settled {
+                key: ALPHA,
+                accepted: true,
+                ..
+            }))
+        ),
+        "{tag}: the next generation's attempt is accepted: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec![
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "attempt_interrupted",
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "candidate_prepared",
+            "task_candidate_created",
+        ],
+        "{tag}: the settlement, then the next generation's whole candidate sequence"
+    );
+    let prepared = prepared_candidates_of(&fixture);
+    let [candidate] = prepared.as_slice() else {
+        panic!("{tag}: one candidate across the kill: {prepared:?}");
+    };
+    assert_eq!(candidate.generation, GenerationId(1), "{tag}");
+    assert_eq!(
+        candidates_refs_of(&fixture),
+        vec![(
+            candidate.candidate_ref.0.clone(),
+            candidate.commit_sha.0.clone()
+        )],
+        "{tag}: R11 at the commit the next generation wrote"
+    );
+    for phase in [HookPhase::Before, HookPhase::After] {
+        assert!(
+            observed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(EffectSiteId::Object(ObjectSite::CandidateCommitTree), phase),
+            "{tag}: the next generation's capture performs its own commit-tree ({phase})"
+        );
+    }
+    let still_left = candidate_commits_left_to_git(&fixture);
+    assert!(
+        left.iter()
+            .all(|commit| still_left.contains(commit) || *commit == candidate.commit_sha.0),
+        "{tag}: the dead capture's commit is still Git's unless the next generation's own \
+         commit-tree wrote the same object: {left:?} then {still_left:?}"
+    );
+    assert!(
+        recovery_for(&manager, RUN_ID, &replayed(&fixture), ALPHA)
+            .expect("classify again")
+            .is_empty(),
+        "{tag}: nothing is owed after the recovery"
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+#[test]
+fn a_kill_before_the_candidate_pin_is_settled_interrupted_and_leaves_the_written_commit_to_git() {
+    a_kill_after_the_candidate_commit_is_written_is_settled_interrupted_and_the_commit_left_to_git(
+        "before-candidate-pin",
+        "kill-before-candidate-pin",
+    );
+}
+
+#[test]
+fn a_kill_before_the_candidate_commits_id_is_read_is_settled_interrupted_and_leaves_the_commit_to_git()
+ {
+    a_kill_after_the_candidate_commit_is_written_is_settled_interrupted_and_the_commit_left_to_git(
+        "commit-tree-id-unread",
+        "kill-candidate-commit-id-unread",
+    );
+}
+
+#[test]
+fn a_kill_after_the_candidates_ref_is_created_is_adopted_by_the_next_resume_which_appends_the_queue_position_once()
+ {
+    use crate::engine::topology::candidate::recovery_for;
+    use crate::topology::effects::{EntryPhase, ResourceRow, ResumeAction};
+    use crate::topology::fold::GenerationClass;
+
+    let tag = "kill-after-candidates-ref";
+    let fixture = Fixture::healthy(tag);
+    let planted = kill_the_candidate_sequence(&fixture, "after-candidates-ref", tag);
+
+    let site = EffectSiteId::Ref(RefSite::CreateCandidates);
+    let semantics = site.semantics(EntryPhase::After);
+    assert_eq!(semantics.rows, vec![ResourceRow::R11], "{tag}");
+    assert_eq!(semantics.action, ResumeAction::AdoptPerformed, "{tag}");
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec![
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "candidate_prepared"
+        ],
+        "{tag}: the candidate is prepared and its queue position is not appended"
+    );
+    let prepared = prepared_candidates_of(&fixture);
+    let candidate = prepared.first().expect("the prepared candidate").clone();
+    let commit = candidate.commit_sha.0.clone();
+    assert_eq!(
+        candidates_refs_of(&fixture),
+        vec![(candidate.candidate_ref.0.clone(), commit.clone())],
+        "{tag}: R11: the candidates ref stands at the recorded commit"
+    );
+    assert_eq!(
+        ref_target(&fixture, candidate.prepared_ref.as_str()),
+        Some(commit.clone()),
+        "{tag}: and the pin is not yet pruned"
+    );
+    let manager = fixture.manager();
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let worktree = manager.slot_path(&slot);
+    assert!(
+        worktree.is_dir() && manager.intents().expect("intents").contains(&slot),
+        "{tag}: nor the worktree reclaimed"
+    );
+    let fold = replayed(&fixture);
+    assert_eq!(
+        fold.task(ALPHA)
+            .and_then(|task| task.generations.last())
+            .map(|generation| generation.class.clone()),
+        Some(GenerationClass::Promoting),
+        "{tag}"
+    );
+    let recovery = recovery_for(&manager, RUN_ID, &fold, ALPHA).expect("classify");
+    assert!(
+        !recovery.settles_interrupted && recovery.orphan_pin.is_none(),
+        "{tag}: {recovery:?}"
+    );
+    let Some(promoting) = recovery.promotion else {
+        panic!("{tag}: a durable `candidate_prepared` is an unfinished promotion");
+    };
+    assert_eq!(
+        promoting.candidate().commit_sha,
+        candidate.commit_sha,
+        "{tag}"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (recovered, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut hooks,
+    )
+    .expect("the next incarnation resumes");
+    assert_eq!(
+        recovered.finished,
+        vec![ALPHA],
+        "{tag}: step (f) finishes the promotion"
+    );
+    assert_eq!(recovered.interrupted, 0, "{tag}: nothing is in flight");
+    assert_eq!(
+        observed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .count(site, HookPhase::Before),
+        0,
+        "{tag}: the resume adopts the ref the dead incarnation created and enters no create \
+         funnel"
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec![
+            "run_resumed",
+            "task_dispatched",
+            "attempt_started",
+            "candidate_prepared",
+            "task_candidate_created",
+            "run_resumed",
+        ],
+        "{tag}: the queue position is appended by the recovery, before its `run_resumed`"
+    );
+    assert_eq!(
+        candidates_refs_of(&fixture),
+        vec![(candidate.candidate_ref.0.clone(), commit.clone())],
+        "{tag}: R11 is not moved"
+    );
+    assert!(pins_of(&fixture).is_empty(), "{tag}: the pin is pruned");
+    assert!(
+        !worktree.exists() && !manager.intents().expect("intents").contains(&slot),
+        "{tag}: the promoted generation's worktree and intent are reclaimed"
+    );
+    assert!(
+        recovery_for(&manager, RUN_ID, &replayed(&fixture), ALPHA)
+            .expect("classify again")
+            .is_empty(),
+        "{tag}: a finished promotion owes nothing"
+    );
+
+    let runner = RecordingRunner::editing();
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Integrated { key: ALPHA, .. }))
+        ),
+        "{tag}: the adopted candidate integrates: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()),
+        Some(commit),
+        "{tag}: the integration ref is at the candidate the dead incarnation prepared"
+    );
+    assert_eq!(
+        durable_kinds(&fixture)
+            .iter()
+            .filter(|kind| *kind == "task_candidate_created")
+            .count(),
+        1,
+        "{tag}: one queue position across the kill and the recovery"
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+#[test]
+fn an_error_after_the_logs_torn_tail_is_truncated_refuses_the_resume_before_any_effect_and_the_next_resume_converges()
+ {
+    use crate::topology::effects::{EntryPhase, ResourceRow};
+
+    let tag = "open-log-truncate-error";
+    let fixture = Fixture::build(
+        tag,
+        Damage {
+            open_generation: true,
+            ..Damage::default()
+        },
+    );
+    let committed = fixture.log_bytes();
+    let planted = durable_kinds(&fixture).len();
+    crate::workspace_manager::fixture::write_file(
+        &fixture.log(),
+        &[
+            committed.as_slice(),
+            b"{\"ts\":\"2026-08-23T09:41".as_slice(),
+        ]
+        .concat(),
+    );
+    let site = EffectSiteId::Event(EventSite::OpenLog);
+    let point = SubEffectPoint::TruncateTornTail;
+    let mode = InjectionMode::ErrorReturn;
+    assert_eq!(
+        site.semantics(EntryPhase::Point { point, mode }).rows,
+        vec![ResourceRow::R21],
+        "{tag}"
+    );
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(&fixture, &runtime, &certifies);
+
+    let faulted = harness();
+    faulted
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .arm(site, point, mode)
+        .expect("TruncateTornTail supports an error return");
+    let (outcome, _) = resume(&fixture, &faulted, &given);
+    let text = message(&outcome.expect_err("the error after the truncation refuses the resume"));
+    assert!(
+        text.contains(point.name()) && text.contains("the run is resumable"),
+        "{tag}: the write command refuses resumably, naming the point: {text}"
+    );
+    assert_eq!(
+        fixture.log_bytes(),
+        committed,
+        "{tag}: the unterminated final line is truncated and nothing is appended"
+    );
+    {
+        let seen = faulted.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            seen.observed(site, HookPhase::Point { point, mode }),
+            "{tag}: the armed point fired"
+        );
+        assert!(
+            !seen.touched(EffectSiteId::Event(EventSite::ProvePrefixStable))
+                && !seen.touched(EffectSiteId::RunDir(RunDirSite::RemoveMarker))
+                && !seen.touched(EffectSiteId::Event(EventSite::Append)),
+            "{tag}: no proof, no census effect and no recovery event follow the refusal"
+        );
+    }
+
+    let observed = harness();
+    let (outcome, _) = resume(&fixture, &observed, &given);
+    outcome.expect("the next resume converges");
+    {
+        let seen = observed.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            seen.observed(site, HookPhase::After)
+                && seen.observed(
+                    EffectSiteId::Event(EventSite::ProvePrefixStable),
+                    HookPhase::After
+                ),
+            "{tag}: the next open repeats the barrier"
+        );
+        assert!(
+            !seen.reached_point(site, point, mode),
+            "{tag}: the truncation the refused open made stands, so nothing is truncated again"
+        );
+    }
+    assert!(
+        fixture.log_bytes().starts_with(&committed),
+        "{tag}: the committed prefix survives"
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec!["run_resumed"],
+        "{tag}: the next resume appends after the committed prefix"
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+fn worktree_lease_answer(fixture: &Fixture) -> String {
+    let exe = std::env::current_exe().expect("the test binary");
+    let spec = CommandSpec::new(exe.to_string_lossy().into_owned())
+        .arg("--exact")
+        .arg("rundir::tests::worktree_lease_probe_child")
+        .arg("--ignored")
+        .arg("--nocapture")
+        .env(
+            "UPSTROKE_TEST_WORKTREE_DIR",
+            fixture.repo_root.to_string_lossy().into_owned(),
+        )
+        .env(
+            "UPSTROKE_TEST_WORKTREE_GIT_DIR",
+            fixture.git_dir.to_string_lossy().into_owned(),
+        );
+    let output = crate::runner::host::HostRunner::new()
+        .run(&crate::runner::gate_request(
+            spec,
+            fixture.root.clone(),
+            Duration::from_secs(60),
+            crate::runner::InvocationId::attempt(
+                ALPHA,
+                GEN,
+                crate::topology::events::AttemptNumber(1),
+                crate::runner::invocation::AttemptRole::Gate(0),
+                0,
+            ),
+        ))
+        .expect("the lease probe runs through the process funnel");
+    assert_eq!(
+        output.code,
+        Some(0),
+        "the lease probe failed: {}",
+        output.stderr
+    );
+    output
+        .stdout
+        .lines()
+        .find(|line| matches!(*line, "absent" | "free" | "refused"))
+        .unwrap_or_else(|| panic!("the lease probe gave no answer: {}", output.stdout))
+        .to_owned()
+}
+
+fn a_fault_at_the_worktree_lease_ends_the_resume_and_the_next_resume_converges(
+    site: LockSite,
+    phase: HookPhase,
+    tag: &str,
+) {
+    use crate::topology::effects::{EntryPhase, ResourceRow, ResumeAction};
+
+    let fixture = Fixture::healthy(tag);
+    let lock_file = fixture.worktree_lock_file();
+    assert!(
+        !lock_file.exists(),
+        "{tag}: the planted run has never taken its worktree lease"
+    );
+    let create = EffectSiteId::Lock(LockSite::CreateWorktreeLockFile);
+    let site = EffectSiteId::Lock(site);
+    let semantics = site.semantics(match phase {
+        HookPhase::Before => EntryPhase::Before,
+        HookPhase::After => EntryPhase::After,
+        HookPhase::Point { .. } => panic!("a lease site's coordinates are its two hook phases"),
+    });
+    assert_eq!(
+        semantics.rows,
+        match (phase, site == create) {
+            (HookPhase::After, true) => vec![ResourceRow::R25],
+            (HookPhase::After, false) => vec![ResourceRow::R17],
+            _ => Vec::new(),
+        },
+        "{tag}"
+    );
+    assert_eq!(
+        semantics.action,
+        if phase == HookPhase::Before {
+            ResumeAction::ResumeUnperformed
+        } else {
+            ResumeAction::AdoptPerformed
+        },
+        "{tag}"
+    );
+    let planted = durable_kinds(&fixture).len();
+    let before = fixture.log_bytes();
+
+    let faulted = harness();
+    let mut armed = ArmedFinalization::new(&faulted, (site, phase));
+    let error = message(
+        &resume_with_real_refs_hooked(&fixture, &mut armed)
+            .expect_err("the fault at the lease ends the resume"),
+    );
+    drop(armed);
+    assert!(
+        error.contains(&format!("`{site}` ({phase})")),
+        "{tag}: the injected error is the one returned: {error}"
+    );
+    {
+        let seen = faulted.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            seen.observed(site, phase),
+            "{tag}: the armed coordinate was reached"
+        );
+        assert!(
+            !seen.touched(EffectSiteId::Event(EventSite::OpenLog))
+                && !seen.touched(EffectSiteId::RunDir(RunDirSite::RemoveMarker))
+                && !seen.touched(EffectSiteId::Event(EventSite::Append)),
+            "{tag}: nothing after the lease ran"
+        );
+    }
+    assert_eq!(fixture.log_bytes(), before, "{tag}: nothing was appended");
+    let create_performed = (site, phase) != (create, HookPhase::Before);
+    assert_eq!(
+        lock_file.exists(),
+        create_performed,
+        "{tag}: the lease's file is left exactly when its create was performed"
+    );
+    assert!(
+        !rundir::is_running(&fixture.public()),
+        "{tag}: the run lock went with the command"
+    );
+    if create_performed {
+        assert_eq!(
+            worktree_lease_answer(&fixture),
+            "free",
+            "{tag}: the command that ended holds no lease"
+        );
+        crate::workspace_manager::fixture::write_file(&lock_file, b"adopted");
+    } else {
+        assert_eq!(worktree_lease_answer(&fixture), "absent", "{tag}");
+    }
+
+    let observed = harness();
+    let (_, handle) =
+        resume_with_real_refs(&fixture, &observed).expect("the next resume takes the lease");
+    {
+        let seen = observed.lock().unwrap_or_else(PoisonError::into_inner);
+        for (converged, phase) in [
+            (LockSite::CreateWorktreeLockFile, HookPhase::Before),
+            (LockSite::CreateWorktreeLockFile, HookPhase::After),
+            (LockSite::AcquireWorktree, HookPhase::Before),
+            (LockSite::AcquireWorktree, HookPhase::After),
+        ] {
+            assert!(
+                seen.observed(EffectSiteId::Lock(converged), phase),
+                "{tag}: the next resume runs `Lock.{}` ({phase})",
+                converged.name()
+            );
+        }
+    }
+    assert_eq!(
+        worktree_lease_answer(&fixture),
+        "refused",
+        "{tag}: the next resume holds the lease"
+    );
+    drop(handle);
+    assert_eq!(
+        worktree_lease_answer(&fixture),
+        "free",
+        "{tag}: and releases it with its handle"
+    );
+    if create_performed {
+        assert_eq!(
+            std::fs::read(&lock_file).expect("the lock file reads"),
+            b"adopted",
+            "{tag}: the file the faulted command created was adopted, not replaced"
+        );
+    }
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec!["run_resumed"],
+        "{tag}: the next resume appends after the planted prefix"
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+#[test]
+fn a_fault_before_the_worktree_lock_file_is_created_ends_the_resume_and_the_next_resume_creates_it()
+{
+    a_fault_at_the_worktree_lease_ends_the_resume_and_the_next_resume_converges(
+        LockSite::CreateWorktreeLockFile,
+        HookPhase::Before,
+        "resume-lease-create-before",
+    );
+}
+
+#[test]
+fn a_fault_after_the_worktree_lock_file_is_created_ends_the_resume_and_the_next_resume_adopts_it() {
+    a_fault_at_the_worktree_lease_ends_the_resume_and_the_next_resume_converges(
+        LockSite::CreateWorktreeLockFile,
+        HookPhase::After,
+        "resume-lease-create-after",
+    );
+}
+
+#[test]
+fn a_fault_before_the_worktree_lease_is_taken_ends_the_resume_and_the_next_resume_takes_it() {
+    a_fault_at_the_worktree_lease_ends_the_resume_and_the_next_resume_converges(
+        LockSite::AcquireWorktree,
+        HookPhase::Before,
+        "resume-lease-acquire-before",
+    );
+}
+
+#[test]
+fn a_fault_after_the_worktree_lease_is_taken_ends_the_resume_with_it_released_and_the_next_resume_takes_it_again()
+ {
+    a_fault_at_the_worktree_lease_ends_the_resume_and_the_next_resume_converges(
+        LockSite::AcquireWorktree,
+        HookPhase::After,
+        "resume-lease-acquire-after",
+    );
+}
+
+const PROCESS_SPAWN_KILL_CHILD: &str = "engine::topology::recover::tests::process_spawn_kill_child";
+const SPAWNED_WORKER_PID: &str = "spawned-worker.pid";
+
+struct SpawnPhaseFault {
+    inner: crate::runner::HarnessHooks,
+    at: Option<(crate::topology::effects::ProcessSite, HookPhase)>,
+    injection: Injection,
+    pid_file: Option<PathBuf>,
+}
+
+impl crate::agent::proc::SpawnHooks for SpawnPhaseFault {
+    fn point(&mut self, point: SubEffectPoint) -> Injection {
+        self.inner.point(point)
+    }
+
+    fn point_mode(&mut self, point: SubEffectPoint, mode: InjectionMode) -> Injection {
+        self.inner.point_mode(point, mode)
+    }
+
+    fn phase(
+        &mut self,
+        site: crate::topology::effects::ProcessSite,
+        phase: HookPhase,
+    ) -> Injection {
+        let answered = self.inner.phase(site, phase);
+        if Some((site, phase)) == self.at {
+            crate::observations::Exported::new(Arc::clone(self.inner.harness()))
+                .carried(self.injection)
+        } else {
+            answered
+        }
+    }
+
+    fn child_created(&mut self, pid: u32) {
+        self.inner.child_created(pid);
+        if let Some(file) = &self.pid_file {
+            #[cfg(windows)]
+            let record = format!(
+                "{pid} {}",
+                crate::agent::proc::process_creation_time(pid).unwrap_or(0)
+            );
+            #[cfg(not(windows))]
+            let record = pid.to_string();
+            crate::workspace_manager::fixture::write_file(file, record.as_bytes());
+        }
+    }
+}
+
+struct SpawningRunner {
+    host: crate::runner::host::HostRunner,
+    editing: RecordingRunner,
+    program: CommandSpec,
+    timeout: Option<Duration>,
+}
+
+impl Runner for SpawningRunner {
+    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+        if request.role == crate::runner::ExecutionRole::Implement {
+            self.host.run(&RunnerRequest {
+                command: self.program.clone(),
+                timeout: self.timeout.unwrap_or(request.timeout),
+                ..request.clone()
+            })?;
+        }
+        self.editing.run(request)
+    }
+}
+
+fn this_binary_running(test: &str) -> CommandSpec {
+    CommandSpec::new(
+        std::env::current_exe()
+            .expect("the test binary")
+            .to_string_lossy()
+            .into_owned(),
+    )
+    .arg("--exact")
+    .arg(test)
+    .arg("--ignored")
+}
+
+fn spawn_point_named(name: &str) -> SubEffectPoint {
+    crate::runner::SPAWN_SITE
+        .sub_effects()
+        .iter()
+        .copied()
+        .find(|point| point.name() == name)
+        .unwrap_or_else(|| panic!("`{name}` is not a point of `Process.Spawn`"))
+}
+
+#[test]
+#[ignore = "spawned as a subprocess by the process-spawn kill witnesses"]
+fn process_spawn_kill_child() {
+    use crate::engine::topology::select::Ceiling;
+
+    let root = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_ROOT").expect("the parent names the fixture root"),
+    );
+    let coordinate =
+        std::env::var("UPSTROKE_TEST_KILL_COORDINATE").expect("the parent names the coordinate");
+    let fixture = Fixture::adopted_by_a_kill_child(root, plan());
+    let harness = harness();
+    let at = if coordinate == "After" {
+        Some((
+            crate::topology::effects::ProcessSite::Spawn,
+            HookPhase::After,
+        ))
+    } else {
+        harness
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .arm(
+                crate::runner::SPAWN_SITE,
+                spawn_point_named(&coordinate),
+                InjectionMode::Kill,
+            )
+            .expect("the point supports a kill");
+        None
+    };
+    let mut hooks = SpawnPhaseFault {
+        inner: crate::runner::HarnessHooks::new(Arc::clone(&harness)),
+        at,
+        injection: Injection::Kill,
+        pid_file: Some(fixture.root.join(SPAWNED_WORKER_PID)),
+    };
+    if coordinate == "AmbientJobJoined" {
+        let contained = crate::runner::host::contain_write_command(&mut hooks);
+        panic!("the kill at `{coordinate}` did not take this process: {contained:?}");
+    }
+    crate::runner::host::contain_write_command(&mut crate::agent::proc::NoHooks)
+        .expect("the coordinator is contained, as every write command is before it spawns");
+    let runner = SpawningRunner {
+        host: crate::runner::host::HostRunner::new().with_hooks(Box::new(hooks)),
+        editing: RecordingRunner::editing(),
+        program: this_binary_running("engine::topology::coverage::tests::sleeps_until_terminated"),
+        timeout: None,
+    };
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
+    with_live_run_hooked_runner(
+        &fixture,
+        &harness,
+        Ceiling::unlimited(),
+        &adapters,
+        &runner,
+        |run, seams, hooks| {
+            let stepped = run.step(seams, hooks).map(|_| ());
+            panic!("the kill at `{coordinate}` did not take this process: {stepped:?}");
+        },
+    );
+}
+
+fn a_kill_in_the_workers_spawn_converges_on_the_next_resume(coordinate: &str, tag: &str) {
+    use crate::engine::topology::scaffold::KILL_CHILD_BOUND;
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child_within};
+
+    let fixture = Fixture::healthy(tag);
+    let planted = durable_kinds(&fixture).len();
+    let Some(status) = run_kill_child_within(
+        PROCESS_SPAWN_KILL_CHILD,
+        &[
+            ("UPSTROKE_TEST_KILL_ROOT", fixture.root.as_os_str()),
+            (
+                "UPSTROKE_TEST_KILL_COORDINATE",
+                std::ffi::OsStr::new(coordinate),
+            ),
+        ],
+        KILL_CHILD_BOUND,
+    ) else {
+        panic!(
+            "{tag}: the kill child armed at `{coordinate}` did not end within \
+             {KILL_CHILD_BOUND:?}, and was killed and reaped"
+        );
+    };
+    assert!(
+        died_by_abort(&status),
+        "{tag}: the child did not die by the kill at `{coordinate}`: {status:?}"
+    );
+    let contained_only = coordinate == "AmbientJobJoined";
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        if contained_only {
+            Vec::new()
+        } else {
+            vec!["run_resumed", "task_dispatched", "attempt_started"]
+        },
+        "{tag}: the durable prefix the kill left"
+    );
+    assert!(
+        wait_for_cleanup_hold_release(&fixture.public()),
+        "{tag}: the run's cleanup hold is still observed: nothing settled what the spawn left"
+    );
+    #[cfg(windows)]
+    if let Ok(record) = std::fs::read_to_string(fixture.root.join(SPAWNED_WORKER_PID)) {
+        let mut fields = record.split_whitespace();
+        let pid: u32 = fields
+            .next()
+            .and_then(|field| field.parse().ok())
+            .expect("the recorded pid");
+        let created: u64 = fields
+            .next()
+            .and_then(|field| field.parse().ok())
+            .expect("the recorded creation time");
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while crate::agent::proc::process_alive(pid, created) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{tag}: the worker the dead coordinator spawned is still alive (pid {pid})"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    assert!(
+        !rundir::is_running(&fixture.public()),
+        "{tag}: the run lock went with the dead process"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (recovered, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut hooks,
+    )
+    .expect("the next resume converges");
+    assert_eq!(
+        recovered.interrupted,
+        usize::from(!contained_only),
+        "{tag}: step (d) settles the attempt whose worker's spawn the kill took"
+    );
+    let runner = RecordingRunner::editing();
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Settled {
+                key: ALPHA,
+                accepted: true,
+                ..
+            }))
+        ),
+        "{tag}: the next attempt is accepted: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+#[test]
+fn a_kill_after_the_workers_process_is_spawned_is_settled_and_the_next_resume_converges() {
+    a_kill_in_the_workers_spawn_converges_on_the_next_resume("After", "spawn-kill-after");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_kill_at_each_unix_point_of_the_workers_spawn_is_settled_by_the_reaper_and_the_next_resume_converges()
+ {
+    for point in [
+        "ReaperStarted",
+        "PreExecPgidAndRegister",
+        "Exec",
+        "Registered",
+    ] {
+        a_kill_in_the_workers_spawn_converges_on_the_next_resume(
+            point,
+            &format!("spawn-kill-{point}"),
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_kill_at_each_windows_point_of_the_workers_spawn_leaves_no_process_and_the_next_resume_converges()
+ {
+    for point in [
+        "AmbientJobJoined",
+        "CreatedSuspended",
+        "PrivateJobAssigned",
+        "Resumed",
+    ] {
+        a_kill_in_the_workers_spawn_converges_on_the_next_resume(
+            point,
+            &format!("spawn-kill-{point}"),
+        );
+    }
+}
+
+fn a_fault_at_the_workers_termination_ends_the_step_and_the_next_resume_converges(
+    phase: HookPhase,
+    tag: &str,
+) {
+    use crate::engine::topology::select::Ceiling;
+    use crate::topology::effects::ProcessSite;
+
+    let fixture = Fixture::healthy(tag);
+    let planted = durable_kinds(&fixture).len();
+    let site = EffectSiteId::Process(ProcessSite::Terminate);
+    let faulted = harness();
+    let runner = SpawningRunner {
+        host: crate::runner::host::HostRunner::new().with_hooks(Box::new(SpawnPhaseFault {
+            inner: crate::runner::HarnessHooks::new(Arc::clone(&faulted)),
+            at: Some((ProcessSite::Terminate, phase)),
+            injection: Injection::Error,
+            pid_file: None,
+        })),
+        editing: RecordingRunner::editing(),
+        program: this_binary_running("engine::topology::coverage::tests::sleeps_until_terminated"),
+        timeout: Some(Duration::from_secs(1)),
+    };
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
+    let stepped = with_live_run_hooked_runner(
+        &fixture,
+        &faulted,
+        Ceiling::unlimited(),
+        &adapters,
+        &runner,
+        |run, seams, hooks| run.step(seams, hooks),
+    );
+    let error = message(&stepped.expect_err("the fault at the worker's termination ends the step"));
+    assert!(
+        error.contains("Terminate") && error.contains(&format!("({phase})")),
+        "{tag}: the injected error is the one the step returns: {error}"
+    );
+    assert!(
+        faulted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .observed(site, phase),
+        "{tag}: the worker outlived its timeout and the funnel reached `{site}` ({phase})"
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec!["run_resumed", "task_dispatched", "attempt_started"],
+        "{tag}: the attempt is left in flight"
+    );
+    assert!(
+        wait_for_cleanup_hold_release(&fixture.public()),
+        "{tag}: no hold outlives the step: the funnel settled the worker it could not terminate \
+         cleanly"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (recovered, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut hooks,
+    )
+    .expect("the next resume converges");
+    assert_eq!(
+        recovered.interrupted, 1,
+        "{tag}: step (d) settles the attempt"
+    );
+    let runner = RecordingRunner::editing();
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Settled {
+                key: ALPHA,
+                accepted: true,
+                ..
+            }))
+        ),
+        "{tag}: the next attempt is accepted: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+#[test]
+fn a_fault_before_the_workers_termination_ends_the_step_and_the_next_resume_converges() {
+    a_fault_at_the_workers_termination_ends_the_step_and_the_next_resume_converges(
+        HookPhase::Before,
+        "terminate-fault-before-engine",
+    );
+}
+
+#[test]
+fn a_fault_after_the_workers_termination_ends_the_step_and_the_next_resume_converges() {
+    a_fault_at_the_workers_termination_ends_the_step_and_the_next_resume_converges(
+        HookPhase::After,
+        "terminate-fault-after-engine",
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn an_error_at_the_ambient_job_join_refuses_the_write_command_and_the_next_resume_converges() {
+    let tag = "ambient-job-join-error";
+    let fixture = Fixture::healthy(tag);
+    let planted = durable_kinds(&fixture).len();
+    let site = crate::runner::SPAWN_SITE;
+    let point = SubEffectPoint::AmbientJobJoined;
+    let mode = InjectionMode::ErrorReturn;
+    let faulted = harness();
+    faulted
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .arm(site, point, mode)
+        .expect("the ambient join supports an error return");
+    let mut hooks = crate::runner::HarnessHooks::new(Arc::clone(&faulted));
+    let refused = crate::runner::host::contain_write_command(&mut hooks);
+    drop(hooks);
+    assert!(
+        refused.is_err(),
+        "{tag}: the write command refuses before the ambient join"
+    );
+    assert!(
+        faulted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .observed(site, HookPhase::Point { point, mode }),
+        "{tag}: the armed point fired"
+    );
+    assert!(
+        kinds_after(&fixture, planted).is_empty(),
+        "{tag}: the refused command appended nothing"
+    );
+
+    let (_, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(harness()),
+    )
+    .expect("the next resume converges");
+    drop(handle);
+    assert_eq!(kinds_after(&fixture, planted), vec!["run_resumed"], "{tag}");
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+#[test]
+fn an_error_before_the_workers_process_is_spawned_spawns_nothing_and_the_next_step_spawns_it() {
+    use crate::engine::topology::select::Ceiling;
+
+    let tag = "spawn-error-before";
+    let fixture = Fixture::healthy(tag);
+    let planted = durable_kinds(&fixture).len();
+    let site = crate::runner::SPAWN_SITE;
+    let faulted = harness();
+    let created_in_the_refused_step = fixture.root.join("created-in-the-refused-step.pid");
+    let runner = SpawningRunner {
+        host: crate::runner::host::HostRunner::new().with_hooks(Box::new(SpawnPhaseFault {
+            inner: crate::runner::HarnessHooks::new(Arc::clone(&faulted)),
+            at: Some((
+                crate::topology::effects::ProcessSite::Spawn,
+                HookPhase::Before,
+            )),
+            injection: Injection::Error,
+            pid_file: Some(created_in_the_refused_step.clone()),
+        })),
+        editing: RecordingRunner::editing(),
+        program: this_binary_running("a_test_this_tree_does_not_contain_and_never_will"),
+        timeout: None,
+    };
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
+    let first = with_live_run_hooked_runner(
+        &fixture,
+        &faulted,
+        Ceiling::unlimited(),
+        &adapters,
+        &runner,
+        |run, seams, hooks| run.step(seams, hooks),
+    );
+    {
+        let seen = faulted.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            seen.observed(site, HookPhase::Before) && !seen.observed(site, HookPhase::After),
+            "{tag}: the error came at the spawn's before phase"
+        );
+    }
+    assert!(
+        !created_in_the_refused_step.exists(),
+        "{tag}: the funnel created a worker process before the refusal: {:?}",
+        std::fs::read_to_string(&created_in_the_refused_step)
+    );
+    let kinds = kinds_after(&fixture, planted);
+    assert!(
+        kinds.starts_with(&[
+            "run_resumed".to_owned(),
+            "task_dispatched".to_owned(),
+            "attempt_started".to_owned()
+        ]) && !kinds.iter().any(|kind| kind == "candidate_prepared"),
+        "{tag}: the attempt started and produced no candidate: {kinds:?} ({first:?})"
+    );
+    assert!(
+        wait_for_cleanup_hold_release(&fixture.public()),
+        "{tag}: no hold outlives a spawn that never happened"
+    );
+
+    let observed = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&observed));
+    let (_, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut hooks,
+    )
+    .expect("the next resume converges");
+    let created_in_the_next_step = fixture.root.join("created-in-the-next-step.pid");
+    let runner = SpawningRunner {
+        host: crate::runner::host::HostRunner::new().with_hooks(Box::new(SpawnPhaseFault {
+            inner: crate::runner::HarnessHooks::new(harness()),
+            at: None,
+            injection: Injection::Proceed,
+            pid_file: Some(created_in_the_next_step.clone()),
+        })),
+        editing: RecordingRunner::editing(),
+        program: this_binary_running("a_test_this_tree_does_not_contain_and_never_will"),
+        timeout: None,
+    };
+    let driven = drive_handle(
+        &fixture,
+        handle,
+        &DriveSeams::default(),
+        2,
+        &runner,
+        &mut hooks,
+    );
+    drop(hooks);
+    assert!(
+        created_in_the_next_step.exists(),
+        "{tag}: the next attempt's worker process was created through the funnel"
+    );
+    assert!(
+        driven.progress.iter().any(|step| matches!(
+            step,
+            Ok(Progress::Settled {
+                key: ALPHA,
+                accepted: true,
+                ..
+            })
+        )),
+        "{tag}: the attempt whose worker was spawned is accepted: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+const CONTAINER_MOUNT_KILL_CHILD: &str =
+    "engine::topology::recover::tests::container_mount_kill_child";
+
+struct ContainerKilledAt {
+    inner: crate::runner::container::HarnessHooks,
+    at: (EffectSiteId, HookPhase),
+}
+
+impl crate::runner::container::ContainerHooks for ContainerKilledAt {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        let answered = self.inner.phase(site, phase);
+        if (site, phase) == self.at {
+            crate::observations::Exported::new(Arc::clone(self.inner.harness()))
+                .carried(Injection::Kill)
+        } else {
+            answered
+        }
+    }
+
+    fn trace(&self) -> ContainerTrace {
+        self.inner.trace()
+    }
+}
+
+fn mount_phase_named(name: &str) -> HookPhase {
+    match name {
+        "Before" => HookPhase::Before,
+        "After" => HookPhase::After,
+        other => panic!("`{other}` is not a phase of `Container.MountGitView`"),
+    }
+}
+
+#[test]
+#[ignore = "spawned as a subprocess by the git-view mount kill witnesses"]
+fn container_mount_kill_child() {
+    use crate::topology::effects::ContainerSite;
+
+    let root = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_ROOT").expect("the parent names the fixture root"),
+    );
+    let phase = mount_phase_named(
+        &std::env::var("UPSTROKE_TEST_KILL_COORDINATE").expect("the parent names the phase"),
+    );
+    let fixture = Fixture::adopted_by_a_kill_child(root, plan_with(true));
+    let fake = runtime_holding_the_record();
+    let runner =
+        production_container_runner(&fixture, &fake).with_hooks(Box::new(ContainerKilledAt {
+            inner: crate::runner::container::HarnessHooks::new(harness()),
+            at: (EffectSiteId::Container(ContainerSite::MountGitView), phase),
+        }));
+    let driven = drive_with(
+        &fixture,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut HarnessTopologyHooks::new(harness()),
+    );
+    panic!(
+        "the kill at the git view's mount ({phase}) did not take this process: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+}
+
+fn a_kill_at_the_gate_containers_git_view_mount_is_reclaimed_by_the_next_resume(
+    phase: HookPhase,
+    tag: &str,
+) {
+    use crate::engine::topology::scaffold::KILL_CHILD_BOUND;
+    use crate::topology::effects::{ContainerSite, EntryPhase, ResourceRow, ResumeAction};
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child_within};
+
+    let fixture = Fixture::two_tasks(tag);
+    plant_stale_verification(&fixture);
+    let planted = durable_kinds(&fixture).len();
+    let site = EffectSiteId::Container(ContainerSite::MountGitView);
+    let semantics = site.semantics(match phase {
+        HookPhase::Before => EntryPhase::Before,
+        HookPhase::After => EntryPhase::After,
+        HookPhase::Point { .. } => panic!("the mount's coordinates are its two phases"),
+    });
+    let Some(status) = run_kill_child_within(
+        CONTAINER_MOUNT_KILL_CHILD,
+        &[
+            ("UPSTROKE_TEST_KILL_ROOT", fixture.root.as_os_str()),
+            (
+                "UPSTROKE_TEST_KILL_COORDINATE",
+                std::ffi::OsStr::new(&format!("{phase:?}")),
+            ),
+        ],
+        KILL_CHILD_BOUND,
+    ) else {
+        panic!(
+            "{tag}: the kill child armed at the mount ({phase}) did not end within \
+             {KILL_CHILD_BOUND:?}, and was killed and reaped"
+        );
+    };
+    assert!(
+        died_by_abort(&status),
+        "{tag}: the child did not die by the kill at the mount ({phase}): {status:?}"
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec![
+            "merge_verification_interrupted",
+            "run_resumed",
+            "merge_verification_started"
+        ],
+        "{tag}: the kill came inside the re-verification's gate launch"
+    );
+    let intents = crate::runner::container::list_intents(&fixture.private_root)
+        .expect("the container namespace lists");
+    let [intent] = intents.as_slice() else {
+        panic!("{tag}: the launch left exactly its own intent: {intents:?}");
+    };
+    assert_eq!(
+        intent.record.incarnation, RESUMER,
+        "{tag}: the intent is the dead incarnation's"
+    );
+    let view = crate::runner::container::census::view_path(&fixture.private_root, &intent.name);
+    assert_eq!(
+        view.exists(),
+        semantics.rows.contains(&ResourceRow::R19),
+        "{tag}: the view is left exactly where the authority's rows say R19 holds it ({:?})",
+        semantics.rows
+    );
+    assert_eq!(
+        semantics.action,
+        match phase {
+            HookPhase::Before => ResumeAction::ResumeUnperformed,
+            _ => ResumeAction::AdoptPerformed,
+        },
+        "{tag}: the action the authority tables for `{site}` ({phase})"
+    );
+    assert!(
+        !rundir::is_running(&fixture.public()),
+        "{tag}: the run lock went with the dead process"
+    );
+
+    let recovery = harness();
+    let (_, handle) = resume_as(
+        &fixture,
+        "resumer-2",
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(Arc::clone(&recovery)),
+    )
+    .expect("the next resume converges");
+    drop(handle);
+    assert!(
+        crate::runner::container::list_intents(&fixture.private_root)
+            .expect("the container namespace lists")
+            .is_empty()
+            && !view.exists(),
+        "{tag}: neither the intent nor the view survives the census"
+    );
+    {
+        let seen = recovery.lock().unwrap_or_else(PoisonError::into_inner);
+        for (reclaim, reclaim_phase) in [
+            (ContainerSite::UnmountGitView, HookPhase::After),
+            (ContainerSite::RemoveIntent, HookPhase::After),
+        ] {
+            assert_eq!(
+                seen.count(EffectSiteId::Container(reclaim), reclaim_phase),
+                1,
+                "{tag}: the census reclaimed through `Container.{}` ({reclaim_phase}) once",
+                reclaim.name()
+            );
+        }
+    }
+    let reclaimed_at = first_observation(
+        &recovery,
+        EffectSiteId::Container(ContainerSite::RemoveIntent),
+    )
+    .expect("the intent was removed through its funnel");
+    let appended_at = first_observation(&recovery, EffectSiteId::Event(EventSite::Append))
+        .expect("the resume appended");
+    assert!(
+        reclaimed_at < appended_at,
+        "{tag}: the launch was reclaimed (at {reclaimed_at}) before any recovery event (at \
+         {appended_at})"
+    );
+    assert_eq!(
+        interrupted_sequences(&fixture),
+        vec![1, 2],
+        "{tag}: the verification the kill took is settled interrupted after the planted one"
+    );
+
+    let driven = drive(&fixture, &DriveSeams::default(), 1);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Integrated {
+                key: ALPHA,
+                sequence: crate::topology::events::SequenceId(3),
+                ..
+            }))
+        ),
+        "{tag}: the candidate re-verifies and publishes under the next sequence: {:?}",
+        driven.progress
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+#[test]
+fn a_kill_before_the_gate_containers_git_view_is_mounted_is_reclaimed_by_the_next_resume() {
+    a_kill_at_the_gate_containers_git_view_mount_is_reclaimed_by_the_next_resume(
+        HookPhase::Before,
+        "mount-kill-before-engine",
+    );
+}
+
+#[test]
+fn a_kill_after_the_gate_containers_git_view_is_mounted_is_reclaimed_by_the_next_resume() {
+    a_kill_at_the_gate_containers_git_view_mount_is_reclaimed_by_the_next_resume(
+        HookPhase::After,
+        "mount-kill-after-engine",
+    );
+}
+
+fn a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
+    ref_created: bool,
+    tag: &str,
+) {
+    let fixture = Fixture::healthy(tag);
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(&fixture, &runtime, &certifies);
+    let integration_ref = fixture.started.integration_ref.as_str().to_owned();
+    let base = fixture.started.base_sha.as_str().to_owned();
+    let remove_marker = EffectSiteId::RunDir(RunDirSite::RemoveMarker);
+    let create_ref = EffectSiteId::Ref(RefSite::CreateIntegration);
+    let committed = fixture.log_bytes();
+    let marker = fixture.public().join(rundir::MARKER);
+    assert!(
+        marker.exists(),
+        "{tag}: the fixture's creator left its marker standing (P6)"
+    );
+
+    let constructed = harness();
+    rundir::remove_marker(
+        &fixture.public(),
+        &mut rundir::HarnessHooks::new(Arc::clone(&constructed)),
+    )
+    .expect("P7: the creator's marker is removed through its funnel");
+    if ref_created {
+        given
+            .refs
+            .create_zero_old(
+                &mut crate::workspace_manager::HarnessEffects::new(Arc::clone(&constructed)),
+                &integration_ref,
+                &base,
+            )
+            .expect("P8: the integration ref is created through its funnel");
+    }
+    {
+        let seen = constructed.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(
+            seen.observed(remove_marker, HookPhase::After)
+                && seen.observed(create_ref, HookPhase::After) == ref_created,
+            "{tag}: the prefix was built through the funnels whose phases it ends at"
+        );
+    }
+    assert!(!marker.exists(), "{tag}: the marker is gone");
+    assert_eq!(
+        given.refs.target(),
+        ref_created.then(|| base.clone()),
+        "{tag}: the ref exists exactly when its creation was performed"
+    );
+    assert!(
+        !fixture.manager().execution_root().exists(),
+        "{tag}: nothing the run does after its creation is on disk"
+    );
+    assert_eq!(
+        fixture.log_bytes(),
+        committed,
+        "{tag}: the log is the creator's committed prefix"
+    );
+
+    let recovery = harness();
+    let (result, _) = resume(&fixture, &recovery, &given);
+    result.expect("the resume over the creation's prefix converges");
+    assert_eq!(
+        recovery
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .count(remove_marker, HookPhase::Before),
+        0,
+        "{tag}: the resume adopts the marker's removal and enters no `{remove_marker}`"
+    );
+    assert_eq!(
+        create_ref_entries(&recovery),
+        u32::from(!ref_created),
+        "{tag}: the resume creates the ref only when the prefix does not hold it"
+    );
+    assert_eq!(
+        given.refs.created(),
+        vec![(integration_ref, base.clone())],
+        "{tag}: across the prefix and the resume the ref was created once, at the recorded name \
+         and base"
+    );
+    assert_eq!(given.refs.target(), Some(base), "{tag}");
+    let after = fixture.log_bytes();
+    assert!(
+        after.starts_with(&committed)
+            && event_kinds(&after).last().map(String::as_str) == Some("run_resumed"),
+        "{tag}: the resume appended its `run_resumed` after the committed prefix"
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
+#[test]
+fn a_resume_over_a_creation_that_stopped_after_removing_its_marker_creates_the_integration_ref_once()
+ {
+    a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
+        false,
+        "creation-stopped-at-p7",
+    );
+}
+
+#[test]
+fn a_resume_over_a_creation_that_stopped_after_creating_its_integration_ref_adopts_it() {
+    a_resume_over_a_creation_that_stopped_after_its_marker_was_removed_converges(
+        true,
+        "creation-stopped-at-p8",
+    );
+}
+
+const STAGING_PATH_KILL_CHILD: &str = "engine::topology::recover::tests::staging_path_kill_child";
+
+#[test]
+#[ignore = "spawned as a subprocess by the staging-path kill witness"]
+fn staging_path_kill_child() {
+    let root = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_ROOT").expect("the parent names the fixture root"),
+    );
+    let at = match std::env::var("UPSTROKE_TEST_KILL_COORDINATE")
+        .expect("the parent names the coordinate")
+        .as_str()
+    {
+        "before-prepared-pin" => (EffectSiteId::Ref(RefSite::PinPrepared), HookPhase::Before),
+        other => panic!("`{other}` is not a coordinate of the staging path"),
+    };
+    let fixture = Fixture::adopted_by_a_kill_child(root, plan_with(true));
+    let mut hooks = EffectKilledAt::new(&harness(), at);
+    let driven = drive_hooked(&fixture, &DriveSeams::default(), 1, &mut hooks);
+    panic!(
+        "the kill at `{}` ({}) did not take this process: {:?}",
+        at.0,
+        at.1,
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_kill_before_the_proposals_pin_leaves_a_picked_staging_worktree_the_next_resume_reclaims_and_the_candidate_integrates()
+ {
+    use crate::engine::topology::scaffold::KILL_CHILD_BOUND;
+    use crate::workspace_manager::fixture::{died_by_abort, git, run_kill_child_within};
+
+    let tag = "kill-before-prepared-pin";
+    let fixture = Fixture::build(
+        tag,
+        Damage {
+            two_tasks: true,
+            ..Damage::default()
+        },
+    );
+    let (_planted, head) = plant_stale_queued_candidate(&fixture);
+    let planted = durable_kinds(&fixture).len();
+    let Some(status) = run_kill_child_within(
+        STAGING_PATH_KILL_CHILD,
+        &[
+            ("UPSTROKE_TEST_KILL_ROOT", fixture.root.as_os_str()),
+            (
+                "UPSTROKE_TEST_KILL_COORDINATE",
+                std::ffi::OsStr::new("before-prepared-pin"),
+            ),
+        ],
+        KILL_CHILD_BOUND,
+    ) else {
+        panic!(
+            "{tag}: the kill child armed before the proposal's pin did not end within \
+             {KILL_CHILD_BOUND:?}, and was killed and reaped"
+        );
+    };
+    assert!(
+        died_by_abort(&status),
+        "{tag}: the child did not die by the kill before the proposal's pin: {status:?}"
+    );
+    assert_eq!(
+        kinds_after(&fixture, planted),
+        vec!["run_resumed"],
+        "{tag}: the staging path records nothing before its pin"
+    );
+    let manager = fixture.manager();
+    let slot =
+        crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(1));
+    let staging = manager.slot_path(&slot);
+    assert!(
+        staging.is_dir() && manager.intents().expect("intents").contains(&slot),
+        "{tag}: R10: the staging worktree and its intent stand"
+    );
+    let proposal = git(&staging, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        git(&fixture.repo_root, &["rev-parse", &format!("{proposal}^")]),
+        head.0,
+        "{tag}: the pick completed: the staging worktree's head is the proposal on the moved head"
+    );
+    assert_eq!(
+        ref_target(
+            &fixture,
+            crate::engine::topology::integrate::prepared_pin_ref(
+                RUN_ID,
+                crate::topology::events::SequenceId(1)
+            )
+            .as_str()
+        ),
+        None,
+        "{tag}: and no prepared pin names it"
+    );
+    assert!(
+        !rundir::is_running(&fixture.public()),
+        "{tag}: the run lock went with the dead process"
+    );
+
+    let (_, handle) = resume_with_real_refs(&fixture, &harness())
+        .expect("the resume reclaims the picked staging worktree rather than refusing");
+    assert_staging_residue_reclaimed(&fixture, &staging, &handle);
+    drop(handle);
+    assert!(
+        crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+            .expect("fsck")
+            .contains(&proposal),
+        "{tag}: the unpinned proposal commit is left to Git"
+    );
+
+    let driven = drive(&fixture, &DriveSeams::default(), 1);
+    assert_the_candidate_integrates_under_the_next_sequence_on_the_moved_head(
+        &fixture, &driven, &head, tag,
+    );
+}
+
 /// Beta's candidate queued at the base, unmerged, so that a second lineage
 /// can be rooted at beta.
 fn plant_queued_beta(fixture: &Fixture) -> crate::topology::events::CandidateRef {
