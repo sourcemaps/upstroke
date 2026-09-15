@@ -43,6 +43,7 @@ under `e03f7eae…/round1/`.
 | 5 the design (O2): §5, §12, §23.1, each citing this record | **done** — §10; `test-docs-consistency.sh` green; `design/15`, `README.md`, `MAINTAINING.md` and `design/25` untouched |
 | 6 the findings-ledger file | **done** — §11; `test-pr-policy.sh` and `test-pr-ledger-evidence.sh` green, the row validated by both validators |
 | 7 the ten gates on this box, the guest, this record, the draft pull request | **done on this box** — the ten gates green at `fcfedc75` (§12) and at `3b44fc5d` and `e03f7eae`, the body's to report; the guest evidence is CI's Windows leg at the pushed head, by the orchestrator's ruling (§13); the draft is #290, its number set in the finding file by `e03f7eae` (§11); round 1 in §16 |
+| R1 the round-1 repair of `e03f7eae` | **done** — §16: B1–B7 fixed, each its own commit; F1 filed as `PR290-R1-APPEND-DOES-NOT-ENFORCE-THE-WRITE-INVARIANT`; every mutation re-run at the round's code head; the ten gates at the round's final head are the body's to report |
 
 ## 1. What this pull request is, from the contract
 
@@ -906,7 +907,8 @@ where the execution is:
   matched six lines of this record and, by the regex alone, the unrelated identifier
   `PlantedAnswerFiles` in `src/engine/topology/recover/tests.rs`, its notes and PR10's record
   (untouched); `grep -n '== None'` on this record matched R7's one sentence; the handover and the
-  body matched neither. After the rewrite this record matches none.
+  body matched neither. After the rewrite this record matches only this entry's own quotation
+  of the regex (the "after" listing in the same file).
 - **B4 (record 5): a test description exceeded its assertions; the M9 sentence gave the wrong
   reason.** `the_writer_refuses_a_conviction_without_a_citation` now asserts the constructor's
   refusal for `""`, `"   "` and `" \n"`; the record's row and the M9 row rewritten (§7, §8).
@@ -946,3 +948,46 @@ where the execution is:
   'design_defect\|DesignDefect' -- docs/internals` (the six changed notes and the two others), and
   for each new production item a grep of its notes file for a heading naming it.
   `bash .github/scripts/test-internals-notes.sh` after the edits: `round1/b7-test-internals-notes.log`.
+- **F1 (contract, P2): the event-append path does not enforce the write invariant.** Filed, not
+  fixed, as `findings/P2_correctness_202609150214_the-event-append-path-does-not-enforce-the-write-invariant.md`
+  (`PR290-R1-APPEND-DOES-NOT-ENFORCE-THE-WRITE-INVARIANT`, `correctness`, `pr: 290`,
+  `reviewed_sha` `e03f7eae`, `location` `src/events/mod.rs:530`, `introduced_by_feature`,
+  `first_bad` `c4362105`, `deferred`), in its own findings-only commit, the last before the push,
+  with the body's ledger row. Why filed: the contract places enforcement at the single writer and
+  the reader's rule and rejects validating the record on the log or fold layer (*"Fold-validated
+  convictions … Enforcement belongs to the single writer and to projections' read rule"*). Why
+  harmless at this head, each by the grep the file names: no path assigns the two fields after
+  construction (`git grep -n -E '\.(attribution|citation)\s*=[^=]' -- src` matches nothing);
+  `Some(QuestionAttribution::DesignDefect)` occurs in the constructors, the derivation, the answer
+  writer's check and test literals only; the two legacy emitters write `None, None`; the topology
+  has no emitter; and every projection reads the shape as a discovery.
+
+**Every mutation recipe re-run at the round's code head**, `33a90025c5ae913b80b7f20635dd87232c3c4bba`
+(the Rust tree is `92b45c9d`'s: the commits between are notes and this record; the commit after it
+is the finding). Runner `mutate.py` (in the session's scratchpad, its text at the top of the
+summary): each recipe is the exact string replacement the phase sections attribute to it, applied,
+run through the wrapper on the named tests, restored, and the file's SHA-256 checked against the
+pristine — `33a90025…/mutations/summary.txt`, `<name>.diff`, `<name>.log`:
+
+| mutation | outcome at `33a90025` |
+|---|---|
+| M1 `skip_serializing_if` removed from `attribution` | exit `101`: the three Phase 1 failures, **and the two round-1 pins** — `the_legacy_append_is_byte_identical_to_the_pre_move_writer` and `every_event_kind_round_trips` — which the corpus test still cannot see |
+| M2 the reader returns the stored value | exit `101`: `a_conviction_without_a_citation_reads_as_a_discovery` |
+| M3 `DesignDefect::convicted` accepts an empty citation | exit `101`: `convicted_refuses_an_empty_or_blank_citation` |
+| M4 the writer's refusal removed | exit `101`: `the_writer_refuses_a_conviction_without_a_citation` |
+| M5 `#[serde(flatten)]` removed | exit `101`: the three Phase 2 failures, **and now** `answers_survive_the_trip_through_a_file` and `answer::tests::an_answer_lands_where_the_engine_will_find_it`, because `read_answer` reads `ir::Answer` directly since B2 and an unflattened file is not one |
+| M6 the reader drops the attribution | exit `101`: the two Phase 2 failures |
+| M7 `deny_unknown_fields` removed from `QuestionAnswered4` | exit `101`: the two Phase 2 failures and `an_attributed_design_defect_reads_through_the_informational_path`, whose transaction half it also breaks |
+| M8 the topology's `DesignDefect` payload made strict | exit `101`: the two Phase 3 failures |
+| M9 the fold derives an answer from the record | exit `101`: `an_attributed_design_defect_folds_to_no_derived_state` |
+| M10 the pinned `defect()` converted to `discovered` (round 1) | exit `101`: `the_legacy_append_is_byte_identical_to_the_pre_move_writer`; `every_event_kind_round_trips` passes, its own fixture untouched |
+| M11 `AnswerRecord::convicted` accepts the empty string (round 1, the lens's) | exit `101`: `the_writer_refuses_a_conviction_without_a_citation` |
+| M12 `read_answer` routed through `AnswerRecord` (round 1) | exit `101`: `a_legacy_answer_file_with_a_foreign_column_still_parks_rather_than_erroring`, and it alone |
+| B2's recipe (the spin test's file replaced by the foreign column), expected to pass | exit `0`: `an_answer_file_that_changes_nothing_does_not_spin_the_scheduler` passes — the witness that the fix holds |
+
+**The gates and the guest at the round's final head** are the body's to report, under that head's
+directory: the ten gates from a clean worktree, the read-only measurement of the guest's `C:`
+immediately before the push (the answer-1 threshold, 12 GB, decides whether a local guest run is
+made; §13), `git merge-tree --write-tree origin/master HEAD` (`origin/master` moved to `aff2b024`
+during the round: two pull requests touching `findings/` and `scripts/pr-review-parse.py`, nothing
+this branch touches — the merge is clean and the base is not merged in), and both body validators.
