@@ -35,7 +35,10 @@ jobs:
         # by tests. It is absent from this matrix because it runs below, in
         # `test-windows`, on a self-hosted runner; these two legs stay on
         # GitHub's runners.
-        os: [ubuntu-latest, macos-latest]
+        # MEASUREMENT BRANCH ONLY: windows-latest is temporarily restored to
+        # re-measure the hosted-vs-guest gap recorded in
+        # decisions/2026-09-01-self-hosted-windows-test-leg.md. Not for merge.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
