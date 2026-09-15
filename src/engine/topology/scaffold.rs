@@ -1559,10 +1559,9 @@ pub(super) fn kill_child_and_adopt(test: &str, dir: &Path, site: &str) -> Run {
 
 pub(super) fn kill_child_and_adopt_in_a_scratch_tree(
     test: &str,
-    tag: &str,
     site: &str,
 ) -> (crate::rundir::scratch_tree::ScratchTree, Run) {
-    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), tag).unwrap_or_else(
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "kill").unwrap_or_else(
         |refusal| panic!("`{site}`: a scratch tree for the kill child: {refusal:?}"),
     );
     let temporary = tree.path().as_os_str();

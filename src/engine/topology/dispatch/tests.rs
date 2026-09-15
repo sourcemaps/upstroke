@@ -349,7 +349,6 @@ fn kill_after_dispatch_recreates_worktree_without_spend() {
     for site in ["before_intent", "after_intent", "after_add"] {
         let (_handoff, mut run) = kill_child_and_adopt_in_a_scratch_tree(
             "engine::topology::dispatch::tests::dispatch_kill_child",
-            "killdispatch",
             site,
         );
 

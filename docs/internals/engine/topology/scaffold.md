@@ -708,6 +708,20 @@ root; one that fails while the test unwinds is reported without a second panic
 `kill_child_and_adopt`, which the older kill witnesses use, are left as they
 were: their handoff directory is named for the process and nothing removes it.
 
+The tree's tag is `kill`, the same for every site, and short on purpose. The
+nesting lengthens every path under the child's fixture by the tree's name, and
+Git for Windows does not add a worktree whose `.git` path is longer than 220
+characters: `git worktree add` exits 128 with `fatal: '$GIT_DIR' too big`
+(measured on the Windows guest, with Git 2.50.1, the version CI's
+`test (winguest)` runs, and `core.longpaths` unset: 220 added, 221 refused).
+With the site in the tag, that leg failed at `2780e0e4` on the
+`after_snapshot_intent` child, which ended 101 instead of aborting; the launch
+discards the child's standard error, so that is all CI shows. On the guest,
+under the same temporary directory, `C:\Users\Administrator\AppData\Local\Temp`,
+and with that standard error kept by a diagnostic build, the child had
+panicked in its dispatch: Git refused its task worktree, whose `.git` path was
+223 characters (#292's review round 8).
+
 ## `fn launch_the_kill_child_and_adopt(`
 
 The launch, the abort check and the adoption both entry points share: the child

@@ -1332,8 +1332,7 @@ fn listed_as(listed: &Path, worktree: &Path) -> bool {
 #[test]
 fn kill_after_the_stage_before_the_tree_leaves_index_referenced_objects_then_scrub_releases_them() {
     for site in ["after_stage", "before_write_tree"] {
-        let (_handoff, mut run) =
-            kill_child_and_adopt_in_a_scratch_tree(CHILD, &format!("kill-{site}"), site);
+        let (_handoff, mut run) = kill_child_and_adopt_in_a_scratch_tree(CHILD, site);
         let dispatched = adopted_generation(&run);
         let mut process = Process::new();
 
@@ -1399,8 +1398,7 @@ fn kill_after_the_stage_before_the_tree_leaves_index_referenced_objects_then_scr
 #[test]
 fn kill_after_the_snapshot_intent_before_its_worktree_is_reclaimed_by_the_settlement() {
     for site in ["after_snapshot_intent", "before_snapshot_add"] {
-        let (_handoff, mut run) =
-            kill_child_and_adopt_in_a_scratch_tree(CHILD, &format!("kill-{site}"), site);
+        let (_handoff, mut run) = kill_child_and_adopt_in_a_scratch_tree(CHILD, site);
         let dispatched = adopted_generation(&run);
         let mut process = Process::new();
 
@@ -1564,8 +1562,7 @@ fn kill_at_snapshot_commit_id_unread_point_leaves_gc_owned_object() {
 #[test]
 fn a_kill_before_the_snapshot_commits_id_is_read_is_settled_interrupted_and_leaves_the_commit_to_git()
  {
-    let (_handoff, mut run) =
-        kill_child_and_adopt_in_a_scratch_tree(CHILD, "kill-id-unread-settled", "id_unread");
+    let (_handoff, mut run) = kill_child_and_adopt_in_a_scratch_tree(CHILD, "id_unread");
     let dispatched = adopted_generation(&run);
     let mut process = Process::new();
 
