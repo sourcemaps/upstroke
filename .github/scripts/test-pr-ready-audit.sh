@@ -4416,23 +4416,39 @@ def main(argv):
 PYSHAPE
 probe_expect elsewhere \
   'decoded=no unrefusing=- unproven=- skipped=- | refusing=- drive=returned:0 swept=- forced=0'
-# AND THEN THE PARSER THE AUDIT ACTUALLY RUNS, DRIVEN OVER ITS OWN WORK. Seven real parses: the
+# AND THEN THE PARSER THE AUDIT ACTUALLY RUNS, DRIVEN OVER ITS OWN WORK. Eight real parses: the
 # workflow form in both renderings, the repeated name it must refuse, the same at three objects
-# down, the older bare object, the frontier form, and the ledger subcommand. They are drives rather
-# than assertions -- what each returns is asserted by the families above, on these same shapes --
-# and their job here is that the parser's own code runs, and every scan it makes is answered for.
-# What they leave, the probe takes: a handler the seven never enter is entered, and a branch they
-# take one way only is turned -- measured when this was written, all 90 conditional branches in the
-# 35 code objects of `scripts/pr-review-parse.py` went both ways, over 78 altered runs -- and the
-# verdict line below asserts that every instruction in the file ran. A loop no document enters is
-# the one thing turning cannot reach -- `verdict_candidates` reads the bare object only inside one,
-# which is why the bare drive is here -- so if a change leaves one behind, give it a drive rather
-# than a filter.
+# down, the older bare object, the frontier form, the frontier form quoting a fenced example, and
+# the ledger subcommand. They are drives rather than assertions -- what the first seven return is
+# asserted by the families above, on these same shapes -- and their job here is that the parser's
+# own code runs, and every scan it makes is answered for. What they leave, the probe takes: a
+# handler the eight never enter is entered, and a branch they take one way only is turned --
+# measured when this was written, all 118 conditional branches in the 41 code objects of
+# `scripts/pr-review-parse.py` went both ways, over 109 altered runs -- and the verdict line below
+# asserts that every instruction in the file ran. A loop no document enters is the one thing
+# turning cannot reach -- `verdict_candidates` reads the bare object only inside one, which is why
+# the bare drive is here -- so if a change leaves one behind, give it a drive rather than a filter.
+#
+# THE QUOTED DRIVE IS THAT RULE, APPLIED. The parser reads a fence run inside a block's content only
+# inside a loop over that content, and resolves a reference in an info string only inside the
+# callback `rendered_language` hands `re.sub`. None of the other seven documents reaches either,
+# and with only those seven this line read
+# `unproven=referable,rendered_language.<locals>.resolved,unresolved_material`. The example's nested
+# fence enters the loop, and without it `unresolved_material` stays unproven. Its info string holds
+# one of each path the callback takes: a backslash escape, a named reference, a name no table holds,
+# a decimal and a hex reference, and a reference to a control character, which is left as written.
+# With one decimal reference alone, `rendered_language.<locals>.resolved` stayed unproven. What it
+# returns is asserted nowhere, and nothing turns on it: the parser reads it as a prose review.
 printf '<!-- upstroke-frontier-review pr=1 -->\nReviewed head: %s\n\n%s\n\n' \
   "$revived_head" '1. **P2 -- a finding.** Detail.' > "$tmp/probe-drive-prose.md"
 printf 'VERDICT: CHANGES_REQUIRED\n' >> "$tmp/probe-drive-prose.md"
 printf '%s\n\n| ID | Disposition |\n| --- | --- |\n| PR1-A | fixed |\n' \
   '## Review finding ledger' > "$tmp/probe-drive-ledger.md"
+{ printf '<!-- upstroke-frontier-review pr=1 -->\nReviewed head: %s\n\n' "$revived_head"
+  printf '````text\n```%s\nan example quoted inside an example\n```\n````\n\n' \
+    '\*&amp;&notareal;&#110;&#x6a;&#11;'
+  printf '1. **P2 -- a finding.** Detail.\n\nVERDICT: CHANGES_REQUIRED\n'
+} > "$tmp/probe-drive-quoted.md"
 # Only the verdict line is asserted, and deliberately: which functions refuse and what the drives
 # returned are the parser's own business -- a second decoder that genuinely refuses adds its name
 # to them and must stay green. `decoded=yes` is the limb that makes the rest mean something: a
@@ -4440,7 +4456,8 @@ printf '%s\n\n| ID | Disposition |\n| --- | --- |\n| PR1-A | fixed |\n' \
 got="$(decode_probe scripts/pr-review-parse.py \
   "review|$tmp/one-findings.md" "review --nul|$tmp/one-findings.md" \
   "review|$tmp/dup-findings.md" "review|$tmp/dup-deep.md" "review|$tmp/one-bare.md" \
-  "review|$tmp/probe-drive-prose.md" "ledger --nul|$tmp/probe-drive-ledger.md")"
+  "review|$tmp/probe-drive-prose.md" "review|$tmp/probe-drive-quoted.md" \
+  "ledger --nul|$tmp/probe-drive-ledger.md")"
 [[ "${got%% | *}" == 'decoded=yes unrefusing=- unproven=- skipped=-' ]] \
   || error "MUT-JSON-REPEATED-NAME-CHOSEN: got [$got], want the verdict [decoded=yes unrefusing=- unproven=- skipped=-]"
 # THAT THE SWEEP IS EMPTY IS NOT ASSERTED, and the reason is round 2's finding: an empty sweep
