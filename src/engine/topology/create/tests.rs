@@ -193,7 +193,9 @@ impl EventHooks for ArmedEvents {
                 .arm(EffectSiteId::Event(site), point, mode)
                 .expect("the site exposes this point in this mode");
         }
-        harness.hook(EffectSiteId::Event(site), HookPhase::Point { point, mode })
+        let injection = harness.hook(EffectSiteId::Event(site), HookPhase::Point { point, mode });
+        drop(harness);
+        crate::observations::Exported::new(Arc::clone(&self.harness)).carried(injection)
     }
 
     fn written_kill_shape(&mut self, site: EventSite) -> WrittenShape {
@@ -2362,6 +2364,11 @@ fn drive_into_the_kill(which: &str, fixture: &Fixture) -> ! {
             );
         }
         "p6" => kill_before(RunDirSite::RemoveMarker),
+        "p6synced" => hooks.arm(
+            EventSite::AppendFirst,
+            SubEffectPoint::Synced,
+            InjectionMode::Kill,
+        ),
         "p7" => refs.kill_on_create = true,
         "p8" => {}
         other => panic!("unknown prefix `{other}`"),
@@ -4233,4 +4240,132 @@ fn an_error_after_the_log_is_created_refuses_the_run_resumably_and_the_next_crea
     assert_eq!(once.state(), twice.state(), "replay twice equal");
     assert_eq!(fold.state(), once.state(), "and equal to the live fold");
     drop(lock);
+}
+
+#[test]
+fn a_kill_after_the_first_line_is_synced_leaves_a_committed_run_whose_next_census_repairs_its_marker()
+ {
+    use crate::engine::topology::startup::{CensusInputs, RunDirOutcome, census_run_dirs};
+    use crate::topology::effects::{EntryPhase, ResourceRow};
+
+    let site = EffectSiteId::Event(EventSite::AppendFirst);
+    let point = SubEffectPoint::Synced;
+    let mode = InjectionMode::Kill;
+    assert_eq!(
+        site.semantics(EntryPhase::Point { point, mode }).rows,
+        vec![ResourceRow::R21]
+    );
+    let fixture = Fixture::new("kill-p6-synced");
+    let code = spawn_and_wait(
+        "engine::topology::create::tests::create_kill_child",
+        &fixture.root,
+        "p6synced",
+        91,
+    );
+    assert_ne!(code, Some(0), "the child must have died");
+
+    let path = fixture.public().join(EVENT_LOG);
+    let bytes = std::fs::read(&path).expect("the log exists");
+    let events = TopologyFold::parse_log(&bytes).expect("the log parses");
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.body.kind())
+            .collect::<Vec<_>>(),
+        vec!["run_started"],
+        "the first line was written and synced, and nothing after it"
+    );
+    assert!(
+        fixture.public().join(MARKER).is_file(),
+        "P7 never ran, so the marker stands"
+    );
+    let commit: CommitRecord = serde_json::from_str(
+        &std::fs::read_to_string(fixture.private().join(COMMIT_RECORD))
+            .expect("the commit record is published"),
+    )
+    .expect("the commit record parses");
+    assert_eq!(
+        crate::rundir::classify_run_dir(&fixture.public()),
+        crate::rundir::RunDirClass::Committed
+    );
+
+    let mut hooks = TestHooks::new();
+    let mut warnings = Vec::new();
+    let stable = establish_stable_prefix(
+        &path,
+        inputs(),
+        Some(&commit.run_started_sha256),
+        &mut warnings,
+        hooks.events(),
+    )
+    .expect("the next open converges the synced line through the barrier");
+    assert_eq!(
+        stable.bytes(),
+        bytes.as_slice(),
+        "the stable prefix is the synced line"
+    );
+    assert_eq!(stable.events(), events.as_slice());
+    assert!(
+        fixture.public().join(MARKER).is_file(),
+        "the barrier acts on nothing derived from the log"
+    );
+    let runtime = crate::runner::container::FakeRuntime::new(
+        crate::runner::container::runtime::ContainerTrace::default(),
+    );
+    let liveness = crate::runner::container::FakeOwnerLiveness::new();
+    let view = crate::runner::container::DisposableDirView::new(
+        crate::runner::container::runtime::ContainerTrace::default(),
+    );
+    let report = census_run_dirs(
+        hooks.rundir(),
+        &CensusInputs {
+            repo_root: &fixture.repo,
+            repo_key: &fixture.repo_key,
+            authorized_root: &fixture.private_root,
+            incarnation: "01KZTINCB0CREATE0000000002",
+            runtime: &runtime,
+            liveness: &liveness,
+            view: &view,
+        },
+        None,
+    )
+    .expect("the census runs");
+    assert!(
+        matches!(
+            report.of(RUN_ID).map(|entry| &entry.outcome),
+            Some(RunDirOutcome::RepairedStaleMarker)
+        ),
+        "the next census repairs the committed run's stale marker: {report:?}"
+    );
+    assert!(
+        hooks.observed(
+            EffectSiteId::RunDir(RunDirSite::RemoveMarker),
+            HookPhase::After
+        ),
+        "through `RunDir.RemoveMarker`"
+    );
+    assert!(
+        !fixture.public().join(MARKER).exists() && !fixture.public().join(MARKER_STAGED).exists()
+    );
+    assert_eq!(
+        crate::rundir::classify_run_dir(&fixture.public()),
+        crate::rundir::RunDirClass::Committed
+    );
+    assert_eq!(
+        crate::rundir::list_runs(&fixture.repo),
+        vec![RUN_ID.to_owned()]
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("the log"),
+        bytes,
+        "the repair leaves the committed line as it was"
+    );
+    let once = TopologyFold::replay(inputs(), &events).expect("the log replays");
+    let twice = TopologyFold::replay(inputs(), &events).expect("the log replays again");
+    assert_eq!(once.state(), twice.state(), "replay twice equal");
+    assert_eq!(
+        stable.fold().state(),
+        once.state(),
+        "and equal to the barrier's fold"
+    );
 }

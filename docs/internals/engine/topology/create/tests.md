@@ -98,6 +98,13 @@ Armed in the shared harness at the moment it becomes due, so
 the injection and the coverage record still come from one
 place rather than two that could disagree.
 
+## `fn point(&mut self, site: EventSite, point: SubEffectPoint, mode: InjectionMode) -> Injection {` › `crate::observations::Exported::new(Arc::clone(&self.harness)).carried(injection)`
+
+A kill point's observation is exported before the kill is handed back. The funnel aborts right
+after, and a process that dies at a hook never reaches the drop that would otherwise write the
+record, so without this a kill child's record never names the point it died at. The harness guard is
+released first, because the export takes the same lock.
+
 ## `struct ArmedContainer {`
 
 The container funnel, armed and recording.
@@ -1420,3 +1427,22 @@ run directory for the next command to step around. The next creation over the sa
 converges: its open creates the log and syncs the directory again, `run_started` is the log's one
 line, the run classifies committed, and the log replays twice to states equal to each other and to
 the live fold.
+
+## `fn a_kill_after_the_first_line_is_synced_leaves_a_committed_run_whose_next_census_repairs_its_marker()`
+
+Gate 5's strict re-audit, row 106: `Event.AppendFirst`'s `Synced` kill had no committed witness. The
+prefix test killed at P6 only before the marker's removal, after the append had returned, and
+`event_kill_child` kills a bare log. The `p6synced` arm of `create_kill_child` kills run creation at
+the first line's `Synced` point: `run_started` is written and synced, and nothing after it runs.
+
+What the kill leaves is one committed line and nothing else in the log, the commit record, and the
+marker P7 never removed, so the directory classifies committed. The authority's action for the
+point is that the next open converges the surviving prefix through its stable-prefix barrier
+before any fold-derived effect, and the next command's census repairs the marker. Both are
+performed here with production code, in that order. `establish_stable_prefix`, given the commit
+record's digest, proves the synced line as the stable prefix and acts on nothing. Then
+`census_run_dirs` plans the committed run's stale marker for repair and removes it through
+`RunDir.RemoveMarker`. The run still classifies committed, readers list it, the log is untouched,
+and it replays twice to states equal to each other and to the barrier's fold.
+
+The kill child's record is the one that holds the point, because the parent never appends.
