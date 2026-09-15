@@ -500,6 +500,16 @@ In flight, and now killed inside it: the arming is at the capture
 because `retry` itself must succeed for the generation to be
 `InFlight { attempt: 2 }` when the coordinator dies.
 
+## `fn attempt_kill_child()` › `run.arm(STAGE, HookPhase::After, Injection::Kill);`
+
+Gate 5's strict re-audit, row 48: the stage is done and the tree not yet written. The index holds
+the worker's blob and no capture event exists.
+
+## `fn attempt_kill_child()` › `run.arm(WRITE_TREE, HookPhase::Before, Injection::Kill);`
+
+Row 49: the same durable prefix as the stage's after phase, killed at the write-tree's own before
+phase, so the child's record names that exact coordinate.
+
 ## `fn attempt_kill_child()` › `run.arm(WRITE_TREE, HookPhase::After, Injection::Kill);`
 
 Sub-prefix (b): the staged blob and tree objects exist and are
@@ -516,6 +526,14 @@ Sub-prefix (c), the `IdUnread` point: the child exited with the
 object written and the coordinator never recorded the id. Armed on
 the shared harness, because a point is a real injection coordinate
 and `IdUnread` supports `Kill` alone.
+
+## `fn attempt_kill_child()` › `"after_snapshot_intent" => run.arm(SNAPSHOT_INTENT, HookPhase::After, Injection::Kill),`
+
+Gate 5's strict re-audit, row 24: the snapshot intent is synced and no snapshot worktree is added.
+
+## `fn attempt_kill_child()` › `"before_snapshot_add" => run.arm(SNAPSHOT_ADD, HookPhase::Before, Injection::Kill),`
+
+Row 25: the same durable prefix, killed at the add's own before phase.
 
 ## `fn attempt_kill_child()` › `"after_snapshot_add" => run.arm(SNAPSHOT_ADD, HookPhase::After, Injection::Kill),`
 
@@ -555,6 +573,23 @@ claim the dead coordinator's unknown spend as its own.
 
 The redispatch: a new generation, at the same base, and the fold accepts
 it — which it would not if the old generation were still open.
+
+## `fn kill_after_the_stage_before_the_tree_leaves_index_referenced_objects_then_scrub_releases_them() {`
+
+Rows 48 and 49 of Gate 5's strict re-audit, one durable prefix killed at both of its coordinates,
+the stage's after phase and the write-tree's before phase. The child died inside the capture, so
+no capture event exists, and the index holds the worker's blob, which is reachable (R9). The
+interrupted settlement appends the interruption, returns the task to `Pending`, and scrubs the
+worktree with force through the scrub funnel, which releases the blob to Git (R27). Each prefix
+replays twice to equal states. The kill child's record holds both coordinates.
+
+## `fn kill_after_the_snapshot_intent_before_its_worktree_is_reclaimed_by_the_settlement() {`
+
+Rows 24 and 25 of Gate 5's strict re-audit, one durable prefix killed at the snapshot intent's
+after phase and at the add's before phase. The synced snapshot intent names no worktree, added or
+registered, and the ephemeral commit written before it is unreferenced. The interrupted settlement
+reclaims the intent with the task's, leaves the commit to Git, appends the interruption and returns
+the task to `Pending`. Each prefix replays twice to equal states.
 
 ## `fn kill_after_capture_leaves_index_referenced_objects_then_scrub_releases_them() {`
 
