@@ -1793,6 +1793,14 @@ contains MUT-JSON-REPEATED-NAME-CHOSEN "$got" "open-P1:CRITICAL"
 #     the copy in place; a default that cannot be copied leaves its function unproven. A default
 #     that SELECTS a decode without holding one is set, in a repeat of the run that entered its
 #     function, to each value of its own kind the file holds and to the kind's own empty value.
+#   * A LATER CALL IS ASKED THE SAME QUESTION, AND A RE-RUN THAT REACHED NO SCAN PROVES NOTHING.
+#     Which call a reader takes its verdict from is a thing the reader can decide, so a reader that
+#     answers safely once and unsafely the next time -- a hook chosen by a call counter, a decoder
+#     rebound after first use -- escapes a probe that stops at the first call. Once nothing is left
+#     to alter, EVERY NATURAL RUN THAT MADE A SCAN IS MADE ONCE MORE and the second run's scan is
+#     answered like the first's. And the probe's OWN take-away is itself a later call: a reader that
+#     raises the second time makes the copied-default repeat raise before it decodes, so a REPEAT
+#     THAT REACHED NO SCAN OR BUILD FROM THE CALL THE NOTE WAS TAKEN AT is unproven, not clean.
 #   * WHAT CANNOT RUN IS NOT ASKED FOR. Code written after a call of something that cannot return --
 #     `sys.exit`, or a function of Python with no return in it -- is not required, and that is
 #     decided from what the call was seen to call, not from how it is spelled.
@@ -1871,6 +1879,10 @@ inner_of = weakref.WeakKeyDictionary()  # a watched scanner -> the scanner the s
 faults = []           # the probe's own failures inside a call of MODULE's, raised again at the end
 activity = [None]     # (label, replay) of what the probe is running now: `<module>`, `<drive>`,
                       # or the name of the callable the sweep is calling
+runs = []             # (label, replay, record) for every run the probe performed, in order
+this_run = [None]     # the record of the run now being performed, or None outside a run
+made_scan = [None]    # the record the last `perform` built, for the caller that asked for that run
+in_attempt = [0]      # > 0 while a run the probe altered is being performed
 
 
 def ended(call):
@@ -2005,6 +2017,23 @@ def site():
     return activity[0][0] if activity[0] is not None else "<probe>"
 
 
+def chain():
+    """EVERY frame of MODULE's on the stack, innermost first, as the code of MODULE's it runs and
+    the offset it is at: which call, of which function, a scan or a build was made from."""
+    frames, frame = [], sys._getframe(1)
+    while frame is not None:
+        if ours(frame.f_code):
+            frames.append((alias.get(frame.f_code, frame.f_code), frame.f_lasti))
+        frame = frame.f_back
+    return tuple(frames)
+
+
+def noted():
+    """Record that the run now being performed made a scan or a build here, and from what."""
+    if this_run[0] is not None:
+        this_run[0]["events"].append(chain())
+
+
 busy = [0]            # > 0 while the probe's own bookkeeping runs inside a call of MODULE's
 
 
@@ -2127,7 +2156,8 @@ def defaults_of(function):
             + list((function.__kwdefaults__ or {}).items()))
 
 
-held_by_default = {}  # (code, key of a default) -> (what the scanner refused with, the run)
+held_by_default = {}  # (code, key of a default) -> (what the scanner refused with, the run, the
+                      # call the scan or build was made from)
 
 
 def defaulted(where, carriers):
@@ -2138,17 +2168,19 @@ def defaulted(where, carriers):
     the sweep is calling, that holds what the scanner refuses with is noted, and `taken_away`
     repeats the run with it taken out. A scan made while the module body runs cannot be repeated
     with a default changed -- running the body makes its functions again -- so there, and only
-    there, the note is the answer."""
+    there, the note is the answer. The call the scan or build was made from is stored with it, so a
+    repeat that never got back there can be told from one that did."""
     functions, frame = [], sys._getframe(1)
     while frame is not None:
         if ours(frame.f_code):
-            functions += [one for one in gc.get_referrers(frame.f_code)
+            at = ("at", alias.get(frame.f_code, frame.f_code), frame.f_lasti)
+            functions += [(one, at) for one in gc.get_referrers(frame.f_code)
                           if isinstance(one, types.FunctionType)]
         frame = frame.f_back
     called = callee.get(activity[0][0]) if activity[0] is not None else None
     if isinstance(called, types.FunctionType) and ours(called.__code__):
-        functions.append(called)
-    for function in functions:
+        functions.append((called, ("path", chain())))
+    for function, at in functions:
         for key, value in defaults_of(function):
             if not holds(value, carriers):
                 continue
@@ -2156,7 +2188,7 @@ def defaulted(where, carriers):
                 answers.setdefault(where, set()).add("unrefusing")
             else:
                 code = alias.get(function.__code__, function.__code__)
-                held_by_default.setdefault((code, key), (carriers, activity[0]))
+                held_by_default.setdefault((code, key), (carriers, activity[0], at))
 
 
 def carriers_of(context):
@@ -2228,6 +2260,7 @@ def watch(inner, carriers):
             where = site()
             answers.setdefault(where, set()).add(ask(inner))
             defaulted(where, carriers)
+            noted()
             observed[0] += 1
             return where, twice(string, idx)
         where, named_twice = recorded(record)
@@ -2253,6 +2286,7 @@ def watching(real):
                 where = site()
                 built.append((where, weakref.ref(scanner)))
                 defaulted(where, carriers)
+                noted()
                 observed[0] += 1
             recorded(record)
         return scanner
@@ -2375,6 +2409,8 @@ def expired(signum, frame):
     if asking and busy[0] > asking[-1]:
         late[0] = True
     elif asking or (not probing[0] and not busy[0]):
+        if not asking and this_run[0] is not None:
+            this_run[0]["cut"] = True
         raise Forced("a run went past %d seconds" % SECONDS)
 
 
@@ -2507,14 +2543,17 @@ class Sink:
 
 
 def perform(label, replay):
-    saved = activity[0], sys.stdout
-    activity[0], sys.stdout = (label, replay), Sink()
+    record = {"events": [], "natural": not in_attempt[0], "cut": False}
+    runs.append((label, replay, record))
+    made_scan[0] = record
+    saved = activity[0], sys.stdout, this_run[0]
+    activity[0], sys.stdout, this_run[0] = (label, replay), Sink(), record
     signal.setitimer(signal.ITIMER_REAL, SECONDS, 1)
     try:
         return replay()
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
-        activity[0], sys.stdout = saved
+        activity[0], sys.stdout, this_run[0] = saved
 
 
 spec = importlib.util.spec_from_file_location(MODULE, target)
@@ -2764,7 +2803,11 @@ def attempt(key, label, base, alteration):
                 armed.clear()
             recorded(lambda: uninstall(undo))
             forcing[0] -= 1
-    perform(label, replay)
+    in_attempt[0] += 1
+    try:
+        perform(label, replay)
+    finally:
+        in_attempt[0] -= 1
     forced.append(key)
 
 
@@ -2875,13 +2918,24 @@ def redefault(code, key, value, undo):
             function.__kwdefaults__ = dict(named, **{key: value(named[key])})
 
 
+def reached(record, at):
+    """Whether the run RECORD made a scan or a build from the call AT names."""
+    if at[0] == "at":
+        return any(at[1:] in one for one in record["events"])
+    return at[1] in record["events"]
+
+
 def taken_away():
     """A REFUSAL A DEFAULT HOLDS IS A REFUSAL ITS CALLER CAN TAKE AWAY, so the run that saw one is
     repeated with that default copied without what the scanner refused with -- and what the decode
     does then is the answer, not the note. A default that cannot be copied cannot be asked, and
-    leaves its function unproven."""
+    leaves its function unproven. AND A REPEAT THAT NEVER GOT BACK THERE ANSWERED NOTHING: a reader
+    whose refusal on its first call is not its default's but its own -- state it keeps between
+    calls, a counter that raises the second time -- makes no scan under the copied default at all,
+    and a repeat that reached no scan or build from the call the note was taken at leaves its
+    function unproven rather than silently clean."""
     progress = False
-    for (code, key), (carriers, (label, base)) in list(held_by_default.items()):
+    for (code, key), (carriers, (label, base), at) in list(held_by_default.items()):
         k = ("taken", code, key)
         if k in tried:
             continue
@@ -2892,6 +2946,8 @@ def taken_away():
             except Exception:
                 answers.setdefault(code.co_qualname, set()).add("unproven")
         attempt(k, label, base, alteration)
+        if not reached(made_scan[0], at):
+            answers.setdefault(code.co_qualname, set()).add("unproven")
         progress = True
     return progress
 
@@ -2939,6 +2995,25 @@ def selected():
 
 while alter() or sweep() or together() or environment() or taken_away() or selected():
     pass
+
+
+def again():
+    """AND A LATER CALL IS ASKED THE SAME QUESTION. A reader can answer safely once and unsafely
+    the next time on the same input -- a hook chosen by a call counter, a decoder rebound after
+    the first use -- and the sweep stops once a function's instructions have all run while the
+    drive stops when the program returns, so neither reaches that later call. Once nothing is left
+    to alter, every natural run that made a scan is made once more, and the scan it makes the
+    second time is answered like any other: a call that decodes unhooked only after the first is
+    caught here. A run its bound ended is not made again, and each distinct run is repeated once."""
+    seen = set()
+    for label, replay, record in [one for one in runs if one[2]["natural"]]:
+        if id(replay) in seen or record["cut"] or not record["events"]:
+            continue
+        seen.add(id(replay))
+        perform(label, replay)
+
+
+again()
 
 gc.collect()
 for where, scanner in built:
@@ -2993,7 +3068,7 @@ decode_probe() {  # decode_probe MODULE DRIVE...: the report's two lines as one,
 }
 printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 # THE PROBE IS ITSELF UNDER TEST, because a probe that has stopped watching agrees with a clean
-# parser and says so in the same words. So it runs first over thirty-three stand-ins whose answers
+# parser and says so in the same words. So it runs first over thirty-five stand-ins whose answers
 # are known, and MUTATIONS OF THE PROBE WERE WATCHED AGAINST THEM -- each the smallest text change
 # that undoes one rule, and each run through this whole file:
 #
@@ -3080,8 +3155,11 @@ printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 #   a kind's own empty value never tried               `selected`
 #   the question held outside the bound (round 6's     the probe never ends on `settling`, and the
 #     rule)                                              gate was killed at 400 seconds
+#   no natural run made once more (this round's rule)  `relay`
+#   a take-away that reached no scan not made          `spent`
+#     unproven (this round's rule)
 #
-# and none of the fifty-four that ran to their end moved an assertion of any other family in this
+# and none of the fifty-six that ran to their end moved an assertion of any other family in this
 # file. One more was measured and moves no assertion, because what it changes is a time: a question
 # whose time runs out while the probe is recording is ended when the recording is done, and without
 # that `settling` took 6, 12 and 13 seconds in three runs where it takes 4, as the timer fired again
@@ -4330,6 +4408,78 @@ def settled(pairs):
 PYSHAPE
 probe_expect settling \
   'decoded=yes unrefusing=- unproven=one_reading,read skipped=- | refusing=- drive=returned:0 swept=one_reading:raised:ValueError/raised:ValueError/raised:ValueError forced=1'
+# AND A READER THAT ANSWERS ONCE AND DIFFERENTLY THE NEXT TIME -- round 8's escape, and the one the
+# question it drove could not see. Round 8 decided a decoder's safety by RUNNING it: the drive runs
+# the program, the sweep calls every callable, and a default that holds a refusal is TAKEN AWAY and
+# the run repeated. But WHICH CALL the verdict is taken from is itself a thing a reader can decide,
+# and a reader that keeps state between calls -- a counter, a decoder rebound after first use --
+# answers a LATER call otherwise than the first. Two escapes follow, and each is closed:
+#
+#   * THE LATER CALL DECODES UNHOOKED, on the same input. The sweep stops calling a function once
+#     every instruction of it has run, and the drive stops when the program returns, so neither
+#     reaches a second call whose hook is chosen by a call counter -- `object_pairs_hook=(one_reading,
+#     one_reading, None)[min(calls, 2)]` reads hooked twice and unhooked after, and it is one
+#     instruction with no branch to turn. So once nothing is left to alter, EVERY NATURAL RUN THAT
+#     MADE A SCAN IS MADE ONCE MORE, and the scan the second run makes is answered like the first's:
+#     the unhooked decode on the later call is seen, and `relay` below is red. A run its bound ended
+#     is not repeated, and each distinct run is repeated once.
+#   * THE PROBE'S OWN TAKE-AWAY IS A LATER CALL, AND THE COUNTER BLOCKS IT. `taken_away` copies a
+#     default without the refusal it holds and repeats the run -- but that repeat is another call of
+#     the same reader, and a reader that raises the second time (`if calls >= 2: raise`) raises in
+#     the repeat before it decodes at all, so round 8 saw the copied default reach no decode and read
+#     that silence as safe. A REPEAT THAT REACHED NO SCAN OR BUILD FROM THE CALL THE NOTE WAS TAKEN AT
+#     PROVES NOTHING, and leaves its function unproven. `spent` below is that reader -- master's grep
+#     refused it, round 8 accepted it, and it is the P1 this round was written for -- and it is red.
+cat > "$tmp/probe-relay.py" <<'PYSHAPE'
+import json
+
+
+class Block:
+    def __init__(self, content):
+        self.content = content
+
+
+def one_reading(pairs):
+    seen = set()
+    for name, _ in pairs:
+        if name in seen:
+            raise ValueError("names %r twice" % name)
+        seen.add(name)
+    return dict(pairs)
+
+
+_calls = [0]
+
+
+def read(text, block):
+    _calls[0] += 1
+    return json.loads(block.content, object_pairs_hook=(one_reading, one_reading, None)[min(_calls[0], 2)])
+
+
+def main(argv):
+    read("", Block(open(argv[-1]).read()))
+    return 0
+PYSHAPE
+probe_expect relay \
+  'decoded=yes unrefusing=read unproven=- skipped=- | refusing=read drive=returned:0 swept=- forced=0'
+# The take-away's later call, blocked by a counter: the reader the drive and the sweep both refuse on
+# the first call, and whose copied-default repeat raises before it can decode. Reached no scan under
+# the copy -> unproven, not clean.
+probe_stand_in spent 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+_reader_calls = 0
+
+
+def extra_review_reader(text, *, options={"object_pairs_hook": one_reading}):
+    global _reader_calls
+    _reader_calls += 1
+    if _reader_calls >= 2:
+        raise RuntimeError("reader already used")
+    return json.loads(text, **options)
+PYSHAPE
+probe_expect spent \
+  'decoded=yes unrefusing=- unproven=extra_review_reader skipped=- | refusing=extra_review_reader,read drive=returned:0 swept=extra_review_reader:raised:ValueError/raised:RuntimeError forced=1'
 # WHAT THIS DOES NOT REACH. Each shape below was written beside a hooked decode and run through this
 # probe, which reported nothing unrefusing, nothing unproven and nothing skipped -- and each one
 # returns without a refusal on a document naming `findings` twice (for the hook that counts names,
@@ -4372,6 +4522,16 @@ probe_expect settling \
 #   * and a hook that raises on the duplicate for something only both values together make. One
 #     refusing any object of more than two names raises on it, reads both readings, and is counted
 #     as refusing.
+#   * a SELECTING default whose unsafe value is blocked by the reader's own state: `def by_mode(text,
+#     mode="strict"): calls += 1; if calls >= 2: raise; return json.loads(text,
+#     object_pairs_hook={"strict": one_reading, "loose": None}[mode])`. Setting the default to
+#     `"loose"` is how the unhooked decode would be reached, but the run that first read `mode` has
+#     spent the reader, so the repeat raises before it decodes -- and unlike the copied-default
+#     re-run above, a selecting-default repeat that reaches no scan cannot be called unproven without
+#     also refusing `by_short_name`, whose unknown-mode lookup legitimately raises with nothing wrong.
+#     Master's grep refuses this reader for its unhooked spelling; here it needs a caller passing
+#     `mode="loose"` on a fresh reader, which the module does not have, and closing it wants a repeat
+#     on state the run never touched, which this probe does not build.
 # AND WHAT IT REFUSES AND SHOULD NOT, OR MIGHT NOT -- because a guard is only honest if both sides
 # of it are written down. Each was run through this probe and reported red; the first, second and
 # fourth do what a parser should, the third is the cost of reading nothing into a value a function
