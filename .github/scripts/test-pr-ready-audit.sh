@@ -1601,7 +1601,7 @@ contains MUT-JSON-REPEATED-NAME-CHOSEN "$got" "open-P1:CRITICAL"
 # THE SHAPE, NOT THE INSTANCE -- AND ASKED OF THE DECODE, NEVER OF HOW IT IS WRITTEN. One
 # `json.loads` reads review content today and the hook is on it; a second one added without the
 # hook is this finding again, in a place no fixture here is pointed at. So what is asserted is the
-# class, and this is the SIXTH guard written for it. Each one before it was wrong, and each in its
+# class, and this is the EIGHTH guard written for it. Each one before it was wrong, and each in its
 # own way:
 #
 #   * round 0 matched the literal `json.loads(`. `json.loads (text)` is a working, unhooked decoder
@@ -1647,6 +1647,18 @@ contains MUT-JSON-REPEATED-NAME-CHOSEN "$got" "open-P1:CRITICAL"
 # sweep are two ways of making MODULE's code run; what is concluded is decided by what ran, and by
 # nothing else.
 #
+# AND ROUND 6 STILL CHOSE WHAT TO CALL FROM A LIST, and each of its two reviews executed an escape
+# from it -- neither a decode the probe misread, both a place it never looked. It held a
+# module-level name, a class body and a module-level container, and a class body only for the
+# functions MODULE wrote, so `read = staticmethod(json.loads)` in a class was never called. And it
+# called everything with its defaults as written, so `def extra_review_reader(text,
+# options={"object_pairs_hook": one_reading})` refused under the sweep and returns PASS for a caller
+# passing `options={}` -- a reader MASTER'S GREP REFUSED, which made the round a regression. Every
+# round before it was shown one more shape its list did not reach, and a list over an open set is
+# never finished. So what is called names no place a callable sits, and what a default could take
+# away is not recognised from how the default is written: it is TAKEN AWAY, and what the decode does
+# then is the answer.
+#
 # So this guard states WHAT MAY BE CONCLUDED, AND FROM WHAT, and implements exactly that:
 #
 #   * WHAT MAKES A SCANNER ACCEPTABLE: it REFUSES A REPEATED NAME, concluded from a PAIRED RESULT --
@@ -1681,21 +1693,32 @@ contains MUT-JSON-REPEATED-NAME-CHOSEN "$got" "open-P1:CRITICAL"
 #     is measured with `sys.monitoring`, instruction by instruction, and nothing in it reads a
 #     spelling.
 #   * HOW IT IS MADE TO RUN. The drive runs the program on its own documents; the sweep calls every
-#     callable MODULE holds that nothing has run -- by a module-level name, in a class body, or
-#     inside a module-level container -- and whatever those calls return or yield that can be
-#     called; and what neither reaches is TAKEN. A HANDLER NO RUN ENTERED is entered by raising what
-#     it catches at an instruction its body ran, in a repeat of the run that ran it, because any
-#     instruction can raise. A BRANCH TAKEN ONE WAY ONLY is turned -- the conditional jump flipped
-#     in a copy of the code object -- and the run that took it is repeated, because a branch the
-#     probe's documents do not take is exactly where round 5 lost `parse_prose_review`: under that,
-#     `if os.environ.get("UPSTROKE_LOOSE")` runs its body, and so does `hook = None if loose else
-#     one_reading`, whose other arm is a constant. Taking a branch its condition would not take puts
-#     the code in a state its callers may never make, so while a turned run is going the probe's
-#     question is put to the code as MODULE wrote it. A code object the turns one at a time leave
-#     short is run once more with all of its one-way branches turned together, and a variable MODULE
-#     reads from the environment is set, in a repeat of the run that read it, to each string
-#     MODULE's code holds. Any run -- turned or not -- that goes past ten seconds is ended where it
-#     is.
+#     callable MODULE's namespaces refer to that nothing has run -- WHATEVER HOLDS IT, found by the
+#     garbage collector's own account of what refers to what and never by a list of places -- and
+#     whatever those calls return or yield that can be called; and what neither reaches is TAKEN. A
+#     callable is called rather than opened, a class MODULE did not write is not walked, and a
+#     decoder's own machinery is asked at its scanner. A HANDLER NO RUN ENTERED is entered by
+#     raising what it catches at an instruction its body ran, in a repeat of the run that ran it,
+#     because any instruction can raise. A BRANCH TAKEN ONE WAY ONLY is turned -- the conditional
+#     jump flipped in a copy of the code object -- and the run that took it is repeated, because a
+#     branch the probe's documents do not take is exactly where round 5 lost `parse_prose_review`:
+#     under that, `if os.environ.get("UPSTROKE_LOOSE")` runs its body, and so does `hook = None if
+#     loose else one_reading`, whose other arm is a constant. Taking a branch its condition would
+#     not take puts the code in a state its callers may never make, so while a turned run is going
+#     the probe's question is put to the code as MODULE wrote it. A code object the turns one at a
+#     time leave short is run once more with all of its one-way branches turned together, and a
+#     variable MODULE reads from the environment is set, in a repeat of the run that read it, to
+#     each string MODULE's code holds. Any run -- turned or not -- that goes past ten seconds is
+#     ended where it is, and the question, which runs MODULE's hook, is ended after two and answers
+#     UNPROVEN.
+#   * A DEFAULT IS AN INPUT, AND A REFUSAL A DEFAULT HOLDS IS NOT THE DECODE'S OWN. A default is
+#     what a caller gets by passing nothing, so a refusal it holds is one any caller can take away.
+#     At every scan, each default of a function of MODULE's on the stack -- or of the one the sweep
+#     is calling -- that holds what the scanner refuses with (its decoder, its hook, the class
+#     MODULE wrote for it, what the hook calls) is COPIED WITHOUT IT, and the run is repeated with
+#     the copy in place; a default that cannot be copied leaves its function unproven. A default
+#     that SELECTS a decode without holding one is set, in a repeat of the run that entered its
+#     function, to each value of its own kind the file holds and to the kind's own empty value.
 #   * WHAT CANNOT RUN IS NOT ASKED FOR. Code written after a call of something that cannot return --
 #     `sys.exit`, or a function of Python with no return in it -- is not required, and that is
 #     decided from what the call was seen to call, not from how it is spelled.
@@ -1706,11 +1729,12 @@ contains MUT-JSON-REPEATED-NAME-CHOSEN "$got" "open-P1:CRITICAL"
 #
 # BOTH HALVES OF THE BOUNDARY, over every scanner the standard library makes. Closed against: a
 # scanner that returns on the duplicate, one that is not shown to refuse it, a refusal a frame of
-# MODULE's returns over, and code the probe could not make run. Let through: a scanner shown to
-# refuse, whatever reaches it -- a factory, an alias, an attribute chain, a namespace attribute, a
-# `functools` wrapper, a `**` unpacking, a subclass, a `decode` of its own with a required keyword,
-# a SECOND scanner that genuinely refuses -- and a helper whose every instruction ran without one.
-# What is left either way is measured at the end of this section.
+# MODULE's returns over, a refusal that is gone once a default is taken out, and code the probe
+# could not make run. Let through: a scanner shown to refuse, whatever reaches it -- a factory, an
+# alias, an attribute chain, a namespace attribute, a `functools` wrapper, a `**` unpacking, a
+# subclass, a `decode` of its own with a required keyword, a SECOND scanner that genuinely refuses,
+# a default that happens to hold the hook the decode does not take from it -- and a helper whose
+# every instruction ran without one. What is left either way is measured at the end of this section.
 cat > "$tmp/decode-probe.py" <<'DECODEPROBE'
 """Ask every JSON scanner this module's code makes or uses whether it REFUSES A REPEATED NAME -- and
 RUN EVERY INSTRUCTION AND TAKE EVERY BRANCH this module's file holds, concluding green only from that.
@@ -1726,12 +1750,13 @@ REPORT-FILE and never to stdout, which belongs to MODULE:
 
 A swept function is called with the probe's document as text, then with one of its readings, then
 with a path to the document, until everything written in it has run; its outcomes are joined by `/`.
-`forced` counts the runs the probe repeated with a branch turned or an exception raised. An empty
+`forced` counts the runs the probe repeated with something altered: a branch turned, an exception
+raised, a variable of the environment set, or a default taken out or changed. An empty
 list is written `-`. Exit 0 means the report was written, and any other exit means it was not: a
 failure of the probe's own is never caught and never becomes a report.
 """
-import builtins, dis, gc, importlib.util, inspect, json.decoder, json.scanner, opcode, os, signal
-import sys, tempfile, types, weakref
+import builtins, copy, dis, functools, gc, importlib.util, inspect, json.decoder, json.scanner
+import opcode, os, signal, sys, tempfile, time, types, weakref
 
 # Coverage is measured with `sys.monitoring`, which Python 3.12 introduced. An older interpreter
 # cannot run this probe, and it says so rather than reporting from a measurement it did not take.
@@ -1757,6 +1782,8 @@ READINGS = ('{"verdict":"PASS","findings":[{"id":"CRITICAL","severity":"P1"}]}',
             '{"verdict":"PASS","findings":[]}')
 
 target = os.path.abspath(sys.argv[1])
+MODULE = "under_probe"  # the name MODULE is loaded under
+probe_file = os.path.abspath(__file__)
 report_file = os.path.abspath(sys.argv[2])
 drives = sys.argv[3:]
 scratch = tempfile.mkdtemp()
@@ -1797,6 +1824,8 @@ def names_once(pairs):
 
 
 reference = json.decoder.JSONDecoder(object_pairs_hook=names_once)
+NEUTRAL = json.decoder.JSONDecoder()  # no hook: what a caller passing nothing gets, and watched
+PLAIN = dict(vars(NEUTRAL))           # a decoder's own machinery, as the standard library sets it
 real_py = json.scanner.py_make_scanner
 real_c = json.scanner.c_make_scanner
 
@@ -1852,15 +1881,34 @@ def pristine():
     return restore
 
 
+QUESTION = 2          # seconds the question may take: three documents of a few dozen bytes each
+asking = []           # the depth of the probe's bookkeeping each question now being put started at
+late = [False]        # the question's time ran out while the probe was recording
+
+
 def ask(scanner):
-    """SCANNER's paired result, asked of the scanner the standard library made -- its signature is
-    the standard library's, so nothing MODULE declares is called to put the question."""
+    """SCANNER's paired result, asked of the scanner the standard library made -- its signature
+    is the standard library's, so nothing MODULE declares is called to put the question. The
+    question runs MODULE's hook, and a hook can loop for ever on a repeated name, so it is
+    bounded like a run: one that has not answered in QUESTION seconds is UNPROVEN, and the run it
+    interrupted goes on."""
     probing[0] += 1
     restore = pristine()
+    started = time.monotonic()
+    remaining, interval = signal.setitimer(signal.ITIMER_REAL, QUESTION, 1)
+    asking.append(busy[0])
     try:
         duplicate = ended(lambda: scanner(DUPLICATE, 0))
         readings = [ended(lambda one=one: scanner(one, 0)) for one in READINGS]
+    except Forced:
+        return "unproven"
     finally:
+        asking.pop()
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        late[0] = False
+        if remaining:
+            signal.setitimer(signal.ITIMER_REAL,
+                             max(remaining - (time.monotonic() - started), 0.001), interval)
         restore()
         probing[0] -= 1
     if duplicate == "returned":
@@ -1887,15 +1935,20 @@ busy = [0]            # > 0 while the probe's own bookkeeping runs inside a call
 
 
 def recorded(record):
-    """RECORD's value, with a failure of the probe's own kept to be raised again at the end."""
+    """RECORD's value, with a failure of the probe's own kept to be raised again at the end -- and a
+    question's time, where it ran out while this was recording, ended as soon as this is done."""
     busy[0] += 1
     try:
-        return record()
+        value = record()
     except BaseException as exc:
         faults.append(exc)
         raise
     finally:
         busy[0] -= 1
+    if late[0] and asking and busy[0] == asking[-1]:
+        late[0] = False
+        raise Forced("the question went past %d seconds" % QUESTION)
+    return value
 
 
 pending = {}          # id of a frame of MODULE's a refusal is on its way out of -> that frame
@@ -1957,7 +2010,141 @@ def over(frame):
             M.set_events(TOOL, 0)
 
 
-def watch(inner):
+callee = {}           # the name the sweep calls something by -> what it calls
+ATOMS = (str, bytes, int, float, complex, bool, type(None))
+
+
+def elsewhere(value):
+    """Whether VALUE is not a value MODULE's code bound but a namespace of somebody else's: a
+    module's dictionary, code, a frame, a class written outside MODULE, or the probe's own code."""
+    if isinstance(value, (types.CodeType, types.FrameType)):
+        return True
+    if isinstance(value, dict):
+        return any(value is vars(one) for one in list(sys.modules.values()) + [builtins])
+    if isinstance(value, type):
+        return value.__module__ != MODULE
+    code = getattr(value, "__code__", None)
+    return isinstance(code, types.CodeType) and os.path.abspath(code.co_filename) == probe_file
+
+
+def holds(value, carriers):
+    """Whether VALUE holds one of CARRIERS: is one, or reaches one through what it refers to --
+    never through a function's code or its globals, which reach everything the module has."""
+    wanted = {id(one) for one in carriers if one is not None}
+    stack, seen, kept = [value], set(), []
+    while stack:
+        one = stack.pop()
+        if id(one) in wanted:
+            return True
+        if isinstance(one, ATOMS) or id(one) in seen or isinstance(one, type) or elsewhere(one):
+            continue
+        seen.add(id(one))
+        kept.append(one)
+        if isinstance(one, types.FunctionType):
+            stack += [one.__defaults__, one.__kwdefaults__, one.__closure__, one.__dict__]
+        else:
+            stack += gc.get_referents(one)
+    return False
+
+
+def defaults_of(function):
+    """(key, value) for each default of FUNCTION: an index into `__defaults__`, or a keyword."""
+    return (list(enumerate(function.__defaults__ or ()))
+            + list((function.__kwdefaults__ or {}).items()))
+
+
+held_by_default = {}  # (code, key of a default) -> (what the scanner refused with, the run)
+
+
+def defaulted(where, carriers):
+    """WHERE A CALLER COULD TAKE A REFUSAL AWAY. A default is what a caller gets by passing
+    nothing, so a refusal a default holds is removed by any caller that passes that parameter --
+    `options={}` for a default of `{"object_pairs_hook": one_reading}`, `hook=None`,
+    `cls=json.JSONDecoder`. Every default of a function of MODULE's on the stack, and of the one
+    the sweep is calling, that holds what the scanner refuses with is noted, and `taken_away`
+    repeats the run with it taken out. A scan made while the module body runs cannot be repeated
+    with a default changed -- running the body makes its functions again -- so there, and only
+    there, the note is the answer."""
+    functions, frame = [], sys._getframe(1)
+    while frame is not None:
+        if ours(frame.f_code):
+            functions += [one for one in gc.get_referrers(frame.f_code)
+                          if isinstance(one, types.FunctionType)]
+        frame = frame.f_back
+    called = callee.get(activity[0][0]) if activity[0] is not None else None
+    if isinstance(called, types.FunctionType) and ours(called.__code__):
+        functions.append(called)
+    for function in functions:
+        for key, value in defaults_of(function):
+            if not holds(value, carriers):
+                continue
+            if activity[0] is None or activity[0][0] == "<module>":
+                answers.setdefault(where, set()).add("unrefusing")
+            else:
+                code = alias.get(function.__code__, function.__code__)
+                held_by_default.setdefault((code, key), (carriers, activity[0]))
+
+
+def carriers_of(context):
+    """What a scanner built over CONTEXT refuses with: the context, its pairs hook, its class where
+    MODULE wrote that class, and what the hook itself calls through its closure or a `partial`. Read
+    when the scanner is built, because that is when the scanner reads them."""
+    kind = type(context)
+    hook = getattr(context, "object_pairs_hook", None)
+    inside = []
+    for cell in getattr(hook, "__closure__", None) or ():
+        try:
+            inside.append(cell.cell_contents)
+        except ValueError:
+            pass
+    if isinstance(hook, functools.partial):
+        inside += [hook.func, *hook.args, *hook.keywords.values()]
+    return tuple([context, hook, kind if kind.__module__ == MODULE else None]
+                 + [one for one in inside if callable(one)])
+
+
+def without(value, carriers):
+    """VALUE copied with every one of CARRIERS taken out of it, at any depth: a decoder becomes
+    the standard library's with no hook, a class MODULE wrote becomes the standard library's
+    decoder class, and anything else -- a hook -- becomes `dict`, which is what a scanner with no
+    hook builds an object with. A function holding one in its defaults or its closure is made
+    again around the copies. The copy is `copy.deepcopy`'s, so what cannot be copied raises."""
+    memo = {}
+    for one in carriers:
+        if one is not None and id(one) not in memo:
+            memo[id(one)] = (NEUTRAL if isinstance(one, json.decoder.JSONDecoder)
+                             else json.decoder.JSONDecoder if isinstance(one, type) else dict)
+    stack, seen, found = [value], set(), []
+    while stack:
+        one = stack.pop()
+        if isinstance(one, ATOMS) or id(one) in seen or isinstance(one, type) or elsewhere(one):
+            continue
+        seen.add(id(one))
+        if isinstance(one, types.FunctionType):
+            found.append(one)
+            stack += [one.__defaults__, one.__kwdefaults__, one.__closure__, one.__dict__]
+        else:
+            stack += gc.get_referents(one)
+    for function in reversed(found):
+        if id(function) in memo or not holds(function, carriers):
+            continue
+        cells = []
+        for cell in function.__closure__ or ():
+            try:
+                cells.append(types.CellType(copy.deepcopy(cell.cell_contents, memo)))
+            except ValueError:
+                cells.append(types.CellType())
+        again = types.FunctionType(function.__code__, function.__globals__, function.__name__,
+                                   copy.deepcopy(function.__defaults__, memo),
+                                   tuple(cells) if function.__closure__ is not None else None)
+        again.__kwdefaults__ = copy.deepcopy(function.__kwdefaults__, memo)
+        again.__qualname__ = function.__qualname__
+        again.__dict__.update(copy.deepcopy(function.__dict__, memo))
+        memo[id(function)] = again
+    return copy.deepcopy(value, memo)
+
+
+def watch(inner, carriers):
     """INNER, a scanner the standard library made, with every scan through it answered for."""
     def scanning(string, idx, *rest, **named):
         if probing[0]:
@@ -1966,6 +2153,7 @@ def watch(inner):
         def record():
             where = site()
             answers.setdefault(where, set()).add(ask(inner))
+            defaulted(where, carriers)
             observed[0] += 1
             return where, twice(string, idx)
         where, named_twice = recorded(record)
@@ -1984,10 +2172,13 @@ def watch(inner):
 
 def watching(real):
     def make_scanner(context):
-        scanner = watch(real(context))
+        carriers = carriers_of(context)
+        scanner = watch(real(context), carriers)
         if not probing[0]:
             def record():
-                built.append((site(), weakref.ref(scanner)))
+                where = site()
+                built.append((where, weakref.ref(scanner)))
+                defaulted(where, carriers)
                 observed[0] += 1
             recorded(record)
         return scanner
@@ -2002,7 +2193,7 @@ if real_c is not None:
 json.scanner.make_scanner = json.scanner.c_make_scanner or json.scanner.py_make_scanner
 for existing in gc.get_objects():
     if isinstance(existing, json.decoder.JSONDecoder) and existing is not reference:
-        existing.scan_once = watch(existing.scan_once)
+        existing.scan_once = watch(existing.scan_once, carriers_of(existing))
 
 # ---- what every code object of MODULE's must be seen to do ---------------------------------------
 INERT = frozenset({
@@ -2103,9 +2294,13 @@ SECONDS = 10
 
 
 def expired(signum, frame):
-    # Never inside the probe's own question or its bookkeeping: the timer fires again a second
-    # later, and a run that is still going is by then in MODULE's code.
-    if not probing[0] and not busy[0]:
+    # Never inside the probe's own bookkeeping: the timer fires again a second later, and a run that
+    # is still going is by then in MODULE's code. Inside the question it does -- at the depth of
+    # bookkeeping the question started at, which is MODULE's hook running -- and `ask` answers for a
+    # question that did not end.
+    if asking and busy[0] > asking[-1]:
+        late[0] = True
+    elif asking or (not probing[0] and not busy[0]):
         raise Forced("a run went past %d seconds" % SECONDS)
 
 
@@ -2206,6 +2401,8 @@ def uninstall(undo):
                 os.environ.pop(holder, None)
             else:
                 os.environ[holder] = previous
+        elif isinstance(holder, types.FunctionType) and isinstance(previous, tuple):
+            holder.__defaults__, holder.__kwdefaults__ = previous
         elif isinstance(holder, types.FunctionType):
             holder.__code__ = previous
         elif previous is None:
@@ -2246,7 +2443,7 @@ def perform(label, replay):
         activity[0], sys.stdout = saved
 
 
-spec = importlib.util.spec_from_file_location("under_probe", target)
+spec = importlib.util.spec_from_file_location(MODULE, target)
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 os.chdir(scratch)
@@ -2288,38 +2485,54 @@ if callable(getattr(module, "main", None)):
 drive = ",".join(driven) or "absent"
 
 
-def held(namespace, found, seen, top_level=True, label=None, depth=0):
-    for name, value in list(namespace.items()):
-        where = name if label is None else label(name)
+def members(where, value):
+    """(name, value) for everything VALUE refers to. A callable is CALLED rather than opened, so
+    of a callable only its own attributes are members; of anything else, whatever the garbage
+    collector says it refers to -- named by key, index or attribute where VALUE names it, and by
+    type where not. A decoder's own machinery, where it is the standard library's, is asked at
+    its scanner instead."""
+    if isinstance(value, type):
+        return [("%s.%s" % (value.__qualname__, key), one) for key, one in vars(value).items()]
+    found = []
+    if isinstance(value, dict):
+        found += [("%s[%s]" % (where, str(key)[:24]), one) for key, one in value.items()]
+        found += [("%s.keys()[%d]" % (where, index), key) for index, key in enumerate(value)]
+    elif isinstance(value, (list, tuple)):
+        found += [("%s[%d]" % (where, index), one) for index, one in enumerate(value)]
+    attributes = getattr(value, "__dict__", None)
+    if isinstance(attributes, dict) and not elsewhere(attributes):
+        found += [("%s.%s" % (where, key), one) for key, one in attributes.items()
+                  if not (isinstance(value, json.decoder.JSONDecoder) and key in PLAIN
+                          and (key == "scan_once" or one is PLAIN[key]
+                               or (type(one) is type(PLAIN[key]) and one == PLAIN[key])))]
+    if not callable(value):
+        named = {id(one) for _, one in found} | {id(attributes)}
+        found += [("%s<%s>" % (where, type(one).__name__), one) for one in gc.get_referents(value)
+                  if id(one) not in named]
+    return found
+
+
+def held(namespace):
+    """(name, callable) for EVERY CALLABLE MODULE'S NAMESPACE REACHES, and not a list of the
+    places a callable may sit: a name, a class body, a container of any kind at any depth, an
+    attribute, a key. Whatever is reached is taken as it is -- nothing here asks whether it
+    decodes, or whose code it runs. A function of MODULE's is named by its qualified name, and
+    anything else by its path."""
+    found, seen, kept = [], set(), []
+    stack = list(reversed(list(namespace.items())))
+    while stack:
+        where, value = stack.pop()
         if isinstance(value, (staticmethod, classmethod)):
             value = value.__func__
-        if id(value) in seen or isinstance(value, types.ModuleType) or value is vars(builtins):
+        if isinstance(value, ATOMS) or id(value) in seen or elsewhere(value):
             continue
-        if isinstance(value, type):
-            if value.__module__ == module.__name__:
-                seen.add(id(value))
-                held(vars(value), found, seen, False, None, depth)
-            continue
+        seen.add(id(value))
+        kept.append(value)
         if isinstance(value, types.FunctionType) and value.__code__ in mine:
-            seen.add(id(value))
-            found.append((value.__qualname__, value))
-        elif top_level and callable(value):
-            seen.add(id(value))
+            where = value.__qualname__
+        if callable(value) and not isinstance(value, type):
             found.append((where, value))
-        elif top_level and depth < 3:
-            if isinstance(value, (list, tuple)):
-                items, mark = {"%d" % i: one for i, one in enumerate(value)}, "%s[%s]"
-            elif isinstance(value, dict):
-                items, mark = {str(key)[:24]: one for key, one in value.items()}, "%s[%s]"
-            elif isinstance(value, types.SimpleNamespace) or type(value).__module__ == module.__name__:
-                items, mark = getattr(value, "__dict__", None), "%s.%s"
-                if not isinstance(items, dict):
-                    continue
-            else:
-                continue
-            seen.add(id(value))
-            held(dict(items), found, seen, True,
-                 lambda key, where=where, mark=mark: mark % (where, key), depth + 1)
+        stack.extend(reversed(members(where, value)))
     return found
 
 
@@ -2371,12 +2584,13 @@ skipped, swept, called = [], [], set()
 
 def sweep():
     progress = False
-    for name, function in held(vars(module), [], set()):
+    for name, function in held(vars(module)):
         code = getattr(function, "__code__", None)
         own = code is not None and code in mine
         if id(function) in called or (own and required(code, False) <= ran[code]):
             continue
         called.add(id(function))
+        callee[name] = function
         progress = True
         try:
             signature = inspect.signature(function)
@@ -2573,7 +2787,83 @@ def environment():
     return progress
 
 
-while alter() or sweep() or together() or environment():
+def redefault(code, key, value, undo):
+    """Every function made from MODULE's CODE, with the default at KEY set to VALUE until UNDO."""
+    for function in [one for one in gc.get_objects() if isinstance(one, types.FunctionType)
+                     and alias.get(one.__code__, one.__code__) is code]:
+        positional, named = function.__defaults__, function.__kwdefaults__
+        if isinstance(key, int) and positional is not None and key < len(positional):
+            undo.append((function, (positional, named)))
+            function.__defaults__ = (positional[:key] + (value(positional[key]),)
+                                     + positional[key + 1:])
+        elif isinstance(key, str) and named is not None and key in named:
+            undo.append((function, (positional, named)))
+            function.__kwdefaults__ = dict(named, **{key: value(named[key])})
+
+
+def taken_away():
+    """A REFUSAL A DEFAULT HOLDS IS A REFUSAL ITS CALLER CAN TAKE AWAY, so the run that saw one is
+    repeated with that default copied without what the scanner refused with -- and what the decode
+    does then is the answer, not the note. A default that cannot be copied cannot be asked, and
+    leaves its function unproven."""
+    progress = False
+    for (code, key), (carriers, (label, base)) in list(held_by_default.items()):
+        k = ("taken", code, key)
+        if k in tried:
+            continue
+
+        def alteration(undo, code=code, key=key, carriers=carriers):
+            try:
+                redefault(code, key, lambda value: without(value, carriers), undo)
+            except Exception:
+                answers.setdefault(code.co_qualname, set()).add("unproven")
+        attempt(k, label, base, alteration)
+        progress = True
+    return progress
+
+
+def scalars(code):
+    for const in code.co_consts:
+        if type(const) in (str, bytes, int, float, bool):
+            yield const
+        elif isinstance(const, (tuple, frozenset)):
+            yield from (one for one in const if type(one) in (str, bytes, int, float, bool))
+
+
+kinds = sorted({(type(one).__name__, one) for code in tree for one in scalars(code)
+                if not isinstance(one, (str, bytes)) or (len(one) <= 64 and "\n" not in str(one))})
+
+
+def selected():
+    """AND A DEFAULT IS AN INPUT, as the environment is. A default a run used can select a decode
+    without holding one -- `HOOKS[mode]` with `mode="strict"`, `(None, one_reading)[index]` -- so
+    it is set, in a repeat of the run that first entered its function, to each value OF ITS OWN
+    KIND that MODULE's code holds as a constant, and to the kind's own empty value, asked of the
+    kind: a string default to each of the file's strings and `""`, a number to each of its
+    numbers and `0`, a flag to both."""
+    progress, made = False, {}
+    for one in gc.get_objects():
+        if isinstance(one, types.FunctionType) and (one.__defaults__ or one.__kwdefaults__):
+            made.setdefault(alias.get(one.__code__, one.__code__), one)
+    for code in tree:
+        if code not in entered or entered[code][0] == "<module>" or code not in made:
+            continue
+        label, base = entered[code]
+        for key, value in defaults_of(made[code]):
+            if type(value) not in (str, bytes, int, float, bool):
+                continue
+            own = {(type(value).__name__, type(value)()), ("bool", True), ("bool", False)}
+            for kind, other in sorted(set(kinds) | own):
+                k = ("selected", code, key, kind, other)
+                if type(value).__name__ != kind or other == value or k in tried:
+                    continue
+                attempt(k, label, base, lambda undo, code=code, key=key, other=other:
+                        redefault(code, key, lambda _: other, undo))
+                progress = True
+    return progress
+
+
+while alter() or sweep() or together() or environment() or taken_away() or selected():
     pass
 
 gc.collect()
@@ -2629,7 +2919,7 @@ decode_probe() {  # decode_probe MODULE DRIVE...: the report's two lines as one,
 }
 printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 # THE PROBE IS ITSELF UNDER TEST, because a probe that has stopped watching agrees with a clean
-# parser and says so in the same words. So it runs first over twenty-nine stand-ins whose answers
+# parser and says so in the same words. So it runs first over thirty-three stand-ins whose answers
 # are known, and MUTATIONS OF THE PROBE WERE WATCHED AGAINST THEM -- each the smallest text change
 # that undoes one rule, and each run through this whole file:
 #
@@ -2638,60 +2928,92 @@ printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 #     readings ignored (round 2's rule)
 #   the first reading alone asked                      `unrelated`
 #   the last reading alone asked                       `unrelated`
-#   the unproven left out of the verdict line          `bare`, `exhausted`, `unnamed`, `unreadable`,
-#                                                        `unrelated`
+#   the unproven left out of the verdict line          `bare`, `exhausted`, `settling`, `taken`,
+#                                                        `unnamed`, `unreadable`, `unrelated`
 #   `py_make_scanner` not replaced                     `scanner`, `swallowed`
-#   `c_make_scanner` left as the standard library's    twenty-six, and the parser itself
-#     while `make_scanner` is still watched
+#   `c_make_scanner` left as the standard library's    `scanner`
+#     while `make_scanner` and `_json.make_scanner`
+#     are still watched
 #   `_json.make_scanner` not replaced                  `scanner`
-#   the scanners of decoders that already exist left   thirteen
+#   the scanners of decoders that already exist left   sixteen
 #     unwrapped
-#   a scanner MODULE built and still holds never asked `unused`
+#   a scanner MODULE built and still holds never asked `taken`, `unused`
 #   a refusal not followed out of the frames above     `delivered`, `swallowed`
 #     the scan
 #   the drive's entry point held to that rule too      `delivered`, and the parser itself
 #   only the swept callable's own frame held, and      `delivered`, `swallowed`
 #     only under the sweep (round 5's rule)
 #   the document actually scanned not judged           `nested`
-#   a scan with no frame of MODULE's under it          `exhausted`, `reached`, `routes`, `threaded`,
-#     answered for by nobody (round 5's rule)            `unnamed`
-#   only the code of callables MODULE holds by name    `exhausted`, `unnamed`
-#     held to coverage, not every code object
-#   no instruction required to run                     `bare`, `branches`, `exhausted`, `unnamed`,
-#                                                        `unreadable`
+#   a scan with no frame of MODULE's under it          `exhausted`, `held`, `reached`, `routes`,
+#     answered for by nobody (round 5's rule)            `threaded`, `unnamed`
+#   only the code of callables MODULE holds held to    `exhausted`
+#     coverage, not every code object
+#   no instruction required to run                     `bare`, `branches`, `exhausted`, `settling`,
+#                                                        `unnamed`, `unreadable`
 #   handler code not required to run                   `contracts`, `delivered`, `handlers`,
 #                                                        `routes`, `swallowed`
 #   a handler no run entered left unentered            the same five, and the parser itself
-#   a branch taken one way only left unturned          nine, and the parser itself
+#   a branch taken one way only left unturned          ten, and the parser itself
 #   a code object's branches never turned together     `branches`
 #   a variable MODULE reads never set to the file's    `branches`, `contracts`, `delivered`,
 #     own strings                                        `swallowed`
 #   a call of something that cannot return not         `after-exit`
 #     ending its block
-#   the question put to the code as the probe altered  `pristine`, `unrelated`
+#   the question put to the code as the probe altered  `pristine`, `settling`, `unrelated`
 #     it
 #   the sweep skipping every function anything has     `branches`, `exhausted`
 #     entered (round 5's rule)
 #   the sweep stopping once the swept function has     `swallowed`, `unrelated`
 #     run, whatever it called
-#   a callable MODULE only binds not held              `exhausted`, `reached`, `routes`, `unnamed`,
-#                                                        `wrapped`
-#   module-level containers not walked                 `exhausted`, `unnamed`
-#   what a call returns not called                     `unnamed`
-#   keyword-only parameters left out of the call       `contracts`, `exhausted`, `strict-keyword`,
-#                                                        `unused`
+#   nothing held but MODULE's own functions            `exhausted`, `held`, `reached`, `routes`,
+#                                                        `unnamed`, `wrapped`
+#   what a dictionary, a list or a tuple holds, and    `exhausted`, `held`, `unnamed`
+#     what anything else refers to, not walked
+#   what a call returns not called                     `taken`, `unnamed`
+#   keyword-only parameters left out of the call       `contracts`, `exhausted`, `unused`
 #   a coroutine called and not awaited                 `contracts`
-#   the sweep's later documents never tried            eleven
+#   the sweep's later documents never tried            fourteen
 #   the report written to stdout (round 2's channel)   every stand-in, and the parser itself
 #   the skipped left out of the verdict line           `unreadable`
 #   the drive removed                                  every stand-in, and the parser itself
 #   only the first drive run                           the parser itself
-#   a sweep that calls nothing                         nineteen
-#   a hardcoded clean verdict line                     twenty-two
+#   a sweep that calls nothing                         twenty-five
+#   a hardcoded clean verdict line                     twenty-six
+#   a class body held only for the functions MODULE    `held`, `unnamed`
+#     wrote (round 6's rule)
+#   a dictionary's keys not walked                     `held`
+#   what a value refers to beyond its items and its    `held`, `unnamed`
+#     attributes not walked
+#   a callable's own attributes not walked             `held`
+#   a class written outside MODULE walked as MODULE's  every stand-in, and the parser itself
+#   the probe's own code walked and called             `taken`
+#   a decoder's own machinery walked and called        `taken`, `unused`
+#   a refusal a default holds never taken away         `taken`
+#     (round 6's rule)
+#   the defaults of what the sweep is calling not      `taken`
+#     looked at
+#   what the hook calls not among what the scanner     `taken`
+#     refuses with
+#   the class MODULE wrote for it not among them       `taken`
+#   the decoder not among them                         `taken`
+#   a function holding one not made again around the   `taken`
+#     copy
+#   a scan the module body makes not answered where    `taken`
+#     a default holds what it refuses with
+#   a default that cannot be copied not unproven       `taken`
+#   a default never set to the file's values (round    `exhausted`, `scanner`, `selected`
+#     6's rule)
+#   a kind's own empty value never tried               `selected`
+#   the question held outside the bound (round 6's     the probe never ends on `settling`, and the
+#     rule)                                              gate was killed at 400 seconds
 #
-# and none of the thirty-seven moved an assertion of any other family in this file. The ten-second
-# bound on a run is not in the table: it is how the probe ends a run that would otherwise never
-# end, and no stand-in here runs long enough to reach it.
+# and none of the fifty-four that ran to their end moved an assertion of any other family in this
+# file. One more was measured and moves no assertion, because what it changes is a time: a question
+# whose time runs out while the probe is recording is ended when the recording is done, and without
+# that `settling` took 6, 12 and 13 seconds in three runs where it takes 4, as the timer fired again
+# and again inside the probe's own callback. The ten-second bound on a run is not in the table: it
+# is how the probe ends a run that would otherwise never end, and no stand-in here runs long enough
+# to reach it.
 #
 # Each stand-in decodes THE WAY THE PARSER DOES -- out of a block object its caller built, not out
 # of a string handed to `read` -- so the drive is load-bearing: the sweep cannot construct a block,
@@ -2948,7 +3270,7 @@ def by_context_scanner(text):
     return _json.make_scanner(Context())(text, 0)[0]
 PYSHAPE
 probe_expect scanner \
-  'decoded=yes unrefusing=OwnScan.raw_decode,by_c_scanner,by_context_scanner,by_default_scanner,by_made_scanner,by_python_scanner,by_scan_once unproven=- skipped=- | refusing=by_hooked_scanner,read drive=returned:0 swept=OwnScan.raw_decode:raised:AttributeError/raised:AttributeError/raised:AttributeError,by_c_scanner:returned,by_context_scanner:returned,by_default_scanner:returned,by_hooked_scanner:raised:ValueError/returned,by_made_scanner:returned,by_own_raw_decode:returned,by_python_scanner:returned,by_scan_once:returned forced=0'
+  'decoded=yes unrefusing=OwnScan.raw_decode,by_c_scanner,by_context_scanner,by_default_scanner,by_made_scanner,by_python_scanner,by_scan_once unproven=- skipped=- | refusing=by_hooked_scanner,read drive=returned:0 swept=OwnScan.raw_decode:raised:AttributeError/raised:AttributeError/raised:AttributeError,by_c_scanner:returned,by_context_scanner:returned,by_default_scanner:returned,by_hooked_scanner:raised:ValueError/returned,by_made_scanner:returned,by_own_raw_decode:returned,by_python_scanner:returned,by_scan_once:returned forced=1'
 # AND ONE THAT IS NEVER SCANNED WITH on any run the documents make: built at module level and read
 # from only behind a branch nothing takes. Its scanner is asked where it was BUILT, because MODULE
 # still holds it at the end, and named for the module body that built it; and the branch that reads
@@ -2981,9 +3303,9 @@ probe_expect unused \
 # probe's own documents. `by_short_name` runs its one line and returns, and the table it indexes is
 # where round 5 had to stop: `readers["loose"]` is a bare `json.loads` the default argument never
 # selects. It is held now -- a callable inside a module-level container is held like one bound to a
-# name -- so the table's decoder is swept and answered for, and it is red. What `by_short_name`
-# would do for a name the probe never passes is still not asked; that is measured at the end of
-# this section.
+# name -- so the table's decoder is swept and answered for, and it is red. And so is `by_short_name`
+# itself, which round 6 had to leave: its default is an input now, set to each of the file's
+# strings, and under `name="loose"` it decodes unhooked.
 probe_stand_in exhausted 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
 
 
@@ -3019,7 +3341,7 @@ def by_unconsumed(text):
     return rows is None
 PYSHAPE
 probe_expect exhausted \
-  'decoded=yes unrefusing=by_branch_reader,readers[loose] unproven=by_bytes_reader,by_unconsumed.<locals>.<genexpr> skipped=- | refusing=by_reached_branch,read drive=returned:0 swept=by_branch_reader:returned/returned/returned,by_bytes_reader:raised:AttributeError/raised:AttributeError/raised:AttributeError,by_reached_branch:raised:ValueError,by_short_name:returned,by_unconsumed:returned,by_whole_body:returned,readers[loose]:returned forced=2'
+  'decoded=yes unrefusing=by_branch_reader,by_short_name,readers[loose] unproven=by_bytes_reader,by_unconsumed.<locals>.<genexpr> skipped=- | refusing=by_reached_branch,read drive=returned:0 swept=by_branch_reader:returned/returned/returned,by_bytes_reader:raised:AttributeError/raised:AttributeError/raised:AttributeError,by_reached_branch:raised:ValueError,by_short_name:returned,by_unconsumed:returned,by_whole_body:returned,readers[loose]:returned forced=9'
 # THE DECODE BEHIND SOMEBODY ELSE'S FRAME -- round 3's false green, and the reason the whole stack
 # is searched. `functools.singledispatch` puts one frame of `functools` between the caller and the
 # decode; round 3 stepped over the `json` frames, found `functools`, and answered for nobody. Here
@@ -3598,7 +3920,7 @@ class Review:
         return json.loads(self.text)
 PYSHAPE
 probe_expect unnamed \
-  'decoded=yes unrefusing=DecodingMeta.__call__,TABLE[loose],__getattr__,_listed unproven=Review.verdict skipped=- | refusing=HookedMeta.__call__,read drive=returned:0 swept=DecodingMeta.__call__:returned,HookedMeta.__call__:raised:ValueError,TABLE[loose]:returned,__getattr__:returned,_listed:returned forced=0'
+  'decoded=yes unrefusing=DecodingMeta.__call__,TABLE[loose],__getattr__,_listed unproven=Review.verdict skipped=- | refusing=HookedMeta.__call__,read drive=returned:0 swept=DecodingMeta.__call__:returned,HookedMeta.__call__:raised:ValueError,Review.verdict:raised:AttributeError/raised:AttributeError/raised:AttributeError,TABLE[loose]:returned,__getattr__:returned,_listed:returned forced=0'
 # A HANDLER NO DOCUMENT ENTERS. `by_handler` decodes only when `text.upper()` raises, and nothing
 # the probe hands it makes that happen; the handler is entered by raising what it catches where its
 # body runs, and it decodes unhooked. `by_raising_handler` is entered by the refusal itself, raises,
@@ -3769,6 +4091,171 @@ def later(value):
 PYSHAPE
 probe_expect after-exit \
   'decoded=yes unrefusing=- unproven=- skipped=- | refusing=read drive=returned:0 swept=later:returned forced=1'
+# ROUND 6'S FIRST ESCAPE, AND WHY NO PLACE A CALLABLE CAN SIT IS NAMED ANY MORE. Round 6 held what a
+# module-level name, a class body and a module-level container held, and a class body only for the
+# functions MODULE wrote -- so `read = staticmethod(json.loads)` in a class was never called, and
+# the gate passed a reader that returns `{'verdict': 'PASS', 'findings': []}` from a document naming
+# `findings` twice. Every list of places is the next escape, so what is swept now is whatever the
+# module's namespaces refer to, by the garbage collector's own account: the class-bound reader, a
+# `partial` in a class inside a class, a function's attribute, a dictionary's key, and a reader
+# three containers deep in a `deque` are each red, and nothing here names a class body, an
+# attribute, a key or a `deque`. `strict_read`, reached through a class body as a `staticmethod`,
+# genuinely refuses.
+probe_stand_in held 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+import collections
+import functools
+
+
+def strict_read(text):
+    return json.loads(text, object_pairs_hook=one_reading)
+
+
+class ExtraReviewReaders:
+    read = staticmethod(json.loads)
+    strict = staticmethod(strict_read)
+
+    class Nested:
+        loose = functools.partial(json.loads)
+
+
+strict_read.fallback = functools.partial(json.loads)
+QUEUED = collections.deque([{"deep": [(functools.partial(json.loads),)]}])
+KEYED = {functools.partial(json.loads): "loose"}
+PYSHAPE
+probe_expect held \
+  'decoded=yes unrefusing=ExtraReviewReaders.Nested.loose,ExtraReviewReaders.read,KEYED.keys()[0],QUEUED<dict>[deep][0][0],strict_read.fallback unproven=- skipped=- | refusing=read,strict_read drive=returned:0 swept=ExtraReviewReaders.Nested.loose:returned,ExtraReviewReaders.read:returned,KEYED.keys()[0]:returned,QUEUED<dict>[deep][0][0]:returned,strict_read.fallback:returned,strict_read:raised:ValueError forced=0'
+# ROUND 6'S SECOND ESCAPE, AND A REGRESSION: MASTER'S GUARD REFUSED IT. `extra_review_reader(text,
+# options={"object_pairs_hook": one_reading})` refuses when the sweep calls it, because the sweep
+# passes nothing for a parameter with a default -- and called with `options={}` it returns PASS with
+# an empty findings array. A DEFAULT IS WHAT A CALLER GETS BY PASSING NOTHING, so a refusal a
+# default holds is one any caller can take away. Nothing here reads how a default is written: at
+# every scan the probe looks at what the scanner refuses WITH -- its decoder, its hook, the class
+# MODULE wrote for it, what the hook calls -- and at the defaults of every function of MODULE's on
+# the stack; one holding any of those is copied without it, and the run is repeated with that copy
+# in place. What the decode then does is the answer. Nine readers hold their refusal in a default --
+# a dictionary of keywords, the hook, the decoder class, a decoder, the hook behind a `lambda`, a
+# factory's hook, a function made around the hook, which is made again around the copy, a decoder
+# the module body builds through a default, which cannot be repeated and is answered where it is
+# seen, and a `MappingProxyType` that cannot be copied, which is unproven -- and each is red.
+# `by_own_hook` has defaults holding the very same hook and a hooked decoder, and decodes with its
+# own: repeated without them it still refuses, and it is green, and so is `by_module_decoder`.
+probe_stand_in taken 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+import types
+
+
+class StrictDecoder(json.JSONDecoder):
+    def __init__(self, **kwargs):
+        super().__init__(object_pairs_hook=one_reading, **kwargs)
+
+
+STRICT = json.JSONDecoder(object_pairs_hook=one_reading)
+
+
+def extra_review_reader(text, options={"object_pairs_hook": one_reading}):
+    return json.loads(text, **options)
+
+
+def by_hook_default(text, hook=one_reading):
+    return json.loads(text, object_pairs_hook=hook)
+
+
+def by_class_default(text, cls=StrictDecoder):
+    return json.loads(text, cls=cls)
+
+
+def by_decoder_default(text, *, decoder=STRICT):
+    return decoder.decode(text)
+
+
+def by_wrapped_default(text, hook=one_reading):
+    return json.loads(text, object_pairs_hook=lambda pairs: hook(pairs))
+
+
+def by_factory_default(hook=one_reading):
+    return lambda text: json.loads(text, object_pairs_hook=hook)
+
+
+def by_frozen_default(text, options=types.MappingProxyType({"object_pairs_hook": one_reading})):
+    return json.loads(text, **options)
+
+
+def strict_for(hook):
+    return lambda text: json.loads(text, object_pairs_hook=hook)
+
+
+def by_closure_default(text, decode=strict_for(one_reading)):
+    return decode(text)
+
+
+def strict_decoder(hook=one_reading):
+    return json.JSONDecoder(object_pairs_hook=hook)
+
+
+BODY_MADE = strict_decoder()
+
+
+def by_own_hook(text, decoder=STRICT, fallback=one_reading):
+    return json.loads(text, object_pairs_hook=one_reading)
+
+
+def by_module_decoder(text):
+    return STRICT.decode(text)
+PYSHAPE
+probe_expect taken \
+  'decoded=yes unrefusing=by_class_default,by_decoder_default,by_factory_default.<locals>.<lambda>,by_hook_default,by_wrapped_default,extra_review_reader,strict_decoder,strict_for.<locals>.<lambda> unproven=by_frozen_default skipped=- | refusing=<module>,StrictDecoder.__init__,by_class_default,by_decoder_default,by_factory_default.<locals>.<lambda>,by_frozen_default,by_hook_default,by_module_decoder,by_own_hook,by_wrapped_default,extra_review_reader,read,strict_decoder,strict_for.<locals>.<lambda> drive=returned:0 swept=StrictDecoder.__init__:raised:TypeError/raised:TypeError/raised:TypeError,by_class_default:raised:ValueError,by_closure_default:raised:ValueError,by_decoder_default:raised:ValueError,by_factory_default:raised:ValueError,by_frozen_default:raised:ValueError,by_hook_default:raised:ValueError,by_module_decoder:raised:ValueError,by_own_hook:raised:ValueError,by_wrapped_default:raised:ValueError,extra_review_reader:raised:ValueError forced=10'
+# AND A DEFAULT THAT SELECTS A DECODE WITHOUT HOLDING ONE. `HOOKS[mode]` with `mode="strict"` holds
+# nothing a copy could take out, and a caller passing `mode="loose"` decodes unhooked. So a default
+# is an input, as the environment is: set, in a repeat of the run that entered its function, to each
+# value of its own kind the file holds as a constant and to the kind's own empty value -- which is
+# how `index=1` becomes `0`, and a keyword-only `strict=True` becomes `False`. Three red;
+# `by_any_mode` reads a table whose every entry, and whose fallback, is the hook, and is green
+# whatever it is given.
+probe_stand_in selected 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+HOOKS = {"strict": one_reading, "loose": None}
+
+
+def by_selected_hook(text, mode="strict"):
+    return json.loads(text, object_pairs_hook=HOOKS[mode])
+
+
+def by_selected_index(text, index=1):
+    return json.loads(text, object_pairs_hook=(None, one_reading)[index])
+
+
+def by_selected_flag(text, *, strict=True):
+    return json.loads(text, object_pairs_hook=(None, one_reading)[strict])
+
+
+STRICT_HOOKS = {"strict": one_reading, "also": one_reading}
+
+
+def by_any_mode(text, mode="strict"):
+    return json.loads(text, object_pairs_hook=STRICT_HOOKS.get(mode, one_reading))
+PYSHAPE
+probe_expect selected \
+  'decoded=yes unrefusing=by_selected_flag,by_selected_hook,by_selected_index unproven=- skipped=- | refusing=by_any_mode,by_selected_flag,by_selected_hook,by_selected_index,read drive=returned:0 swept=by_any_mode:raised:ValueError,by_selected_flag:raised:ValueError,by_selected_hook:raised:ValueError,by_selected_index:raised:ValueError forced=15'
+# AND THE QUESTION ENDS. It runs MODULE's hook, and round 6 held it outside the ten-second bound on
+# a run, so a hook that rebuilds `dict(pairs)` until it is as long as `pairs` -- which a repeated
+# name never makes true -- held the probe until something outside it killed it, with no report. The
+# question is bounded on its own now, and one that has not answered in time is UNPROVEN: red, and
+# reported, in the time the bound allows.
+probe_stand_in settling 'json.loads(block.content, object_pairs_hook=settled)' <<'PYSHAPE'
+
+
+def settled(pairs):
+    table = dict(pairs)
+    while len(table) != len(pairs):
+        table = dict(pairs)
+    return table
+PYSHAPE
+probe_expect settling \
+  'decoded=yes unrefusing=- unproven=one_reading,read skipped=- | refusing=- drive=returned:0 swept=one_reading:raised:ValueError/raised:ValueError/raised:ValueError forced=1'
 # WHAT THIS DOES NOT REACH. Each shape below was written beside a hooked decode and run through this
 # probe, which reported nothing unrefusing, nothing unproven and nothing skipped -- and each one
 # returns without a refusal on a document naming `findings` twice (for the hook that counts names,
@@ -3785,11 +4272,26 @@ probe_expect after-exit \
 #     above -- but only the code objects compiled from MODULE's own file are held to coverage, so a
 #     branch in theirs is not turned;
 #   * a value the probe does not vary, in code that ran whole: `getattr(json, name)` with
-#     `name="dumps"` a default the sweep leaves as it is, and a loop over `re.findall('"verdict"',
-#     text)` that sets the hook inside it, and so runs no times for a document with no `verdict` in
-#     it. A branch is turned, and a variable read from the environment is set to each of the file's
-#     own strings; a value that arrives any other way -- a default, a document's content, a file,
-#     the clock -- is taken as it came;
+#     `name="dumps"`, a default set to each of the file's strings and never to `"loads"`, which the
+#     file does not hold; and a loop over `re.findall('"verdict"', text)` that sets the hook inside
+#     it, and so runs no times for a document with no `verdict` in it. A branch is turned, a
+#     variable read from the environment is set to each of the file's own strings, and a default to
+#     each value of its own kind the file holds and to its kind's empty value; a value that arrives
+#     any other way -- a document's content, a file, the clock -- is taken as it came;
+#   * a refusal a default holds only through code: `def by_function_default(text,
+#     decode=strict_read)`, whose default is a function that refuses with the module's own hook. A
+#     default is searched for what the scanner refused with through what it holds -- its items, its
+#     attributes, a function's own defaults and closure -- and never through a function's code or
+#     its globals, which reach everything the module has; a caller passing `decode=json.loads` gets
+#     the erased value;
+#   * a default of a function only the module body runs: `STRICT = make_decoder()` with `def
+#     make_decoder(mode="strict")`, selecting from `{"strict": one_reading, "loose": None}`. A run
+#     of the module body cannot be repeated with a default changed, because the body makes its
+#     functions again, so that default is not varied, and `make_decoder(mode="loose")` decodes
+#     unhooked;
+#   * a class whose `__module__` names another module: `types.new_class("Readers", ...)` is written
+#     in this file and says it is `types`'s. A class is walked only where it says it is MODULE's, so
+#     the `staticmethod(json.loads)` inside that one is never called;
 #   * the scanner the standard library made, dug out of the closure of the probe's own watch: a
 #     module that goes looking for it scans with nothing watching, and under this probe it returns
 #     the erased value;
@@ -3797,17 +4299,25 @@ probe_expect after-exit \
 #     refusing any object of more than two names raises on it, reads both readings, and is counted
 #     as refusing.
 # AND WHAT IT REFUSES AND SHOULD NOT, OR MIGHT NOT -- because a guard is only honest if both sides
-# of it are written down. Each was run through this probe and reported red; the first two do what a
-# parser should, and the third is the cost of reading nothing into a value a function returns:
+# of it are written down. Each was run through this probe and reported red; the first, second and
+# fourth do what a parser should, the third is the cost of reading nothing into a value a function
+# returns, and the fifth the cost of asking a default only through a copy of it:
 #   * a decoder whose hook is `list`, keeping the pairs the scanner built, with its own `decode`
 #     walking them and raising on a repeated name. The scanner returns, so the pair reports
 #     UNREFUSING -- accurately, of the scanner -- while the reader refuses. Rounds 4 and 5 red it
 #     too. The only way to ask it is through the method it declares, which is round 3's defect;
 #   * a property nothing reads whose getter calls anything at all -- `return self.text.upper()` --
 #     is code in the file that never ran, and unproven. The remedy is a drive that reads it;
-#   * and a function that catches a refusal and returns anything but the refusal -- an error value,
+#   * a function that catches a refusal and returns anything but the refusal -- an error value,
 #     `None` -- is counted with the unrefusing, as round 5 counted it: nothing here reads what the
-#     returned value means.
+#     returned value means;
+#   * a helper that reads an attribute of its argument before it does anything else -- `def
+#     path_label(path): return path.as_posix()` -- raises on every document the probe hands it, as
+#     text or as a path string, never runs past that line, and is unproven. The remedy is a drive
+#     that calls it with what it takes;
+#   * and a reader whose default holds its hook in something `copy.deepcopy` cannot copy -- a
+#     `MappingProxyType` of keywords -- cannot be asked without the hook, and is unproven whether or
+#     not any caller would ever pass that parameter.
 # And `borrowed` above is a fourth, stated there: a library the parser calls that decodes a
 # repeated name for its own reasons is answered for as the parser, and red.
 # Round 5's other false red, a decoder whose `scan_once` takes its index by keyword only, is green
