@@ -135,6 +135,17 @@ answered at all.
 Only a log older than schema 3, which requires the
 policy on every decline.
 
+## `EventBody::DesignDefect { data } => match data.effective_attribution() {`
+
+Three records, three lines, read through the one reader the record has
+(`DesignDefect::effective_attribution`) and never off the stored pair. A
+record written before the taxonomy prints the line it always printed, so a
+legacy log's status is byte-identical; a discovery prints its attribution;
+a conviction prints its attribution and the citation that convicts. A stored
+`design_defect` with no citation is a discovery to this arm, because the
+reader derives it so — the projection re-decides nothing
+(`reviews/2026-09-14-o3-attribution-record.md`, R7).
+
 ## `let outcome = match data.outcome {`
 
 Spelt here rather than through `Debug`: a derived `Debug` is a

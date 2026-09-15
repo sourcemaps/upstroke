@@ -635,9 +635,15 @@ already closed absorbs the second one instead of applying it.
 
 ## `impl Run<'_>` › `self.emit(EventBody::DesignDefect {`
 
-§5: a question that reached a human at runtime is, by definition, a
-design-phase defect — logged as one so the accumulated defects can
-become review material for the designer prompt.
+§5's attribution loop: every question that reached a human at runtime is
+logged, with the question and the answer, as the `design_defect` record —
+the tag is historical; the record carries the judgment. This is the schema-3
+writer, and it writes the record **unclassified**: `attribution: None,
+citation: None`, never through `DesignDefect::discovered` or `::convicted`,
+so the bytes are what this writer always wrote and a reader treats them as
+written before the taxonomy (`reviews/2026-09-14-o3-attribution-record.md`,
+R1). The ruling an answer file may carry is not read here: `read_answer`
+returns the answer alone.
 
 ## `impl Run<'_>` › `if answer == Answer::Declined {`
 

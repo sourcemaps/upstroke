@@ -57,6 +57,52 @@ sees the whole exchange.
 
 `None` while open.
 
+## `pub struct AnswerRecord {`
+
+What `answers/<question-id>.json` holds: the `Answer` (flattened, so the
+file is the answer's own object) and the attribution a human ruled on the
+question, in the two optional fields the `design_defect` record carries in
+the same serde mold (`reviews/2026-09-14-o3-attribution-record.md`, R5).
+A record without a ruling serialises to exactly the bytes `write_answer`
+wrote before the fields existed, and a file written before them reads as
+`Unclassified`. The attribution sits on the record rather than inside the
+`Answered` variant because a decline is ruled on too: the `design_defect`
+record is written for declined answers, and the rule attributes every
+question that reaches a person.
+
+## `pub struct AnswerRecord` › `pub attribution: Option<QuestionAttribution>,`
+
+`None` is no ruling — what `upstroke answer` writes today — and is not a
+discovery: the writer that turns the file into a `design_defect` applies the
+default, the file does not.
+
+## `pub struct AnswerRecord` › `pub citation: Option<String>,`
+
+A conviction's cited checklist item or precedent; `None` on discoveries, and
+invalid to write beside `design_defect` — see `write_answer`.
+
+## `impl AnswerRecord` › `pub fn unattributed(answer: Answer) -> Self {`
+
+No ruling. The shape `upstroke answer` produces.
+
+## `impl AnswerRecord` › `pub fn discovered(answer: Answer) -> Self {`
+
+Ruled a hole design could not reasonably have foreseen: the default polarity
+of the 2026-09-01 decision, stated rather than left to the reader.
+
+## `impl AnswerRecord` › `pub fn convicted(answer: Answer, citation: String) -> Result<Self, UncitedConviction> {`
+
+Ruled a design-phase defect, citing the checklist item or precedent that was
+available and unapplied. A blank citation is refused through the `Result`:
+no citation, no conviction. The rule is `events::cited`, shared with
+`DesignDefect::convicted`.
+
+## `impl AnswerRecord` › `pub fn effective_attribution(&self) -> EffectiveAttribution<'_> {`
+
+What a reader treats the record as, derived by `EffectiveAttribution::derive`
+and never re-decided: a `design_defect` whose citation is absent or blank
+reads as a discovery.
+
 ## `pub fn write_question(dir: &Path, record: &QuestionRecord) -> Result<(), UpstrokeError> {`
 
 §15: `questions/<question-id>.json`, the payload notifiers and UIs read.
@@ -76,9 +122,18 @@ raise. The engine ingests the file and emits the `question_answered` event
 itself, so the log still records every answer — the file is transport, the
 event is the record.
 
-## `pub fn write_answer(dir: &Path, id: &QuestionId, answer: &Answer) -> Result<(), UpstrokeError> {`
+## `pub fn write_answer(`
 
 The source retains the publication protocol required by §10.
+
+The single writer of the answer file, and where the writer-side rule of the
+2026-09-01 decision is enforced: an `AnswerRecord` carrying
+`attribution: Some(DesignDefect)` with no citation, or a blank one, is
+refused with `UpstrokeError::Refused` before anything is staged, so the
+directory is left exactly as it was — no `.partial`, no file. Every other
+shape is written as it is; the reader's rule (a citation-less conviction
+reads as a discovery) covers a file something other than this writer
+produced.
 
 Write an answer atomically.
 
@@ -92,13 +147,24 @@ so.
 Through `Answer.StageWrite` then `Answer.PublishRename` — the two sites the
 frozen inventory gives the answer command. Same two steps, same bytes.
 
-## `pub fn read_answer(dir: &Path, id: &QuestionId) -> Result<Option<Answer>, UpstrokeError> {`
+## `pub fn read_answer_record(`
 
-Read an answer if one has been left. `None` simply means not yet.
+Read the whole record if one has been left — the answer and the ruling.
+`None` simply means not yet. This is what a writer of the attributed
+`design_defect` record reads; the legacy engine reads `read_answer`.
 
 `Answer.Ingest` — a read-only observation, which is why it performs no
 effect and is still a site: the inventory names it and a site nothing calls
 cannot be shown to execute.
+
+## `pub fn read_answer(dir: &Path, id: &QuestionId) -> Result<Option<Answer>, UpstrokeError> {`
+
+The answer half of the record, and nothing of the ruling. The schema-3
+engine's `EventLogAnswers` and `coordinator::ingest_answer` read through
+this, so whatever ruling a file carries, a schema-3 `question_answered`
+event embeds the same `Answer` it always did and the legacy `design_defect`
+record stays unclassified: the ruling reaches no schema-3 record, which is
+the contract's "its records read as unclassified" (R5).
 
 ## `pub fn render_question(question: &Question) -> String {`
 

@@ -20,6 +20,18 @@ that run picks it up — a live one on its next scheduler turn, or the next
 That indirection is what makes §12's promise ("a run survives its
 notifier") true of answers as well as delivery.
 
+What the file holds is an `interaction::AnswerRecord`: the answer, and —
+since the 2026-09-01 decision that a runtime question is a discovery until
+convicted (`reviews/2026-09-14-o3-attribution-record.md`) — the optional
+attribution a human rules, `discovered_hole` by default or `design_defect`
+with the citation that convicts. This command writes the record
+**unattributed**: it has no flag for a ruling, and `None` in the file means
+no ruling was made, which the engine that ingests it reads as the default
+rather than as a conviction. A ruling therefore arrives only through the
+answer channel's file, never through the `question_answered` transaction,
+and never without its citation — `interaction::write_answer` refuses a
+`design_defect` that cites nothing.
+
 ## `#![allow(clippy::disallowed_methods)]`
 
 LEGACY-EFFECT: this module is in the **frozen legacy section** of
@@ -67,6 +79,14 @@ An empty reply means "leave it parked" at a prompt (§12), and typing
 nothing into this command almost certainly means the same — but here it
 would write a file the engine then ingests as an answer, which is not
 what the operator asked for.
+
+## `pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, UpstrokeError> {` › `let record = interaction::AnswerRecord::unattributed(answer);`
+
+The command's reply becomes the file's record with no attribution: what a
+person typed is the answer, and whether the question was a hole design could
+not have foreseen or a defect it should have caught is a separate ruling this
+command does not take. The `Answer` is moved into the record and out again
+into the result rather than cloned.
 
 ## `pub fn show(repo_root: &Path, wanted: &str) -> Result<String, UpstrokeError> {`
 

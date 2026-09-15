@@ -2,7 +2,7 @@
 
 The record of the pull request that lands the engine half of the 2026-09-01 decision *a runtime
 question is a discovery until convicted* (obligations O3 and O2 of the private record
-`2026-09-01-discovery-vs-defect-taxonomy.md`, whose public half is reproduced verbatim in §12
+`2026-09-01-discovery-vs-defect-taxonomy.md`, whose public half is reproduced verbatim in §15
 below). Kept on the branch so that a successor session inherits what was decided and why; written
 before the work and updated as each piece lands, so that at any commit on this branch the record is
 true. It is **not** a design document: `DESIGN.md` and the contract stay the authority, and a
@@ -19,7 +19,7 @@ against (`git diff --stat caf6bed0..8b28944f` touches `src/agent/proc.rs`, its n
 (`reviews/2026-09-08-pr9-record.md`, `reviews/2026-09-12-pr10-record.md`): the owner ruled on
 2026-09-08 that a slice's working record does not belong at the repository root, and
 `docs/internals/` holds only module notes (`validate-internals-notes.sh` N2). So it sits beside the
-gate reports in `reviews/`, dated. It also holds the public half of the contract (§12), because the
+gate reports in `reviews/`, dated. It also holds the public half of the contract (§15), because the
 directory that half was staged for, `decisions/`, was retired on 2026-09-03 (R2).
 
 **Evidence.** Every figure quoted here is in a saved file under
@@ -32,9 +32,9 @@ directory; `<sha>` is the full sha the measurement was taken at.
 |---|---|
 | 0 base measured, readings taken, record opened | **done** — this commit |
 | 1 the vocabulary (`src/events/mod.rs`): `QuestionAttribution`, the two fields, `discovered`, `convicted`, `effective_attribution`; the legacy emitters unclassified; the census offer and the fixtures through the constructors; the mutations | **done** — §6; the full suite green through the wrapper, the three mutations each killed by the tests named for them |
-| 2 the answer file (`src/interaction.rs`): the attributed answer record, the writer-side refusal, the schema-4 refusal executed | **done** — §7; the full suite green through the wrapper, four mutations each killed by the tests named for them; the guest run of the path-shaped tests is owed at the head the body records (§10) |
+| 2 the answer file (`src/interaction.rs`): the attributed answer record, the writer-side refusal, the schema-4 refusal executed | **done** — §7; the full suite green through the wrapper, four mutations each killed by the tests named for them; the guest run of the path-shaped tests is owed at the head the body records (§13) |
 | 3 the decoder fixture (`src/topology/events.rs`, `src/topology/fold/tests.rs`): an attributed record through the informational-tolerance path; the fold untouched | **done** — §8; the full suite green through the wrapper, two mutations each killed by the tests named for them |
-| 4 the internals notes, held both ways by `test-internals-notes.sh` | pending |
+| 4 the internals notes, held both ways by `test-internals-notes.sh` | **done** — §9; `test-internals-notes.sh` and `test-docs-consistency.sh` green from the worktree root |
 | 5 the design (O2): §5, §12, §23.1, each citing this record | pending |
 | 6 the findings-ledger file | pending |
 | 7 the ten gates on this box, the guest, this record, the draft pull request | pending |
@@ -61,7 +61,7 @@ nothing else"*; *"§15's event list is unchanged; the wire tag stays."*
 What the contract places elsewhere, and this pull request does not build: the topology's production
 emitter of the record and the answer-ingest into schema 4 (*"the first topology code that emits
 it"*, which PR9 was expected to be and was not — §4), the hazard map's attribution axis (O5, v0.3),
-and any change to the `question_answered` transaction. §11 says so again, as what is not claimed.
+and any change to the `question_answered` transaction. §14 says so again, as what is not claimed.
 
 ## 2. What the tree already had at `8b28944f`, measured by reading
 
@@ -210,7 +210,7 @@ text) in the same change"*. `decisions/` was retired on 2026-09-03 (`DESIGN.md` 
 *"They were retired so that the design is the one place a rule lives"*), and `CLAUDE.md` says the
 design section changes in the same pull request with no separate record.
 
-**Reading.** The public half's landing text goes verbatim into §12 of this record, and the three
+**Reading.** The public half's landing text goes verbatim into §15 of this record, and the three
 amended passages cite this record by path, `reviews/2026-09-14-o3-attribution-record.md`. No row is
 added to the retired-records table (it lists records that existed and were retired; this one never
 existed there), and no other design passage is touched. The staged text says PR9 adds the fields;
@@ -268,7 +268,7 @@ the fields to `ir::Answer::Answered`:
 `.partial` is left and no file is published. `write_answer` (what `upstroke answer` calls) writes
 `AnswerFile::unattributed`, so the command's files are unchanged. No CLI flag mints a conviction in
 this pull request: that is a §18 change (`upstroke answer <question-id> [--option N | --text "…"]`)
-the brief keeps out of scope, and §11 says so. **What a later consumer finds missing:** the
+the brief keeps out of scope, and §14 says so. **What a later consumer finds missing:** the
 command-line spelling of a ruling; the file format it will write is this one.
 
 **Alternative rejected.** Adding the fields to `ir::Answer::Answered` (51 sites across eleven files
@@ -488,7 +488,7 @@ restored from pristine copies and their SHA-256 checked equal after each):
 exit `0` (2026-09-15T00:17:01Z–2026-09-15T00:19:09Z) — Phase 1's 2603 plus the five tests above.
 
 **Not built here, by the brief:** the schema-4 answer-ingest that would read
-`read_answer_record` into a `design_defect`, and a command-line spelling of a ruling (§11).
+`read_answer_record` into a `design_defect`, and a command-line spelling of a ruling (§14).
 
 ## 8. The decoder fixture (Phase 3)
 
@@ -535,15 +535,43 @@ informational tests), `phase3/fmt-1.log` (clean after `cargo fmt`), `phase3/clip
 (`-D warnings`, clean), `phase3/full-1.log`: library `2611 passed; 0 failed; 77 ignored` in
 90.83 s, binary `10 passed`, exit `0` (2026-09-15T00:29:45Z–2026-09-15T00:31:57Z) — Phase 2's 2608 plus the three tests above.
 
-## 9. The ten gates on this box
+## 9. The internals notes (Phase 4)
+
+Six notes files change, the three the brief names and the three R9 adds; every changed module
+keeps its single `Extended notes:` pointer and no other prose (§13), and every new item has a
+section headed by its source line (`docs/internals/README.md`'s grep-string rule):
+
+| notes file | what changed |
+|---|---|
+| `docs/internals/events/mod.md` | the `DesignDefect {` variant section restated for the attribution loop; new sections for `QuestionAttribution` and its variants, `EffectiveAttribution` with `derive` and `attribution`, `cited`, `UncitedConviction`, `pub struct DesignDefect {`, its two new fields, and `discovered`, `convicted`, `effective_attribution` |
+| `docs/internals/topology/events.md` | the `DesignDefect {` section: the attributed payload, the informational-tolerance path, the refused transaction, no emitter yet; the `is_transaction` section names the two columns as the columns it describes; sections for `a_question_answered_transaction_refuses_an_attribution_key`, `attributed_design_defects`, and the two attributed-fixture tests |
+| `docs/internals/answer.md` | the module section says what the file holds, that this command writes it unattributed, and where a ruling can and cannot arrive; a section for the record the command now builds |
+| `docs/internals/interaction.md` | sections for `AnswerRecord`, its two fields and four methods; `write_answer` restated as the single writer and the writer-side rule; `read_answer_record`; `read_answer` restated as the answer half the legacy engine reads |
+| `docs/internals/engine/coordinator.md` | the `self.emit(EventBody::DesignDefect {` section no longer restates the presumption §5 retires: the schema-3 writer writes the record unclassified, not through the constructors |
+| `docs/internals/status/render.md` | a section for the `DesignDefect` arm: three lines, read through the reader method, the legacy line unchanged |
+
+Gates from the worktree root: `bash .github/scripts/test-internals-notes.sh` — `internals notes:
+150 marker(s), 150 notes file(s), all resolve both ways`, `41 cases passed`, exit `0`
+(`phase4/test-internals-notes.log`); `bash .github/scripts/test-docs-consistency.sh` — `PASS`,
+exit `0` (`phase4/test-docs-consistency.log`).
+
+## 10. The design (Phase 5)
 
 Pending.
 
-## 10. The Windows guest
+## 11. The findings-ledger file (Phase 6)
 
 Pending.
 
-## 11. What is not claimed
+## 12. The ten gates on this box
+
+Pending.
+
+## 13. The Windows guest
+
+Pending.
+
+## 14. What is not claimed
 
 - **No topology emitter of the record.** The topology still writes no `design_defect`; the
   constructors are the writer-side rule for the code that will, and the decoder fixture is what such
@@ -563,7 +591,7 @@ Pending.
   file is not lost — the file stays where `upstroke answer` left it — but no schema-3 record carries
   it, which is the contract's "its records read as unclassified".
 
-## 12. The public half of the contract, verbatim
+## 15. The public half of the contract, verbatim
 
 The landing text the private record stages under its heading "Public half (staged for landing;
 named identically on both sides)", reproduced without change. Its relative link to

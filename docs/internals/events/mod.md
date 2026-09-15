@@ -146,8 +146,11 @@ The scheduler waited out a deferral and made that work runnable again.
 
 ## `DesignDefect {`
 
-§5: every question that reaches a human at runtime is a design-phase
-defect, logged as one so the designer prompt can learn from it.
+§5's attribution loop: every question that reaches a human at runtime is
+logged, with the question, the answer and an attribution — `discovered_hole`
+by default, `design_defect` only by citation — so the designer prompt learns
+from honestly labelled data. The tag is a historical name; the record carries
+the judgment (`reviews/2026-09-14-o3-attribution-record.md`).
 
 ## `CapacitySnapshot {`
 
@@ -694,10 +697,99 @@ legacy answer whose older writer did not record the policy.
 Which channel produced it — a terminal, an out-of-band `upstroke answer`,
 or a resume picking up an answer written while the run was dead.
 
+## `pub enum QuestionAttribution {`
+
+The attribution the 2026-09-01 decision gives every runtime question — a
+runtime question is a discovery until convicted
+(`reviews/2026-09-14-o3-attribution-record.md`; `DESIGN.md` §5, §12,
+§23.1). It is the judgment the `design_defect` record carries now that its
+tag is a historical name. Spelled `discovered_hole` and `design_defect` on
+the wire, `BudgetKind`'s mold, and `Display` writes the same spelling.
+
+## `pub enum QuestionAttribution` › `DiscoveredHole,`
+
+The default: execution surfaced a decision design could not reasonably have
+been expected to exhaust.
+
+## `pub enum QuestionAttribution` › `DesignDefect,`
+
+A conviction: the design-phase checklist item or precedent that would have
+surfaced this question was available and unapplied. Recorded only with the
+citation that names it — no citation, no conviction.
+
+## `pub enum EffectiveAttribution<'a> {`
+
+What a reader derives from the stored pair, and the only thing a projection
+reads. `Unclassified` is a record written before the taxonomy (`None`);
+`Discovered` is a discovery, or a conviction that cites nothing;
+`Convicted` carries the citation. Derived, never re-decided: the stored
+fields are kept as written and nothing rewrites them.
+
+## `impl<'a> EffectiveAttribution<'a>` › `pub fn derive(stored: Option<QuestionAttribution>, citation: Option<&'a str>) -> Self {`
+
+The one derivation, shared by `DesignDefect` and the answer file's
+`interaction::AnswerRecord`. A `design_defect` whose citation is absent or
+blank reads as a discovery: the reader applies the rule the writer refuses
+on, so a record no constructor could have written reads the way the
+writer's refusal implies (the record's R6).
+
+## `impl<'a> EffectiveAttribution<'a>` › `pub fn attribution(self) -> Option<QuestionAttribution> {`
+
+The derived value as the wire enum: `None`, `DiscoveredHole`, `DesignDefect`.
+
+## `pub fn cited(citation: &str) -> bool {`
+
+The one spelling of "a citation is not blank", used by both constructors
+and by the derivation.
+
+## `pub struct UncitedConviction;`
+
+What `convicted` refuses through: a `design_defect` without a citation is
+invalid to write. A `Result`, never a panic — the citation is input.
+
+## `pub struct DesignDefect {`
+
+§5's record of a question that reached a person at runtime: the question,
+the answer, and since the taxonomy the attribution. Two writers write it
+unclassified — the schema-3 emitters in `engine/coordinator.rs` and
+`engine/resume.rs`, `None` and `None`, not routed through the constructors,
+so their bytes and their projections are unchanged and their records read
+as written before the taxonomy; everything else constructs it through
+`discovered` or `convicted`, which always write `Some`. No
+`deny_unknown_fields`, so an older reader tolerates the two columns, and the
+schema-4 decoder reads them through its informational-tolerance path.
+
 ## `pub context: String,`
 
 The decision execution had to stop for — review material for the
 designer prompt (§5).
+
+## `pub struct DesignDefect` › `pub attribution: Option<QuestionAttribution>,`
+
+`None` means written before the taxonomy — the schema-3 writers' records —
+and is not a discovery: it reads as `EffectiveAttribution::Unclassified`.
+In the `decline_halts_run` mold, so a record without it is byte-identical
+to the pre-taxonomy one.
+
+## `pub struct DesignDefect` › `pub citation: Option<String>,`
+
+A conviction's cited item; `None` on discoveries. `Some(DesignDefect)` with
+no citation is invalid to write and reads as a discovery.
+
+## `impl DesignDefect` › `pub fn discovered(question: QuestionId, context: String, answer: String) -> Self {`
+
+The default polarity, written as `Some(DiscoveredHole)` rather than left
+`None`, so a post-taxonomy record is distinguishable from a pre-taxonomy one.
+
+## `impl DesignDefect` › `pub fn convicted(`
+
+A conviction, with the citation that convicts; a blank one is
+`Err(UncitedConviction)`.
+
+## `impl DesignDefect` › `pub fn effective_attribution(&self) -> EffectiveAttribution<'_> {`
+
+The reader method every projection uses (`status/render.rs` renders through
+it); see `EffectiveAttribution::derive`.
 
 ## `#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]`
 
