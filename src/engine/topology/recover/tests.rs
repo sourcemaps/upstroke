@@ -13093,10 +13093,9 @@ fn answer_ingest_kill_child() {
 }
 
 fn a_kill_at_the_answer_ingestion_converges_on_the_next_incarnation(phase: HookPhase, tag: &str) {
+    use crate::engine::topology::scaffold::KILL_CHILD_BOUND;
     use crate::topology::effects::{AnswerSite, EntryPhase, ResumeAction};
-    use crate::workspace_manager::fixture::{
-        KILL_CHILD_BOUND, died_by_abort, run_kill_child_within,
-    };
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child_within};
 
     let fixture = Fixture::build(
         tag,
@@ -13949,9 +13948,8 @@ fn candidate_sequence_kill_child() {
 }
 
 fn kill_the_candidate_sequence(fixture: &Fixture, coordinate: &str, tag: &str) -> usize {
-    use crate::workspace_manager::fixture::{
-        KILL_CHILD_BOUND, died_by_abort, run_kill_child_within,
-    };
+    use crate::engine::topology::scaffold::KILL_CHILD_BOUND;
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child_within};
 
     let planted = durable_kinds(fixture).len();
     let Some(status) = run_kill_child_within(
@@ -15021,9 +15019,8 @@ fn process_spawn_kill_child() {
 }
 
 fn a_kill_in_the_workers_spawn_converges_on_the_next_resume(coordinate: &str, tag: &str) {
-    use crate::workspace_manager::fixture::{
-        KILL_CHILD_BOUND, died_by_abort, run_kill_child_within,
-    };
+    use crate::engine::topology::scaffold::KILL_CHILD_BOUND;
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child_within};
 
     let fixture = Fixture::healthy(tag);
     let planted = durable_kinds(&fixture).len();
@@ -15509,10 +15506,9 @@ fn a_kill_at_the_gate_containers_git_view_mount_is_reclaimed_by_the_next_resume(
     phase: HookPhase,
     tag: &str,
 ) {
+    use crate::engine::topology::scaffold::KILL_CHILD_BOUND;
     use crate::topology::effects::{ContainerSite, EntryPhase, ResourceRow, ResumeAction};
-    use crate::workspace_manager::fixture::{
-        KILL_CHILD_BOUND, died_by_abort, run_kill_child_within,
-    };
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child_within};
 
     let fixture = Fixture::two_tasks(tag);
     plant_stale_verification(&fixture);
@@ -15802,9 +15798,8 @@ fn staging_path_kill_child() {
 #[test]
 fn a_kill_before_the_proposals_pin_leaves_a_picked_staging_worktree_the_next_resume_reclaims_and_the_candidate_integrates()
  {
-    use crate::workspace_manager::fixture::{
-        KILL_CHILD_BOUND, died_by_abort, git, run_kill_child_within,
-    };
+    use crate::engine::topology::scaffold::KILL_CHILD_BOUND;
+    use crate::workspace_manager::fixture::{died_by_abort, git, run_kill_child_within};
 
     let tag = "kill-before-prepared-pin";
     let fixture = Fixture::build(

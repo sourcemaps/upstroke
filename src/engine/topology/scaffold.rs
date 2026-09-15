@@ -33,7 +33,7 @@ use crate::topology::schema::TOPOLOGY_SCHEMA;
 use crate::util::DurabilityLedger;
 use crate::workspace_manager::{
     EffectHooks, HarnessEffects, WorkspaceManager,
-    fixture::{Fixture, KILL_CHILD_BOUND, died_by_abort, run_kill_child_within, write_file},
+    fixture::{Fixture, died_by_abort, run_kill_child_within, write_file},
 };
 
 use super::attempt::{AttemptPlan, GatePlan, ReviewerPlan};
@@ -1539,6 +1539,8 @@ impl Run {
 }
 
 const HANDOFF: &str = "fixture-root";
+
+pub(super) const KILL_CHILD_BOUND: Duration = Duration::from_secs(120);
 
 pub(super) fn kill_dir(tag: &str) -> PathBuf {
     static ORDINAL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

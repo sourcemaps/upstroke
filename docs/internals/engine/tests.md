@@ -2462,6 +2462,12 @@ is durable.
 
 The second: the payload's write dies at one of its phases.
 
+## `const KILL_CHILD_BOUND: Duration = Duration::from_secs(120);`
+
+The deadline both kill children are given through `workspace_manager::fixture::run_kill_child_within`:
+the topology scaffold's `KILL_CHILD_BOUND`, which this module cannot name, at the same 120 seconds. A
+child still running at the bound is killed and reaped, and the witness fails naming its tag.
+
 ## `const ASKING_PLAN: &str =`
 
 One implementer task, whose worker (`Effect::AskQuestion`) stops and asks.

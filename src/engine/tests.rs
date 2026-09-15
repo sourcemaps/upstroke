@@ -9033,6 +9033,8 @@ const PARKING_SETTLEMENT_KILL_CHILD: &str = "engine::tests::parking_settlement_k
 
 const QUESTION_PAYLOAD_KILL_CHILD: &str = "engine::tests::question_payload_kill_child";
 
+const KILL_CHILD_BOUND: Duration = Duration::from_secs(120);
+
 const ASKING_PLAN: &str =
     "## Ask before building\n<!-- upstroke: id=t1 kind=implement depends= -->\n";
 
@@ -9164,11 +9166,11 @@ fn a_run_killed_once_its_parking_settlement_is_durable(
     let Some(killed) = crate::workspace_manager::fixture::run_kill_child_within(
         PARKING_SETTLEMENT_KILL_CHILD,
         &[("UPSTROKE_CRASH_REPO", repo.as_os_str())],
-        crate::workspace_manager::fixture::KILL_CHILD_BOUND,
+        KILL_CHILD_BOUND,
     ) else {
         panic!(
-            "{tag}: the parking run did not end within {:?}, and was killed and reaped",
-            crate::workspace_manager::fixture::KILL_CHILD_BOUND
+            "{tag}: the parking run did not end within {KILL_CHILD_BOUND:?}, and was killed and \
+             reaped"
         );
     };
     assert!(
@@ -9270,12 +9272,11 @@ fn a_kill_at_the_question_payload_write_is_recovered_by_the_resume(
                 std::ffi::OsStr::new(&coordinate),
             ),
         ],
-        crate::workspace_manager::fixture::KILL_CHILD_BOUND,
+        KILL_CHILD_BOUND,
     ) else {
         panic!(
-            "{tag}: the payload writer armed at the {phase} phase did not end within {:?}, and \
-             was killed and reaped",
-            crate::workspace_manager::fixture::KILL_CHILD_BOUND
+            "{tag}: the payload writer armed at the {phase} phase did not end within \
+             {KILL_CHILD_BOUND:?}, and was killed and reaped"
         );
     };
     assert!(
