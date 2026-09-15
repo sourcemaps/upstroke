@@ -329,6 +329,42 @@ impl Fixture {
         }
     }
 
+    /// [`Fixture::new`], built in `root`, a directory the caller owns.
+    ///
+    /// For the witnesses that hold a `rundir::scratch_tree` guard over their
+    /// fixture, so that the guard reclaims the fixture's private root however
+    /// the witness ends (#292's review round 6). [`Fixture::new`]'s pid-named
+    /// root is left as it was.
+    fn at(root: PathBuf, run: &str, incarnation: &str, invocation: &InvocationId) -> Self {
+        let trace = ContainerTrace::recording();
+        let runtime = FakeRuntime::new(trace.clone());
+        runtime.add_image(IMAGE_ID, Some(MANIFEST_DIGEST));
+        runtime.add_image(OTHER_IMAGE_ID, None);
+        runtime.tag(IMAGE_REFERENCE, IMAGE_ID);
+        let record = intent_for(run, incarnation, invocation);
+        let name = name_for(run, incarnation, invocation);
+        let spec = spec_for(&name, &record, &root, IMAGE_ID);
+        let view = GitViewRequest {
+            path: root.join("views").join(name.as_str()),
+            workspace: PathBuf::from("/srv/work/task"),
+            head: Some("0".repeat(40)),
+        };
+        Self {
+            plan: LaunchPlan {
+                private_root: root.clone(),
+                name,
+                invocation: invocation.clone(),
+                intent: record,
+                spec,
+                view,
+            },
+            view: DisposableDirView::new(trace.clone()),
+            runtime,
+            trace,
+            root,
+        }
+    }
+
     fn hooks(&self) -> RecordingHooks {
         RecordingHooks::new(self.trace.clone())
     }
@@ -1244,7 +1280,16 @@ fn a_fault_at_the_git_view_mount_is_reclaimed_by_the_next_census(
     use super::census::{Census, CensusStart, run_startup_census};
     use crate::topology::effects::{EntryPhase, HookHarness, HookPhase, ResumeAction};
 
-    let fixture = Fixture::new(tag, RUN_A, INCARNATION_1, &shell_probe());
+    // Bound before the fixture, so it is reclaimed after it: the guard owns the
+    // fixture's private root until this witness returns or unwinds.
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), tag)
+        .expect("a scratch tree for the fixture");
+    let fixture = Fixture::at(
+        tree.path().to_path_buf(),
+        RUN_A,
+        INCARNATION_1,
+        &shell_probe(),
+    );
     let site = EffectSiteId::Container(ContainerSite::MountGitView);
     let semantics = site.semantics(match phase {
         HookPhase::Before => EntryPhase::Before,

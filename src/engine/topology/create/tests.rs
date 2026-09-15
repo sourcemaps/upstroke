@@ -4174,7 +4174,11 @@ fn an_error_after_the_log_is_created_refuses_the_run_resumably_and_the_next_crea
         site.semantics(EntryPhase::Point { point, mode }).rows,
         vec![ResourceRow::R21]
     );
-    let fixture = Fixture::new("open-log-create-error");
+    // Bound before the fixture, so it is reclaimed after everything built in it:
+    // the guard owns the fixture's tree until this witness returns or unwinds.
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "open-log-create-error")
+        .expect("a scratch tree for the fixture");
+    let fixture = Fixture::at(tree.path());
     let probes = RecordingProbes::new(&host_digest());
     let refs = FakeRefs::empty();
 
@@ -4301,7 +4305,11 @@ fn a_kill_after_the_first_line_is_synced_leaves_a_committed_run_whose_next_censu
         site.semantics(EntryPhase::Point { point, mode }).rows,
         vec![ResourceRow::R21]
     );
-    let fixture = Fixture::new("kill-p6-synced");
+    // Bound before the fixture, so it is reclaimed after everything built in it:
+    // the guard owns the fixture's tree until this witness returns or unwinds.
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "kill-p6-synced")
+        .expect("a scratch tree for the fixture");
+    let fixture = Fixture::at(tree.path());
     kill_the_creation(&fixture.root, "p6synced");
 
     let path = fixture.public().join(EVENT_LOG);
@@ -4443,7 +4451,12 @@ fn census_of(
 fn a_kill_while_the_first_line_is_written_leaves_a_retained_husk_whose_next_open_truncates_it() {
     use crate::engine::topology::startup::RunDirOutcome;
 
-    let fixture = Fixture::new("kill-p5b-torn-recovered");
+    // Bound before the fixture, so it is reclaimed after everything built in it:
+    // the guard owns the fixture's tree until this witness returns or unwinds.
+    let tree =
+        crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "kill-p5b-torn-recovered")
+            .expect("a scratch tree for the fixture");
+    let fixture = Fixture::at(tree.path());
     kill_the_creation(&fixture.root, "p5btorn");
     let path = fixture.public().join(EVENT_LOG);
     let torn = std::fs::read(&path).expect("the log exists");

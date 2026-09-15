@@ -9160,8 +9160,21 @@ fn question_payload_kill_child() {
 
 fn a_run_killed_once_its_parking_settlement_is_durable(
     tag: &str,
-) -> (PathBuf, String, QuestionRecord) {
-    let repo = temp_engine_repo(tag);
+) -> (
+    rundir::scratch_tree::ScratchTree,
+    PathBuf,
+    String,
+    QuestionRecord,
+) {
+    // The repository and its sibling private root (`private_root_for`) are made
+    // in one tree, handed back for the caller to hold: the guard reclaims both
+    // when the witness returns and when it unwinds (#292's review round 6).
+    let tree = rundir::scratch_tree::acquire(&std::env::temp_dir(), tag)
+        .expect("a scratch tree for the repository and its private root");
+    git_in(tree.path(), &["init", "-q", "-b", "main", "repo"]);
+    let repo = tree.path().join("repo");
+    git_in(&repo, &["config", "user.email", "test@upstroke.local"]);
+    git_in(&repo, &["config", "user.name", "upstroke tests"]);
     seed(&repo, ASKING_PLAN, Some(PARKING_CONFIG));
     let Some(killed) = crate::workspace_manager::fixture::run_kill_child_within(
         PARKING_SETTLEMENT_KILL_CHILD,
@@ -9202,7 +9215,7 @@ fn a_run_killed_once_its_parking_settlement_is_durable(
         !rundir::is_running(&paths.public),
         "{tag}: the OS released the run lock"
     );
-    (repo, run_id, record.clone())
+    (tree, repo, run_id, record.clone())
 }
 
 fn question_payload(repo: &Path, run_id: &str, record: &QuestionRecord) -> PathBuf {
@@ -9260,7 +9273,9 @@ fn a_kill_at_the_question_payload_write_is_recovered_by_the_resume(
         HookPhase::After => EntryPhase::After,
         HookPhase::Point { .. } => panic!("the payload's coordinates are its two phases"),
     });
-    let (repo, run_id, record) = a_run_killed_once_its_parking_settlement_is_durable(tag);
+    // Bound first, so it is reclaimed last: `_tree` owns the repository and its
+    // private root until this witness returns or unwinds.
+    let (_tree, repo, run_id, record) = a_run_killed_once_its_parking_settlement_is_durable(tag);
     let payload = question_payload(&repo, &run_id, &record);
     let coordinate = format!("{phase:?}");
     let Some(killed) = crate::workspace_manager::fixture::run_kill_child_within(
@@ -9375,7 +9390,9 @@ fn a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converg
     use crate::topology::effects::{HookHarness, HookPhase, InjectionMode, SubEffectPoint};
 
     let tag = "ambient-join-error-resume";
-    let (repo, run_id, record) = a_run_killed_once_its_parking_settlement_is_durable(tag);
+    // `_tree` owns the repository and its private root until this witness
+    // returns or unwinds.
+    let (_tree, repo, run_id, record) = a_run_killed_once_its_parking_settlement_is_durable(tag);
     let paths = paths_of(&repo, &run_id);
     let payload = question_payload(&repo, &run_id, &record);
     let log = fs::read(paths.events()).expect("the log");

@@ -91,6 +91,12 @@ A create spec that asks for `image_id`.
 
 A whole plan, plus a fake runtime already holding the recorded image.
 
+## `impl Fixture` › `fn at(root: PathBuf, run: &str, incarnation: &str, invocation: &InvocationId) -> Self {`
+
+The same fixture in a root the caller owns. The mount-fault witnesses build it inside a
+`rundir::scratch_tree` tree they hold, so the root is reclaimed however the witness ends. `new`'s
+pid-named root, which nothing removes, is the tree's older allocator and is left as it was.
+
 ## `fn skipped(reason: &str) {`
 
 What a Docker-gated test does when there is no runtime.
@@ -540,6 +546,12 @@ and the intent's are read after it, and a second census over the converged state
 No event log is involved at this level, so nothing replays here; the same coordinates in a run
 with a log, resumed and replayed twice, are
 `engine::topology::recover::tests::a_kill_at_the_gate_containers_git_view_mount_is_reclaimed_by_the_next_resume`.
+
+The fixture is built with `Fixture::at` inside a `rundir::scratch_tree` tree the witness holds, so
+its private root is reclaimed when the witness returns and when it unwinds, under that guard's
+policy: a failed reclaim fails the test naming the root, and on an unwind it is reported without a
+second panic. The census removes only what the launch left; before #292's review round 6 nothing
+removed the root.
 
 ## `fn the_intent_record_carries_the_six_fields_and_each_is_read_back() {`
 

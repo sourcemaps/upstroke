@@ -208,7 +208,10 @@ build error in a `TOPOLOGY_MODULE` — tests included.
 ## `impl Fixture` › `fn at(root: &Path) -> Self {`
 
 The same layout at a root that already exists — how a kill child
-lands in the directory its parent will inspect.
+lands in the directory its parent will inspect, and how the witnesses
+of rows 94, 103 and 106 build their fixture inside a
+`rundir::scratch_tree` tree they hold, which reclaims it however the
+witness ends.
 
 ## `impl Fixture` › `fn private_root_canonical(&self) -> PathBuf {`
 
@@ -1434,7 +1437,8 @@ creation stops at P4 and names the point. Nothing past the open ran, so no commi
 run directory for the next command to step around. The next creation over the same repository
 converges: its open creates the log and syncs the directory again, `run_started` is the log's one
 line, the run classifies committed, and the log replays twice to states equal to each other and to
-the live fold.
+the live fold. Its fixture is built with `Fixture::at` inside a `rundir::scratch_tree` tree the
+witness holds, reclaimed when the witness returns and when it unwinds (#292's review round 6).
 
 ## `fn kill_the_creation(root: &Path, site: &str) {`
 
@@ -1469,7 +1473,9 @@ record's digest, proves the synced line as the stable prefix and acts on nothing
 `RunDir.RemoveMarker`. The run still classifies committed, readers list it, the log is untouched,
 and it replays twice to states equal to each other and to the barrier's fold.
 
-The kill child's record is the one that holds the point, because the parent never appends.
+The kill child's record is the one that holds the point, because the parent never appends. Its
+fixture is built with `Fixture::at` inside a `rundir::scratch_tree` tree the witness holds,
+reclaimed when the witness returns and when it unwinds (#292's review round 6).
 
 ## `fn census_of(`
 
@@ -1487,4 +1493,6 @@ record cannot be told from a truncated committed log. The next open through the 
 the commit record's digest, truncates the torn line (and warns once), then refuses resumably at
 `Event.ProvePrefixStable`: the commit record names a first line the proven prefix does not hold.
 Nothing committed is left in the log, so there is no event to replay, and a census after the open
-still retains the husk possibly committed.
+still retains the husk possibly committed. Its fixture is built with `Fixture::at` inside a
+`rundir::scratch_tree` tree the witness holds, reclaimed when the witness returns and when it
+unwinds (#292's review round 6).

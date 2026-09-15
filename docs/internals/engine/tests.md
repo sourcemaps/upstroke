@@ -2512,9 +2512,17 @@ record holds the coordinate.
 
 ## `fn a_run_killed_once_its_parking_settlement_is_durable(`
 
-Seeds the plan, runs the first kill child, and reads back what it left: the log ends at the
-`attempt_finished` with its parking decision, the replayed state holds exactly one open question,
-no payload exists, and the run lock went with the process.
+Makes the repository, seeds the plan, runs the first kill child, and reads back what it left: the
+log ends at the `attempt_finished` with its parking decision, the replayed state holds exactly one
+open question, no payload exists, and the run lock went with the process.
+
+The repository and its sibling private root (`private_root_for`) are made inside one
+`rundir::scratch_tree` tree, which the helper hands back with them, and each caller holds it for
+its whole body. Both are reclaimed when the witness returns and when it unwinds. A reclaim that
+fails on the return fails the test naming the root; one that fails while the test unwinds is
+reported on stderr beside the failure, without a second panic (`rundir::scratch_tree`'s own tests
+witness both). Before #292's review round 6 they were `upstroke-engine-<tag>-<pid>` and its
+`-home` in the temporary directory, which nothing removed.
 
 ## `fn question_payload(repo: &Path, run_id: &str, record: &QuestionRecord) -> PathBuf {`
 

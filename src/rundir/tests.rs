@@ -614,9 +614,13 @@ fn a_fault_at_the_worktree_lease_converges_on_the_next_acquisition(
 ) {
     use crate::topology::effects::{EntryPhase, ResourceRow, ResumeAction};
 
-    let root = scratch(tag);
-    let repo = root.join("repo");
-    let git_dir = root.join("git-dir");
+    // Held until this witness returns or unwinds, which reclaims the tree:
+    // `scratch_tree`'s guard, whose failed reclaim fails the test naming the
+    // root, or on an unwind is reported without a second panic (#292's review
+    // round 6: the root was the pid-named `scratch`, which nothing removed).
+    let root = scratch_tree::acquire(&std::env::temp_dir(), tag).expect("a scratch tree");
+    let repo = root.path().join("repo");
+    let git_dir = root.path().join("git-dir");
     fs::create_dir_all(&repo).expect("repository");
     fs::create_dir_all(&git_dir).expect("worktree git dir");
     let lock_file = worktree_lock_file(&git_dir);
