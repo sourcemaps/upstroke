@@ -213,6 +213,13 @@ rows: before the primitive, R22 still accounts for the handle, so the fate is `U
 it, the row holds nothing, so the fate is `Gone`. The tabled action is then the next command
 through the same adapter, which runs to its own exit.
 
+The scratch directory the helper publishes its identity into is a `rundir::scratch_tree` guard, so it
+is reclaimed when the witness unwinds as well as when it returns. A reclaim that fails on the return
+fails the test naming the directory; one that fails while the test is already unwinding is reported
+on stderr beside the failure that unwound it, never as a second panic (#292's review round 5,
+finding 3: the directory was removed by a last statement whose error was discarded, and a failing
+assertion skipped it).
+
 ## `struct SpawnAfterThenTerminateAfterFault {`
 
 The production adapter with an error return at the after phase of both process sites, and every
@@ -229,7 +236,8 @@ This reaches `kill_tree` on Linux and Windows through the path that calls it whe
 phase fails: the child is created (recorded once), the spawn's after phase returns the injected error,
 the cleanup termination runs its before phase and its primitive, and its after phase returns the
 second error. The failure is the spawn's error with the termination's beside it, the child is gone
-when the funnel returns, and the fate is `Gone`.
+when the funnel returns, and the fate is `Gone`. Its scratch directory is the same kind of guard as
+the witness above.
 
 Not on macOS. On every Unix that error path drops the Supervisor before it calls `kill_tree`, and
 the drop's `finish` has the reaper kill the group and wait until it holds no non-zombie member, so

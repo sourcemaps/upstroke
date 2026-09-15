@@ -377,13 +377,12 @@ fn a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(
         HookPhase::After => EntryPhase::After,
         HookPhase::Point { .. } => panic!("the terminate site's coordinates are its two phases"),
     });
-    let scratch = std::env::temp_dir().join(format!(
-        "upstroke-{tag}-{}-{}",
-        std::process::id(),
-        crate::ulid::ulid()
-    ));
-    std::fs::create_dir_all(&scratch).expect("scratch directory");
-    let ready = scratch.join("ready");
+    // Owned by a guard that reclaims it when this witness unwinds as well as
+    // when it returns; `rundir::scratch_tree` says, and tests, what a reclaim
+    // that fails does on each path.
+    let scratch = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), tag)
+        .expect("a scratch directory");
+    let ready = scratch.path().join("ready");
 
     let harness = Arc::new(Mutex::new(HookHarness::new()));
     let mut hooks = TerminateFaultAt {
@@ -481,7 +480,6 @@ fn a_fault_at_the_terminate_funnel_settles_the_child_and_reports_its_fate(
          terminated"
     );
     drop(seen);
-    let _ = std::fs::remove_dir_all(&scratch);
 }
 
 #[test]
@@ -547,12 +545,10 @@ fn a_spawn_fault_whose_cleanup_termination_faults_after_its_primitive_reports_th
 
     use crate::topology::effects::{EffectSiteId, HookHarness};
 
-    let scratch = std::env::temp_dir().join(format!(
-        "upstroke-spawn-then-terminate-fault-{}-{}",
-        std::process::id(),
-        crate::ulid::ulid()
-    ));
-    std::fs::create_dir_all(&scratch).expect("scratch directory");
+    // Reclaimed when this witness unwinds as well as when it returns, as above.
+    let scratch =
+        crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "spawn-then-terminate-fault")
+            .expect("a scratch directory");
     let harness = Arc::new(Mutex::new(HookHarness::new()));
     let mut hooks = SpawnAfterThenTerminateAfterFault {
         inner: crate::runner::HarnessHooks::new(Arc::clone(&harness)),
@@ -561,7 +557,10 @@ fn a_spawn_fault_whose_cleanup_termination_faults_after_its_primitive_reports_th
     let mut command = Command::new(std::env::current_exe().expect("test executable"));
     command
         .args(["terminate_fault_helper", "--ignored", "--nocapture"])
-        .env("UPSTROKE_TERMINATE_FAULT_READY", scratch.join("ready"));
+        .env(
+            "UPSTROKE_TERMINATE_FAULT_READY",
+            scratch.path().join("ready"),
+        );
     let failure = run_with_timeout_classified(
         ProcessSite::Spawn,
         ProcessSite::Terminate,
@@ -608,7 +607,6 @@ fn a_spawn_fault_whose_cleanup_termination_faults_after_its_primitive_reports_th
         ProcessFate::Gone,
         "the cleanup termination's primitive completed before its after phase failed: {message}"
     );
-    let _ = std::fs::remove_dir_all(&scratch);
 }
 
 #[cfg(unix)]
