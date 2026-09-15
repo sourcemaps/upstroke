@@ -81,12 +81,12 @@ and any change to the `question_answered` transaction. §14 says so again, as wh
   |---|---|---|
   | `src/engine/coordinator.rs:1037` | legacy emitter (schema 3, live ingest) | `attribution: None, citation: None` |
   | `src/engine/resume.rs:585` | legacy emitter (schema 3, resume repair) | `attribution: None, citation: None` |
-  | `src/events/log/tests.rs:67` | test fixture, the legacy-append byte test's `defect()` | `DesignDefect::discovered` |
-  | `src/events/mod.rs:1886` | test fixture, the round-trip corpus | `DesignDefect::discovered` |
-  | `src/topology/census.rs:1630` | the census offer (a test-only fold-census candidate) | `DesignDefect::discovered` |
-  | `src/topology/events.rs:2073` | canonical serialisation corpus, `every_kind()` | `None, None` (R1) |
-  | `src/topology/events.rs:4361` | canonical serialisation corpus, `canonical_events()` | `None, None` (R1) |
-  | `src/topology/fold/tests.rs:8452` | test fixture, the fold's `every_kind()` | `DesignDefect::discovered` |
+  | `src/events/log/tests.rs:67` | serialisation fixture: `defect()`, fed to the byte comparison in `the_legacy_append_is_byte_identical_to_the_pre_move_writer` | `None, None`, pinned literally by that test (R1) |
+  | `src/events/mod.rs:1886` | serialisation fixture: the round-trip corpus of `every_event_kind_round_trips` | `None, None`, pinned literally by that test, with a discovered and a convicted sibling beside it (R1) |
+  | `src/topology/census.rs:1630` | behaviour fixture: the census offer (a test-only fold-census candidate) | `DesignDefect::discovered` (R1) |
+  | `src/topology/events.rs:2073` | serialisation fixture: the canonical corpus's `every_kind()` | `None, None` (R1) |
+  | `src/topology/events.rs:4361` | serialisation fixture: `canonical_events()` | `None, None` (R1) |
+  | `src/topology/fold/tests.rs:8452` | behaviour fixture: the fold's `every_kind()` | `DesignDefect::discovered` (R1) |
 
   The goal counts nine at `caf6bed0` "including the census offer". This derivation gives eight; the
   ninth line the grep matches that is neither a pattern nor a variant declaration is the struct's own
@@ -176,31 +176,43 @@ and any change to the `question_answered` transaction. §14 says so again, as wh
 Each is a place where the contract, the design and the code together do not determine the answer.
 The contract sentence, the reading, the alternative rejected, and what a later consumer would find.
 
-### R1 — the legacy writer versus "every construction site"
+### R1 — the legacy writer, "every construction site", and "every existing serialisation fixture"
 
 The contract: *"the legacy writer is not modified, so legacy projections stay byte-identical (PR2
 invariant) and its records read as unclassified"*, and *"The post-PR9 topology writer always writes
-`Some`"*. The goal: the constructors are *"used at every construction site on master"*.
+`Some`"*. The goal (`/home/ubuntu/orch-o3-attribution/GOAL.txt`) binds two sentences at once:
+*"two constructors, discovered and convicted, the latter requiring a non-empty citation, used at
+every construction site on master (git grep them; nine at the PR10 merge commit caf6bed0,
+including the census offer)"* and *"every existing serialisation fixture is byte-identical"*.
 
-**Reading.** Both hold together only if the two schema-3 emitters — `src/engine/coordinator.rs:1037`
-and `src/engine/resume.rs:585` — keep writing unclassified records: they gain
-`attribution: None, citation: None` and nothing else, and are not routed through the constructors,
-which by construction never write `None`. Every other construction site that stands for a writer's
-output goes through `discovered` (the four test fixtures and the census offer in §2's table). The
-two sites of the canonical serialisation corpus in `src/topology/events.rs` (`every_kind()` and
-`canonical_events()`) also keep the pre-taxonomy shape, `None, None`: they exist to pin the frozen
-schema-4 payload of every kind, the goal's invariant *"every existing serialisation fixture is
-byte-identical"* is prior, and a constructor there would add an `attribution` key to the corpus. The
-attributed shapes are new fixtures beside the corpus (Phase 3), through the constructors. "Not
-edited" (the brief, of `canonical_events`) is read as *its payloads are unchanged*: the struct
-literal gains the two `None` fields, which the build requires and which serialise to nothing;
-Phase 1's literal-JSON test and the corpus test passing unmodified prove the bytes.
+**Reading** (as landed in round 1; the first landing converted four fixtures to `discovered` and
+so moved two serialised payloads the second sentence protects — record lens finding 1, contract
+lens F2, resolved by the orchestrator's ruling in `repair-290-r1.md` B1). The two schema-3 emitters
+— `src/engine/coordinator.rs:1037` and `src/engine/resume.rs:585` — keep writing unclassified
+records: they gain `attribution: None, citation: None` and nothing else, and are not routed
+through the constructors, which by construction never write `None`. Of the six remaining sites in
+§2's table, a **serialisation fixture** is one whose test asserts its serialised bytes or feeds it
+to a byte comparison, and it keeps its pre-taxonomy bytes, constructed in the literal form with the
+two fields `None` and pinned by a literal assertion of its three-field payload: `defect()` in
+`src/events/log/tests.rs` (fed to both writers of
+`the_legacy_append_is_byte_identical_to_the_pre_move_writer`, which now opens with the pin), the
+round-trip corpus of `every_event_kind_round_trips` in `src/events/mod.rs` (pinned in that test
+before its loop, with a `discovered` and a `convicted` sibling beside the pre-taxonomy entry so the
+attributed shapes round-trip through an `Event` too), and the canonical corpus pair in
+`src/topology/events.rs` (`every_kind()` and `canonical_events()`, whose attributed cases are
+Phase 3's separate fixtures). A **behaviour fixture** is one whose test exercises the census arms
+or the fold and never its bytes, and it goes through the constructors as the goal's "including the
+census offer" requires: the census offer in `src/topology/census.rs` and the fold's `every_kind()`
+in `src/topology/fold/tests.rs`, both `discovered`. So the first sentence holds of every site that
+stands for a writer's output, and the second holds of every fixture whose bytes any test compares.
 
 **Alternative rejected.** Routing the legacy emitters through `discovered`, which would stamp every
-schema-3 record a discovery and move the legacy projections' bytes; and constructing the corpus pair
-through `discovered`, which would move the frozen payload. **What a later consumer finds missing:**
-nothing — a schema-3 log reads as unclassified, which the contract's hazard-map accommodation
-already designed for.
+schema-3 record a discovery and move the legacy projections' bytes; constructing the serialisation
+fixtures through `discovered`, which is what the first landing did — the byte comparison and the
+round-trip test could not see it, because both compute the expected bytes from the same changed
+value, which is why each pin is a literal. **What a later consumer finds missing:** nothing — a
+schema-3 log reads as unclassified, which the contract's hazard-map accommodation already designed
+for.
 
 ### R2 — where the Public half lives and what the design cites
 
@@ -298,12 +310,14 @@ pre-taxonomy record) the line is unchanged, byte for byte, so legacy projections
 `effective_attribution()`. **Alternative rejected:** leaving the line as it is for every record,
 which reads a discovery as a defect.
 
-### R8 — the corpus pair is a construction site the taxonomy does not apply to
+### R8 — which of the eight sites the constructors reach
 
 Restated from R1 for the census: of the eight sites, the two legacy emitters are excluded by the
-contract's own sentence, the two corpus sites by the byte-identity invariant, and the remaining four
-go through the constructors. A reviewer counting constructor call sites will find four, plus the new
-fixtures Phase 3 adds.
+contract's own sentence, the four serialisation fixtures (the canonical pair, `defect()`, the
+round-trip corpus entry) by the goal's byte-identity sentence, and the two behaviour fixtures (the
+census offer, the fold's `every_kind()`) go through the constructors. A reviewer counting
+constructor call sites among the eight will find two, plus the attributed fixtures Phase 1's
+round-trip siblings and Phase 3 add.
 
 ### R9 — which notes change
 
@@ -369,12 +383,14 @@ Each with the file the figure lives in, under `/home/ubuntu/o3-attribution-evide
 - The two legacy emitters, `src/engine/coordinator.rs:1044` and `src/engine/resume.rs:589`,
   gain `attribution: None, citation: None` and nothing else (R1; `phase1/fixture-diffs.txt`, the
   "legacy emitters" hunks).
-- The census offer (`src/topology/census.rs`) and the three fixtures (`src/events/log/tests.rs`
-  `defect()`, the round-trip corpus in `src/events/mod.rs`, the fold's `every_kind()` in
-  `src/topology/fold/tests.rs`) go through `discovered`. The canonical corpus pair in
-  `src/topology/events.rs` gains `attribution: None, citation: None` (R1, R8): the hunks are in
-  `phase1/fixture-diffs.txt`, and `git diff --stat` of that file is `4 +` — the two pairs of
-  `None` lines and nothing else.
+- The two behaviour fixtures — the census offer (`src/topology/census.rs`) and the fold's
+  `every_kind()` (`src/topology/fold/tests.rs`) — go through `discovered`. The four serialisation
+  fixtures keep the pre-taxonomy literal, `attribution: None, citation: None`: the canonical corpus
+  pair in `src/topology/events.rs` (its hunks are in `phase1/fixture-diffs.txt`, `4 +`, the two
+  pairs of `None` lines and nothing else), `defect()` in `src/events/log/tests.rs` and the
+  round-trip corpus of `every_event_kind_round_trips` in `src/events/mod.rs` (both converted to
+  `discovered` in the first landing and returned to the literal in round 1, each with a literal pin
+  of its three-field payload; R1).
 - `src/status/render.rs` (R7): the `DesignDefect` arm matches `effective_attribution()`.
   `Unclassified` prints the line it always printed; `Discovered` prints
   `question {q} attributed: discovered_hole`; `Convicted { citation }` prints
@@ -404,11 +420,20 @@ Each with the file the figure lives in, under `/home/ubuntu/o3-attribution-evide
 | `engine::tests::the_legacy_ingest_writes_an_unclassified_design_defect` | the live schema-3 emitter, driven through `run_harness` with a scripted answer: the one `design_defect` line on disk has exactly the keys `answer`, `context`, `question`, and reads as `Unclassified` |
 | `engine::tests::the_resume_repair_writes_an_unclassified_design_defect` | the resume emitter, driven through the decline-prefix mold (`truncate_log_after(…, "question_answered")`, then `resume_with`): the record it appends has the same three keys and reads as `Unclassified` |
 
-**The existing fixture tests pass unmodified** — `every_event_serializes_to_exactly_its_independently_written_payload`,
-`every_event_decodes_from_its_independently_written_payload`,
-`the_legacy_append_is_byte_identical_to_the_pre_move_writer`, `every_kind_is_represented_exactly_once_and_the_list_agrees`
-and the round-trip test in `src/events/mod.rs` — in `phase1/full-2.log`; none of their bodies is in the diff
-(`phase1/fixture-diffs.txt` shows every hunk of the fixture files).
+**The existing serialisation fixtures keep their bytes, and which test bodies are in the diff.**
+`every_event_serializes_to_exactly_its_independently_written_payload`,
+`every_event_decodes_from_its_independently_written_payload` and
+`every_kind_is_represented_exactly_once_and_the_list_agrees` in `src/topology/events.rs` are
+unmodified and pass (`phase1/full-2.log`, and every later full run). Two test bodies **are** in the
+diff, each by a literal pin added in round 1 (`e03f7eae…/round1/`, B1):
+`the_legacy_append_is_byte_identical_to_the_pre_move_writer` opens with
+`serde_json::to_value(defect("q-1"))["data"] == {"question":"q-1","context":"context Ünicode","answer":"answer"}`,
+and `every_event_kind_round_trips` asserts the same three-key shape of its `q-1` entry before its
+loop and carries the two attributed siblings. Executed: at `e03f7eae` (the fixtures still
+`discovered`) the log test's pin fails with `"attribution": String("discovered_hole")` in the
+payload (`round1/b1-before/pin-on-converted-fixture.log`, exit `101`); at the round-1 head both
+pins pass, and the mutation that converts `defect()` back to `discovered` fails the log test's pin
+(`round1/mutations/M10-…`, §16).
 
 **Mutations, executed** (`phase1/mutations/summary.txt`, one `.diff` and `.log` per mutation; the
 file restored from a pristine copy and its SHA-256 checked equal after each):

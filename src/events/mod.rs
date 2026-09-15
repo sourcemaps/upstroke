@@ -1980,11 +1980,29 @@ mod tests {
                 },
             },
             EventBody::DesignDefect {
+                data: DesignDefect {
+                    question: QuestionId::from("q-1"),
+                    context: "cursor format was never decided".to_owned(),
+                    answer: "use base64".to_owned(),
+                    attribution: None,
+                    citation: None,
+                },
+            },
+            EventBody::DesignDefect {
                 data: DesignDefect::discovered(
-                    QuestionId::from("q-1"),
-                    "cursor format was never decided".to_owned(),
-                    "use base64".to_owned(),
+                    QuestionId::from("q-2"),
+                    "the plan says nothing about cursors".to_owned(),
+                    "opaque cursors".to_owned(),
                 ),
+            },
+            EventBody::DesignDefect {
+                data: DesignDefect::convicted(
+                    QuestionId::from("q-3"),
+                    "the plan contradicts itself about cursors".to_owned(),
+                    "rescope".to_owned(),
+                    "design checklist item 2".to_owned(),
+                )
+                .expect("a cited conviction"),
             },
             EventBody::RunFinished {
                 data: RunFinished {
@@ -1995,6 +2013,21 @@ mod tests {
                 },
             },
         ];
+        let pre_taxonomy = bodies
+            .iter()
+            .find(|body| {
+                matches!(body, EventBody::DesignDefect { data } if data.question.as_str() == "q-1")
+            })
+            .expect("the corpus keeps its pre-taxonomy design_defect");
+        assert_eq!(
+            serde_json::to_value(pre_taxonomy).expect("fixture")["data"],
+            serde_json::json!({
+                "question": "q-1",
+                "context": "cursor format was never decided",
+                "answer": "use base64"
+            }),
+            "the existing fixture keeps its pre-taxonomy three-field payload"
+        );
         for body in bodies {
             let event = Event::now(body);
             let line = serde_json::to_string(&event).expect("serialize");
