@@ -841,18 +841,18 @@ fn resume(paths: &RunPaths) -> StablePrefix {
 }
 
 /// Replay twice equal, after a recovery: the log's bytes on disk replayed twice,
-/// the two folds equal to each other and to the one the next process recovered
-/// from the same prefix.
+/// the two states equal to each other and to the state of the fold the next
+/// process recovers from the same prefix ([`resume`]).
 #[track_caller]
-fn assert_replays_twice_to(paths: &RunPaths, recovered: &TopologyFold) {
+fn assert_replays_twice_to_the_next_open(paths: &RunPaths) {
     let events = TopologyFold::parse_log(&read(&paths.events())).expect("the log parses");
     let once = TopologyFold::replay(inputs(), &events).expect("the log replays");
     let twice = TopologyFold::replay(inputs(), &events).expect("the log replays again");
     assert_eq!(once.state(), twice.state(), "two replays disagree");
     assert_eq!(
-        recovered.state(),
+        resume(paths).fold().state(),
         once.state(),
-        "the recovered fold and a replay of the log disagree"
+        "the next open's fold and a replay of the log disagree"
     );
 }
 
@@ -1103,8 +1103,8 @@ fn open_sync_failure_refuses_resumably_with_no_fold_derived_effect() {
     .expect("the next resume establishes the barrier");
     assert_eq!(prefix.bytes(), &before[..]);
     assert!(prefix.fold().budget_stop().is_some());
-    // And the log replays twice to the fold that open recovered.
-    assert_replays_twice_to(&paths, prefix.fold());
+    // And the log replays twice to the fold a further open recovers.
+    assert_replays_twice_to_the_next_open(&paths);
 }
 
 // ---------------------------------------------------------------------------
@@ -2028,10 +2028,9 @@ fn every_append_site_reaches_the_protocol_under_its_own_site() {
             site == EventSite::AppendFirst
         );
 
-        // The next process's barrier over what the protocol left, and the log
-        // replayed twice to the fold it recovers.
-        let recovered = resume(&fixture.paths);
-        assert_replays_twice_to(&fixture.paths, recovered.fold());
+        // The log the protocol left, replayed twice to the fold the next
+        // process's barrier recovers from it.
+        assert_replays_twice_to_the_next_open(&fixture.paths);
     }
 }
 
