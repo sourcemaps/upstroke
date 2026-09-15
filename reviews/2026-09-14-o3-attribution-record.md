@@ -24,7 +24,12 @@ directory that half was staged for, `decisions/`, was retired on 2026-09-03 (R2)
 
 **Evidence.** Every figure quoted here is in a saved file under
 `/home/ubuntu/o3-attribution-evidence/<sha>/` on the build box, cited by path relative to that
-directory; `<sha>` is the full sha the measurement was taken at.
+directory. `<sha>` names the directory, not always the head measured: the base's directory,
+`8b28944f…`, holds Phase 0's measurements at the base and the runs of Phases 1–6, each made on the
+base plus that phase's uncommitted edits (or, for a phase's mutations, on the previous phase's
+commit plus the mutation), and each log's `head:` line says which; the per-head directories
+`fcfedc75…`, `3b44fc5d…` and `e03f7eae…` hold the gate runs at those heads and round 1's evidence
+under `e03f7eae…/round1/`.
 
 ## 0. Status
 
@@ -37,7 +42,7 @@ directory; `<sha>` is the full sha the measurement was taken at.
 | 4 the internals notes, held both ways by `test-internals-notes.sh` | **done** — §9; `test-internals-notes.sh` and `test-docs-consistency.sh` green from the worktree root |
 | 5 the design (O2): §5, §12, §23.1, each citing this record | **done** — §10; `test-docs-consistency.sh` green; `design/15`, `README.md`, `MAINTAINING.md` and `design/25` untouched |
 | 6 the findings-ledger file | **done** — §11; `test-pr-policy.sh` and `test-pr-ledger-evidence.sh` green, the row validated by both validators |
-| 7 the ten gates on this box, the guest, this record, the draft pull request | **done on this box** — the ten gates green at `fcfedc75`, the code-complete head (§12), and run again at the head the body records, which is the body's to report; the guest evidence is CI's Windows leg at the pushed head, by the orchestrator's ruling (§13); the draft pull request follows the push of this record's head, and its number lands in the finding file's `pr:` field by the second push that ruling authorises (§11) |
+| 7 the ten gates on this box, the guest, this record, the draft pull request | **done on this box** — the ten gates green at `fcfedc75` (§12) and at `3b44fc5d` and `e03f7eae`, the body's to report; the guest evidence is CI's Windows leg at the pushed head, by the orchestrator's ruling (§13); the draft is #290, its number set in the finding file by `e03f7eae` (§11); round 1 in §16 |
 
 ## 1. What this pull request is, from the contract
 
@@ -159,12 +164,13 @@ and any change to the `question_answered` transaction. §14 says so again, as wh
   (`phase0/baseline-build.log`, `phase0/baseline-test.log`; the `Compiling upstroke v0.1.0
   (/srv/worktrees/o3-attribution)` line names this worktree): the library's `2595 passed; 0 failed;
   77 ignored` in 81.29 s, the binary's `10 passed`, the example's `0 passed`, exit `0`
-  (2026-09-14, 23:49:02Z–23:50:47Z). The same counts pull request #287's body records for the merge
+  (2026-09-14, 23:49:25Z–23:50:47Z). The same counts pull request #287's body records for the merge
   commit's parent.
 - The build target. `/mnt/ramtarget` (a 48 GiB tmpfs) was at 100 % when this session's first build
   ran — `rustc-LLVM ERROR: IO failure on output stream: No space left on device`
-  (`phase0/baseline-build-attempt1-enospc.log`; the occupants, none of them this session's, in
-  `phase0/ramtarget-full.txt`). Following the `iso-fix-g5-c` precedent another session set minutes
+  (`phase0/baseline-build-attempt1-enospc.log`; the occupants in `phase0/ramtarget-full.txt`: the
+  other sessions' directories, and this session's own 677M partial target of that failed first
+  attempt, `ramtarget-full.txt:38`, which `phase0/target-redirect.txt` records removing). Following the `iso-fix-g5-c` precedent another session set minutes
   earlier, `/mnt/ramtarget/iso-impl_o3-attribution` and `/mnt/ramtarget/iso-o3-attribution` (the
   name `w1-eight-iso` derives from the worktree's basename) are symbolic links to
   `/home/ubuntu/disktarget/iso-impl_o3-attribution` (`phase0/target-redirect.txt`). The wrapper
@@ -285,8 +291,11 @@ this pull request: that is a §18 change (`upstroke answer <question-id> [--opti
 the brief keeps out of scope, and §14 says so. **What a later consumer finds missing:** the
 command-line spelling of a ruling; the file format it will write is this one.
 
-**Alternative rejected.** Adding the fields to `ir::Answer::Answered` (51 sites across eleven files
-would change; the legacy leak above; no attribution on a decline).
+**Alternative rejected.** Adding the fields to `ir::Answer::Answered` (`git grep -n
+'Answer::Answered' -- src` at the base matches 51 lines in eleven files —
+`e03f7eae…/round1/b6-answer-answered-grep-at-base.txt` — a count of matches, `Answer::Answered
+{ .. }` patterns that tolerate added fields included, not a census of what would change; the
+legacy leak above; no attribution on a decline).
 
 ### R6 — a blank citation is no citation at the reader too
 
@@ -455,7 +464,7 @@ the summary); it was re-applied well-formed and is the row above.
 **Runs** (all through the wrapper on the private target): `phase1/targeted-2.log` (48 passed),
 `phase1/fmt-2.log` (clean after `cargo fmt`), `phase1/clippy-1.log` (`-D warnings`, clean),
 `phase1/full-2.log`: library `2603 passed; 0 failed; 77 ignored` in 93.64 s, binary `10 passed`,
-exit `0` (2026-09-15, 00:09:56Z–00:11:42Z) — 2595 at the base plus the eight tests above.
+exit `0` (2026-09-15, 00:10:08Z–00:11:42Z) — 2595 at the base plus the eight tests above.
 
 ## 7. The answer file (Phase 2)
 
@@ -643,9 +652,9 @@ presumption's defect, no way to tell a discovery from a conviction, no writer fo
 this pull request changes; it stays open because the emitter and the schema-4 answer-ingest are
 still owed (§14).
 
-The `pr:` field is blank until the pull request exists — the orchestrator's answer to question 1
-rules out predicting the number — and is set to the number `gh pr create` reports in one
-`docs(findings):` commit, the second push that answer authorises for that one-line change.
+The `pr:` field was blank until the pull request existed — the orchestrator's answer to question
+1 rules out predicting the number — and `e03f7eae`, the second push that answer authorised for
+that one-line change, set it to `290`, the number `gh pr create` reported.
 
 The pull request body's ledger row, validated with the finding staged
 (`phase6/ledger-row.txt`; `phase6/draft-body-for-validation.md` through `validate-pr-body.sh`,
@@ -657,9 +666,12 @@ passed`, exit `0` (`phase6/test-pr-policy.log`); `bash .github/scripts/test-pr-l
 
 ## 12. The ten gates on this box
 
-At `fcfedc755f99c39a9178630dd70eb58352c9c268`, the head that carries every code, notes, design
-and finding change of this pull request (the commits after it are this record's own; `git diff
---stat fcfedc75 <head> -- . ':!reviews/2026-09-14-o3-attribution-record.md'` is empty at each).
+At `fcfedc755f99c39a9178630dd70eb58352c9c268`, the first landing's code-complete head. The three
+commits after it up to `e03f7eae` are this record's own and the finding file's `pr:` line (blank
+at `3b44fc5d`, `290` at `e03f7eae`: `git diff --stat fcfedc75 e03f7eae -- .
+':!reviews/2026-09-14-o3-attribution-record.md'` is that one file, `1 insertion(+), 1
+deletion(-)`); round 1's commits follow (§16), and the gates at round 1's final head are the
+body's to report.
 Logs under `fcfedc755f99c39a9178630dd70eb58352c9c268/gates/`: `box-load.log`,
 `w1-eight-iso.log`, `eight-logs/NN-<name>.log` (a copy of `~/eight-logs/fcfedc7/`),
 `test-pr-ready-audit.log`.
@@ -904,3 +916,14 @@ where the execution is:
   2026-09-15 by both selections, the command and every matching path in
   `round1/b5-flake-rescan.txt`: 1,119 logs, 57 with the test reported `FAILED`, 56 with the
   assertion text, the one difference that same export log. The body's sentence says this.
+- **B6 (record 6): measurements and references not true at the head.** Corrected, each to its
+  file: the baseline's start is `23:49:25Z` (`phase0/baseline-test.log`'s `date:` line; `23:49:02Z`
+  was the compile's `end:`), Phase 1's full run starts `00:10:08Z` (`phase1/full-2.log`); R1's
+  "four test fixtures and the census offer" is the table's two behaviour fixtures and four
+  serialisation fixtures since B1; the evidence paragraph says what the base's directory holds and
+  what each log's `head:` line names; §12 says what the commits after `fcfedc75` change (the
+  finding's `pr:` line, not nothing); the tmpfs occupants included this session's own 677M
+  partial target; the "51 sites" sentence names its saved grep and says it counts matches. The
+  body: the finding's `pr:` is `290` at every head since `e03f7eae`; the attempt-1 directory is
+  `eight-logs-attempt1-failed/`; the fenced numstat is the literal output of the two commands,
+  leading space included.
