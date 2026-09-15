@@ -206,8 +206,11 @@ two fields `None` and pinned by a literal assertion of its three-field payload: 
 round-trip corpus of `every_event_kind_round_trips` in `src/events/mod.rs` (pinned in that test
 before its loop, with a `discovered` and a `convicted` sibling beside the pre-taxonomy entry so the
 attributed shapes round-trip through an `Event` too), and the canonical corpus pair in
-`src/topology/events.rs` (`every_kind()` and `canonical_events()`, whose attributed cases are
-Phase 3's separate fixtures). A **behaviour fixture** is one whose test exercises the census arms
+`src/topology/events.rs` (`every_kind()` and `canonical_events()`, pinned since round 2 in
+`every_event_serializes_to_exactly_its_independently_written_payload` before its loop — the
+corpus's own `design_defect` entry is computed by serialising the struct, so without the pin that
+test compared two values that moved together, which the round-2 fix-check lens found, S1; the
+attributed cases are Phase 3's separate fixtures). Three pins, one per test. A **behaviour fixture** is one whose test exercises the census arms
 or the fold and never its bytes, and it goes through the constructors as the goal's "including the
 census offer" requires: the census offer in `src/topology/census.rs` and the fold's `every_kind()`
 in `src/topology/fold/tests.rs`, both `discovered`. So the first sentence holds of every site that
@@ -439,11 +442,13 @@ Each with the file the figure lives in, under `/home/ubuntu/o3-attribution-evide
 | `engine::tests::the_resume_repair_writes_an_unclassified_design_defect` | the resume emitter, driven through the decline-prefix mold (`truncate_log_after(…, "question_answered")`, then `resume_with`): the record it appends has the same three keys and reads as `Unclassified` |
 
 **The existing serialisation fixtures keep their bytes, and which test bodies are in the diff.**
-`every_event_serializes_to_exactly_its_independently_written_payload`,
 `every_event_decodes_from_its_independently_written_payload` and
 `every_kind_is_represented_exactly_once_and_the_list_agrees` in `src/topology/events.rs` are
-unmodified and pass (`phase1/full-2.log`, and every later full run). Two test bodies **are** in the
-diff, each by a literal pin added in round 1 (`e03f7eae…/round1/`, B1):
+unmodified and pass (`phase1/full-2.log`, and every later full run). Three test bodies **are** in
+the diff, each by a literal pin — two added in round 1 (`e03f7eae…/round1/`, B1), the third in
+round 2 (§17, B1): `every_event_serializes_to_exactly_its_independently_written_payload` asserts,
+before its loop, that the corpus's `design_defect` payload is exactly the three-key object
+(`q-design-0001`, the Ünicode context, `rescope`);
 `the_legacy_append_is_byte_identical_to_the_pre_move_writer` opens with
 `serde_json::to_value(defect("q-1"))["data"] == {"question":"q-1","context":"context Ünicode","answer":"answer"}`,
 and `every_event_kind_round_trips` asserts the same three-key shape of its `q-1` entry before its
@@ -971,7 +976,7 @@ pristine — `33a90025…/mutations/summary.txt`, `<name>.diff`, `<name>.log`:
 
 | mutation | outcome at `33a90025` |
 |---|---|
-| M1 `skip_serializing_if` removed from `attribution` | exit `101`: the three Phase 1 failures, **and the two round-1 pins** — `the_legacy_append_is_byte_identical_to_the_pre_move_writer` and `every_event_kind_round_trips` — which the corpus test still cannot see |
+| M1 `skip_serializing_if` removed from `attribution` | exit `101`: the three Phase 1 failures, **and the two round-1 pins** — `the_legacy_append_is_byte_identical_to_the_pre_move_writer` and `every_event_kind_round_trips`; the corpus test passed under it at this head (`… every_event_serializes_to_exactly_its_independently_written_payload ... ok` in the log), the survivor the round-2 fix-check lens named (S1) and the round-2 pin closes (§17) |
 | M2 the reader returns the stored value | exit `101`: `a_conviction_without_a_citation_reads_as_a_discovery` |
 | M3 `DesignDefect::convicted` accepts an empty citation | exit `101`: `convicted_refuses_an_empty_or_blank_citation` |
 | M4 the writer's refusal removed | exit `101`: `the_writer_refuses_a_conviction_without_a_citation` |

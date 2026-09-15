@@ -4534,6 +4534,19 @@ mod tests {
             TOPOLOGY_EVENT_KINDS.len(),
             "the canonical corpus does not cover the whole vocabulary"
         );
+        let pre_taxonomy = canonical
+            .iter()
+            .find(|value| value["event"] == "design_defect")
+            .expect("the corpus has a design_defect payload");
+        assert_eq!(
+            pre_taxonomy["data"],
+            serde_json::json!({
+                "question": "q-design-0001",
+                "context": "  the plan contradicts itself about Ünicode paths  ",
+                "answer": "rescope"
+            }),
+            "the canonical design_defect keeps its pre-taxonomy three-field payload"
+        );
         for (body, expected) in events.iter().zip(&canonical) {
             assert_eq!(
                 &payload_of(body),
