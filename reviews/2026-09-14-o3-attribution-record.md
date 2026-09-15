@@ -36,7 +36,7 @@ directory; `<sha>` is the full sha the measurement was taken at.
 | 3 the decoder fixture (`src/topology/events.rs`, `src/topology/fold/tests.rs`): an attributed record through the informational-tolerance path; the fold untouched | **done** — §8; the full suite green through the wrapper, two mutations each killed by the tests named for them |
 | 4 the internals notes, held both ways by `test-internals-notes.sh` | **done** — §9; `test-internals-notes.sh` and `test-docs-consistency.sh` green from the worktree root |
 | 5 the design (O2): §5, §12, §23.1, each citing this record | **done** — §10; `test-docs-consistency.sh` green; `design/15`, `README.md`, `MAINTAINING.md` and `design/25` untouched |
-| 6 the findings-ledger file | pending |
+| 6 the findings-ledger file | **done** — §11; `test-pr-policy.sh` and `test-pr-ledger-evidence.sh` green, the row validated by both validators |
 | 7 the ten gates on this box, the guest, this record, the draft pull request | pending |
 
 ## 1. What this pull request is, from the contract
@@ -589,7 +589,29 @@ the worktree root: `bash .github/scripts/test-docs-consistency.sh` — `PASS`, e
 
 ## 11. The findings-ledger file (Phase 6)
 
-Pending.
+`findings/P3_docs-contract_202609150036_the-topology-vocabulary-declared-design-defect-unclassified-since-pr9.md`,
+id `O3-DESIGN-DEFECT-UNCLASSIFIED-SINCE-PR9`, in `findings/README.md`'s shape: `P3` (no consequence
+can be shown — no topology log with the record exists, §2), `docs-contract`, `deferred`,
+`provenance: pre_existing`, `reviewed_sha` the base, `location` `src/topology/events.rs:1261` (the
+`DesignDefect { data: DesignDefect }` variant at the base), `first_bad` PR9's merge commit
+`74da2cbbd24c55f7aed7f3593162981a11720f79` (resolved from `git log --merges --grep 'pull request
+#249' origin/master`), `guard` the slice that adds the topology's emitter. Its failure sequence is
+what a reader of a topology log would have concluded since PR9 — every record the retired
+presumption's defect, no way to tell a discovery from a conviction, no writer for either — and what
+this pull request changes; it stays open because the emitter and the schema-4 answer-ingest are
+still owed (§14).
+
+`pr: 290` is the next number after the latest pull request (#289) and issue (#121) at the time of
+writing; it is re-checked immediately before the push, and if the draft opens under another number
+the field is corrected in the pull request's first repair push — this pull request pushes once.
+
+The pull request body's ledger row, validated with the finding staged
+(`phase6/ledger-row.txt`; `phase6/draft-body-for-validation.md` through `validate-pr-body.sh`,
+exit `0`, and `validate-pr-ledger-evidence.sh <head>` with the finding committed on a throwaway
+commit, exit `0`: `phase6/validate-pr-body.log`, `phase6/validate-pr-ledger-evidence.log`). The
+gates from the worktree root: `bash .github/scripts/test-pr-policy.sh` — `PR policy fixtures
+passed`, exit `0` (`phase6/test-pr-policy.log`); `bash .github/scripts/test-pr-ledger-evidence.sh`
+— `PR ledger evidence fixtures passed`, exit `0` (`phase6/test-pr-ledger-evidence.log`).
 
 ## 12. The ten gates on this box
 
