@@ -48,7 +48,8 @@ under `e03f7eae…/round1/`.
 ## 1. What this pull request is, from the contract
 
 The contract's obligation **O3** (the vocabulary) and **O2** (the design), landed as one pull
-request off `master`, plus one findings-ledger file. In the contract's words, O3: *"Two fields on
+request off `master`, plus one findings-ledger file (Phase 6, §11) — and, since round 1, a second,
+F1 (§16), so the diff adds two. In the contract's words, O3: *"Two fields on
 the shared `DesignDefect` record (`src/events/mod.rs`), in the `decline_halts_run` mold —
 `#[serde(default, skip_serializing_if = "Option::is_none")]`, `None` meaning "written before the
 taxonomy""* — `attribution: Option<QuestionAttribution>` (`DiscoveredHole | DesignDefect`) and
@@ -138,7 +139,7 @@ and any change to the `question_answered` transaction. §14 says so again, as wh
   and `coordinator::ingest_answer` (`src/engine/coordinator.rs:1006`) writes the schema-3
   `question_answered` event carrying that `Answer` and then the unclassified `design_defect`.
 - The topology has **no production emitter** of the record: the seven enum-variant constructions
-  above are the two legacy emitters and five test fixtures; `src/engine/topology/run.rs`'s
+  above are the two legacy emitters and six fixture construction sites; `src/engine/topology/run.rs`'s
   `ingest_answers` (`:787`) appends `question_answered` (`Answer4`) and no `design_defect`. The
   contract's "Measured" section said the same of `3c09f6e`, and it is still true at the base.
 - `status` renders the record as `design defect recorded for {question}`
@@ -681,10 +682,11 @@ passed`, exit `0` (`phase6/test-pr-policy.log`); `bash .github/scripts/test-pr-l
 
 At `fcfedc755f99c39a9178630dd70eb58352c9c268`, the first landing's code-complete head. The three
 commits after it up to `e03f7eae` are this record's own and the finding file's `pr:` line (blank
-at `3b44fc5d`, `290` at `e03f7eae`: `git diff --stat fcfedc75 e03f7eae -- .
+at `3b44fc5d`, `290` at `e03f7eae`: `git diff --stat fcfedc75 3b44fc5d -- .
 ':!reviews/2026-09-14-o3-attribution-record.md'` is that one file, `1 insertion(+), 1
-deletion(-)`); round 1's commits follow (§16), and the gates at round 1's final head are the
-body's to report.
+deletion(-)`, and the same command with `e03f7eae` in place of `3b44fc5d` prints nothing, the
+field having gone `290` → blank → `290`); round 1's commits follow (§16), and the gates at round
+1's final head are the body's to report.
 Logs under `fcfedc755f99c39a9178630dd70eb58352c9c268/gates/`: `box-load.log`,
 `w1-eight-iso.log`, `eight-logs/NN-<name>.log` (a copy of `~/eight-logs/fcfedc7/`),
 `test-pr-ready-audit.log`.
@@ -973,9 +975,11 @@ where the execution is:
   has no emitter; and every projection reads the shape as a discovery.
 
 **Every mutation recipe re-run at the round's code head**, `33a90025c5ae913b80b7f20635dd87232c3c4bba`
-(the Rust tree is `92b45c9d`'s: the commits between are notes and this record; the commit after it
-is the finding). Runner `mutate.py` (in the session's scratchpad, its text at the top of the
-summary): each recipe is the exact string replacement the phase sections attribute to it, applied,
+(the `src` tree is `92b45c9d`'s, `ed5bef5b5455516fe5ca44da3e442f32dcd4b765`: the commits between
+are notes and this record; the commits after it are the record, `bb73be2b`, and the finding,
+`c3688ada`). Runner `mutate.py` (in the session's scratchpad; the summary's first line names its
+path, and its text is not saved): each recipe is the exact string replacement the phase sections
+attribute to it, applied,
 run through the wrapper on the named tests, restored, and the file's SHA-256 checked against the
 pristine — `33a90025…/mutations/summary.txt`, `<name>.diff`, `<name>.log`:
 

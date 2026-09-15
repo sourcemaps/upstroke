@@ -20,7 +20,8 @@ of the record", so that no topology log would ever exist in the unclassified for
 contract (`reviews/2026-09-08-pr9-record.md` §1) never carried O3, and PR9 merged at
 `74da2cbbd24c55f7aed7f3593162981a11720f79` without an emitter: `git grep -nP 'DesignDefect\s*\{'`
 at that merge's successor `caf6bed0` and at `8b28944f9607447448f5d9b9950ee49596073e58` finds two
-schema-3 emitters and five test fixtures, and no topology code that writes the record
+schema-3 emitters and six test-fixture construction sites (`canonical_events()` at base
+`src/topology/events.rs:4361` among them), and no topology code that writes the record
 (`reviews/2026-09-14-o3-attribution-record.md` §2). So from PR9 to `8b28944f` the topology
 vocabulary (`TopologyEventBody::DesignDefect { data: DesignDefect }`, `src/topology/events.rs:1261`)
 declared a `design_defect` whose record had no attribution column at all -> a reader of a topology
