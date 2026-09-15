@@ -4014,17 +4014,16 @@ failed the retry's `HoldsTree` verification and closed the generation.
 
 ## `fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnations_first_step() {`
 
+Staged and not yet published, the answer is resumed over first: that
+incarnation ingests nothing, parks the run again and leaves the partial
+byte-identical, and only then is the answer published. Both incarnations end
+with their log replayed twice to the driven run's fold (`drive_observing`,
+`assert_log_replays_twice_equal`).
+
 `T-ANSWER` through the production reader: with no answer file the run
 hard-blocks; an answer staged and published into `answers/` while the
 engine is away is ingested by the next incarnation's first step, `via`
 `event-log`, before anything else is selected.
-
-The answer is staged and one incarnation driven before it is published: a
-partial the writer never renamed is ingested by nobody, that incarnation
-parks the run again, and the partial is byte-identical after it. Both that
-incarnation and the one that ingests the published answer end with their
-log replayed twice to the driven run's fold (`drive_observing`,
-`assert_log_replays_twice_equal`).
 
 ## `fn two_lineages_publish_in_lineage_order_and_the_younger_candidate_waits_behind_the_older() {`
 
