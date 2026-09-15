@@ -1805,11 +1805,24 @@ contains MUT-JSON-REPEATED-NAME-CHOSEN "$got" "open-P1:CRITICAL"
 #   * A REPEAT STARTS WHERE THE RUN IT REPEATS STARTED. Every altered run repeats an earlier run,
 #     and a reader that keeps state between calls met round 9's repeats in a state the run they
 #     repeated never saw: a counter raising from the second call raised in the take-away's repeat
-#     and in the repeat that set `mode="loose"`, before either decoded. So MODULE'S STATE -- every
-#     dictionary, list, set, deque, byte array, cell, default and class attribute its namespace
-#     reaches, held by reference, and the process environment, the one input outside MODULE the
-#     probe varies -- is read before every natural run, put back to what the base run found before a
-#     repeat is made, and put back to what the natural runs left once it is done. The protocol names
+#     and in the repeat that set `mode="loose"`, before either decoded. So MODULE'S STATE is read
+#     before every natural run, put back to what the base run found before a repeat is made, and put
+#     back to what the natural runs left once it is done. What that state is is NOT A LIST OF KINDS
+#     to keep: round 13 walked past a first-call selector whose counter was an `itertools.count`, and
+#     master refused it, because the state walk named the containers it could put back -- a
+#     dictionary, list, set, deque, byte array, cell, default, class attribute, and the process
+#     environment -- and a carrier of any other kind went by unnamed and unrestored. The kinds are an
+#     open set: `itertools.count`, an `array`, a `random.Random`, a `__slots__` object each keep a
+#     first call's answer where none of those containers reach. So a value the walk cannot round-trip
+#     in place is put back BY ITS OWN RECONSTRUCTION: read at the base run's start through
+#     `__reduce_ex__` when its state lives outside its `__dict__`, and the name rebound, before the
+#     repeat, to a fresh object rebuilt at that start value -- so the count is 1 again, the PRNG at
+#     its seed, the slot at 0. A value whose whole mutable state IS its `__dict__` (a decoder) or that
+#     is immutable (a compiled pattern) keeps its identity, restored in place as before. The one
+#     state this leaves is state NO RECONSTRUCTION CARRIES and no walk reaches -- an `lru_cache`
+#     wrapper's C-level call statistics, an attribute a reader sets on another module, a tally on
+#     disk -- which only a fresh interpreter would reset; that bound is stated with its witnesses in
+#     the section on what this does not reach, and master refuses each of them too. The protocol names
 #     the interpreter keeps in MODULE's namespace on its behalf -- the loader's, `__builtins__`, the
 #     registry `warnings` writes there -- are put back with the rest and are not counted as state.
 #   * THE DOCUMENT THAT MATTERS IS ASKED IN EVERY STATE A CALL FOUND MODULE IN. A reader answering
@@ -2589,16 +2602,71 @@ def kept(space, name, value):
                 and not (isinstance(value, types.FunctionType) and value.__code__ in mine))
 
 
+class Recur:
+    """A snapshot value that RESTORE rebuilds, so a name is rebound to a fresh copy at the snapshot's
+    value rather than to the object that has moved on since. `token` is a stable mark of that value,
+    so two snapshots of one state fingerprint alike though each Recur is a new object."""
+    __slots__ = ("build", "token")
+
+    def __init__(self, build, token):
+        self.build = build
+        self.token = token
+
+
+def rebuilt(one):
+    """A recipe that reproduces ONE at its state now, WHEN restoring ONE's __dict__ in place does not
+    reach that state -- a counter, a PRNG, an array, a `__slots__` object, whose data a `__reduce_ex__`
+    carries in its constructor arguments or its state tuple rather than in `__dict__`. None keeps ONE's
+    identity: its state is its __dict__ (a decoder), it is immutable (a compiled pattern), or no
+    reduction rebuilds it -- an `lru_cache` wrapper pickled by reference, a generator -- which is the
+    one gap this leaves, stated in this section's comments and red only where another rule reaches it."""
+    if (isinstance(one, ATOMS) or isinstance(one, (tuple, frozenset, dict, list, set,
+            collections.deque, bytearray, types.CellType, types.FunctionType, type))
+            or elsewhere(one)):
+        return None                      # immutable, or a container state() round-trips in place
+    dct = getattr(one, "__dict__", None)
+    try:
+        red = one.__reduce_ex__(4)
+    except Exception:
+        return None                      # immutable (a compiled pattern) or unrebuildable
+    if not isinstance(red, tuple):
+        return None                      # pickled by reference (an lru_cache wrapper): a stated gap
+    state_part = red[2] if len(red) > 2 else None
+    if state_part is not None and (state_part is dct or state_part == dct):
+        return None                      # its whole state is __dict__, restored in place
+    try:
+        frozen = copy.deepcopy(one)
+        mark = str(red)
+    except Exception:
+        return None                      # cannot be copied: a stated gap
+    if frozen is one:
+        return None                      # deepcopy handed it straight back: immutable
+    return Recur(lambda: copy.deepcopy(frozen), mark)
+
+
+def snap(value):
+    return rebuilt(value) or value
+
+
+def unsnap(value):
+    return value.build() if isinstance(value, Recur) else value
+
+
 def state():
     """MODULE'S STATE AS IT IS NOW: everything its namespace reaches that holds a value the probe
     can read back and set again -- each dictionary's items, each list's, set's, deque's and byte
     array's contents, each cell's value, each function's defaults, and the attributes of each class
     MODULE wrote -- and the process environment, the one input outside MODULE the probe varies, read
-    underneath `os.environ` so that reading it is not a read of MODULE's. Held by reference, with
-    nothing copied, so what `restore` puts back is the very objects that were there, and read
-    through the base types' own methods, so nothing MODULE declares runs. Code, frames, modules,
-    classes written elsewhere and the probe's own functions are not MODULE's state, and are not
-    walked."""
+    underneath `os.environ` so that reading it is not a read of MODULE's. These are held by
+    reference, so what `restore` puts back is the very objects that were there. A value the walk
+    reaches that holds mutable state NONE of those containers round-trips -- a counter, a PRNG, an
+    array, a `__slots__` object, whose data a `__reduce_ex__` carries outside its `__dict__` -- is
+    held instead as a `Recur`: `snap` reads it now and `restore` rebinds its name to a fresh copy
+    rebuilt at this value, because rebinding the name to the same object would leave a counter that
+    has moved on (`rebuilt`). A value whose whole state is its `__dict__`, and an immutable one, keep
+    their identity. All values are read through the base types' own methods, so nothing MODULE
+    declares runs. Code, frames, modules, classes written elsewhere and the probe's own functions are
+    not MODULE's state, and are not walked."""
     saved, stack, seen = [(os.environ, dict(os.environ._data))], [vars(module)], set()
     while stack:
         one = stack.pop()
@@ -2608,25 +2676,26 @@ def state():
             continue
         seen.add(id(one))
         if isinstance(one, type):
-            items = dict(vars(one))
-            saved.append((one, items))
-            stack += list(items.values())
+            live = dict(vars(one))
+            saved.append((one, {name: snap(item) for name, item in live.items()}))
+            stack += list(live.values())
         elif isinstance(one, dict):
-            items = dict.copy(one)
-            saved.append((one, items))
-            stack += [part for name, item in items.items() if kept(one, name, item) for part in (name, item)]
+            live = dict.copy(one)
+            saved.append((one, {name: snap(item) for name, item in live.items()}))
+            stack += [part for name, item in live.items() if kept(one, name, item) for part in (name, item)]
         elif isinstance(one, (list, set, collections.deque, bytearray)):
-            items = (list.copy(one) if isinstance(one, list) else set.copy(one)
-                     if isinstance(one, set) else bytes(one) if isinstance(one, bytearray)
-                     else list(collections.deque.__iter__(one)))
-            saved.append((one, items))
-            stack += [] if isinstance(one, bytearray) else list(items)
+            live = (list.copy(one) if isinstance(one, list) else set.copy(one)
+                    if isinstance(one, set) else bytes(one) if isinstance(one, bytearray)
+                    else list(collections.deque.__iter__(one)))
+            stored = live if isinstance(one, bytearray) else type(live)(snap(item) for item in live)
+            saved.append((one, stored))
+            stack += [] if isinstance(one, bytearray) else list(live)
         elif isinstance(one, types.CellType):
             try:
                 value = one.cell_contents
             except ValueError:
                 value = EMPTY
-            saved.append((one, value))
+            saved.append((one, snap(value)))
             stack.append(value)
         elif isinstance(one, types.FunctionType):
             saved.append((one, (one.__defaults__, one.__kwdefaults__)))
@@ -2653,24 +2722,25 @@ def restore(saved):
             for name in [name for name in vars(one) if name not in value]:
                 type.__delattr__(one, name)
             for name, item in value.items():
+                item = unsnap(item)
                 if vars(one).get(name, EMPTY) is not item:
                     type.__setattr__(one, name, item)
         elif isinstance(one, dict):
             dict.clear(one)
-            dict.update(one, value)
+            dict.update(one, {name: unsnap(item) for name, item in value.items()})
         elif isinstance(one, list):
-            list.__setitem__(one, slice(None), value)
+            list.__setitem__(one, slice(None), [unsnap(item) for item in value])
         elif isinstance(one, set):
             set.clear(one)
-            set.update(one, value)
+            set.update(one, {unsnap(item) for item in value})
         elif isinstance(one, collections.deque):
             collections.deque.clear(one)
-            collections.deque.extend(one, value)
+            collections.deque.extend(one, [unsnap(item) for item in value])
         elif isinstance(one, bytearray):
             bytearray.__setitem__(one, slice(None), value)
         elif isinstance(one, types.CellType):
             if value is not EMPTY:
-                one.cell_contents = value
+                one.cell_contents = unsnap(value)
             elif "cell_contents" in dir(one):
                 try:
                     del one.cell_contents
@@ -3200,15 +3270,19 @@ def fingerprint(saved):
     """What STATE read, by the identity of every object it read and of every value in each: two
     states with the same fingerprint are the same state."""
     marks = []
+
+    def mark(item):
+        return item.token if isinstance(item, Recur) else id(item)
+
     for one, value in saved:
         if isinstance(one, types.FunctionType):
             inner = (id(value[0]), id(value[1]))
         elif isinstance(value, dict):
-            inner = tuple((id(name), id(item)) for name, item in value.items() if kept(one, name, item))
+            inner = tuple((id(name), mark(item)) for name, item in value.items() if kept(one, name, item))
         elif isinstance(value, list):
-            inner = tuple(map(id, value))
+            inner = tuple(mark(item) for item in value)
         elif isinstance(value, set):
-            inner = tuple(sorted(map(id, value)))
+            inner = tuple(sorted(mark(item) for item in value))
         elif isinstance(value, bytes):
             inner = value
         else:
@@ -3327,7 +3401,7 @@ decode_probe() {  # decode_probe MODULE DRIVE...: the report's two lines as one,
 }
 printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 # THE PROBE IS ITSELF UNDER TEST, because a probe that has stopped watching agrees with a clean
-# parser and says so in the same words. So it runs first over forty-two stand-ins whose answers
+# parser and says so in the same words. So it runs first over forty-three stand-ins whose answers
 # are known, and MUTATIONS OF THE PROBE WERE WATCHED AGAINST THEM -- each the smallest text change
 # that undoes one rule, and each run through this whole file:
 #
@@ -3427,6 +3501,9 @@ printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 #     round's rule)
 #   the natural runs' state not put back after a       `alternating`, `disagreeing`
 #     repeat
+#   a carrier the state walk cannot round-trip not     `blocked`, `revived`
+#     rebuilt from its reduction on restore (round
+#     13's rule)
 #   the environment not part of MODULE's state         `restarted`
 #   the interpreter's own names counted as MODULE's    thirty-five
 #     state
@@ -3435,7 +3512,7 @@ printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 #     (this round's rule)                                `spent`
 #   a value the environment cannot hold tried          `unsettable`
 #
-# and none of the sixty-six that ran to their end moved an assertion of any other family in this
+# and none of the sixty-seven that ran to their end moved an assertion of any other family in this
 # file. One more was measured and moves no assertion, because what it changes is a time: a question
 # whose time runs out while the probe is recording is ended when the recording is done, and without
 # that `settling` took 9, 9 and 17 seconds in three runs where it takes 6, as the timer fired again
@@ -4921,10 +4998,11 @@ probe_expect unsettable \
 # hands back only how many findings it read: no reading, so only the scanner watch sees these three,
 # and they are red; `by_hooked_scanner_count` refuses, and is green. And a take-away that reached no
 # scan was unproven only in `spent`, whose repeat now starts where its run started and reaches the
-# scan. `blocked` keeps its count in an iterator, which the probe cannot put back, and from its
-# second call raises the same `ValueError` its first call's refusal raises: no later run ends
-# otherwise, no state tells one run from another, and the take-away's repeat reaches no scan --
-# unproven, by that rule alone.
+# scan. `blocked` keeps its count in an `itertools.count`, which round 13 walked past because the
+# state walk could not put it back; the count is now rebuilt from its own reduction at the run's
+# start, so the take-away's repeat finds the count at 1, decodes under the copied default with its
+# hook removed, and is unrefusing -- caught, where before it was unproven only by the reached-no-scan
+# rule.
 probe_stand_in consumed 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
 
 
@@ -4973,7 +5051,76 @@ def extra_review_reader(text, *, options={"object_pairs_hook": one_reading}):
     return json.loads(text, **options)
 PYSHAPE
 probe_expect blocked \
-  'decoded=yes unrefusing=- unproven=extra_review_reader skipped=- | refusing=extra_review_reader,read drive=returned:0 swept=extra_review_reader:raised:ValueError/raised:ValueError forced=1'
+  'decoded=yes unrefusing=extra_review_reader unproven=- skipped=- | refusing=extra_review_reader,read drive=returned:0 swept=extra_review_reader:raised:ValueError/raised:ValueError forced=3'
+# THE CARRIER IS NOT THE POINT; THE RESTART IS. Round 13 walked past a first-call selector -- hooked
+# on `mode="strict"`, unhooked on `mode="loose"`, and unsafe only on its genuine first call -- whose
+# count lived in an `itertools.count` the state walk could not put back, so the repeat that set
+# `mode="loose"` never found the first call again. This asserts the fix on a carrier of every kind
+# the walk misses, not on that one: `by_iterator` an `itertools.count`, `by_buffer` an `array`,
+# `by_stream` a `random.Random`, `by_slotted` a `__slots__` object -- each rebuilt at its start value
+# from its own reduction, each caught unrefusing on the repeat's first call. `by_kept` HOLDS a
+# `random.Random` and advances it every call yet always hooks: rebuilding its stream changes nothing,
+# and it stays green -- the reset restarts the state, it does not red a reader for holding one.
+# Removing the rebuild reds none of the four here, and reds nothing else; leaving master's grep in
+# its place reds all four for their spelling. The gap this does not close is stated below.
+probe_stand_in revived 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+import array
+import itertools
+import random
+
+
+_iter_calls = itertools.count(1)
+
+
+def by_iterator(text, mode="strict"):
+    hook = {"strict": one_reading, "loose": None}[mode] if next(_iter_calls) == 1 else one_reading
+    return json.loads(text, object_pairs_hook=hook)
+
+
+_buffer_calls = array.array("i", [0])
+
+
+def by_buffer(text, mode="strict"):
+    _buffer_calls[0] += 1
+    hook = {"strict": one_reading, "loose": None}[mode] if _buffer_calls[0] == 1 else one_reading
+    return json.loads(text, object_pairs_hook=hook)
+
+
+_stream = random.Random(0)
+_first_draw = random.Random(0).random()
+
+
+def by_stream(text, mode="strict"):
+    first = _stream.random() == _first_draw
+    hook = {"strict": one_reading, "loose": None}[mode] if first else one_reading
+    return json.loads(text, object_pairs_hook=hook)
+
+
+class _Slotted:
+    __slots__ = ("calls",)
+
+
+_slotted = _Slotted()
+_slotted.calls = 0
+
+
+def by_slotted(text, mode="strict"):
+    _slotted.calls += 1
+    hook = {"strict": one_reading, "loose": None}[mode] if _slotted.calls == 1 else one_reading
+    return json.loads(text, object_pairs_hook=hook)
+
+
+_kept = random.Random(0)
+
+
+def by_kept(text, mode="strict"):
+    _kept.random()
+    return json.loads(text, object_pairs_hook=one_reading)
+PYSHAPE
+probe_expect revived \
+  'decoded=yes unrefusing=by_buffer,by_iterator,by_slotted,by_stream unproven=- skipped=- | refusing=by_buffer,by_iterator,by_kept,by_slotted,by_stream,read drive=returned:0 swept=array<builtin_function_or_method>:raised:TypeError/raised:TypeError/raised:TypeError,by_buffer:raised:ValueError/returned,by_iterator:raised:ValueError/returned,by_kept:raised:ValueError,by_slotted:raised:ValueError/returned,by_stream:raised:ValueError/returned forced=159'
 # WHAT THIS DOES NOT REACH. Each shape below was written beside a hooked decode and run through this
 # probe, which reported nothing unrefusing, nothing unproven and nothing skipped -- and each one
 # returns without a refusal on a document naming `findings` twice (for the hook that counts names,
@@ -5024,12 +5171,23 @@ probe_expect blocked \
 #     `object_pairs_hook=(one_reading, None)[calls == 100]`. The twice-named document is asked in
 #     every state a natural run found MODULE in, and no natural run finds a reader on its hundredth
 #     call. The same choice behind a branch is turned, and red;
-#   * state kept where the probe cannot read it back and set it in place: an iterator's position --
-#     `next(itertools.count(1)) == 1` choosing the hook by `mode` on the first call only -- and an
-#     attribute of another module, `json.calls = getattr(json, "calls", 0) + 1`, making the same
-#     choice. A repeat starts from MODULE's own state and the environment, and a count kept anywhere
-#     else goes on counting through it: the repeat that sets `mode="loose"` finds the count past one
-#     and decodes hooked. Master's grep refuses both, for their spelling.
+#   * state a reader keeps where NO RECONSTRUCTION CARRIES IT AND NO WALK REACHES IT, and whose
+#     first-call answer therefore cannot be restarted. Three shapes remain, each one master's grep
+#     refuses for its spelling and each one this probe leaves green, so each is a `1 -> 0` this fix
+#     does not close and its residue is named here rather than hidden: an `lru_cache` wrapper's own
+#     call statistics -- `_seen.cache_info().misses == 0` choosing the hook on the first call -- which
+#     are C-level, reached by no `gc` walk and pickled by reference so no `__reduce_ex__` rebuilds
+#     them, and which only `cache_clear()` or a fresh interpreter resets; an attribute a reader sets
+#     on ANOTHER module, `json.calls = getattr(json, "calls", 0) + 1`, which the walk does not enter
+#     because that module is not MODULE's state and is shared with the whole interpreter; and a tally
+#     a reader keeps ON DISK. A repeat rebuilds every carrier MODULE's own namespace holds -- a
+#     counter, a PRNG, an array, a `__slots__` object among them (the `revived` stand-in) -- but a
+#     count kept in one of these three goes on through the repeat, which finds it past one and decodes
+#     hooked. Closing them needs a fresh interpreter per repeat, ruled out on cost in round 10 (4s ->
+#     110s) and because it breaks the take-away's reliance on object identity; the honest bound is
+#     stated instead. A choice made by an iterator's position held in MODULE's own namespace,
+#     `next(itertools.count(1)) == 1`, round 13's own witness, is NOT in this list any more: it is
+#     rebuilt at the start value and caught (the `revived` stand-in, `by_iterator`).
 # AND WHAT IT REFUSES AND SHOULD NOT, OR MIGHT NOT -- because a guard is only honest if both sides
 # of it are written down. Each was run through this probe and reported red; the first, second and
 # fourth do what a parser should, the third is the cost of reading nothing into a value a function
