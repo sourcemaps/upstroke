@@ -717,6 +717,10 @@ A conviction: the design-phase checklist item or precedent that would have
 surfaced this question was available and unapplied. Recorded only with the
 citation that names it — no citation, no conviction.
 
+## `impl fmt::Display for QuestionAttribution` › `fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {`
+
+The wire spelling, for the projection that prints it (`status/render.rs`).
+
 ## `pub enum EffectiveAttribution<'a> {`
 
 What a reader derives from the stored pair, and the only thing a projection

@@ -70,11 +70,18 @@ wrote before the fields existed, and a file written before them reads as
 record is written for declined answers, and the rule attributes every
 question that reaches a person.
 
+## `pub struct AnswerRecord` › `pub answer: Answer,`
+
+The `Answer` itself, flattened, so that on disk the record is the answer's
+own object with the two optional keys beside it.
+
 ## `pub struct AnswerRecord` › `pub attribution: Option<QuestionAttribution>,`
 
 `None` is no ruling — what `upstroke answer` writes today — and is not a
-discovery: the writer that turns the file into a `design_defect` applies the
-default, the file does not.
+discovery. The file does not apply the default; the topology writer that
+will turn the file into a `design_defect` at ingest does, and it is not
+built: today's schema-3 ingestion writes its record unclassified (`None,
+None`, `engine/coordinator.rs`) and the reader reports `Unclassified`.
 
 ## `pub struct AnswerRecord` › `pub citation: Option<String>,`
 

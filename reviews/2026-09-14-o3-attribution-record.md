@@ -601,7 +601,9 @@ informational tests), `phase3/fmt-1.log` (clean after `cargo fmt`), `phase3/clip
 Six notes files change, the three the brief names and the three R9 adds; every changed module
 keeps its single `Extended notes:` pointer and no other prose (§13), and every new production item
 — type, field, function — has a section headed by its source line (`docs/internals/README.md`'s
-grep-string rule; the check per item is in `e03f7eae…/round1/b7-searches.txt`). Of the new tests,
+grep-string rule; the check per item is in `e03f7eae…/round1/b7-searches.txt` and, since round 2,
+`c3688ada…/round2/b4-headings.txt`, which enumerates every new `pub` item of the diff and names the
+two that had no heading until round 2: `QuestionAttribution`'s `Display` and `AnswerRecord.answer`). Of the new tests,
 `docs/internals/topology/events.md` carries sections for the three whose purpose is not their
 name; the other new tests have none, which the convention asks of no test —
 `validate-internals-notes.sh` checks markers and backlinks (N1–N4), not sections:
