@@ -253,7 +253,7 @@ transaction"*, and *"a conviction only when the answer channel carries one"*. Th
 type that is: `src/answer.rs`'s `Answered` is never serialised; what `interaction::write_answer`
 puts on disk is `crate::ir::Answer`.
 
-**Reading.** The file's record is a new type beside its writer, `interaction::AnswerFile`:
+**Reading.** The file's record is a new type beside its writer, `interaction::AnswerRecord`:
 the `ir::Answer` flattened (`#[serde(flatten)]`), plus `attribution: Option<QuestionAttribution>`
 and `citation: Option<String>`, both `#[serde(default, skip_serializing_if = "Option::is_none")]`.
 On disk an answered record is therefore `{"answer":"answered","text":…,"attribution":…,"citation":…}`
@@ -272,14 +272,15 @@ the fields to `ir::Answer::Answered`:
    question that reaches a human; a field on the `Answered` variant alone could not attribute a
    decline.
 3. **The future ingest reads one type.** The schema-4 ingest that is not in this slice reads
-   `read_answer_file`, maps the `Answer` half to `Answer4` (which has no room for the attribution,
+   `read_answer_record`, maps the `Answer` half to `Answer4` (which has no room for the attribution,
    by `deny_unknown_fields`) and constructs `DesignDefect::discovered` or `::convicted` from the
    other half.
 
-**The writer-side rule** is enforced where the file is written: `write_answer_file` refuses
-`attribution: Some(DesignDefect)` with no citation (absent or blank) before staging anything, so no
-`.partial` is left and no file is published. `write_answer` (what `upstroke answer` calls) writes
-`AnswerFile::unattributed`, so the command's files are unchanged. No CLI flag mints a conviction in
+**The writer-side rule** is enforced where the file is written: `write_answer`, the one writer,
+which takes an `AnswerRecord`, refuses `attribution: Some(DesignDefect)` with no citation (absent
+or blank) before staging anything, so no `.partial` is left and no file is published.
+`upstroke answer` writes `AnswerRecord::unattributed` through it, so the command's files are
+unchanged. No CLI flag mints a conviction in
 this pull request: that is a §18 change (`upstroke answer <question-id> [--option N | --text "…"]`)
 the brief keeps out of scope, and §14 says so. **What a later consumer finds missing:** the
 command-line spelling of a ruling; the file format it will write is this one.
@@ -292,10 +293,12 @@ would change; the legacy leak above; no attribution on a decline).
 The contract: *"a reader treats a citation-less conviction as a discovery — derived, never
 re-decided"*, and `convicted` refuses *"an empty or whitespace-only citation"* (the brief).
 **Reading:** the reader applies the same rule as the writer — `Some(DesignDefect)` whose citation is
-absent **or blank** (`trim().is_empty()`) reads as `DiscoveredHole` — so a record no constructor
-could have written (raw JSON with `"citation": ""`) reads the way the writer's refusal implies.
-The derivation is one function, `QuestionAttribution::effective`, used by `DesignDefect` and by
-`AnswerFile` alike. **Alternative rejected:** reading a blank citation as a conviction, which would
+absent **or blank** (`trim().is_empty()`) reads as `EffectiveAttribution::Discovered`
+(`DiscoveredHole` through `.attribution()`) — so a record no constructor could have written (raw
+JSON with `"citation": ""`) reads the way the writer's refusal implies. The derivation is one
+function, `EffectiveAttribution::derive(stored, citation) -> EffectiveAttribution`, with the
+variants `Unclassified`, `Discovered` and `Convicted { citation }`, used by
+`DesignDefect::effective_attribution` and by `AnswerRecord::effective_attribution` alike. **Alternative rejected:** reading a blank citation as a conviction, which would
 let a hand-edited file convict without citing.
 
 ### R7 — `status` shows the attribution
@@ -303,12 +306,13 @@ let a hand-edited file convict without citing.
 `src/status/render.rs:162` renders the record as `design defect recorded for {question}`. The
 brief: decide and record whether it shows the attribution; if it does, through the reader method.
 **Reading:** it does. A projection that reads the record and prints "design defect" for a ruled
-discovery would restate the retired presumption. For `effective_attribution() == None` (a
-pre-taxonomy record) the line is unchanged, byte for byte, so legacy projections stay identical
-(PR2 invariant); a discovery prints `question {q} attributed: discovered_hole`; a conviction prints
+discovery would restate the retired presumption. The arm matches `effective_attribution()`, which
+returns an `EffectiveAttribution`: for `Unclassified` (a pre-taxonomy record, stored `None`) the
+line is unchanged, byte for byte, so legacy projections stay identical (PR2 invariant);
+`Discovered` prints `question {q} attributed: discovered_hole`; `Convicted { citation }` prints
 `question {q} attributed: design_defect, citing {citation}`; a record whose stored value is
-`design_defect` with no citation prints the discovery line, because the projection reads only
-`effective_attribution()`. **Alternative rejected:** leaving the line as it is for every record,
+`design_defect` with no citation prints the discovery line, because the derivation answers
+`Discovered` for it and the projection matches nothing else. **Alternative rejected:** leaving the line as it is for every record,
 which reads a discovery as a defect.
 
 ### R8 — which of the eight sites the constructors reach
@@ -842,3 +846,52 @@ it.
   presumption, minting exactly the mislabeled records this decision exists to
   prevent, then migrating.
 ```
+
+## 16. Round 1 — the review of `e03f7eae`
+
+Three `gpt-6-astra` lenses at `max` reviewed `e03f7eaec026a02cb5feac916dd22961794a7816`:
+contract, regression and record, each `CHANGES_REQUIRED`
+(`/home/ubuntu/orch-o3-attribution/reviews/r1/{contract,regression,record}.md`; the combined
+comment https://github.com/sourcemaps/upstroke/pull/290#issuecomment-5673424882). CI at that head
+was green on both contexts, the Windows leg included (run 34916931904). The orchestrator's brief
+for the round is `/home/ubuntu/orch-o3-attribution/repair-290-r1.md`; its evidence is under
+`e03f7eaec026a02cb5feac916dd22961794a7816/round1/`. Each item, what it found, what changed, and
+where the execution is:
+
+- **B1 (record 1, P1; contract F2): "every existing serialisation fixture is byte-identical" was
+  false.** Four fixtures had been converted to `discovered`; two of them are serialisation
+  fixtures whose payloads moved, and their tests could not see it. Resolved as R1 now reads, with
+  the ruling's classes: `defect()` and the round-trip corpus entry back to the `None, None`
+  literal, each pinned; the census offer and the fold fixture stay `discovered`. Executed: the pin
+  on the converted fixture at `e03f7eae` fails, `"attribution": String("discovered_hole")` in the
+  payload (`round1/b1-before/pin-on-converted-fixture.log`, exit `101`, the diff beside it); at
+  `371525a7` both pins pass (`round1/b1-targeted.log`, 139 passed); mutation M10, `defect()`
+  converted to `discovered`, fails `the_legacy_append_is_byte_identical_to_the_pre_move_writer`
+  and leaves `every_event_kind_round_trips` passing, since it converts one fixture
+  (`round1/mutations/M10-pinned-fixture-converted-to-discovered.{diff,log}`, exit `101`).
+- **B2 (regression, P2): `read_answer` refused legacy files the base tolerated.** The lens's
+  recipe — the scheduler-spin test's answer file replaced by `{"answer":"unanswered","citation":7}`
+  — executed at the base (`round1/b2-recipe/base.log`, exit `0`, parked), at `e03f7eae`
+  (`head-before-fix.log`, exit `101`: `resume: Parse { … invalid type: integer `7`, expected a
+  string at line 1 column 35 }`), and after the fix at `8f94b356` (`head-after-fix.log`, exit `0`);
+  the three diffs beside them. The fix: `read_answer` deserialises `ir::Answer` directly and only
+  `read_answer_record` validates (§7); the recipe turned permanent is
+  `a_legacy_answer_file_with_a_foreign_column_still_parks_rather_than_erroring`, and mutation M12
+  (the reader routed back through `AnswerRecord`) fails it and it alone
+  (`round1/mutations/M12-read-answer-through-the-record-type.{diff,log}`, exit `101`).
+  `docs/internals/interaction.md`'s `read_answer` and `read_answer_record` sections say so.
+- **B3 (contract F3; record 3): the readings named interfaces that do not exist.** R5, R6 and R7
+  rewritten to `AnswerRecord`, `read_answer_record`, `write_answer`, `AnswerRecord::unattributed`,
+  `EffectiveAttribution::derive` and the enum's variants. Searches, before and after, in
+  `round1/b3-searches.txt`: `git grep -n -E 'AnswerFile|read_answer_file|write_answer_file|QuestionAttribution::effective' -- .`
+  matched six lines of this record and, by the regex alone, the unrelated identifier
+  `PlantedAnswerFiles` in `src/engine/topology/recover/tests.rs`, its notes and PR10's record
+  (untouched); `grep -n '== None'` on this record matched R7's one sentence; the handover and the
+  body matched neither. After the rewrite this record matches none.
+- **B4 (record 5): a test description exceeded its assertions; the M9 sentence gave the wrong
+  reason.** `the_writer_refuses_a_conviction_without_a_citation` now asserts the constructor's
+  refusal for `""`, `"   "` and `" \n"`; the record's row and the M9 row rewritten (§7, §8).
+  Executed: the lens's mutation M11 (`if !citation.is_empty() && !cited(&citation)`) survives the
+  test as it stood at `e03f7eae` (`round1/b4-before/M11-before.log`, exit `0`) and fails the
+  empty-string assertion at `92b45c9d` (`round1/mutations/M11-constructor-accepts-empty.{diff,log}`,
+  exit `101`, `the constructor refuses what the writer refuses: ""`).
