@@ -484,6 +484,47 @@ pub(crate) fn run_kill_child(test: &str, env: &[(&str, &OsStr)]) -> std::process
     command.status().expect("spawn the kill child")
 }
 
+/// [`run_kill_child`] with a deadline: `Some` with the child's exit status
+/// once it ends within `bound`, and `None` when it has not — and then the
+/// child has been killed and reaped before this returns, so a child that
+/// wedges neither holds its caller past the bound nor outlives the call.
+///
+/// Spawned exactly as [`run_kill_child`] spawns it, and polled (`try_wait`,
+/// then a 10 ms sleep) rather than blocked on, so a child that ends is
+/// answered for within one poll of its end. The kill is the child's own
+/// (`Child::kill`): a process the child started is not killed with it.
+pub(crate) fn run_kill_child_within(
+    test: &str,
+    env: &[(&str, &OsStr)],
+    bound: std::time::Duration,
+) -> Option<std::process::ExitStatus> {
+    let mut command = Command::new(std::env::current_exe().expect("this test binary"));
+    command
+        .args(["--exact", test, "--ignored", "--nocapture"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().expect("spawn the kill child");
+    let deadline = std::time::Instant::now() + bound;
+    loop {
+        if let Some(status) = child.try_wait().expect("poll the kill child") {
+            return Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            child
+                .kill()
+                .expect("kill the kill child the deadline ended");
+            child
+                .wait()
+                .expect("reap the kill child the deadline ended");
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// Run this test binary again, `--exact --ignored --nocapture`, with `env` set
 /// and its stdout piped, adopted by a [`readiness::Producer`]: the caller waits
 /// for the line the helper prints once it is ready, and the child is
