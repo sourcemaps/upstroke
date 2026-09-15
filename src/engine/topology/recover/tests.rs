@@ -15634,7 +15634,11 @@ fn kill_after_report_before_each_cleanup_step() {
             );
             let report_bytes = std::fs::read(fixture.public().join("report.json"))
                 .expect("the report the second resume left current");
-            plant_report_leftover(fixture);
+            let leftover = plant_report_leftover(fixture);
+            let staging = leftover
+                .parent()
+                .expect("the staged file is inside the staging directory")
+                .to_path_buf();
             let third = harness();
             let (result, _) = resume(fixture, &third, &given);
             let text = message(&result.expect_err("a finalized run refuses again"));
@@ -15657,6 +15661,19 @@ fn kill_after_report_before_each_cleanup_step() {
                 std::fs::read(fixture.public().join("report.json")).expect("the report stands"),
                 report_bytes,
                 "{tag}: and writes nothing: the report is byte-identical"
+            );
+            assert!(
+                !leftover.exists(),
+                "{tag}: the staged file a dead writer left before this resume is gone after the \
+                 fresh branch"
+            );
+            assert!(
+                !staging.exists(),
+                "{tag}: the directory its record names is gone after the fresh branch"
+            );
+            assert!(
+                !rundir::report_staging_record(&fixture.private()).exists(),
+                "{tag}: the record naming that directory is gone after the fresh branch"
             );
             assert!(
                 !planted.report_leftover.exists()
@@ -16634,6 +16651,8 @@ fn a_report_directory_barrier_that_fails_refuses_pruning_on_every_resume_until_i
             2,
             "{tag}: a prepared pin and a candidate-prepared pin stand to be pruned"
         );
+        rundir::sync_report_dir(&fixture.public(), &fixture.private(), &mut NoHooks)
+            .expect("the planted dead writer's leftover is reclaimed before the fault is armed");
         let fault = crate::util::fail_barriers_at(&fixture.public());
 
         let first = harness();
@@ -16653,10 +16672,12 @@ fn a_report_directory_barrier_that_fails_refuses_pruning_on_every_resume_until_i
             report_of(fixture).is_fresh_against(&bytes),
             "{tag}: and current by digest — the shape the next resume takes the fresh branch on"
         );
-        assert!(
+        assert_eq!(
             rundir::report_staging_leftovers(&fixture.public(), &fixture.private())
-                .expect("listed")
-                .is_empty()
+                .expect("listed"),
+            vec![rundir::report_staging_record(&fixture.private())],
+            "{tag}: the record of the staging directory the publication removed outlives the \
+             refused barrier, and nothing else of the protocol is left"
         );
         assert_eq!(
             candidates_refs_of(fixture).len(),
@@ -16781,6 +16802,8 @@ fn a_report_rename_without_directory_sync_is_proven_before_pruning() {
             2,
             "{tag}: a prepared pin and a candidate-prepared pin stand to be pruned"
         );
+        rundir::sync_report_dir(&fixture.public(), &fixture.private(), &mut NoHooks)
+            .expect("the planted dead writer's leftover is reclaimed before the fault is armed");
 
         {
             let _fault = crate::util::fail_barriers_at(&fixture.public());
@@ -16960,6 +16983,8 @@ fn fresh_report_hook_errors_stop_cleanup_and_retry() {
             2,
             "{tag}: a prepared pin and a candidate-prepared pin stand to be pruned"
         );
+        rundir::sync_report_dir(&fixture.public(), &fixture.private(), &mut NoHooks)
+            .expect("the planted dead writer's leftover is reclaimed before the fault is armed");
 
         {
             let _fault = crate::util::fail_barriers_at(&fixture.public());
@@ -17018,11 +17043,17 @@ fn fresh_report_hook_errors_stop_cleanup_and_retry() {
                 bytes,
                 "{cell}: the report is byte-identical"
             );
-            assert!(
+            assert_eq!(
                 rundir::report_staging_leftovers(&fixture.public(), &fixture.private())
-                    .expect("listed")
-                    .is_empty(),
-                "{cell}: nothing was staged"
+                    .expect("listed"),
+                if phase == HookPhase::Before {
+                    vec![rundir::report_staging_record(&fixture.private())]
+                } else {
+                    Vec::new()
+                },
+                "{cell}: nothing was staged; the record of the directory the first finalization \
+                 removed before its refused barrier stands until the fresh branch's reclaim, \
+                 between the report site's two phases, takes the barrier and removes it"
             );
             assert_eq!(
                 candidates_refs_of(fixture).len(),
