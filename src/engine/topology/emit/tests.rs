@@ -34,6 +34,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::engine::topology::identity::{AttemptIdentities, ReservationKind};
+use crate::engine::topology::scaffold::KILL_CHILD_BOUND;
 use crate::engine::topology::seams::HarnessTopologyHooks;
 use crate::events::log::{
     HarnessEventHooks, INJECTED_PREFIX, StablePrefix, SyncTarget, WrittenShape,
@@ -3033,7 +3034,7 @@ fn kill_the_informational_append(tag: &str, coordinate: &str) -> (Fixture, Vec<u
         &crate::runner::gate_request(
             spec,
             fixture.paths.public.clone(),
-            Duration::from_secs(120),
+            KILL_CHILD_BOUND,
             crate::runner::InvocationId::attempt(
                 AAY,
                 GenerationId(0),
@@ -3044,6 +3045,12 @@ fn kill_the_informational_append(tag: &str, coordinate: &str) -> (Fixture, Vec<u
         ),
     )
     .expect("the child runs through the process funnel");
+    assert!(
+        !output.timed_out,
+        "`{coordinate}`: the kill child did not end within {KILL_CHILD_BOUND:?}, and the process \
+         funnel terminated it at that timeout: {}",
+        output.stderr
+    );
     assert!(
         !output.stderr.contains("panicked at") && output.code != Some(0),
         "`{coordinate}`: the child was not killed: {:?} {}",
@@ -3346,7 +3353,7 @@ fn kill_the_open(path: &Path, point: &str, workspace: &Path) {
         &crate::runner::gate_request(
             spec,
             workspace.to_path_buf(),
-            Duration::from_secs(120),
+            KILL_CHILD_BOUND,
             crate::runner::InvocationId::attempt(
                 AAY,
                 GenerationId(0),
@@ -3357,6 +3364,12 @@ fn kill_the_open(path: &Path, point: &str, workspace: &Path) {
         ),
     )
     .expect("the child runs through the process funnel");
+    assert!(
+        !output.timed_out,
+        "`{point}`: the kill child did not end within {KILL_CHILD_BOUND:?}, and the process \
+         funnel terminated it at that timeout: {}",
+        output.stderr
+    );
     assert!(
         !output.stderr.contains("panicked at") && output.code != Some(0),
         "`{point}`: the child was not killed: {:?} {}",
