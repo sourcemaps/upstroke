@@ -5,8 +5,8 @@ use std::fmt::Write as _;
 
 use super::RunStatus;
 use crate::events::{
-    AttemptRecord, AttemptTransition, Event, EventBody, LadderEscalated, LadderRetry,
-    ReviewPassOutcome, RunOutcome, TaskDeferred, TaskFailed,
+    AttemptRecord, AttemptTransition, EffectiveAttribution, Event, EventBody, LadderEscalated,
+    LadderRetry, QuestionAttribution, ReviewPassOutcome, RunOutcome, TaskDeferred, TaskFailed,
 };
 use crate::ir::Answer;
 use crate::util::terminal::{TerminalLines, one_line};
@@ -159,9 +159,21 @@ pub(super) fn describe(event: &Event) -> String {
                 data.question, data.via
             ),
         },
-        EventBody::DesignDefect { data } => {
-            format!("design defect recorded for {}", data.question)
-        }
+        EventBody::DesignDefect { data } => match data.effective_attribution() {
+            EffectiveAttribution::Unclassified => {
+                format!("design defect recorded for {}", data.question)
+            }
+            EffectiveAttribution::Discovered => format!(
+                "question {} attributed: {}",
+                data.question,
+                QuestionAttribution::DiscoveredHole
+            ),
+            EffectiveAttribution::Convicted { citation } => format!(
+                "question {} attributed: {}, citing {citation}",
+                data.question,
+                QuestionAttribution::DesignDefect
+            ),
+        },
         EventBody::CapacitySnapshot { data } => format!(
             "capacity snapshot under `{}`: {}",
             data.strategy,

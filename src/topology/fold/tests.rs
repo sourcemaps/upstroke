@@ -8449,11 +8449,11 @@ fn every_kind() -> Vec<TopologyEvent> {
             },
         }),
         ev(TopologyEventBody::DesignDefect {
-            data: DesignDefect {
-                question: QuestionId::from("q-design"),
-                context: "  the contract is ambiguous  ".to_owned(),
-                answer: "  ask the designer  ".to_owned(),
-            },
+            data: DesignDefect::discovered(
+                QuestionId::from("q-design"),
+                "  the contract is ambiguous  ".to_owned(),
+                "  ask the designer  ".to_owned(),
+            ),
         }),
     ];
     assert_eq!(

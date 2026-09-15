@@ -64,11 +64,11 @@ fn commit(sha: &str, message: &str) -> EventBody {
 
 fn defect(question: &str) -> EventBody {
     EventBody::DesignDefect {
-        data: DesignDefect {
-            question: QuestionId(question.to_owned()),
-            context: "context Ünicode".to_owned(),
-            answer: "answer".to_owned(),
-        },
+        data: DesignDefect::discovered(
+            QuestionId(question.to_owned()),
+            "context Ünicode".to_owned(),
+            "answer".to_owned(),
+        ),
     }
 }
 

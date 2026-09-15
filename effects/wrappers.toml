@@ -1452,6 +1452,12 @@ effectful = []
 effectful_unnameable = []
 effect_free = [
     "apply",
+    "attribution",
+    "cited",
+    "convicted",
+    "derive",
+    "discovered",
+    "effective_attribution",
     "ensure_supported_schema",
     "event",
     "fmt",

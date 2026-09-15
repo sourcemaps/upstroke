@@ -31,7 +31,7 @@ directory; `<sha>` is the full sha the measurement was taken at.
 | Step | State |
 |---|---|
 | 0 base measured, readings taken, record opened | **done** — this commit |
-| 1 the vocabulary (`src/events/mod.rs`): `QuestionAttribution`, the two fields, `discovered`, `convicted`, `effective_attribution`; the legacy emitters unclassified; the census offer and the fixtures through the constructors; the mutations | pending |
+| 1 the vocabulary (`src/events/mod.rs`): `QuestionAttribution`, the two fields, `discovered`, `convicted`, `effective_attribution`; the legacy emitters unclassified; the census offer and the fixtures through the constructors; the mutations | **done** — §6; the full suite green through the wrapper, the three mutations each killed by the tests named for them |
 | 2 the answer file (`src/interaction.rs`): the attributed answer record, the writer-side refusal, the schema-4 refusal executed | pending |
 | 3 the decoder fixture (`src/topology/events.rs`, `src/topology/fold/tests.rs`): an attributed record through the informational-tolerance path; the fold untouched | pending |
 | 4 the internals notes, held both ways by `test-internals-notes.sh` | pending |
@@ -343,7 +343,89 @@ Each with the file the figure lives in, under `/home/ubuntu/o3-attribution-evide
 
 ## 6. The vocabulary (Phase 1)
 
-Pending.
+**What landed** (`src/events/mod.rs`, after `QuestionAnswered`):
+
+- `QuestionAttribution { DiscoveredHole, DesignDefect }` — `Copy`, `Serialize`, `Deserialize`,
+  `#[serde(rename_all = "snake_case")]` (R3), with a `Display` that writes the wire spelling.
+- `EffectiveAttribution<'a> { Unclassified, Discovered, Convicted { citation: &'a str } }` — what a
+  reader derives from the stored pair, and the only thing a projection reads.
+  `EffectiveAttribution::derive(stored, citation)` is the one derivation: `None` → `Unclassified`;
+  `Some(DesignDefect)` with a citation that is present and not blank → `Convicted`; every other
+  `Some` → `Discovered` (so a citation-less or blank-cited conviction reads as a discovery, R6, and
+  a discovery with a stray citation stays a discovery). `attribution()` maps it back to the
+  `Option<QuestionAttribution>` the brief describes: `None`, `DiscoveredHole`, `DesignDefect`.
+- `cited(&str) -> bool` — the one spelling of "a citation is not blank", used by the constructor
+  and the derivation.
+- `UncitedConviction`, a `thiserror` unit error: *"a design_defect conviction cites the
+  design-phase checklist item or precedent that was available and unapplied; no citation, no
+  conviction"*.
+- `DesignDefect` gains `attribution: Option<QuestionAttribution>` and `citation: Option<String>`,
+  both `#[serde(default, skip_serializing_if = "Option::is_none")]`, appended after `answer` so a
+  record written without them is byte-identical to the schema-3 writer's.
+  `DesignDefect::discovered(question, context, answer)` writes `Some(DiscoveredHole)`, `None`;
+  `DesignDefect::convicted(question, context, answer, citation) -> Result<Self,
+  UncitedConviction>` refuses a blank citation through the `Result`, never by panic;
+  `effective_attribution(&self) -> EffectiveAttribution<'_>` is the reader method.
+- The two legacy emitters, `src/engine/coordinator.rs:1044` and `src/engine/resume.rs:589`,
+  gain `attribution: None, citation: None` and nothing else (R1; `phase1/fixture-diffs.txt`, the
+  "legacy emitters" hunks).
+- The census offer (`src/topology/census.rs`) and the three fixtures (`src/events/log/tests.rs`
+  `defect()`, the round-trip corpus in `src/events/mod.rs`, the fold's `every_kind()` in
+  `src/topology/fold/tests.rs`) go through `discovered`. The canonical corpus pair in
+  `src/topology/events.rs` gains `attribution: None, citation: None` (R1, R8): the hunks are in
+  `phase1/fixture-diffs.txt`, and `git diff --stat` of that file is `4 +` — the two pairs of
+  `None` lines and nothing else.
+- `src/status/render.rs` (R7): the `DesignDefect` arm matches `effective_attribution()`.
+  `Unclassified` prints the line it always printed; `Discovered` prints
+  `question {q} attributed: discovered_hole`; `Convicted { citation }` prints
+  `question {q} attributed: design_defect, citing {citation}`.
+- `effects/wrappers.toml`: the six new externally reachable functions of `src/events/mod.rs`
+  (`attribution`, `cited`, `convicted`, `derive`, `discovered`, `effective_attribution`) are
+  classified `effect_free`, because
+  `effects::tests::every_externally_reachable_fn_of_a_legacy_or_shared_module_is_classified`
+  refuses an unclassified name (`phase1/full-1.log`, the one failure before the classification;
+  `phase1/effects-1.log`, 171 passed after it). This is a path `MAINTAINING.md` step 7 names as
+  an instrument; the pull request body says so under its gate-control paragraph, and it is the
+  orchestrator's to read against the delegation rule, not this record's.
+- The fold is untouched: `src/topology/fold/apply.rs` and `src/topology/fold/start.rs` have the
+  blob hashes §2 recorded at the base (`phase1/fixture-diffs.txt`, last two lines).
+
+**Tests**, each existing exactly once (`phase1/fixture-diffs.txt` does not list them; `git grep
+-c "fn <name>("` is 1 for each — the run in `phase1/targeted-2.log` names them all):
+
+| test | what it proves |
+|---|---|
+| `events::tests::the_attribution_is_spelled_in_snake_case_on_the_wire` | `discovered_hole` / `design_defect` on the wire and in `Display`; other spellings refused |
+| `events::tests::a_discovered_record_carries_its_attribution_and_no_citation_through_json` | the round trip of `discovered`, against a literal JSON string with `attribution` and no `citation` key |
+| `events::tests::a_convicted_record_carries_its_citation_through_json` | the round trip of `convicted`, against a literal JSON string with both keys |
+| `events::tests::an_unclassified_record_serialises_to_its_pre_taxonomy_bytes` | a `None`/`None` record inside an `Event` serialises to the literal pre-change line; a pre-taxonomy payload reads as `Unclassified`, never as a discovery |
+| `events::tests::convicted_refuses_an_empty_or_blank_citation` | `""`, `" "`, `"   "`, `"\n"`, `"\t \n"` are `Err(UncitedConviction)`; a citation is `Ok` |
+| `events::tests::a_conviction_without_a_citation_reads_as_a_discovery` | raw JSON the constructor cannot produce — `design_defect` with no `citation`, with `""`, with `"  \n"` — keeps its stored value and reads as `Discovered`; a cited one reads as `Convicted`; a discovery with a stray citation reads as `Discovered` |
+| `engine::tests::the_legacy_ingest_writes_an_unclassified_design_defect` | the live schema-3 emitter, driven through `run_harness` with a scripted answer: the one `design_defect` line on disk has exactly the keys `answer`, `context`, `question`, and reads as `Unclassified` |
+| `engine::tests::the_resume_repair_writes_an_unclassified_design_defect` | the resume emitter, driven through the decline-prefix mold (`truncate_log_after(…, "question_answered")`, then `resume_with`): the record it appends has the same three keys and reads as `Unclassified` |
+
+**The existing fixture tests pass unmodified** — `every_event_serializes_to_exactly_its_independently_written_payload`,
+`every_event_decodes_from_its_independently_written_payload`,
+`the_legacy_append_is_byte_identical_to_the_pre_move_writer`, `every_kind_is_represented_exactly_once_and_the_list_agrees`
+and the round-trip test in `src/events/mod.rs` — in `phase1/full-2.log`; none of their bodies is in the diff
+(`phase1/fixture-diffs.txt` shows every hunk of the fixture files).
+
+**Mutations, executed** (`phase1/mutations/summary.txt`, one `.diff` and `.log` per mutation; the
+file restored from a pristine copy and its SHA-256 checked equal after each):
+
+| mutation | tests that fail | tests that keep passing, and why |
+|---|---|---|
+| M1 `skip_serializing_if` removed from `attribution` | `an_unclassified_record_serialises_to_its_pre_taxonomy_bytes`, `the_legacy_ingest_writes_an_unclassified_design_defect`, `the_resume_repair_writes_an_unclassified_design_defect` | `every_event_serializes_to_exactly_its_independently_written_payload` and `the_legacy_append_is_byte_identical_to_the_pre_move_writer` pass: both compute their expected bytes by serialising the same struct, so they cannot see this mutation — which is why the literal-JSON test exists |
+| M2 the reader returns the stored value unconditionally | `a_conviction_without_a_citation_reads_as_a_discovery` (`left: Convicted { citation: "" }`, `right: Discovered`) | the rest |
+| M3 `convicted` accepts an empty citation | `convicted_refuses_an_empty_or_blank_citation` | the rest |
+
+M2's first application did not compile (a missing comma in the mutated arm, `M2-…` first entry in
+the summary); it was re-applied well-formed and is the row above.
+
+**Runs** (all through the wrapper on the private target): `phase1/targeted-2.log` (48 passed),
+`phase1/fmt-2.log` (clean after `cargo fmt`), `phase1/clippy-1.log` (`-D warnings`, clean),
+`phase1/full-2.log`: library `2603 passed; 0 failed; 77 ignored` in 93.64 s, binary `10 passed`,
+exit `0` (2026-09-15, 00:09:56Z–00:11:42Z) — 2595 at the base plus the eight tests above.
 
 ## 7. The answer file (Phase 2)
 

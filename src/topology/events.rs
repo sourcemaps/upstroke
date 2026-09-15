@@ -2074,6 +2074,8 @@ mod tests {
                     question: QuestionId::from("q-design-0001"),
                     context: "  the plan contradicts itself about Ünicode paths  ".to_owned(),
                     answer: "rescope".to_owned(),
+                    attribution: None,
+                    citation: None,
                 },
             },
         ]
@@ -4362,6 +4364,8 @@ mod tests {
                         question: QuestionId::from("q-design-0001"),
                         context: "  the plan contradicts itself about Ünicode paths  ".to_owned(),
                         answer: "rescope".to_owned(),
+                        attribution: None,
+                        citation: None,
                     })
                     .expect("legacy design defect"),
                 ),
