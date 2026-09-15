@@ -573,7 +573,8 @@ commit of this branch; §2's blob hashes).
 | `topology::events::tests::an_attributed_design_defect_reads_through_the_informational_path` | each payload decodes to its body; `kind()` is `design_defect`; `is_transaction()` is false; `effective_attribution()` is `Discovered` / `Convicted { citation }`; with an unknown column (`"Ünknown Column  "`) added to `data` the record still decodes, equal to the body — *"an informational record with an extra column costs nothing to ignore"* — while the same column on the canonical `question_answered` payload is refused with `unknown field `Ünknown Column  ``; and, in passing, `TOPOLOGY_EVENT_KINDS.len() == 24` and `TOPOLOGY_TRANSACTION_KINDS == 21` |
 | `topology::fold::tests::an_attributed_design_defect_folds_to_no_derived_state` | on a fold with a merged task, `plan_transition` of the discovery and of the conviction each yields a delta whose `derived` is `Derived::None`, and `apply_delta` leaves `state()` equal to what it was |
 
-The invariants the contract names are held by the existing assertions, unmodified:
+The invariants the contract names are held by the existing assertions — unmodified but for the round-2
+pin `every_event_serializes_to_exactly_its_independently_written_payload` gained before its loop (§17, B1):
 `every_kind_is_represented_exactly_once_and_the_list_agrees` (24 kinds, 21 transactions, the
 informational three named), `every_event_serializes_to_exactly_its_independently_written_payload`
 (the corpus covers all 24 and the `design_defect` payload is the pre-taxonomy one), and the type of
@@ -1007,3 +1008,77 @@ immediately before the push (the answer-1 threshold, 12 GB, decides whether a lo
 made; §13), `git merge-tree --write-tree origin/master HEAD` (`origin/master` moved to `aff2b024`
 during the round: two pull requests touching `findings/` and `scripts/pr-review-parse.py`, nothing
 this branch touches — the merge is clean and the base is not merged in), and both body validators.
+
+## 17. Round 2 — the review of `c3688ada`
+
+Four `gpt-6-astra` lenses at `max` reviewed `c3688ada0b9558fa35ba7b2ac9885261be7b887d`: regression
+`PASS`; fix-check, record and contract `CHANGES_REQUIRED`
+(`/home/ubuntu/orch-o3-attribution/reviews/r2/{fix-check,record,contract,regression}.md`; the
+combined comment https://github.com/sourcemaps/upstroke/pull/290#issuecomment-5673989691). CI at
+`c3688ada` was green on both contexts, all ten jobs including `test (winguest)` (run 34921849231;
+`/home/ubuntu/o3-attribution-evidence/orch/ci-jobs-c3688ada-34921849231.txt`). The orchestrator's
+brief for the round is `/home/ubuntu/orch-o3-attribution/repair-290-r2.md`; its evidence is under
+`c3688ada0b9558fa35ba7b2ac9885261be7b887d/round2/`.
+
+**The round-1 CI trap, for the record.** The body applied by `gh pr edit` one second before the
+push at `c3688ada` fired a `pull_request: edited` run whose payload named the pre-push head, and
+`ci.yml`'s `cancel-in-progress` on group `ci-CI-290` cancelled the push's own runs, 34921203398
+(`CI`) and 34921203340 (`Pull request policy`), in its favour; the orchestrator re-triggered CI by
+re-applying the body at 02:36Z (run 34921849231, green). This round applies the body first, waits
+for its runs to exist, then pushes.
+
+- **B1 (fix-check S1, P1; record 1; contract F2): the canonical corpus was claimed "pinned by a
+  literal assertion" and was not.** `canonical_events()` computes its `design_defect` payload with
+  `serde_json::to_value(DesignDefect { .. })`, the serialiser the test under check uses, so
+  `every_event_serializes_to_exactly_its_independently_written_payload` compared two values that
+  moved together: the M1 log at `33a90025` records it `ok`, and the contract lens's conversion
+  mutation — `attribution: None` → `Some(DiscoveredHole)` at both canonical sites — leaves both
+  corpus tests passing at `c3688ada` (`round2/b1-before/M13-before-pin.log`, exit `0`, the diff
+  beside it). The test now asserts, before its loop, that the corpus's `design_defect` payload is
+  exactly the three-key object (`q-design-0001`, the Ünicode context, `rescope`) — the third pin,
+  in the third test (`0de39a89`). After it: M1 fails that test alongside the two round-1 pins,
+  and M13 fails it alone (`round2/mutations/M1-…` and `M13-…`, exit `101` each, restored and
+  hash-checked). R1, §6 and §8 say three pins, one per test, and which test bodies are in the diff.
+- **B2 (record 2; contract F3): the F1 finding attributed to the contract a prohibition broader
+  than the clause it quotes.** The file, this record's §16 entry and the body now attribute the
+  deferral to the round-1 brief's ruling ("File, do not fix"), quote the fold clause and the
+  "Enforcement belongs to the single writer" sentence verbatim and only for what they say, and
+  state that an append-side check's compatibility is an open reading for the first production
+  writer's slice (`eb1c1d1c`). F1 is not implemented.
+- **B3 (fix-check B6; record 4): the round-1 B6 residue.** `git diff --stat fcfedc75 3b44fc5d
+  -- . ':!reviews/…record.md'` is the finding's one line and the same command with `e03f7eae`
+  prints nothing (§12); the `src` tree ids — `fcfedc75`, `3b44fc5d` and `e03f7eae` share
+  `a180d9644b94a8d2121ed257a773248e0b99d957`, and `92b45c9d`, `33a90025`, `bb73be2b` and
+  `c3688ada` share `ed5bef5b5455516fe5ca44da3e442f32dcd4b765` (`git rev-parse <sha>:src`), so
+  "the identical Rust tree passed at `fcfedc75`, `e03f7eae` and this head" was false and the
+  body now says which heads share a tree; the runner's path, not its text, heads the summary;
+  `33a90025` is followed by the record `bb73be2b` and then the finding `c3688ada` (§16); the diff
+  adds two findings files (§1); the base census has six fixture construction sites, the sixth
+  `canonical_events()` at base `src/topology/events.rs:4361` (§2, and the O3 finding); the scan's
+  46 logs are 43 under `~/eight-logs/` over 32 distinct heads plus `09d6887a`'s, `1c5bb58c`'s and
+  the `r3` directory's logs, at least 34 identifiable heads
+  (`round2/b3-flake-heads.txt`, recounted from the scan's own lines) — the body says so
+  (`703bcd07`).
+- **B4 (fix-check B7; record 3): the round-1 B7 residue.** `docs/internals/interaction.md`'s
+  `AnswerRecord.attribution` section now says the file does not apply the default, the topology
+  writer that will is not built, and today's schema-3 ingestion writes `None, None`; the two new
+  items with no heading — `QuestionAttribution`'s `Display` (`fn fmt`) and `AnswerRecord.answer`
+  — have theirs; `round2/b4-headings.txt` enumerates every new `pub` item of the diff with its
+  heading count before and after (the one remaining zero is the `impl fmt::Display` block's own
+  line, which is neither type, field nor function; its `fn fmt` has a heading) (`0333e37c`).
+  `test-internals-notes.sh`: `round2/b4-test-internals-notes.log`, 150 markers and files, 41
+  cases, exit `0`.
+- **B5 (fix-check S2): the class-search account.** Round 1's B1, B4 and B6 classes and this
+  round's, searched at `c3688ada` before this round's edits (`round2/b5-searches-before.txt`) and
+  at `0333e37c` after them (`round2/b5-searches-after.txt`), each pattern against the record, the
+  body to be applied and the notes and findings: `pinned by a literal`, `unmodified`, `none of
+  their bodies`, `byte-identical`, `refuses the same`, `apply.rs still`, `23:49:02Z`, `00:09:56Z`,
+  `none of them this session`, `51 sites`, `four test fixtures`, `log or fold layer`, `log-layer`,
+  `rejects validating`, `plus one findings-ledger`, `five test fixtures`, `32 unrelated heads`,
+  `identical Rust tree`, `its text at the top`, `commit after it is the finding`, `applies the`,
+  `is empty at each`, `1 insertion(+), 1`, `every new production`. After the edits every remaining
+  hit is one of: a correction sentence quoting the old wording (this record's round-1 B6 entry,
+  the F1 finding's own account of its earlier wording, the body's B2 bullet), the search accounts
+  themselves, or a true use (`byte-identical` of the legacy projections; `unmodified` of the two
+  corpus tests that are; `applies the` in the fold's and the reader's sentences). The
+  round-1 searches for B3 and B7 are in §16 and `round1/b3-searches.txt`, `b7-searches.txt`.
