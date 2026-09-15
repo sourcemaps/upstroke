@@ -36,6 +36,60 @@ First occurrence in 41 concluded runs of that branch, each running a macOS leg; 
 same SHA came back green, and CI re-runs erase the failure from `gh run list`, which is why the
 rate was written down at observation time.
 
+
+## Re-verified at master `60a5ac4f`, 2026-09-15 — still reproduces, and now deterministically
+
+**The 1-in-18 race above is no longer the only way in.** The state can be constructed directly, which
+makes this reproducible on demand rather than sampled:
+
+- **Fixture V8**, two intents. After both reclaim attempts the intents are still `[alpha, bravo]`
+  with **`bravo` untouched**:
+
+  ```
+  git worktree list --porcelain -z failed …
+  fatal: failed to read .git/worktrees/kbravo-g1/commondir: Success
+  ```
+
+- Only calling `remove_worktree(bravo)` **directly** gets past it; a third `reclaim_intents()` then
+  returns `Ok`.
+
+### Mechanism
+
+`reclaim_intents` runs `remove_worktree` then `remove_intent` for each sorted intent
+(`src/workspace_manager.rs:2080-2083`). **`remove_intent` opens with `slot.validate()?;
+self.revalidate()?;` (`:1992`), and `revalidate` enumerates.** So one torn `commondir` wedges the
+**whole reclaim loop**, not just its own slot.
+
+**Why the in-tree tests do not catch it: each has only ONE torn slot.** The defect needs a second
+intent to follow the torn one, which is what fixture V8 supplies.
+
+### What master's removal repair does and does not fix
+
+`src/workspace_manager.rs` ~2703 now detects an empty `commondir` (`metadata.len() == 0`), runs
+`worktree prune` when the registration no longer names the path, and otherwise removes the proved
+admin directory — deliberately using a **proved registration** rather than the directory scan that
+got round 7 reverted.
+
+**That fixes the REMOVAL path. It does not fix the ENUMERATION path**, which is the half this finding
+opens with, and it is why the defect survives at master.
+
+### Reachability — a property of this SHA, not of the code
+
+**At `60a5ac4f` no code outside `#[cfg(test)]` constructs a `WorkspaceManager`.** The constructor is
+`WorkspaceManager::derive`, which has no call site outside `tests.rs` and `fixture.rs`; both modules
+are declared `#[cfg(test)]` (`src/workspace_manager.rs:5868`, `:5888`), and
+`src/engine/topology.rs:29-30` declares `#[cfg(test)] mod scaffold;`. **So the shipped binary cannot
+reach this today.**
+
+**Re-check that whenever any of these gains a non-test caller**, which is where reachability would
+come from: `src/engine/topology/finalize.rs:247-256`,
+`src/engine/topology/recover.rs:1162-1166` and `:1212-1218`, `src/engine/dispatch.rs:340-341`.
+
+### Not tested by this verification
+
+macOS (where the same read failure reads `Undefined error: 0` rather than `Success`), Windows, the
+kill race itself — the state was **constructed**, not raced — and the engine loops above end to end.
+
 ## What the change that takes this up should do
 
 Solve containment-authorization restoration and removal-widening **together**, and get a
