@@ -2158,6 +2158,12 @@ callee = {}           # the name the sweep calls something by -> what it calls
 ATOMS = (str, bytes, int, float, complex, bool, type(None))
 
 
+def atom(value):
+    """Whether VALUE is a value of one of ATOMS itself. A class derived from one is not: an `int`
+    subclass, an `IntEnum` member, carries a dictionary or slots of its own like anything else."""
+    return type(value) in ATOMS
+
+
 def elsewhere(value):
     """Whether VALUE is not a value MODULE's code bound but a namespace of somebody else's: a
     module's dictionary, code, a frame, a class written outside MODULE, or the probe's own code."""
@@ -2180,7 +2186,7 @@ def holds(value, carriers):
         one = stack.pop()
         if id(one) in wanted:
             return True
-        if isinstance(one, ATOMS) or id(one) in seen or isinstance(one, type) or elsewhere(one):
+        if atom(one) or id(one) in seen or isinstance(one, type) or elsewhere(one):
             continue
         seen.add(id(one))
         kept.append(one)
@@ -2264,7 +2270,7 @@ def without(value, carriers):
     stack, seen, found = [value], set(), []
     while stack:
         one = stack.pop()
-        if isinstance(one, ATOMS) or id(one) in seen or isinstance(one, type) or elsewhere(one):
+        if atom(one) or id(one) in seen or isinstance(one, type) or elsewhere(one):
             continue
         seen.add(id(one))
         if isinstance(one, types.FunctionType):
@@ -2605,6 +2611,10 @@ PICTURED = object()   # the entry that ends what STATE reads: each value it pict
 AT = object()         # marks an identity inside a picture, so that no identity is read as a number
 WORD = ctypes.sizeof(ctypes.c_void_p)
 WHOLE = (dict, list, set, collections.deque, bytearray)  # whose contents STATE reads and RESTORE writes back
+# A container is not only what it holds. It is PICTURED like every other value, READ in the order its own
+# class hands its items out, WRITTEN BACK through that class's own implementation and only where its
+# picture moved, and COMPARED again -- in order where the language guarantees one, as a set where it does
+# not -- but for the words writing it back moves (`churn`) and the words a reading moves (`READING`).
 PROTOCOL = ("__copy__", "__reduce_ex__", "__reduce__", "__getstate__", "__setstate__", "__getnewargs_ex__",
             "__getnewargs__", "__new__")
 declared_by = {}      # a class -> the member descriptors its classes declare
@@ -2631,7 +2641,7 @@ def fields(one):
 
 
 def ref(value):
-    return value if isinstance(value, ATOMS) else (AT, id(value))
+    return value if atom(value) else (AT, id(value))
 
 
 
@@ -2659,58 +2669,105 @@ def foreign(one):
     return isinstance(own, dict) and any(dict.__contains__(own, name) for name in PROTOCOL)
 
 
-def described(value, depth=0):
+UNREAD = object()     # a reading that failed for want of memory or depth: no comparison takes it for a reading
+READING = object()    # marks a value whose own bytes a reading of the state moves, which are not its state
+
+
+def described(value, depth=0, twin=EMPTY):
     """VALUE as two readings compare it: a tuple, list or dictionary by what it holds -- the copy protocol
-    makes those afresh for each reading -- an iterator of the standard library's by what it hands out, and
-    any other object by identity."""
-    if depth > 3 or isinstance(value, ATOMS):
-        return ref(value)
+    makes those afresh for each reading -- and any other object by identity. TWIN is what a second reading,
+    made while this one is still held, has in VALUE's place. Where that is another object of VALUE's class,
+    the reading itself made VALUE -- a dictionary's item iterator, a deque's iterator, a range iterator's
+    range -- and its identity is the reading's, not the value's: it is read in turn by what the copy
+    protocol reads of it, so what it holds is still compared. NOTHING IS READ BY RUNNING IT. An iterator is
+    never drained: one that never ends would never be done being read, and one a value holds would be spent
+    by the reading. What is compared of an iterator is the copy protocol's reading of it -- the position it
+    has reached in what it iterates -- which ends for any object written in C. Past the depth read, an
+    object the reading made is read as made, never by an identity no later reading can have."""
+    if atom(value):
+        return value
+    if depth > 3:
+        return ("made",) if twin is not EMPTY and twin is not value else ref(value)
     if type(value) in (tuple, list):
-        return (type(value).__name__,) + tuple(described(part, depth + 1) for part in value)
+        twins = twin if type(twin) is type(value) and len(twin) == len(value) else (EMPTY,) * len(value)
+        return (type(value).__name__,) + tuple(described(part, depth + 1, other)
+                                               for part, other in zip(value, twins))
     if type(value) is dict:
-        return ("dict",) + tuple((described(key, depth + 1), described(part, depth + 1))
-                                 for key, part in value.items())
-    if type(value).__module__ == "builtins" and hasattr(type(value), "__next__"):
-        return ("iter",) + tuple(described(part, depth + 1) for part in list(value))
+        twins = (list(twin.items()) if type(twin) is dict and len(twin) == len(value)
+                 else [(EMPTY, EMPTY)] * len(value))
+        return ("dict",) + tuple((described(key, depth + 1, other_key), described(part, depth + 1, other))
+                                 for (key, part), (other_key, other) in zip(value.items(), twins))
+    if twin is not EMPTY and twin is not value and type(twin) is type(value):
+        return ("made", reduction(value, depth + 1))
     return ref(value)
 
 
-def reduction(one):
+def reduction(one, depth=0):
     """ONE as the standard library's copy protocol reads it, or None where that would run code of MODULE's
-    or the protocol has no reading of it."""
+    or the protocol has no reading of it. It is read twice, the first reading held while the second is
+    made, so that an object the reading makes is told from one ONE holds (`described`). A READING THAT
+    FAILS IS NOT A READING: where memory or depth runs out, what comes back is UNREAD, which no comparison
+    takes for the value being back (`alike`), and never None, which would say there was nothing to read."""
     if foreign(one):
         return None
     reductor = copyreg.dispatch_table.get(type(one))
     try:
-        return described(reductor(one) if reductor is not None else type(one).__reduce_ex__(one, 4))
+        first, second = (reductor(one) if reductor is not None else type(one).__reduce_ex__(one, 4)
+                         for _ in range(2))
+        return described(first, depth, second)
+    except (MemoryError, RecursionError):
+        if depth:
+            raise
+        return UNREAD
     except Exception:
         return None
 
 
-def picture(one):
-    """EVERYTHING THE INTERPRETER LETS THE PROBE READ OF ONE'S OWN STATE, as one value two readings compare
-    by. Each member its classes declare; for a value no walk of contents reads whole, what it refers to;
-    and for a value that is not a tuple or a frozenset, whose items are all they hold, the object's own
-    bytes -- its reference count, and the words linking its dictionary and weak references, blanked, since
-    the interpreter moves those for reasons of its own -- the buffer it exports, and the copy protocol's
-    reading of it. This names no kind: a value of a kind nobody has thought of is read the same way, and
-    nothing MODULE declares runs to read it."""
+def own_bytes(one):
+    """ONE's own bytes, its reference count and the words linking its dictionary and weak references
+    blanked, since the interpreter moves those for reasons of its own."""
     kind = type(one)
-    members = tuple(ref(value) for _, value in fields(one))
-    if isinstance(one, WHOLE):
-        return (id(kind), members)
-    try:
-        own = id(object.__getattribute__(one, "__dict__"))
-    except (AttributeError, TypeError):
-        own = None
-    refers = tuple(ref(item) for item in gc.get_referents(one) if id(item) != own)
-    if isinstance(one, (tuple, frozenset)):
-        return (id(kind), members, refers)
     raw = bytearray(ctypes.string_at(id(one), kind.__basicsize__))
     raw[:WORD] = bytes(WORD)
     for offset in (kind.__weakrefoffset__, kind.__dictoffset__):
         if 0 < offset <= len(raw) - WORD:
             raw[offset:offset + WORD] = bytes(WORD)
+    return bytes(raw)
+
+
+def differing(a, b):
+    """The index of each byte of each word at which A and B, two readings of one layout, differ."""
+    return frozenset(index for word in range(0, min(len(a), len(b)), WORD)
+                     if a[word:word + WORD] != b[word:word + WORD] for index in range(word, word + WORD))
+
+
+def picture(one):
+    """EVERYTHING THE INTERPRETER LETS THE PROBE READ OF ONE'S OWN STATE, as one value two readings compare
+    by: each member its classes declare, what it refers to in the order the collector names it, and -- for
+    a value other than a tuple or a frozenset, whose items are all they hold -- its own bytes
+    (`own_bytes`), the buffer it exports, and the copy protocol's reading of it, which hands out what a
+    dictionary, a list, a set or a deque holds in the order its own class keeps it. A CONTAINER IS READ
+    LIKE ANYTHING ELSE, because what it holds is not all it is: a set keeps where its next `pop` starts
+    among its own bytes, and an `OrderedDict` an order its dictionary does not. This names no kind: a
+    value of a kind nobody has thought of is read the same way, and nothing MODULE declares runs to read
+    it. WHAT A SET HOLDS IS READ AS A SET. Every other kind the walk reads whole hands its items out in an
+    order the language guarantees -- a list, a tuple, a deque, and since 3.7 a dictionary and its
+    subclasses, by insertion -- so a caller may depend on that order and a reader may choose on it. A set
+    and a frozenset guarantee none: what a reader sees is which items are there, and where the next `pop`
+    starts, which is among the own bytes below. So their items are pictured as a set, and the copy
+    protocol's reading of them, which hands them out in the order their table happens to keep, is not
+    read."""
+    kind = type(one)
+    members = tuple(ref(value) for _, value in fields(one))
+    try:
+        own = id(object.__getattribute__(one, "__dict__"))
+    except (AttributeError, TypeError):
+        own = None
+    held = [ref(item) for item in gc.get_referents(one) if id(item) != own]
+    loose = isinstance(one, (set, frozenset))
+    refers = frozenset(held) if loose else tuple(held)
+    if kind in (tuple, frozenset):
+        return (id(kind), members, refers)
     exported = None
     if not isinstance(inspect.getattr_static(kind, "__buffer__", None), types.FunctionType):
         try:
@@ -2718,18 +2775,24 @@ def picture(one):
                 exported = view.tobytes()
         except (TypeError, BufferError, ValueError):
             pass
-    return (id(kind), members, refers, bytes(raw), exported, reduction(one))
+    return (id(kind), members, refers, own_bytes(one), exported, None if loose else reduction(one))
 
 
 def alike(now, then, noise, stands):
     """Whether the picture NOW is the picture THEN: each identity in NOW read through STANDS -- a rebuilt
     copy for the value it was rebuilt from -- and the bytes at NOISE, where a copy's own memory lives, not
-    compared. NOISE None leaves the bytes out: a holder rebuilt around a copy points somewhere new."""
+    compared. NOISE None leaves the bytes out: a holder rebuilt around a copy points somewhere new. A
+    picture whose reading failed (UNREAD) is alike nothing, itself included."""
+    if UNREAD in now[5:] + then[5:]:
+        return False
+
     def through(value):
         if type(value) is tuple:
             if len(value) == 2 and value[0] is AT:
                 return (AT, stands.get(value[1], value[1]))
             return tuple(through(part) for part in value)
+        if type(value) is frozenset:
+            return frozenset(through(part) for part in value)
         return value
     now = through(now)
     if len(now) == len(then) == 6 and noise != frozenset():
@@ -2779,12 +2842,37 @@ def reproduced(one):
     if first is None or second is None:
         return None
     a, b = picture(first), picture(second)
-    noise = frozenset()
-    if len(a) == 6:
-        noise = frozenset(index for word in range(0, len(a[3]), WORD)
-                          if a[3][word:word + WORD] != b[3][word:word + WORD]
-                          for index in range(word, word + WORD))
-    return (first, noise)
+    return (first, differing(a[3], b[3]) if len(a) == 6 else frozenset())
+
+
+def churn(one):
+    """The bytes of each word of ONE's own that putting back what it holds moves without changing anything
+    a reader sees -- ONE being a value STATE reads whole: where two copies of it differ, which is where
+    each keeps what it holds, and where a copy differs from itself once it is written to hold one item
+    more, and again once it is written to hold what it held, which is the room it set aside, how many
+    items it holds -- what it holds is compared item by item -- and the count of its changes. AND FOR A
+    SET, whose arrangement is not what it holds, where a copy differs from itself once it is written to
+    hold the same items in another order, and once for each quarter of the first sixteen integers, which a
+    small table holds in slots it takes from their value: what a set keeps of a table it has outgrown is
+    the arrangement of whatever it held before it grew, which no write-back puts back and no reader reads,
+    while where its next `pop` starts -- which a reader does read -- no write-back touches, and so is
+    compared. Measured on copies, never on ONE; None where no copy can be made, and then every word of ONE
+    is compared."""
+    first, second = copied(one), copied(one)
+    if first is None or second is None:
+        return None
+    before, held = own_bytes(first), contents(first)
+    more = (held + b"\0" if isinstance(held, bytes)
+            else held + [(object(), None)] if isinstance(one, dict) else held + [object()])
+    written(first, more, lambda item: item)
+    grown = own_bytes(first)
+    written(first, held, lambda item: item)
+    moved = differing(before, own_bytes(second)) | differing(before, grown) | differing(before, own_bytes(first))
+    if isinstance(one, set) and not isinstance(held, bytes):
+        for other in (held[::-1], [0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11], [12, 13, 14, 15], held):
+            written(first, other, lambda item: item)
+            moved |= differing(before, own_bytes(first))
+    return moved
 
 
 def around(one, memo, rebuild):
@@ -2852,24 +2940,74 @@ def put(one, held, memo):
             pass
 
 
+def native(kind, name):
+    """NAME, for a value of KIND, as the nearest of KIND's classes that wrote it in C has it: the
+    implementation that keeps in step whatever a class written in C adds -- an `OrderedDict`'s order --
+    and that runs no code of MODULE's."""
+    for klass in kind.__mro__:
+        found = vars(klass).get(name)
+        if isinstance(found, (types.WrapperDescriptorType, types.MethodDescriptorType)):
+            return found
+    return None
+
+
+def contents(one):
+    """What ONE, a value STATE reads whole, holds, in the order its class's own implementation hands it out
+    -- an order is part of what a reader sees: each name with its value for a mapping, the bytes of a byte
+    array, and the items of anything else."""
+    if isinstance(one, bytearray):
+        return bytes(one)
+    items = list(native(type(one), "__iter__")(one))
+    if isinstance(one, dict):
+        return [(name, dict.__getitem__(one, name)) for name in items]
+    return items
+
+
+def written(one, value, swap):
+    """ONE holding again what CONTENTS read of it as VALUE, in VALUE's order, each object read through SWAP
+    -- written through the implementation its class inherits from C (`native`)."""
+    kind = type(one)
+    native(kind, "clear")(one)
+    if isinstance(one, dict):
+        setitem = native(kind, "__setitem__")
+        for name, item in value:
+            setitem(one, swap(name), swap(item))
+    elif isinstance(one, set):
+        native(kind, "update")(one, [swap(item) for item in value])
+    elif value:
+        native(kind, "extend")(one, value if isinstance(value, bytes) else [swap(item) for item in value])
+
+
+def parts(one, value):
+    """Each object VALUE, what CONTENTS read of ONE, holds."""
+    if isinstance(value, bytes):
+        return []
+    return [part for pair in value for part in pair] if isinstance(one, dict) else value
+
+
 def state(copies=True):
     """MODULE'S STATE AS IT IS NOW: every value its namespace reaches, and all of each that the probe can
     read. What each dictionary, list, set, deque and byte array holds, each cell's value, each function's
     defaults, the attributes of each class MODULE wrote, and the process environment -- the one input
     outside MODULE the probe varies, read underneath `os.environ` so that reading it is not a read of
-    MODULE's -- are held by reference, and `restore` writes them back whole. EVERY OTHER VALUE THE WALK
-    REACHES IS PICTURED -- a tuple and what it holds, a counter, a lock, an instance, the slots and the
-    dictionary of a container whose class MODULE wrote -- by `picture`, which reads a value of any kind the
-    same way; and where COPIES, a copy of it is kept wherever the copy protocol reproduces it. Each value
-    is placed by the path the walk first reached it at, so that one that is not back can be named. Nothing
-    here decides that a value needs no reading, or that it is back: that is asked of the value, by reading
-    it again, in `restore`. All values are read through the base types' own methods and descriptors, so
+    MODULE's -- are held by reference, in the order their own class hands them out (`contents`), and
+    `restore` writes them back. EVERY VALUE THE WALK REACHES IS ALSO PICTURED -- a tuple and what it holds,
+    a counter, a lock, an instance, and a container too, which keeps among its own bytes what no reading of
+    its items shows: where a set's next `pop` starts, and the order an `OrderedDict` holds its own -- by
+    `picture`, which reads a value of any kind the same way. Where COPIES, a copy of each is kept wherever
+    the copy protocol reproduces it, the words writing back what a container holds moves are measured on
+    copies of it (`churn`), AND EVERY PICTURE IS READ A SECOND TIME: a value whose own bytes move when
+    nothing but the reading has run -- a library iterating a value of MODULE's under a guard it keeps in a
+    set of its own -- is marked READING, and those bytes are not compared, because a reading is not a
+    change. Each value is placed by the path the walk first reached it at, so that one that is not back can
+    be named. Nothing here decides that a value needs no reading, or that it is back: that is asked of the
+    value, by reading it again, in `restore`. All values are read through the base types' own methods and descriptors, so
     nothing MODULE declares runs. Code, frames, modules, classes written elsewhere and the probe's own
     functions are not MODULE's state, and are not walked."""
     saved, stack, seen, table, places = [(os.environ, dict(os.environ._data))], [(vars(module), "")], set(), {}, {}
     while stack:
         one, where = stack.pop()
-        if (isinstance(one, ATOMS) or id(one) in seen
+        if (atom(one) or id(one) in seen
                 or isinstance(one, (types.CodeType, types.FrameType, types.ModuleType))
                 or (one is not vars(module) and elsewhere(one))):
             continue
@@ -2894,41 +3032,46 @@ def state(copies=True):
                 ("__defaults__", one.__defaults__), ("__kwdefaults__", one.__kwdefaults__),
                 ("__closure__", one.__closure__), ("__dict__", one.__dict__))]
             continue
-        if isinstance(one, dict):
-            items = dict.copy(one)
+        if isinstance(one, WHOLE):
+            items = contents(one)
             saved.append((one, items))
-            stack += [(part, str(name) if one is vars(module) else "%s[%s]" % (where, str(name)[:24]))
-                      for name, item in items.items() if kept(one, name, item) for part in (name, item)]
-        elif isinstance(one, WHOLE):
-            items = (list.copy(one) if isinstance(one, list) else set.copy(one)
-                     if isinstance(one, set) else bytes(one) if isinstance(one, bytearray)
-                     else list(collections.deque.__iter__(one)))
-            saved.append((one, items))
-            stack += [] if isinstance(one, bytearray) else [
-                (item, "%s[%d]" % (where, index)) for index, item in enumerate(items)]
+            if isinstance(one, dict):
+                stack += [(part, str(name) if one is vars(module) else "%s[%s]" % (where, str(name)[:24]))
+                          for name, item in items if kept(one, name, item) for part in (name, item)]
+            elif not isinstance(one, bytearray):
+                stack += [(item, "%s[%d]" % (where, index)) for index, item in enumerate(items)]
         elif isinstance(one, (tuple, frozenset)):
             stack += [(item, "%s[%d]" % (where, index)) for index, item in enumerate(gc.get_referents(one))]
         else:
             stack += [(item, "%s<%s>" % (where, type(item).__name__)) for item in gc.get_referents(one)]
-        if type(one) in WHOLE:
-            continue
         held = fields(one)
         try:
             stack.append((object.__getattribute__(one, "__dict__"), where + ".__dict__"))
         except (AttributeError, TypeError):
             pass
         stack += [(value, "%s.%s" % (where, member.__name__)) for member, value in held]
-        table[id(one)] = (one, picture(one), held) + ((reproduced(one) if copies else None)
-                                                       or (None, frozenset()))
+        if isinstance(one, WHOLE):
+            table[id(one)] = (one, picture(one), held, None, frozenset(), churn(one) if copies else None)
+        else:
+            table[id(one)] = (one, picture(one), held) + (
+                (reproduced(one) if copies else None) or (None, frozenset())) + (frozenset(),)
+    if copies:
+        for key, entry in list(table.items()):
+            if len(entry[1]) == 6:
+                again = picture(entry[0])
+                if len(again) == 6 and again[3] != entry[1][3]:
+                    table[key] = entry[:5] + (READING,)
     saved.append((PICTURED, (table, places)))
     return saved
 
 
 def back(then, memo):
     """WHAT IS NOT BACK: MODULE's state read again and compared with what THEN read -- the same values
-    reached, each holder holding what it held, and each pictured value's picture what it was, a copy MEMO
-    rebuilt standing, with its own dictionary, for the value it was rebuilt from, and read but for the
-    words where its own memory is pointed to. Each value that differs is named by the path the walk
+    reached, each holder holding what it held IN THE ORDER IT HELD THEM where its class guarantees one and
+    as a set where it does not, and each pictured value's picture what it was, a copy MEMO rebuilt
+    standing, with its own dictionary, for the value it was rebuilt from, and read but for the words where
+    its own memory is pointed to, the words writing back what it holds moves, and the words a reading of
+    the state moves. Each value that differs is named by the path the walk
     reached it at; none are, where the state is what THEN read."""
     now, (table, places), stands, wrong = state(False), then[-1][1], {}, set()
     later = now[-1][1][1]
@@ -2949,7 +3092,7 @@ def back(then, memo):
                 pair_one(new, old, depth)
 
     def pair_one(new, old, depth):
-        if (new is not old and type(new) is type(old) and not isinstance(new, ATOMS) and depth < 3
+        if (new is not old and type(new) is type(old) and not atom(new) and depth < 3
                 and id(new) not in stands and id(old) not in memo):
             pair(new, old, depth + 1)
     for key, fresh in memo.items():
@@ -2957,7 +3100,7 @@ def back(then, memo):
             pair(fresh, table[key][0], 0)
 
     def through(value):
-        if isinstance(value, ATOMS):
+        if atom(value):
             return value
         return (AT, -id(value) if id(value) in memo else stands.get(id(value), id(value)))
     before = {id(one): value for one, value in then[:-1]}
@@ -2968,13 +3111,16 @@ def back(then, memo):
         (one, value), old = after[key], before[key]
         if one is os.environ or isinstance(value, bytes):
             same = value == old
-        elif isinstance(value, dict):
-            same = ({through(name): through(item) for name, item in value.items()}
-                    == {ref(name): ref(item) for name, item in old.items()})
-        elif isinstance(value, list):
-            same = [through(item) for item in value] == [ref(item) for item in old]
-        elif isinstance(value, set):
+        elif isinstance(one, type):
+            same = ([(through(name), through(item)) for name, item in value.items()]
+                    == [(ref(name), ref(item)) for name, item in old.items()])
+        elif isinstance(one, dict):
+            same = ([(through(name), through(item)) for name, item in value]
+                    == [(ref(name), ref(item)) for name, item in old])
+        elif isinstance(one, set):
             same = {through(item) for item in value} == {ref(item) for item in old}
+        elif isinstance(one, WHOLE):
+            same = [through(item) for item in value] == [ref(item) for item in old]
         elif isinstance(one, types.FunctionType):
             same = (through(value[0]), through(value[1])) == (ref(old[0]), ref(old[1]))
         else:
@@ -2988,7 +3134,7 @@ def back(then, memo):
     wrong |= {later.get(id(pictured[key][0]), "") for key in pictured.keys() - table.keys()}
     for key in table.keys() & pictured.keys():
         one, current = pictured[key][0], pictured[key][1]
-        noise = frozenset()
+        noise = None if table[key][5] is READING else (table[key][5] or frozenset())
         if id(one) != key:
             noise = table[key][4] if table[key][3] is not None else None
         if not alike(current, table[key][1], noise, stale):
@@ -2997,8 +3143,13 @@ def back(then, memo):
 
 
 def restore(saved):
-    """PUT BACK EVERY VALUE STATE READ, AND NAME EACH ONE THAT IS NOT BACK. A container, a cell, a default,
-    a class's attributes and the environment are written back whole. A pictured value whose picture has
+    """PUT BACK EVERY VALUE STATE READ, AND NAME EACH ONE THAT IS NOT BACK. A cell, a default, a class's
+    attributes and the environment are written back whole; a container is written back only where its
+    picture moved or it holds something rebuilt, in the order STATE read it, through the implementation its
+    own class inherits from C (`written`) -- so that an `OrderedDict` is rebuilt in the order it kept, and
+    nothing of MODULE's runs to do it. A value rebuilt to put the state back is the value it was rebuilt
+    from: what the sweep has already asked of the one it does not ask again of the other, or a module that
+    hands out a new callable on every call would give it work without end. A pictured value whose picture has
     moved has its members set back in place; one that has moved still is REBUILT from the copy STATE kept
     of it, ONCE -- so every name, item and slot that held it holds the one copy, and a reader asking
     whether two of them are one object is answered as in the run it repeats -- and what holds it and
@@ -3010,9 +3161,15 @@ def restore(saved):
     back."""
     (table, places), memo, lost = saved[-1][1], {}, set()
     moved = [entry for entry in table.values() if picture(entry[0]) != entry[1]]
-    for one, _, held, _, _ in moved:
+    for one, _, held, _, _, _ in moved:
         put(one, held, {})
-    for one, then, _, again, _ in moved:
+    rewritten = {id(entry[0]) for entry in moved if isinstance(entry[0], WHOLE)}
+    for one, value in saved:
+        if id(one) in rewritten:
+            written(one, value, lambda item: item)
+    for one, then, _, again, _, _ in moved:
+        if isinstance(one, WHOLE):
+            continue
         if picture(one) != then:
             fresh = copied(again) if again is not None else None
             if fresh is None:
@@ -3043,6 +3200,10 @@ def restore(saved):
                 memo[key] = fresh
                 grown = True
 
+    for key, fresh in memo.items():
+        if key in called:
+            called.add(id(fresh))
+
     def swap(item):
         return memo.get(id(item), item)
     for one, value in saved:
@@ -3060,19 +3221,9 @@ def restore(saved):
             for name, item in value.items():
                 if vars(one).get(name, EMPTY) is not swap(item):
                     type.__setattr__(one, name, swap(item))
-        elif isinstance(one, dict):
-            dict.clear(one)
-            dict.update(one, {swap(name): swap(item) for name, item in value.items()})
-        elif isinstance(one, list):
-            list.__setitem__(one, slice(None), [swap(item) for item in value])
-        elif isinstance(one, set):
-            set.clear(one)
-            set.update(one, {swap(item) for item in value})
-        elif isinstance(one, collections.deque):
-            collections.deque.clear(one)
-            collections.deque.extend(one, [swap(item) for item in value])
-        elif isinstance(one, bytearray):
-            bytearray.__setitem__(one, slice(None), value)
+        elif isinstance(one, WHOLE):
+            if memo and any(id(part) in memo for part in parts(one, value)):
+                written(one, value, swap)
         elif isinstance(one, types.CellType):
             if value is not EMPTY:
                 one.cell_contents = swap(value)
@@ -3193,7 +3344,7 @@ def held(namespace):
         where, value = stack.pop()
         if isinstance(value, (staticmethod, classmethod)):
             value = value.__func__
-        if isinstance(value, ATOMS) or id(value) in seen or elsewhere(value):
+        if atom(value) or id(value) in seen or elsewhere(value):
             continue
         seen.add(id(value))
         kept.append(value)
@@ -3275,7 +3426,7 @@ def chose(handed):
     stack, seen = list(handed), set()
     while stack:
         one = stack.pop()
-        if isinstance(one, ATOMS) or id(one) in seen or isinstance(one, type) or elsewhere(one):
+        if atom(one) or id(one) in seen or isinstance(one, type) or elsewhere(one):
             continue
         seen.add(id(one))
         if isinstance(one, dict) and id(one) not in made and any(carries(one, r) for r in READ):
@@ -3387,14 +3538,25 @@ def raising(test):
 
 
 forced, tried = [], set()
+REPEATS = 2048        # the most repeats the probe makes: what it cannot ask within them is unproven
 
 
 def attempt(key, label, base, alteration):
     """BASE again, with ALTERATION in force for the whole of it -- AND FROM WHERE BASE STARTED:
     MODULE's state is put back to what it was when BASE first ran, and after the repeat to what it
     was before the repeat, so the natural runs go on from where they were. A value that is not back,
-    before the repeat or after it, is named unproven (`unrestored`)."""
+    before the repeat or after it, is named unproven (`unrestored`).
+
+    AND THE WORK IS BOUNDED. A module that makes a new callable on every call -- a weak reference it
+    keeps, a bound method it hands out -- gives the sweep work it has not done at every call, and each
+    repeat gives it more: there is no fixed point to reach, and an unbounded reading is one that reports
+    nothing at all. So the repeats are counted, and past REPEATS -- five times the most any reader
+    measured here has needed -- the question is not asked and what it would have answered for is
+    unproven, which is what a question nobody asked is."""
     tried.add(key)
+    if len(forced) >= REPEATS:
+        answers.setdefault(label, set()).add("unproven")
+        return
     start = started_from.get(id(base), (None, None))[1]
 
     def replay():
@@ -3612,6 +3774,16 @@ def selected():
     return progress
 
 
+def blanked(picture, noise):
+    """PICTURE with the bytes at NOISE of its own bytes not read, and with none of them read where a
+    reading of the state moves them (READING)."""
+    if len(picture) != 6 or not noise:
+        return picture
+    if noise is READING:
+        return picture[:3] + (None,) + picture[4:]
+    return picture[:3] + (bytes(0 if index in noise else byte for index, byte in enumerate(picture[3])),) + picture[4:]
+
+
 def fingerprint(saved):
     """What STATE read: the identity of every object it read and of every value in each, and the
     picture of every value it pictured. Two states with the same fingerprint are the same state -- and
@@ -3619,15 +3791,18 @@ def fingerprint(saved):
     marks = []
     for one, value in saved:
         if one is PICTURED:
-            inner = tuple((key, entry[1]) for key, entry in value[0].items())
+            inner = tuple((key, blanked(entry[1], entry[5])) for key, entry in value[0].items()
+                          if entry[0] is not vars(module))
         elif isinstance(one, types.FunctionType):
             inner = (id(value[0]), id(value[1]))
         elif isinstance(value, dict):
-            inner = tuple((id(name), id(item)) for name, item in value.items() if kept(one, name, item))
+            inner = tuple((id(name), id(item)) for name, item in value.items())
+        elif isinstance(one, dict):
+            inner = tuple((id(name), id(item)) for name, item in value if kept(one, name, item))
+        elif isinstance(one, set):
+            inner = tuple(sorted(map(id, value)))
         elif isinstance(value, list):
             inner = tuple(map(id, value))
-        elif isinstance(value, set):
-            inner = tuple(sorted(map(id, value)))
         elif isinstance(value, bytes):
             inner = value
         else:
@@ -5633,6 +5808,120 @@ def by_released(text, mode="strict"):
 PYSHAPE
 probe_expect unrestored \
   'decoded=yes unrefusing=by_retold unproven=_gate,_noted,_position,_tally skipped=- | refusing=by_gate,by_noted,by_position,by_released,by_retold,read drive=returned:0 swept=array<builtin_function_or_method>:raised:TypeError/raised:TypeError/raised:TypeError,by_gate:raised:ValueError/returned,by_noted:raised:ValueError/returned,by_position:raised:ValueError/returned,by_released:raised:ValueError/returned,by_retold:raised:ValueError/returned forced=143'
+# AND WHAT ROUND 14 READ BY WHAT A VALUE DERIVES FROM, NOT BY WHAT IT IS. A value was taken for a scalar
+# where it was an instance of one, so a class of the file's own derived from `int`, `float` or `str` -- an
+# `IntEnum` member among them -- was never entered, and the count in its own dictionary or its slot was
+# never read. `by_counted` keeps its count in the dictionary of an `int` subclass, `by_member` on an
+# `IntEnum` member, `by_weighed` in the slot of a `float` subclass: each is read like any other object,
+# found moved, put back, and caught unrefusing on the repeat's first call. `by_chosen` holds an `IntEnum`
+# member and keeps nothing between calls: it is green, because what is read of a value is decided by what
+# it is, and nothing here is refused for the class it derives from.
+probe_stand_in subclassed 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+import enum
+
+
+class _Tally(int):
+    pass
+
+
+_tally = _Tally(0)
+_tally.calls = 0
+
+
+def by_counted(text, mode="strict"):
+    _tally.calls += 1
+    hook = {"strict": one_reading, "loose": None}[mode] if _tally.calls == 1 else one_reading
+    return json.loads(text, object_pairs_hook=hook)
+
+
+class _Mode(enum.IntEnum):
+    STRICT = 1
+    LOOSE = 2
+
+
+_Mode.STRICT.calls = 0
+
+
+def by_member(text, mode="strict"):
+    _Mode.STRICT.calls += 1
+    hook = {"strict": one_reading, "loose": None}[mode] if _Mode.STRICT.calls == 1 else one_reading
+    return json.loads(text, object_pairs_hook=hook)
+
+
+class _Weight(float):
+    __slots__ = ("calls",)
+
+
+_weight = _Weight(1.0)
+_weight.calls = 0
+
+
+def by_weighed(text, mode="strict"):
+    _weight.calls += 1
+    hook = {"strict": one_reading, "loose": None}[mode] if _weight.calls == 1 else one_reading
+    return json.loads(text, object_pairs_hook=hook)
+
+
+def by_chosen(text, mode="strict"):
+    return json.loads(text, object_pairs_hook=one_reading) if _Mode[mode.upper()] else None
+PYSHAPE
+probe_expect subclassed \
+  'decoded=yes unrefusing=by_counted,by_member,by_weighed unproven=- skipped=- | refusing=by_chosen,by_counted,by_member,by_weighed,read drive=returned:0 swept=_Mode.__format__:raised:TypeError/raised:TypeError/raised:TypeError,_Mode.__new__:raised:AttributeError/raised:AttributeError/raised:AttributeError,_Mode._generate_next_value_:raised:AttributeError/raised:AttributeError/raised:AttributeError,_Mode._new_member_:raised:TypeError/raised:TypeError/raised:TypeError,_Mode._value_repr_:raised:TypeError/raised:TypeError/raised:TypeError,by_chosen:raised:ValueError,by_counted:raised:ValueError/returned,by_member:raised:ValueError/returned,by_weighed:raised:ValueError/returned forced=205'
+# AND WHAT A CONTAINER IS, BESIDE WHAT IT HOLDS. Round 14 read a dictionary, a list, a set, a deque and a
+# byte array by their items alone, and put them back by writing those items in again; so an `OrderedDict`
+# whose order a call moves came back in the order the walk happened to read, and a set whose next `pop` a
+# call moved came back with the cursor where the call left it -- and the reading that was meant to catch
+# that certified both back. Here a container is pictured like anything else -- its members, what it refers
+# to, its own bytes, the buffer it exports -- read in the order its own class hands its items out, and
+# written back through that class's own C implementation, so an `OrderedDict`'s order is rebuilt as it was.
+# `by_ordered` moves an `OrderedDict`'s order and is caught unrefusing; `by_popped` keeps its count in
+# where a set's next `pop` starts, which no write-back can put back, and is named `unproven=_popped` --
+# never passed over as back. `by_kept_in_order` appends to a list, adds to a set of strings and appends to
+# a bounded deque on every call and always hooks: the room a container sets aside, the arrangement of a
+# table it has outgrown and the blocks it keeps to reuse are measured on copies of it (`churn`), so it is
+# green. (The rule that a word A READING ITSELF MOVES is not state -- the standard library iterates a
+# `WeakSet` under a guard it keeps in a set of its own, while the probe is reading it -- is measured on a
+# reader appended to the parser rather than here, because a `WeakSet` hands the sweep a new callable at
+# every call and the number of repeats it needs is not the same twice.)
+probe_stand_in arranged 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+import collections
+
+
+_ordered = collections.OrderedDict([("first", 0), ("later", 0)])
+
+
+def by_ordered(text, mode="strict"):
+    first = next(iter(_ordered)) == "first"
+    _ordered.move_to_end("first")
+    hook = {"strict": one_reading, "loose": None}[mode] if first else one_reading
+    return json.loads(text, object_pairs_hook=hook)
+
+
+_popped = set(range(256))
+
+
+def by_popped(text, mode="strict"):
+    hook = {"strict": one_reading, "loose": None}[mode] if _popped.pop() == 0 else one_reading
+    return json.loads(text, object_pairs_hook=hook)
+
+
+_log = [0]
+_seen = {"seen-%d" % number for number in range(64)}
+_history = collections.deque(maxlen=4)
+
+
+def by_kept_in_order(text, mode="strict"):
+    _log.append(len(text))
+    _seen.add(text[:16])
+    _history.append(len(text))
+    return json.loads(text, object_pairs_hook=one_reading)
+PYSHAPE
+probe_expect arranged \
+  'decoded=yes unrefusing=by_ordered unproven=_popped skipped=- | refusing=by_kept_in_order,by_ordered,by_popped,read drive=returned:0 swept=by_kept_in_order:raised:ValueError,by_ordered:raised:ValueError/returned,by_popped:raised:ValueError/returned forced=45'
 # WHAT THIS DOES NOT REACH. Each shape below was written beside a hooked decode and run through this
 # probe, which reported nothing unrefusing, nothing unproven and nothing skipped -- and each one
 # returns without a refusal on a document naming `findings` twice (for the hook that counts names,
@@ -5721,7 +6010,20 @@ probe_expect unrestored \
 #     through `functools.lru_cache`, whose call statistics move on every call and whose wrapper no copy
 #     reproduces -- is named unproven by the path the walk reached it at, because a repeat of its first
 #     call cannot be made to start where that call started. The remedy is state the probe can read and
-#     rebuild: a dictionary the reader fills itself.
+#     rebuild: a dictionary the reader fills itself;
+#   * a correct reader that ROTATES A DEQUE, or pops a set and puts back what it popped. A deque keeps
+#     where its two ends sit and which blocks it has finished with among its own bytes, and a set where
+#     its next `pop` starts; writing back what either holds sets the deque's ends to values of its own and
+#     leaves the set's cursor where the run left it. Neither can be put back, so each is named unproven by
+#     the path the walk reached it at. The cursor is the one of the two a reader can read, and a reader
+#     that pops a set to choose IS the defect this round closes (`by_popped`), so it is read rather than
+#     passed over; the deque's ends no reader can read, and it is the cost of reading a container's own
+#     bytes at all;
+#   * and any reader at all, where the repeats run out. A module that hands the sweep a new callable on
+#     every call -- a `WeakSet` that makes a weak reference per call, a bound method it hands back -- has
+#     no fixed point to reach: the sweep is given work at every call, and every repeat gives it more. The
+#     repeats are bounded (REPEATS), and what the bound cuts off is unproven rather than passed over, so a
+#     reader of that shape is red for what was not asked rather than green for what was not done.
 # And `borrowed` above is a fourth, stated there: a library the parser calls that decodes a
 # repeated name for its own reasons is answered for as the parser, and red.
 # Round 5's other false red, a decoder whose `scan_once` takes its index by keyword only, is green
