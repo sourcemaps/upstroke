@@ -4103,6 +4103,50 @@ it replays twice to equal states.
 Because the recovery adopts, this parent's own observation record never holds the coordinate. The
 registry cites the kill child for it, whose record does.
 
+## `const QUESTION_PAYLOAD_KILL_CHILD: &str =`
+
+The kill child of the question-payload witness below.
+
+## `struct RunDirKilledAt {`
+
+The run directory's production adapter with a kill armed at one coordinate. It works as
+`KillingEffects` does for the effect family: the harness records the phase, and the observation is
+exported before the kill is handed back.
+
+## `fn parked_question_of(fixture: &Fixture) -> crate::ir::Question {`
+
+The question the durable park froze, read back from its `attempt_finished` through
+`rematerialize_question`, in the shape the payload file carries. The operator's command reads that
+shape (`interaction::QuestionRecord`).
+
+## `fn question_payload_kill_child() {`
+
+Writes the parked question's payload through `RunDir.WriteQuestionPayload` under the run
+directory's production adapter, and dies at the funnel's after phase: the file is published and
+nothing after the write runs. The topology driver writes no payload of its own, since every
+production caller reaches this funnel with `NoHooks` (`interaction::write_question`). So the write is
+the child's, at the point `T-FAILED` places it, after the parking settlement is durable. Reaching
+the panic means the kill did not land.
+
+## `fn a_kill_after_a_parked_questions_payload_is_written_is_adopted_and_the_answer_read_from_it_is_ingested()`
+
+Gate 5's strict re-audit, row 86: `RunDir.WriteQuestionPayload`/after had no committed witness. The
+audit's shape was a `settlement_kill_child` arm whose parent reads the payload and replays the fold.
+Review round 3 refused that shape for the adjacent row 85, because it performs no resume. Here the
+run is resumed, and the payload is then used the way the design says it is used.
+
+The prefix is a healthy run with alpha's attempt parked on a question. The child writes that
+question's payload and dies after the write: the log is byte for byte the park, and the payload is
+present (R21) and holds the frozen question, open. The authority's rows are R21 and its action is
+adoption. The next incarnation resumes. Its replay rematerializes the same question under the same
+id (`T-FAILED`'s "never re-decide"), alpha awaits input, and the payload is neither rewritten nor
+removed. The operator's command then answers through the production path, `answer::answer`: it finds
+the question by the adopted file, parses it, and publishes an answer while nothing holds the run.
+The incarnation after that ingests the answer on its first step, once, `via` `event-log`. The
+payload is still as it was written, and the log replays twice to equal states.
+
+As with row 36, this parent never executes the funnel, so the registry cites the kill child.
+
 ## `fn two_lineages_publish_in_lineage_order_and_the_younger_candidate_waits_behind_the_older() {`
 
 Two lineages overlapping on one path, the younger's repair already queued

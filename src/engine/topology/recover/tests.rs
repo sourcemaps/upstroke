@@ -13941,6 +13941,213 @@ fn a_kill_after_the_candidates_ref_is_created_is_adopted_by_the_next_resume_whic
     assert_replays_twice_equal(&fixture, tag);
 }
 
+const QUESTION_PAYLOAD_KILL_CHILD: &str =
+    "engine::topology::recover::tests::question_payload_kill_child";
+
+struct RunDirKilledAt {
+    inner: rundir::HarnessHooks,
+    at: (EffectSiteId, HookPhase),
+}
+
+impl rundir::RunDirHooks for RunDirKilledAt {
+    fn hook(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        let answered = self.inner.hook(site, phase);
+        if (site, phase) == self.at {
+            crate::observations::Exported::new(Arc::clone(self.inner.harness()))
+                .carried(Injection::Kill)
+        } else {
+            answered
+        }
+    }
+
+    fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+        self.inner.durability_ledger()
+    }
+}
+
+fn parked_question_of(fixture: &Fixture) -> crate::ir::Question {
+    let frozen = TopologyFold::parse_log(&fixture.log_bytes())
+        .expect("the log parses")
+        .into_iter()
+        .find_map(|event| match event.body {
+            TopologyEventBody::AttemptFinished { data } => {
+                crate::engine::topology::settle::rematerialize_question(&data).cloned()
+            }
+            _ => None,
+        })
+        .expect("a parking settlement is durable");
+    crate::ir::Question {
+        id: frozen.id,
+        kind: frozen.kind,
+        affected_tasks: vec![TaskId::from("alpha")],
+        context: frozen.context,
+        options: frozen.options,
+    }
+}
+
+#[test]
+#[ignore = "spawned as a subprocess by the question-payload kill witness"]
+fn question_payload_kill_child() {
+    let root = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_ROOT").expect("the parent names the fixture root"),
+    );
+    let fixture = Fixture::adopted_by_a_kill_child(root, plan());
+    let question = parked_question_of(&fixture);
+    let component = crate::util::filename_component(question.id.as_str());
+    let mut hooks = RunDirKilledAt {
+        inner: rundir::HarnessHooks::new(harness()),
+        at: (
+            EffectSiteId::RunDir(RunDirSite::WriteQuestionPayload),
+            HookPhase::After,
+        ),
+    };
+    let written = rundir::write_question_payload(
+        &fixture.public().join("questions"),
+        &component,
+        &crate::interaction::QuestionRecord::open(question),
+        &mut hooks,
+    );
+    panic!(
+        "the kill at `RunDir.WriteQuestionPayload` (after) did not take this process: {:?}",
+        written.map(|()| component)
+    );
+}
+
+#[test]
+fn a_kill_after_a_parked_questions_payload_is_written_is_adopted_and_the_answer_read_from_it_is_ingested()
+ {
+    use crate::topology::effects::{EntryPhase, ResourceRow, ResumeAction};
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child};
+
+    let tag = "kill-after-question-payload";
+    let fixture = Fixture::healthy(tag);
+    append_events(
+        &fixture,
+        &[
+            dispatched_at(&fixture.base_sha),
+            attempt_started_in(&fixture, 1),
+            parked_settlement(1, PARKED_QUESTION),
+        ],
+    );
+    let paths = crate::rundir::RunPaths::with_private_root(
+        &fixture.repo_root,
+        &fixture.started.run_id,
+        &fixture.private_root,
+    );
+    paths.create().expect("the run directories are creatable");
+    let before = fixture.log_bytes();
+    let question = parked_question_of(&fixture);
+    let payload = crate::interaction::answer_path(&paths.questions(), &question.id);
+    assert!(
+        crate::util::read_file_bounded(&payload).is_err(),
+        "{tag}: no payload is planted"
+    );
+
+    let status = run_kill_child(
+        QUESTION_PAYLOAD_KILL_CHILD,
+        &[("UPSTROKE_TEST_KILL_ROOT", fixture.root.as_os_str())],
+    );
+    assert!(
+        died_by_abort(&status),
+        "{tag}: the child did not die by the kill after the payload's write: {status:?}"
+    );
+    let site = EffectSiteId::RunDir(RunDirSite::WriteQuestionPayload);
+    let semantics = site.semantics(EntryPhase::After);
+    assert_eq!(semantics.rows, vec![ResourceRow::R21], "{tag}");
+    assert_eq!(semantics.action, ResumeAction::AdoptPerformed, "{tag}");
+    assert_eq!(
+        fixture.log_bytes(),
+        before,
+        "{tag}: the park is the durable prefix and the kill appended nothing"
+    );
+    let bytes =
+        crate::util::read_file_bounded(&payload).expect("R21: the written payload survives");
+    let record: crate::interaction::QuestionRecord =
+        serde_json::from_slice(&bytes).expect("the payload parses");
+    assert_eq!(
+        record,
+        crate::interaction::QuestionRecord::open(question.clone()),
+        "{tag}: the payload is the question the settlement froze, open"
+    );
+
+    let (_, handle) = resume_as(
+        &fixture,
+        RESUMER,
+        &runtime_holding_the_record(),
+        &mut HarnessTopologyHooks::new(harness()),
+    )
+    .expect("the next incarnation resumes the parked run");
+    drop(handle);
+    let fold = replayed(&fixture);
+    assert_eq!(
+        fold.task_state(ALPHA),
+        Some(TaskState::AwaitingInput),
+        "{tag}"
+    );
+    assert_eq!(
+        fold.open_questions()
+            .and_then(|open| open.get(&question.id))
+            .map(|held| (held.question.id.clone(), held.question.options.clone())),
+        Some((question.id.clone(), question.options.clone())),
+        "{tag}: the replay rematerializes the question the payload holds, with its id"
+    );
+    assert_eq!(
+        crate::util::read_file_bounded(&payload).expect("the payload"),
+        bytes,
+        "{tag}: the resume adopts the payload: it is neither rewritten nor removed"
+    );
+
+    let answered = crate::answer::answer(
+        &fixture.repo_root,
+        PARKED_QUESTION,
+        crate::answer::Reply::Option(1),
+    )
+    .expect("the operator's command answers from the adopted payload");
+    assert_eq!(answered.question_id, PARKED_QUESTION, "{tag}");
+    assert!(!answered.run_is_live, "{tag}: nothing holds the run's lock");
+
+    let seams = DriveSeams {
+        answers_from_run_dir: true,
+        ..DriveSeams::default()
+    };
+    let runner = driven_runner(&seams);
+    let driven = drive_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &seams,
+        1,
+        &runner,
+        &mut HarnessTopologyHooks::new(harness()),
+    );
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Answered {
+                key: ALPHA,
+                declined: false,
+                ..
+            }))
+        ),
+        "{tag}: the next incarnation's first step ingests the answer: {:?}",
+        driven
+            .progress
+            .iter()
+            .map(progress_shape)
+            .collect::<Vec<_>>()
+    );
+    let answers = answers_of(&driven.log, ALPHA);
+    assert_eq!(answers.len(), 1, "{tag}: one `question_answered`");
+    assert_eq!(answers[0].question, question.id, "{tag}");
+    assert_eq!(answers[0].via, "event-log", "{tag}");
+    assert_eq!(
+        crate::util::read_file_bounded(&payload).expect("the payload"),
+        bytes,
+        "{tag}: the payload is left as it was written"
+    );
+    assert_replays_twice_equal(&fixture, tag);
+}
+
 /// Beta's candidate queued at the base, unmerged, so that a second lineage
 /// can be rooted at beta.
 fn plant_queued_beta(fixture: &Fixture) -> crate::topology::events::CandidateRef {
