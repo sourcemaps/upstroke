@@ -17093,17 +17093,17 @@ const FINALIZATION_KILL_CHILD: &str = "engine::topology::recover::tests::finaliz
 #[ignore = "spawned as a subprocess by the finalization kill tests"]
 fn finalization_kill_child() {
     let repo_root = PathBuf::from(
-        std::env::var("UPSTROKE_TEST_KILL_REPO").expect("the parent names the repository"),
+        std::env::var_os("UPSTROKE_TEST_KILL_REPO").expect("the parent names the repository"),
     );
     let git_dir = PathBuf::from(
-        std::env::var("UPSTROKE_TEST_KILL_GITDIR").expect("the parent names the git dir"),
+        std::env::var_os("UPSTROKE_TEST_KILL_GITDIR").expect("the parent names the git dir"),
     );
     let cell: (EffectSiteId, HookPhase) = serde_json::from_str(
         &std::env::var("UPSTROKE_TEST_KILL_SITE").expect("the parent names the cell"),
     )
     .expect("the cell the parent names parses");
     let report_path = PathBuf::from(
-        std::env::var("UPSTROKE_TEST_KILL_REPORT").expect("the parent names the report"),
+        std::env::var_os("UPSTROKE_TEST_KILL_REPORT").expect("the parent names the report"),
     );
     let repo_key = RepoKey::v1(&std::fs::canonicalize(&git_dir).expect("the git dir exists"));
     let harness = harness();
