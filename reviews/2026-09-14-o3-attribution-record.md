@@ -958,10 +958,15 @@ where the execution is:
   (`PR290-R1-APPEND-DOES-NOT-ENFORCE-THE-WRITE-INVARIANT`, `correctness`, `pr: 290`,
   `reviewed_sha` `e03f7eae`, `location` `src/events/mod.rs:530`, `introduced_by_feature`,
   `first_bad` `c4362105`, `deferred`), in its own findings-only commit, the last before the push,
-  with the body's ledger row. Why filed: the contract places enforcement at the single writer and
-  the reader's rule and rejects validating the record on the log or fold layer (*"Fold-validated
-  convictions … Enforcement belongs to the single writer and to projections' read rule"*). Why
-  harmless at this head, each by the grep the file names: no path assigns the two fields after
+  with the body's ledger row. Why filed: the round-1 brief's ruling, "File, do not fix". What
+  the contract says, only for what it says: it rejects fold-validated convictions (*"Refusing a
+  citation-less conviction at the fold makes an informational record quasi-transactional and puts
+  gate weight on a record the gates deliberately ignore"*) and places enforcement thus
+  (*"Enforcement belongs to the single writer and to projections' read rule"*); whether an
+  append-side check is compatible with that is an open reading for the first production writer's
+  slice. Round 2 corrected this entry, the file and the body, which had attributed a broader "log
+  or fold layer" prohibition to the contract — the round-1 brief's wording (round-2 record 2,
+  contract F3; §17). Why harmless at this head, each by the grep the file names: no path assigns the two fields after
   construction (`git grep -n -E '\.(attribution|citation)\s*=[^=]' -- src` matches nothing);
   `Some(QuestionAttribution::DesignDefect)` occurs in the constructors, the derivation, the answer
   writer's check and test literals only; the two legacy emitters write `None, None`; the topology

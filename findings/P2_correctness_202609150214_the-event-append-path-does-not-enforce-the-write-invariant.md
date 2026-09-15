@@ -29,12 +29,19 @@ and not the write rule. Filed from the contract lens's F1 on PR #290's round-1 r
 `an_uncited_conviction_cannot_be_appended` beside `defect()` in `src/events/log/tests.rs`, not
 executed in that review and not added here.
 
-**Why it is filed and not fixed.** The contract places enforcement at the single writer and at the
-reader's derived rule, and rejects validating the record on the log or fold layer, in its own
-words: *"**Fold-validated convictions.** Refusing a citation-less conviction at the fold makes an
-informational record quasi-transactional and puts gate weight on a record the gates deliberately
-ignore. Enforcement belongs to the single writer and to projections' read rule."* The append path
-is that layer's writer, not the record's.
+**Why it is filed and not fixed.** The orchestrator's brief for PR #290's round-1 repair
+(`/home/ubuntu/orch-o3-attribution/repair-290-r1.md`, "File, do not fix") ruled that this pull
+request files the gap and implements no append-side check. What the contract itself says, verbatim
+and only for what it says: it rejects **fold**-validated convictions — *"**Fold-validated
+convictions.** Refusing a citation-less conviction at the fold makes an informational record
+quasi-transactional and puts gate weight on a record the gates deliberately ignore."* — and it
+places enforcement thus: *"Enforcement belongs to the single writer and to projections' read
+rule."* Neither sentence speaks of the event-append path. Whether a check at
+`EventLog::append_topology`, or in the record's own serialisation, is part of "the single writer"
+or is the fold-validation the contract rejects is an open reading, left to the slice that builds
+the first production writer of the record. An earlier version of this file said the contract
+"rejects validating the record on the log or fold layer"; that was the round-1 brief's wording,
+not the contract's (the round-2 record and contract lenses, finding 2 and F3).
 
 **Reachability at the reviewed head.** No production path mutates the two fields after
 construction: `git grep -n -E '\.(attribution|citation)\s*=[^=]' -- src` matches nothing, tests
@@ -51,7 +58,7 @@ can be written only by code that sets a public field on purpose, and read only a
 Build the first production writer of the attributed record — the schema-4 answer-ingest's emitter
 — so that it constructs through `DesignDefect::discovered` and `DesignDefect::convicted` and
 never through the struct literal, and prove it with a test that appends a record built each way
-and reads the log back; if a future reviewer wants the append path itself to refuse the shape, that
-is a change to the contract's placement of enforcement (the rejection clause above) and needs the
-decision's owner, not a guard in `EventLog`. Until then the fields stay public because the two
-legacy emitters and the serialisation fixtures construct the literal form.
+and reads the log back. Whether the append path should itself refuse the shape is the open reading
+above, to be taken by that slice with the contract in hand and recorded in its record as a reading
+with the two sentences quoted — not decided here. Until then the fields stay public because the
+two legacy emitters and the serialisation fixtures construct the literal form.
