@@ -37,7 +37,7 @@ directory; `<sha>` is the full sha the measurement was taken at.
 | 4 the internals notes, held both ways by `test-internals-notes.sh` | **done** — §9; `test-internals-notes.sh` and `test-docs-consistency.sh` green from the worktree root |
 | 5 the design (O2): §5, §12, §23.1, each citing this record | **done** — §10; `test-docs-consistency.sh` green; `design/15`, `README.md`, `MAINTAINING.md` and `design/25` untouched |
 | 6 the findings-ledger file | **done** — §11; `test-pr-policy.sh` and `test-pr-ledger-evidence.sh` green, the row validated by both validators |
-| 7 the ten gates on this box, the guest, this record, the draft pull request | **in progress** — the ten gates green at `fcfedc75`, the code-complete head (§12); the guest run blocked on the guest's disk, question 1 to the orchestrator filed (§13); the draft pull request not yet opened |
+| 7 the ten gates on this box, the guest, this record, the draft pull request | **done on this box** — the ten gates green at `fcfedc75`, the code-complete head (§12), and run again at the head the body records, which is the body's to report; the guest evidence is CI's Windows leg at the pushed head, by the orchestrator's ruling (§13); the draft pull request follows the push of this record's head, and its number lands in the finding file's `pr:` field by the second push that ruling authorises (§11) |
 
 ## 1. What this pull request is, from the contract
 
@@ -601,9 +601,9 @@ presumption's defect, no way to tell a discovery from a conviction, no writer fo
 this pull request changes; it stays open because the emitter and the schema-4 answer-ingest are
 still owed (§14).
 
-`pr: 290` is the next number after the latest pull request (#289) and issue (#121) at the time of
-writing; it is re-checked immediately before the push, and if the draft opens under another number
-the field is corrected in the pull request's first repair push — this pull request pushes once.
+The `pr:` field is blank until the pull request exists — the orchestrator's answer to question 1
+rules out predicting the number — and is set to the number `gh pr create` reports in one
+`docs(findings):` commit, the second push that answer authorises for that one-line change.
 
 The pull request body's ledger row, validated with the finding staged
 (`phase6/ledger-row.txt`; `phase6/draft-body-for-validation.md` through `validate-pr-body.sh`,
@@ -651,27 +651,55 @@ report, under `<that head>/gates/` in the evidence directory.
 
 ## 13. The Windows guest
 
-**Not run yet, and why.** The persistent guest (`windowsguest`, `ssh` reachable) had no room for
-a tree and a target of this pull request's own: `C:` had 1.69 GB free at 2026-09-14 23:52Z,
-0.51 GB at 00:2xZ and 0.50 GB at 00:4xZ, `D:`, `E:` and `F:` 0 bytes, with two `cargo.exe` and up
-to five `upstroke-*` test binaries of other sessions running throughout. What holds the disk is
-other sessions' trees and targets — `C:\upstroke\target` 6.7 GB (the tree the self-hosted CI
-runner uses), `C:\upstroke-pr10\target` 15.1 GB, `C:\upstroke-g5\target` 15.2 GB (the G5
-session's), and `upstroke-fix-target`, `upstroke-redo-target`, `upstroke-verify-target`,
-`pr9r3-target`, `pr8-fix8-target`, `cargo-target` beside a dozen `pr*` and `wingate-*` trees —
-none of it this session's to remove, and a build of this crate's test binary needs several GB. A
-tree of this pull request's was therefore not created there, and nothing of another session's was
-touched. Question 1 to the orchestrator
-(`/home/ubuntu/orch-o3-attribution/questions/impl_o3-attribution-1.md`) states the options: room
-freed and the run made in `C:\upstroke-o3` (the default if room appears); a run inside the G5
-session's tree with its owner's word; or CI's `test (winguest)` leg at the pushed head as the
-guest evidence. This section is rewritten with the outcome before the push.
+**The local guest run was not made.** The orchestrator's answer to question 1
+(`/home/ubuntu/orch-o3-attribution/answers/impl_o3-attribution-1.md`, 2026-09-15 ~01:00Z) rules
+option C: CI's `test (winguest)` leg at the pushed head is this pull request's guest evidence,
+recorded by the orchestrator in the body at merge time; nothing on the guest that is not this
+session's is created, deleted, moved or written, and no space is freed — freeing it means deleting
+other sessions' data, which the orchestrator escalated to the owner. The one exception the answer
+allows, decided by a measurement: immediately before the push `C:` is measured once more, read-only,
+the output saved under the evidence directory for the pushed head, and only if it then has 12 GB or
+more free is a tree of this pull request's own (`C:\upstroke-o3`, its own target, from a bundle of
+the head) made and the path-shaped tests run there. No sentence in this record, the body, the notes
+or the finding file claims a guest run was made.
 
-**What is path-shaped in this pull request**, and so owed a Windows run: the four answer-file
-tests in `src/interaction.rs` (an answer file under a temporary directory, its staging and
-rename), the two legacy-emitter tests in `src/engine/tests.rs` (a run directory and a git
-repository), and `answer::tests` unchanged but through the changed writer. The vocabulary, the
-decoder fixture, the fold test and the render arm are path-free.
+**Why there is no room**, each figure from a saved file under the evidence directory:
+
+- `orch/guest-disk-20260915T005753Z.txt` (the orchestrator's read-only measurement, 00:57:53Z):
+  `C:` 0.46 GB free, 118.46 GB used; `D:`, `E:` and `F:` 0 GB free; two `cargo` processes (started
+  23:56:02 and 00:03:43) and three `upstroke-8bdbea19d48fcc33` test binaries (23:56:02, 00:03:44,
+  00:08:54), none of them ours.
+- `guest/guest-listing-20260915T010021Z.txt` (this session's read-only listing, 01:00:32Z, nothing
+  created or written on the guest): `C:` 498,536,448 bytes free against 127,184,461,824 used; `D:`
+  6,010,140,672 used and 0 free; `E:` 789,645,312 and 0; `F:` 387,072 and 0; two `cargo.exe` and
+  eight `upstroke-8bdbea19d48fcc33` processes running. The build targets on `C:`, none this
+  session's: `C:\upstroke-pr10\target` 15,122,137,284 bytes, `C:\upstroke-g5\target`
+  15,160,180,955 (the G5 session's), `C:\cargo-target` 9,104,151,320, `C:\upstroke\target`
+  6,730,667,875, `C:\upstroke-fix-target` 4,417,538,490, `C:\upstroke-redo-target` 3,921,409,879,
+  `C:\pr9r3-target` 3,549,349,514, `C:\pr8-fix8-target` 3,530,234,008,
+  `C:\upstroke-verify-target` 2,851,813,521 — 64,387,482,846 bytes across those nine, beside
+  `C:\actions-runner` (the self-hosted CI runner) and the `pr*`, `upstroke-*` and `wingate-*` trees
+  the listing names.
+- `guest/guest-disk-and-tasks-captured-20260915T0033Z-to-0036Z.txt` (this session's earlier
+  read-only capture): `C:` 498,974,720 bytes free, five `upstroke-8bdbea19d48fcc33` processes and
+  two `cargo.exe`.
+
+A build of this crate's test binary needs several GB (the nine targets above are between 2.85 GB
+and 15.2 GB each), and filling the last half-gigabyte would also break the CI runner's Windows leg
+for every open pull request; so no tree of this pull request's was made on the guest.
+
+**What is path-shaped in this pull request**, and so is what CI's Windows leg will exercise:
+`interaction::tests::an_attributed_answer_file_is_read_back_with_its_ruling`,
+`interaction::tests::an_unattributed_answer_file_keeps_the_bytes_the_writer_always_wrote`,
+`interaction::tests::the_writer_refuses_a_conviction_without_a_citation` and
+`interaction::tests::a_conviction_without_a_citation_in_the_file_reads_as_a_discovery` (an answer
+file under a temporary directory, its staging and its rename);
+`engine::tests::the_legacy_ingest_writes_an_unclassified_design_defect` and
+`engine::tests::the_resume_repair_writes_an_unclassified_design_defect` (a run directory and a git
+repository); and `answer::tests::*`, unchanged but through the changed writer. The vocabulary, the
+decoder fixture, the fold test and the render arm are path-free. All of these pass on Linux at
+`fcfedc75` (§12). If the CI leg fails with `No space left on device`, that is the guest's condition
+and the orchestrator's to handle, not a defect of this change.
 
 ## 14. What is not claimed
 
