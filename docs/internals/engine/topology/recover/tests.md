@@ -4132,7 +4132,9 @@ message, so this refuses any unreachable commit whose subject is not the snapsho
 ## `fn registered_with_git(`
 
 Whether Git lists the worktree among the repository's registered worktrees; the settlement
-witnesses below assert it before and after, beside the directory itself.
+witnesses below assert it before and after, beside the directory itself. A registration is compared
+by its name and its parent directory, which outlives the removed worktree: `util::same_path` on the
+full paths panics when neither resolves.
 
 ## `fn a_kill_before_the_candidate_commit_is_written_is_settled_interrupted_and_the_next_generation_writes_it()`
 

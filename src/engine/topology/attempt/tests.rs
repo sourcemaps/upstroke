@@ -1313,7 +1313,19 @@ fn registered_with_git(run: &Run, worktree: &Path) -> bool {
         .worktree_records()
         .expect("worktree records")
         .iter()
-        .any(|record| crate::util::same_path(record.path(), worktree))
+        .any(|record| listed_as(record.path(), worktree))
+}
+
+/// Whether a registration's path names `worktree`, compared by name and by the
+/// parent directory, which outlives the worktree: `util::same_path` resolves
+/// both paths and cannot compare a removed worktree with a stale registration
+/// of it.
+fn listed_as(listed: &Path, worktree: &Path) -> bool {
+    listed.file_name() == worktree.file_name()
+        && match (listed.parent(), worktree.parent()) {
+            (Some(listed), Some(wanted)) => crate::util::same_path(listed, wanted),
+            _ => false,
+        }
 }
 
 #[test]

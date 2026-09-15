@@ -584,6 +584,13 @@ Whether Git lists the worktree among the repository's registered worktrees. A se
 removes only the intent, or the directory by hand, leaves the registration behind, so the
 settlement witnesses assert the directory and the registration separately.
 
+## `fn listed_as(listed: &Path, worktree: &Path) -> bool {`
+
+A registration names the worktree when its name matches and its parent directory resolves to the
+worktree's. The parent outlives a removed worktree; `util::same_path` on the two full paths panics
+when neither resolves, which is exactly the state of a worktree removed by hand whose registration
+stayed.
+
 ## `fn kill_after_the_stage_before_the_tree_leaves_index_referenced_objects_then_scrub_releases_them() {`
 
 Rows 48 and 49 of Gate 5's strict re-audit, one durable prefix killed at both of its coordinates,

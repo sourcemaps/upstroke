@@ -14036,7 +14036,13 @@ fn registered_with_git(
         .worktree_records()
         .expect("worktree records")
         .iter()
-        .any(|record| crate::util::same_path(record.path(), worktree))
+        .any(|record| {
+            record.path().file_name() == worktree.file_name()
+                && match (record.path().parent(), worktree.parent()) {
+                    (Some(listed), Some(wanted)) => crate::util::same_path(listed, wanted),
+                    _ => false,
+                }
+        })
 }
 
 #[test]
