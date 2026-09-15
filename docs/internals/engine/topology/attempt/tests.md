@@ -601,6 +601,12 @@ worktree with force through the scrub funnel, which releases the blob to Git (R2
 is gone and Git no longer lists it (`registered_with_git`). Each prefix replays twice to equal
 states. The kill child's record holds both coordinates.
 
+Each prefix's kill child is launched through `kill_child_and_adopt_in_a_scratch_tree`: its handoff
+directory and everything it makes in its temporary directory lie in a `rundir::scratch_tree` tree
+the iteration holds, reclaimed when the iteration ends and when it unwinds (#292's review round 7;
+before, `kill_dir`'s handoff directory and the child's neutral Git configuration stayed in the
+temporary directory).
+
 ## `fn kill_after_the_snapshot_intent_before_its_worktree_is_reclaimed_by_the_settlement() {`
 
 Rows 24 and 25 of Gate 5's strict re-audit, one durable prefix killed at the snapshot intent's
@@ -609,6 +615,10 @@ registered, and the ephemeral commit written before it is unreferenced; the task
 registered. The interrupted settlement reclaims the intent with the task's, scrubs the task
 worktree (gone, and no longer registered with Git), leaves the commit to Git, appends the
 interruption and returns the task to `Pending`. Each prefix replays twice to equal states.
+
+Each prefix's kill child is launched through `kill_child_and_adopt_in_a_scratch_tree`, so its
+handoff directory and everything it makes in its temporary directory lie in a tree the iteration
+holds and reclaims however it ends (#292's review round 7).
 
 ## `fn kill_after_capture_leaves_index_referenced_objects_then_scrub_releases_them() {`
 
@@ -676,6 +686,10 @@ directory gone and its Git registration with it), leaves the unreferenced commit
 `attempt_interrupted` and returns the task to `Pending`, and the log replays twice to equal
 states. The worktree assertions are review round 2's: a settlement that removed only the intent
 passed every assertion before them.
+
+The kill child is launched through `kill_child_and_adopt_in_a_scratch_tree`, so its handoff
+directory and everything it makes in its temporary directory lie in a tree the witness holds and
+reclaims when it returns and when it unwinds (#292's review round 7).
 
 ## `fn kill_after_snapshot_add_reclaims_snapshot_and_releases_its_commit() {`
 

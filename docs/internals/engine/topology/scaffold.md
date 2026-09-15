@@ -686,6 +686,33 @@ reaped at the bound, and the test fails naming the site and the child, not
 at whatever outer timeout would otherwise end the suite (#292's review round
 2, `standards/12`'s bounded waits).
 
+The launch and the checks are `launch_the_kill_child_and_adopt`'s, which this
+calls with no environment beyond the directory and the site.
+
+## `pub(super) fn kill_child_and_adopt_in_a_scratch_tree(`
+
+`kill_child_and_adopt` over a directory the witness owns, for a witness that
+must leave nothing behind (#292's review round 7). It acquires a
+`rundir::scratch_tree` tree in the temporary directory, hands it to the child
+as the handoff directory **and** as its temporary directory (`TMPDIR`, and the
+`TMP` and `TEMP` Windows reads), and returns the guard with the adopted run.
+So everything the child makes in its temporary directory lies inside the tree:
+the fixture it builds and hands off, and the neutral Git configuration its Git
+calls write once per process (`fixture::neutral_git_config`), which the child's
+abort would otherwise leave behind. The witness binds the guard before the run
+(`let (_handoff, mut run) = ...`), so the run drops first, removing the fixture
+it adopted, and the guard then reclaims the tree, when the witness returns and
+when it unwinds. A reclaim that fails on the return fails the test naming the
+root; one that fails while the test unwinds is reported without a second panic
+(`rundir::scratch_tree`'s own tests witness both). `kill_dir` and
+`kill_child_and_adopt`, which the older kill witnesses use, are left as they
+were: their handoff directory is named for the process and nothing removes it.
+
+## `fn launch_the_kill_child_and_adopt(`
+
+The launch, the abort check and the adoption both entry points share: the child
+gets the handoff directory and the site, and whatever `temporary` adds.
+
 ## `pub(super) fn kill_child_environment() -> (PathBuf, String) {`
 
 The directory and site a kill child is given.

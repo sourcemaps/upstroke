@@ -202,6 +202,15 @@ the parent adopted from the child's log. The recovery holds neither the log
 nor the fold and appends nothing, so what this pins is that the log it
 recovered over still replays to the state the recovery was handed.
 
+Each prefix's kill child is launched through
+`kill_child_and_adopt_in_a_scratch_tree`, so its handoff directory and
+everything the child makes in its temporary directory lie in a
+`rundir::scratch_tree` tree the iteration holds, reclaimed when the iteration
+ends and when it unwinds (#292's review round 7). Before, every iteration left
+an `upstroke-topo-killdispatch-<pid>-<n>` handoff directory and the child's
+neutral Git configuration in the temporary directory, the two prefixes this
+test had before #292 included.
+
 ## `fn kill_after_dispatch_recreates_worktree_without_spend()` › `let existed = dispatched.worktree.is_dir();`
 
 What the child actually left, which is the difference between the

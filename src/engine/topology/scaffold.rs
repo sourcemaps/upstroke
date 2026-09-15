@@ -1554,14 +1554,43 @@ pub(super) fn kill_dir(tag: &str) -> PathBuf {
 }
 
 pub(super) fn kill_child_and_adopt(test: &str, dir: &Path, site: &str) -> Run {
-    let Some(status) = run_kill_child_within(
+    launch_the_kill_child_and_adopt(test, dir, site, &[])
+}
+
+pub(super) fn kill_child_and_adopt_in_a_scratch_tree(
+    test: &str,
+    tag: &str,
+    site: &str,
+) -> (crate::rundir::scratch_tree::ScratchTree, Run) {
+    let tree = crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), tag).unwrap_or_else(
+        |refusal| panic!("`{site}`: a scratch tree for the kill child: {refusal:?}"),
+    );
+    let temporary = tree.path().as_os_str();
+    let run = launch_the_kill_child_and_adopt(
         test,
+        tree.path(),
+        site,
         &[
-            ("UPSTROKE_TEST_KILL_DIR", dir.as_os_str()),
-            ("UPSTROKE_TEST_KILL_SITE", std::ffi::OsStr::new(site)),
+            ("TMPDIR", temporary),
+            ("TMP", temporary),
+            ("TEMP", temporary),
         ],
-        KILL_CHILD_BOUND,
-    ) else {
+    );
+    (tree, run)
+}
+
+fn launch_the_kill_child_and_adopt(
+    test: &str,
+    dir: &Path,
+    site: &str,
+    temporary: &[(&str, &std::ffi::OsStr)],
+) -> Run {
+    let mut env = vec![
+        ("UPSTROKE_TEST_KILL_DIR", dir.as_os_str()),
+        ("UPSTROKE_TEST_KILL_SITE", std::ffi::OsStr::new(site)),
+    ];
+    env.extend_from_slice(temporary);
+    let Some(status) = run_kill_child_within(test, &env, KILL_CHILD_BOUND) else {
         panic!(
             "`{site}`: the kill child `{test}` did not end within {KILL_CHILD_BOUND:?}, and was \
              killed and reaped"

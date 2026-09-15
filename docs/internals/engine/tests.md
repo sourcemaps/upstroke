@@ -2524,17 +2524,30 @@ reported on stderr beside the failure, without a second panic (`rundir::scratch_
 witness both). Before #292's review round 6 they were `upstroke-engine-<tag>-<pid>` and its
 `-home` in the temporary directory, which nothing removed.
 
+The kill child is given the tree as its temporary directory too (`TMPDIR`, and the `TMP` and
+`TEMP` Windows reads), so the pools file `options` makes it through `no_pools`, named for the
+child's process, lies inside the tree (#292's review round 7: it was
+`upstroke-engine-nopools-<pid>` in the temporary directory, which the child's abort left there).
+
 ## `fn question_payload(repo: &Path, run_id: &str, record: &QuestionRecord) -> PathBuf {`
 
 Where the question's payload lives.
 
-## `fn resume_parked(repo: &Path, run_id: &str, record: &QuestionRecord, tag: &str) {`
+## `fn resume_options_in(`
+
+`resume_options`, with its empty pools file written in the witness's tree instead of through
+`no_pools`, which makes one per test process in the temporary directory and which nothing removes.
+The payload witnesses and the ambient-join witness resume through this, so a run of them alone
+leaves nothing in the temporary directory (#292's review round 7).
+
+## `fn resume_parked(`
 
 The tabled recovery: `resume_harness_inner`, the legacy resume, whose question rewrite
 (`resume.rs`, every record of the replayed state written through `interaction::write_question`) is
 the production payload writer's recovery. With no answer the run parks again, the payload holds
 exactly the record the settlement recorded, the report names that one question, and the resumed
-state and report equal a replay of the log on each of two loads.
+state and report equal a replay of the log on each of two loads. It resumes with
+`resume_options_in` over the witness's tree.
 
 ## `fn a_kill_at_the_question_payload_write_is_recovered_by_the_resume(`
 
@@ -2546,7 +2559,8 @@ phase, leaving the payload exactly where the authority's rows put R21 (absent be
 present after it). The legacy resume then writes or adopts it: after the after-phase kill, its
 rewrite is byte-identical to what the killed write left. It appends after the durable prefix, and
 its state replays equal on two loads. With the rewrite made to clear each record's options (the
-lens's mutation), both witnesses fail on the payload's equality with the recorded question.
+lens's mutation), both witnesses fail on the payload's equality with the recorded question. The
+second child is given the witness's tree as its temporary directory, as the first is.
 
 ## `struct CreationsRecorded {`
 
@@ -2562,3 +2576,4 @@ adapter above with the point armed. The facade refuses with the injected error a
 fired. Nothing the continuation does happened: no process was created (no `child_created`
 callback), the runner ran nothing, the log's bytes are unchanged, the question's payload was not
 written, and nothing holds the run lock. The next resume converges as `resume_parked` requires.
+Both resumes run with `resume_options_in` over the witness's tree.

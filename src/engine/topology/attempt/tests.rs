@@ -6,7 +6,8 @@ use super::*;
 use crate::engine::topology::dispatch::DispatchKind;
 use crate::engine::topology::identity::{ReservationKind, Reservations};
 use crate::engine::topology::scaffold::{
-    AGENT, ALPHA, RETAINED_SESSION, Run, kill_child_and_adopt, kill_child_environment, kill_dir,
+    AGENT, ALPHA, RETAINED_SESSION, Run, kill_child_and_adopt,
+    kill_child_and_adopt_in_a_scratch_tree, kill_child_environment, kill_dir,
 };
 use crate::engine::topology::settle::{self, ManagedWorktrees, RetryOutcome, RetryRequest};
 use crate::topology::effects::{
@@ -1331,8 +1332,8 @@ fn listed_as(listed: &Path, worktree: &Path) -> bool {
 #[test]
 fn kill_after_the_stage_before_the_tree_leaves_index_referenced_objects_then_scrub_releases_them() {
     for site in ["after_stage", "before_write_tree"] {
-        let dir = kill_dir(&format!("kill-{site}"));
-        let mut run = kill_child_and_adopt(CHILD, &dir, site);
+        let (_handoff, mut run) =
+            kill_child_and_adopt_in_a_scratch_tree(CHILD, &format!("kill-{site}"), site);
         let dispatched = adopted_generation(&run);
         let mut process = Process::new();
 
@@ -1398,8 +1399,8 @@ fn kill_after_the_stage_before_the_tree_leaves_index_referenced_objects_then_scr
 #[test]
 fn kill_after_the_snapshot_intent_before_its_worktree_is_reclaimed_by_the_settlement() {
     for site in ["after_snapshot_intent", "before_snapshot_add"] {
-        let dir = kill_dir(&format!("kill-{site}"));
-        let mut run = kill_child_and_adopt(CHILD, &dir, site);
+        let (_handoff, mut run) =
+            kill_child_and_adopt_in_a_scratch_tree(CHILD, &format!("kill-{site}"), site);
         let dispatched = adopted_generation(&run);
         let mut process = Process::new();
 
@@ -1563,8 +1564,8 @@ fn kill_at_snapshot_commit_id_unread_point_leaves_gc_owned_object() {
 #[test]
 fn a_kill_before_the_snapshot_commits_id_is_read_is_settled_interrupted_and_leaves_the_commit_to_git()
  {
-    let dir = kill_dir("kill-id-unread-settled");
-    let mut run = kill_child_and_adopt(CHILD, &dir, "id_unread");
+    let (_handoff, mut run) =
+        kill_child_and_adopt_in_a_scratch_tree(CHILD, "kill-id-unread-settled", "id_unread");
     let dispatched = adopted_generation(&run);
     let mut process = Process::new();
 

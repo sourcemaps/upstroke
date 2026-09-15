@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::engine::topology::scaffold::{
-    ALPHA, BETA, OUTCOME, Run, kill_child_and_adopt, kill_child_environment, kill_dir,
+    ALPHA, BETA, OUTCOME, Run, kill_child_and_adopt, kill_child_and_adopt_in_a_scratch_tree,
+    kill_child_environment, kill_dir,
 };
 use crate::topology::effects::{
     EffectSiteId, HookPhase, Injection, ObjectResidue, ObjectSite, RefSite, ResidueElement,
@@ -346,10 +347,9 @@ fn dispatch_kill_child() {
 #[test]
 fn kill_after_dispatch_recreates_worktree_without_spend() {
     for site in ["before_intent", "after_intent", "after_add"] {
-        let dir = kill_dir("killdispatch");
-        let mut run = kill_child_and_adopt(
+        let (_handoff, mut run) = kill_child_and_adopt_in_a_scratch_tree(
             "engine::topology::dispatch::tests::dispatch_kill_child",
-            &dir,
+            "killdispatch",
             site,
         );
 

@@ -9176,9 +9176,15 @@ fn a_run_killed_once_its_parking_settlement_is_durable(
     git_in(&repo, &["config", "user.email", "test@upstroke.local"]);
     git_in(&repo, &["config", "user.name", "upstroke tests"]);
     seed(&repo, ASKING_PLAN, Some(PARKING_CONFIG));
+    let temporary = tree.path().as_os_str();
     let Some(killed) = crate::workspace_manager::fixture::run_kill_child_within(
         PARKING_SETTLEMENT_KILL_CHILD,
-        &[("UPSTROKE_CRASH_REPO", repo.as_os_str())],
+        &[
+            ("UPSTROKE_CRASH_REPO", repo.as_os_str()),
+            ("TMPDIR", temporary),
+            ("TMP", temporary),
+            ("TEMP", temporary),
+        ],
         KILL_CHILD_BOUND,
     ) else {
         panic!(
@@ -9225,10 +9231,32 @@ fn question_payload(repo: &Path, run_id: &str, record: &QuestionRecord) -> PathB
     ))
 }
 
-fn resume_parked(repo: &Path, run_id: &str, record: &QuestionRecord, tag: &str) {
+fn resume_options_in(
+    tree: &rundir::scratch_tree::ScratchTree,
+    repo: &Path,
+    run_id: &str,
+) -> ResumeOptions {
+    let pools = tree.path().join("pools.toml");
+    fs::write(&pools, "# no pools\n").expect("the witness's own empty pools file");
+    let mut opts = ResumeOptions::new(run_id.to_owned(), repo.to_path_buf());
+    opts.pools_path = Some(pools);
+    opts.attempt_timeout = Duration::from_secs(60);
+    opts.defer_backoff = Duration::ZERO;
+    opts.wait_on_block = Some(Duration::ZERO);
+    opts.private_root = Some(private_root_for(repo));
+    opts
+}
+
+fn resume_parked(
+    tree: &rundir::scratch_tree::ScratchTree,
+    repo: &Path,
+    run_id: &str,
+    record: &QuestionRecord,
+    tag: &str,
+) {
     let source = source(vec![Effect::AskQuestion], vec![ReviewBehavior::Pass]);
     let (resumed, state) = resume_harness_inner(
-        &resume_options(repo, run_id),
+        &resume_options_in(tree, repo, run_id),
         &Harness {
             adapters: &source,
             answers: None,
@@ -9273,11 +9301,12 @@ fn a_kill_at_the_question_payload_write_is_recovered_by_the_resume(
         HookPhase::After => EntryPhase::After,
         HookPhase::Point { .. } => panic!("the payload's coordinates are its two phases"),
     });
-    // Bound first, so it is reclaimed last: `_tree` owns the repository and its
+    // Bound first, so it is reclaimed last: `tree` owns the repository and its
     // private root until this witness returns or unwinds.
-    let (_tree, repo, run_id, record) = a_run_killed_once_its_parking_settlement_is_durable(tag);
+    let (tree, repo, run_id, record) = a_run_killed_once_its_parking_settlement_is_durable(tag);
     let payload = question_payload(&repo, &run_id, &record);
     let coordinate = format!("{phase:?}");
+    let temporary = tree.path().as_os_str();
     let Some(killed) = crate::workspace_manager::fixture::run_kill_child_within(
         QUESTION_PAYLOAD_KILL_CHILD,
         &[
@@ -9286,6 +9315,9 @@ fn a_kill_at_the_question_payload_write_is_recovered_by_the_resume(
                 "UPSTROKE_TEST_KILL_COORDINATE",
                 std::ffi::OsStr::new(&coordinate),
             ),
+            ("TMPDIR", temporary),
+            ("TMP", temporary),
+            ("TEMP", temporary),
         ],
         KILL_CHILD_BOUND,
     ) else {
@@ -9315,7 +9347,7 @@ fn a_kill_at_the_question_payload_write_is_recovered_by_the_resume(
     let left = fs::read(&payload).ok();
     let log = fs::read(paths_of(&repo, &run_id).events()).expect("the log");
 
-    resume_parked(&repo, &run_id, &record, tag);
+    resume_parked(&tree, &repo, &run_id, &record, tag);
     if let Some(left) = left {
         assert_eq!(
             fs::read(&payload).expect("the payload"),
@@ -9390,9 +9422,9 @@ fn a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converg
     use crate::topology::effects::{HookHarness, HookPhase, InjectionMode, SubEffectPoint};
 
     let tag = "ambient-join-error-resume";
-    // `_tree` owns the repository and its private root until this witness
+    // `tree` owns the repository and its private root until this witness
     // returns or unwinds.
-    let (_tree, repo, run_id, record) = a_run_killed_once_its_parking_settlement_is_durable(tag);
+    let (tree, repo, run_id, record) = a_run_killed_once_its_parking_settlement_is_durable(tag);
     let paths = paths_of(&repo, &run_id);
     let payload = question_payload(&repo, &run_id, &record);
     let log = fs::read(paths.events()).expect("the log");
@@ -9413,7 +9445,7 @@ fn a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converg
     let runner = RecordingRunner::new();
 
     let refused = resume_contained(
-        &resume_options(&repo, &run_id),
+        &resume_options_in(&tree, &repo, &run_id),
         &Harness::new(&source),
         &runner,
         || crate::runner::host::contain_write_command(&mut hooks),
@@ -9457,5 +9489,5 @@ fn a_resume_whose_ambient_job_join_errs_runs_nothing_and_the_next_resume_converg
     );
     drop(hooks);
 
-    resume_parked(&repo, &run_id, &record, tag);
+    resume_parked(&tree, &repo, &run_id, &record, tag);
 }
