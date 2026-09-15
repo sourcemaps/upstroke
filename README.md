@@ -1,4 +1,4 @@
-# upstroke
+<h1><img src="assets/upstroke-wordmark.svg" alt="upstroke" height="80"></h1>
 
 [![CI](https://github.com/sourcemaps/upstroke/actions/workflows/ci.yml/badge.svg)](https://github.com/sourcemaps/upstroke/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/upstroke.svg)](https://crates.io/crates/upstroke)

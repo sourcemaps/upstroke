@@ -1,0 +1,8 @@
+# Images are binary: never newline-convert them (core.autocrlf is commonly on).
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+
+# SVG is text, but pin LF so the committed bytes are identical on every platform.
+*.svg text eol=lf
