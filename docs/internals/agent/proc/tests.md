@@ -213,6 +213,24 @@ rows: before the primitive, R22 still accounts for the handle, so the fate is `U
 it, the row holds nothing, so the fate is `Gone`. The tabled action is then the next command
 through the same adapter, which runs to its own exit.
 
+## `struct SpawnAfterThenTerminateAfterFault {`
+
+The production adapter with an error return at the after phase of both process sites, and every
+`child_created` callback recorded with the child's identity (on Windows its creation time, which
+`ambient::process_alive` needs).
+
+## `fn a_spawn_fault_whose_cleanup_termination_faults_after_its_primitive_reports_the_child_gone() {`
+
+`kill_tree` stores `Gone` as soon as its primitive completes, before its after phase is consulted
+(#292's fate fix). The timeout witnesses above reach `kill_tree` only on Windows: on Unix a timeout
+terminates through `terminate_supervised`, which stores the fate itself, so a `kill_tree` that
+stored it only on Windows kept the Linux suite green (#292's round-1 fix-check lens, finding 3).
+This reaches `kill_tree` on every host through the path that calls it when the spawn's after phase
+fails: the child is created (recorded once), the spawn's after phase returns the injected error,
+the cleanup termination runs its before phase and its primitive, and its after phase returns the
+second error. The failure is the spawn's error with the termination's beside it, the child is gone
+when the funnel returns, and the fate is `Gone`.
+
 ## `fn a_child_registered_pre_exec_is_settled_when_the_parent_never_registers_it() {`
 
 The reaper knows the group **before** the parent registers it, because

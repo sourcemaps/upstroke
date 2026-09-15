@@ -500,6 +500,114 @@ fn a_fault_after_the_terminate_primitive_reports_the_child_gone() {
     );
 }
 
+struct SpawnAfterThenTerminateAfterFault {
+    inner: crate::runner::HarnessHooks,
+    created: Vec<(u32, u64)>,
+}
+
+impl SpawnHooks for SpawnAfterThenTerminateAfterFault {
+    fn point(&mut self, point: SubEffectPoint) -> Injection {
+        self.inner.point(point)
+    }
+
+    fn point_mode(
+        &mut self,
+        point: SubEffectPoint,
+        mode: crate::topology::effects::InjectionMode,
+    ) -> Injection {
+        self.inner.point_mode(point, mode)
+    }
+
+    fn phase(&mut self, site: ProcessSite, phase: HookPhase) -> Injection {
+        let answered = self.inner.phase(site, phase);
+        if phase == HookPhase::After {
+            Injection::Error
+        } else {
+            answered
+        }
+    }
+
+    fn child_created(&mut self, pid: u32) {
+        #[cfg(windows)]
+        let created =
+            super::ambient::process_creation_time(pid).expect("the created child's creation time");
+        #[cfg(not(windows))]
+        let created = 0_u64;
+        self.created.push((pid, created));
+        self.inner.child_created(pid);
+    }
+}
+
+#[test]
+fn a_spawn_fault_whose_cleanup_termination_faults_after_its_primitive_reports_the_child_gone() {
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use crate::topology::effects::{EffectSiteId, HookHarness};
+
+    let scratch = std::env::temp_dir().join(format!(
+        "upstroke-spawn-then-terminate-fault-{}-{}",
+        std::process::id(),
+        crate::ulid::ulid()
+    ));
+    std::fs::create_dir_all(&scratch).expect("scratch directory");
+    let harness = Arc::new(Mutex::new(HookHarness::new()));
+    let mut hooks = SpawnAfterThenTerminateAfterFault {
+        inner: crate::runner::HarnessHooks::new(Arc::clone(&harness)),
+        created: Vec::new(),
+    };
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .args(["terminate_fault_helper", "--ignored", "--nocapture"])
+        .env("UPSTROKE_TERMINATE_FAULT_READY", scratch.join("ready"));
+    let failure = run_with_timeout_classified(
+        ProcessSite::Spawn,
+        ProcessSite::Terminate,
+        command,
+        b"",
+        Duration::from_secs(30),
+        &mut hooks,
+    )
+    .expect_err("the error after the spawn ends the supervision");
+    let message = failure.error.to_string();
+    assert!(
+        message.starts_with("the process funnel was made to fail at `Spawn` (after)")
+            && message.contains(
+                "additional cleanup failure: the process funnel was made to fail at `Terminate` \
+                 (after)"
+            ),
+        "the spawn's error is returned with the cleanup termination's after-phase error beside \
+         it: {message}"
+    );
+    let spawn = EffectSiteId::Process(ProcessSite::Spawn);
+    let terminate = EffectSiteId::Process(ProcessSite::Terminate);
+    {
+        let seen = harness.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(
+            (
+                seen.count(spawn, HookPhase::After),
+                seen.count(terminate, HookPhase::Before),
+                seen.count(terminate, HookPhase::After),
+            ),
+            (1, 1, 1),
+            "the cleanup after the spawn's error went through the terminate funnel once: \
+             {message}"
+        );
+    }
+    let &[(pid, created)] = hooks.created.as_slice() else {
+        panic!("one child was created: {:?}", hooks.created);
+    };
+    assert!(
+        terminate_fault_helper_gone(pid, created),
+        "the child {pid} is gone once the funnel returns"
+    );
+    assert_eq!(
+        failure.fate,
+        ProcessFate::Gone,
+        "the cleanup termination's primitive completed before its after phase failed: {message}"
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+}
+
 #[cfg(unix)]
 #[test]
 #[allow(clippy::zombie_processes)]
