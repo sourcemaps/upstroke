@@ -385,7 +385,7 @@ pub(crate) mod tests {
     const BET: TaskKey = TaskKey(1);
     const GIMEL: TaskKey = TaskKey(2);
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     enum PlanShape {
         Chain,
         FanOut,
@@ -393,6 +393,8 @@ pub(crate) mod tests {
     }
 
     impl PlanShape {
+        const ALL: [PlanShape; 3] = [Self::Chain, Self::FanOut, Self::Join];
+
         fn deps(self) -> [&'static [&'static str]; 3] {
             match self {
                 Self::Chain => [&[], &["aleph"], &["bet"]],
@@ -897,8 +899,31 @@ pub(crate) mod tests {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
+    fn satisfies_for(fold: &TopologyFold, key: TaskKey) -> Vec<TaskKey> {
+        fold.satisfies_closure(key).unwrap_or_else(|| vec![key])
+    }
+
+    fn lease_release_for(fold: &TopologyFold, key: TaskKey, generation: u32) -> MergeLeaseRelease {
+        match fold
+            .registry()
+            .and_then(|registry| registry.get(key))
+            .and_then(|entry| entry.lineage)
+        {
+            Some(lineage) => MergeLeaseRelease::Lineage { root: lineage.root },
+            None => MergeLeaseRelease::Candidate {
+                key,
+                generation: GenerationId(generation),
+            },
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "`merge_prepared_for`'s fields with the candidate named by key and generation, \
+                  and the fold its closure is read from"
+    )]
     fn merge_prepared(
+        fold: &TopologyFold,
         sequence: u32,
         key: TaskKey,
         generation: u32,
@@ -916,9 +941,15 @@ pub(crate) mod tests {
             proposed_sha,
             prepared_ref,
             source,
+            satisfies_for(fold, key),
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each parameter is a field of `MergePrepared` some offer chooses; a struct of \
+                  them would restate the event"
+    )]
     fn merge_prepared_for(
         sequence: u32,
         candidate: CandidateRef,
@@ -927,6 +958,7 @@ pub(crate) mod tests {
         proposed_sha: CommitSha,
         prepared_ref: Option<GitRef>,
         source: VerificationSource,
+        satisfies: Vec<TaskKey>,
     ) -> TopologyEvent {
         let CandidateRef {
             key,
@@ -965,7 +997,7 @@ pub(crate) mod tests {
                         detail: "census verification".to_owned(),
                     }),
                 },
-                satisfies: vec![key],
+                satisfies,
             }),
         })
     }
@@ -989,10 +1021,7 @@ pub(crate) mod tests {
                 sequence: SequenceId(sequence),
                 merged_sha,
                 satisfies,
-                lease_release: MergeLeaseRelease::Candidate {
-                    key,
-                    generation: GenerationId(generation),
-                },
+                lease_release: lease_release_for(fold, key, generation),
             },
         })
     }
@@ -1272,6 +1301,7 @@ pub(crate) mod tests {
                 out.push(Candidate::new(
                     format!("merge_prepared/fast/match/{name}/g{generation}"),
                     merge_prepared(
+                        fold,
                         sequence,
                         key,
                         generation,
@@ -1285,6 +1315,7 @@ pub(crate) mod tests {
                 out.push(Candidate::new(
                     format!("merge_prepared/fast/moved-head/{name}/g{generation}"),
                     merge_prepared(
+                        fold,
                         sequence,
                         key,
                         generation,
@@ -1298,6 +1329,7 @@ pub(crate) mod tests {
                 out.push(Candidate::new(
                     format!("merge_prepared/fast/other-proposed/{name}/g{generation}"),
                     merge_prepared(
+                        fold,
                         sequence,
                         key,
                         generation,
@@ -1311,6 +1343,7 @@ pub(crate) mod tests {
                 out.push(Candidate::new(
                     format!("merge_prepared/fast/with-pin/{name}/g{generation}"),
                     merge_prepared(
+                        fold,
                         sequence,
                         key,
                         generation,
@@ -1351,10 +1384,25 @@ pub(crate) mod tests {
                                 }],
                                 detail: "census verification".to_owned(),
                             }),
-                            satisfies: vec![key],
+                            satisfies: satisfies_for(fold, key),
                         }),
                     }),
                 ));
+                if entry.lineage.is_some() {
+                    out.push(Candidate::new(
+                        format!("merge_prepared/fast/self-satisfies/{name}/g{generation}"),
+                        merge_prepared_for(
+                            sequence,
+                            candidate.clone(),
+                            PreparedDisposition::Fast,
+                            sha("base"),
+                            candidate.commit_sha.clone(),
+                            None,
+                            source.clone(),
+                            vec![key],
+                        ),
+                    ));
+                }
                 out.push(Candidate::new(
                     format!("merge_verification_started/stale/{name}/g{generation}"),
                     ev(TopologyEventBody::MergeVerificationStarted {
@@ -1387,6 +1435,7 @@ pub(crate) mod tests {
                 out.push(Candidate::new(
                     format!("merge_prepared/stale_clean/match/{name}/g{generation}"),
                     merge_prepared(
+                        fold,
                         sequence,
                         key,
                         generation,
@@ -1400,6 +1449,7 @@ pub(crate) mod tests {
                 out.push(Candidate::new(
                     format!("merge_prepared/stale_clean/mismatch/{name}/g{generation}"),
                     merge_prepared(
+                        fold,
                         sequence,
                         key,
                         generation,
@@ -1413,6 +1463,7 @@ pub(crate) mod tests {
                 out.push(Candidate::new(
                     format!("merge_prepared/already_present/match/{name}/g{generation}"),
                     merge_prepared(
+                        fold,
                         sequence,
                         key,
                         generation,
@@ -1426,6 +1477,7 @@ pub(crate) mod tests {
                 out.push(Candidate::new(
                     format!("merge_prepared/already_present/mismatch/{name}/g{generation}"),
                     merge_prepared(
+                        fold,
                         sequence,
                         key,
                         generation,
@@ -1657,6 +1709,7 @@ pub(crate) mod tests {
                     "candidate_prepared/",
                     "task_candidate_created/",
                     "merge_prepared/fast/match/",
+                    "merge_prepared/fast/self-satisfies/",
                     "task_merged/",
                     "merge_rejected/conflict/",
                     "run_finished/",
@@ -1668,58 +1721,85 @@ pub(crate) mod tests {
             .collect()
     }
 
-    fn one_merged_two_candidates_prefix() -> (TopologyFold, Vec<TopologyEvent>) {
-        let mut fold = started();
-        let mut trace = vec![run_started_event()];
-        let apply =
-            |fold: &mut TopologyFold, trace: &mut Vec<TopologyEvent>, event: TopologyEvent| {
-                let delta = fold
-                    .plan_transition(&event)
-                    .unwrap_or_else(|error| panic!("the deep seed applies: {error}"));
-                fold.apply_delta(delta);
-                trace.push(event);
-            };
+    fn apply_seed_event(
+        fold: &mut TopologyFold,
+        trace: &mut Vec<TopologyEvent>,
+        event: TopologyEvent,
+    ) {
+        let delta = fold
+            .plan_transition(&event)
+            .unwrap_or_else(|error| panic!("the seed applies: {error}"));
+        fold.apply_delta(delta);
+        trace.push(event);
+    }
+
+    fn carry_to_queued_candidate(
+        fold: &mut TopologyFold,
+        trace: &mut Vec<TopologyEvent>,
+        key: TaskKey,
+    ) {
         for event in [
-            dispatch(ALEPH, 0),
-            attempt_started(&fold, ALEPH, 0, 1),
-            candidate_prepared(ALEPH, 0, 1),
-            candidate_created(ALEPH, 0),
+            dispatch(key, 0),
+            attempt_started(fold, key, 0, 1),
+            candidate_prepared(key, 0, 1),
+            candidate_created(key, 0),
         ] {
-            apply(&mut fold, &mut trace, event);
+            apply_seed_event(fold, trace, event);
         }
-        let prepared = merge_prepared(
-            0,
-            ALEPH,
-            0,
-            PreparedDisposition::Fast,
-            sha("base"),
-            candidate_of(ALEPH, 0).commit_sha,
-            None,
-            VerificationSource::CandidatePrepared {
-                key: ALEPH,
-                generation: GenerationId(0),
-            },
-        );
-        apply(&mut fold, &mut trace, prepared);
-        let merged = task_merged(&fold, 0, ALEPH, 0);
-        apply(&mut fold, &mut trace, merged);
-        for key in [BET, GIMEL] {
-            for event in [
-                dispatch(key, 0),
-                attempt_started(&fold, key, 0, 1),
-                candidate_prepared(key, 0, 1),
-                candidate_created(key, 0),
-            ] {
-                apply(&mut fold, &mut trace, event);
+    }
+
+    fn carry_ready_originals(
+        fold: &mut TopologyFold,
+        trace: &mut Vec<TopologyEvent>,
+    ) -> Vec<TaskKey> {
+        let mut carried = Vec::new();
+        for key in [ALEPH, BET, GIMEL] {
+            if fold.ready(key) {
+                carry_to_queued_candidate(fold, trace, key);
+                carried.push(key);
             }
+        }
+        carried
+    }
+
+    fn engaged_originals_prefix(shape: PlanShape) -> (TopologyFold, Vec<TopologyEvent>) {
+        let mut fold = started_for(shape);
+        let mut trace = vec![run_started_event_for(shape)];
+        let carried = carry_ready_originals(&mut fold, &mut trace);
+        if let &[alone] = carried.as_slice() {
+            let prepared = merge_prepared(
+                &fold,
+                0,
+                alone,
+                0,
+                PreparedDisposition::Fast,
+                sha("base"),
+                candidate_of(alone, 0).commit_sha,
+                None,
+                VerificationSource::CandidatePrepared {
+                    key: alone,
+                    generation: GenerationId(0),
+                },
+            );
+            apply_seed_event(&mut fold, &mut trace, prepared);
+            let merged = task_merged(&fold, 0, alone, 0);
+            apply_seed_event(&mut fold, &mut trace, merged);
+            carry_ready_originals(&mut fold, &mut trace);
         }
         (fold, trace)
     }
 
-    fn deep_census() -> &'static Census {
-        static DEEP: OnceLock<Census> = OnceLock::new();
-        DEEP.get_or_init(|| {
-            let (fold, trace) = one_merged_two_candidates_prefix();
+    fn seeded_census(shape: PlanShape) -> &'static Census {
+        static CHAIN: OnceLock<Census> = OnceLock::new();
+        static FAN_OUT: OnceLock<Census> = OnceLock::new();
+        static JOIN: OnceLock<Census> = OnceLock::new();
+        let cell = match shape {
+            PlanShape::Chain => &CHAIN,
+            PlanShape::FanOut => &FAN_OUT,
+            PlanShape::Join => &JOIN,
+        };
+        cell.get_or_init(|| {
+            let (fold, trace) = engaged_originals_prefix(shape);
             Census::explore(
                 fold,
                 trace,
@@ -1819,16 +1899,18 @@ pub(crate) mod tests {
 
     struct FamilyMember {
         name: &'static str,
+        shape: PlanShape,
         census: &'static Census,
         reaches: &'static [&'static str],
         restricted: bool,
         classes: fn(&TopologyFold) -> Vec<Candidate>,
     }
 
-    fn family() -> [FamilyMember; 2] {
+    fn family() -> [FamilyMember; 4] {
         [
             FamilyMember {
                 name: "prefix",
+                shape: MAIN_SHAPE,
                 census: census(),
                 reaches: &[
                     "originals",
@@ -1846,8 +1928,25 @@ pub(crate) mod tests {
                 classes,
             },
             FamilyMember {
-                name: "seeded: sequences, repairs, lineages",
-                census: deep_census(),
+                name: "seeded chain: sequences, repairs",
+                shape: PlanShape::Chain,
+                census: seeded_census(PlanShape::Chain),
+                reaches: &["sequences", "repairs"],
+                restricted: true,
+                classes: integration_path_classes,
+            },
+            FamilyMember {
+                name: "seeded fan-out: sequences, repairs, lineages",
+                shape: PlanShape::FanOut,
+                census: seeded_census(PlanShape::FanOut),
+                reaches: &["sequences", "repairs", "lineages"],
+                restricted: true,
+                classes: integration_path_classes,
+            },
+            FamilyMember {
+                name: "seeded join: sequences, repairs, lineages",
+                shape: PlanShape::Join,
+                census: seeded_census(PlanShape::Join),
                 reaches: &["sequences", "repairs", "lineages"],
                 restricted: true,
                 classes: integration_path_classes,
@@ -1930,13 +2029,14 @@ pub(crate) mod tests {
         let prefix = &members[0];
         assert_eq!(prefix.name, "prefix");
         assert!(!prefix.restricted);
+        assert_eq!(prefix.shape, MAIN_SHAPE);
         assert!(
             prefix.census.truncated() && prefix.census.states().len() == bounds.max_states,
             "the prefix explores to its stated state ceiling of {} and reports truncation",
             bounds.max_states
         );
         let prefix_reached = reached_dimensions(&[prefix.census]);
-        let mut seeded = 0;
+        let mut seeded = 0usize;
         for member in members.iter().filter(|member| member.restricted) {
             seeded += 1;
             let census = member.census;
@@ -1976,9 +2076,20 @@ pub(crate) mod tests {
                 );
             }
         }
+        let seeded_shapes: BTreeSet<PlanShape> = members
+            .iter()
+            .filter(|member| member.restricted)
+            .map(|member| member.shape)
+            .collect();
         assert_eq!(
-            seeded, 1,
-            "one seeded census, closing, for the three dimensions a deep seed reaches at once"
+            seeded_shapes,
+            PlanShape::ALL.into_iter().collect::<BTreeSet<_>>(),
+            "one seeded census closes for each plan shape the bounds line names"
+        );
+        assert_eq!(
+            seeded,
+            PlanShape::ALL.len(),
+            "one seeded census per plan shape, and no shape seeded twice"
         );
         let unreached: Vec<&str> = bounds
             .dimensions()
@@ -2547,7 +2658,7 @@ pub(crate) mod tests {
         for member in family() {
             let census = member.census;
             for state in census.states() {
-                let replayed = TopologyFold::replay(inputs(), &state.trace)
+                let replayed = TopologyFold::replay(inputs_for(member.shape), &state.trace)
                     .unwrap_or_else(|error| panic!("state {} does not replay: {error}", state.id));
                 assert!(
                     replayed.state() == state.fold.state(),
@@ -2560,7 +2671,8 @@ pub(crate) mod tests {
                     "state {} classifies differently live and on replay",
                     state.id
                 );
-                let again = TopologyFold::replay(inputs(), &state.trace).expect("replays again");
+                let again = TopologyFold::replay(inputs_for(member.shape), &state.trace)
+                    .expect("replays again");
                 assert!(again.state() == replayed.state(), "state {}", state.id);
             }
         }
@@ -3293,6 +3405,7 @@ pub(crate) mod tests {
                 key: ALEPH,
                 generation: GenerationId(0),
             },
+            vec![ALEPH],
         )
     }
 
@@ -3304,7 +3417,11 @@ pub(crate) mod tests {
     }
 
     fn replayed(trace: &[TopologyEvent]) -> TopologyFold {
-        TopologyFold::replay(inputs(), trace)
+        replayed_for(MAIN_SHAPE, trace)
+    }
+
+    fn replayed_for(shape: PlanShape, trace: &[TopologyEvent]) -> TopologyFold {
+        TopologyFold::replay(inputs_for(shape), trace)
             .unwrap_or_else(|error| panic!("a witness trace does not replay: {error}"))
     }
 
@@ -3822,9 +3939,20 @@ pub(crate) mod tests {
         );
     }
 
+    fn expected_dependency_keys(shape: PlanShape) -> Vec<Vec<TaskKey>> {
+        match shape {
+            PlanShape::Chain => vec![vec![], vec![ALEPH], vec![BET]],
+            PlanShape::FanOut => vec![vec![], vec![ALEPH], vec![ALEPH]],
+            PlanShape::Join => vec![vec![], vec![], vec![ALEPH, BET]],
+        }
+    }
+
     #[test]
     fn every_plan_shape_is_explored() {
-        for shape in [PlanShape::Chain, PlanShape::Join] {
+        for shape in PlanShape::ALL
+            .into_iter()
+            .filter(|shape| *shape != MAIN_SHAPE)
+        {
             let census = Census::explore(
                 started_for(shape),
                 vec![run_started_event_for(shape)],
@@ -3837,6 +3965,14 @@ pub(crate) mod tests {
             assert!(
                 census.truncated(),
                 "{}: stops at its state ceiling",
+                shape.name()
+            );
+            assert!(
+                family().iter().any(|member| {
+                    member.restricted && member.shape == shape && !member.census.truncated()
+                }),
+                "{}: the full generator's exploration of this shape is truncated by design; its \
+                 closing exploration is the family's seeded member",
                 shape.name()
             );
             let audit = census.totality_audit();
@@ -3863,12 +3999,7 @@ pub(crate) mod tests {
                 .iter()
                 .map(|entry| entry.deps.clone())
                 .collect();
-            let expected: Vec<Vec<TaskKey>> = match shape {
-                PlanShape::Chain => vec![vec![], vec![ALEPH], vec![BET]],
-                PlanShape::FanOut => vec![vec![], vec![ALEPH], vec![ALEPH]],
-                PlanShape::Join => vec![vec![], vec![], vec![ALEPH, BET]],
-            };
-            assert_eq!(deps, expected, "{}", shape.name());
+            assert_eq!(deps, expected_dependency_keys(shape), "{}", shape.name());
             for state in census.states() {
                 assert_eq!(
                     classify(&state.fold),
@@ -3880,6 +4011,92 @@ pub(crate) mod tests {
                     state.id
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_plan_shape_is_a_closing_member_of_the_family() {
+        assert_eq!(
+            PlanShape::ALL
+                .iter()
+                .map(|shape| shape.name())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["chain", "fan-out", "join"]),
+            "the shapes the bounds line names"
+        );
+        let members = family();
+        let prefix = &members[0];
+        assert!(!prefix.restricted && prefix.shape == MAIN_SHAPE);
+        for member in &members {
+            let root = &member.census.states()[0];
+            let deps: Vec<Vec<TaskKey>> = root
+                .fold
+                .registry()
+                .expect("started")
+                .entries()
+                .iter()
+                .filter(|entry| entry.origin == crate::topology::registry::Origin::Original)
+                .map(|entry| entry.deps.clone())
+                .collect();
+            assert_eq!(
+                deps,
+                expected_dependency_keys(member.shape),
+                "{}: the member's declared shape is the shape its fold was started with",
+                member.name
+            );
+            let replayed = TopologyFold::replay(inputs_for(member.shape), &root.trace)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{}: the seed replays under its shape's inputs: {error}",
+                        member.name
+                    )
+                });
+            assert!(
+                replayed.state() == root.fold.state(),
+                "{}: the seed's fold is the state its trace replays to",
+                member.name
+            );
+        }
+        for shape in PlanShape::ALL {
+            let closing: Vec<&FamilyMember> = members
+                .iter()
+                .filter(|member| member.restricted && member.shape == shape)
+                .collect();
+            assert_eq!(
+                closing.len(),
+                1,
+                "{}: exactly one seeded census closes for this shape: {:?}",
+                shape.name(),
+                closing.iter().map(|member| member.name).collect::<Vec<_>>()
+            );
+            let member = closing[0];
+            assert!(
+                !member.census.truncated(),
+                "{}: its seeded census closes",
+                shape.name()
+            );
+            let root = &member.census.states()[0].fold;
+            let engaged = [ALEPH, BET, GIMEL]
+                .iter()
+                .filter(|key| {
+                    root.task(**key)
+                        .is_some_and(|task| !task.generations.is_empty())
+                })
+                .count();
+            assert!(
+                engaged >= 2,
+                "{}: the seed engages at least two originals, and this one engages {engaged}",
+                shape.name()
+            );
+            assert!(
+                member
+                    .census
+                    .states()
+                    .iter()
+                    .any(|state| { state.outcome == DerivedOutcome::Ending(RunOutcome::Complete) }),
+                "{}: the shape's integration path reaches a completed run",
+                shape.name()
+            );
         }
     }
 
@@ -3905,7 +4122,10 @@ pub(crate) mod tests {
 
         let members = family();
         let shared = reached_dimensions(&[census()]);
-        let deep = reached_dimensions(&[deep_census()]);
+        let by_member: Vec<(&str, BTreeMap<&'static str, u32>)> = members
+            .iter()
+            .map(|member| (member.name, reached_dimensions(&[member.census])))
+            .collect();
         let together = reached_dimensions(
             &members
                 .iter()
@@ -3919,10 +4139,15 @@ pub(crate) mod tests {
                 together[name]
             );
             assert_eq!(
-                together[name], declared,
-                "{name}: declared {declared} and reached {} over the family's union (prefix {}, \
-                 seeded {}); a boundary the family did not reach is not evidence it explored it",
-                together[name], shared[name], deep[name]
+                together[name],
+                declared,
+                "{name}: declared {declared} and reached {} over the family's union ({:?}); a \
+                 boundary the family did not reach is not evidence it explored it",
+                together[name],
+                by_member
+                    .iter()
+                    .map(|(member, reached)| (*member, reached[name]))
+                    .collect::<Vec<_>>()
             );
             let by: Vec<&str> = members
                 .iter()
@@ -3947,19 +4172,49 @@ pub(crate) mod tests {
                 "{name}: the prefix reaches this bound on its own at its state ceiling"
             );
         }
-        assert_eq!(
-            deep["sequences"], 4,
-            "the deep census consumes four sequences"
+        let seeded = |shape: PlanShape| reached_dimensions(&[seeded_census(shape)]);
+        let (chain, fan_out, join) = (
+            seeded(PlanShape::Chain),
+            seeded(PlanShape::FanOut),
+            seeded(PlanShape::Join),
         );
-        assert_eq!(deep["repairs"], 2, "and registers two repairs");
+        for (shape, reached) in [
+            (PlanShape::Chain, &chain),
+            (PlanShape::FanOut, &fan_out),
+            (PlanShape::Join, &join),
+        ] {
+            assert_eq!(
+                reached["sequences"],
+                4,
+                "{}: the seeded census consumes four sequences",
+                shape.name()
+            );
+            assert_eq!(
+                reached["repairs"],
+                2,
+                "{}: and registers two repairs",
+                shape.name()
+            );
+            assert!(
+                !seeded_census(shape).truncated(),
+                "{}: the seeded census closes under its ceilings: {} states",
+                shape.name(),
+                seeded_census(shape).states().len()
+            );
+        }
         assert_eq!(
-            deep["lineages"], 2,
-            "in two lineages: one rejection of each candidate"
+            fan_out["lineages"], 2,
+            "fan-out: two lineages, one rejection of each dependent's candidate"
         );
-        assert!(
-            !deep_census().truncated(),
-            "the deep census closes under its ceilings: {} states",
-            deep_census().states().len()
+        assert_eq!(
+            join["lineages"], 2,
+            "join: two lineages, one rejection of each root's candidate"
+        );
+        assert_eq!(
+            chain["lineages"], 1,
+            "chain: one lineage; the seed merges aleph, a rejected bet parks the run behind a \
+             repair with no runnable rung that this generator never answers, and gimel's \
+             rejections repair one lineage, so one root is rejected per path"
         );
     }
     fn merge_prepared_of(label: &str) -> MergePrepared {
@@ -4130,12 +4385,15 @@ pub(crate) mod tests {
     fn every_explored_state_classifies_and_the_classification_is_the_same_live_and_on_replay() {
         let members = family();
         let (mut finalize, mut reopen, mut recover) = (0, 0, 0);
-        for state in members
-            .iter()
-            .flat_map(|member| member.census.states().iter())
-        {
+        for (member, state) in members.iter().flat_map(|member| {
+            member
+                .census
+                .states()
+                .iter()
+                .map(move |state| (member, state))
+        }) {
             let live = classify(&state.fold);
-            let from_prefix = classify(&replayed(&state.trace));
+            let from_prefix = classify(&replayed_for(member.shape, &state.trace));
             assert_eq!(
                 live, from_prefix,
                 "state {}: the live fold and the durable prefix classify differently",
@@ -4620,11 +4878,17 @@ pub(crate) mod tests {
         let variants = runner_variants();
         assert_eq!(variants.len(), 7);
         let (mut accepted, mut over, mut refused) = (0, 0, 0);
-        let union: Vec<&CensusState> = members
+        let union: Vec<(&FamilyMember, &CensusState)> = members
             .iter()
-            .flat_map(|member| member.census.states().iter())
+            .flat_map(|member| {
+                member
+                    .census
+                    .states()
+                    .iter()
+                    .map(move |state| (member, state))
+            })
             .collect();
-        for state in &union {
+        for (member, state) in &union {
             let over_already = matches!(
                 state.fold.finished(),
                 Some(RunOutcome::Complete | RunOutcome::Halted)
@@ -4654,7 +4918,7 @@ pub(crate) mod tests {
                         classify(&{
                             let mut trace = state.trace.clone();
                             trace.push(identical.clone());
-                            replayed(&trace)
+                            replayed_for(member.shape, &trace)
                         }),
                         "state {}: the resumed state classifies alike live and on replay",
                         state.id
@@ -4748,6 +5012,7 @@ pub(crate) mod tests {
         #[derive(serde::Serialize)]
         struct MemberSummary {
             name: String,
+            plan_shape: String,
             restricted_generator: bool,
             closed: bool,
             reaches_at_bound: Vec<String>,
@@ -4782,6 +5047,7 @@ pub(crate) mod tests {
                 .iter()
                 .map(|member| MemberSummary {
                     name: member.name.to_owned(),
+                    plan_shape: member.shape.name().to_owned(),
                     restricted_generator: member.restricted,
                     closed: !member.census.truncated(),
                     reaches_at_bound: member
@@ -4795,25 +5061,231 @@ pub(crate) mod tests {
                 .collect(),
         };
         assert!(family_summary.every_bound_reached_over_the_union);
-        assert_eq!(family_summary.members.len(), 2);
         assert!(
             family_summary.members[0].summary.truncated && !family_summary.members[0].closed,
             "the prefix member reports its truncation"
         );
-        assert!(
-            !family_summary.members[1].summary.truncated && family_summary.members[1].closed,
-            "the seeded member reports that it closed"
+        let seeded: Vec<&MemberSummary> = family_summary
+            .members
+            .iter()
+            .filter(|member| member.restricted_generator)
+            .collect();
+        assert_eq!(
+            seeded
+                .iter()
+                .map(|member| member.plan_shape.as_str())
+                .collect::<BTreeSet<_>>(),
+            PlanShape::ALL
+                .iter()
+                .map(|shape| shape.name())
+                .collect::<BTreeSet<_>>(),
+            "one seeded member per plan shape in the artifact"
         );
-        assert!(
-            family_summary.members[1].summary.states
-                < family_summary.members[1].summary.bounds["max_states"] as usize
-        );
+        for member in &seeded {
+            assert!(
+                !member.summary.truncated && member.closed,
+                "{}: the seeded member reports that it closed",
+                member.name
+            );
+            assert!(
+                member.summary.states < member.summary.bounds["max_states"] as usize,
+                "{}",
+                member.name
+            );
+        }
         let family_json = serde_json::to_string_pretty(&family_summary).expect("serializes");
-        assert!(family_json.contains("\"seeded: sequences, repairs, lineages\""));
+        for member in &members {
+            assert!(
+                family_json.contains(&format!("\"{}\"", member.name)),
+                "{}",
+                member.name
+            );
+        }
+        assert!(family_json.contains("\"plan_shape\": \"join\""));
         if let Ok(path) = std::env::var("UPSTROKE_CENSUS_SUMMARY") {
             crate::workspace_manager::fixture::write_file(
                 std::path::Path::new(&path),
                 format!("{family_json}\n").as_bytes(),
+            );
+        }
+    }
+
+    fn names_a_repair(label: &str) -> bool {
+        label.contains("/r3/") || label.contains("/r4/") || label.contains("/r5/")
+    }
+
+    #[test]
+    fn every_seeded_census_publishes_a_repair_and_releases_its_lineage_lease() {
+        let members = family();
+        for member in members.iter().filter(|member| member.restricted) {
+            let census = member.census;
+            let accepted = census.accepted_labels();
+            assert!(
+                accepted.iter().any(|label| {
+                    label.starts_with("merge_prepared/fast/match/") && names_a_repair(label)
+                }),
+                "{}: a repair's publication is accepted somewhere; the accepted publications are {:?}",
+                member.name,
+                accepted
+                    .iter()
+                    .filter(|label| label.starts_with("merge_prepared/"))
+                    .collect::<Vec<_>>()
+            );
+            let mut released = 0;
+            for transition in census.transitions() {
+                let label = &*transition.label;
+                if !(label.starts_with("task_merged/") && names_a_repair(label)) {
+                    continue;
+                }
+                let TransitionOutcome::Accepted { to } = transition.outcome else {
+                    continue;
+                };
+                let from = &census.states()[transition.from].fold;
+                let landed = &census.states()[to].fold;
+                let candidate = from
+                    .transaction()
+                    .map(|transaction| transaction.candidate.key)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{}: state {} accepted `{label}` with no transaction open",
+                            member.name, transition.from
+                        )
+                    });
+                let root = from
+                    .registry()
+                    .and_then(|registry| registry.get(candidate))
+                    .and_then(|entry| entry.lineage)
+                    .map(|lineage| lineage.root)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{}: state {} merged `{label}` for a candidate with no lineage",
+                            member.name, transition.from
+                        )
+                    });
+                let holds = |fold: &TopologyFold| {
+                    fold.leases().is_some_and(|leases| {
+                        leases.lineages().iter().any(|lineage| lineage.root == root)
+                    })
+                };
+                assert!(
+                    holds(from),
+                    "{}: state {} held no lineage lease for root {} before its repair merged",
+                    member.name,
+                    transition.from,
+                    root.0
+                );
+                assert!(
+                    !holds(landed),
+                    "{}: state {to} still holds the lineage lease for root {} after its repair merged",
+                    member.name,
+                    root.0
+                );
+                assert_eq!(
+                    landed.task_state(root),
+                    Some(TaskState::Merged),
+                    "{}: state {to}: the repair's publication satisfies its root",
+                    member.name
+                );
+                released += 1;
+            }
+            assert!(
+                released > 0,
+                "{}: a repair's merge is accepted somewhere and releases its lineage lease",
+                member.name
+            );
+            let refused = census.refused_labels();
+            assert!(
+                refused
+                    .iter()
+                    .any(|label| label.starts_with("merge_prepared/fast/self-satisfies/")),
+                "{}: a repair's publication settling the repair alone was offered and refused",
+                member.name
+            );
+            assert!(
+                !accepted
+                    .iter()
+                    .any(|label| label.starts_with("merge_prepared/fast/self-satisfies/")),
+                "{}: a publication settling a repair alone was accepted somewhere",
+                member.name
+            );
+            assert!(
+                census.transitions().iter().any(|transition| {
+                    transition
+                        .label
+                        .starts_with("merge_prepared/fast/self-satisfies/")
+                        && matches!(
+                            &transition.outcome,
+                            TransitionOutcome::Refused { reason }
+                                if reason.contains("as this publication's closure")
+                        )
+                }),
+                "{}: the self-satisfies refusal names the closure the fold derives",
+                member.name
+            );
+        }
+        let prefix = &members[0];
+        assert!(
+            prefix
+                .census
+                .accepted_labels()
+                .iter()
+                .any(|label| label.starts_with("task_merged/") && names_a_repair(label)),
+            "the prefix publishes a repair too"
+        );
+    }
+
+    #[test]
+    fn no_seeded_census_has_a_dead_end_below_the_sequence_bound() {
+        let bounds = CensusBounds::default();
+        for member in family().iter().filter(|member| member.restricted) {
+            let census = member.census;
+            let mut at_the_bound = 0;
+            for state in census.states() {
+                if state.fold.finished().is_some()
+                    || state.trace.len() >= census.bounds().max_trace
+                    || census.has_legal_transition(state.id)
+                {
+                    continue;
+                }
+                let next = state.fold.next_sequence().map_or(0, |sequence| sequence.0);
+                assert!(
+                    next >= bounds.sequences,
+                    "{}: state {} is an unfinished dead end below the sequence bound (next \
+                     sequence {next} of {}): {:?}",
+                    member.name,
+                    state.id,
+                    bounds.sequences,
+                    state
+                        .trace
+                        .iter()
+                        .map(|event| event.body.kind())
+                        .collect::<Vec<_>>()
+                );
+                assert!(
+                    state.fold.queue().is_some_and(|queue| !queue.is_empty()),
+                    "{}: state {}: a dead end at the sequence bound is a candidate the bound leaves \
+                     queued",
+                    member.name,
+                    state.id
+                );
+                assert!(
+                    state.fold.transaction().is_none(),
+                    "{}: state {}: a dead end at the sequence bound holds no open \
+                     transaction: {:?}",
+                    member.name,
+                    state.id,
+                    state
+                        .fold
+                        .transaction()
+                        .map(|open| (open.candidate.key.0, open.sequence.0))
+                );
+                at_the_bound += 1;
+            }
+            assert!(
+                at_the_bound > 0,
+                "{}: the sequence bound stops at least one path with a candidate still queued, and \
+                 the census records that dead end rather than hiding it",
+                member.name
             );
         }
     }
