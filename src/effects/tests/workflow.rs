@@ -674,11 +674,26 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
         job,
         TEST_WINDOWS_JOB,
         "test-windows-toolchain",
-        Some(GOLDEN_IMAGE_TOOLCHAIN),
+        None,
     ));
     for (index, step) in steps_of(job).iter().enumerate() {
         if !installs_a_toolchain(step) {
             continue;
+        }
+        let selected = field(step, "with").and_then(|with| scalar(with, "toolchain"));
+        if selected != Some(GOLDEN_IMAGE_TOOLCHAIN) {
+            out.push(format!(
+                "[test-windows-toolchain] `{TEST_WINDOWS_JOB}` step {index} installs toolchain \
+                 {selected:?}, not `{GOLDEN_IMAGE_TOOLCHAIN}`, the golden image's. Current \
+                 stable is ahead of the image, so `stable` here runs the suite on a compiler \
+                 the pull-request lane never ran it on, and a test whose outcome depends on \
+                 the compiler passes on one lane and fails on the other; an older version \
+                 omits on the queue whatever the image's compiler enables. The pin keeps the \
+                 two test lanes one compiler. It shields the queue from nothing else: \
+                 `lint (windows)` compiles current stable on both events and is required by \
+                 the aggregate, so a stable that moves between a pull request's green and \
+                 its enqueue ejects the entry through that leg, with or without this pin."
+            ));
         }
         if scalar(step, "if") != Some(QUEUE_LANE) {
             out.push(format!(
@@ -1607,7 +1622,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "both lanes on `windows-latest`, as a scalar `runs-on:`. Every step still \
                  matches character for character and the install step's condition still \
                  holds on the queue; only the pull-request lane's machine changed, and with \
-                 it the six minutes every pull request waits on became twenty-five.",
+                 it the six minutes every pull request waits on became twenty-five -- and \
+                 the pull-request lane, whose install is skipped, runs the suite on whatever \
+                 GitHub's image preinstalled.",
         job: Some("test-windows"),
         anchor: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
         replacement: "    runs-on: windows-latest\n",
@@ -1707,11 +1724,12 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-TOOLCHAIN-FLOATS",
-        escape: "the hosted lane installs `stable`. Byte-identical to the image's compiler \
-                 today, and `RUSTFLAGS: -D warnings` is workflow-wide: the day a newer stable \
-                 adds a lint, every pull request is green on the guest and the queue ejects \
-                 each one from the hosted leg for a reason unrelated to its diff. The pin is \
-                 what keeps the two lanes one compiler.",
+        escape: "the hosted lane installs `stable`, which is already ahead of the image's \
+                 compiler: the queue runs the suite on a compiler the pull-request lane never \
+                 ran it on, so a test whose outcome depends on the compiler -- a version-gated \
+                 test, a std behaviour change, a new lint in test code under `-D warnings` -- \
+                 passes on the guest and fails in the queue, or the reverse, for a reason \
+                 unrelated to the diff. The pin is what keeps the two test lanes one compiler.",
         job: Some("test-windows"),
         anchor: "          toolchain: 1.97.1\n",
         replacement: "          toolchain: stable\n",

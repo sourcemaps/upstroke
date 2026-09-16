@@ -236,14 +236,19 @@ so the three cannot drift apart while the pin still reads back. Measured,
 ## `pub(super) const GOLDEN_IMAGE_TOOLCHAIN: &str = "1.97.1";`
 
 The compiler the golden image carries, and so the one the hosted lane
-installs -- not `stable`. Today the two are byte-identical, so the drift
-risk is zero; but `RUSTFLAGS: -D warnings` is workflow-wide, and the day a
-newer stable adds a lint every pull request is green on the guest and the
-queue ejects each one from the hosted leg for a reason unrelated to its
-diff. The pin keeps the two lanes one compiler. It moves when the image is
-re-curated, in the same change, and `lint (windows)` still compiles the
-tree on current stable so a newer compiler's failures are seen on every
-pull request rather than in the queue. Measured,
+installs -- not `stable`. Current stable is ahead of the image
+(`lint (windows)` installed 1.98.1 on 2026-09-16 against the image's
+1.97.1), so `stable` here would run the suite on a compiler the
+pull-request lane never ran it on: a test whose outcome depends on the
+compiler -- a version-gated test, a std behaviour change, a new lint in
+test code under the workflow-wide `-D warnings` -- passes on one lane and
+fails on the other, for a reason unrelated to the diff. The pin keeps the
+two test lanes one compiler. It shields the queue from nothing else, and
+nothing here does: `lint (windows)` compiles current stable on both events
+and is required by the aggregate, so a stable that adds a lint between a
+pull request's green and its enqueue ejects the entry through that leg,
+exactly as before the hosted lane existed. The pin moves when the image is
+re-curated, in the same change. Measured,
 `MUT-TEST-WINDOWS-TOOLCHAIN-FLOATS` and
 `MUT-TEST-WINDOWS-TOOLCHAIN-BEHIND-THE-IMAGE`.
 
@@ -387,7 +392,12 @@ other step of both test jobs keeps [`STEP_FIELDS`].
 ## `pub(super) const LANE_STEP_FIELDS: [&str; 4] = ["if", "name", "uses", "with"];`
 
 The fields the hosted lane's toolchain install may declare: a `uses:` step's
-fields plus the `if:` that names the lane. The one place in this contract
+fields plus the `if:` that names the lane. The condition skips the step on
+the guest, not its archive: the runner resolves and downloads every `uses:`
+during job setup before any `if:` is read, so the guest lane depends on
+GitHub serving this archive as it already depends on it serving
+`actions/checkout`, and a download failure fails the job before the skipped
+step. That availability dependency is the price of one job for both lanes. The one place in this contract
 `if:` is admitted on a step, and admitted for that step alone: on the step
 that runs the suite it is a job that reports success having run nothing on
 the other lane, and on a `run:` step it is a script one lane executes and

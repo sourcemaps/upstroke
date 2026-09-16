@@ -264,14 +264,17 @@ field set before their values are read. Measured,
 
 ## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `out.extend(toolchain_complaints(`
 
-The same helper the gates use, asked for [`GOLDEN_IMAGE_TOOLCHAIN`] rather
-than `stable`: exactly one install, at step 1, at the image's version. Not
-`stable`, because `RUSTFLAGS: -D warnings` is workflow-wide and the day a
-newer stable adds a lint the queue would eject pull requests the guest
-passed; not an older version, because a Windows test enabled only on the
-image's compiler would be omitted on the lane that lands the merge. Before
-the hosted lane existed this job installed nothing and the helper was
-never asked, which the ninth review pass found. Measured,
+The same helper the gates use, asked for the count and the position only:
+exactly one install, at step 1. The version is checked beside it rather
+than through the helper's `expected`, because the helper's complaint says a
+mismatch leaves current stable compiled by no leg, and that is the gates'
+reason, not this job's. This job wants [`GOLDEN_IMAGE_TOOLCHAIN`], the
+image's version: not `stable`, which is already ahead of the image and
+would run the suite in the queue on a compiler the pull-request lane never
+ran it on; not an older version, which would omit on the queue whatever
+the image's compiler enables. Before the hosted lane existed this job
+installed nothing and the helper was never asked, which the ninth review
+pass found. Measured,
 `MUT-TEST-WINDOWS-TOOLCHAIN-FLOATS`,
 `MUT-TEST-WINDOWS-TOOLCHAIN-BEHIND-THE-IMAGE`,
 `MUT-TEST-WINDOWS-SECOND-INSTALL` and `MUT-TEST-WINDOWS-INSTALL-NOT-FIRST`.
