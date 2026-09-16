@@ -111,13 +111,21 @@ The compiler check comes first because the install step cannot make the
 claim on its own. `dtolnay/rust-toolchain` at the pinned commit runs
 `rustup default` under `continue-on-error` and then verifies only
 `rustc +<toolchain>`, so on the hosted lane the install can report success
-while bare `cargo` still resolves to the runner's preinstalled stable. The
-script asks bare `rustc` and `cargo` for their versions and throws unless
-both are [`GOLDEN_IMAGE_TOOLCHAIN`]'s: on the guest that asserts what the
-image carries, on the hosted lane what the install selected, and
-`the_windows_leg_counts_the_tests_it_ran` holds the number in the script to
-the constant, so re-curation edits both or neither. Measured,
-`MUT-WINDOWS-WITNESS-COMPILER-CHECK-DROPPED`.
+while bare `cargo` still resolves to the runner's preinstalled stable. And
+the `rustc` on PATH is not what compiles: Cargo selects its compiler
+through `RUSTC`, `CARGO_BUILD_RUSTC` or a `build.rustc` in any config it
+reads, and the guest's service environment and Cargo home are inputs this
+contract cannot see. So the script asks Cargo itself --
+`cargo rustc --lib -- --version` runs the compiler Cargo would run and
+prints its version, and honours every one of those overrides -- and asks
+the `cargo` on PATH for its own version, and throws unless both are
+[`GOLDEN_IMAGE_TOOLCHAIN`]'s: on the guest that asserts what the image
+carries and its environment selects, on the hosted lane what the install
+selected, and `the_windows_leg_counts_the_tests_it_ran` holds the number
+in the script to the constant, so re-curation edits both or neither. A
+`RUSTC_WRAPPER` that answers `--version` with one compiler and compiles
+with another is a forgery, and the paragraph above is where forgeries are
+bounded. Measured, `MUT-WINDOWS-WITNESS-COMPILER-CHECK-DROPPED`.
 
 Every other pin in this contract is an equality over `ci.yml`, and each
 refuses one named way of arriving at a green job over a suite that never

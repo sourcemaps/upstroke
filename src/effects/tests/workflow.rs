@@ -1645,9 +1645,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "both lanes on `windows-latest`, as a scalar `runs-on:`. Every step still \
                  matches character for character and the install step's condition still \
                  holds on the queue; only the pull-request lane's machine changed, and with \
-                 it the six minutes every pull request waits on became twenty-five -- and \
-                 the pull-request lane, whose install is skipped, runs the suite on whatever \
-                 GitHub's image preinstalled.",
+                 it the six minutes every pull request waits on became twenty-five. The \
+                 pull-request lane's install is skipped there, so the suite step's compiler \
+                 check throws on every pull request: loud, but a workflow that is red by \
+                 construction is refused here before it is pushed.",
         job: Some("test-windows"),
         anchor: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
         replacement: "    runs-on: windows-latest\n",
@@ -1723,13 +1724,14 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-WINDOWS-WITNESS-COMPILER-CHECK-DROPPED",
         escape: "the two lines that refuse any compiler but the image's are gone and the suite \
-                 runs on whatever bare `cargo` resolves to. The install step still matches \
-                 whole, and the toolchain action tolerates a failed `rustup default` and \
-                 verifies only `rustc +1.97.1`, so the hosted lane can run the suite on the \
-                 runner's preinstalled stable with the install reported green -- the \
-                 one-compiler claim with nothing holding it.",
+                 runs on whatever Cargo resolves to. The install step still matches whole, \
+                 the toolchain action tolerates a failed `rustup default` and verifies only \
+                 `rustc +1.97.1`, and a `RUSTC` in the guest's service environment is read by \
+                 nothing here, so either lane can run the suite on a compiler the other \
+                 never saw with the install reported green -- the one-compiler claim with \
+                 nothing holding it.",
         job: Some("test-windows"),
-        anchor: "          $rustc = (rustc --version); $cargo = (cargo --version)\n\
+        anchor: "          $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\n\
                  \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' with '$cargo', not the image's 1.97.1: the compiler was chosen by something other than this workflow\" }\n",
         replacement: "",
         refused_as: "test-windows-command",
@@ -1774,13 +1776,16 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-WINDOWS-TOOLCHAIN-BEHIND-THE-IMAGE",
         escape: "the hosted lane installs `1.96.0`, a compiler the image never carried. Every \
                  step-level pin still holds -- the action is allowlisted, its input keys are \
-                 allowlisted, the components value is pinned, the condition is the lane's -- \
-                 and the queue runs the suite on a compiler the pull-request lane never saw. A \
-                 Windows test enabled only on 1.97 and later is omitted on the lane that lands \
-                 the merge, and the aggregate is green. Before the hosted lane existed this \
-                 was the ninth review pass's finding: the hosted jobs pinned `stable` through \
-                 `toolchain_complaints`, and this job, which installed nothing, was never \
-                 asked.",
+                 allowlisted, the components value is pinned, the condition is the lane's. \
+                 With the suite step intact its compiler check throws on every queue entry, \
+                 so this is not a silent escape but a drift between the two places the \
+                 version is pinned, and the oracle refuses the drift rather than letting the \
+                 queue discover it. Edited together with the suite step it would be silent: \
+                 the queue runs a compiler the pull-request lane never saw, and a Windows test \
+                 enabled only on 1.97 and later is omitted on the lane that lands the merge. \
+                 Before the hosted lane existed this was the ninth review pass's finding: the \
+                 hosted jobs pinned `stable` through `toolchain_complaints`, and this job, \
+                 which installed nothing, was never asked.",
         job: Some("test-windows"),
         anchor: "          toolchain: 1.97.1\n",
         replacement: "          toolchain: 1.96.0\n",
@@ -1789,11 +1794,14 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-TOOLCHAIN-FLOATS",
         escape: "the hosted lane installs `stable`, which is already ahead of the image's \
-                 compiler: the queue runs the suite on a compiler the pull-request lane never \
-                 ran it on, so a test whose outcome depends on the compiler -- a version-gated \
-                 test, a std behaviour change, a new lint in test code under `-D warnings` -- \
-                 passes on the guest and fails in the queue, or the reverse, for a reason \
-                 unrelated to the diff. The pin is what keeps the two test lanes one compiler.",
+                 compiler. With the suite step intact its compiler check throws on every \
+                 queue entry; edited together with it, the queue runs the suite on a compiler \
+                 the pull-request lane never ran it on, so a test whose outcome depends on the \
+                 compiler -- a version-gated test, a std behaviour change, a new lint in test \
+                 code under `-D warnings` -- passes on the guest and fails in the queue, or \
+                 the reverse, for a reason unrelated to the diff. The pin is what keeps the \
+                 two test lanes one compiler, and the oracle refuses the drift between the \
+                 install and the suite step's check either way.",
         job: Some("test-windows"),
         anchor: "          toolchain: 1.97.1\n",
         replacement: "          toolchain: stable\n",
@@ -1813,9 +1821,11 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-INSTALL-ON-THE-WRONG-LANE",
         escape: "the install step's condition inverted while `runs-on:` keeps its lanes: the \
-                 hosted lane compiles on whatever GitHub's image preinstalled -- current \
-                 stable, or the previous one during a rollout -- and the guest lane installs \
-                 over its own. Both pins are exact; they no longer name the same lane.",
+                 hosted lane is left with whatever GitHub's image preinstalled -- current \
+                 stable, or the previous one during a rollout -- where the suite step's \
+                 compiler check then throws on every queue entry, and the guest lane installs \
+                 over its own. Both pins are exact; they no longer name the same lane, and a \
+                 workflow whose queue is red by construction is refused before it is pushed.",
         job: Some("test-windows"),
         anchor: "        if: github.event_name == 'merge_group'\n",
         replacement: "        if: github.event_name != 'merge_group'\n",
@@ -1835,9 +1845,11 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-SECOND-INSTALL",
         escape: "a second, unconditional toolchain step at `stable` after the identity step. \
-                 The pinned install is untouched, so every equality over it holds; the guest \
-                 lane runs the suite on `stable` from `rustup` and the hosted lane on whichever \
-                 of the two installs ran last.",
+                 The pinned install is untouched, so every equality over it holds; the second \
+                 install makes `stable` the default on both lanes, where the suite step's \
+                 compiler check then throws on every build. Loud today; the oracle refuses two \
+                 installs because which compiler the job runs must be decided by one step it \
+                 pins whole, not by whichever install ran last.",
         job: Some("test-windows"),
         anchor: "      - name: Test, and witness that the suite ran\n",
         replacement: "      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\

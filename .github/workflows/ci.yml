@@ -188,16 +188,23 @@ jobs:
       # failed `rustup default` (`continue-on-error` on that step) and then
       # verifies only `rustc +1.97.1`, so on the hosted lane the install can
       # report success while bare `cargo` is still the runner's preinstalled
-      # stable. The script refuses to run the suite unless bare `rustc` and
-      # `cargo` report the image's version, on either lane: the guest asserts
-      # what its image carries, the hosted lane asserts what the install
-      # selected, and the workflow oracle holds the number in this script to
-      # the one it pins for the install. Re-curation edits both together.
+      # stable. And the `rustc` on PATH is not the question: Cargo picks its
+      # compiler through `RUSTC`, `CARGO_BUILD_RUSTC` or a `build.rustc` in
+      # any config it reads, none of which this workflow can see. So the
+      # script asks Cargo itself -- `cargo rustc --lib -- --version` runs the
+      # compiler Cargo would run, and prints its version -- and asks the
+      # `cargo` on PATH for its own, and refuses to run the suite unless both
+      # are the image's, on either lane: the guest asserts what its image
+      # carries and its environment selects, the hosted lane asserts what the
+      # install selected, and the workflow oracle holds the number in this
+      # script to the one it pins for the install. Re-curation edits both
+      # together. On the hosted lane the question compiles the dependencies,
+      # which the suite would compile next anyway.
       - name: Test, and witness that the suite ran
         env:
           UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
         run: |
-          $rustc = (rustc --version); $cargo = (cargo --version)
+          $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()
           if ($rustc -notmatch '^rustc 1\.97\.1 ' -or $cargo -notmatch '^cargo 1\.97\.1 ') { throw "the suite would run on '$rustc' with '$cargo', not the image's 1.97.1: the compiler was chosen by something other than this workflow" }
           cargo test --all-targets --all-features | Tee-Object -Variable log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

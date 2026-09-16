@@ -755,7 +755,8 @@ this check read and how each was shown a spelling it missed.
 
 The leg whose tests leave GitHub's runners on the pull-request lane reports
 that they ran, on either lane, and refuses to run them on any compiler but
-the one [`GOLDEN_IMAGE_TOOLCHAIN`] names. The script is pinned as text by
+the one [`GOLDEN_IMAGE_TOOLCHAIN`] names -- asking Cargo which compiler it
+will run, not which `rustc` is on PATH. The script is pinned as text by
 the oracle; this test holds two numbers inside that text to the constants
 they must equal -- the floor and the compiler version -- and requires the
 compiler check to come before the suite, since a refusal after the run has
