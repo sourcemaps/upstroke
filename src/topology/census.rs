@@ -899,8 +899,27 @@ pub(crate) mod tests {
         })
     }
 
+    fn satisfies_for(fold: &TopologyFold, key: TaskKey) -> Vec<TaskKey> {
+        fold.satisfies_closure(key).unwrap_or_else(|| vec![key])
+    }
+
+    fn lease_release_for(fold: &TopologyFold, key: TaskKey, generation: u32) -> MergeLeaseRelease {
+        match fold
+            .registry()
+            .and_then(|registry| registry.get(key))
+            .and_then(|entry| entry.lineage)
+        {
+            Some(lineage) => MergeLeaseRelease::Lineage { root: lineage.root },
+            None => MergeLeaseRelease::Candidate {
+                key,
+                generation: GenerationId(generation),
+            },
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn merge_prepared(
+        fold: &TopologyFold,
         sequence: u32,
         key: TaskKey,
         generation: u32,
@@ -918,9 +937,11 @@ pub(crate) mod tests {
             proposed_sha,
             prepared_ref,
             source,
+            satisfies_for(fold, key),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn merge_prepared_for(
         sequence: u32,
         candidate: CandidateRef,
@@ -929,6 +950,7 @@ pub(crate) mod tests {
         proposed_sha: CommitSha,
         prepared_ref: Option<GitRef>,
         source: VerificationSource,
+        satisfies: Vec<TaskKey>,
     ) -> TopologyEvent {
         let CandidateRef {
             key,
@@ -967,7 +989,7 @@ pub(crate) mod tests {
                         detail: "census verification".to_owned(),
                     }),
                 },
-                satisfies: vec![key],
+                satisfies,
             }),
         })
     }
@@ -991,10 +1013,7 @@ pub(crate) mod tests {
                 sequence: SequenceId(sequence),
                 merged_sha,
                 satisfies,
-                lease_release: MergeLeaseRelease::Candidate {
-                    key,
-                    generation: GenerationId(generation),
-                },
+                lease_release: lease_release_for(fold, key, generation),
             },
         })
     }
@@ -1274,6 +1293,7 @@ pub(crate) mod tests {
                 out.push(Candidate::new(
                     format!("merge_prepared/fast/match/{name}/g{generation}"),
                     merge_prepared(
+                        fold,
                         sequence,
                         key,
                         generation,
@@ -1287,6 +1307,7 @@ pub(crate) mod tests {
                 out.push(Candidate::new(
                     format!("merge_prepared/fast/moved-head/{name}/g{generation}"),
                     merge_prepared(
+                        fold,
                         sequence,
                         key,
                         generation,
@@ -1300,6 +1321,7 @@ pub(crate) mod tests {
                 out.push(Candidate::new(
                     format!("merge_prepared/fast/other-proposed/{name}/g{generation}"),
                     merge_prepared(
+                        fold,
                         sequence,
                         key,
                         generation,
@@ -1313,6 +1335,7 @@ pub(crate) mod tests {
                 out.push(Candidate::new(
                     format!("merge_prepared/fast/with-pin/{name}/g{generation}"),
                     merge_prepared(
+                        fold,
                         sequence,
                         key,
                         generation,
@@ -1353,10 +1376,25 @@ pub(crate) mod tests {
                                 }],
                                 detail: "census verification".to_owned(),
                             }),
-                            satisfies: vec![key],
+                            satisfies: satisfies_for(fold, key),
                         }),
                     }),
                 ));
+                if entry.lineage.is_some() {
+                    out.push(Candidate::new(
+                        format!("merge_prepared/fast/self-satisfies/{name}/g{generation}"),
+                        merge_prepared_for(
+                            sequence,
+                            candidate.clone(),
+                            PreparedDisposition::Fast,
+                            sha("base"),
+                            candidate.commit_sha.clone(),
+                            None,
+                            source.clone(),
+                            vec![key],
+                        ),
+                    ));
+                }
                 out.push(Candidate::new(
                     format!("merge_verification_started/stale/{name}/g{generation}"),
                     ev(TopologyEventBody::MergeVerificationStarted {
@@ -1389,6 +1427,7 @@ pub(crate) mod tests {
                 out.push(Candidate::new(
                     format!("merge_prepared/stale_clean/match/{name}/g{generation}"),
                     merge_prepared(
+                        fold,
                         sequence,
                         key,
                         generation,
@@ -1402,6 +1441,7 @@ pub(crate) mod tests {
                 out.push(Candidate::new(
                     format!("merge_prepared/stale_clean/mismatch/{name}/g{generation}"),
                     merge_prepared(
+                        fold,
                         sequence,
                         key,
                         generation,
@@ -1415,6 +1455,7 @@ pub(crate) mod tests {
                 out.push(Candidate::new(
                     format!("merge_prepared/already_present/match/{name}/g{generation}"),
                     merge_prepared(
+                        fold,
                         sequence,
                         key,
                         generation,
@@ -1428,6 +1469,7 @@ pub(crate) mod tests {
                 out.push(Candidate::new(
                     format!("merge_prepared/already_present/mismatch/{name}/g{generation}"),
                     merge_prepared(
+                        fold,
                         sequence,
                         key,
                         generation,
@@ -1659,6 +1701,7 @@ pub(crate) mod tests {
                     "candidate_prepared/",
                     "task_candidate_created/",
                     "merge_prepared/fast/match/",
+                    "merge_prepared/fast/self-satisfies/",
                     "task_merged/",
                     "merge_rejected/conflict/",
                     "run_finished/",
@@ -1717,6 +1760,7 @@ pub(crate) mod tests {
         let carried = carry_ready_originals(&mut fold, &mut trace);
         if let &[alone] = carried.as_slice() {
             let prepared = merge_prepared(
+                &fold,
                 0,
                 alone,
                 0,
@@ -3353,6 +3397,7 @@ pub(crate) mod tests {
                 key: ALEPH,
                 generation: GenerationId(0),
             },
+            vec![ALEPH],
         )
     }
 
@@ -4159,8 +4204,9 @@ pub(crate) mod tests {
         );
         assert_eq!(
             chain["lineages"], 1,
-            "chain: one lineage; a rejection holds the chain behind the repair it registers, and \
-             no repair publishes under this generator, so one root is rejected per path"
+            "chain: one lineage; the seed merges aleph, a rejected bet parks the run behind a \
+             repair with no runnable rung that this generator never answers, and gimel's \
+             rejections repair one lineage, so one root is rejected per path"
         );
     }
     fn merge_prepared_of(label: &str) -> MergePrepared {
@@ -5052,6 +5098,175 @@ pub(crate) mod tests {
             crate::workspace_manager::fixture::write_file(
                 std::path::Path::new(&path),
                 format!("{family_json}\n").as_bytes(),
+            );
+        }
+    }
+
+    fn names_a_repair(label: &str) -> bool {
+        label.contains("/r3/") || label.contains("/r4/") || label.contains("/r5/")
+    }
+
+    #[test]
+    fn every_seeded_census_publishes_a_repair_and_releases_its_lineage_lease() {
+        let members = family();
+        for member in members.iter().filter(|member| member.restricted) {
+            let census = member.census;
+            let accepted = census.accepted_labels();
+            assert!(
+                accepted.iter().any(|label| {
+                    label.starts_with("merge_prepared/fast/match/") && names_a_repair(label)
+                }),
+                "{}: a repair's publication is accepted somewhere; the accepted publications are {:?}",
+                member.name,
+                accepted
+                    .iter()
+                    .filter(|label| label.starts_with("merge_prepared/"))
+                    .collect::<Vec<_>>()
+            );
+            let mut released = 0;
+            for transition in census.transitions() {
+                let label = &*transition.label;
+                if !(label.starts_with("task_merged/") && names_a_repair(label)) {
+                    continue;
+                }
+                let TransitionOutcome::Accepted { to } = transition.outcome else {
+                    continue;
+                };
+                let from = &census.states()[transition.from].fold;
+                let landed = &census.states()[to].fold;
+                let candidate = from
+                    .transaction()
+                    .map(|transaction| transaction.candidate.key)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{}: state {} accepted `{label}` with no transaction open",
+                            member.name, transition.from
+                        )
+                    });
+                let root = from
+                    .registry()
+                    .and_then(|registry| registry.get(candidate))
+                    .and_then(|entry| entry.lineage)
+                    .map(|lineage| lineage.root)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{}: state {} merged `{label}` for a candidate with no lineage",
+                            member.name, transition.from
+                        )
+                    });
+                let holds = |fold: &TopologyFold| {
+                    fold.leases().is_some_and(|leases| {
+                        leases.lineages().iter().any(|lineage| lineage.root == root)
+                    })
+                };
+                assert!(
+                    holds(from),
+                    "{}: state {} held no lineage lease for root {} before its repair merged",
+                    member.name,
+                    transition.from,
+                    root.0
+                );
+                assert!(
+                    !holds(landed),
+                    "{}: state {to} still holds the lineage lease for root {} after its repair merged",
+                    member.name,
+                    root.0
+                );
+                assert_eq!(
+                    landed.task_state(root),
+                    Some(TaskState::Merged),
+                    "{}: state {to}: the repair's publication satisfies its root",
+                    member.name
+                );
+                released += 1;
+            }
+            assert!(
+                released > 0,
+                "{}: a repair's merge is accepted somewhere and releases its lineage lease",
+                member.name
+            );
+            let refused = census.refused_labels();
+            assert!(
+                refused
+                    .iter()
+                    .any(|label| label.starts_with("merge_prepared/fast/self-satisfies/")),
+                "{}: a repair's publication settling the repair alone was offered and refused",
+                member.name
+            );
+            assert!(
+                !accepted
+                    .iter()
+                    .any(|label| label.starts_with("merge_prepared/fast/self-satisfies/")),
+                "{}: a publication settling a repair alone was accepted somewhere",
+                member.name
+            );
+            assert!(
+                census.transitions().iter().any(|transition| {
+                    transition
+                        .label
+                        .starts_with("merge_prepared/fast/self-satisfies/")
+                        && matches!(
+                            &transition.outcome,
+                            TransitionOutcome::Refused { reason }
+                                if reason.contains("as this publication's closure")
+                        )
+                }),
+                "{}: the self-satisfies refusal names the closure the fold derives",
+                member.name
+            );
+        }
+        let prefix = &members[0];
+        assert!(
+            prefix
+                .census
+                .accepted_labels()
+                .iter()
+                .any(|label| label.starts_with("task_merged/") && names_a_repair(label)),
+            "the prefix publishes a repair too"
+        );
+    }
+
+    #[test]
+    fn no_seeded_census_has_a_dead_end_below_the_sequence_bound() {
+        let bounds = CensusBounds::default();
+        for member in family().iter().filter(|member| member.restricted) {
+            let census = member.census;
+            let mut at_the_bound = 0;
+            for state in census.states() {
+                if state.fold.finished().is_some()
+                    || state.trace.len() >= census.bounds().max_trace
+                    || census.has_legal_transition(state.id)
+                {
+                    continue;
+                }
+                let next = state.fold.next_sequence().map_or(0, |sequence| sequence.0);
+                assert!(
+                    next >= bounds.sequences,
+                    "{}: state {} is an unfinished dead end below the sequence bound (next \
+                     sequence {next} of {}): {:?}",
+                    member.name,
+                    state.id,
+                    bounds.sequences,
+                    state
+                        .trace
+                        .iter()
+                        .map(|event| event.body.kind())
+                        .collect::<Vec<_>>()
+                );
+                assert!(
+                    state.fold.queue().is_some_and(|queue| !queue.is_empty()),
+                    "{}: state {}: a dead end at the sequence bound is a candidate the bound leaves \
+                     queued",
+                    member.name,
+                    state.id
+                );
+                at_the_bound += 1;
+            }
+            assert!(
+                at_the_bound > 0,
+                "{}: the sequence bound stops at least one path with a candidate still queued, and \
+                 the census records that dead end rather than hiding it",
+                member.name
             );
         }
     }

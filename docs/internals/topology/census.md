@@ -46,7 +46,8 @@ to them:
   names, for every task the fold registers, within the bounds: two
   generations per task, two attempts per generation, every settlement
   transition, the publication dispositions each in a matching and a
-  mismatching shape, rejections (offered where the fold can accept one,
+  mismatching shape, a repair's publication with its lineage closure and
+  with the repair alone, rejections (offered where the fold can accept one,
   each registering the repair the production repair module derives), one
   hand spawn over merged work, at most two open questions, verification
   deferrals to the bound, a resume only where a run resumes, the ceiling
@@ -76,12 +77,13 @@ to them:
   (`seeded_census`) seeds its shape's integration path
   (`engaged_originals_prefix`: every original the shape has ready carried
   to a queued candidate, and where that engaged one original alone, it is
-  integrated at sequence 0 and the originals it releases are carried too),
-  explores it under the restricted generator `integration_path_classes`
-  and **closes** — measured 2026-09-16: the chain in 22 states from an
-  11-event seed, the fan-out in 25 from a 15-event seed (the member the
-  family held before, event for event), the join in 49 from a 9-event
-  seed, none truncated — each reaching the fourth integration sequence and
+  integrated at sequence 0 and the originals it releases are carried too),  explores it under the restricted generator `integration_path_classes`
+  and **closes** — measured 2026-09-16, with the generator publishing its
+  repairs (`fn seeded_census`, below): the chain in 25 states from an
+  11-event seed, the fan-out in 31 from a 15-event seed (the seed the
+  family's one seeded member held before, event for event), the join in
+  75 from a 9-event seed, none truncated — each reaching the fourth
+  integration sequence and
   the second repair, the fan-out and the join the second lineage besides;
   the chain reaches one lineage and names two dimensions, not three
   (`fn seeded_census`, below). Since the prefix reaches every bound too,
@@ -631,11 +633,41 @@ The same candidate at a named commit. Its commit is part of its
 identity, so every later record that names it carries the same label or
 the fold refuses the log.
 
+## `mod tests` › `fn satisfies_for(fold: &TopologyFold, key: TaskKey) -> Vec<TaskKey> {`
+
+The keys a publication of `key` settles, read from the fold: the
+candidate's own lineage closure (`TopologyFold::satisfies_closure`), which
+is `key` alone for an original and the whole parent chain for a repair —
+the root, every earlier repair of the lineage, and the repair itself. The
+production emitter derives the same value from the same fold
+(`engine::topology::integrate`, the prepared request's `satisfies`), so
+an offer built here is the offer a live run makes. Until 2026-09-16 every
+publication the generator built named `key` alone; the fold refused every
+publication of a repair as `InvalidSatisfies` ("settles [3], and the fold
+derives [2, 3] as this publication's closure"), and no member of the
+family ever merged a repair — filed and fixed as
+`G5-CLAUSE1-CENSUS-NO-REPAIR-IS-EVER-PUBLISHED` after #302's first
+review. The relation's negative is kept as
+`merge_prepared/fast/self-satisfies/` in `classes`.
+
+## `mod tests` › `fn lease_release_for(fold: &TopologyFold, key: TaskKey, generation: u32) -> MergeLeaseRelease {`
+
+The lease a merge of `key`'s candidate releases: the candidate's own for
+an original, the lineage's for a repair, whose publication settles the
+lineage's root. `check_lease_release` refuses the other one either way,
+and the production emitter chooses the same way
+(`integrate::lease_release`). Until 2026-09-16 the generator released the
+candidate's lease for every key, so a repair's publication, had it been
+accepted, could not have been followed by its merge.
+
 ## `mod tests` › `fn merge_prepared_for(`
 
 The same publication naming its candidate outright, so a witness whose
 whole point is a candidate at a label the fixture does not otherwise
-derive can still be published.
+derive can still be published. Its `satisfies` is the caller's:
+`merge_prepared` passes the fold's closure (`satisfies_for`), the
+self-satisfies negative passes the repair alone, and `fast_publication`
+names aleph, an original whose closure is itself.
 
 ## `fn merge_prepared_for(` › `VerificationSource::Verification { .. } => Some(Verificatio…`
 
@@ -649,7 +681,10 @@ The merge that resolves an open publication.
 `merged_sha` and `satisfies` are read off the transaction the fold is
 holding, because a merge is the ref move a publication already
 authorized: a class that invented either would only ever be refused,
-and the census would then never resolve a transaction.
+and the census would then never resolve a transaction. The lease it
+releases is derived from `key`'s lineage (`lease_release_for`), as the
+emitter derives it: a repair's merge releases the lineage lease and
+settles the lineage's root.
 
 ## `mod tests` › `fn rejection_of(`
 
@@ -691,6 +726,14 @@ the fold registers as many as a run asks for.
 ## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `out.push(Candidate::new(`
 
 The fast relation, matching and each way of missing it.
+
+## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `if entry.lineage.is_some() {`
+
+The satisfies relation's negative, for repairs only: the fast
+publication settling the repair alone, which the fold refuses wherever it
+reaches the closure check ("settles [3], and the fold derives [2, 3] as
+this publication's closure"). An original's closure is itself, so for an
+original the negative would be the positive, and it is not offered.
 
 ## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `out.push(Candidate::new(`
 
@@ -779,7 +822,10 @@ action is the classifier tests' claim, over the same states.
 
 The classes of the integration path alone: what each seeded census
 explores from its shape's seed, so that four sequences and two repairs
-are a few steps away rather than forty. No `question_answered` is among
+are a few steps away rather than forty. The one publication negative that
+concerns a repair, `merge_prepared/fast/self-satisfies/`, is admitted
+too, so each seeded census answers the satisfies relation both ways.
+No `question_answered` is among
 them, so a repair whose admission asks a person — in this fixture a
 repair of bet, whose one small rung lies below the repair floor of mid
 (`repair_ladder`, `admission_for`) — parks the run where it stands, and
@@ -822,41 +868,50 @@ repairs). Each seed engages at least two originals, which
 
 The seeded census of one plan shape: from [`engaged_originals_prefix`],
 the integration path alone (`integration_path_classes`) — each queued
-candidate integrated or rejected, each repair dispatched and carried to a
-queued candidate — explored to closure under a ceiling of 5,000 states,
-memoised per shape. Measured 2026-09-16 from the family artifact
-(`UPSTROKE_CENSUS_SUMMARY`) at the head that admitted the chain and the
-join: the chain closes in 22 states from its 11-event seed (1,152 offers,
-21 accepted), the fan-out in 25 from its 15-event seed (1,405 offers, 24
-accepted), the join in 49 from its 9-event seed (2,880 offers, 59
-accepted); none is truncated and no state sits past a trace of 27 under
-the trace ceiling of 48. Each reaches the fourth sequence and the second
-repair; the fan-out and the join reach the second lineage, one rejection
-of each of two originals' candidates; the chain reaches one lineage,
-because a rejection holds the chain behind the repair it registers and
-no repair publishes here, so one root is rejected per path — its
-`reaches` names the two dimensions it reaches and not the third.
+candidate integrated or rejected, each repair dispatched, carried to a
+queued candidate and integrated in its turn — explored to closure under a
+ceiling of 5,000 states, memoised per shape. Measured 2026-09-16 from the
+family artifact (`UPSTROKE_CENSUS_SUMMARY`) at the tree whose generator
+publishes repairs: the chain closes in 25 states from its 11-event seed
+(1,317 offers, 25 accepted), the fan-out in 31 from its 15-event seed
+(1,756 offers, 32 accepted), the join in 75 from its 9-event seed (4,477
+offers, 91 accepted); none is truncated, no state sits past a trace of 27
+under the trace ceiling of 48, and the only unfinished dead ends are at
+the sequence bound with a candidate still queued — one in the chain, one
+in the fan-out, three in the join
+(`no_seeded_census_has_a_dead_end_below_the_sequence_bound`). Each
+reaches the fourth sequence and the second repair; the fan-out and the
+join reach the second lineage, one rejection of each of two originals'
+candidates; the chain reaches one lineage, because its seed merges aleph,
+a rejected bet's repair has no rung at or above the repair floor and asks
+a person — a question this generator never answers, so the run parks with
+gimel pending — and gimel's rejections repair one lineage. Its `reaches`
+names the two dimensions it reaches and not the third.
 
-**No repair is integrated in any member, the prefix included, and until
-2026-09-16 these notes said the opposite of the fan-out member.** Every
-publication the generator builds carries `satisfies: [key]`, and the fold
-derives a repair's closure as its root and itself (`satisfies_closure`),
-so a repair's `merge_prepared` is refused wherever it is otherwise
-admissible — measured on the fan-out member as "settles [3], and the fold
-derives [2, 3]" and on the prefix as "settles [3], and the fold derives
-[0, 3]" — and no `task_merged` of a repair follows. The census therefore
-reaches a repair's dispatch, attempt, candidate and rejection, and under
-the full generator its verification, and never a repair's publication,
-the lineage lease's release at `task_merged` or a multi-key `satisfies`;
-the fold's own tests cover those. Filed as
-`G5-CLAUSE1-CENSUS-NO-REPAIR-IS-EVER-PUBLISHED`; the change that takes it
-up derives the publication's `satisfies` from the fold and the lease
-release from the candidate's lineage, and every member's explored set
-moves with it. Until PR10's round 2 the fan-out seed had two originals
-merged and one candidate, whose two repairs were one lineage. The prefix
-reaches every bound at its own ceiling (measured in round 6), so these
-members exist as the family's closing censuses, one per shape, rather
-than as the only route to any bound.
+**Until 2026-09-16 no repair was integrated in any member, the prefix
+included, and these notes said the opposite of the fan-out member.**
+Every publication the generator built carried `satisfies: [key]`, the
+fold derives a repair's closure as its whole parent chain, so a repair's
+`merge_prepared` was refused wherever it was otherwise admissible, no
+`task_merged` of a repair followed, and three of the seeded members' six
+unfinished dead ends sat below the sequence bound with that wrongly built
+publication as their only way forward (the chain then closed in 22
+states, the fan-out in 25, the join in 49). Filed as
+`G5-CLAUSE1-CENSUS-NO-REPAIR-IS-EVER-PUBLISHED` and fixed in the same
+pull request after its first review: `satisfies_for` and
+`lease_release_for` build every publication and merge from the fold, as
+the emitter does, and
+`every_seeded_census_publishes_a_repair_and_releases_its_lineage_lease`
+holds every seeded member to a repair publication accepted, its lineage
+lease released at the merge, its root merged, and the self-satisfies
+negative refused with the closure. With the fix the prefix accepts 379 of
+the 175,800 repair publications it offers, the chain 3 of 32, the fan-out
+6 of 88, the join 14 of 232 (measured for #302's round-1 repair). Until
+PR10's round 2 the fan-out seed had two originals merged and one
+candidate, whose two repairs were one lineage. The prefix reaches every
+bound at its own ceiling (measured in round 6), so these members exist as
+the family's closing censuses, one per shape, rather than as the only
+route to any bound.
 
 ## `mod tests` › `fn reached_dimensions(censuses: &[&Census]) -> BTreeMap<&'s…`
 
@@ -1463,7 +1518,8 @@ prefix above.
 
 ## `mod tests` › `fn fast_publication(base: CommitSha, commit: CommitSha) -> TopologyEvent {`
 
-The fast publication of `aleph`'s first candidate at one head.
+The fast publication of `aleph`'s first candidate at one head, settling
+aleph alone — its closure, as an original.
 
 The two labels are the offer side of the two relations
 `decisions.bounded_census.abstraction` retains, so an offer built from
@@ -1852,3 +1908,32 @@ offers, truncation), the union's reach in every dimension, and whether the
 union reaches every bound; since 2026-09-16 the artifact carries one
 seeded member per plan shape, each closed, and the test holds it to that.
 Written to `UPSTROKE_CENSUS_SUMMARY` when that names a file.
+
+## `mod tests` › `fn names_a_repair(label: &str) -> bool {`
+
+Whether a class label is about a repair: the registry's fourth, fifth and
+sixth entries, which `label` names `r3`, `r4` and `r5`.
+
+## `mod tests` › `fn every_seeded_census_publishes_a_repair_and_releases_its_lineage_lease() {`
+
+The regression test of `G5-CLAUSE1-CENSUS-NO-REPAIR-IS-EVER-PUBLISHED`:
+in every seeded census some repair's fast publication is accepted; some
+repair's merge is accepted, and at each such merge the source state held
+the lineage lease of the repair's root, the landed state holds it no
+longer, and the root is merged; the self-satisfies negative is offered,
+refused everywhere, and somewhere refused with the closure the fold
+derives; and the prefix merges a repair too. On the generator that named
+the repair alone it fails at its first assertion — the chain's accepted
+publications were bet's and gimel's and no repair's.
+
+## `mod tests` › `fn no_seeded_census_has_a_dead_end_below_the_sequence_bound() {`
+
+An unfinished dead end is a state with no `run_finished`, below the trace
+ceiling, at which no offer is accepted. In a seeded census the only
+legitimate ones are at the sequence bound, where the generator stops
+offering publications and a candidate stays queued: this holds every
+seeded member to that, and to having at least one such state, so the
+bound is seen to stop a path rather than assumed to. On the generator
+that named the repair alone the fan-out's state 18 and the join's 26 and
+42 were dead ends below the bound, their only way forward the repair
+publication the generator could not build.
