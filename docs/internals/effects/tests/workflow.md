@@ -273,7 +273,11 @@ reason, not this job's. This job wants [`GOLDEN_IMAGE_TOOLCHAIN`], the
 image's version: not `stable`, which is already ahead of the image and
 would run the suite in the queue on a compiler the pull-request lane never
 ran it on; not an older version, which would omit on the queue whatever
-the image's compiler enables. Before the hosted lane existed this job
+the image's compiler enables. The install alone does not settle which
+compiler bare `cargo` runs -- the action tolerates a failed `rustup
+default` -- so the pinned suite script refuses any other version before it
+runs, and the constant is held to that script by
+`the_windows_leg_counts_the_tests_it_ran`. Before the hosted lane existed this job
 installed nothing and the helper was never asked, which the ninth review
 pass found. Measured,
 `MUT-TEST-WINDOWS-TOOLCHAIN-FLOATS`,
@@ -316,8 +320,18 @@ their floor lowered to a number an unexecuted suite clears. Measured,
 
 ## `fn checkout_complaints(job: &Yaml, named: &str, code: &str) -> Vec<String> {`
 
-Every way a test job's checkout points the suite at a tree other than the
-head under test.
+Every way a job's checkout points its steps at a tree other than the head
+under test, or is not where the steps assume it: exactly one checkout, at
+step 0, with no inputs.
+
+Count and position first. A pinned action placed above the checkout runs
+against an empty workspace, or one it prepared itself, and a second
+checkout later can replace the candidate while the first, input-free one
+still matches; both pass a reading that checks only the inputs of whatever
+checkouts it finds, and the position the toolchain check asserts for the
+install is only meaningful if the checkout is the step before it. Measured,
+`MUT-TEST-WINDOWS-CACHE-BEFORE-CHECKOUT` and
+`MUT-TEST-WINDOWS-SECOND-CHECKOUT`.
 
 `actions/checkout` with no inputs checks out the event's own ref: for a
 pull request, the candidate merged onto its base. Any input -- `ref:`,

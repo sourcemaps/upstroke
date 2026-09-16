@@ -754,7 +754,12 @@ this check read and how each was shown a spelling it missed.
 ## `fn the_windows_leg_counts_the_tests_it_ran() {`
 
 The leg whose tests leave GitHub's runners on the pull-request lane reports
-that they ran, on either lane.
+that they ran, on either lane, and refuses to run them on any compiler but
+the one [`GOLDEN_IMAGE_TOOLCHAIN`] names. The script is pinned as text by
+the oracle; this test holds two numbers inside that text to the constants
+they must equal -- the floor and the compiler version -- and requires the
+compiler check to come before the suite, since a refusal after the run has
+already spent the run on the wrong compiler.
 
 Every other assertion here reads `ci.yml` and concludes what CI was *asked*
 to do. Cargo can be asked for this suite and execute none of it: a

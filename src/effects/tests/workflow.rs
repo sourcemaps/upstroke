@@ -745,9 +745,11 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
     if running != 1 {
         out.push(format!(
             "[test-windows-command] `{TEST_WINDOWS_JOB}` has {running} steps whose `run:` is \
-             exactly the pinned suite-and-witness script, not one. Its first line is \
-             `{TEST_COMMAND}`; the rest is the count that says the suite executed rather \
-             than compiling and being handed to something that exits zero."
+             exactly the pinned suite-and-witness script, not one. Its cargo line is \
+             `{TEST_COMMAND}`; the lines before it refuse to run the suite on any compiler \
+             but the image's `{GOLDEN_IMAGE_TOOLCHAIN}`, and the lines after it are the \
+             count that says the suite executed rather than compiling and being handed to \
+             something that exits zero."
         ));
     }
     out.extend(checkout_complaints(
@@ -766,6 +768,23 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
 
 fn checkout_complaints(job: &Yaml, named: &str, code: &str) -> Vec<String> {
     let mut out = Vec::new();
+    let checkouts: Vec<usize> = steps_of(job)
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| {
+            scalar(step, "uses").is_some_and(|uses| uses.starts_with("actions/checkout@"))
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if checkouts != [0] {
+        out.push(format!(
+            "[{code}] `{named}` checks out at steps {checkouts:?}, not exactly once at step 0. \
+             Every step of a job runs against the tree the checkout put there: a step above \
+             the checkout runs against an empty workspace or one another action prepared, \
+             and a second checkout later can replace the candidate with another tree while \
+             the first, input-free one still matches."
+        ));
+    }
     for (index, step) in steps_of(job).iter().enumerate() {
         let checks_out =
             scalar(step, "uses").is_some_and(|uses| uses.starts_with("actions/checkout@"));
@@ -1700,6 +1719,46 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         anchor: "          $passed = [int](($log | Select-String -Pattern '^test result: ok\\. (\\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)\n          if ($passed -lt 1700) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n",
         replacement: "",
         refused_as: "test-windows-command",
+    },
+    WorkflowEscape {
+        name: "MUT-WINDOWS-WITNESS-COMPILER-CHECK-DROPPED",
+        escape: "the two lines that refuse any compiler but the image's are gone and the suite \
+                 runs on whatever bare `cargo` resolves to. The install step still matches \
+                 whole, and the toolchain action tolerates a failed `rustup default` and \
+                 verifies only `rustc +1.97.1`, so the hosted lane can run the suite on the \
+                 runner's preinstalled stable with the install reported green -- the \
+                 one-compiler claim with nothing holding it.",
+        job: Some("test-windows"),
+        anchor: "          $rustc = (rustc --version); $cargo = (cargo --version)\n\
+                 \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' with '$cargo', not the image's 1.97.1: the compiler was chosen by something other than this workflow\" }\n",
+        replacement: "",
+        refused_as: "test-windows-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CACHE-BEFORE-CHECKOUT",
+        escape: "a pinned cache step placed above the checkout. The install is still step 1 \
+                 and the checkout is still input-free, so a reading that checks the install's \
+                 index and the checkout's inputs passes, while a Rust-aware action runs \
+                 before the compiler is selected and before the tree exists.",
+        job: Some("test-windows"),
+        anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\n\
+                 \x20     # The hosted lane's compiler: the image's, exactly. The workflow oracle\n",
+        replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
+                      \x20     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\n\
+                      \x20     # The hosted lane's compiler: the image's, exactly. The workflow oracle\n",
+        refused_as: "test-windows-checkout",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-SECOND-CHECKOUT",
+        escape: "a second, input-free checkout after the identity step. The first still \
+                 matches; the second re-checks out the event's ref, which for this job is the \
+                 same tree today and is whatever the action's default becomes tomorrow, and \
+                 anything the identity step wrote to the tree is gone.",
+        job: Some("test-windows"),
+        anchor: "      - name: Test, and witness that the suite ran\n",
+        replacement: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\
+                      \x20     - name: Test, and witness that the suite ran\n",
+        refused_as: "test-windows-checkout",
     },
     WorkflowEscape {
         name: "MUT-WINDOWS-WITNESS-FLOOR-DROPPED",

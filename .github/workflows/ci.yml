@@ -183,10 +183,22 @@ jobs:
       # the same claim on either machine. The floor is today's count on this
       # platform less a margin; removing that many tests is a deliberate act,
       # and it edits this number in the same change.
+      #
+      # First, though, the compiler. The toolchain action above tolerates a
+      # failed `rustup default` (`continue-on-error` on that step) and then
+      # verifies only `rustc +1.97.1`, so on the hosted lane the install can
+      # report success while bare `cargo` is still the runner's preinstalled
+      # stable. The script refuses to run the suite unless bare `rustc` and
+      # `cargo` report the image's version, on either lane: the guest asserts
+      # what its image carries, the hosted lane asserts what the install
+      # selected, and the workflow oracle holds the number in this script to
+      # the one it pins for the install. Re-curation edits both together.
       - name: Test, and witness that the suite ran
         env:
           UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
         run: |
+          $rustc = (rustc --version); $cargo = (cargo --version)
+          if ($rustc -notmatch '^rustc 1\.97\.1 ' -or $cargo -notmatch '^cargo 1\.97\.1 ') { throw "the suite would run on '$rustc' with '$cargo', not the image's 1.97.1: the compiler was chosen by something other than this workflow" }
           cargo test --all-targets --all-features | Tee-Object -Variable log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $passed = [int](($log | Select-String -Pattern '^test result: ok\. (\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)

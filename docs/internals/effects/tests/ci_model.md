@@ -101,10 +101,23 @@ is a deliberate act, and it edits this number in the same change.
 
 ## `pub(super) const WINDOWS_TEST_WITNESS: &str`
 
-The Windows leg's suite step, character for character: the pinned test
-command, its exit status, and a count of what libtest reported. One step for
-both lanes: the count is the same claim on either machine, and a step per
-lane would be two scripts to pin and a condition on each.
+The Windows leg's suite step, character for character: a refusal to run on
+any compiler but the image's, then the pinned test command, its exit
+status, and a count of what libtest reported. One step for both lanes: the
+count is the same claim on either machine, and a step per lane would be two
+scripts to pin and a condition on each.
+
+The compiler check comes first because the install step cannot make the
+claim on its own. `dtolnay/rust-toolchain` at the pinned commit runs
+`rustup default` under `continue-on-error` and then verifies only
+`rustc +<toolchain>`, so on the hosted lane the install can report success
+while bare `cargo` still resolves to the runner's preinstalled stable. The
+script asks bare `rustc` and `cargo` for their versions and throws unless
+both are [`GOLDEN_IMAGE_TOOLCHAIN`]'s: on the guest that asserts what the
+image carries, on the hosted lane what the install selected, and
+`the_windows_leg_counts_the_tests_it_ran` holds the number in the script to
+the constant, so re-curation edits both or neither. Measured,
+`MUT-WINDOWS-WITNESS-COMPILER-CHECK-DROPPED`.
 
 Every other pin in this contract is an equality over `ci.yml`, and each
 refuses one named way of arriving at a green job over a suite that never
@@ -244,7 +257,8 @@ so the three cannot drift apart while the pin still reads back. Measured,
 ## `pub(super) const GOLDEN_IMAGE_TOOLCHAIN: &str = "1.97.1";`
 
 The compiler the golden image carries, and so the one the hosted lane
-installs -- not `stable`. Current stable is ahead of the image
+installs and the one [`WINDOWS_TEST_WITNESS`] refuses to run without, on
+either lane -- not `stable`. Current stable is ahead of the image
 (`lint (windows)` installed 1.98.1 on 2026-09-16 against the image's
 1.97.1), so `stable` here would run the suite on a compiler the
 pull-request lane never ran it on: a test whose outcome depends on the

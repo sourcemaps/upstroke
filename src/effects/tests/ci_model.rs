@@ -22,7 +22,7 @@ pub(super) const TEST_WINDOWS_SCRIPTS: [&str; 2] = [GIT_IDENTITY_SCRIPT, WINDOWS
 
 pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;
 
-pub(super) const WINDOWS_TEST_WITNESS: &str = "cargo test --all-targets --all-features | Tee-Object -Variable log\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n$passed = [int](($log | Select-String -Pattern '^test result: ok\\. (\\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)\nif ($passed -lt 1700) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n";
+pub(super) const WINDOWS_TEST_WITNESS: &str = "$rustc = (rustc --version); $cargo = (cargo --version)\nif ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' with '$cargo', not the image's 1.97.1: the compiler was chosen by something other than this workflow\" }\ncargo test --all-targets --all-features | Tee-Object -Variable log\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n$passed = [int](($log | Select-String -Pattern '^test result: ok\\. (\\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)\nif ($passed -lt 1700) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n";
 
 pub(super) const FMT_GATE: &str = "cargo fmt --check";
 pub(super) const SHELL_GATES: [&str; 6] = [
