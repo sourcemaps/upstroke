@@ -192,20 +192,25 @@ jobs:
       # compiler through `RUSTC`, `CARGO_BUILD_RUSTC` or a `build.rustc` in
       # any config it reads, none of which this workflow can see. So the
       # script asks Cargo itself -- `cargo rustc --lib -- --version` runs the
-      # compiler Cargo would run, and prints its version -- and asks the
-      # `cargo` on PATH for its own, and refuses to run the suite unless both
-      # are the image's, on either lane: the guest asserts what its image
-      # carries and its environment selects, the hosted lane asserts what the
-      # install selected, and the workflow oracle holds the number in this
-      # script to the one it pins for the install. Re-curation edits both
-      # together. On the hosted lane the question compiles the dependencies,
-      # which the suite would compile next anyway.
+      # compiler Cargo would run, and prints its version. The `rustc` on PATH
+      # is a second question, not a substitute: the suite's own fixtures spawn
+      # bare `rustc` against what Cargo built (`effects::tests`, the log and
+      # run-directory tests), and a PATH rustc of another version fails them
+      # with an incompatible-rlib error rather than a wrong answer. So the
+      # script asks all three -- Cargo's compiler, PATH's rustc, PATH's cargo
+      # -- and refuses to run the suite unless every one is the image's, on
+      # either lane: the guest asserts what its image carries and its
+      # environment selects, the hosted lane asserts what the install
+      # selected, and the workflow oracle holds the number in this script to
+      # the one it pins for the install. Re-curation edits both together. On
+      # the hosted lane the first question compiles the dependencies, which
+      # the suite would compile next anyway.
       - name: Test, and witness that the suite ran
         env:
           UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
         run: |
-          $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()
-          if ($rustc -notmatch '^rustc 1\.97\.1 ' -or $cargo -notmatch '^cargo 1\.97\.1 ') { throw "the suite would run on '$rustc' with '$cargo', not the image's 1.97.1: the compiler was chosen by something other than this workflow" }
+          $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()
+          if ($rustc -notmatch '^rustc 1\.97\.1 ' -or $path_rustc -notmatch '^rustc 1\.97\.1 ' -or $cargo -notmatch '^cargo 1\.97\.1 ') { throw "the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow" }
           cargo test --all-targets --all-features | Tee-Object -Variable log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $passed = [int](($log | Select-String -Pattern '^test result: ok\. (\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)

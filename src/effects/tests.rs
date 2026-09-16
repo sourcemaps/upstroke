@@ -1371,10 +1371,18 @@ fn the_windows_leg_counts_the_tests_it_ran() {
          suite it witnesses is not the suite the other legs run"
     );
     let version = GOLDEN_IMAGE_TOOLCHAIN.replace('.', "\\.");
-    for tool in ["rustc", "cargo"] {
+    for (variable, tool, asked) in [
+        ("rustc", "rustc", "the compiler Cargo will run"),
+        (
+            "path_rustc",
+            "rustc",
+            "the `rustc` on PATH, which the suite's fixtures spawn",
+        ),
+        ("cargo", "cargo", "the `cargo` on PATH"),
+    ] {
         assert!(
-            WINDOWS_TEST_WITNESS.contains(&format!("${tool} -notmatch '^{tool} {version} '")),
-            "the Windows leg's step does not refuse a bare `{tool}` other than the image's \
+            WINDOWS_TEST_WITNESS.contains(&format!("${variable} -notmatch '^{tool} {version} '")),
+            "the Windows leg's step does not refuse {asked} being other than the image's \
              `{GOLDEN_IMAGE_TOOLCHAIN}` before running the suite, so the toolchain the install \
              step pins and the one the suite runs on can differ with every pin matching"
         );

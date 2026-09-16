@@ -330,6 +330,8 @@ checkout later can replace the candidate while the first, input-free one
 still matches; both pass a reading that checks only the inputs of whatever
 checkouts it finds, and the position the toolchain check asserts for the
 install is only meaningful if the checkout is the step before it. Measured,
+`MUT-TEST-WINDOWS-CHECKOUT-AFTER-INSTALL` -- the shape only this pin
+refuses, the install kept at step 1 and the checkout moved below it --
 `MUT-TEST-WINDOWS-CACHE-BEFORE-CHECKOUT` and
 `MUT-TEST-WINDOWS-SECOND-CHECKOUT`.
 

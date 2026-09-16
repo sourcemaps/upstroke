@@ -689,7 +689,7 @@ the command and the count that says it executed, see
 [`the_windows_leg_counts_the_tests_it_ran`] -- the platform-default shell on
 every `run:` step, and a field set with no `if:` or `continue-on-error:`
 anywhere but on that one install. The refusals are executed in
-[`WORKFLOW_ESCAPES`], every row named `MUT-TEST-WINDOWS-*` and both
+[`WORKFLOW_ESCAPES`], every row named `MUT-TEST-WINDOWS-*` and the three
 `MUT-WINDOWS-WITNESS-*`.
 
 ## `fn the_windows_leg_routes_each_lane_to_the_runner_its_install_step_is_written_for() {`
@@ -756,7 +756,8 @@ this check read and how each was shown a spelling it missed.
 The leg whose tests leave GitHub's runners on the pull-request lane reports
 that they ran, on either lane, and refuses to run them on any compiler but
 the one [`GOLDEN_IMAGE_TOOLCHAIN`] names -- asking Cargo which compiler it
-will run, not which `rustc` is on PATH. The script is pinned as text by
+will run, and PATH which `rustc` the fixtures will spawn, and PATH which
+`cargo` it has. The script is pinned as text by
 the oracle; this test holds two numbers inside that text to the constants
 they must equal -- the floor and the compiler version -- and requires the
 compiler check to come before the suite, since a refusal after the run has

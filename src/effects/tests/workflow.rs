@@ -1731,23 +1731,59 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  never saw with the install reported green -- the one-compiler claim with \
                  nothing holding it.",
         job: Some("test-windows"),
-        anchor: "          $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\n\
-                 \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' with '$cargo', not the image's 1.97.1: the compiler was chosen by something other than this workflow\" }\n",
+        anchor: "          $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\n\
+                 \x20         if ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\n",
         replacement: "",
         refused_as: "test-windows-command",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-CACHE-BEFORE-CHECKOUT",
-        escape: "a pinned cache step placed above the checkout. The install is still step 1 \
-                 and the checkout is still input-free, so a reading that checks the install's \
-                 index and the checkout's inputs passes, while a Rust-aware action runs \
-                 before the compiler is selected and before the tree exists.",
+        escape: "a pinned cache step placed above the checkout, everything else in order: the \
+                 checkout slips to step 1 and the install to step 2, so the install's position \
+                 check refuses this shape too. The checkout pin is named because it is the one \
+                 that reads the cause -- a Rust-aware action running before the tree exists -- \
+                 and `MUT-TEST-WINDOWS-CHECKOUT-AFTER-INSTALL` is the shape only it refuses.",
         job: Some("test-windows"),
         anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\n\
                  \x20     # The hosted lane's compiler: the image's, exactly. The workflow oracle\n",
         replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
                       \x20     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\n\
                       \x20     # The hosted lane's compiler: the image's, exactly. The workflow oracle\n",
+        refused_as: "test-windows-checkout",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CHECKOUT-AFTER-INSTALL",
+        escape: "the shape the checkout pin exists for: a pinned cache step at 0, the install \
+                 still at 1, and the checkout moved to 2. The install's position check passes, \
+                 the checkout is still input-free, and a Rust-aware action runs before the \
+                 compiler is selected and before the tree exists; only a pin on where the \
+                 checkout is, not merely what it is given, refuses it.",
+        job: Some("test-windows"),
+        anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\n\
+                 \x20     # The hosted lane's compiler: the image's, exactly. The workflow oracle\n\
+                 \x20     # pins this step whole -- one install, right after the checkout, on\n\
+                 \x20     # exactly the lane whose runner needs one, at exactly the image's version\n\
+                 \x20     # -- and refuses an `if:` on any other step of this job. On the guest\n\
+                 \x20     # lane the step is skipped after its archive is downloaded at setup.\n\
+                 \x20     - name: Install the image's toolchain on the hosted lane\n\
+                 \x20       if: github.event_name == 'merge_group'\n\
+                 \x20       uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
+                 \x20       with:\n\
+                 \x20         toolchain: 1.97.1\n\
+                 \x20         components: clippy\n",
+        replacement: "      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\n\
+                      \x20     # The hosted lane's compiler: the image's, exactly. The workflow oracle\n\
+                 \x20     # pins this step whole -- one install, right after the checkout, on\n\
+                 \x20     # exactly the lane whose runner needs one, at exactly the image's version\n\
+                 \x20     # -- and refuses an `if:` on any other step of this job. On the guest\n\
+                 \x20     # lane the step is skipped after its archive is downloaded at setup.\n\
+                 \x20     - name: Install the image's toolchain on the hosted lane\n\
+                 \x20       if: github.event_name == 'merge_group'\n\
+                 \x20       uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
+                 \x20       with:\n\
+                 \x20         toolchain: 1.97.1\n\
+                 \x20         components: clippy\n\
+                      \x20     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
         refused_as: "test-windows-checkout",
     },
     WorkflowEscape {

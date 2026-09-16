@@ -117,8 +117,14 @@ through `RUSTC`, `CARGO_BUILD_RUSTC` or a `build.rustc` in any config it
 reads, and the guest's service environment and Cargo home are inputs this
 contract cannot see. So the script asks Cargo itself --
 `cargo rustc --lib -- --version` runs the compiler Cargo would run and
-prints its version, and honours every one of those overrides -- and asks
-the `cargo` on PATH for its own version, and throws unless both are
+prints its version, and honours every one of those overrides. The `rustc`
+on PATH is a second question rather than a substitute: the suite's own
+fixtures spawn bare `rustc` against what Cargo built -- the effect-denial
+fixtures here, the log and run-directory tests -- and a PATH rustc of
+another version fails them with an incompatible-rlib error, so a lane
+whose PATH disagrees with its Cargo is not the same suite either. The
+script asks all three, Cargo's compiler, PATH's rustc and PATH's cargo,
+and throws unless every one is
 [`GOLDEN_IMAGE_TOOLCHAIN`]'s: on the guest that asserts what the image
 carries and its environment selects, on the hosted lane what the install
 selected, and `the_windows_leg_counts_the_tests_it_ran` holds the number
