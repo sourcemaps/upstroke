@@ -23,7 +23,7 @@ prints `Failed to initialize: unix socket path "…" is too long`, which the cla
 
 Observed at `a2fe09c2` on 2026-09-15 during Gate 5 run 2's first full-suite export run, whose
 `TMPDIR` was this session's scratchpad — **102 characters**, so the socket path the test builds under it is
-**141 characters**, against `sun_path`'s 108:
+**141 characters**, against `sun_path`'s 108-byte array (107 usable):
 
 ```
 thread 'runner::container::tests::real_docker_prints_the_transcribed_unreachable_diagnostics'
@@ -37,7 +37,8 @@ socket path \"/tmp/claude-1000/…/tmpdir-export1/upstroke-r2-denied-1455436/doc
 test alone with `UPSTROKE_REQUIRE_DOCKER=1` at the same head:
 
 - `TMPDIR` = a **105**-character directory (socket path 144): `FAILED`, `cargo exit=101`, the message above;
-- `TMPDIR` = `/home/ubuntu/g5r2-tmp/docker2` (**29** characters): `ok`, `cargo exit=0`.
+- `TMPDIR` = a short directory under `/home/ubuntu`: `ok`, `cargo exit=0`. The control log records that run
+  and its status, not the path, so no length is quoted for it here.
 
 It is not a defect of the engine: nothing in `src/runner/container.rs` reads `TMPDIR` in production,
 and the suite passes under the ordinary `/tmp`. It is a test whose subject changes with the
