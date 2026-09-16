@@ -5,8 +5,8 @@ disposition: deferred
 category: security-trust
 pr: none
 reviewed_sha: 8b28944f9607447448f5d9b9950ee49596073e58
-location: .github/workflows/pr-policy.yml
-provenance: orchestrator_observed   # reproduced on sourcemaps/upstroke#280, run 34908130306, 2026-09-14T23:17Z
+location: .github/workflows/pr-policy.yml:61
+provenance: pre_existing   # observed by the orchestrator; reproduced on sourcemaps/upstroke#280, run 34908130306, 2026-09-14T23:17Z
 first_bad: unknown
 guard: a pr-policy run over a pull request body larger than 131072 bytes in which steps 4 and 5 execute and report their own verdict, failing before the change and passing after
 ---
