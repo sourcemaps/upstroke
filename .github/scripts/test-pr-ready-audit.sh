@@ -2676,6 +2676,25 @@ def foreign(one):
     return isinstance(own, dict) and any(dict.__contains__(own, name) for name in PROTOCOL)
 
 
+PLACING = ("__hash__", "__eq__")   # what a mapping and a set run to place what they hold
+
+
+def placed(one):
+    """Whether placing ONE in a mapping or a set would run code of MODULE's: both find it BY ITS HASH,
+    and fall back on comparing it where two hashes meet in one slot, so both are MODULE's to write where
+    ONE is of a class MODULE wrote. Reading gets round this -- `contents` walks the table the class keeps
+    and asks no key anything -- and writing cannot: nothing written in C places a key without asking the
+    key. The same restriction `foreign` puts on the copy protocol, for the one pair of methods a
+    mapping and a set cannot be written back without running."""
+    kind = type(one)
+    for name in PLACING:
+        found = inspect.getattr_static(kind, name, None)
+        found = getattr(found, "__func__", found)
+        if isinstance(found, types.FunctionType) and ours(found.__code__):
+            return True
+    return False
+
+
 UNREAD = object()     # a reading that failed for want of memory or depth: no comparison takes it for a reading
 
 
@@ -2889,7 +2908,8 @@ def churn(one):
     before, held = own_bytes(first), contents(first)
     more = (held + b"\0" if isinstance(held, bytes)
             else held + [(object(), None)] if isinstance(one, dict) else held + [object()])
-    written(first, more, lambda item: item)
+    if not written(first, more, lambda item: item):
+        return None
     grown = own_bytes(first)
     written(first, held, lambda item: item)
     moved = differing(before, own_bytes(second)) | differing(before, grown) | differing(before, own_bytes(first))
@@ -2979,13 +2999,20 @@ def native(kind, name):
 def contents(one):
     """What ONE, a value STATE reads whole, holds, in the order its class's own implementation hands it out
     -- an order is part of what a reader sees: each name with its value for a mapping, the bytes of a byte
-    array, and the items of anything else."""
+    array, and the items of anything else.
+
+    AND IT IS READ THROUGH THAT IMPLEMENTATION AND NO OTHER. A mapping's values are read by walking the
+    table its own class keeps (`items`), never by asking the mapping for each key in turn:
+    `dict.__getitem__` finds a key BY ITS HASH, and a key's `__hash__` is MODULE's to write -- it can
+    refuse, and it can block, and either is MODULE's code running inside a reading that promises to run
+    none. A class's own `items` hands the pairs out in the order that class keeps them, which is the order
+    its `__iter__` hands the names out: an `OrderedDict`'s is its own, and keeps the order it moves entries
+    into."""
     if isinstance(one, bytearray):
         return bytes(one)
-    items = list(native(type(one), "__iter__")(one))
     if isinstance(one, dict):
-        return [(name, dict.__getitem__(one, name)) for name in items]
-    return items
+        return list(native(type(one), "items")(one))
+    return list(native(type(one), "__iter__")(one))
 
 
 def written(one, value, swap):
@@ -2998,13 +3025,22 @@ def written(one, value, swap):
     would change the room the run left alone, so its items are written in place. Everything else is
     emptied and filled, which is what puts a room the run DID change back: measured, writing a mapping
     in place instead kept the table the run had grown, and two readers keeping an `OrderedDict` as a
-    least-recently-used table went from green to unproven."""
+    least-recently-used table went from green to unproven.
+
+    AND IT PUTS NOTHING BACK BY RUNNING CODE OF MODULE'S, which is what returning False says it did not
+    do. A mapping's key and a set's item are PLACED BY THEIR HASH (`placed`), and there is no
+    implementation in C that places one without asking it; a write-back that cannot be made without
+    running MODULE's code is a write-back the probe cannot make, and what it could not put back is named
+    (`restore`) rather than put back by running MODULE or passed over as though it were back."""
     kind = type(one)
-    if isinstance(one, list) and len(one) == len(value):
+    placing = [name for name, _ in value] if isinstance(one, dict) else value if isinstance(one, set) else ()
+    if any(placed(item) for item in placing):
+        return False
+    if isinstance(one, list) and native(kind, "__len__")(one) == len(value):
         setitem = native(kind, "__setitem__")
         for index, item in enumerate(value):
             setitem(one, index, swap(item))
-        return
+        return True
     native(kind, "clear")(one)
     if isinstance(one, dict):
         setitem = native(kind, "__setitem__")
@@ -3014,6 +3050,7 @@ def written(one, value, swap):
         native(kind, "update")(one, [swap(item) for item in value])
     elif value:
         native(kind, "extend")(one, value if isinstance(value, bytes) else [swap(item) for item in value])
+    return True
 
 
 def parts(one, value):
@@ -3201,8 +3238,8 @@ def restore(saved):
         put(one, held, {})
     rewritten = {id(entry[0]) for entry in moved if isinstance(entry[0], WHOLE)}
     for one, value in saved:
-        if id(one) in rewritten:
-            written(one, value, lambda item: item)
+        if id(one) in rewritten and not written(one, value, lambda item: item):
+            lost.add(places.get(id(one), ""))
     for one, then, _, again, _, _, _ in moved:
         if isinstance(one, WHOLE):
             continue
@@ -3258,8 +3295,9 @@ def restore(saved):
                 if vars(one).get(name, EMPTY) is not swap(item):
                     type.__setattr__(one, name, swap(item))
         elif isinstance(one, WHOLE):
-            if memo and any(id(part) in memo for part in parts(one, value)):
-                written(one, value, swap)
+            if (memo and any(id(part) in memo for part in parts(one, value))
+                    and not written(one, value, swap)):
+                lost.add(places.get(id(one), ""))
         elif isinstance(one, types.CellType):
             if value is not EMPTY:
                 one.cell_contents = swap(value)
@@ -3283,7 +3321,22 @@ def unrestored(names):
 
 
 def perform(label, replay):
-    now = state() if not in_attempt[0] or id(replay) not in started_from else None
+    """LABEL's run, from a snapshot of MODULE's state -- AND THE BOUND IS ARMED BEFORE THE SNAPSHOT, NOT
+    AFTER IT. Reading the state runs nothing MODULE declared where the probe can read without asking
+    MODULE (`contents`, `written`), but no reading can promise that of every value a module can build, and
+    a bound that starts after the thing it bounds is not a bound: a key hashed under a lock the module
+    holds blocked the snapshot for ever, with the timer still seven lines away. A snapshot the bound cuts
+    is a state the probe could not read, and a run repeated from a state it does not have answers for
+    nothing -- so what that run would have answered for is unproven, which is what a question nobody
+    could ask is."""
+    signal.setitimer(signal.ITIMER_REAL, SECONDS, 1)
+    try:
+        now = state() if not in_attempt[0] or id(replay) not in started_from else None
+    except Forced:
+        now = None
+        answers.setdefault(label, set()).add("unproven")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
     started_from.setdefault(id(replay), (replay, now))
     record = {"events": [], "natural": not in_attempt[0], "cut": False, "state": now}
     runs.append((label, replay, record))
@@ -3900,7 +3953,8 @@ def every_state():
                 marks[mark] = len(states)
                 states.append(record["state"])
     for label, replay, record in [one for one in runs if one[2]["natural"] and one[2].get("twice")]:
-        own = marks.get(fingerprint(started_from[id(replay)][1]), -1)
+        start = started_from[id(replay)][1]
+        own = marks.get(fingerprint(start), -1) if start is not None else -1
         for which, saved in enumerate(states):
             k = ("state", id(replay), which)
             if which == own or k in tried:
@@ -3997,7 +4051,7 @@ decode_probe() {  # decode_probe MODULE DRIVE...: the report's two lines as one,
 }
 printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 # THE PROBE IS ITSELF UNDER TEST, because a probe that has stopped watching agrees with a clean
-# parser and says so in the same words. So it runs first over forty-eight stand-ins whose answers
+# parser and says so in the same words. So it runs first over forty-nine stand-ins whose answers
 # are known, and MUTATIONS OF THE PROBE WERE WATCHED AGAINST THEM -- each the smallest text change
 # that undoes one rule, and each run through this whole file:
 #
@@ -6116,6 +6170,101 @@ def by_remembered(text, mode="strict"):
 PYSHAPE
 probe_expect observed \
   'decoded=yes unrefusing=by_annotated,by_marked,by_permitted unproven=_marks,_permit.__annotations__[return].__dict__,_tally.__annotations__[return] skipped=- | refusing=by_annotated,by_marked,by_permitted,by_remembered,by_roomed,read drive=returned:0 swept=by_annotated:raised:ValueError/returned,by_marked:raised:ValueError/returned,by_permitted:raised:ValueError/returned,by_remembered:raised:ValueError,by_roomed:raised:ValueError/returned forced=100'
+# AND NOTHING MODULE DECLARED RUNS TO READ THE STATE, WHICH IS WHAT THE WALK HAS ALWAYS SAID IT DOES.
+# Round 16 read a container through its class's own implementation and still asked two questions that
+# a class of MODULE's may answer in Python. HOW MANY A VALUE HOLDS: putting a list back in place asked
+# `len(one)`, so a list subclass whose logical length is not its slots -- `by_measured`'s `_buffer` --
+# raised out of the middle of the snapshot and the probe died with no report at all. AND WHAT A KEY
+# HASHES TO: a mapping's values were read by asking for each key in turn, and `dict.__getitem__` finds
+# a key BY ITS HASH, so `by_locked`, whose key hashes under a lock the module holds, held the probe for
+# ever before any timer was armed. Both are read now through the implementation the class inherits from
+# C -- `native(kind, "__len__")`, and the class's own `items`, which walks the table and asks no key
+# anything. PLACING A KEY BACK CANNOT GET ROUND THE HASH: `dict.__setitem__` and `set.update` ask the
+# key, and nothing written in C does otherwise. So a write-back that would run MODULE's code is not
+# made (`placed`), and what could not be put back is NAMED -- `by_opened`, whose key hashes only while
+# the module is open, died with no report before this and is `unproven` now. The cost is the naming: a
+# mapping or a set that a run moves, keyed by a class MODULE wrote, is unproven where it was green.
+probe_stand_in guarded 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+import threading
+
+
+class _Reading(list):
+    """One reading, in a list of fixed shape. Its logical length is the span it covers, which is not
+    how many slots it keeps, so asking the list for a length is a mistake it refuses."""
+
+    def __len__(self):
+        raise TypeError("a reading has no length; ask it for its span")
+
+
+_buffer = _Reading([0])
+
+
+def by_measured(text, mode="strict"):
+    _buffer[0] = len(text)
+    return json.loads(text, object_pairs_hook=one_reading)
+
+
+_ready = threading.Lock()
+
+
+class _Slot:
+    """A name hashed under the module's lock, which the module takes as it is built and holds."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name):
+        self.name = name
+
+    def __eq__(self, other):
+        return type(other) is _Slot and other.name == self.name
+
+    def __hash__(self):
+        with _ready:
+            return hash(self.name)
+
+
+_slots = {_Slot("read"): 0}
+_ready.acquire()
+
+
+def by_locked(text, mode="strict"):
+    return json.loads(text, object_pairs_hook=one_reading)
+
+
+class _Key:
+    """A key the module hashes only while it is open for reading. Shut, it refuses."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name):
+        self.name = name
+
+    def __eq__(self, other):
+        return type(other) is _Key and other.name == self.name
+
+    def __hash__(self):
+        if not _open:
+            raise TypeError("a key has no hash while the module is shut")
+        return hash(self.name)
+
+
+_open = False
+_counts = {}
+
+
+def by_opened(text, mode="strict"):
+    global _open
+    _open = True
+    try:
+        _counts[_Key("read")] = _counts.get(_Key("read"), 0) + 1
+        return json.loads(text, object_pairs_hook=one_reading)
+    finally:
+        _open = False
+PYSHAPE
+probe_expect guarded \
+  'decoded=yes unrefusing=- unproven=_Key.__eq__,_Slot.__eq__,_counts,_counts[<under_probe._Key object] skipped=- | refusing=by_locked,by_measured,by_opened,read drive=returned:0 swept=_Key.__eq__:returned/returned/returned,_Key.__hash__:raised:TypeError/raised:TypeError/raised:TypeError,_Key.__init__:raised:AttributeError,_Reading.__len__:raised:TypeError,_Slot.__eq__:returned/returned/returned,by_locked:raised:ValueError,by_measured:raised:ValueError,by_opened:raised:ValueError forced=59'
 # WHAT THIS DOES NOT REACH. Each shape below was written beside a hooked decode and run through this
 # probe, which reported nothing unrefusing, nothing unproven and nothing skipped -- and each one
 # returns without a refusal on a document naming `findings` twice (for the hook that counts names,
