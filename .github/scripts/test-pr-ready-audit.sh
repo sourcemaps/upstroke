@@ -3074,8 +3074,15 @@ def state(copies=True):
     the copy protocol reproduces it, and the words writing back what a container holds moves are measured
     on copies of it (`churn`). Each value is placed by the path the walk first reached it at, so that one that is not back can
     be named. Nothing here decides that a value needs no reading, or that it is back: that is asked of the
-    value, by reading it again, in `restore`. All values are read through the base types' own methods and descriptors, so
-    nothing MODULE declares runs. Code, frames, modules, classes written elsewhere and the probe's own
+    value, by reading it again, in `restore`. All values are read through the base types' own methods and
+    descriptors, and their contents through the implementation their class inherits from C (`contents`,
+    `written`): the walk asks no value how many it holds and no key what it hashes to, and a reading it
+    cannot make that way it does not make. ONE READING IS NOT LIKE THAT AND IS BOUNDED INSTEAD: deciding
+    whether a value is somebody else's asks it for its `__code__` (`elsewhere`), which a class of
+    MODULE's may answer with a `__getattr__` of its own -- measured, a holder that fills itself under a
+    lock the module holds stops the walk there. So the bound is armed BEFORE the snapshot (`perform`),
+    and a snapshot the bound cuts is a state the probe could not read rather than no report at all.
+    Code, frames, modules, classes written elsewhere and the probe's own
     functions are not MODULE's state, and are not walked."""
     saved, stack, seen, table, places = [(os.environ, dict(os.environ._data))], [(vars(module), "")], set(), {}, {}
     while stack:
