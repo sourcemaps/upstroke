@@ -917,7 +917,11 @@ pub(crate) mod tests {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "`merge_prepared_for`'s fields with the candidate named by key and generation, \
+                  and the fold its closure is read from"
+    )]
     fn merge_prepared(
         fold: &TopologyFold,
         sequence: u32,
@@ -941,7 +945,11 @@ pub(crate) mod tests {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each parameter is a field of `MergePrepared` some offer chooses; a struct of \
+                  them would restate the event"
+    )]
     fn merge_prepared_for(
         sequence: u32,
         candidate: CandidateRef,
@@ -5259,6 +5267,17 @@ pub(crate) mod tests {
                      queued",
                     member.name,
                     state.id
+                );
+                assert!(
+                    state.fold.transaction().is_none(),
+                    "{}: state {}: a dead end at the sequence bound holds no open \
+                     transaction: {:?}",
+                    member.name,
+                    state.id,
+                    state
+                        .fold
+                        .transaction()
+                        .map(|open| (open.candidate.key.0, open.sequence.0))
                 );
                 at_the_bound += 1;
             }

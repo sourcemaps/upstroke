@@ -643,11 +643,16 @@ production emitter derives the same value from the same fold
 (`engine::topology::integrate`, the prepared request's `satisfies`), so
 an offer built here is the offer a live run makes. Until 2026-09-16 every
 publication the generator built named `key` alone; the fold refused every
-publication of a repair as `InvalidSatisfies` ("settles [3], and the fold
-derives [2, 3] as this publication's closure"), and no member of the
-family ever merged a repair — filed and fixed as
+publication of a repair that reached its closure check as
+`InvalidSatisfies` ("settles [3], and the fold derives [2, 3] as this
+publication's closure"), and no member of the family ever merged a
+repair — filed and fixed as
 `G5-CLAUSE1-CENSUS-NO-REPAIR-IS-EVER-PUBLISHED` after #302's first
-review. The relation's negative is kept as
+review. The inline `merge_prepared/fast/with-verification` offer takes
+its `satisfies` from here too, and nothing can observe it there: the fold
+refuses a fast publication carrying a verification record before it reads
+`satisfies`, so that offer was never refused for its closure, before the
+fix or after. The relation's negative is kept as
 `merge_prepared/fast/self-satisfies/` in `classes`.
 
 ## `mod tests` › `fn lease_release_for(fold: &TopologyFold, key: TaskKey, generation: u32) -> MergeLeaseRelease {`
@@ -684,7 +689,11 @@ authorized: a class that invented either would only ever be refused,
 and the census would then never resolve a transaction. The lease it
 releases is derived from `key`'s lineage (`lease_release_for`), as the
 emitter derives it: a repair's merge releases the lineage lease and
-settles the lineage's root.
+settles the lineage's root. So while a publication is open, every repair
+of one lineage offers the same merge under its own labels, at either
+generation, and an accepted `task_merged/` label of a repair says that a
+repair of its lineage merged, not which one: the open transaction's
+candidate says that.
 
 ## `mod tests` › `fn rejection_of(`
 
@@ -877,8 +886,8 @@ publishes repairs: the chain closes in 25 states from its 11-event seed
 (1,756 offers, 32 accepted), the join in 75 from its 9-event seed (4,477
 offers, 91 accepted); none is truncated, no state sits past a trace of 27
 under the trace ceiling of 48, and the only unfinished dead ends are at
-the sequence bound with a candidate still queued — one in the chain, one
-in the fan-out, three in the join
+the sequence bound with no transaction open and a candidate still queued
+— one in the chain, one in the fan-out, three in the join
 (`no_seeded_census_has_a_dead_end_below_the_sequence_bound`). Each
 reaches the fourth sequence and the second repair; the fan-out and the
 join reach the second lineage, one rejection of each of two originals'
@@ -904,9 +913,14 @@ the emitter does, and
 `every_seeded_census_publishes_a_repair_and_releases_its_lineage_lease`
 holds every seeded member to a repair publication accepted, its lineage
 lease released at the merge, its root merged, and the self-satisfies
-negative refused with the closure. With the fix the prefix accepts 379 of
-the 175,800 repair publications it offers, the chain 3 of 32, the fan-out
-6 of 88, the join 14 of 232 (measured for #302's round-1 repair). Until
+negative refused with the closure. With the fix the prefix makes 175,800
+offers of a repair's `merge_prepared` or `task_merged`, the negative
+apart, and the fold accepts 379 of them: 169 whose successors the prefix
+explores and 210 `Truncated`, accepted where the state ceiling left no
+room. The chain accepts 3 of 32, the fan-out 6 of 88 and the join 14 of
+232, none truncated (measured for #302's round-1 repair, the split by its
+second review). The artifact's `accepted` counts the first kind alone and
+its `truncated_offers` the second. Until
 PR10's round 2 the fan-out seed had two originals merged and one
 candidate, whose two repairs were one lineage. The prefix reaches every
 bound at its own ceiling (measured in round 6), so these members exist as
@@ -1930,10 +1944,19 @@ publications were bet's and gimel's and no repair's.
 
 An unfinished dead end is a state with no `run_finished`, below the trace
 ceiling, at which no offer is accepted. In a seeded census the only
-legitimate ones are at the sequence bound, where the generator stops
-offering publications and a candidate stays queued: this holds every
-seeded member to that, and to having at least one such state, so the
-bound is seen to stop a path rather than assumed to. On the generator
-that named the repair alone the fan-out's state 18 and the join's 26 and
-42 were dead ends below the bound, their only way forward the repair
-publication the generator could not build.
+legitimate ones are where the sequence bound withholds integration: the
+next sequence at the bound and no transaction open, so `classes` offers
+no publication, merge or rejection, and a candidate stays queued. The
+test holds every unfinished dead end of every seeded member to all three,
+and every seeded member to at least one. The next sequence alone would
+not do: a fast publication advances it as it opens its transaction, and
+while that transaction is open `classes` still offers its merge, so a
+dead end at the bound holding one is a merge the generator could not
+build, not the bound. On the generator that named the repair alone the
+fan-out's state 18 and the join's 26 and 42 were dead ends below the
+bound, their only way forward the repair publication the generator could
+not build. With a merge that settles a repair's root and the repair
+rather than the open transaction's `satisfies`, the join's state 53 is a
+dead end at the bound holding the transaction of r4's publication at
+sequence 3, and only the transaction assertion catches it (#302's second
+review, M12).
