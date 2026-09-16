@@ -14,13 +14,15 @@ use yaml_rust2::{Yaml, YamlLoader};
 use super::ci_model::{
     ACTION_INPUTS, AGGREGATE_JOB, AGGREGATE_JOB_FIELDS, AGGREGATE_SCRIPT, AGGREGATE_SHELL,
     AGGREGATE_STEP_FIELDS, CI_TARGETS, CI_WORKFLOW, CLIPPY_GATE, CiTarget, DEFAULTS_FIELDS,
-    DEFAULTS_RUN_FIELDS, ENCODED_RUSTFLAGS_KEY, GATE_JOB_FIELDS, GATE_SCRIPTS, KNOWN_SHELLS,
-    MSRV_COMMAND, MSRV_JOB, MSRV_JOB_FIELDS, OPTIONAL_DEFAULTS_FIELD, PINNED_ACTIONS,
-    REQUIRED_CONTEXT, RUSTFLAGS_KEY, RUSTFLAGS_VALUE, SELF_HOSTED_TEST_PLATFORM, STABLE_TOOLCHAIN,
-    STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS, TEST_SCRIPTS, TEST_STEP_ENV, TEST_STEP_FIELDS,
-    TEST_WINDOWS_JOB, TEST_WINDOWS_JOB_FIELDS, TEST_WINDOWS_LABELS, TEST_WINDOWS_SCRIPTS,
-    TEST_WINDOWS_STEP_ENV, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS, WINDOWS_BUILD_WITNESS,
-    WINDOWS_TEST_WITNESS, WORKFLOW_ENV, WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
+    DEFAULTS_RUN_FIELDS, ENCODED_RUSTFLAGS_KEY, GATE_JOB_FIELDS, GATE_SCRIPTS,
+    GOLDEN_IMAGE_TOOLCHAIN, KNOWN_SHELLS, LANE_STEP_FIELDS, MSRV_COMMAND, MSRV_JOB,
+    MSRV_JOB_FIELDS, OPTIONAL_DEFAULTS_FIELD, PINNED_ACTIONS, QUEUE_LANE, REQUIRED_CONTEXT,
+    RUSTFLAGS_KEY, RUSTFLAGS_VALUE, STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS,
+    TEST_SCRIPTS, TEST_STEP_ENV, TEST_STEP_FIELDS, TEST_WINDOWS_JOB, TEST_WINDOWS_JOB_FIELDS,
+    TEST_WINDOWS_PLATFORM, TEST_WINDOWS_RUNS_ON, TEST_WINDOWS_SCRIPTS, TEST_WINDOWS_STEP_ENV,
+    TEST_WINDOWS_TOOLCHAIN_COMPONENTS, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS,
+    WINDOWS_BUILD_WITNESS, WINDOWS_TEST_WITNESS, WORKFLOW_ENV, WORKFLOW_FIELDS,
+    WORKFLOW_PERMISSIONS,
 };
 use super::repo_root;
 
@@ -596,7 +598,11 @@ pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
 }
 
 fn hosts_tests(target: &CiTarget) -> bool {
-    target.runner != SELF_HOSTED_TEST_PLATFORM
+    target.runner != TEST_WINDOWS_PLATFORM
+}
+
+fn installs_a_toolchain(step: &Yaml) -> bool {
+    scalar(step, "uses").is_some_and(|uses| uses.starts_with(TOOLCHAIN_ACTION))
 }
 
 pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
@@ -612,10 +618,10 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
     };
     let Some(platform) = CI_TARGETS
         .iter()
-        .find(|target| target.runner == SELF_HOSTED_TEST_PLATFORM)
+        .find(|target| target.runner == TEST_WINDOWS_PLATFORM)
     else {
         return vec![format!(
-            "[test-windows-platform] `{SELF_HOSTED_TEST_PLATFORM}` is not a runner this \
+            "[test-windows-platform] `{TEST_WINDOWS_PLATFORM}` is not a runner this \
              contract models, so the shell its steps resolve to is undecidable here"
         )];
     };
@@ -629,13 +635,19 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
         let runs_the_suite = scalar(step, "run") == Some(WINDOWS_TEST_WITNESS);
         let allowed: &[&str] = if runs_the_suite {
             &TEST_STEP_FIELDS
+        } else if installs_a_toolchain(step) {
+            &LANE_STEP_FIELDS
         } else {
             &STEP_FIELDS
         };
         let strange = unexpected(&field_names(step), allowed);
         if !strange.is_empty() {
             out.push(format!(
-                "[unexpected-step-field] `{TEST_WINDOWS_JOB}` step {index} declares {strange:?}"
+                "[unexpected-step-field] `{TEST_WINDOWS_JOB}` step {index} declares {strange:?}. \
+                 `if:` is admitted on the toolchain install alone, where it names the lane \
+                 whose runner needs one; on the step that runs the suite it is a job that \
+                 reports success having run nothing on the other lane, and on a `run:` step \
+                 it is a script one lane executes and the other never shows a reviewer."
             ));
         }
         if runs_the_suite {
@@ -658,30 +670,51 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
         }
     }
 
+    out.extend(toolchain_complaints(
+        job,
+        TEST_WINDOWS_JOB,
+        "test-windows-toolchain",
+        Some(GOLDEN_IMAGE_TOOLCHAIN),
+    ));
     for (index, step) in steps_of(job).iter().enumerate() {
-        if scalar(step, "uses").is_some_and(|uses| uses.starts_with(TOOLCHAIN_ACTION)) {
+        if !installs_a_toolchain(step) {
+            continue;
+        }
+        if scalar(step, "if") != Some(QUEUE_LANE) {
             out.push(format!(
-                "[test-windows-toolchain] `{TEST_WINDOWS_JOB}` step {index} installs a \
-                 toolchain. The golden image carries the compiler this leg runs; a step here \
-                 selects one the workflow never curated, and a Windows test gated on a newer \
-                 compiler is then omitted on the one leg that executes it."
+                "[test-windows-toolchain] `{TEST_WINDOWS_JOB}` step {index} installs its \
+                 toolchain under {:?}, not exactly `{QUEUE_LANE}`. The install is written for \
+                 the hosted lane, whose runner carries no curated compiler; the guest's image \
+                 carries the compiler this job runs, and re-curation is how it moves. \
+                 Unconditional, the step selects the guest's compiler from the workflow \
+                 instead; inverted, the hosted lane runs on whatever GitHub's image \
+                 preinstalled and the guest lane installs over its own.",
+                scalar(step, "if")
+            ));
+        }
+        let components = field(step, "with").and_then(|with| scalar(with, "components"));
+        if components != Some(TEST_WINDOWS_TOOLCHAIN_COMPONENTS) {
+            out.push(format!(
+                "[test-windows-toolchain] `{TEST_WINDOWS_JOB}` step {index} installs components \
+                 {components:?}, not exactly `{TEST_WINDOWS_TOOLCHAIN_COMPONENTS}`. \
+                 `dtolnay/rust-toolchain` installs the minimal profile, and \
+                 `every_declared_effect_denial_refuses_for_the_reason_it_declares` drives \
+                 `clippy-driver` on the hosted lane as it does in `test`."
             ));
         }
     }
 
-    let expected_labels: BTreeSet<String> = TEST_WINDOWS_LABELS
-        .iter()
-        .copied()
-        .map(str::to_owned)
-        .collect();
-    let labels = field(job, "runs-on").and_then(scalar_set);
-    if labels.as_ref() != Some(&expected_labels) {
+    if scalar(job, "runs-on") != Some(TEST_WINDOWS_RUNS_ON) {
         out.push(format!(
-            "[test-windows-runner] `{TEST_WINDOWS_JOB}` runs on {:?}, not exactly the label \
-             set {expected_labels:?}. A scalar here is a hosted runner, a subset is any \
-             self-hosted Windows machine the account registers, and the pinned set names the \
-             curated image and the lane expression that keeps queue builds off the \
-             pull-request guest.",
+            "[test-windows-runner] `{TEST_WINDOWS_JOB}` runs on {:?}, not exactly \
+             `{TEST_WINDOWS_RUNS_ON}`. The expression names both machines, by lane: \
+             `{TEST_WINDOWS_PLATFORM}` for a merge-queue entry, which nothing waits on \
+             interactively, and the pinned label set for every other build, whose third \
+             label names the curated image. A bare scalar sends the pull-request lane to the \
+             hosted runner and its six minutes become twenty-five; a bare label set sends the \
+             queue back to a guest this change retires; a subset of the labels admits any \
+             self-hosted Windows machine the account registers; and a condition other than \
+             `{QUEUE_LANE}` routes a lane to a machine its install step was not written for.",
             field(job, "runs-on")
         ));
     }
@@ -905,10 +938,10 @@ pub(super) fn ci_windows_build_witness_complaints(doc: &Yaml) -> Vec<String> {
     };
     let Some(platform) = CI_TARGETS
         .iter()
-        .find(|target| target.runner == SELF_HOSTED_TEST_PLATFORM)
+        .find(|target| target.runner == TEST_WINDOWS_PLATFORM)
     else {
         return vec![format!(
-            "[windows-build-witness] `{SELF_HOSTED_TEST_PLATFORM}` is not a runner this \
+            "[windows-build-witness] `{TEST_WINDOWS_PLATFORM}` is not a runner this \
              contract models, so the shell its steps resolve to is undecidable here"
         )];
     };
@@ -916,7 +949,7 @@ pub(super) fn ci_windows_build_witness_complaints(doc: &Yaml) -> Vec<String> {
         .into_iter()
         .filter(|name| {
             field(jobs, name).is_some_and(|job| {
-                scalar(job, "runs-on") == Some(SELF_HOSTED_TEST_PLATFORM)
+                scalar(job, "runs-on") == Some(TEST_WINDOWS_PLATFORM)
                     && steps_of(job)
                         .iter()
                         .any(|step| scalar(step, "run") == Some(WINDOWS_BUILD_WITNESS))
@@ -926,7 +959,7 @@ pub(super) fn ci_windows_build_witness_complaints(doc: &Yaml) -> Vec<String> {
     let [carrier] = carriers.as_slice() else {
         out.push(format!(
             "[windows-build-witness] expected exactly one job whose `runs-on:` is \
-             `{SELF_HOSTED_TEST_PLATFORM}` and one of whose steps has `run:` equal to \
+             `{TEST_WINDOWS_PLATFORM}` and one of whose steps has `run:` equal to \
              `{WINDOWS_BUILD_WITNESS}`, found {carriers:?}. Without it no hosted leg \
              code-generates or links the Windows tree on current stable: `cargo check` and \
              Clippy stop before codegen, and the self-hosted leg builds with the image's \
@@ -1571,32 +1604,46 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-REHOSTED",
-        escape: "the self-hosted job moved back to `windows-latest` as a scalar `runs-on:`. \
-                 Every step still matches character for character; only the machine, and \
-                 with it the twelve minutes, changed.",
+        escape: "both lanes on `windows-latest`, as a scalar `runs-on:`. Every step still \
+                 matches character for character and the install step's condition still \
+                 holds on the queue; only the pull-request lane's machine changed, and with \
+                 it the six minutes every pull request waits on became twenty-five.",
         job: Some("test-windows"),
-        anchor: "    runs-on: [self-hosted, windows, \"${{ github.event_name == 'merge_group' && 'winguest-queue' || 'winguest' }}\"]\n",
+        anchor: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
         replacement: "    runs-on: windows-latest\n",
         refused_as: "test-windows-runner",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-LABEL-DROPPED",
-        escape: "the labels loosened to `[self-hosted, windows]`, which any Windows runner \
-                 the account ever registers satisfies; the curated image is named by the \
-                 label this drops",
+        escape: "the self-hosted labels loosened to `[self-hosted, windows]`, which any \
+                 Windows runner the account ever registers satisfies; the curated image is \
+                 named by the label this drops",
         job: Some("test-windows"),
-        anchor: "    runs-on: [self-hosted, windows, \"${{ github.event_name == 'merge_group' && 'winguest-queue' || 'winguest' }}\"]\n",
-        replacement: "    runs-on: [self-hosted, windows]\n",
+        anchor: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
+        replacement: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\"]') }}\n",
         refused_as: "test-windows-runner",
     },
     WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-LANE-COLLAPSED",
-        escape: "the lane expression replaced by the plain `winguest` label. Every run still \
-                 lands on a curated guest, but a merge-queue entry now queues behind whatever \
-                 pull-request build holds that guest, and the second guest idles.",
+        name: "MUT-TEST-WINDOWS-QUEUE-LANE-REGUESTED",
+        escape: "the expression replaced by the plain label set. Every build lands on the \
+                 pull-request guest, a merge-queue entry queues behind whatever pull-request \
+                 build holds it, and the hosted lane -- the install step, its condition, the \
+                 forty-five minutes -- is dead text no build ever takes.",
         job: Some("test-windows"),
-        anchor: "    runs-on: [self-hosted, windows, \"${{ github.event_name == 'merge_group' && 'winguest-queue' || 'winguest' }}\"]\n",
+        anchor: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
         replacement: "    runs-on: [self-hosted, windows, winguest]\n",
+        refused_as: "test-windows-runner",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-LANES-SWAPPED",
+        escape: "the condition inverted in `runs-on:` alone: the pull-request lane goes to \
+                 `windows-latest`, where no step installs a compiler, and the queue goes to \
+                 the guest, where the install step now runs over the image's own. The \
+                 install's `if:` still matches; it is the runner that no longer agrees with \
+                 it.",
+        job: Some("test-windows"),
+        anchor: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
+        replacement: "    runs-on: ${{ github.event_name != 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
         refused_as: "test-windows-runner",
     },
     WorkflowEscape {
@@ -1643,23 +1690,137 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         refused_as: "test-windows-command",
     },
     WorkflowEscape {
-        name: "MUT-TEST-WINDOWS-TOOLCHAIN-INSTALLED",
-        escape: "the pinned toolchain action, with its allowlisted `toolchain` and `components` \
-                 inputs, is inserted after the self-hosted checkout with `toolchain: 1.96.0`. \
-                 Every step-level pin still holds -- the action is allowlisted, its input keys \
-                 are allowlisted, the components value is pinned -- and the suite runs on a \
-                 compiler the image never carried. A Windows test enabled only on 1.97 and \
-                 later is omitted on the one leg that executes it, and the aggregate is green. \
-                 Found by the ninth review pass: the hosted jobs pin `stable` through \
-                 `toolchain_complaints`, and this job, which installs nothing, was never asked.",
+        name: "MUT-TEST-WINDOWS-TOOLCHAIN-BEHIND-THE-IMAGE",
+        escape: "the hosted lane installs `1.96.0`, a compiler the image never carried. Every \
+                 step-level pin still holds -- the action is allowlisted, its input keys are \
+                 allowlisted, the components value is pinned, the condition is the lane's -- \
+                 and the queue runs the suite on a compiler the pull-request lane never saw. A \
+                 Windows test enabled only on 1.97 and later is omitted on the lane that lands \
+                 the merge, and the aggregate is green. Before the hosted lane existed this \
+                 was the ninth review pass's finding: the hosted jobs pinned `stable` through \
+                 `toolchain_complaints`, and this job, which installed nothing, was never \
+                 asked.",
         job: Some("test-windows"),
-        anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
-        replacement: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n\
-                      \x20     - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c\n\
-                      \x20       with:\n\
-                      \x20         toolchain: 1.96.0\n\
-                      \x20         components: clippy\n",
+        anchor: "          toolchain: 1.97.1\n",
+        replacement: "          toolchain: 1.96.0\n",
         refused_as: "test-windows-toolchain",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-TOOLCHAIN-FLOATS",
+        escape: "the hosted lane installs `stable`. Byte-identical to the image's compiler \
+                 today, and `RUSTFLAGS: -D warnings` is workflow-wide: the day a newer stable \
+                 adds a lint, every pull request is green on the guest and the queue ejects \
+                 each one from the hosted leg for a reason unrelated to its diff. The pin is \
+                 what keeps the two lanes one compiler.",
+        job: Some("test-windows"),
+        anchor: "          toolchain: 1.97.1\n",
+        replacement: "          toolchain: stable\n",
+        refused_as: "test-windows-toolchain",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-INSTALL-UNCONDITIONAL",
+        escape: "the install step's `if:` dropped. The hosted lane is unchanged; the guest \
+                 lane now has its compiler selected by the workflow instead of by the image, \
+                 which is the escape the contract refused before there was a hosted lane -- \
+                 `rustup` on a frozen image, over a curated toolchain, on every pull request.",
+        job: Some("test-windows"),
+        anchor: "        if: github.event_name == 'merge_group'\n",
+        replacement: "",
+        refused_as: "test-windows-toolchain",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-INSTALL-ON-THE-WRONG-LANE",
+        escape: "the install step's condition inverted while `runs-on:` keeps its lanes: the \
+                 hosted lane compiles on whatever GitHub's image preinstalled -- current \
+                 stable, or the previous one during a rollout -- and the guest lane installs \
+                 over its own. Both pins are exact; they no longer name the same lane.",
+        job: Some("test-windows"),
+        anchor: "        if: github.event_name == 'merge_group'\n",
+        replacement: "        if: github.event_name != 'merge_group'\n",
+        refused_as: "test-windows-toolchain",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-COMPONENTS-WITHOUT-CLIPPY",
+        escape: "the hosted lane's install drops `components: clippy`. The action installs \
+                 the minimal profile, so `clippy-driver` is absent and the effect-denial \
+                 fixtures cannot run on the lane that lands the merge -- \
+                 `MUT-CI-STOPS-INSTALLING-CLIPPY`'s shape on this job.",
+        job: Some("test-windows"),
+        anchor: "          components: clippy\n",
+        replacement: "",
+        refused_as: "test-windows-toolchain",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-SECOND-INSTALL",
+        escape: "a second, unconditional toolchain step at `stable` after the identity step. \
+                 The pinned install is untouched, so every equality over it holds; the guest \
+                 lane runs the suite on `stable` from `rustup` and the hosted lane on whichever \
+                 of the two installs ran last.",
+        job: Some("test-windows"),
+        anchor: "      - name: Test, and witness that the suite ran\n",
+        replacement: "      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
+                      \x20       with:\n\
+                      \x20         toolchain: stable\n\
+                      \x20         components: clippy\n\
+                      \x20     - name: Test, and witness that the suite ran\n",
+        refused_as: "test-windows-toolchain",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-INSTALL-NOT-FIRST",
+        escape: "the install step moved below the identity step. Nothing runs Cargo between \
+                 the two today, so this is the shape `MUT-TOOLCHAIN-NOT-FIRST` refuses on the \
+                 gates, held here for the same reason: a Cargo command placed above the \
+                 install would run on GitHub's preinstalled compiler with every other pin \
+                 matching.",
+        job: Some("test-windows"),
+        anchor: "      - name: Install the image's toolchain on the hosted lane\n\
+                 \x20       if: github.event_name == 'merge_group'\n\
+                 \x20       uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
+                 \x20       with:\n\
+                 \x20         toolchain: 1.97.1\n\
+                 \x20         components: clippy\n\n\
+                 \x20     - name: Configure git identity\n\
+                 \x20       run: |\n\
+                 \x20         git config --global user.email \"ci@upstroke.local\"\n\
+                 \x20         git config --global user.name \"upstroke CI\"\n",
+        replacement: "      - name: Configure git identity\n\
+                 \x20       run: |\n\
+                 \x20         git config --global user.email \"ci@upstroke.local\"\n\
+                 \x20         git config --global user.name \"upstroke CI\"\n\n\
+                 \x20     - name: Install the image's toolchain on the hosted lane\n\
+                 \x20       if: github.event_name == 'merge_group'\n\
+                 \x20       uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
+                 \x20       with:\n\
+                 \x20         toolchain: 1.97.1\n\
+                 \x20         components: clippy\n",
+        refused_as: "test-windows-toolchain",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-SUITE-ON-ONE-LANE",
+        escape: "the lane condition, exactly as the install step spells it, on the step that \
+                 runs the suite. The pull-request lane checks out, configures git, and \
+                 reports success having run nothing; the queue still runs the suite, so the \
+                 merge is still guarded, and every pull request is green on Windows for \
+                 free. The allowance is per step, not per value.",
+        job: Some("test-windows"),
+        anchor: "      - name: Test, and witness that the suite ran\n",
+        replacement: "      - name: Test, and witness that the suite ran\n\
+                      \x20       if: github.event_name == 'merge_group'\n",
+        refused_as: "unexpected-step-field",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-ONLY-RETARGET",
+        escape: "a `run:` step under the lane condition that fetches `master` and checks it \
+                 out before the suite. The pull-request lane, the one a reviewer watches, \
+                 never executes it; the queue tests `master` and lands the candidate. Refused \
+                 twice, by the field set and by the script pin, and the field set is the one \
+                 named here because it refuses the lane-conditional script before reading it.",
+        job: Some("test-windows"),
+        anchor: "      - name: Test, and witness that the suite ran\n",
+        replacement: "      - if: github.event_name == 'merge_group'\n\
+                      \x20       run: git fetch origin master && git checkout --detach FETCH_HEAD\n\
+                      \x20     - name: Test, and witness that the suite ran\n",
+        refused_as: "unexpected-step-field",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-RENAMED-AWAY",
@@ -1795,8 +1956,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  crate: the pinned test command tests an empty `ci-pass/` while the labels, \
                  shells, checkout and command all still match character for character",
         job: Some("test-windows"),
-        anchor: "    timeout-minutes: 20\n",
-        replacement: "    timeout-minutes: 20\n\
+        anchor: "    timeout-minutes: ${{ github.event_name == 'merge_group' && 45 || 20 }}\n",
+        replacement: "    timeout-minutes: ${{ github.event_name == 'merge_group' && 45 || 20 }}\n\
                       \x20   defaults:\n\
                       \x20     run:\n\
                       \x20       working-directory: ci-pass\n",

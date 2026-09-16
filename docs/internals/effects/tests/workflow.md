@@ -199,7 +199,7 @@ step-only reading could not see.
 
 The matrix is the platform half of the same claim, and it is compared
 against the same derived runner set the Clippy legs are, less the one
-platform whose suite runs self-hosted: a fixture that runs on one
+platform whose suite runs in its own job: a fixture that runs on one
 platform proves nothing about the other.
 
 ## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `match field(job, "strategy") {`
@@ -223,39 +223,84 @@ them, including the ones GitHub adds next. Measured,
 ## `fn hosts_tests(target: &CiTarget) -> bool {`
 
 Whether a [`CI_TARGETS`] runner hosts its platform's tests in the `test`
-matrix -- every platform but the one whose suite is self-hosted.
+matrix -- every platform but the one whose suite runs in its own job.
+
+## `fn installs_a_toolchain(step: &Yaml) -> bool {`
+
+Whether a step is the pinned toolchain action, by its `uses:` prefix. The
+one kind of step the Windows job may put a lane condition on.
 
 ## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {`
 
-Every way the self-hosted Windows job fails its contract.
+Every way the Windows test job fails its contract.
 
 The same shape as [`ci_test_job_complaints`] without the matrix, and with
-the one thing that job cannot say: which machine. A hosted runner is named
-by a scalar `runs-on:`; a self-hosted one by the set of labels a runner must
-carry, and the set is compared whole -- a subset admits every Windows
-machine the account registers, and a scalar `windows-latest` is the leg this
-contract retired coming back with every step still matching.
+the one thing that job cannot say: which machine, and on which lane. The
+job runs on two: the curated guest for a pull request or push, where a
+reviewer waits on it, and `windows-latest` for a merge-queue entry, where
+nobody does. The `runs-on:` is one expression over the lane test, compared
+whole -- a scalar sends every pull request to the slow machine, a bare label
+set sends the queue back to a guest this contract retired, a subset of the
+labels admits every Windows machine the account registers, and an inverted
+condition routes each lane to the machine the other's setup was written for.
 
-No toolchain step is required: the guest's image carries `clippy-driver`
-for the fixtures, and the decision record binds re-curation to that claim,
-which a document parser cannot check.
+The guest's image carries `clippy-driver` for the fixtures, and re-curation
+is bound to that claim, which a document parser cannot check. The hosted
+runner carries nothing curated, so the job installs the image's compiler
+there -- and the contract pins that install as tightly as it pins the
+labels: one step, right after the checkout, under the lane condition
+exactly, at the image's version exactly, with `clippy` exactly.
 
-## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `for (index, step) in steps_of(job).iter().enumerate() {`
+## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `&LANE_STEP_FIELDS`
 
-The image carries the compiler this leg runs, and re-curation is how it
-moves. So an install step here is not a convenience: it selects a
-toolchain the workflow never curated, and the hosted legs' pin on
-`stable` never reaches this job, since `toolchain_complaints` is asked
-about the jobs that install and this one does not. The action and its
-`toolchain` input are allowlisted for those jobs, which is why the
-step-pin check alone accepted it. Zero installs, as an equality.
-Measured, `MUT-TEST-WINDOWS-TOOLCHAIN-INSTALLED`.
+The toolchain install is the one step that may carry an `if:`, and it may
+carry nothing this contract does not model. Every other step keeps its
+usual set, so the lane condition on the suite step -- a pull-request lane
+that reports success having run nothing -- and a lane-conditional `run:`
+step -- a script the reviewed lane never executes -- are refused by the
+field set before their values are read. Measured,
+`MUT-TEST-WINDOWS-SUITE-ON-ONE-LANE` and
+`MUT-TEST-WINDOWS-HOSTED-ONLY-RETARGET`.
+
+## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `out.extend(toolchain_complaints(`
+
+The same helper the gates use, asked for [`GOLDEN_IMAGE_TOOLCHAIN`] rather
+than `stable`: exactly one install, at step 1, at the image's version. Not
+`stable`, because `RUSTFLAGS: -D warnings` is workflow-wide and the day a
+newer stable adds a lint the queue would eject pull requests the guest
+passed; not an older version, because a Windows test enabled only on the
+image's compiler would be omitted on the lane that lands the merge. Before
+the hosted lane existed this job installed nothing and the helper was
+never asked, which the ninth review pass found. Measured,
+`MUT-TEST-WINDOWS-TOOLCHAIN-FLOATS`,
+`MUT-TEST-WINDOWS-TOOLCHAIN-BEHIND-THE-IMAGE`,
+`MUT-TEST-WINDOWS-SECOND-INSTALL` and `MUT-TEST-WINDOWS-INSTALL-NOT-FIRST`.
+
+## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(step, "if") != Some(QUEUE_LANE) {`
+
+The install's condition, exactly [`QUEUE_LANE`]. Dropped, the guest lane
+has its compiler selected by the workflow instead of by the image, which is
+the escape this job refused before it had a hosted lane; inverted, the
+hosted lane compiles on whatever GitHub's image preinstalled while the
+guest installs over its own. The condition is the same string `runs-on:`
+routes by, so the step runs on exactly the lane whose machine needs it.
+Measured, `MUT-TEST-WINDOWS-INSTALL-UNCONDITIONAL` and
+`MUT-TEST-WINDOWS-INSTALL-ON-THE-WRONG-LANE`.
+
+## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(job, "runs-on") != Some(TEST_WINDOWS_RUNS_ON) {`
+
+The whole expression, as a string equality. The contract cannot evaluate
+it, so it pins the one spelling whose two arms are known: the hosted
+runner's name and the pinned labels, selected by the same condition the
+install step carries. Measured, `MUT-TEST-WINDOWS-REHOSTED`,
+`MUT-TEST-WINDOWS-LABEL-DROPPED`, `MUT-TEST-WINDOWS-QUEUE-LANE-REGUESTED`
+and `MUT-TEST-WINDOWS-LANES-SWAPPED`.
 
 ## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite = scalar(step, "run") == Some(WINDOWS_TEST_WITNESS);`
 
-The same one-step allowance as the hosted job's, pinned to
-[`TEST_WINDOWS_STEP_ENV`]: the guest's NTFS folds case, so the declaration
-is `1` outright. Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED`.
+The same one-step allowance as the `test` job's, pinned to
+[`TEST_WINDOWS_STEP_ENV`]: NTFS folds case on the guest and on
+`windows-latest` alike, so the declaration is `1` outright. Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED`.
 
 ## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let running = steps_of(job)`
 
@@ -323,12 +368,18 @@ decides which compiler it installs. A gate downgraded from `stable` to the
 version the golden image already carries leaves no leg compiling on current
 stable, and every other pin in this contract still matches. The MSRV leg is
 not checked here: it pins its own floor against the manifest, in
-[`ci_msrv_job_complaints`]. Measured, `MUT-GATE-TOOLCHAIN-DOWNGRADED`.
+[`ci_msrv_job_complaints`]. The Windows test job is, asked for the image's
+version rather than `stable`, and its install's lane condition is read
+beside this helper rather than in it. Measured,
+`MUT-GATE-TOOLCHAIN-DOWNGRADED`.
 
 ## `out.push(format!(`
 
-Zero is legitimate only where the image carries the toolchain, which
-is the self-hosted leg, and that job is not checked here.
+Zero installs is a job whose compiler something other than this workflow
+chose. Every job this helper is asked about installs one, the Windows test
+job included: its install is conditional on the queue lane, and the guest
+lane -- where the image carries the compiler -- is the skipped arm of that
+one step, not a second shape of the job.
 
 ## `if *install != 1 {`
 
@@ -364,8 +415,8 @@ Measured, `MUT-WORKFLOW-PERMISSIONS-WIDENED`.
 
 Every way the hosted Windows codegen witness fails its contract.
 
-The self-hosted leg executes the Windows suite with the golden image's
-toolchain, which moves only by re-curation. `cargo check` and Clippy on
+The Windows test leg executes the suite with the golden image's toolchain
+on both lanes, which moves only by re-curation. `cargo check` and Clippy on
 `windows-latest` type-check current stable and stop before codegen, so
 without this witness nothing on GitHub's current stable ever code-generates
 or links the Windows tree: a Windows-only codegen or link failure there
