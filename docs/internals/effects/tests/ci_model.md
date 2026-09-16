@@ -128,10 +128,21 @@ and throws unless every one is
 [`GOLDEN_IMAGE_TOOLCHAIN`]'s: on the guest that asserts what the image
 carries and its environment selects, on the hosted lane what the install
 selected, and `the_windows_leg_counts_the_tests_it_ran` holds the number
-in the script to the constant, so re-curation edits both or neither. A
-`RUSTC_WRAPPER` that answers `--version` with one compiler and compiles
-with another is a forgery, and the paragraph above is where forgeries are
-bounded. Measured, `MUT-WINDOWS-WITNESS-COMPILER-CHECK-DROPPED`.
+in the script to the constant, so re-curation edits both or neither.
+
+What the three questions bound is the compiler a lane selects by accident:
+a rustup default that did not move, a `RUSTC` in the service environment, a
+PATH that names another install. They are asked from the step's own
+process, and the test executables get a process of their own: Cargo builds
+their environment, prepends its output directories to their PATH, and
+applies a Cargo config's `[env]` table to them, so a config written with
+`[env] PATH = { value = "...", force = true }` answers all three questions
+with one compiler and hands the fixtures another. That is not a
+misconfiguration the questions can catch; it is a config written to defeat
+them, a forgery in the paragraph above's sense, on a machine the operator
+provisions, and no reading of `ci.yml` sees it -- the same standing the
+witness gives a wrapper that answers `--version` with one compiler and
+compiles with another. Measured, `MUT-WINDOWS-WITNESS-COMPILER-CHECK-DROPPED`.
 
 Every other pin in this contract is an equality over `ci.yml`, and each
 refuses one named way of arriving at a green job over a suite that never
