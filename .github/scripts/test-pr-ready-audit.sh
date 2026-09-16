@@ -2614,7 +2614,7 @@ WHOLE = (dict, list, set, collections.deque, bytearray)  # whose contents STATE 
 # A container is not only what it holds. It is PICTURED like every other value, READ in the order its own
 # class hands its items out, WRITTEN BACK through that class's own implementation and only where its
 # picture moved, and COMPARED again -- in order where the language guarantees one, as a set where it does
-# not -- but for the words writing it back moves (`churn`) and the words a reading moves (`READING`).
+# not -- but for the words writing it back moves (`churn`).
 PROTOCOL = ("__copy__", "__reduce_ex__", "__reduce__", "__getstate__", "__setstate__", "__getnewargs_ex__",
             "__getnewargs__", "__new__")
 declared_by = {}      # a class -> the member descriptors its classes declare
@@ -2670,7 +2670,6 @@ def foreign(one):
 
 
 UNREAD = object()     # a reading that failed for want of memory or depth: no comparison takes it for a reading
-READING = object()    # marks a value whose own bytes a reading of the state moves, which are not its state
 
 
 def described(value, depth=0, twin=EMPTY):
@@ -2995,11 +2994,8 @@ def state(copies=True):
     a counter, a lock, an instance, and a container too, which keeps among its own bytes what no reading of
     its items shows: where a set's next `pop` starts, and the order an `OrderedDict` holds its own -- by
     `picture`, which reads a value of any kind the same way. Where COPIES, a copy of each is kept wherever
-    the copy protocol reproduces it, the words writing back what a container holds moves are measured on
-    copies of it (`churn`), AND EVERY PICTURE IS READ A SECOND TIME: a value whose own bytes move when
-    nothing but the reading has run -- a library iterating a value of MODULE's under a guard it keeps in a
-    set of its own -- is marked READING, and those bytes are not compared, because a reading is not a
-    change. Each value is placed by the path the walk first reached it at, so that one that is not back can
+    the copy protocol reproduces it, and the words writing back what a container holds moves are measured
+    on copies of it (`churn`). Each value is placed by the path the walk first reached it at, so that one that is not back can
     be named. Nothing here decides that a value needs no reading, or that it is back: that is asked of the
     value, by reading it again, in `restore`. All values are read through the base types' own methods and descriptors, so
     nothing MODULE declares runs. Code, frames, modules, classes written elsewhere and the probe's own
@@ -3055,12 +3051,6 @@ def state(copies=True):
         else:
             table[id(one)] = (one, picture(one), held) + (
                 (reproduced(one) if copies else None) or (None, frozenset())) + (frozenset(),)
-    if copies:
-        for key, entry in list(table.items()):
-            if len(entry[1]) == 6:
-                again = picture(entry[0])
-                if len(again) == 6 and again[3] != entry[1][3]:
-                    table[key] = entry[:5] + (READING,)
     saved.append((PICTURED, (table, places)))
     return saved
 
@@ -3070,8 +3060,7 @@ def back(then, memo):
     reached, each holder holding what it held IN THE ORDER IT HELD THEM where its class guarantees one and
     as a set where it does not, and each pictured value's picture what it was, a copy MEMO rebuilt
     standing, with its own dictionary, for the value it was rebuilt from, and read but for the words where
-    its own memory is pointed to, the words writing back what it holds moves, and the words a reading of
-    the state moves. Each value that differs is named by the path the walk
+    its own memory is pointed to, and the words writing back what it holds moves. Each value that differs is named by the path the walk
     reached it at; none are, where the state is what THEN read."""
     now, (table, places), stands, wrong = state(False), then[-1][1], {}, set()
     later = now[-1][1][1]
@@ -3134,7 +3123,7 @@ def back(then, memo):
     wrong |= {later.get(id(pictured[key][0]), "") for key in pictured.keys() - table.keys()}
     for key in table.keys() & pictured.keys():
         one, current = pictured[key][0], pictured[key][1]
-        noise = None if table[key][5] is READING else (table[key][5] or frozenset())
+        noise = table[key][5] or frozenset()
         if id(one) != key:
             noise = table[key][4] if table[key][3] is not None else None
         if not alike(current, table[key][1], noise, stale):
@@ -3775,12 +3764,9 @@ def selected():
 
 
 def blanked(picture, noise):
-    """PICTURE with the bytes at NOISE of its own bytes not read, and with none of them read where a
-    reading of the state moves them (READING)."""
+    """PICTURE with the bytes at NOISE of its own bytes not read."""
     if len(picture) != 6 or not noise:
         return picture
-    if noise is READING:
-        return picture[:3] + (None,) + picture[4:]
     return picture[:3] + (bytes(0 if index in noise else byte for index, byte in enumerate(picture[3])),) + picture[4:]
 
 
@@ -4043,10 +4029,35 @@ printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 #   the twice-named document not asked in every state  `alternating`, `disagreeing`, `restarted`,
 #     (this round's rule)                                `spent`
 #   a value the environment cannot hold tried          `unsettable`
+#   a value read by the type it derives from (round    `subclassed`
+#     14's rule)
+#   a container read by its items alone                `arranged`, `rebound`, `restarted`, `revived`,
+#                                                        `spent`, `subclassed`, `unrestored`
+#   a container written back through the base class's  `arranged`
+#     implementation, not the one its own class has
+#   a set compared in the order its table keeps        `arranged`
+#   the copy protocol's reading taken once, so what a  forty-one, `arranged` and `held` among them
+#     reading made is read by identity
+#   what a write-back moves measured without the       `arranged`
+#     grown state
+#   a set's arrangement left out of that measurement   `arranged`
+#   a mapping compared without its order               nothing here: writing a mapping back through its
+#                                                        own class restores the order. With the
+#                                                        write-back undone too, `arranged` is named
+#                                                        `unproven`
+#   a reading that failed read as no reading at all    nothing here: no reader measured runs a reading
+#                                                        out of memory or out of depth
+#   an iterator read by draining it (round 14's rule)  nothing here: the gate does not END, on a reader
+#                                                        holding `enumerate(iter(int, 1))`
+#   a rebuilt value taken for work the sweep has not   nothing here alone, and nothing with the bound
+#     done, and the repeats unbounded                    alone; undo both and the gate does not END on
+#                                                        a count read through a bound `__next__`
 #
 # and none of the sixty-six from earlier rounds that ran to their end, each measured at the head
-# that added it, nor the eleven of round 14, measured at the head that added them, moved an
-# assertion of any other family in this file. One more was measured and moves no assertion, because
+# that added it, nor the eleven of round 14 and the twelve of round 15, each measured at the head
+# that added them, moved an assertion of any other family in this file. FIVE OF ROUND 15'S TWELVE
+# MOVE NOTHING HERE AT ALL, and their rows say so: their witness is a reader appended to the parser,
+# because a stand-in of that shape would make this file's own run take minutes or never end. One more was measured and moves no assertion, because
 # what it changes is a time: a question whose time runs out while the probe is recording is ended
 # when the recording is done, and without that `settling` took 9, 9 and 17 seconds in three runs
 # where it takes 6, as the timer fired again and again inside the probe's own callback. The
@@ -5881,10 +5892,7 @@ probe_expect subclassed \
 # never passed over as back. `by_kept_in_order` appends to a list, adds to a set of strings and appends to
 # a bounded deque on every call and always hooks: the room a container sets aside, the arrangement of a
 # table it has outgrown and the blocks it keeps to reuse are measured on copies of it (`churn`), so it is
-# green. (The rule that a word A READING ITSELF MOVES is not state -- the standard library iterates a
-# `WeakSet` under a guard it keeps in a set of its own, while the probe is reading it -- is measured on a
-# reader appended to the parser rather than here, because a `WeakSet` hands the sweep a new callable at
-# every call and the number of repeats it needs is not the same twice.)
+# green.
 probe_stand_in arranged 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
 
 
