@@ -2191,7 +2191,8 @@ def holds(value, carriers):
         seen.add(id(one))
         kept.append(one)
         if isinstance(one, types.FunctionType):
-            stack += [one.__defaults__, one.__kwdefaults__, one.__closure__, one.__dict__]
+            stack += [one.__defaults__, one.__kwdefaults__, one.__closure__, one.__dict__,
+                      one.__annotations__]
         else:
             stack += gc.get_referents(one)
     return False
@@ -2275,7 +2276,8 @@ def without(value, carriers):
         seen.add(id(one))
         if isinstance(one, types.FunctionType):
             found.append(one)
-            stack += [one.__defaults__, one.__kwdefaults__, one.__closure__, one.__dict__]
+            stack += [one.__defaults__, one.__kwdefaults__, one.__closure__, one.__dict__,
+                      one.__annotations__]
         else:
             stack += gc.get_referents(one)
     for function in reversed(found):
@@ -2641,7 +2643,12 @@ def fields(one):
 
 
 def ref(value):
-    return value if atom(value) else (AT, id(value))
+    """VALUE AS A COMPARISON HOLDS IT: an atom with its type, and anything else by its identity.
+    `False` and `0` are one value to `==` and two to a reader that asks which of them it has --
+    `is False`, `type(one) is int`, `isinstance(one, bool)` -- and so are `1` and `True`. What a
+    reader can tell apart, a comparison that decides whether a reader would run again must tell
+    apart too."""
+    return (type(value), value) if atom(value) else (AT, id(value))
 
 
 
@@ -2684,7 +2691,7 @@ def described(value, depth=0, twin=EMPTY):
     has reached in what it iterates -- which ends for any object written in C. Past the depth read, an
     object the reading made is read as made, never by an identity no later reading can have."""
     if atom(value):
-        return value
+        return ref(value)
     if depth > 3:
         return ("made",) if twin is not EMPTY and twin is not value else ref(value)
     if type(value) in (tuple, list):
@@ -2738,6 +2745,18 @@ def differing(a, b):
     """The index of each byte of each word at which A and B, two readings of one layout, differ."""
     return frozenset(index for word in range(0, min(len(a), len(b)), WORD)
                      if a[word:word + WORD] != b[word:word + WORD] for index in range(word, word + WORD))
+
+
+def sized(one):
+    """WHAT ONE REPORTS OF ITS OWN MEMORY, read through the implementation its class inherits from C.
+    This is the interpreter's own reading of the words `churn` would otherwise hide -- the room a list
+    has set aside, the table a set or a dictionary keeps, the blocks a deque holds -- and any reader
+    can read it: `one.__sizeof__()`, `sys.getsizeof(one)`. None where reading it raises."""
+    found = native(type(one), "__sizeof__")
+    try:
+        return found(one) if found is not None else None
+    except Exception:
+        return None
 
 
 def picture(one):
@@ -2856,7 +2875,14 @@ def churn(one):
     the arrangement of whatever it held before it grew, which no write-back puts back and no reader reads,
     while where its next `pop` starts -- which a reader does read -- no write-back touches, and so is
     compared. Measured on copies, never on ONE; None where no copy can be made, and then every word of ONE
-    is compared."""
+    is compared.
+
+    WHAT THIS MEASURES IS A CANDIDATE, NOT A LICENCE. A word is left out of a comparison only because
+    no reader can read it -- never because a write-back moves it, which is a fact about the write-back
+    and not about what a reader sees. So none of these words is hidden unless the value still reports
+    the size it reported (`sized`), which is a reading of these very words that any reader can make and
+    which `back` asks of the value itself. Where the size is not the size, nothing is hidden and the
+    difference is named -- unproven -- rather than passed over."""
     first, second = copied(one), copied(one)
     if first is None or second is None:
         return None
@@ -2964,8 +2990,21 @@ def contents(one):
 
 def written(one, value, swap):
     """ONE holding again what CONTENTS read of it as VALUE, in VALUE's order, each object read through SWAP
-    -- written through the implementation its class inherits from C (`native`)."""
+    -- written through the implementation its class inherits from C (`native`).
+
+    AND IT CHANGES NO MORE THAN IT MUST. How much room a value has is something a reader can read
+    (`sized`), and emptying a value and filling it again gives it the room its class sets aside for
+    what it is filled with. Where the run changed what a list holds and not how much, emptying it
+    would change the room the run left alone, so its items are written in place. Everything else is
+    emptied and filled, which is what puts a room the run DID change back: measured, writing a mapping
+    in place instead kept the table the run had grown, and two readers keeping an `OrderedDict` as a
+    least-recently-used table went from green to unproven."""
     kind = type(one)
+    if isinstance(one, list) and len(one) == len(value):
+        setitem = native(kind, "__setitem__")
+        for index, item in enumerate(value):
+            setitem(one, index, swap(item))
+        return
     native(kind, "clear")(one)
     if isinstance(one, dict):
         setitem = native(kind, "__setitem__")
@@ -2987,7 +3026,9 @@ def parts(one, value):
 def state(copies=True):
     """MODULE'S STATE AS IT IS NOW: every value its namespace reaches, and all of each that the probe can
     read. What each dictionary, list, set, deque and byte array holds, each cell's value, each function's
-    defaults, the attributes of each class MODULE wrote, and the process environment -- the one input
+    defaults and ANNOTATIONS -- a holder like any other, and the one a function keeps that neither its
+    defaults nor its own dictionary reach -- the attributes of each class MODULE wrote, and the process
+    environment -- the one input
     outside MODULE the probe varies, read underneath `os.environ` so that reading it is not a read of
     MODULE's -- are held by reference, in the order their own class hands them out (`contents`), and
     `restore` writes them back. EVERY VALUE THE WALK REACHES IS ALSO PICTURED -- a tuple and what it holds,
@@ -3026,7 +3067,8 @@ def state(copies=True):
             saved.append((one, (one.__defaults__, one.__kwdefaults__)))
             stack += [(part, "%s.%s" % (where, name)) for name, part in (
                 ("__defaults__", one.__defaults__), ("__kwdefaults__", one.__kwdefaults__),
-                ("__closure__", one.__closure__), ("__dict__", one.__dict__))]
+                ("__closure__", one.__closure__), ("__dict__", one.__dict__),
+                ("__annotations__", one.__annotations__))]
             continue
         if isinstance(one, WHOLE):
             items = contents(one)
@@ -3047,10 +3089,11 @@ def state(copies=True):
             pass
         stack += [(value, "%s.%s" % (where, member.__name__)) for member, value in held]
         if isinstance(one, WHOLE):
-            table[id(one)] = (one, picture(one), held, None, frozenset(), churn(one) if copies else None)
+            table[id(one)] = (one, picture(one), held, None, frozenset(),
+                              churn(one) if copies else None, sized(one))
         else:
             table[id(one)] = (one, picture(one), held) + (
-                (reproduced(one) if copies else None) or (None, frozenset())) + (frozenset(),)
+                (reproduced(one) if copies else None) or (None, frozenset())) + (frozenset(), sized(one))
     saved.append((PICTURED, (table, places)))
     return saved
 
@@ -3060,7 +3103,10 @@ def back(then, memo):
     reached, each holder holding what it held IN THE ORDER IT HELD THEM where its class guarantees one and
     as a set where it does not, and each pictured value's picture what it was, a copy MEMO rebuilt
     standing, with its own dictionary, for the value it was rebuilt from, and read but for the words where
-    its own memory is pointed to, and the words writing back what it holds moves. Each value that differs is named by the path the walk
+    its own memory is pointed to, and -- WHERE THE VALUE STILL REPORTS THE SIZE IT REPORTED -- the words
+    writing back what it holds moves. A value that reports another size has had its room changed by the
+    write-back, which a reader can read (`one.__sizeof__()`), so nothing of its own bytes is hidden and
+    the difference is named. Each value that differs is named by the path the walk
     reached it at; none are, where the state is what THEN read."""
     now, (table, places), stands, wrong = state(False), then[-1][1], {}, set()
     later = now[-1][1][1]
@@ -3090,7 +3136,7 @@ def back(then, memo):
 
     def through(value):
         if atom(value):
-            return value
+            return ref(value)
         return (AT, -id(value) if id(value) in memo else stands.get(id(value), id(value)))
     before = {id(one): value for one, value in then[:-1]}
     after = {stands.get(id(one), id(one)): (one, value) for one, value in now[:-1]}
@@ -3124,6 +3170,8 @@ def back(then, memo):
     for key in table.keys() & pictured.keys():
         one, current = pictured[key][0], pictured[key][1]
         noise = table[key][5] or frozenset()
+        if sized(one) != table[key][6]:
+            noise = frozenset()
         if id(one) != key:
             noise = table[key][4] if table[key][3] is not None else None
         if not alike(current, table[key][1], noise, stale):
@@ -3150,13 +3198,13 @@ def restore(saved):
     back."""
     (table, places), memo, lost = saved[-1][1], {}, set()
     moved = [entry for entry in table.values() if picture(entry[0]) != entry[1]]
-    for one, _, held, _, _, _ in moved:
+    for one, _, held, _, _, _, _ in moved:
         put(one, held, {})
     rewritten = {id(entry[0]) for entry in moved if isinstance(entry[0], WHOLE)}
     for one, value in saved:
         if id(one) in rewritten:
             written(one, value, lambda item: item)
-    for one, then, _, again, _, _ in moved:
+    for one, then, _, again, _, _, _ in moved:
         if isinstance(one, WHOLE):
             continue
         if picture(one) != then:
@@ -3421,7 +3469,8 @@ def chose(handed):
         if isinstance(one, dict) and id(one) not in made and any(carries(one, r) for r in READ):
             return True
         if isinstance(one, types.FunctionType):
-            stack += [one.__defaults__, one.__kwdefaults__, one.__closure__, one.__dict__]
+            stack += [one.__defaults__, one.__kwdefaults__, one.__closure__, one.__dict__,
+                      one.__annotations__]
         else:
             stack += gc.get_referents(one)
     return False
@@ -3431,11 +3480,24 @@ skipped, swept, called = [], [], set()
 
 
 def sweep():
+    """EVERY CALLABLE MODULE'S NAMESPACE HOLDS, CALLED -- AND THE ASKING IS BOUNDED. A module that
+    binds a new callable on every call -- `_cached_reader = functools.partial(read)`, a bound method
+    it keeps, a weak reference it makes -- hands the sweep work it has not done at every call, and
+    the sweep's own calls are natural runs: they force no repeat, so a bound counted in repeats is
+    never reached and this loop never runs out of callables to ask. A reader of that shape can be
+    perfectly correct, and the answer `master` gives it is that it decodes; an unbounded reading
+    reports nothing at all, which is worse than any verdict. So THE RUNS ARE COUNTED, here and in every
+    repeat, against one bound (RUNS): a run is what either kind of work costs, and counting only the
+    repeats left this loop unbounded. Past the bound the callable is not asked, and is named unproven
+    under the name it is held by -- which is what a question nobody asked is."""
     progress = False
     for name, function in held(vars(module)):
         code = getattr(function, "__code__", None)
         own = code is not None and code in mine
         if id(function) in called or (own and required(code, False) <= ran[code]):
+            continue
+        if len(runs) >= RUNS:
+            answers.setdefault(name, set()).add("unproven")
             continue
         called.add(id(function))
         callee[name] = function
@@ -3527,7 +3589,7 @@ def raising(test):
 
 
 forced, tried = [], set()
-REPEATS = 2048        # the most repeats the probe makes: what it cannot ask within them is unproven
+RUNS = 2048           # the most runs the probe makes: past it, what it has not asked is unproven
 
 
 def attempt(key, label, base, alteration):
@@ -3539,11 +3601,16 @@ def attempt(key, label, base, alteration):
     AND THE WORK IS BOUNDED. A module that makes a new callable on every call -- a weak reference it
     keeps, a bound method it hands out -- gives the sweep work it has not done at every call, and each
     repeat gives it more: there is no fixed point to reach, and an unbounded reading is one that reports
-    nothing at all. So the repeats are counted, and past REPEATS -- five times the most any reader
-    measured here has needed -- the question is not asked and what it would have answered for is
-    unproven, which is what a question nobody asked is."""
+    nothing at all. COUNTING REPEATS IS NOT COUNTING THE WORK: the sweep's own calls are natural runs
+    and force no repeat, so a bound counted in repeats left a module that binds a new callable on every
+    call sweeping for ever, and a reader that is CORRECT got no report at all where master gives it
+    one. So what is counted is THE RUNS THE PROBE MAKES -- the unit both kinds of work are paid in --
+    here and in the sweep, against one bound (RUNS). Past it the question is not asked and what it
+    would have answered for is unproven, which is what a question nobody asked is. The most any reader
+    measured here has needed is 1241 runs, and that one is a `WeakSet` making a weak reference per
+    call -- the shape the bound exists for; the most any other has needed is 437."""
     tried.add(key)
-    if len(forced) >= REPEATS:
+    if len(runs) >= RUNS:
         answers.setdefault(label, set()).add("unproven")
         return
     start = started_from.get(id(base), (None, None))[1]
@@ -3770,10 +3837,22 @@ def blanked(picture, noise):
     return picture[:3] + (bytes(0 if index in noise else byte for index, byte in enumerate(picture[3])),) + picture[4:]
 
 
+marked = {}           # a state STATE read -> (that state, what it fingerprints as)
+
+
 def fingerprint(saved):
     """What STATE read: the identity of every object it read and of every value in each, and the
     picture of every value it pictured. Two states with the same fingerprint are the same state -- and
-    two whose values are the same objects, but whose counter, stream or buffer has moved, are not."""
+    two whose values are the same objects, but whose counter, stream or buffer has moved, are not.
+
+    A STATE IS READ THIS WAY ONCE. What STATE read is a reading already taken: nothing of it moves
+    afterwards, so its mark cannot change, and `every_state` asks for the mark of every state again on
+    every pass it makes. Reading them afresh each time is quadratic in the natural runs, which is what
+    a module that hands the sweep a new callable on every call makes many of -- minutes of work inside
+    the bound rather than a verdict at it. The state is held beside its mark, so no state it has read
+    can be freed and another take its place at the same address."""
+    if id(saved) in marked:
+        return marked[id(saved)][1]
     marks = []
     for one, value in saved:
         if one is PICTURED:
@@ -3794,7 +3873,8 @@ def fingerprint(saved):
         else:
             inner = id(value)
         marks.append((id(one), inner))
-    return tuple(marks)
+    marked[id(saved)] = (saved, tuple(marks))
+    return marked[id(saved)][1]
 
 
 def every_state():
@@ -3805,19 +3885,26 @@ def every_state():
     run that handed MODULE a document naming something twice -- the sweep's, or any run a scan saw
     one in -- is repeated from each state any natural run started from, and answered like any
     other run: a reader that chooses on its second call, on every other call, or once a table has
-    filled, is asked the twice-named document in the state the probe's own calls left it in."""
-    progress, states, marks = False, [], set()
+    filled, is asked the twice-named document in the state the probe's own calls left it in.
+
+    A STATE IS NAMED BY WHICH OF THEM IT IS, not by its mark. The mark of a state is the picture of
+    every value in it, and a question already asked is remembered by its key: keying on the mark
+    itself reads all of that afresh for every pair of run and state, which is quadratic in the
+    natural runs with a whole state read at each step -- for a module that hands the sweep a new
+    callable on every call, minutes of it inside the bound instead of a verdict at it. Marks decide
+    WHICH states there are; the key carries the one number that says which."""
+    progress, states, marks = False, [], {}
     for _, _, record in runs:
         if record["natural"] and record.get("state") is not None:
             mark = fingerprint(record["state"])
             if mark not in marks:
-                marks.add(mark)
-                states.append((mark, record["state"]))
+                marks[mark] = len(states)
+                states.append(record["state"])
     for label, replay, record in [one for one in runs if one[2]["natural"] and one[2].get("twice")]:
-        own = fingerprint(started_from[id(replay)][1])
-        for mark, saved in states:
-            k = ("state", id(replay), mark)
-            if mark == own or k in tried:
+        own = marks.get(fingerprint(started_from[id(replay)][1]), -1)
+        for which, saved in enumerate(states):
+            k = ("state", id(replay), which)
+            if which == own or k in tried:
                 continue
             attempt(k, label, replay, lambda undo, saved=saved: unrestored(restore(saved)))
             progress = True
@@ -3836,7 +3923,8 @@ def again():
     drive stops when the program returns, so neither reaches that later call. Once nothing is left
     to alter, every natural run that made a scan is made once more, and the scan it makes the
     second time is answered like any other: a call that decodes unhooked only after the first is
-    caught here. AND A SECOND RUN THAT ENDS OTHERWISE THAN THE FIRST -- returning where it raised,
+    caught here. This is work like any other and is counted against the same bound (RUNS): a run
+    the bound leaves unasked is unproven, not passed over. AND A SECOND RUN THAT ENDS OTHERWISE THAN THE FIRST -- returning where it raised,
     raising where it returned, or raising something else -- gave two answers to one question, and
     what it ran is unproven whether or not either end decoded. A run its bound ended is not made
     again, and each distinct run is repeated once."""
@@ -3845,6 +3933,9 @@ def again():
         if id(replay) in seen or record["cut"] or not record["events"]:
             continue
         seen.add(id(replay))
+        if len(runs) >= RUNS:
+            answers.setdefault(label, set()).add("unproven")
+            continue
         if perform(label, replay) != record.get("ended"):
             answers.setdefault(label, set()).add("unproven")
 
@@ -3907,7 +3998,7 @@ decode_probe() {  # decode_probe MODULE DRIVE...: the report's two lines as one,
 }
 printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 # THE PROBE IS ITSELF UNDER TEST, because a probe that has stopped watching agrees with a clean
-# parser and says so in the same words. So it runs first over forty-five stand-ins whose answers
+# parser and says so in the same words. So it runs first over forty-eight stand-ins whose answers
 # are known, and MUTATIONS OF THE PROBE WERE WATCHED AGAINST THEM -- each the smallest text change
 # that undoes one rule, and each run through this whole file:
 #
@@ -5824,7 +5915,10 @@ probe_expect unrestored \
 # `IntEnum` member among them -- was never entered, and the count in its own dictionary or its slot was
 # never read. `by_counted` keeps its count in the dictionary of an `int` subclass, `by_member` on an
 # `IntEnum` member, `by_weighed` in the slot of a `float` subclass: each is read like any other object,
-# found moved, put back, and caught unrefusing on the repeat's first call. `by_chosen` holds an `IntEnum`
+# found moved, put back, and caught unrefusing on the repeat's first call. Since round 16 the two that
+# keep their count in an INSTANCE DICTIONARY are also named `unproven`: what such a dictionary reports of
+# its own memory moves between readings without the run touching it, and a word is hidden from the
+# comparison only where the value still reports the size it reported. `by_chosen` holds an `IntEnum`
 # member and keeps nothing between calls: it is green, because what is read of a value is decided by what
 # it is, and nothing here is refused for the class it derives from.
 probe_stand_in subclassed 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
@@ -5879,7 +5973,7 @@ def by_chosen(text, mode="strict"):
     return json.loads(text, object_pairs_hook=one_reading) if _Mode[mode.upper()] else None
 PYSHAPE
 probe_expect subclassed \
-  'decoded=yes unrefusing=by_counted,by_member,by_weighed unproven=- skipped=- | refusing=by_chosen,by_counted,by_member,by_weighed,read drive=returned:0 swept=_Mode.__format__:raised:TypeError/raised:TypeError/raised:TypeError,_Mode.__new__:raised:AttributeError/raised:AttributeError/raised:AttributeError,_Mode._generate_next_value_:raised:AttributeError/raised:AttributeError/raised:AttributeError,_Mode._new_member_:raised:TypeError/raised:TypeError/raised:TypeError,_Mode._value_repr_:raised:TypeError/raised:TypeError/raised:TypeError,by_chosen:raised:ValueError,by_counted:raised:ValueError/returned,by_member:raised:ValueError/returned,by_weighed:raised:ValueError/returned forced=205'
+  'decoded=yes unrefusing=by_counted,by_member,by_weighed unproven=_Mode.STRICT.__dict__,_tally.__dict__ skipped=- | refusing=by_chosen,by_counted,by_member,by_weighed,read drive=returned:0 swept=_Mode.__format__:raised:TypeError/raised:TypeError/raised:TypeError,_Mode.__new__:raised:AttributeError/raised:AttributeError/raised:AttributeError,_Mode._generate_next_value_:raised:AttributeError/raised:AttributeError/raised:AttributeError,_Mode._new_member_:raised:TypeError/raised:TypeError/raised:TypeError,_Mode._value_repr_:raised:TypeError/raised:TypeError/raised:TypeError,by_chosen:raised:ValueError,by_counted:raised:ValueError/returned,by_member:raised:ValueError/returned,by_weighed:raised:ValueError/returned forced=205'
 # AND WHAT A CONTAINER IS, BESIDE WHAT IT HOLDS. Round 14 read a dictionary, a list, a set, a deque and a
 # byte array by their items alone, and put them back by writing those items in again; so an `OrderedDict`
 # whose order a call moves came back in the order the walk happened to read, and a set whose next `pop` a
@@ -5890,9 +5984,14 @@ probe_expect subclassed \
 # `by_ordered` moves an `OrderedDict`'s order and is caught unrefusing; `by_popped` keeps its count in
 # where a set's next `pop` starts, which no write-back can put back, and is named `unproven=_popped` --
 # never passed over as back. `by_kept_in_order` appends to a list, adds to a set of strings and appends to
-# a bounded deque on every call and always hooks: the room a container sets aside, the arrangement of a
-# table it has outgrown and the blocks it keeps to reuse are measured on copies of it (`churn`), so it is
-# green.
+# a bounded deque on every call and always hooks. The arrangement of a table a set has outgrown and the
+# blocks a deque keeps to reuse are measured on copies of it (`churn`) and left out of the comparison, and
+# the set and the deque come back. THE LIST DOES NOT, and since round 16 the report says so: a list a run
+# appended to cannot be given the room it had -- emptying it and filling it again sets the room afresh,
+# and `one.__sizeof__()` reads it -- so `_log` is named `unproven`. That is the measured cost of comparing
+# what a reader can read, stated rather than hidden: of the twenty-four correct readers screened for round
+# 16, three are named this way, and each holds either a list a run appended to or the dictionary of an
+# instance, whose table the interpreter re-sizes between readings of its own accord.
 probe_stand_in arranged 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
 
 
@@ -5929,7 +6028,78 @@ def by_kept_in_order(text, mode="strict"):
     return json.loads(text, object_pairs_hook=one_reading)
 PYSHAPE
 probe_expect arranged \
-  'decoded=yes unrefusing=by_ordered unproven=_popped skipped=- | refusing=by_kept_in_order,by_ordered,by_popped,read drive=returned:0 swept=by_kept_in_order:raised:ValueError,by_ordered:raised:ValueError/returned,by_popped:raised:ValueError/returned forced=45'
+  'decoded=yes unrefusing=by_ordered unproven=_log,_popped skipped=- | refusing=by_kept_in_order,by_ordered,by_popped,read drive=returned:0 swept=by_kept_in_order:raised:ValueError,by_ordered:raised:ValueError/returned,by_popped:raised:ValueError/returned forced=45'
+# AND WHAT A READER CAN TELL APART, A COMPARISON MUST TELL APART. Round 15 read a container like
+# anything else and still passed over three things a reader can read. A VALUE AND ITS TYPE: `False`
+# and `0` are equal, so a marker a call turns from the one into the other came back "restored", and
+# the call that chose was never asked again -- `by_marked`. WHAT A FUNCTION HOLDS IN ITS
+# ANNOTATIONS: the walk read a function's defaults, its closure and its own dictionary and went no
+# further, so a counter kept in a return annotation was never read, never put back and never asked
+# a second time -- `by_annotated`, and `by_permitted`, which keeps its one permit there in a
+# `threading.Semaphore`, a holder no diff of this file had. AND THE ROOM A CONTAINER HAS: `churn`
+# measured which words writing a container's items back moves and left those out of the comparison,
+# which is a fact about the write-back and not about what a reader sees -- `one.__sizeof__()` reads
+# those very words. So a word is left out only where the value still reports the size it reported,
+# and `by_roomed`, which hooks unsafely only while its list has the room it was built with, is named
+# `unproven=_marks` rather than passed over as back. `by_remembered` keeps its count in a mapping
+# and always hooks: emptying that mapping and filling it again gives it the room its contents call
+# for, which is the room it had, and it is green.
+probe_stand_in observed 'json.loads(block.content, object_pairs_hook=one_reading)' <<'PYSHAPE'
+
+
+import threading
+
+
+_flags = [False]
+
+
+def by_marked(text, mode="strict"):
+    hook = {"strict": one_reading, "loose": None}[mode] if _flags[0] is False else one_reading
+    _flags[0] = 0
+    return json.loads(text, object_pairs_hook=hook)
+
+
+def _tally() -> []:
+    """The readings so far, kept where nothing but an annotation holds them."""
+
+
+def by_annotated(text, mode="strict"):
+    seen = _tally.__annotations__["return"]
+    hook = {"strict": one_reading, "loose": None}[mode] if not seen else one_reading
+    seen.append(len(text))
+    return json.loads(text, object_pairs_hook=hook)
+
+
+def _permit() -> threading.Semaphore(1):
+    """The one permit, kept where nothing but an annotation holds it."""
+
+
+def by_permitted(text, mode="strict"):
+    free = _permit.__annotations__["return"].acquire(blocking=False)
+    hook = {"strict": one_reading, "loose": None}[mode] if free else one_reading
+    return json.loads(text, object_pairs_hook=hook)
+
+
+_marks = [0]
+_room = _marks.__sizeof__()
+
+
+def by_roomed(text, mode="strict"):
+    hook = ({"strict": one_reading, "loose": None}[mode]
+            if _marks.__sizeof__() == _room else one_reading)
+    _marks.append(len(text))
+    return json.loads(text, object_pairs_hook=hook)
+
+
+_counts = {"calls": 0}
+
+
+def by_remembered(text, mode="strict"):
+    _counts["calls"] += 1
+    return json.loads(text, object_pairs_hook=one_reading)
+PYSHAPE
+probe_expect observed \
+  'decoded=yes unrefusing=by_annotated,by_marked,by_permitted unproven=_marks,_permit.__annotations__[return].__dict__,_tally.__annotations__[return] skipped=- | refusing=by_annotated,by_marked,by_permitted,by_remembered,by_roomed,read drive=returned:0 swept=by_annotated:raised:ValueError/returned,by_marked:raised:ValueError/returned,by_permitted:raised:ValueError/returned,by_remembered:raised:ValueError,by_roomed:raised:ValueError/returned forced=100'
 # WHAT THIS DOES NOT REACH. Each shape below was written beside a hooked decode and run through this
 # probe, which reported nothing unrefusing, nothing unproven and nothing skipped -- and each one
 # returns without a refusal on a document naming `findings` twice (for the hook that counts names,
@@ -6027,10 +6197,12 @@ probe_expect arranged \
 #     that pops a set to choose IS the defect this round closes (`by_popped`), so it is read rather than
 #     passed over; the deque's ends no reader can read, and it is the cost of reading a container's own
 #     bytes at all;
-#   * and any reader at all, where the repeats run out. A module that hands the sweep a new callable on
-#     every call -- a `WeakSet` that makes a weak reference per call, a bound method it hands back -- has
-#     no fixed point to reach: the sweep is given work at every call, and every repeat gives it more. The
-#     repeats are bounded (REPEATS), and what the bound cuts off is unproven rather than passed over, so a
+#   * and any reader at all, where the work runs out. A module that hands the sweep a new callable on
+#     every call -- a `WeakSet` that makes a weak reference per call, a bound method it hands back, a
+#     `functools.partial` it caches -- has no fixed point to reach: the sweep is given work at every call,
+#     and every repeat gives it more. The RUNS the probe makes are bounded, in the sweep and in every
+#     repeat alike -- counting repeats alone bounded nothing, since the sweep's own calls are natural
+#     runs and force no repeat -- and what the bound cuts off is unproven rather than passed over, so a
 #     reader of that shape is red for what was not asked rather than green for what was not done.
 # And `borrowed` above is a fourth, stated there: a library the parser calls that decodes a
 # repeated name for its own reasons is answered for as the parser, and red.
