@@ -3,7 +3,7 @@ id: G5-CLAUSE1-CENSUS-NO-REPAIR-IS-EVER-PUBLISHED
 severity: P3
 disposition: deferred
 category: correctness
-pr: 
+pr: 302
 reviewed_sha: 5ac786f36c4e6c90b5000816557572cf270ba5f9
 location: src/topology/census.rs:968
 provenance: pre_existing
@@ -21,8 +21,9 @@ refuses every publication of a repair as `InvalidSatisfies`; measured 2026-09-16
 on the seeded fan-out census as "`merge_prepared` settles [3], and the fold derives [2, 3] as
 this publication's closure" and on the 20,000-state prefix as "settles [3], and the fold derives
 [0, 3]" -> no member of the census family ever accepts a repair's `merge_prepared` or
-`task_merged` (the prefix's accepted labels for r3 and r4 hold dispatches, attempts, candidates,
-rejections and verification starts, and no publication), so the census never executes
+`task_merged` (the prefix's accepted labels for r3 and r4 hold dispatches, attempts and their settlements,
+interruptions and generation closes, candidates, rejections and verification starts, and no
+publication), so the census never executes
 `apply_task_merged` with a multi-key `satisfies` or a `MergeLeaseRelease::Lineage` release ->
 the notes for the seeded census said "the repairs integrated" until 2026-09-16, a coverage the
 census does not have.
