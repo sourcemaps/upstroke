@@ -3028,9 +3028,8 @@ def state(copies=True):
     read. What each dictionary, list, set, deque and byte array holds, each cell's value, each function's
     defaults and ANNOTATIONS -- a holder like any other, and the one a function keeps that neither its
     defaults nor its own dictionary reach -- the attributes of each class MODULE wrote, and the process
-    environment -- the one input
-    outside MODULE the probe varies, read underneath `os.environ` so that reading it is not a read of
-    MODULE's -- are held by reference, in the order their own class hands them out (`contents`), and
+    environment -- the one input outside MODULE the probe varies, read underneath `os.environ` so that
+    reading it is not a read of MODULE's -- are held by reference, in the order their own class hands them out (`contents`), and
     `restore` writes them back. EVERY VALUE THE WALK REACHES IS ALSO PICTURED -- a tuple and what it holds,
     a counter, a lock, an instance, and a container too, which keeps among its own bytes what no reading of
     its items shows: where a set's next `pop` starts, and the order an `OrderedDict` holds its own -- by
@@ -4129,8 +4128,10 @@ printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 #   a set compared in the order its table keeps        `arranged`
 #   the copy protocol's reading taken once, so what a  forty-one, `arranged` and `held` among them
 #     reading made is read by identity
-#   what a write-back moves measured without the       `arranged`
-#     grown state
+#   what a write-back moves measured without the       nothing here NOW: it moved `arranged` at the head
+#     grown state                                        that added it, and round 16 compares a value's
+#                                                        own bytes wherever it no longer reports the size
+#                                                        it reported, which names what this row named
 #   a set's arrangement left out of that measurement   `arranged`
 #   a mapping compared without its order               nothing here: writing a mapping back through its
 #                                                        own class restores the order. With the
@@ -4141,14 +4142,29 @@ printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 #   an iterator read by draining it (round 14's rule)  nothing here: the gate does not END, on a reader
 #                                                        holding `enumerate(iter(int, 1))`
 #   a rebuilt value taken for work the sweep has not   nothing here alone, and nothing with the bound
-#     done, and the repeats unbounded                    alone; undo both and the gate does not END on
+#     done, and the work bound put past reach            alone; undo both and the gate does not END on
 #                                                        a count read through a bound `__next__`
+# and round 16's seven:
+#   an atom compared without its type, so that `False` `observed`
+#     and `0` are one value
+#   a function's annotations never visited             `observed`
+#   what a write-back moves hidden whatever the value  `arranged`, `observed`, `subclassed`
+#     now reports of its own memory
+#   a list emptied and filled again where only what it `observed`, `restarted`
+#     holds changed
+#   the sweep's own calls not counted against the      nothing here: the gate does not END, on a reader
+#     bound                                              that is CORRECT and caches a
+#                                                        `functools.partial` of itself on every call
+#   a later call asked again without the bound         nothing here: measured on that same reader
+#   the work bound put past reach                      nothing here: measured on that same reader
 #
 # and none of the sixty-six from earlier rounds that ran to their end, each measured at the head
-# that added it, nor the eleven of round 14 and the twelve of round 15, each measured at the head
-# that added them, moved an assertion of any other family in this file. FIVE OF ROUND 15'S TWELVE
-# MOVE NOTHING HERE AT ALL, and their rows say so: their witness is a reader appended to the parser,
-# because a stand-in of that shape would make this file's own run take minutes or never end. One more was measured and moves no assertion, because
+# that added it, nor the eleven of round 14, the eleven of round 15 or the seven of round 16, each
+# measured at the head that added them, moved an assertion of any other family in this file. FIVE OF
+# ROUND 15'S ELEVEN AND THREE OF ROUND 16'S SEVEN MOVE NOTHING HERE AT ALL, and their rows say so:
+# their witness is a reader appended to the parser, because a stand-in of that shape would make this
+# file's own run take minutes or never end. One row of round 15's moves nothing here any more, and
+# says which head it moved `arranged` at: a rule round 16 added covers what it covered. One more was measured and moves no assertion, because
 # what it changes is a time: a question whose time runs out while the probe is recording is ended
 # when the recording is done, and without that `settling` took 9, 9 and 17 seconds in three runs
 # where it takes 6, as the timer fired again and again inside the probe's own callback. The
