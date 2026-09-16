@@ -191,14 +191,20 @@ runner landed on. On 2026-09-01 it moved to an ephemeral self-hosted guest --
 a throwaway overlay of a frozen image, one job per boot, registered with a
 single-use just-in-time config -- and a second guest took the merge queue's
 builds so a queue entry never waited behind a pull request. Measured again
-on 2026-09-15/16, one sha, six hosted samples: the guest runs the suite in
-307 s and `windows-latest` in 1122-1499 s, a 6-minute job against 21 to 28.
-Since 2026-09-16 the queue lane runs on `windows-latest` after all: nothing
-waits on the queue interactively, six to ten merges a day fill a fifth to a
-third of the lane at 25 minutes an entry, and the second guest can then be
-retired from a box where two guests and the builds contend for one set of
-cores. The pull-request lane keeps the guest, because a pull request waits
-on it.
+on 2026-09-15/16: five hosted samples (run 34980597250, at `126b8832`) ran
+the harness in 1122-1499 s, 21m 30s to 28m 03s a job, and the guest, on
+three green runs of pull request #299, in 346 s, 6m 47s to 6m 55s a job --
+three to four times faster. Since 2026-09-16 the queue lane runs on
+`windows-latest` after all: nothing waits on the queue interactively, six to
+ten merges a day fill a fifth to a third of the lane at 25 minutes an entry,
+and the second guest can then be retired from a box where two guests and
+the builds contend for one set of cores. The pull-request lane keeps the
+guest, because a pull request waits on it. What the queue's hosted run does
+not prove is behaviour that differs between the two machines: a test whose
+outcome depends on the runner passes on `windows-latest` in the queue and
+fails on the guest, and the push to master, which runs the guest, is the
+first run to see it. The compiler pin narrows that gap to runtime
+differences; it does not close it.
 
 ## `pub(super) const QUEUE_LANE: &str = "github.event_name == 'merge_group'";`
 

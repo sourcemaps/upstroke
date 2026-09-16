@@ -92,15 +92,21 @@ jobs:
   # pull-request or push build runs on an ephemeral self-hosted runner: a
   # throwaway overlay of a frozen Server 2025 image on the build box, one job
   # per boot, registered for that job with a single-use just-in-time config
-  # (MAINTAINING.md step 3). Measured on one sha, 2026-09-15/16: the guest
-  # runs the suite in 307 s, a 6m 13s job; windows-latest ran it in 1122-1499 s
-  # over six samples, 21m 30s to 28m 03s a job. A pull request waits on this
-  # leg interactively, so it keeps the guest. A merge-queue entry runs on
+  # (MAINTAINING.md step 3). Measured 2026-09-15/16: five hosted samples of
+  # the suite on windows-latest (run 34980597250, at 126b8832) took 1122-1499 s
+  # in the harness, 21m 30s to 28m 03s a job; the guest, on three green runs of
+  # pull request #299, took 346 s in the harness, 6m 47s to 6m 55s a job --
+  # three to four times faster. A pull request waits on this leg
+  # interactively, so it keeps the guest. A merge-queue entry runs on
   # windows-latest: nothing waits on the queue interactively, at six to ten
   # merges a day the lane is a fifth to a third utilised at 25 minutes an
   # entry, and moving it lets the queue's guest be retired from a box where
   # two guests and the builds contend for the same cores -- one guest leg went
-  # from 6m to 10m 38s under that load. `lint (windows)` and the Windows MSRV
+  # from 6m to 10m 38s under that load. What the hosted queue run does not
+  # prove is behaviour that differs between the two machines -- what the
+  # runner environment reports, what the image carries; a test that passes on
+  # windows-latest in the queue and fails on the guest is seen first by the
+  # push to master, which runs the guest. `lint (windows)` and the Windows MSRV
   # leg stay on windows-latest, and `lint (windows)` also links every binary
   # and test harness with `cargo build --all-targets`, so GitHub's runner still
   # compiles, code-generates and links every `#[cfg(windows)]` body on current

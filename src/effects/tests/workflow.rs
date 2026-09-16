@@ -1644,8 +1644,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-WINDOWS-QUEUE-LANE-REGUESTED",
         escape: "the expression replaced by the plain label set. Every build lands on the \
                  pull-request guest, a merge-queue entry queues behind whatever pull-request \
-                 build holds it, and the hosted lane -- the install step, its condition, the \
-                 forty-five minutes -- is dead text no build ever takes.",
+                 build holds it, and the queue lane's install step, still conditioned on the \
+                 event rather than on the machine, now runs on the guest and installs over \
+                 the image's compiler, under the forty-five minutes meant for the slow host.",
         job: Some("test-windows"),
         anchor: "    runs-on: ${{ github.event_name == 'merge_group' && 'windows-latest' || fromJSON('[\"self-hosted\", \"windows\", \"winguest\"]') }}\n",
         replacement: "    runs-on: [self-hosted, windows, winguest]\n",
@@ -2056,8 +2057,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-CHECKOUT-REF",
-        escape: "the self-hosted job's checkout points at `master`. Every hosted leg still \
-                 reads the candidate, the self-hosted leg tests a tree the candidate never \
+        escape: "the Windows job's checkout points at `master`. Every other leg still reads \
+                 the candidate; this job, on either lane, tests a tree the candidate never \
                  touched, and a Windows-only regression goes green.",
         job: Some("test-windows"),
         anchor: "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
