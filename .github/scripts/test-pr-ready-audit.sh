@@ -4175,12 +4175,13 @@ printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 #   a value the environment cannot hold tried          `unsettable`
 #   a value read by the type it derives from (round    `subclassed`
 #     14's rule)
-#   a container read by its items alone                `arranged`, `rebound`, `restarted`, `revived`,
-#                                                        `spent`, `subclassed`, `unrestored`
+#   a container read by its items alone                `arranged`, `guarded`, `observed`, `rebound`,
+#                                                        `restarted`, `revived`, `spent`,
+#                                                        `subclassed`, `unrestored`
 #   a container written back through the base class's  `arranged`
 #     implementation, not the one its own class has
 #   a set compared in the order its table keeps        `arranged`
-#   the copy protocol's reading taken once, so what a  forty-one, `arranged` and `held` among them
+#   the copy protocol's reading taken once, so what a  forty-three, `arranged` and `held` among them
 #     reading made is read by identity
 #   what a write-back moves measured without the       nothing here NOW: it moved `arranged` at the head
 #     grown state                                        that added it, and round 16 compares a value's
@@ -4193,8 +4194,12 @@ printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 #                                                        `unproven`
 #   a reading that failed read as no reading at all    nothing here: no reader measured runs a reading
 #                                                        out of memory or out of depth
-#   an iterator read by draining it (round 14's rule)  nothing here: the gate does not END, on a reader
-#                                                        holding `enumerate(iter(int, 1))`
+#   an iterator read by draining it (round 14's rule)  `guarded`, which holds a mapping whose values
+#                                                        are read by walking the table its class keeps.
+#                                                        It moved nothing here until this file held
+#                                                        one, and its other witness is a reader
+#                                                        holding `enumerate(iter(int, 1))`, on which
+#                                                        the gate does not END
 #   a rebuilt value taken for work the sweep has not   nothing here alone, and nothing with the bound
 #     done, and the work bound put past reach            alone; undo both and the gate does not END on
 #                                                        a count read through a bound `__next__`
@@ -4211,13 +4216,31 @@ printf '{"verdict":"PASS","findings":[]}\n' > "$tmp/probe-drive.json"
 #                                                        `functools.partial` of itself on every call
 #   a later call asked again without the bound         nothing here: measured on that same reader
 #   the work bound put past reach                      nothing here: measured on that same reader
+# and round 17's four:
+#   how many a value holds asked of MODULE's class,    `guarded`
+#     which may answer with a length of its own or
+#     refuse to answer at all
+#   a mapping's values read by asking it for each key, THE GATE DOES NOT END: `guarded` holds a key
+#     which finds the key by its hash                   hashed under a lock the module holds, and the
+#                                                        snapshot blocks before any timer is armed
+#   a write-back made by running MODULE's code, and a  THE GATE DOES NOT END, on that same key: a
+#     churn measured by making one                       mapping is written back by placing each key,
+#                                                        and placing a key asks the key
+#   the bound armed after the thing it bounds          nothing here, and nothing on any reader
+#                                                        measured: undoing it moves the block from the
+#                                                        snapshot `perform` takes to the one `attempt`
+#                                                        takes inside `recorded`, which no timer
+#                                                        reaches. Its witness is that move, read off a
+#                                                        bounded traceback, not a verdict
 #
 # and none of the sixty-six from earlier rounds that ran to their end, each measured at the head
-# that added it, nor the eleven of round 14, the eleven of round 15 or the seven of round 16, each
-# measured at the head that added them, moved an assertion of any other family in this file. FIVE OF
-# ROUND 15'S ELEVEN AND THREE OF ROUND 16'S SEVEN MOVE NOTHING HERE AT ALL, and their rows say so:
-# their witness is a reader appended to the parser, because a stand-in of that shape would make this
-# file's own run take minutes or never end. One row of round 15's moves nothing here any more, and
+# that added it, nor the eleven of round 14, the eleven of round 15, the seven of round 16 or the
+# four of round 17, each measured at the head that added them, moved an assertion of any other family
+# in this file. FOUR OF ROUND 15'S ELEVEN, THREE OF ROUND 16'S SEVEN AND ONE OF ROUND 17'S FOUR MOVE
+# NOTHING HERE AT ALL, and their rows say so: the witness of round 15's four and round 16's three is
+# a reader appended to the parser, because a stand-in of that shape would make this file's own run
+# take minutes or never end, and round 17's is a bounded traceback, because what that rule changes is
+# where a block lands and not what any run answers. One row of round 15's moves nothing here any more, and
 # says which head it moved `arranged` at: a rule round 16 added covers what it covered. One more was measured and moves no assertion, because
 # what it changes is a time: a question whose time runs out while the probe is recording is ended
 # when the recording is done, and without that `settling` took 9, 9 and 17 seconds in three runs
