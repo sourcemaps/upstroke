@@ -98,9 +98,10 @@ jobs:
   # pull request #299, took 346 s in the harness, 6m 47s to 6m 55s a job --
   # three to four times faster. A pull request waits on this leg
   # interactively, so it keeps the guest. A merge-queue entry runs on
-  # windows-latest: nothing waits on the queue interactively, at six to ten
-  # merges a day the lane is a fifth to a third utilised at 25 minutes an
-  # entry, and moving it lets the queue's guest be retired from a box where
+  # windows-latest: nothing waits on the queue interactively, six to ten
+  # merges a day are a tenth to a sixth of what a serial lane at 25 minutes
+  # an entry can take in a day (57), bursts queue rather than fail, and moving
+  # it lets the queue's guest be retired from a box where
   # two guests and the builds contend for the same cores -- one guest leg went
   # from 6m to 10m 38s under that load. What the hosted queue run does not
   # prove is behaviour that differs between the two machines -- what the
@@ -138,7 +139,7 @@ jobs:
   # a queue entry's ref is a fresh `gh-readonly-queue/` branch, and no run on
   # `master` ever saves a hosted `test-windows` cache, so a cache step would
   # upload a cache per entry that no later entry could read. The hosted
-  # timeout is calibrated to the six samples, whose slowest was 28 minutes,
+  # timeout is calibrated to the five samples, whose slowest was 28 minutes,
   # with room for the host lottery windows-latest showed before; the guest
   # keeps its own. A hung queue entry surfaces in 45 minutes rather than 20.
   test-windows:

@@ -196,8 +196,9 @@ the harness in 1122-1499 s, 21m 30s to 28m 03s a job, and the guest, on
 three green runs of pull request #299, in 346 s, 6m 47s to 6m 55s a job --
 three to four times faster. Since 2026-09-16 the queue lane runs on
 `windows-latest` after all: nothing waits on the queue interactively, six to
-ten merges a day fill a fifth to a third of the lane at 25 minutes an entry,
-and the second guest can then be retired from a box where two guests and
+ten merges a day are a tenth to a sixth of the 57 a serial lane at 25
+minutes an entry can take in a day, bursts queue rather than fail, and the
+second guest can then be retired from a box where two guests and
 the builds contend for one set of cores. The pull-request lane keeps the
 guest, because a pull request waits on it. What the queue's hosted run does
 not prove is behaviour that differs between the two machines: a test whose
@@ -231,8 +232,9 @@ The job's `runs-on:`, character for character: a ternary over the lane test
 that yields the hosted runner's name on the queue and the label set,
 through `fromJSON`, everywhere else. A scalar `windows-latest` sends the
 pull-request lane to the hosted runner and its six minutes become
-twenty-five; a bare label set sends the queue back to a guest this contract
-retired and leaves the hosted lane's install as dead text. The literal is
+twenty-five; a bare label set sends every build to the pull-request guest,
+where a queue entry's install -- conditioned on the event, not the machine
+-- runs over the image's compiler. The literal is
 held to [`QUEUE_LANE`], [`TEST_WINDOWS_PLATFORM`] and
 [`TEST_WINDOWS_LABELS`] by
 `the_windows_leg_routes_each_lane_to_the_runner_its_install_step_is_written_for`,

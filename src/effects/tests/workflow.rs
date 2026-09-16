@@ -726,8 +726,10 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
              `{TEST_WINDOWS_PLATFORM}` for a merge-queue entry, which nothing waits on \
              interactively, and the pinned label set for every other build, whose third \
              label names the curated image. A bare scalar sends the pull-request lane to the \
-             hosted runner and its six minutes become twenty-five; a bare label set sends the \
-             queue back to a guest this change retires; a subset of the labels admits any \
+             hosted runner and its six minutes become twenty-five; a bare label set sends \
+             every build to the pull-request guest, where a queue entry's install, conditioned \
+             on the event and not the machine, runs over the image's compiler; a subset of the \
+             labels admits any \
              self-hosted Windows machine the account registers; and a condition other than \
              `{QUEUE_LANE}` routes a lane to a machine its install step was not written for.",
             field(job, "runs-on")

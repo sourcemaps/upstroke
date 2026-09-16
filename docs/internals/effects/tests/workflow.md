@@ -240,7 +240,8 @@ job runs on two: the curated guest for a pull request or push, where a
 reviewer waits on it, and `windows-latest` for a merge-queue entry, where
 nobody does. The `runs-on:` is one expression over the lane test, compared
 whole -- a scalar sends every pull request to the slow machine, a bare label
-set sends the queue back to a guest this contract retired, a subset of the
+set sends every build to the pull-request guest where a queue entry's
+event-conditioned install runs over the image's compiler, a subset of the
 labels admits every Windows machine the account registers, and an inverted
 condition routes each lane to the machine the other's setup was written for.
 
