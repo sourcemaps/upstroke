@@ -730,8 +730,10 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
              every build to the pull-request guest, where a queue entry's install, conditioned \
              on the event and not the machine, runs over the image's compiler; a subset of the \
              labels admits any \
-             self-hosted Windows machine the account registers; and a condition other than \
-             `{QUEUE_LANE}` routes a lane to a machine its install step was not written for.",
+             self-hosted Windows machine the account registers; and a condition spelled \
+             other than `{QUEUE_LANE}` is one this contract cannot evaluate -- it may route \
+             both lanes as the install step expects or send one to a machine the step was \
+             not written for, and an equality over the text cannot tell which.",
             field(job, "runs-on")
         ));
     }
