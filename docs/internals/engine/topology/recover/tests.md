@@ -1219,7 +1219,14 @@ implement.
 
 ## `fn steps_d_and_e_reach_every_generation_not_the_first() {`
 
-**Steps (d) and (e) handle every entry, not the first one.**
+**Steps (d) and (e) handle every entry, not the first one.** The two retained generations stand
+in the log alone — each task's dispatch, its attempt and a settlement retained for epoch 0 — on
+the P6 fixture (the creator's marker still published, no execution root, no integration ref). The
+test plants no worktree and no intent for either, so this is not the retry row's prefix of Gate
+5's audit (rows 9 and 10), which a crash at `Worktree.Verify` leaves with the generation's
+worktree and intent standing (R9). The resume is production's `run_recovery_order`: it repairs the
+fixture's damage, closes both generations at step (e) with nothing to scrub, and afterwards the
+log replays twice to equal states.
 
 Two catalogue entries survived the whole suite at `6a21be6` for one reason —
 no fixture had a second thing for these loops to reach:
@@ -1286,6 +1293,17 @@ A retained session belongs to the incarnation that retained it. Step (e)
 closes the generation, so after the resume there is no retry to evaluate —
 and the fold refuses one.
 
+This is the retry row's prefix of Gate 5's audit (rows 9 and 10, `Worktree.Verify` before and
+after): a `RetainedIdle` generation with its worktree, and no retry started. The resume is
+production's `run_recovery_order`, the worktree is reclaimed with the close, and the log replays
+twice to equal states. The prefix stands on the P6 fixture and carries its damage: the creator's
+marker still published, the integration ref missing, and the settlement retained for epoch 0, the
+creator's, which never steps. `plant_task_worktree` writes the generation's intent and adds its
+worktree under the execution root, so the resume removes the marker and creates the ref but never
+creates the root;
+`a_retained_generation_left_by_a_dead_incarnation_is_closed_by_the_next_resume_and_its_worktree_reclaimed`
+builds the same prefix as a crash leaves it.
+
 `recovery_order` (i): "`ready_retry` is never evaluated before (h) and the
 fold refuses a stale-incarnation retry". The first clause is structural
 here: nothing in this file evaluates `ready_retry`, and the loop that does
@@ -1296,6 +1314,24 @@ directly, against the replayed fold.
 
 And the transition itself is refused: a forged retry into the closed
 generation does not plan.
+
+## `fn a_retained_generation_left_by_a_dead_incarnation_is_closed_by_the_next_resume_and_its_worktree_reclaimed()`
+
+Rows 9 and 10 of Gate 5's audit, `Worktree.Verify` before and after: the retry row's prefix (a
+`RetainedIdle` generation and no retry started) built as a crash leaves it, where
+`retry_refused_after_resume` builds it on the P6 fixture. A stepping incarnation has always resumed
+once, because the creator never steps, so the run is resumed first — the creator's marker removed,
+the execution root and the integration ref created, `run_resumed` durable, the handle released —
+and only then does the dead incarnation's work go in: the dispatch at the recorded base, the
+attempt, and its settlement retained for that incarnation's epoch (the fold refuses any other), with
+the attempt's worktree standing at the base and the worker's edit staged in it (R9). The next
+resume performs the row's action, step (e): the generation is closed
+`ResumeDiscardsRetainedSession` before the resume's own `run_resumed`, the worktree and its intent
+are reclaimed through their own funnels (the directory gone, its registration gone, the staged
+edit released to Git and not deleted), nothing is verified, and neither a marker nor a missing
+root is repaired, because the prefix carries neither. Its first step opens a fresh generation,
+never a retry, and that attempt is accepted; the log replays twice to equal states, before and
+after the step.
 
 ## `fn run_resumed_records_identical_runner_identity() {`
 
@@ -3952,7 +3988,8 @@ next generation from the same recorded source, and that generation is
 materialized again, once; the closed one never is. The closed generation's
 real worktree and intent, planted before the retained prefix, are gone
 after the resume and still gone after the replacement merges and another
-resume runs — PR #249's crash review, finding 2.
+resume runs — PR #249's crash review, finding 2. After that last resume the log replays twice
+to equal states (Gate 5's audit, rows 9 and 10: the retry row's prefix, resumed by production).
 
 ## `fn a_fresh_incarnation_closes_a_retained_repair_generation_…` › `let events = TopologyFold::parse_log(&fixture.log_bytes()).…`
 
@@ -4112,10 +4149,14 @@ dropped, because `Fixture`'s drop removes the tree the parent still has to read.
 Resumes the parent's healthy run as `RESUMER` and takes one step of the driver with an editing
 worker. With nothing planted, that step is a whole attempt: the dispatch, the attempt, the judge
 and then the candidate sequence. The child dies at the coordinate `UPSTROKE_TEST_KILL_COORDINATE`
-names: before `Object.CandidateCommitTree` writes the candidate commit, at its `IdUnread` point
-(the object written and its id not yet read, a point armed in kill mode on the shared harness),
-before `Ref.PinCandidatePrepared` pins the written commit, or after `Ref.CreateCandidates` has
-created the candidates ref. Reaching the panic means the kill did not land.
+names. In the capture: after `Object.CandidateStage` stages the worker's edit, and before and
+after `Object.CandidateWriteTree` writes the tree. In the judge's gates snapshot: after
+`Object.SnapshotCommitTree` writes the ephemeral commit and at its `IdUnread` point, after
+`Snapshot.WriteIntent`, and before and after `Snapshot.Add`. In the candidate sequence: before
+`Object.CandidateCommitTree` writes the candidate commit and at its `IdUnread` point (the object
+written and its id not yet read; a point is armed in kill mode on the shared harness), before and
+after `Ref.PinCandidatePrepared` pins the written commit, and before and after
+`Ref.CreateCandidates` creates the candidates ref. Reaching the panic means the kill did not land.
 
 ## `fn kill_the_candidate_sequence(fixture: &Fixture, coordinate: &str, tag: &str) -> usize {`
 
@@ -4200,6 +4241,89 @@ it replays twice to equal states.
 
 Because the recovery adopts, this parent's own observation record never holds the coordinate. The
 registry cites the kill child for it, whose record does.
+
+## `fn index_blobs_of(worktree: &Path) -> Vec<String> {`
+
+The blob ids a worktree's index holds, so a witness can name the worker's staged edit and follow
+it from R9 (index-referenced) to R27 (released to Git by the scrub).
+
+## `fn ephemeral_snapshot_commits_left_to_git(fixture: &Fixture) -> Vec<String> {`
+
+The judge's snapshot inputs that nothing references any more, by id: the commits
+`assert_no_unreachable_commit_but_snapshot_inputs` tolerates by subject, here compared across a
+recovery to show they were neither adopted nor deleted.
+
+## `fn object_present(fixture: &Fixture, object: &str) -> bool {`
+
+Whether the object store still holds an object; released to Git is not deleted.
+
+## `fn snapshot_slots_of(`
+
+The snapshot intents the manager reads, which is what `reclaim_snapshot_residue` reads.
+
+## `enum AttemptResidue {`
+
+The four shapes a kill inside the attempt's capture or its gates snapshot leaves, beside the
+attempt in flight and its worktree with the worker's edit staged: the staged edit alone; one
+ephemeral snapshot commit unreferenced; the snapshot intent durable with no worktree; or the
+snapshot worktree checked out at that commit. A witness names the shape it expects, and the driver
+asserts that shape before the resume and its reclaim after.
+
+## `fn a_kill_inside_the_attempt_is_settled_interrupted_by_the_next_resume_which_reclaims_what_it_left(`
+
+Rows 23 to 26 and 48 to 53 of Gate 5's audit: `Snapshot.WriteIntent` and `Snapshot.Add` before and
+after, `Object.CandidateStage`/after, `Object.CandidateWriteTree` before and after, and
+`Object.SnapshotCommitTree` before, after and at its `IdUnread` kill point. The attempt module's
+kill witnesses construct these same prefixes and recover them through
+`AttemptContext::settle_interrupted`, which production never calls (its only caller is
+`cancel_in_flight`, which nothing outside tests calls); the gate's run 3 declined them for that. Here
+the kill is taken inside the driver's own attempt, in the kill child, and the recovery is the next
+incarnation's `run_recovery_order`: `recover::settle_interrupted` at step (d),
+`reclaim_closed_generations` at step (e) and `reclaim_snapshot_residue` through
+`finish_integration`.
+
+Every prefix holds `run_resumed`, `task_dispatched` and `attempt_started` and nothing after; the
+worktree and intent stand (R9), Git lists the worktree, and its index holds the worker's edit,
+reachable. The snapshot residue is the named shape. `recovery_for` owes an interrupted settlement
+and nothing of a candidate. The resume settles the attempt interrupted (one `attempt_interrupted`
+before its `run_resumed`), scrubs the worktree through `Worktree.Remove` and `Worktree.RemoveIntent`
+(the directory and its registration gone, the staged edit released to Git and still present),
+reclaims the snapshot intent and worktree through `Snapshot.Remove` and `Snapshot.RemoveIntent`
+exactly when an intent named them, leaves every ephemeral commit to Git, and performs none of the
+five sites' own effects. Nothing is owed afterwards and the log replays twice to equal states. The
+next step's attempt is accepted, performing the killed site in both phases from the prefix in
+which nothing was performed, and the log replays twice again. The `Object.SnapshotCommitTree`/before
+and `Snapshot.WriteIntent`/before rows are read from the adjacent after-phase kills,
+`Object.CandidateWriteTree`/after and `Object.SnapshotCommitTree`/after: between the first pair
+lie only reads (the candidate diff, the assessment, the review inputs and the snapshot input's
+resolution), and between the second only the id's parse and the intent's validation.
+
+## `fn a_kill_before_the_candidates_ref_is_created_is_finished_by_the_next_resume_which_creates_it_and_appends_the_queue_position_once()`
+
+Row 35 of Gate 5's audit, `Ref.CreateCandidates`/before. The candidate module's witness recovers
+through `complete_promotion`, which production reaches only from `promote`, which nothing outside
+tests calls. Here the kill is the driver's own and the recovery is the resume's step (f),
+`finish_promotions`. The prefix holds `candidate_prepared` and nothing after it: the pin at the
+prepared commit (R23), no candidates ref, the worktree and intent standing, the generation
+`Promoting`, an unfinished promotion owed. The resume finishes it, performing `Ref.CreateCandidates`
+in both phases from the prefix in which nothing was performed, appends `task_candidate_created`
+before its `run_resumed`, leaves the candidates ref at the recorded commit, prunes the pin and
+reclaims the worktree and intent. The next step integrates the candidate at that commit, the log
+holds one queue position across the kill and the recovery, and it replays twice to equal states.
+
+## `fn a_kill_after_the_candidate_pin_is_settled_interrupted_by_the_next_resume_which_prunes_the_orphan_pin()`
+
+Row 40 of Gate 5's audit, `Ref.PinCandidatePrepared`/after, which the gate's run 3 regraded: the
+candidate module's witness composes `recovery_for`, a plan, with a direct `prune_orphan_pin` and
+only classifies the interrupted settlement. Here the kill is the driver's own and the resume
+performs both. The prefix holds the attempt in flight, its worktree and intent, and the pin alone
+at the candidate commit it keeps reachable (R23): no `candidate_prepared`, no candidates ref, no
+loose candidate commit. `recovery_for` owes the settlement and the orphan pin at its exact recorded
+value. The resume settles the attempt interrupted at step (d) and prunes the pin at step (f)
+through `Ref.DeleteCandidatePin`: the pin is gone, the commit is again Git's and not deleted, no
+pin or candidates ref is created, and the closed generation's worktree and intent are reclaimed.
+Nothing is owed, the log replays twice to equal states, and the next generation's attempt is
+accepted, pinning its own candidate and pruning that pin with its promotion.
 
 ## `fn an_error_after_the_logs_torn_tail_is_truncated_refuses_the_resume_before_any_effect_and_the_next_resume_converges()`
 
@@ -4394,8 +4518,10 @@ The kill child of the staging-path witness below.
 ## `fn staging_path_kill_child() {`
 
 Adopts the parent's two-task run with a stale queued candidate on a moved head and drives one step,
-which takes the staging path, and dies before `Ref.PinPrepared` pins the proposal the pick produced.
-Reaching the panic means the kill did not land. This child's record holds the coordinates.
+which takes the staging path, and dies at the coordinate `UPSTROKE_TEST_KILL_COORDINATE` names:
+after `Worktree.WriteStagingIntent` writes the staging intent, before `Worktree.AddStaging` adds
+its worktree, or before or after `Ref.PinPrepared` pins the proposal the pick produced. Reaching
+the panic means the kill did not land. This child's record holds the coordinates.
 
 ## `fn a_kill_before_the_proposals_pin_leaves_a_picked_staging_worktree_the_next_resume_reclaims_and_the_candidate_integrates()`
 
@@ -4409,6 +4535,36 @@ staging worktree with force and its intent, creates no pin, leaves the candidate
 recorded for the interrupted pick, and leaves the proposal commit to Git. The next step takes the
 staging path again and publishes the candidate under sequence 1 on the moved head, and the log
 replays twice to equal states.
+
+## `fn kill_the_staging_path(fixture: &Fixture, coordinate: &str, tag: &str) -> usize {`
+
+Runs the staging-path child at one coordinate and returns how many events the planted log held,
+as `kill_the_candidate_sequence` does for the candidate sequence.
+
+## `fn a_kill_between_the_staging_intent_and_its_worktree_leaves_an_intent_the_next_resume_reclaims(`
+
+Rows 16 and 17 of Gate 5's audit, `Worktree.WriteStagingIntent`/after and
+`Worktree.AddStaging`/before, one durable prefix: the staging intent durable, the only intent, and
+no staging worktree added or registered; no pin, and nothing of the sequence recorded. The only
+committed plant of a bare staging intent puts it in a log with no candidate, which is not this
+prefix; here the kill is the staging path's own, over the stale queued candidate. The resume
+reclaims the intent through `Worktree.RemoveStaging` and `Worktree.RemoveStagingIntent`, performs
+none of the path's own sites, creates no pin, leaves the candidate queued with nothing recorded, and
+the log replays twice to equal states. The next step takes the staging path again, performing the
+killed site in both phases, and publishes the candidate under sequence 1 on the moved head.
+
+## `fn a_kill_after_the_proposals_pin_leaves_a_pinned_staging_worktree_the_next_resume_reclaims_with_its_pin_and_the_candidate_integrates()`
+
+Row 44 of Gate 5's audit, `Ref.PinPrepared`/after: the pick complete, the staging worktree's head
+the proposal on the moved head (R10), the prepared pin at sequence 1 naming it (R12), and
+`merge_verification_started` not yet appended, so nothing durable records the sequence. The
+committed plants of a prepared pin either append that event after it or put the pin in a
+candidate-less log. The resume deletes the orphan pin at the next sequence through
+`Ref.DeletePreparedPin`, reclaims the staging worktree and its intent, pins nothing and stages
+nothing of its own, leaves the proposal commit to Git, and the log replays twice to equal states.
+The next step pins its own proposal and publishes the candidate under sequence 1 on the moved
+head.
+
 ## `fn two_lineages_publish_in_lineage_order_and_the_younger_candidate_waits_behind_the_older() {`
 
 Two lineages overlapping on one path, the younger's repair already queued
